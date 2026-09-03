@@ -87,9 +87,31 @@ def _log(log_path: Optional[Path], msg: str) -> None:
         pass
 
 
+def _is_zombie(pid: int) -> bool:
+    """True if *pid* has exited but has not been reaped by its parent.
+
+    ``os.kill(pid, 0)`` SUCCEEDS for such a process: a zombie still holds a
+    process-table entry until its parent waits on it, so a signal-0 probe
+    alone reports a dead process as alive, and a caller polling for it to
+    disappear waits forever. Linux answers this definitively in
+    ``/proc/<pid>/stat``; where that is unavailable (macOS, BSD) this returns
+    False and the signal-0 answer stands unchanged.
+
+    The state is the first field after the ``comm`` field, and ``comm`` is
+    parenthesised and may itself contain ``)`` - so the split is on the LAST
+    ``)``, never the first.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return fh.read().decode("utf-8", "replace").rpartition(")")[2].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def pid_alive(pid: int) -> bool:
     """True if *pid* names a live process. Windows and POSIX both handled
-    without a third-party dependency."""
+    without a third-party dependency. A zombie (exited, not yet reaped) is
+    NOT alive: see _is_zombie, and test_pid_alive_is_false_for_an_unreaped_child."""
     if sys.platform == "win32":
         import ctypes
         import ctypes.wintypes
@@ -118,7 +140,7 @@ def pid_alive(pid: int) -> bool:
             return True
         except OSError as e:
             return e.errno != errno.ESRCH
-        return True
+        return not _is_zombie(pid)
 
 
 def marker_path(crash_dir: Path, instance_id: str) -> Path:

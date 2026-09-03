@@ -10,12 +10,15 @@ from __future__ import annotations
 import http.server
 import importlib.util
 import json
+import os
 import socket
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 WATCHDOG_SCRIPT = REPO / "scripts" / "crash_recovery_watchdog.py"
@@ -100,6 +103,35 @@ class TestPidAlive:
         while wd.pid_alive(proc.pid) and time.monotonic() < deadline:
             time.sleep(0.05)
         assert wd.pid_alive(proc.pid) is False
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="a zombie is a POSIX process state; the Windows arm reads "
+               "GetExitCodeProcess, which already reports an exited process "
+               "as not STILL_ACTIVE")
+    def test_pid_alive_is_false_for_an_unreaped_child(self):
+        """A child that has EXITED but not been waited on is a zombie: it keeps
+        its process-table entry, so os.kill(pid, 0) succeeds and a signal-0-only
+        probe calls it alive.
+
+        run()'s `while pid_alive(pid): sleep()` loop then never terminates, and
+        test_clean_exit_is_never_relaunched below cannot reap the child either -
+        its proc.wait() sits on the line AFTER the run() call that never
+        returns. That deadlock is what wedged a pytest worker, and through it
+        the whole ubuntu CI leg.
+
+        The sibling test above reaps FIRST, so it passes with or without the
+        fix; only a deliberately-unreaped child can express this.
+        """
+        wd = _load_wd()
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        try:
+            # Block until it has exited but leave it UNREAPED (WNOWAIT), so the
+            # zombie state is deterministic rather than a timing guess.
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+            assert wd.pid_alive(proc.pid) is False
+        finally:
+            proc.wait(timeout=10)
 
 
 class TestReadMarkerPid:
