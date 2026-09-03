@@ -1,0 +1,60 @@
+# Refuse a pull request that INTRODUCES a dependency carrying a known advisory.
+#
+# This is the pre-merge half of the supply chain check, and it is the half
+# dependabot cannot do. Dependabot alerts on what is ALREADY in uv.lock; this
+# refuses the change that would put it there in the first place.
+#
+# It calls one API (the dependency review endpoint) and needs no checkout, so
+# it installs nothing and builds nothing. A run of this shape completes in
+# roughly ten seconds, which is why it is safe to trigger on every pull request
+# while ci.yml's matrix deliberately stays behind its full-ci label.
+#
+# It cannot report success without having looked. Every path in the action that
+# fails to obtain dependency data calls setFailed: a 404 with no dependency
+# data, a 403 when the dependency graph is disabled, and the catch-all. That is
+# the property this repository requires of a scanner.
+name: Dependency Review
+
+# No paths filter. A manifest is not the only way a dependency enters the graph,
+# and on a public repository the run is free, so scoping the trigger would trade
+# coverage for nothing.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: review dependency changes
+    runs-on: ubuntu-latest
+    # contents: read is the entire requirement. pull-requests: write would only
+    # be needed to post the summary as a PR comment, which is left off so this
+    # job cannot write anything.
+    permissions:
+      contents: read
+    steps:
+      # No actions/checkout step. The action reads the filesystem only when
+      # config-file is set, and every option here is passed inline.
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        with:
+          # Stated rather than inherited, so a change to the action's own
+          # default cannot quietly move this gate.
+          fail-on-severity: low
+          # Only a dependency that ships to users blocks the merge. A dev-only
+          # advisory is reported in the job summary without failing the build.
+          fail-on-scopes: runtime
+          # Off deliberately. With no allow-list or deny-list configured, the
+          # only thing the license check can do here is fail a build when a
+          # dependency reports a license string that is not valid SPDX, which
+          # blocks a merge on a question nobody asked. Turning it on is a
+          # separate decision that needs an explicit license policy with it.
+          license-check: false
+          # Off deliberately, and this one is not cosmetic. Left at its default
+          # of true, the action additionally calls api.deps.dev and
+          # api.securityscorecards.dev for each changed dependency, which adds
+          # two third-party services to the critical path of a required check
+          # and lets an outage in either of them redden a pull request that has
+          # no dependency problem.
+          show-openssf-scorecard: false

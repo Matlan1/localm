@@ -101,6 +101,27 @@ on:
     # release moving under an unrelated commit, for instance).
     - cron: "37 6 * * 1"
 
+concurrency:
+  # Supersede a run whose commit has already been replaced by a newer push to
+  # the same branch. Measured over a recent 200-run window, superseded runs were
+  # burning roughly an hour of runner time a day, the worst single case being 19
+  # minutes of a 22 minute Ubuntu matrix leg that a newer push had already
+  # obsoleted.
+  #
+  # Each term of the group key is load-bearing:
+  #   event_name   a push-triggered abi-check and a pull_request run never share
+  #                a group, so they can never cancel one another.
+  #   ref          the branch is the unit of supersession.
+  #   full-ci      `synchronize` and `labeled` can fire on the SAME commit a
+  #                second apart. Without this term the second to arrive would
+  #                cancel the first, so an unlabeled run could kill the
+  #                two-platform matrix on a release PR. Separating labeled from
+  #                unlabeled runs makes that unrepresentable.
+  group: ci-${{ github.event_name }}-${{ github.ref }}-${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+  # Cancel pull_request runs ONLY. The push leg is the paths-scoped abi-check on
+  # a native binding change and must always run to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

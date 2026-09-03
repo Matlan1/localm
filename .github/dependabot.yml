@@ -37,3 +37,12 @@ updates:
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-patch"
+
+  # The jsdom/eslint/playwright harness that tests the vanilla-JS GUI. It is a
+  # devDependencies-only tree and ships to nobody, so these bumps carry no
+  # runtime risk, but they are the only npm surface in the repository and were
+  # previously tracked by nothing.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
