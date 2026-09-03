@@ -66,7 +66,14 @@ class TestWidthHalf:
         real localm.cli._core.console rather than a fresh instance."""
         _dumb_env(monkeypatch)
         from localm.cli import _core
-        _core.console.width = 80   # simulates an unrelated test poisoning it
+        # Poison through monkeypatch too (not a raw assignment): monkeypatch
+        # snapshots whatever a value WAS at the moment of its OWN first
+        # setattr call and restores exactly that at teardown. A raw
+        # assignment here would poison the value monkeypatch snapshots
+        # instead of the true original, leaking width=80 into every test
+        # that runs after this one in the same process - which is exactly
+        # what happened the first time this test was written.
+        monkeypatch.setattr(_core.console, "_width", 80)
         make_console_wide_and_plain(monkeypatch, width="300")
         assert _core.console.size.width == 300 - _core.console.legacy_windows
 
