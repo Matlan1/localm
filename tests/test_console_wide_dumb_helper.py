@@ -42,14 +42,23 @@ class TestWidthHalf:
         # without a modern terminal - platform-dependent, not a fixed number.
         assert c.size.width == 300 - c.legacy_windows
 
-    def test_a_preexisting_console_is_also_widened(self, monkeypatch):
+    def test_a_preexisting_singleton_is_also_widened(self, monkeypatch):
         """The shared CLI singletons are constructed before any fixture
-        runs, so the fix must reach an ALREADY-BUILT instance too."""
+        runs, so the fix must reach an ALREADY-BUILT instance too.
+
+        Targets the REAL localm.cli._core.console, not an arbitrary fresh
+        Console(). A fresh, unrelated instance is a claim the fix was never
+        designed to make: os.get_terminal_size() on the real file
+        descriptors succeeds on some platforms (observed: a real GitHub
+        Actions runner, returning a genuine 80x24) in a way it never does
+        under WSL's pipes, and Console.size's os.get_terminal_size() branch
+        runs before COLUMNS is consulted - orthogonal to is_dumb_terminal,
+        and irrelevant to the singletons the product code actually uses."""
         _dumb_env(monkeypatch)
-        preexisting = rich.console.Console(file=io.StringIO())
-        assert preexisting.size.width == 80
+        from localm.cli import _core
+        assert _core.console.size.width == 80
         make_console_wide_and_plain(monkeypatch, width="300")
-        assert preexisting.size.width == 300 - preexisting.legacy_windows
+        assert _core.console.size.width == 300 - _core.console.legacy_windows
 
 
     def test_a_poisoned_shared_singletons_width_is_also_reset(self, monkeypatch):
