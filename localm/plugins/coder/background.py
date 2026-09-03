@@ -547,8 +547,11 @@ class ShellJob(BackgroundJob):
         except OSError:
             pgid = None
         # Never signal our own group: if start_new_session did not take, the
-        # child shares it and killpg would take down localm itself.
-        if pgid is not None and pgid != os.getpgrp():
+        # child shares it and killpg would take down localm itself. pgid 1 and 0
+        # are worse: killpg is kill(-pgid), so those are the kill(2) broadcast
+        # and our own group, reaching every process this user may signal.
+        # See test_terminate_tree_posix_never_broadcasts.
+        if pgid is not None and pgid > 1 and pgid != os.getpgrp():
             try:
                 os.killpg(pgid, sig)
                 return

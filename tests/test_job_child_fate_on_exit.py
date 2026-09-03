@@ -237,6 +237,47 @@ class TestSelection:
         assert J.terminate_children_for_exit() == 1
 
 
+class TestTreeWalkOwnership:
+    """The tree walk sends SIGTERM to every process it enumerates, so it may only
+    ever be pointed at a process THIS one spawned.
+
+    Both arms are needed: the first alone is satisfied by a walk that never runs,
+    which would silently stop grandchildren being terminated at all."""
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="the psutil tree walk is the POSIX arm; Windows "
+                               "terminates the tree with taskkill /T")
+    def test_tree_walk_refuses_a_pid_we_did_not_spawn(self, monkeypatch):
+        psutil = pytest.importorskip("psutil")
+        walked: list[int] = []
+        monkeypatch.setattr(psutil.Process, "children",
+                            lambda self, *a, **kw: (walked.append(self.pid) or []))
+        # pid 1 is a real, live process that this test did not spawn. Its
+        # recursive children are every process this user owns.
+        J._terminate_process_tree(_FakeProc(pid=1), grace=0)
+        assert walked == [], (
+            f"walked the process tree of pid(s) {walked}, which this process did "
+            "not spawn - every descendant would have been sent SIGTERM")
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="the psutil tree walk is the POSIX arm; Windows "
+                               "terminates the tree with taskkill /T")
+    def test_tree_walk_still_happens_for_our_own_child(self, monkeypatch):
+        psutil = pytest.importorskip("psutil")
+        walked: list[int] = []
+        proc = _spawn_sleeper(30)
+        try:
+            monkeypatch.setattr(psutil.Process, "children",
+                                lambda self, *a, **kw: (walked.append(self.pid) or []))
+            J._terminate_process_tree(proc, grace=0)
+            assert walked == [proc.pid], (
+                "the tree of our OWN child was not walked, so any grandchildren "
+                "it spawned would be left running")
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
 # --------------------------------------------------------------------------- #
 #  both exit paths must call it
 # --------------------------------------------------------------------------- #

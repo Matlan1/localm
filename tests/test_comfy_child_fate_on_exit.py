@@ -37,6 +37,63 @@ from localm.inference import http_server as hs
 from localm.media import comfy_client as cc
 
 
+class _RecordingProc:
+    """A Popen stand-in that records which handle call it received."""
+
+    def __init__(self, pid: int = 4242) -> None:
+        self.pid = pid
+        self.terminated = 0
+        self.killed = 0
+
+    def terminate(self) -> None:
+        self.terminated += 1
+
+    def kill(self) -> None:
+        self.killed += 1
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class TestKillProcessTreeNeverBroadcasts:
+    """killpg(pgid, sig) is kill(-pgid, sig).
+
+    pgid 1 is therefore the kill(2) BROADCAST - every process this user may
+    signal - and pgid 0 is this process's own group. Either one takes localm
+    down with the child it meant to stop, and on a CI runner it also signals the
+    runner agent, which then reports a shutdown signal and cancels the job."""
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="the killpg arm is POSIX; Windows uses taskkill /T")
+    @pytest.mark.parametrize("pgid", [1, 0])
+    def test_kill_process_tree_never_broadcasts(self, monkeypatch, pgid):
+        sent = []
+        monkeypatch.setattr(os, "getpgid", lambda _pid: pgid)
+        monkeypatch.setattr(os, "killpg",
+                            lambda g, s: sent.append((g, s)))
+        proc = _RecordingProc()
+        cc._kill_process_tree(proc)
+        assert sent == [], (
+            f"sent killpg{sent} - pgid {pgid} signals every process this user "
+            "owns, including the test runner and the CI runner agent")
+        assert proc.terminated == 1, (
+            "fell back to no signal at all; the child must still be stopped "
+            "through its own handle")
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="the killpg arm is POSIX; Windows uses taskkill /T")
+    def test_kill_process_tree_still_signals_a_real_child_group(self, monkeypatch):
+        """The guard must not disable group termination for a genuine group."""
+        sent = []
+        monkeypatch.setattr(os, "getpgid", lambda _pid: 987654)
+        monkeypatch.setattr(os, "killpg", lambda g, s: sent.append((g, s)))
+        proc = _RecordingProc()
+        cc._kill_process_tree(proc)
+        assert [g for g, _ in sent] == [987654], (
+            "a real, non-broadcast child group was not signalled, so the tree "
+            "would be left running")
+
+
 def _spawn_sleeper(seconds: int = 120) -> subprocess.Popen:
     """Spawn a real child the same way _launch_and_wait spawns ComfyUI: its own
     process group/session on POSIX (start_new_session), its own process group
