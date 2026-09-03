@@ -305,6 +305,15 @@ def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
     single-purpose credential the peer itself minted and stored only in its
     own 0600 registry entry).
 
+    Refuses before building the request unless the entry's ``host``/``scheme``
+    pass :func:`localm.peer_routing.is_routable_peer_endpoint` (dialled
+    address loopback AND scheme ``http``/``https``): :func:`list_gpu_peers`'s
+    ``/whoami`` handshake verifies loopback only, so an entry naming any other
+    host or a scheme smuggling its own authority was never checked and must
+    not receive the credential. See
+    test_a_non_loopback_host_is_refused_without_sending_the_token and
+    test_a_scheme_smuggling_an_authority_is_refused_without_sending_the_token.
+
     Advisory and best-effort: any failure (missing port/token, network error,
     timeout, non-200, malformed body) returns False. A caller must treat False
     exactly like "no peer available"."""
@@ -312,11 +321,21 @@ def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
     token = peer.get("coordination_token")
     if not port or not token:
         return False
+    host = peer.get("host")
     scheme = peer.get("scheme") or "http"
-    # Same machine, so loopback - but WHICH loopback depends on what the peer
-    # bound: an IPv6-bound peer does not answer on 127.0.0.1.
+
+    from localm.peer_routing import is_routable_peer_endpoint
+    if not is_routable_peer_endpoint(host, scheme):
+        logger.warning(
+            "gpu_registry: refusing cooperative-unload to peer %r at "
+            "unroutable endpoint scheme=%r host=%r; not sending the "
+            "coordination_token because only a loopback address over http "
+            "or https has had its occupant identity-verified",
+            peer.get("instance_id"), scheme, host)
+        return False
+
     from localm.bindhost import self_connect_host, url_host
-    _h = url_host(self_connect_host(peer.get("host")))
+    _h = url_host(self_connect_host(host))
     url = f"{scheme}://{_h}:{int(port)}/v1/instances/cooperate-unload"
 
     import requests
@@ -324,7 +343,7 @@ def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
         from localm.tls import requests_verify
         verify = requests_verify(url)
     except FileNotFoundError:
-        # CA file absent: fall back to verify=False on loopback, same machine.
+        # CA file absent: fall back to verify=False. _h above is loopback.
         verify = False
     except Exception as e:
         logger.debug("gpu_registry: could not determine TLS verification for %s: %s", url, e)

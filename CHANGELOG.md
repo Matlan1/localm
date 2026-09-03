@@ -11,6 +11,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- Fixed a flaw in the multi-instance GPU coordination handshake: a request
+  asking another local instance to free VRAM could be sent to an address that
+  was never verified as belonging to that instance, carrying the one-time
+  credential that authorizes the request. The request is now sent only to an
+  address and connection type this instance has confirmed is the same
+  machine.
+
 ## [0.2.0] - 2026-09-03
 
 ### Added

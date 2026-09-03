@@ -335,6 +335,62 @@ class TestRequestCooperativeUnload:
         peer = {"port": 9008, "scheme": "http", "coordination_token": "t"}
         assert gpu_registry.request_cooperative_unload(peer) is False
 
+    def test_a_non_loopback_host_is_refused_without_sending_the_token(self, monkeypatch):
+        """list_gpu_peers' /whoami handshake verifies loopback only (no
+        bind_host is ever passed), so a registry entry naming another host was
+        never checked and must not receive the coordination_token just
+        because that handshake passed for its port+instance_id."""
+        calls = []
+
+        def fake_post(url, json=None, headers=None, timeout=None, verify=None):
+            calls.append((url, headers))
+            return None
+
+        monkeypatch.setattr("requests.post", fake_post)
+        peer = {"port": 9009, "scheme": "http", "host": "192.168.1.5",
+                "coordination_token": "the-peers-real-token"}
+        assert gpu_registry.request_cooperative_unload(peer) is False
+        assert calls == [], "the coordination_token left this process"
+
+    def test_the_same_peer_on_loopback_still_sends(self, monkeypatch):
+        """The control for the test above: everything else identical, so the
+        host is provably the discriminator rather than some unrelated reason
+        the call was refused."""
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {"status": "unloaded"}
+
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None, verify=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _Resp()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        peer = {"port": 9010, "scheme": "http", "host": "127.0.0.1",
+                "coordination_token": "peer-tok"}
+        assert gpu_registry.request_cooperative_unload(peer) is True
+        assert "127.0.0.1:9010" in captured["url"]
+
+    def test_a_scheme_smuggling_an_authority_is_refused_without_sending_the_token(
+            self, monkeypatch):
+        """The URL is built as "{scheme}://{host}:{port}{path}", so a crafted
+        scheme moves the authority off a loopback host entirely; pinning the
+        host alone would still leave this open."""
+        calls = []
+
+        def fake_post(url, json=None, headers=None, timeout=None, verify=None):
+            calls.append((url, headers))
+            return None
+
+        monkeypatch.setattr("requests.post", fake_post)
+        peer = {"port": 9011, "scheme": "http://attacker.example/collect?x",
+                "host": "127.0.0.1", "coordination_token": "the-peers-real-token"}
+        assert gpu_registry.request_cooperative_unload(peer) is False
+        assert calls == [], "the coordination_token left this process"
+
 
 # ------------------------------------------------------------------ #
 #  switch_engine(): cooperative-unload eviction fallback              #
