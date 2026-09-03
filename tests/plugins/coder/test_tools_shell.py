@@ -7,6 +7,7 @@ Tests for shell and test-runner tools in localm.plugins.coder.tools:
 import json
 import shutil
 import subprocess
+import sys
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -237,6 +238,22 @@ class TestDetectTestRunner:
         assert "yarn" in cmd[0]
 
 
+def _runnable_npm():
+    """The npm these end-to-ends can actually drive, or None.
+
+    Presence on PATH is not enough. Under WSL the WINDOWS npm is on PATH through
+    interop (``/mnt/c/...``); launched from a Linux working directory it never
+    reaches the package script at all, because CMD.EXE cannot use the UNC path
+    and falls back to the Windows directory. Such an npm can neither deliver an
+    argument nor withhold one, so it cannot answer what these tests ask."""
+    npm = shutil.which("npm")
+    if npm is None:
+        return None
+    if sys.platform != "win32" and npm.startswith("/mnt/"):
+        return None
+    return npm
+
+
 class TestPassWithNoTestsActuallyReachesTheRunner:
     """Appended bare, ``npm test --passWithNoTests`` never reaches the runner.
 
@@ -321,8 +338,9 @@ class TestPassWithNoTestsActuallyReachesTheRunner:
         that npm exists, not that the separator is what delivers the flag, which
         a pure argv-shape assertion cannot see.
         """
-        if shutil.which("npm") is None:
-            pytest.skip("npm is not installed on this box")
+        if _runnable_npm() is None:
+            pytest.skip("no natively runnable npm on this box "
+                        "(a WSL interop npm cannot be driven from a Linux cwd)")
         # Named jest.js so detection recognises a supported runner; the file
         # itself only reports its argv, which is the thing under test.
         (tmp_path / "jest.js").write_text(
@@ -557,8 +575,9 @@ class TestCallerArgsReachTheRunner:
         half would only prove that npm exists, not that the separator is what
         delivers the flag, which an argv-shape assertion cannot see.
         """
-        if shutil.which("npm") is None:
-            pytest.skip("npm is not installed on this box")
+        if _runnable_npm() is None:
+            pytest.skip("no natively runnable npm on this box "
+                        "(a WSL interop npm cannot be driven from a Linux cwd)")
         (tmp_path / "argv.js").write_text(
             'console.log("ARGV=" + JSON.stringify(process.argv.slice(2)));\n',
             encoding="utf-8")
