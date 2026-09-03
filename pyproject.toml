@@ -511,3 +511,24 @@ pytest_add_cli_args_test_selection = [
 # own __init__.py, which setup-llama writes into directly. Without it in the
 # wheel there is no runtime package for a pip install to provision at all.
 packages = ["localm", "runtime/localm_llama_runtime"]
+
+[tool.hatch.build.targets.sdist]
+# An ALLOWLIST, not a list of things to leave out. hatchling drops every
+# .gitignore pattern when the build root itself matches one, and the runner
+# path and any worktree under .claude/ both match, so gitignore-based selection
+# is off in those builds. A list of paths to exclude would then have to name
+# every local-only file that exists now or later - private keys, scratch dirs,
+# the maintainer's own notes - and anything unnamed ships. Naming what goes IN
+# is complete by construction, so a new local-only file is packaged only if
+# someone adds it here.
+only-include = [
+  "localm",
+  "runtime",
+  "tests",
+  "docs",
+  "pyproject.toml",
+  "README.md",
+  "LICENSE",
+  "VERSION",
+  "CHANGELOG.md",
+]

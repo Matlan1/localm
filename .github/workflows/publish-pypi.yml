@@ -87,6 +87,57 @@ jobs:
           test -f "dist/localm-${file_version}.tar.gz"
           test -f "dist/localm-${file_version}-py3-none-any.whl"
 
+      # twine check reads the metadata; it never installs anything. Without the
+      # step below nothing in this repo installs a built artifact at all - ci.yml
+      # uses `pip install -e .`, which resolves imports to the source tree and so
+      # passes whether or not the wheel selected the right files.
+      #
+      # The import assertion is the load-bearing half. A venv created inside a
+      # checkout still has the source tree reachable, so `import localm` can
+      # succeed from the CHECKOUT while the wheel is empty. The run therefore
+      # asserts localm resolves under the venv, and does it from a directory that
+      # holds no localm package, with PYTHONPATH cleared.
+      - name: Install the built wheel and prove it is the wheel that answers
+        run: |
+          set -euo pipefail
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          whl="$(pwd)/dist/localm-${file_version}-py3-none-any.whl"
+          python -m venv /tmp/wheelcheck
+          /tmp/wheelcheck/bin/python -m pip install --upgrade pip --quiet
+          /tmp/wheelcheck/bin/python -m pip install --quiet "$whl"
+          mkdir -p /tmp/neutral
+          cd /tmp/neutral
+          PYTHONPATH= /tmp/wheelcheck/bin/python - <<'PY'
+          import pathlib, sys, localm
+          p = pathlib.Path(localm.__file__).resolve()
+          prefix = pathlib.Path(sys.prefix).resolve()
+          assert str(p).startswith(str(prefix)), f"localm resolved OUTSIDE the venv: {p}"
+          assert "site-packages" in str(p), f"localm is not an installed package: {p}"
+          print("import OK:", p)
+          PY
+          PYTHONPATH= /tmp/wheelcheck/bin/localm --version
+          # A missing package-data file is the failure class that yanked 0.1.5:
+          # the import above still succeeds when static assets are absent.
+          PYTHONPATH= /tmp/wheelcheck/bin/python - <<'PY'
+          import pathlib, localm
+          root = pathlib.Path(localm.__file__).parent
+          # The three icons are the ones worth asserting on: .gitignore excludes
+          # *.png and re-includes only these by negation, so they are the packaged
+          # files that actually disappear when file selection goes wrong. Losing
+          # them costs the favicon and every manifest.webmanifest icon.
+          required = [
+              "plugins/gui/static/index.html",
+              "plugins/builtin/tts/static/tts.js",
+              "plugins/gui/static/icon-192.png",
+              "plugins/gui/static/icon-512.png",
+              "plugins/gui/static/icon-maskable-512.png",
+          ]
+          missing = [r for r in required if not (root / r).is_file()]
+          assert not missing, f"wheel is missing packaged assets: {missing}"
+          import localm_llama_runtime
+          print("package data OK; runtime shim at", pathlib.Path(localm_llama_runtime.__file__).parent)
+          PY
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: dist
