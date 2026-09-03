@@ -59,18 +59,17 @@ def copy_to_clipboard(text: str) -> bool:
 
 
 def _native_window_allowed_by_preference() -> bool:
-    """Has the user explicitly turned the app window off (config key
-    desktop_window_mode == "browser")? Defaults to True (allowed) on any read
-    failure, so a config problem never silently disables a feature the user did
-    not ask to disable - the same posture run_native_window's own
-    desktop_window_quit_on_close read uses. Never raises."""
+    """Has the user explicitly turned the app window ON (config key
+    desktop_window_mode == anything other than "browser", which is the
+    default)? Both a config dict missing the key and a read failure fall
+    back to "browser" (not allowed) - the safe default. Never raises."""
     try:
         from localm.config import load_config
-        return load_config().get("desktop_window_mode", "auto") != "browser"
+        return load_config().get("desktop_window_mode", "browser") != "browser"
     except Exception:
         logger.debug("appface: reading desktop_window_mode failed, "
-                     "defaulting to allowed", exc_info=True)
-        return True
+                     "defaulting to browser", exc_info=True)
+        return False
 
 
 def native_window_available() -> bool:

@@ -406,12 +406,13 @@ DEFAULT_CONFIG: dict = {
     # makes the close button quit the whole app and stop the server instead.
     # No effect when localm opens in a browser tab.
     "desktop_window_quit_on_close": False,
-    # "auto" (default): use the standalone app window (localm[desktop]) when
-    # it is installed, otherwise the browser tab. "browser": always use the
-    # browser tab even when the extra IS installed. There is no "always
-    # window" value: a setting must never defeat run_native_window's
-    # fallback-on-failure.
-    "desktop_window_mode": "auto",
+    # "auto": use the standalone app window (localm[desktop]) when it is
+    # installed, otherwise the browser tab. "browser" (default): always use
+    # the browser tab even when the extra IS installed - an explicit opt-in
+    # is required to try the app window; see run_native_window's docstring
+    # for why. There is no "always window" value: a setting must never
+    # defeat run_native_window's fallback-on-failure.
+    "desktop_window_mode": "browser",
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy; an explicit --port does not)
     # Bind address for a fresh server start when -H/--host is not given on the

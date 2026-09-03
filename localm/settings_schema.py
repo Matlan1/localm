@@ -567,9 +567,9 @@ CORE_FIELDS: list = [
                  group="Coder", options=["right", "left"]),
     SettingField("desktop_window_mode", Widget.SELECT, "Default window mode",
                  "How `localm gui` opens when the standalone-window extra "
-                 "(localm[desktop]) is installed. auto (default): the app "
-                 "window when available, else a browser tab. browser: always "
-                 "a browser tab.",
+                 "(localm[desktop]) is installed. browser (default): always "
+                 "a browser tab. auto: the app window when available, else a "
+                 "browser tab.",
                  group="Desktop", options=["auto", "browser"]),
     SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
                  "Quit when the app window is closed",

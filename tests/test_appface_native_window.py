@@ -51,6 +51,34 @@ def test_native_window_available_false_when_not_installed(monkeypatch):
     assert appface.native_window_available() is False
 
 
+def test_desktop_window_mode_default_is_browser():
+    """Pins the product decision directly against the real config default,
+    not a mocked dict: the app window is opt-in, not opt-out. Reproduced
+    2026-09-03 as a real, reliable Windows fatal exception (0x8001010d,
+    RPC_E_CANTCALLOUT_ININPUTSYNCCALL) inside pywebview's WinForms backend
+    whenever the app window runs concurrently with the real HTTP server -
+    ruled out the model, every webview.start() kwarg individually and
+    combined, and the tray/status window, all still crashing; not resolved
+    within this fix. "auto" tried the app window by default with no opt-in
+    required beyond installing localm[desktop], so the safe default is
+    "browser" until the underlying interaction is understood."""
+    from localm.config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["desktop_window_mode"] == "browser"
+
+
+def test_native_window_available_false_by_default_with_no_config_key(monkeypatch):
+    """A config dict that is missing the key entirely (an older config
+    written before this default changed) must resolve the SAME as an
+    explicit "browser" - not fall back to a hardcoded "auto" independent of
+    config.py's own default, which would silently re-enable the crash for
+    exactly the users a stale-but-otherwise-valid config was meant to protect."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.setitem(sys.modules, "webview", MagicMock())
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+
+    assert appface.native_window_available() is False
+
+
 def test_native_window_available_true_when_importable(monkeypatch):
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     monkeypatch.setitem(sys.modules, "webview", MagicMock())
@@ -69,9 +97,11 @@ def test_native_window_available_false_when_mode_is_browser(monkeypatch):
     assert appface.native_window_available() is False
 
 
-def test_native_window_allowed_defaults_true_when_config_read_fails(monkeypatch):
-    """A config problem must never silently disable a feature the user did
-    not ask to disable - same posture as the quit_on_close read."""
+def test_native_window_allowed_defaults_false_when_config_read_fails(monkeypatch):
+    """A config problem must never silently ENABLE a feature the user did
+    not explicitly opt into - the app window defaults off (desktop_window_mode
+    default is "browser"), so a read failure must fail toward the safe,
+    already-verified-working browser tab, not toward native."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     monkeypatch.setitem(sys.modules, "webview", MagicMock())
 
@@ -79,7 +109,7 @@ def test_native_window_allowed_defaults_true_when_config_read_fails(monkeypatch)
         raise RuntimeError("disk on fire")
 
     monkeypatch.setattr("localm.config.load_config", _boom)
-    assert appface.native_window_available() is True
+    assert appface.native_window_available() is False
 
 
 def test_run_native_window_returns_false_when_mode_is_browser(monkeypatch):
@@ -152,6 +182,8 @@ def test_run_native_window_returns_true_when_the_window_actually_loads(monkeypat
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     fake, window = _fake_webview(loaded=True)
     monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
 
     assert appface.run_native_window("http://127.0.0.1:8642/") is True
     fake.create_window.assert_called_once()
@@ -169,6 +201,8 @@ def test_run_native_window_enables_text_selection(monkeypatch):
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     fake, _ = _fake_webview(loaded=True)
     monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
 
     assert appface.run_native_window("http://127.0.0.1:8642/") is True
     fake.create_window.assert_called_once()
@@ -184,6 +218,8 @@ def test_run_native_window_forces_qt_backend_on_linux(monkeypatch):
     fake, _ = _fake_webview(loaded=True)
     monkeypatch.setitem(sys.modules, "webview", fake)
     monkeypatch.setattr(appface.sys, "platform", "linux")
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
 
     assert appface.run_native_window("http://127.0.0.1:8642/") is True
     fake.start.assert_called_once()
@@ -197,6 +233,8 @@ def test_run_native_window_does_not_force_gui_on_windows(monkeypatch):
     fake, _ = _fake_webview(loaded=True)
     monkeypatch.setitem(sys.modules, "webview", fake)
     monkeypatch.setattr(appface.sys, "platform", "win32")
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
 
     assert appface.run_native_window("http://127.0.0.1:8642/") is True
     fake.start.assert_called_once()
@@ -211,8 +249,15 @@ def test_run_native_window_returns_false_when_the_window_never_reports_loaded(mo
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     fake, _ = _fake_webview(loaded=False)
     monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
 
     assert appface.run_native_window("http://127.0.0.1:8642/") is False
+    # Confirm this returned False because loaded.wait timed out, not because
+    # the preference gate blocked it before create_window/start ever ran -
+    # the same shape as this file's other opt-in-mode tests must guard against.
+    fake.create_window.assert_called_once()
+    fake.start.assert_called_once()
 
 
 def test_run_native_window_hides_and_vetoes_close_when_quit_setting_is_off(monkeypatch):
@@ -223,7 +268,8 @@ def test_run_native_window_hides_and_vetoes_close_when_quit_setting_is_off(monke
     fake, window = _fake_webview(loaded=True, start_sleep=0.05)
     monkeypatch.setitem(sys.modules, "webview", fake)
     monkeypatch.setattr("localm.config.load_config",
-                        lambda: {"desktop_window_quit_on_close": False})
+                        lambda: {"desktop_window_mode": "auto",
+                                "desktop_window_quit_on_close": False})
 
     appface.run_native_window("http://127.0.0.1:8642/")
 
@@ -240,7 +286,8 @@ def test_run_native_window_allows_close_and_calls_on_quit_when_setting_is_on(mon
     fake, window = _fake_webview(loaded=True, start_sleep=0.05)
     monkeypatch.setitem(sys.modules, "webview", fake)
     monkeypatch.setattr("localm.config.load_config",
-                        lambda: {"desktop_window_quit_on_close": True})
+                        lambda: {"desktop_window_mode": "auto",
+                                "desktop_window_quit_on_close": True})
     quit_called = threading.Event()
 
     appface.run_native_window("http://127.0.0.1:8642/", on_quit=quit_called.set)
@@ -283,17 +330,20 @@ def test_run_native_window_returns_false_and_never_raises_when_start_fails(monke
 
 def test_run_native_window_establishes_and_releases_a_com_apartment_around_start(
         monkeypatch):
-    """The WinForms backend's own window creation (lazy, inside webview.start())
-    can trigger outgoing COM calls, and a thread with no COM apartment
-    established raises RPC_E_CANTCALLOUT_ININPUTSYNCCALL when that happens - a
-    real crash reproduced on 2026-09-03 (Windows fatal exception 0x8001010d in
-    webview/platforms/winforms.py's create_window, called from webview.start()
-    on run_native_window's own thread). Shares appface._com_init/_com_uninit
-    with _WinTray's identical, already-fixed need - see
-    test_appface_tray_com.py."""
+    """appface._com_init/_com_uninit, shared with _WinTray's identical call
+    (test_appface_tray_com.py), wrap webview.start(). Real-world note: a
+    Windows fatal exception 0x8001010d was reproduced on 2026-09-03 inside
+    webview.start() and this alone did NOT resolve it (the fault is on a
+    thread pywebview creates and STA-configures internally, not the calling
+    thread this establishes an apartment on) - desktop_window_mode's default
+    was changed to "browser" instead (see test_desktop_window_mode_default_is_
+    browser). This fix is kept as a real, harmless hardening for the other
+    call site (_WinTray._run's identical need), not as the resolution."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     fake, _ = _fake_webview(loaded=True, start_sleep=0)
     monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
     calls = []
     sentinel_ole32 = object()
     monkeypatch.setattr(appface, "_com_init",
@@ -315,6 +365,8 @@ def test_run_native_window_releases_the_com_apartment_even_when_start_raises(
     fake, _ = _fake_webview(loaded=False)
     fake.start.side_effect = RuntimeError("boom")
     monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
     sentinel_ole32 = object()
     monkeypatch.setattr(appface, "_com_init", lambda: sentinel_ole32)
     uninit_calls = []
@@ -350,7 +402,8 @@ def test_show_and_close_native_window_reach_the_active_window(monkeypatch):
     fake.start.side_effect = lambda *a, **k: release_start.wait(timeout=5.0)
     monkeypatch.setitem(sys.modules, "webview", fake)
     monkeypatch.setattr("localm.config.load_config",
-                        lambda: {"desktop_window_quit_on_close": False})
+                        lambda: {"desktop_window_mode": "auto",
+                                "desktop_window_quit_on_close": False})
 
     runner = threading.Thread(
         target=appface.run_native_window, args=("http://127.0.0.1:8642/",))
