@@ -39,7 +39,12 @@ if [ -z "$UVEXE" ]; then
     esac
     echo "  Installing uv ..."
     export UV_INSTALL_DIR="$PWD/.uv"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+        echo
+        echo "  [!] Could not download or run Astral's uv installer."
+        echo "      Use the console installer instead:  ./setup.sh"
+        exit 1
+    fi
     # The installer updates the shell profile, which this already running shell
     # does not see. Prepend every directory it may have used, in setup.sh's own
     # order, so the uv just installed is callable right now.

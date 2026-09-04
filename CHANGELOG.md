@@ -195,6 +195,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   explicitly either way.
 
 ### Fixed
+- **The graphical installer could not install anything on a machine that did
+  not already have uv.** It opened, then stopped on its first step with
+  "could not start uv". Setting up a fresh copy puts uv inside that folder, and
+  the installer looked for it on the system path instead, where it had just
+  been told it was not. It now uses the copy it was started with, and says
+  which folders it searched if there is genuinely no uv to run. The console
+  installer was never affected.
 - **`localm image`, `localm music` and `localm video` ignored the ComfyUI
   address set for that plugin.** They always used the shared one, so a plugin
   pointed at its own ComfyUI worked in the interface and quietly went somewhere
