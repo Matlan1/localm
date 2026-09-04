@@ -985,27 +985,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 503, f"'{name}' is currently being freed by another request; "
                 f"retry shortly.")
 
-        existing = _engines.get(name)
-        # An engine resolves its config-derived load parameters (context window,
-        # GPU layers, MoE split, VRAM overhead) when it is CONSTRUCTED. A cached
-        # engine that is neither loaded nor mid-unload is rebuilt from the factory
-        # so the next load uses the CURRENT config; a loaded or unloading one is
-        # reused. Constructing an engine does not read the model file.
-        #
-        # The factory raises for a model that is not in the registry (one served
-        # by direct path), which has no rebuild: that engine keeps its kept
-        # object, exactly as before.
-        # See test_unloaded_engine_is_rebuilt_so_config_changes_apply and
-        # test_lazy_reload_reuses_kept_object_not_the_factory.
-        if existing is None:
-            new_engine = _engine_factory(name)
-        elif existing.loaded or getattr(existing, "unloading", False):
-            new_engine = existing
+        if name in _engines:
+            new_engine = _engines[name]
         else:
-            try:
-                new_engine = _engine_factory(name)
-            except Exception:
-                new_engine = existing
+            new_engine = _engine_factory(name)
 
         cancel = threading.Event()
         # Install the fresh event for EVERY load, preempt or not. An engine object

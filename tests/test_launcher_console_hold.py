@@ -51,8 +51,8 @@ class TestConsoleHold:
     def test_a_native_fault_is_caught_as_well_as_an_ordinary_failure(self):
         """Both signs, or the violent crashes are exactly the ones lost."""
         tail = _hold(["localm", "gui"], {})
-        assert "if errorlevel 1 pause" in tail, tail
-        assert "if not errorlevel 0 pause" in tail, (
+        assert tail == " || pause", tail
+        assert "errorlevel" not in tail, (
             "a negative exit code is never >= 1, so this is what catches a "
             f"native fault: {tail}")
 
