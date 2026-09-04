@@ -142,16 +142,21 @@ def test_start_cli_logs_failure_detail_from_real_output(caplog):
     monkeypatch_target.Popen = lambda *a, **k: _FakeFailingProc()
     try:
         mgr = gj_mod.JobManager()
+        records = []
         with caplog.at_level(logging.ERROR, logger="localm"):
             job = mgr.start_cli("comfy-setup", ["comfy", "setup"],
                                 host_label="ComfyUI setup")
+            # The worker marks the job failed and logs the detail AFTER that, so
+            # waiting on the status alone can read caplog before the record
+            # exists. Wait for the record itself.
             for _ in range(300):
-                if job.status in ("done", "failed", "cancelled"):
+                records = [r for r in caplog.records
+                           if r.name == "localm"
+                           and "ComfyUI setup failed" in r.getMessage()]
+                if records and job.status in ("done", "failed", "cancelled"):
                     break
                 time.sleep(0.01)
         assert job.status == "failed"
-        records = [r for r in caplog.records
-                  if r.name == "localm" and "ComfyUI setup failed" in r.getMessage()]
         assert len(records) == 1
         assert "could not resolve host" in records[0].getMessage()
     finally:

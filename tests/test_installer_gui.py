@@ -220,8 +220,9 @@ class TestUvResolution:
             seen.append([str(c) for c in cmd])
             return 0
 
+        (gui.ROOT / ".venv").mkdir(exist_ok=True)
         monkeypatch.setattr(gui, "_run", fake_run)
-        monkeypatch.setattr(gui, "torch_spec_for", lambda backend: "torch")
+        monkeypatch.setattr(gui, "torch_spec_for", lambda backend: ("torch", ""))
         for step in gui.build_steps(plan or gui.Plan()):
             try:
                 step.run(lambda s: None)
@@ -292,3 +293,323 @@ class TestUvResolution:
         found = machine.find_uv(tmp_path)
         assert found is not None
         assert self._commands(machine, monkeypatch)[0][0] == found
+
+
+# --------------------------------------------------------------------------- #
+#  The same install the console performs                                       #
+# --------------------------------------------------------------------------- #
+
+def _commands_for(gui, monkeypatch, plan, spec="torch"):
+    """Every command the install would run, without running any of them."""
+    seen = []
+
+    def fake_run(cmd, emit, plan, **kw):
+        seen.append([str(c) for c in cmd])
+        return 0
+
+    (gui.ROOT / ".venv").mkdir(exist_ok=True)
+    monkeypatch.setattr(gui, "_run", fake_run)
+    monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+    monkeypatch.setattr(gui, "torch_spec_for", lambda b: (spec, ""))
+    monkeypatch.setattr(gui, "_query", lambda args: "queried")
+    for step in gui.build_steps(plan):
+        try:
+            step.run(lambda s: None)
+        except gui.StepFailed:
+            pass
+    return seen
+
+
+def _labels(gui, plan):
+    return [s.label for s in gui.build_steps(plan)]
+
+
+class TestInstallParity:
+    """setup.bat and setup.sh do these; the window claims to do the same."""
+
+    def test_the_venv_marker_is_written(self, gui, tmp_path, monkeypatch):
+        """uninstall removes .venv only when this marker says setup made it."""
+        (tmp_path / ".venv").mkdir()
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 0)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        step = _step(gui, gui.Plan(), "Creating the Python environment")
+        step.run(lambda s: None)
+        assert (tmp_path / ".venv" / ".localm-venv").is_file()
+
+    def test_the_chosen_plugins_are_installed(self, gui, tmp_path, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(plugins=("coder", "rag"), backend="own"))
+        setup = [c for c in cmds if "plugin" in c and "setup" in c]
+        assert len(setup) == 1, "the chosen features are never installed"
+        assert "--plugins" in setup[0]
+        assert setup[0][setup[0].index("--plugins") + 1] == "coder,rag"
+
+    def test_no_plugin_step_when_none_were_chosen(self, gui):
+        assert not any("optional features" in lb
+                       for lb in _labels(gui, gui.Plan(plugins=())))
+
+    def test_the_deps_answer_is_always_explicit(self, gui, tmp_path, monkeypatch):
+        """The flag's default is to ASK, and a window has no console to answer."""
+        for deps, flag in ((True, "--with-deps"), (False, "--no-deps")):
+            cmds = _commands_for(gui, monkeypatch,
+                                 gui.Plan(plugins=("coder",), plugin_deps=deps,
+                                          backend="own"))
+            setup = [c for c in cmds if "plugin" in c and "setup" in c][0]
+            assert flag in setup, f"{setup} lets the deps prompt decide"
+
+    def test_the_global_command_never_waits_for_an_answer(
+            self, gui, tmp_path, monkeypatch):
+        """globalcmd install prompts on a PATH conflict; nothing can reply."""
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(add_to_path=True, backend="own"))
+        gc = [c for c in cmds if "localm.globalcmd" in c]
+        assert gc and "--yes" in gc[0], f"{gc} can block on stdin"
+
+    def test_the_install_is_recorded(self, gui, tmp_path, monkeypatch):
+        """Without this, uninstall cannot remove what setup created."""
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", shortcut="none"))
+        rec = [c for c in cmds if "localm.install_manifest" in c]
+        assert len(rec) == 1, "nothing records what was installed"
+        assert "record" in rec[0]
+        assert str(tmp_path / ".venv") in rec[0]
+        assert rec[0][rec[0].index("--data-dir") + 1] == str(tmp_path / "home")
+
+    def test_the_recorded_shortcut_is_the_one_created(
+            self, gui, tmp_path, monkeypatch):
+        monkeypatch.setattr(gui, "make_shortcut",
+                            lambda plan, emit: str(tmp_path / "LocaLM.lnk"))
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", shortcut="launcher"))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert rec[rec.index("--shortcut") + 1] == str(tmp_path / "LocaLM.lnk")
+
+    def test_a_portable_install_records_its_tooling_dirs(
+            self, gui, tmp_path, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", portable_store=True))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--runtime-contained" in rec
+        assert rec[rec.index("--python-dir") + 1] == str(tmp_path / ".python")
+
+    def test_a_shared_install_does_not_claim_the_shared_dirs(
+            self, gui, tmp_path, monkeypatch):
+        """Uninstall must never delete a runtime other installs share."""
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", portable_store=False))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--runtime-contained" not in rec
+
+
+class TestHonestFailures:
+    """AGENTS.md rule 5: a step that failed is never reported as done."""
+
+    def test_an_unanswerable_torch_probe_is_not_no_torch_needed(
+            self, gui, monkeypatch):
+        """The probe exiting non-zero says nothing about needing PyTorch."""
+        class Failed:
+            returncode = 3
+            stdout = ""
+            stderr = "ModuleNotFoundError: No module named 'localm'"
+        monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: Failed())
+        spec, problem = gui.torch_spec_for("cuda")
+        assert spec is None
+        assert "could not ask" in problem
+        step = _step(gui, gui.Plan(backend="cuda"), "Installing PyTorch")
+        with pytest.raises(gui.StepFailed) as e:
+            step.run(lambda s: None)
+        assert "could not ask" in str(e.value)
+
+    def test_a_genuinely_torch_free_backend_still_says_so(
+            self, gui, monkeypatch):
+        monkeypatch.setattr(gui, "torch_spec_for", lambda b: (None, ""))
+        lines = []
+        _step(gui, gui.Plan(backend="vulkan"), "Installing PyTorch").run(lines.append)
+        assert any("No PyTorch stack needed" in line for line in lines)
+
+    def test_a_failed_torch_install_reaches_the_summary(self, gui, monkeypatch):
+        """It used to scroll past in the log and end on an unqualified success."""
+        monkeypatch.setattr(gui, "torch_spec_for", lambda b: ("torch", ""))
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        with pytest.raises(gui.StepFailed) as e:
+            _step(gui, gui.Plan(backend="cuda"), "Installing PyTorch").run(
+                lambda s: None)
+        assert "PyTorch" in str(e.value)
+
+    def test_a_failed_path_step_reaches_the_summary(self, gui, monkeypatch):
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        with pytest.raises(gui.StepFailed):
+            _step(gui, gui.Plan(add_to_path=True, backend="own"),
+                  "Adding 'localm'").run(lambda s: None)
+
+
+class TestBackendMenu:
+    """hwdetect can recommend metal and hip, and setup_llama accepts both."""
+
+    def test_every_offered_backend_is_one_the_provisioner_accepts(self, gui):
+        from localm import setup_llama
+        for key, _ in gui._BACKEND_CHOICES:
+            if key == "own":
+                continue
+            assert key in setup_llama.BACKENDS, f"{key} is not a real backend"
+
+    def test_metal_is_offered_on_macos_and_nowhere_else(self, gui, monkeypatch):
+        monkeypatch.setattr(gui.sys, "platform", "darwin")
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        assert "metal" in [k for k, _ in gui.backend_choices()]
+        monkeypatch.setattr(gui.sys, "platform", "win32")
+        monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        assert "metal" not in [k for k, _ in gui.backend_choices()]
+
+    def test_hip_is_offered(self, gui):
+        """An AMD box with a ROCm toolkit is recommended hip by hwdetect."""
+        assert "hip" in [k for k, _ in gui.backend_choices()]
+
+    def test_the_menu_can_show_whatever_hwdetect_recommends(self, gui, monkeypatch):
+        """A recommendation with no matching row leaves the group unselected."""
+        monkeypatch.setattr(gui.sys, "platform", "darwin")
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        mac = {k for k, _ in gui.backend_choices()}
+        monkeypatch.setattr(gui.sys, "platform", "win32")
+        monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        win = {k for k, _ in gui.backend_choices()}
+        from localm import hwdetect
+        import inspect
+        import re
+        src = inspect.getsource(hwdetect.recommended_install_backend)
+        for rec in set(re.findall(r'return "([a-z-]+)"', src)):
+            assert rec in mac or rec in win, f"nothing offers {rec}"
+
+
+class TestPluginChoices:
+    def test_the_picker_reads_the_real_catalog(self, gui):
+        from localm.plugins import catalog
+        offered = [n for n, _ in gui.plugin_choices()]
+        assert offered, "no optional features are offered"
+        assert set(offered) == set(catalog.names()) - set(catalog.preinstalled())
+
+    def test_chat_is_never_offered_because_it_is_always_installed(self, gui):
+        assert "chat" not in [n for n, _ in gui.plugin_choices()]
+
+    def test_the_recommended_set_matches_the_console_installer(self, gui):
+        from localm.cli import plugins as cli_plugins
+        assert set(gui.RECOMMENDED_PLUGINS) == set(cli_plugins._SETUP_DEFAULTS)
+
+
+class TestPosixShortcut:
+    def test_the_launcher_choice_is_honoured(self, gui, tmp_path, monkeypatch):
+        """It used to write the same GUI entry whatever the user picked."""
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        gui.make_shortcut(gui.Plan(shortcut="launcher"), lambda s: None)
+        launcher = (home / "Desktop" / "LocaLM.desktop").read_text(encoding="utf-8")
+        gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        straight = (home / "Desktop" / "LocaLM.desktop").read_text(encoding="utf-8")
+        assert launcher != straight, "both choices wrote the same entry"
+        assert "localm-launcher.sh" in launcher
+        assert launcher.count("Exec=") == 1
+
+    def test_the_written_path_is_returned_for_the_manifest(
+            self, gui, tmp_path, monkeypatch):
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        written = gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        assert written and Path(written).is_file()
+
+
+# --------------------------------------------------------------------------- #
+#  The dialogue                                                                #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def wizard(gui):
+    """A real Tk wizard, skipped where there is no display to build one on."""
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    root.withdraw()
+    try:
+        yield gui.Wizard(root, tk, ttk, filedialog)
+    finally:
+        root.destroy()
+
+
+class TestWizard:
+    """It is a multi-page dialogue, so every question actually gets asked."""
+
+    def test_it_has_a_page_per_group_of_questions(self, wizard):
+        titles = [t for t, _ in wizard.pages]
+        assert titles == ["Inference runtime", "Where things live",
+                          "Optional features", "Options", "Installing"]
+
+    def test_next_and_back_walk_the_pages(self, wizard):
+        assert wizard.index == 0
+        wizard.next_page()
+        assert wizard.index == 1
+        wizard.next_page()
+        assert wizard.index == 2
+        wizard.prev_page()
+        assert wizard.index == 1
+        wizard.prev_page()
+        assert wizard.index == 0
+
+    def test_back_does_nothing_on_the_first_page(self, wizard):
+        wizard.prev_page()
+        assert wizard.index == 0
+
+    def test_the_last_question_page_installs_rather_than_advancing(
+            self, wizard, monkeypatch):
+        started = []
+        monkeypatch.setattr(wizard, "start_install", lambda: started.append(True))
+        for _ in range(len(wizard.pages)):
+            wizard.next_page()
+        assert started, "the dialogue never reaches the install"
+
+    def test_an_empty_custom_data_folder_is_refused_without_advancing(
+            self, wizard):
+        wizard.next_page()
+        assert wizard.pages[wizard.index][0] == "Where things live"
+        wizard.portable_var.set(False)
+        wizard.path_var.set("")
+        wizard.next_page()
+        assert wizard.index == 1, "advanced with no data folder chosen"
+        assert "folder" in wizard.status.cget("text")
+
+    def test_an_answer_survives_leaving_its_page(self, wizard):
+        wizard.backend_var.set("cpu")
+        wizard.next_page()
+        wizard.prev_page()
+        assert wizard.backend_var.get() == "cpu"
+        assert wizard.current_plan().backend == "cpu"
+
+    def test_every_page_feeds_the_plan(self, wizard):
+        wizard.backend_var.set("cpu")
+        wizard.store_var.set(False)
+        wizard.appwin_var.set(True)
+        wizard.path_cmd_var.set(True)
+        wizard.shortcut_var.set("gui")
+        wizard.deps_var.set(False)
+        for name in wizard.plugin_vars:
+            wizard.plugin_vars[name].set(False)
+        if "coder" in wizard.plugin_vars:
+            wizard.plugin_vars["coder"].set(True)
+        plan = wizard.current_plan()
+        assert plan.backend == "cpu"
+        assert plan.portable_store is False
+        assert plan.app_window is True
+        assert plan.add_to_path is True
+        assert plan.shortcut == "gui"
+        assert plan.plugin_deps is False
+        assert plan.plugins == ("coder",)
+
+    def test_the_default_plan_matches_the_console_recommendation(self, wizard, gui):
+        assert set(wizard.current_plan().plugins) == set(gui.RECOMMENDED_PLUGINS)
