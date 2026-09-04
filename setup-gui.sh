@@ -76,9 +76,6 @@ if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DIS
 fi
 
 echo "  Opening the setup window ..."
-# Name the uv that worked here, so the installer's own steps run that exact
-# binary rather than searching for one again.
-export LOCALM_UV="$UVEXE"
 if ! "$UVEXE" run --no-project --python 3.12 python installer/gui.py; then
     echo
     echo "  [!] The setup window could not run."

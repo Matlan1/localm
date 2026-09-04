@@ -70,31 +70,25 @@ def venv_python(root: Path) -> Path:
 
 
 def uv_dirs(root: Path) -> List[Path]:
-    """Every directory uv may live in, in the order they are preferred: the
-    portable copy the launcher puts inside the clone first, then an explicit
-    UV_INSTALL_DIR, then Astral's own default install locations."""
-    dirs = [root / ".uv", root / ".uv" / "bin"]
-    explicit = os.environ.get("UV_INSTALL_DIR", "").strip()
-    if explicit:
-        dirs.append(Path(explicit))
+    """Every directory uv may live in, most preferred first: the portable copy
+    the launcher puts inside the clone, then Astral's own default install
+    locations, which a shell started before the installer ran does not
+    necessarily have on PATH yet."""
     home = Path.home()
-    dirs += [home / ".local" / "bin", home / ".cargo" / "bin"]
-    return dirs
+    return [root / ".uv", root / ".uv" / "bin",
+            home / ".local" / "bin", home / ".cargo" / "bin"]
 
 
 def find_uv(root: Path) -> Optional[str]:
     """The uv to run, or None if there is none. Returns a full path for a
     portable uv and a bare name for one resolved on PATH.
 
-    The launcher scripts export LOCALM_UV naming the exact binary they used to
-    open this window, which is preferred over any other candidate.
+    The launcher scripts put the uv they used on PATH for this process, so a
+    uv that is not in one of the directories above is still reachable here.
 
     Every uv invocation and the entry check below both go through this, so a
     uv that starts the installer is always a uv the steps can run. See
     tests/test_installer_gui.py TestUvResolution."""
-    named = os.environ.get("LOCALM_UV", "").strip()
-    if named and (Path(named).is_file() or shutil.which(named)):
-        return named
     exe = "uv.exe" if IS_WINDOWS else "uv"
     for d in uv_dirs(root):
         candidate = d / exe
@@ -157,8 +151,8 @@ def uv_argv(*args: str) -> List[str]:
     exe = find_uv(ROOT)
     if exe is None:
         raise StepFailed(
-            "uv was not found in this folder, in UV_INSTALL_DIR, or on PATH. "
-            "Close this window and run setup.bat / setup.sh instead.")
+            "uv was not found in this folder or on PATH. Close this window "
+            "and run setup.bat / setup.sh instead.")
     return [exe, *args]
 
 

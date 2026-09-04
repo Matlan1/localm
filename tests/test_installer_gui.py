@@ -199,8 +199,6 @@ class TestUvResolution:
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
-        monkeypatch.delenv("LOCALM_UV", raising=False)
-        monkeypatch.delenv("UV_INSTALL_DIR", raising=False)
         monkeypatch.setenv("PATH", str(tmp_path / "empty"))
         return gui
 
@@ -259,23 +257,7 @@ class TestUvResolution:
         assert machine.find_uv(tmp_path) == str(exe)
         assert self._commands(machine, monkeypatch)[0][0] == machine.find_uv(tmp_path)
 
-    def test_a_launcher_supplied_uv_is_preferred(
-            self, machine, tmp_path, monkeypatch):
-        """The launcher already found a working uv; the installer runs that one
-        rather than searching again and possibly picking a different answer."""
-        self._portable_uv(machine, tmp_path)
-        named = tmp_path / "elsewhere" / ("uv.exe" if machine.IS_WINDOWS else "uv")
-        named.parent.mkdir()
-        named.write_bytes(b"")
-        monkeypatch.setenv("LOCALM_UV", str(named))
-        assert machine.find_uv(tmp_path) == str(named)
 
-    def test_a_launcher_supplied_uv_that_does_not_exist_is_ignored(
-            self, machine, tmp_path, monkeypatch):
-        """A stale variable must not shadow a uv that is really there."""
-        exe = self._portable_uv(machine, tmp_path)
-        monkeypatch.setenv("LOCALM_UV", str(tmp_path / "gone" / "uv.exe"))
-        assert machine.find_uv(tmp_path) == str(exe)
 
     def test_the_portable_uv_wins_over_one_on_path(
             self, machine, tmp_path, monkeypatch):
@@ -287,14 +269,6 @@ class TestUvResolution:
         monkeypatch.setenv("PATH", str(onpath))
         assert machine.find_uv(tmp_path) == str(exe)
 
-    def test_uv_install_dir_is_searched(self, machine, tmp_path, monkeypatch):
-        """Astral's own override for where its installer put uv."""
-        d = tmp_path / "custom"
-        d.mkdir()
-        exe = d / ("uv.exe" if machine.IS_WINDOWS else "uv")
-        exe.write_bytes(b"")
-        monkeypatch.setenv("UV_INSTALL_DIR", str(d))
-        assert machine.find_uv(tmp_path) == str(exe)
 
     def test_a_machine_with_no_uv_reports_it_instead_of_running_nothing(
             self, machine, tmp_path, monkeypatch):
@@ -304,3 +278,17 @@ class TestUvResolution:
         with pytest.raises(machine.StepFailed) as excinfo:
             self._commands(machine, monkeypatch)
         assert "uv was not found" in str(excinfo.value)
+
+    def test_a_uv_only_on_path_is_still_found(
+            self, machine, tmp_path, monkeypatch):
+        """The launcher puts the uv it used on PATH for this process, so one
+        that lives nowhere the search looks is still reachable."""
+        onpath = tmp_path / "sysbin"
+        onpath.mkdir()
+        exe = onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")
+        exe.write_bytes(b"")
+        exe.chmod(0o755)
+        monkeypatch.setenv("PATH", str(onpath))
+        found = machine.find_uv(tmp_path)
+        assert found is not None
+        assert self._commands(machine, monkeypatch)[0][0] == found

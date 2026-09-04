@@ -67,9 +67,6 @@ rem  --no-project so uv never tries to resolve this repo as its own project, and
 rem  an explicit --python so the interpreter is the managed 3.12 the install
 rem  targets rather than whatever else is on the machine.
 echo   Opening the setup window ...
-rem  Name the uv that worked here, so the installer's own steps run that exact
-rem  binary rather than searching for one again.
-set "LOCALM_UV=%UVEXE%"
 "%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
 set "RC=!errorlevel!"
 
