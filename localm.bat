@@ -40,10 +40,23 @@ if "%MODEL%"=="" (
 :run
 echo Starting LocaLM with model: %MODEL%
 "%PY%" -m localm run %MODEL%
-if errorlevel 1 pause
-exit /b %errorlevel%
+set "RC=%errorlevel%"
+if not "%RC%"=="0" goto :held
+exit /b 0
 
 :forward
 "%PY%" -m localm %*
-if errorlevel 1 pause
-exit /b %errorlevel%
+set "RC=%errorlevel%"
+if not "%RC%"=="0" goto :held
+rem Debug asks for the log to be readable, so the window is held even on a
+rem clean exit.
+echo %* | findstr /I /C:"--debug" >nul && goto :held
+exit /b 0
+
+rem "if errorlevel 1" is a >= test against a SIGNED value, so a native fault's
+rem negative exit code (an access violation exits -1073741819) never matched
+rem it and the window closed on exactly the crashes worth reading. RC is
+rem compared as a string, which has no sign to get wrong.
+:held
+pause
+exit /b %RC%
