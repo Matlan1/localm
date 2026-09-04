@@ -69,6 +69,40 @@ def venv_python(root: Path) -> Path:
     return venv_bin(root) / ("python.exe" if IS_WINDOWS else "python")
 
 
+def uv_dirs(root: Path) -> List[Path]:
+    """Every directory uv may live in, in the order they are preferred: the
+    portable copy the launcher puts inside the clone first, then an explicit
+    UV_INSTALL_DIR, then Astral's own default install locations."""
+    dirs = [root / ".uv", root / ".uv" / "bin"]
+    explicit = os.environ.get("UV_INSTALL_DIR", "").strip()
+    if explicit:
+        dirs.append(Path(explicit))
+    home = Path.home()
+    dirs += [home / ".local" / "bin", home / ".cargo" / "bin"]
+    return dirs
+
+
+def find_uv(root: Path) -> Optional[str]:
+    """The uv to run, or None if there is none. Returns a full path for a
+    portable uv and a bare name for one resolved on PATH.
+
+    The launcher scripts export LOCALM_UV naming the exact binary they used to
+    open this window, which is preferred over any other candidate.
+
+    Every uv invocation and the entry check below both go through this, so a
+    uv that starts the installer is always a uv the steps can run. See
+    tests/test_installer_gui.py TestUvResolution."""
+    named = os.environ.get("LOCALM_UV", "").strip()
+    if named and (Path(named).is_file() or shutil.which(named)):
+        return named
+    exe = "uv.exe" if IS_WINDOWS else "uv"
+    for d in uv_dirs(root):
+        candidate = d / exe
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("uv")
+
+
 def detect_recommendation() -> tuple:
     """(vendor, recommended_backend) from localm.hwdetect, imported straight out
     of this source tree. Never raises: an undetectable machine offers the same
@@ -115,6 +149,17 @@ class Plan:
 
 class StepFailed(Exception):
     """A step that must not be reported as success (AGENTS.md rule 5)."""
+
+
+def uv_argv(*args: str) -> List[str]:
+    """A uv command line, resolved when the step runs. Raises StepFailed when
+    uv cannot be found, so a missing uv is reported as the step it broke."""
+    exe = find_uv(ROOT)
+    if exe is None:
+        raise StepFailed(
+            "uv was not found in this folder, in UV_INSTALL_DIR, or on PATH. "
+            "Close this window and run setup.bat / setup.sh instead.")
+    return [exe, *args]
 
 
 @dataclass
@@ -170,18 +215,18 @@ def build_steps(plan: Plan) -> List[Step]:
     steps: List[Step] = []
 
     def venv(emit):
-        _run(["uv", "venv", "--python", PYVER, "--python-preference",
-              "only-managed", "--clear", ".venv"], emit, plan)
+        _run(uv_argv("venv", "--python", PYVER, "--python-preference",
+                     "only-managed", "--clear", ".venv"), emit, plan)
     steps.append(Step("Creating the Python environment", venv))
 
     def install_localm(emit):
-        _run(["uv", "pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"],
+        _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
              emit, plan)
     steps.append(Step("Installing LocaLM", install_localm))
 
     def install_runtime_pkg(emit):
         # Carries llama.dll + ggml inside the venv; setup-llama fills it below.
-        _run(["uv", "pip", "install", "-p", ".venv", "-e", "./runtime"], emit, plan)
+        _run(uv_argv("pip", "install", "-p", ".venv", "-e", "./runtime"), emit, plan)
     steps.append(Step("Installing the native runtime package", install_runtime_pkg))
 
     def install_torch(emit):
@@ -190,14 +235,14 @@ def build_steps(plan: Plan) -> List[Step]:
             emit("No PyTorch stack needed for this backend (GGUF chat does not use it).")
             return
         if spec == "-e .[gpu]":
-            _run(["uv", "pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"],
+            _run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"),
                  emit, plan, allow_fail=True)
             return
-        _run(["uv", "pip", "install", "-p", ".venv"] + spec.split(),
+        _run(uv_argv("pip", "install", "-p", ".venv", *spec.split()),
              emit, plan, allow_fail=True)
-        _run(["uv", "pip", "install", "-p", ".venv",
-              "transformers[kernels]~=5.12", "tokenizers==0.22.2",
-              "accelerate>=1.0", "pillow>=10.0", "soundfile>=0.12"],
+        _run(uv_argv("pip", "install", "-p", ".venv",
+                     "transformers[kernels]~=5.12", "tokenizers==0.22.2",
+                     "accelerate>=1.0", "pillow>=10.0", "soundfile>=0.12"),
              emit, plan, allow_fail=True)
     # Not fatal: a failed torch stack still leaves a working GGUF chat install,
     # which is what setup.bat also says at this point.
@@ -503,7 +548,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    if shutil.which("uv") is None and not (ROOT / ".uv").exists():
+    if find_uv(ROOT) is None:
         print("uv is required and was not found. Run setup.bat / setup.sh instead.",
               file=sys.stderr)
         raise SystemExit(2)

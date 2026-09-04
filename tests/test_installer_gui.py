@@ -175,3 +175,132 @@ def test_portable_store_contains_uv_inside_the_install(gui, tmp_path):
     plain = gui._env_for(gui.Plan(portable_store=False))
     assert plain.get("UV_PYTHON_INSTALL_DIR") != str(tmp_path / ".python")
     assert plain.get("UV_CACHE_DIR") != str(tmp_path / ".cache")
+
+
+# --------------------------------------------------------------------------- #
+#  Finding uv                                                                  #
+# --------------------------------------------------------------------------- #
+
+class TestUvResolution:
+    """The installer runs before anything is installed, so uv is the one tool
+    it cannot assume. setup-gui.bat bootstraps a portable copy into ./.uv when
+    the machine has none, and Astral's installer updates the PERSISTENT PATH
+    rather than the shell that is already running - so on a fresh clone uv is
+    routinely present in the folder and absent from PATH.
+
+    What is pinned here is that the entry check and the steps resolve the SAME
+    uv. When they disagreed, the window opened and died on its first command
+    with "could not start uv: [WinError 2]"."""
+
+    @pytest.fixture()
+    def machine(self, gui, tmp_path, monkeypatch):
+        """A machine with no uv at all: none on PATH, none in the clone, and a
+        home directory that cannot contain one either."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.delenv("LOCALM_UV", raising=False)
+        monkeypatch.delenv("UV_INSTALL_DIR", raising=False)
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        return gui
+
+    @staticmethod
+    def _portable_uv(gui, root):
+        d = root / ".uv"
+        d.mkdir(parents=True, exist_ok=True)
+        exe = d / ("uv.exe" if gui.IS_WINDOWS else "uv")
+        exe.write_bytes(b"")
+        exe.chmod(0o755)
+        return exe
+
+    @staticmethod
+    def _commands(gui, monkeypatch, plan=None):
+        """Every command the install would run, without running any of them."""
+        seen = []
+
+        def fake_run(cmd, emit, plan, **kw):
+            seen.append([str(c) for c in cmd])
+            return 0
+
+        monkeypatch.setattr(gui, "_run", fake_run)
+        monkeypatch.setattr(gui, "torch_spec_for", lambda backend: "torch")
+        for step in gui.build_steps(plan or gui.Plan()):
+            try:
+                step.run(lambda s: None)
+            except gui.StepFailed:
+                raise
+            except Exception:
+                pass
+        return seen
+
+    def test_the_steps_run_the_portable_uv_when_it_is_not_on_path(
+            self, machine, tmp_path, monkeypatch):
+        """The reported failure: a fresh clone whose uv lives in ./.uv."""
+        exe = self._portable_uv(machine, tmp_path)
+        venv_cmd = self._commands(machine, monkeypatch)[0]
+        assert venv_cmd[0] == str(exe), (
+            f"the install ran {venv_cmd[0]!r}, which is not the uv that exists")
+        assert venv_cmd[1:3] == ["venv", "--python"]
+
+    def test_no_step_invokes_a_bare_uv(self, machine, tmp_path, monkeypatch):
+        """Swept across every step, not only the one that was reported: a bare
+        'uv' resolves through PATH, which is exactly where it is not."""
+        self._portable_uv(machine, tmp_path)
+        for cmd in self._commands(
+                machine, monkeypatch,
+                machine.Plan(app_window=True, add_to_path=True, shortcut="gui")):
+            assert cmd[0] != "uv", f"{cmd} searches PATH for uv"
+
+    def test_the_entry_check_and_the_steps_agree(
+            self, machine, tmp_path, monkeypatch):
+        """One resolver, so a uv good enough to OPEN the window is always a uv
+        the steps can run."""
+        exe = self._portable_uv(machine, tmp_path)
+        assert machine.find_uv(tmp_path) == str(exe)
+        assert self._commands(machine, monkeypatch)[0][0] == machine.find_uv(tmp_path)
+
+    def test_a_launcher_supplied_uv_is_preferred(
+            self, machine, tmp_path, monkeypatch):
+        """The launcher already found a working uv; the installer runs that one
+        rather than searching again and possibly picking a different answer."""
+        self._portable_uv(machine, tmp_path)
+        named = tmp_path / "elsewhere" / ("uv.exe" if machine.IS_WINDOWS else "uv")
+        named.parent.mkdir()
+        named.write_bytes(b"")
+        monkeypatch.setenv("LOCALM_UV", str(named))
+        assert machine.find_uv(tmp_path) == str(named)
+
+    def test_a_launcher_supplied_uv_that_does_not_exist_is_ignored(
+            self, machine, tmp_path, monkeypatch):
+        """A stale variable must not shadow a uv that is really there."""
+        exe = self._portable_uv(machine, tmp_path)
+        monkeypatch.setenv("LOCALM_UV", str(tmp_path / "gone" / "uv.exe"))
+        assert machine.find_uv(tmp_path) == str(exe)
+
+    def test_the_portable_uv_wins_over_one_on_path(
+            self, machine, tmp_path, monkeypatch):
+        """Portable means the install uses its own copy, not the machine's."""
+        exe = self._portable_uv(machine, tmp_path)
+        onpath = tmp_path / "sysbin"
+        onpath.mkdir()
+        (onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")).write_bytes(b"")
+        monkeypatch.setenv("PATH", str(onpath))
+        assert machine.find_uv(tmp_path) == str(exe)
+
+    def test_uv_install_dir_is_searched(self, machine, tmp_path, monkeypatch):
+        """Astral's own override for where its installer put uv."""
+        d = tmp_path / "custom"
+        d.mkdir()
+        exe = d / ("uv.exe" if machine.IS_WINDOWS else "uv")
+        exe.write_bytes(b"")
+        monkeypatch.setenv("UV_INSTALL_DIR", str(d))
+        assert machine.find_uv(tmp_path) == str(exe)
+
+    def test_a_machine_with_no_uv_reports_it_instead_of_running_nothing(
+            self, machine, tmp_path, monkeypatch):
+        """No uv anywhere is a step that FAILS, never a command handed to the
+        OS that cannot start (AGENTS.md rule 5)."""
+        assert machine.find_uv(tmp_path) is None
+        with pytest.raises(machine.StepFailed) as excinfo:
+            self._commands(machine, monkeypatch)
+        assert "uv was not found" in str(excinfo.value)
