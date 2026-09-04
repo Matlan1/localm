@@ -528,11 +528,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   simply unknown. Real crashes are still reported, and still name the real
   fault.
 - **A failed launch no longer closes its window before you can read the
-  error.** Starting localm from the launcher or a shortcut opened a console
-  that vanished the instant the process stopped, so a startup refusal (for
-  example, a second copy starting in a folder that already has one) flashed
-  red and disappeared. The window now stays open when a launch fails; a normal
-  exit still closes it.
+  error, however hard it failed.** Starting localm from the launcher or a
+  shortcut opened a console that vanished the instant the process stopped, so a
+  startup refusal (for example, a second copy starting in a folder that already
+  has one) flashed red and disappeared. The window now stays open when a launch
+  fails, including a crash inside the native runtime: those end the process in a
+  way the old check did not recognise, so the crashes least likely to have
+  managed to save a report were exactly the ones that vanished. In debug mode
+  the window now stays open whatever happened, because its live log is the
+  reason it is there; outside debug a normal exit still closes it.
 
 ### Security
 - **A fetched web page or external tool result can no longer impersonate you or
