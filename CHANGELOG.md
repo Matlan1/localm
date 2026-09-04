@@ -195,6 +195,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   explicitly either way.
 
 ### Fixed
+- **You can now select and copy text in the app window.** The window ran with
+  the keyboard shortcuts and the right-click menu switched off, so Ctrl+C,
+  Ctrl+A and right-click Copy all did nothing and there was no way to get an
+  error message, a reply or a setting out of it. All three work now, and the
+  window still does not open developer tools.
 - **The graphical installer could not install anything on a machine that did
   not already have uv.** It opened, then stopped on its first step with
   "could not start uv". Setting up a fresh copy puts uv inside that folder, and
