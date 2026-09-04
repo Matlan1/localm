@@ -200,8 +200,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "could not start uv". Setting up a fresh copy puts uv inside that folder, and
   the installer looked for it on the system path instead, where it had just
   been told it was not. It now uses the copy it was started with, and says
-  which folders it searched if there is genuinely no uv to run. The console
-  installer was never affected.
+  where it looked if there is genuinely no uv to run.
+- **`./setup-gui.sh` would not start on Linux or macOS.** A fresh copy of the
+  project did not mark it runnable, so it refused with a permission error, and
+  the console installer's offer to switch to a window never appeared for the
+  same reason. `rollback.sh` had the same problem, which mattered more because
+  it is what you reach for when an update went wrong.
+- **The graphical installer left out part of the install.** It never asked
+  which optional features you wanted, so a graphical install ended with chat
+  and nothing else even though it had already downloaded what the coding agent
+  needs. It also recorded nothing about what it had installed, so uninstalling
+  afterwards could not remove the desktop shortcut or the `localm` command it
+  had added, and it could not offer Apple Silicon or AMD ROCm as runtimes even
+  where those are what your hardware wants. The console installer was never
+  affected by any of this.
 - **`localm image`, `localm music` and `localm video` ignored the ComfyUI
   address set for that plugin.** They always used the shared one, so a plugin
   pointed at its own ComfyUI worked in the interface and quietly went somewhere
