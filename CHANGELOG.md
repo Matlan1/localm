@@ -200,6 +200,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   explicitly either way.
 
 ### Fixed
+- **A saved engine setting did not take effect when you reloaded the same
+  model.** Settings says engine values apply on the next model load, but a
+  model that had already been loaded once kept the context window, GPU layers
+  and MoE split it was first loaded with, so raising the context window and
+  loading that model again silently did nothing until you restarted LocaLM.
+  Switching to a different model was unaffected.
 - **`rollback.sh` would not start on Linux or macOS.** A fresh copy of the
   project did not mark it runnable, so it refused with a permission error,
   which mattered because it is what you reach for when an update went wrong.
