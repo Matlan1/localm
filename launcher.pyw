@@ -648,7 +648,15 @@ class Launcher(tk.Tk):
         def work():
             result = sync_models_dir_safe()
             models = load_models()
-            self.after(0, lambda: self._refresh_done(result, models))
+            # The scan can outlive the window: closing the launcher while a
+            # large models folder is being read destroys the widget this would
+            # schedule onto, and Tk raises from a thread that is no longer the
+            # one running its loop. Nothing is owed to a window that is gone.
+            try:
+                if self.winfo_exists():
+                    self.after(0, lambda: self._refresh_done(result, models))
+            except (tk.TclError, RuntimeError):
+                pass
 
         threading.Thread(target=work, daemon=True).start()
 
