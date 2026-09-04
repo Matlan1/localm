@@ -11,7 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-03
+## [0.2.0] - 2026-09-04
 
 ### Added
 - **The Browser tab can now show the browser the coding agent is driving.**
@@ -149,14 +149,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exact model name.
 - **LocaLM now has a graphical installer, so you never have to answer setup
   questions in a console.** Double-click `setup-gui.bat` (Windows) or run
-  `./setup-gui.sh` (Linux/macOS): a window asks which inference runtime to use
-  (your hardware's recommendation is already selected), where models and data
-  should live, whether the GUI opens as its own app window or a browser tab,
-  and whether you want a desktop shortcut and a global `localm` command. It
-  then installs with a progress bar and a live log, and offers to start LocaLM
-  when it finishes. It performs exactly the same install as `setup.bat` /
-  `setup.sh`, which are unchanged and remain available for anyone who prefers
-  them.
+  `./setup-gui.sh` (Linux/macOS) and click through four pages, with Back to
+  change an earlier answer: which inference runtime to use (your hardware's
+  recommendation is already selected, including Apple Silicon and AMD ROCm);
+  where models and data live, and whether the Python tooling stays inside the
+  folder so nothing is written to your user profile; which optional features
+  to install, with the recommended ones already ticked; and whether the GUI
+  opens as its own app window, whether you want a desktop shortcut, and
+  whether `localm` should run from any terminal. It then installs with a
+  progress bar and a live log, says plainly if an optional step did not
+  finish, and offers to start LocaLM. It performs the same install as
+  `setup.bat` / `setup.sh` and records what it created, so uninstalling
+  afterwards removes exactly that. Those console installers are unchanged and
+  remain available for anyone who prefers them.
 - **The preview canvas can now be turned off, or limited to you.** A reply
   containing a self-contained HTML or SVG block gets a button that renders it
   in a sandboxed frame. Two settings under Chat now govern it: one turns the
@@ -195,30 +200,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   explicitly either way.
 
 ### Fixed
-- **You can now select and copy text in the app window.** The window ran with
-  the keyboard shortcuts and the right-click menu switched off, so Ctrl+C,
-  Ctrl+A and right-click Copy all did nothing and there was no way to get an
-  error message, a reply or a setting out of it. All three work now, and the
-  window still does not open developer tools.
-- **The graphical installer could not install anything on a machine that did
-  not already have uv.** It opened, then stopped on its first step with
-  "could not start uv". Setting up a fresh copy puts uv inside that folder, and
-  the installer looked for it on the system path instead, where it had just
-  been told it was not. It now uses the copy it was started with, and says
-  where it looked if there is genuinely no uv to run.
-- **`./setup-gui.sh` would not start on Linux or macOS.** A fresh copy of the
-  project did not mark it runnable, so it refused with a permission error, and
-  the console installer's offer to switch to a window never appeared for the
-  same reason. `rollback.sh` had the same problem, which mattered more because
-  it is what you reach for when an update went wrong.
-- **The graphical installer left out part of the install.** It never asked
-  which optional features you wanted, so a graphical install ended with chat
-  and nothing else even though it had already downloaded what the coding agent
-  needs. It also recorded nothing about what it had installed, so uninstalling
-  afterwards could not remove the desktop shortcut or the `localm` command it
-  had added, and it could not offer Apple Silicon or AMD ROCm as runtimes even
-  where those are what your hardware wants. The console installer was never
-  affected by any of this.
+- **`rollback.sh` would not start on Linux or macOS.** A fresh copy of the
+  project did not mark it runnable, so it refused with a permission error,
+  which mattered because it is what you reach for when an update went wrong.
 - **`localm image`, `localm music` and `localm video` ignored the ComfyUI
   address set for that plugin.** They always used the shared one, so a plugin
   pointed at its own ComfyUI worked in the interface and quietly went somewhere
@@ -446,8 +430,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   settings. It is now accepted here too, with the same meaning: no
   runaway-guard limit, bounded only by the model's context window.
 - **Text in the app window (the standalone desktop window, not a browser tab)
-  could not be selected or copied.** The window now allows selecting text and
-  copying it with Ctrl+C.
+  could not be selected or copied.** Selecting it works, and so does copying:
+  Ctrl+C, Ctrl+A and the right-click menu were all switched off in that window,
+  so there was no way to get an error message, a reply or a setting out of it.
+  All three work now, and the window still does not open developer tools.
 - **Clicking an outbound link in the app window, such as the changelog's
   release link, navigated the whole window away to that page instead of
   opening it.** The app window has no address bar or back button, so there
