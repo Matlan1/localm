@@ -138,8 +138,13 @@ def test_a_missing_widget_is_reported(wired, monkeypatch):
     assert appface._enable_clipboard_bindings(_Window())
 
 
-def test_nothing_is_attempted_off_windows(monkeypatch):
+def test_nothing_is_attempted_or_warned_about_off_windows(wired, monkeypatch):
     """The macOS backend leaves these alone and the Linux one only drops the
-    context menu, so there is nothing here to set."""
+    context menu, so there is nothing here to set - and nothing to warn about
+    either, or every app window on those platforms logs a warning that names
+    no real problem."""
+    settings, install = wired
+    install(_Form(_Widget(settings)))
     monkeypatch.setattr(appface.sys, "platform", "linux")
-    assert appface._enable_clipboard_bindings(_Window()) == "not windows"
+    assert appface._enable_clipboard_bindings(_Window()) == ""
+    assert settings.AreBrowserAcceleratorKeysEnabled is False

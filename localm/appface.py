@@ -138,8 +138,9 @@ def _enable_clipboard_bindings(win) -> str:
     """Turn on the WebView2 keyboard shortcuts and right-click menu that
     carry copy, paste and select-all.
 
-    Returns "" when they are on, or a short reason why not. Windows only:
-    the macOS backend leaves them alone, and the Linux one disables the
+    Returns "" when there is nothing to do or it was done, and a short reason
+    only when it was attempted and failed. Off Windows there is nothing to do:
+    the macOS backend leaves these alone, and the Linux one disables the
     context menu but keeps the keyboard shortcuts.
 
     pywebview ties AreBrowserAcceleratorKeysEnabled and
@@ -148,7 +149,7 @@ def _enable_clipboard_bindings(win) -> str:
     CoreWebView2 may only be touched from the UI thread, so the write is
     marshalled onto it. See test_appface_clipboard_bindings.py."""
     if sys.platform != "win32":
-        return "not windows"
+        return ""
     try:
         import webview.platforms.winforms as wf
         from System import Action
