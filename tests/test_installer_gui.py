@@ -384,6 +384,15 @@ class TestInstallParity:
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert rec[rec.index("--shortcut") + 1] == str(tmp_path / "LocaLM.lnk")
 
+    def test_the_data_directory_is_recorded_as_created_by_setup(
+            self, gui, tmp_path, monkeypatch):
+        """setup.sh marks it created whenever it makes one. An earlier step can
+        create ./home first, so asking the filesystem here answers differently."""
+        (tmp_path / "home").mkdir()
+        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own"))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--data-created" in rec
+
     def test_a_portable_install_records_its_tooling_dirs(
             self, gui, tmp_path, monkeypatch):
         cmds = _commands_for(gui, monkeypatch,

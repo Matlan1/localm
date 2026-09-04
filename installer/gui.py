@@ -319,18 +319,16 @@ def build_steps(plan: Plan) -> List[Step]:
     def data_dir(emit):
         marker = ROOT / "localm-home.cfg"
         if plan.portable_data:
-            created = not (ROOT / "home").exists()
             (ROOT / "home").mkdir(parents=True, exist_ok=True)
             if marker.exists():
                 marker.unlink()
             state["data_dir"] = str(ROOT / "home")
-            state["data_created"] = created
+            state["data_created"] = True
             emit(f"Data directory: {ROOT / 'home'} (portable)")
             return
         target = Path(plan.data_path).expanduser()
         if not target.is_absolute():
             raise StepFailed(f"{target} is not an absolute path")
-        created = not target.exists()
         # Directory first, marker second: a marker must never point at
         # something that could not be created.
         try:
@@ -342,7 +340,7 @@ def build_steps(plan: Plan) -> List[Step]:
         except OSError as e:
             raise StepFailed(f"could not record the data directory: {e}")
         state["data_dir"] = str(target)
-        state["data_created"] = created
+        state["data_created"] = True
         state["home_cfg"] = str(marker)
         emit(f"Data directory: {target}")
     steps.append(Step("Recording where data lives", data_dir))
@@ -565,13 +563,15 @@ class Wizard:
 
         ttk.Label(page, text="Models and data",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Radiobutton(page, text=f"Inside this folder ({ROOT / 'home'}) - "
-                                   "delete it and everything is gone",
+        ttk.Radiobutton(page, text="Inside this folder - delete it and "
+                                   "everything is gone",
                         value=True, variable=self.portable_var).pack(anchor="w")
+        ttk.Label(page, text=str(ROOT / "home"), foreground="#555",
+                  wraplength=560).pack(anchor="w", padx=(22, 0))
         row = ttk.Frame(page)
         ttk.Radiobutton(row, text="A folder I choose:", value=False,
                         variable=self.portable_var).pack(side="left")
-        ttk.Entry(row, textvariable=self.path_var, width=32).pack(side="left", padx=6)
+        ttk.Entry(row, textvariable=self.path_var, width=30).pack(side="left", padx=6)
         ttk.Button(row, text="Browse...", command=self._browse).pack(side="left")
         row.pack(anchor="w", pady=(2, 0))
 
@@ -596,14 +596,9 @@ class Wizard:
                                  "with:  localm plugin setup",
                       wraplength=590, foreground="#a33").pack(anchor="w")
             return
-        grid = ttk.Frame(page)
-        grid.pack(anchor="w", fill="x")
-        for i, (name, desc) in enumerate(self.plugin_rows):
-            ttk.Checkbutton(grid, text=f"{name} - {desc}",
-                            variable=self.plugin_vars[name]).grid(
-                                row=i % ((len(self.plugin_rows) + 1) // 2),
-                                column=i // ((len(self.plugin_rows) + 1) // 2),
-                                sticky="w", padx=(0, 18))
+        for name, desc in self.plugin_rows:
+            ttk.Checkbutton(page, text=f"{name} - {desc}",
+                            variable=self.plugin_vars[name]).pack(anchor="w")
         ttk.Checkbutton(page, text="Also install what these features need "
                                    "(downloads more)",
                         variable=self.deps_var).pack(anchor="w", pady=(14, 0))
