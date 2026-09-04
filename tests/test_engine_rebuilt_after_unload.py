@@ -111,3 +111,24 @@ def test_an_unloading_engine_is_not_replaced_mid_flight(engine_bed):
     asyncio.run(hs.switch_engine("m", factory))
 
     assert len(built) == 1, "an unloading engine must be reused, not rebuilt"
+
+
+def test_a_model_the_factory_cannot_rebuild_keeps_its_object(engine_bed):
+    """A model served by direct path is not in the registry, so the factory
+    raises for it and there is no rebuild to be had. It must keep the object it
+    already has rather than losing the ability to reload at all."""
+    cfg, built, factory = engine_bed
+
+    asyncio.run(hs.switch_engine("served-by-path", factory))
+    kept = hs._engines["served-by-path"]
+    kept.loaded = False
+
+    def exploding_factory(name):
+        raise ValueError(f"Model not found: {name}")
+
+    res = asyncio.run(hs.switch_engine("served-by-path", exploding_factory))
+
+    assert res["status"] == "loaded"
+    assert hs._engines["served-by-path"] is kept, (
+        "an engine the factory cannot rebuild must keep its kept object")
+    assert kept.load_calls == 2
