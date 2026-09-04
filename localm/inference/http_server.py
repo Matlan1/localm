@@ -985,8 +985,16 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 503, f"'{name}' is currently being freed by another request; "
                 f"retry shortly.")
 
-        if name in _engines:
-            new_engine = _engines[name]
+        existing = _engines.get(name)
+        # An engine resolves its config-derived load parameters (context window,
+        # GPU layers, MoE split, VRAM overhead) when it is CONSTRUCTED. A cached
+        # engine that is neither loaded nor mid-unload is rebuilt from the factory
+        # so the next load uses the CURRENT config; a loaded or unloading one is
+        # reused. Constructing an engine does not read the model file.
+        # See test_unloaded_engine_is_rebuilt_so_config_changes_apply.
+        if existing is not None and (
+                existing.loaded or getattr(existing, "unloading", False)):
+            new_engine = existing
         else:
             new_engine = _engine_factory(name)
 
