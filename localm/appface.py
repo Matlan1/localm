@@ -134,6 +134,54 @@ def _com_uninit(ole32) -> None:
         pass
 
 
+def _enable_clipboard_bindings(win) -> str:
+    """Turn on the WebView2 keyboard shortcuts and right-click menu that
+    carry copy, paste and select-all.
+
+    Returns "" when they are on, or a short reason why not. Windows only:
+    the macOS backend leaves them alone, and the Linux one disables the
+    context menu but keeps the keyboard shortcuts.
+
+    pywebview ties AreBrowserAcceleratorKeysEnabled and
+    AreDefaultContextMenusEnabled to its own debug flag, which also turns
+    devtools on, so they are set here instead of by asking for debug.
+    CoreWebView2 may only be touched from the UI thread, so the write is
+    marshalled onto it. See test_appface_clipboard_bindings.py."""
+    if sys.platform != "win32":
+        return "not windows"
+    try:
+        import webview.platforms.winforms as wf
+        from System import Action
+    except Exception as e:
+        return f"winforms backend unavailable: {e}"
+    try:
+        form = wf.BrowserView.instances[win.uid]
+        widget = (getattr(form.browser, "webview", None)
+                  or getattr(form.browser, "web_view", None))
+    except Exception as e:
+        return f"browser not reachable: {e}"
+    if widget is None:
+        return "no webview widget"
+    outcome = {}
+
+    def _apply():
+        try:
+            s = widget.CoreWebView2.Settings
+            s.AreBrowserAcceleratorKeysEnabled = True
+            s.AreDefaultContextMenusEnabled = True
+            outcome["ok"] = True
+        except Exception as e:
+            outcome["err"] = f"{type(e).__name__}: {e}"
+
+    try:
+        form.Invoke(Action(_apply))
+    except Exception as e:
+        return f"could not reach the UI thread: {e}"
+    if outcome.get("ok"):
+        return ""
+    return outcome.get("err", "the settings were not applied")
+
+
 def run_native_window(url: str, name: str = "LocaLM", *,
                       hide_on_close: bool = True,
                       on_quit: Optional[Callable] = None) -> bool:
@@ -232,6 +280,11 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         # from this background thread hangs the process.
         if window.events.loaded.wait(timeout=8.0):
             loaded["v"] = True
+            problem = _enable_clipboard_bindings(window)
+            if problem:
+                logger.warning("appface: copy and paste shortcuts could not be "
+                               "enabled in the app window (%s); use the GUI's "
+                               "own copy buttons", problem)
             try:
                 window.show()
             except Exception:
