@@ -42,6 +42,10 @@ if not defined UVEXE (
     echo   Installing uv ...
     set "UV_INSTALL_DIR=%CD%\.uv"
     powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+    rem  Astral's installer updates the persistent user PATH, which this already
+    rem  running shell does not see. Prepend every directory it may have used, in
+    rem  setup.bat's own order, so the uv just installed is callable right now.
+    set "PATH=%CD%\.uv;%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin;%PATH%"
     if exist ".uv\uv.exe" (
         set "UVEXE=%CD%\.uv\uv.exe"
     ) else (
@@ -63,6 +67,10 @@ rem  --no-project so uv never tries to resolve this repo as its own project, and
 rem  an explicit --python so the interpreter is the managed 3.12 the install
 rem  targets rather than whatever else is on the machine.
 echo   Opening the setup window ...
+rem  Keep the interpreter this window runs on inside the folder, so a portable
+rem  install reuses it rather than downloading a second copy.
+set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
+set "UV_CACHE_DIR=%CD%\.cache"
 "%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
 set "RC=!errorlevel!"
 

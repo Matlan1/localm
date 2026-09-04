@@ -39,7 +39,16 @@ if [ -z "$UVEXE" ]; then
     esac
     echo "  Installing uv ..."
     export UV_INSTALL_DIR="$PWD/.uv"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+        echo
+        echo "  [!] Could not download or run Astral's uv installer."
+        echo "      Use the console installer instead:  ./setup.sh"
+        exit 1
+    fi
+    # The installer updates the shell profile, which this already running shell
+    # does not see. Prepend every directory it may have used, in setup.sh's own
+    # order, so the uv just installed is callable right now.
+    export PATH="$PWD/.uv:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
     if [ -x "./.uv/uv" ]; then
         UVEXE="$PWD/.uv/uv"
     elif command -v uv >/dev/null 2>&1; then
@@ -67,6 +76,10 @@ if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DIS
 fi
 
 echo "  Opening the setup window ..."
+# Keep the interpreter this window runs on inside the folder, so a portable
+# install reuses it rather than downloading a second copy.
+export UV_PYTHON_INSTALL_DIR="$PWD/.python"
+export UV_CACHE_DIR="$PWD/.cache"
 if ! "$UVEXE" run --no-project --python 3.12 python installer/gui.py; then
     echo
     echo "  [!] The setup window could not run."

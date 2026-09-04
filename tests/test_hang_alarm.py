@@ -434,8 +434,17 @@ def test_middleware_tracks_inflight_and_progress():
         task = asyncio.ensure_future(
             mw({"type": "http", "path": "/api/stats", "method": "GET"},
                receive, send))
-        await asyncio.sleep(0.05)
-        count, oldest_age, _ = tracker.snapshot()
+        # The request stays in flight until the gate opens, so its age only
+        # grows: wait for the threshold rather than assuming one sleep reached
+        # it. A loaded runner can take longer to start the task than the sleep
+        # itself lasts.
+        deadline = time.monotonic() + 5.0
+        count, oldest_age = 0, 0.0
+        while time.monotonic() < deadline:
+            count, oldest_age, _ = tracker.snapshot()
+            if count == 1 and oldest_age >= 0.04:
+                break
+            await asyncio.sleep(0.01)
         assert count == 1
         assert oldest_age >= 0.04
         entries, _ = tracker.observe()

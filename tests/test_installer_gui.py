@@ -160,6 +160,26 @@ def test_command_output_is_streamed_into_the_log(gui):
     assert any("hello from the step" in l for l in lines)
 
 
+def test_a_shared_install_drops_the_launchers_own_containment(gui, tmp_path,
+                                                             monkeypatch):
+    """The launcher points uv at the clone for the window's own interpreter.
+    A shared install must not inherit that, or the answer never takes effect."""
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(tmp_path / ".python"))
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / ".cache"))
+    env = gui._env_for(gui.Plan(portable_store=False))
+    assert "UV_PYTHON_INSTALL_DIR" not in env
+    assert "UV_CACHE_DIR" not in env
+
+
+def test_a_shared_install_keeps_a_directory_the_user_chose(gui, tmp_path,
+                                                           monkeypatch):
+    """Only the launcher's own value is dropped. A machine-wide choice is the
+    user's and is left alone."""
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "D:/elsewhere/pythons")
+    env = gui._env_for(gui.Plan(portable_store=False))
+    assert env["UV_PYTHON_INSTALL_DIR"] == "D:/elsewhere/pythons"
+
+
 def test_portable_store_contains_uv_inside_the_install(gui, tmp_path):
     """Portable means nothing is written to the user profile: uv's managed
     interpreter and its wheel cache both land inside the install.
@@ -175,3 +195,561 @@ def test_portable_store_contains_uv_inside_the_install(gui, tmp_path):
     plain = gui._env_for(gui.Plan(portable_store=False))
     assert plain.get("UV_PYTHON_INSTALL_DIR") != str(tmp_path / ".python")
     assert plain.get("UV_CACHE_DIR") != str(tmp_path / ".cache")
+
+
+# --------------------------------------------------------------------------- #
+#  Finding uv                                                                  #
+# --------------------------------------------------------------------------- #
+
+class TestUvResolution:
+    """The installer runs before anything is installed, so uv is the one tool
+    it cannot assume. setup-gui.bat bootstraps a portable copy into ./.uv when
+    the machine has none, and Astral's installer updates the PERSISTENT PATH
+    rather than the shell that is already running - so on a fresh clone uv is
+    routinely present in the folder and absent from PATH.
+
+    What is pinned here is that the entry check and the steps resolve the SAME
+    uv. When they disagreed, the window opened and died on its first command
+    with "could not start uv: [WinError 2]"."""
+
+    @pytest.fixture()
+    def machine(self, gui, tmp_path, monkeypatch):
+        """A machine with no uv at all: none on PATH, none in the clone, and a
+        home directory that cannot contain one either."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        return gui
+
+    @staticmethod
+    def _portable_uv(gui, root):
+        d = root / ".uv"
+        d.mkdir(parents=True, exist_ok=True)
+        exe = d / ("uv.exe" if gui.IS_WINDOWS else "uv")
+        exe.write_bytes(b"")
+        exe.chmod(0o755)
+        return exe
+
+    @staticmethod
+    def _commands(gui, monkeypatch, plan=None):
+        """Every command the install would run, without running any of them."""
+        seen = []
+
+        def fake_run(cmd, emit, plan, **kw):
+            seen.append([str(c) for c in cmd])
+            return 0
+
+        (gui.ROOT / ".venv").mkdir(exist_ok=True)
+        monkeypatch.setattr(gui, "_run", fake_run)
+        monkeypatch.setattr(gui, "make_shortcut",
+                            lambda plan, emit: str(gui.ROOT / "LocaLM.lnk"))
+        monkeypatch.setattr(gui, "torch_spec_for", lambda backend: ("torch", ""))
+        for step in gui.build_steps(plan or gui.Plan()):
+            try:
+                step.run(lambda s: None)
+            except gui.StepFailed:
+                raise
+            except Exception:
+                pass
+        return seen
+
+    def test_the_steps_run_the_portable_uv_when_it_is_not_on_path(
+            self, machine, tmp_path, monkeypatch):
+        """The reported failure: a fresh clone whose uv lives in ./.uv."""
+        exe = self._portable_uv(machine, tmp_path)
+        venv_cmd = self._commands(machine, monkeypatch)[0]
+        assert venv_cmd[0] == str(exe), (
+            f"the install ran {venv_cmd[0]!r}, which is not the uv that exists")
+        assert venv_cmd[1:3] == ["venv", "--python"]
+
+    def test_no_step_invokes_a_bare_uv(self, machine, tmp_path, monkeypatch):
+        """Swept across every step, not only the one that was reported: a bare
+        'uv' resolves through PATH, which is exactly where it is not."""
+        self._portable_uv(machine, tmp_path)
+        for cmd in self._commands(
+                machine, monkeypatch,
+                machine.Plan(app_window=True, add_to_path=True, shortcut="gui")):
+            assert cmd[0] != "uv", f"{cmd} searches PATH for uv"
+
+    def test_the_entry_check_and_the_steps_agree(
+            self, machine, tmp_path, monkeypatch):
+        """One resolver, so a uv good enough to OPEN the window is always a uv
+        the steps can run."""
+        exe = self._portable_uv(machine, tmp_path)
+        assert machine.find_uv(tmp_path) == str(exe)
+        assert self._commands(machine, monkeypatch)[0][0] == machine.find_uv(tmp_path)
+
+
+
+    def test_the_portable_uv_wins_over_one_on_path(
+            self, machine, tmp_path, monkeypatch):
+        """Portable means the install uses its own copy, not the machine's."""
+        exe = self._portable_uv(machine, tmp_path)
+        onpath = tmp_path / "sysbin"
+        onpath.mkdir()
+        (onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")).write_bytes(b"")
+        monkeypatch.setenv("PATH", str(onpath))
+        assert machine.find_uv(tmp_path) == str(exe)
+
+
+    def test_a_machine_with_no_uv_reports_it_instead_of_running_nothing(
+            self, machine, tmp_path, monkeypatch):
+        """No uv anywhere is a step that FAILS, never a command handed to the
+        OS that cannot start (AGENTS.md rule 5)."""
+        assert machine.find_uv(tmp_path) is None
+        with pytest.raises(machine.StepFailed) as excinfo:
+            self._commands(machine, monkeypatch)
+        assert "uv was not found" in str(excinfo.value)
+
+    def test_a_uv_only_on_path_is_still_found(
+            self, machine, tmp_path, monkeypatch):
+        """The launcher puts the uv it used on PATH for this process, so one
+        that lives nowhere the search looks is still reachable."""
+        onpath = tmp_path / "sysbin"
+        onpath.mkdir()
+        exe = onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")
+        exe.write_bytes(b"")
+        exe.chmod(0o755)
+        monkeypatch.setenv("PATH", str(onpath))
+        found = machine.find_uv(tmp_path)
+        assert found is not None
+        assert self._commands(machine, monkeypatch)[0][0] == found
+
+
+# --------------------------------------------------------------------------- #
+#  The same install the console performs                                       #
+# --------------------------------------------------------------------------- #
+
+def _commands_for(gui, monkeypatch, plan, spec="torch", code_for=None):
+    """Every command the install would run, without running any of them.
+
+    code_for maps a substring of the command to the exit code it returns, so a
+    test can drive one step's outcome without affecting the others."""
+    seen = []
+
+    def fake_run(cmd, emit, plan, **kw):
+        flat = [str(c) for c in cmd]
+        seen.append(flat)
+        for needle, code in (code_for or {}).items():
+            if any(needle in part for part in flat):
+                return code
+        return 0
+
+    (gui.ROOT / ".venv").mkdir(exist_ok=True)
+    monkeypatch.setattr(gui, "_run", fake_run)
+    monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+    # make_shortcut does NOT go through _run: it shells out to PowerShell on
+    # Windows and writes under Path.home() elsewhere, so stubbing _run alone
+    # lets it touch the real machine.
+    monkeypatch.setattr(gui, "make_shortcut",
+                        lambda plan, emit: str(gui.ROOT / "LocaLM.lnk"))
+    monkeypatch.setattr(gui, "torch_spec_for", lambda b: (spec, ""))
+    monkeypatch.setattr(gui, "_query", lambda args: "queried")
+    for step in gui.build_steps(plan):
+        try:
+            step.run(lambda s: None)
+        except gui.StepFailed:
+            pass
+    return seen
+
+
+def _labels(gui, plan):
+    return [s.label for s in gui.build_steps(plan)]
+
+
+class TestInstallParity:
+    """setup.bat and setup.sh do these; the window claims to do the same."""
+
+    def test_the_venv_marker_is_written(self, gui, tmp_path, monkeypatch):
+        """uninstall removes .venv only when this marker says setup made it."""
+        (tmp_path / ".venv").mkdir()
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 0)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        step = _step(gui, gui.Plan(), "Creating the Python environment")
+        step.run(lambda s: None)
+        assert (tmp_path / ".venv" / ".localm-venv").is_file()
+
+    def test_the_chosen_plugins_are_installed(self, gui, tmp_path, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(plugins=("coder", "rag"), backend="own"))
+        setup = [c for c in cmds if "plugin" in c and "setup" in c]
+        assert len(setup) == 1, "the chosen features are never installed"
+        assert "--plugins" in setup[0]
+        assert setup[0][setup[0].index("--plugins") + 1] == "coder,rag"
+
+    def test_no_plugin_step_when_none_were_chosen(self, gui):
+        assert not any("optional features" in lb
+                       for lb in _labels(gui, gui.Plan(plugins=())))
+
+    def test_the_deps_answer_is_always_explicit(self, gui, tmp_path, monkeypatch):
+        """The flag's default is to ASK, and a window has no console to answer."""
+        for deps, flag in ((True, "--with-deps"), (False, "--no-deps")):
+            cmds = _commands_for(gui, monkeypatch,
+                                 gui.Plan(plugins=("coder",), plugin_deps=deps,
+                                          backend="own"))
+            setup = [c for c in cmds if "plugin" in c and "setup" in c][0]
+            assert flag in setup, f"{setup} lets the deps prompt decide"
+
+    def test_the_global_command_never_waits_for_an_answer(
+            self, gui, tmp_path, monkeypatch):
+        """globalcmd install prompts on a PATH conflict; nothing can reply."""
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(add_to_path=True, backend="own"))
+        gc = [c for c in cmds if "localm.globalcmd" in c]
+        assert gc and "--yes" in gc[0], f"{gc} can block on stdin"
+
+    def test_the_install_is_recorded(self, gui, tmp_path, monkeypatch):
+        """Without this, uninstall cannot remove what setup created."""
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", shortcut="none"))
+        rec = [c for c in cmds if "localm.install_manifest" in c]
+        assert len(rec) == 1, "nothing records what was installed"
+        assert "record" in rec[0]
+        assert str(tmp_path / ".venv") in rec[0]
+        assert rec[0][rec[0].index("--data-dir") + 1] == str(tmp_path / "home")
+
+    def test_the_recorded_shortcut_is_the_one_created(
+            self, gui, tmp_path, monkeypatch):
+        monkeypatch.setattr(gui, "make_shortcut",
+                            lambda plan, emit: str(tmp_path / "LocaLM.lnk"))
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", shortcut="launcher"))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert rec[rec.index("--shortcut") + 1] == str(tmp_path / "LocaLM.lnk")
+
+    def test_the_data_directory_is_recorded_as_created_by_setup(
+            self, gui, tmp_path, monkeypatch):
+        """setup.sh marks it created whenever it makes one. An earlier step can
+        create ./home first, so asking the filesystem here answers differently."""
+        (tmp_path / "home").mkdir()
+        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own"))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--data-created" in rec
+
+    def test_the_tooling_inside_the_folder_is_recorded(
+            self, gui, tmp_path, monkeypatch):
+        """The launcher puts the window's own interpreter inside the folder
+        whichever way the tooling question was answered, so uninstall has to
+        know about it."""
+        (tmp_path / ".python").mkdir()
+        (tmp_path / ".uv").mkdir()
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", portable_store=True))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--runtime-contained" in rec
+        assert rec[rec.index("--python-dir") + 1] == str(tmp_path / ".python")
+        assert rec[rec.index("--uv-dir") + 1] == str(tmp_path / ".uv")
+        assert "--cache-dir" not in rec, "a directory that does not exist"
+
+    def test_it_is_recorded_for_a_shared_install_too(
+            self, gui, tmp_path, monkeypatch):
+        (tmp_path / ".python").mkdir()
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", portable_store=False))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--runtime-contained" in rec
+
+    def test_nothing_outside_the_folder_is_ever_claimed(
+            self, gui, tmp_path, monkeypatch):
+        """Uninstall must never delete a runtime other installs share, so a
+        folder holding none of its own tooling records none."""
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", portable_store=False))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--runtime-contained" not in rec
+        assert "--python-dir" not in rec
+        assert "--cache-dir" not in rec
+
+
+class TestGlobalCommandExitCodes:
+    """globalcmd exit 20 means the command WAS created and its directory was
+    already on PATH. Both console installers record the shim on 20 and add
+    --path-modified only on 0."""
+
+    def test_the_command_is_recorded_when_path_already_had_its_directory(
+            self, gui, tmp_path, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(add_to_path=True, backend="own"),
+                             code_for={"localm.globalcmd": 20})
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert rec[rec.index("--command-shim") + 1] == "queried", (
+            "the shim was created and is not recorded, so uninstall leaves it")
+        assert "--path-modified" not in rec, (
+            "exit 20 did not change PATH, so nothing should claim it did")
+
+    def test_a_path_change_is_recorded_on_zero(self, gui, tmp_path, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(add_to_path=True, backend="own"),
+                             code_for={"localm.globalcmd": 0})
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--path-modified" in rec
+
+    def test_a_real_failure_still_reaches_the_summary(
+            self, gui, tmp_path, monkeypatch):
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        with pytest.raises(gui.StepFailed):
+            _step(gui, gui.Plan(add_to_path=True, backend="own"),
+                  "Adding 'localm'").run(lambda s: None)
+
+
+class TestToolingLocation:
+    """setup.sh and setup.bat pass --python-preference only-managed only for a
+    contained install, so a shared one may reuse an existing Python."""
+
+    def test_a_contained_install_forces_the_managed_python(
+            self, gui, tmp_path, monkeypatch):
+        venv_cmd = _commands_for(gui, monkeypatch,
+                                 gui.Plan(backend="own", portable_store=True))[0]
+        assert "--python-preference" in venv_cmd
+        assert venv_cmd[venv_cmd.index("--python-preference") + 1] == "only-managed"
+
+    def test_sharing_the_tooling_lets_uv_reuse_an_existing_python(
+            self, gui, tmp_path, monkeypatch):
+        venv_cmd = _commands_for(gui, monkeypatch,
+                                 gui.Plan(backend="own", portable_store=False))[0]
+        assert "--python-preference" not in venv_cmd, (
+            "the shared choice never reaches uv, so it always downloads one")
+
+
+class TestHonestFailures:
+    """AGENTS.md rule 5: a step that failed is never reported as done."""
+
+    def test_an_unanswerable_torch_probe_is_not_no_torch_needed(
+            self, gui, monkeypatch):
+        """The probe exiting non-zero says nothing about needing PyTorch."""
+        class Failed:
+            returncode = 3
+            stdout = ""
+            stderr = "ModuleNotFoundError: No module named 'localm'"
+        monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: Failed())
+        spec, problem = gui.torch_spec_for("cuda")
+        assert spec is None
+        assert "could not ask" in problem
+        step = _step(gui, gui.Plan(backend="cuda"), "Installing PyTorch")
+        with pytest.raises(gui.StepFailed) as e:
+            step.run(lambda s: None)
+        assert "could not ask" in str(e.value)
+
+    def test_a_genuinely_torch_free_backend_still_says_so(
+            self, gui, monkeypatch):
+        monkeypatch.setattr(gui, "torch_spec_for", lambda b: (None, ""))
+        lines = []
+        _step(gui, gui.Plan(backend="vulkan"), "Installing PyTorch").run(lines.append)
+        assert any("No PyTorch stack needed" in line for line in lines)
+
+    def test_a_failed_torch_install_reaches_the_summary(self, gui, monkeypatch):
+        """It used to scroll past in the log and end on an unqualified success."""
+        monkeypatch.setattr(gui, "torch_spec_for", lambda b: ("torch", ""))
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        with pytest.raises(gui.StepFailed) as e:
+            _step(gui, gui.Plan(backend="cuda"), "Installing PyTorch").run(
+                lambda s: None)
+        assert "PyTorch" in str(e.value)
+
+    def test_a_failed_path_step_reaches_the_summary(self, gui, monkeypatch):
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        with pytest.raises(gui.StepFailed):
+            _step(gui, gui.Plan(add_to_path=True, backend="own"),
+                  "Adding 'localm'").run(lambda s: None)
+
+
+class TestBackendMenu:
+    """hwdetect can recommend metal and hip, and setup_llama accepts both."""
+
+    def test_every_offered_backend_is_one_the_provisioner_accepts(self, gui):
+        from localm import setup_llama
+        for key, _ in gui._BACKEND_CHOICES:
+            if key == "own":
+                continue
+            assert key in setup_llama.BACKENDS, f"{key} is not a real backend"
+
+    def test_metal_is_offered_on_macos_and_nowhere_else(self, gui, monkeypatch):
+        monkeypatch.setattr(gui.sys, "platform", "darwin")
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        assert "metal" in [k for k, _ in gui.backend_choices()]
+        monkeypatch.setattr(gui.sys, "platform", "win32")
+        monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        assert "metal" not in [k for k, _ in gui.backend_choices()]
+
+    def test_hip_is_offered(self, gui):
+        """An AMD box with a ROCm toolkit is recommended hip by hwdetect."""
+        assert "hip" in [k for k, _ in gui.backend_choices()]
+
+    def test_the_menu_can_show_whatever_hwdetect_recommends(self, gui, monkeypatch):
+        """A recommendation with no matching row leaves the group unselected."""
+        monkeypatch.setattr(gui.sys, "platform", "darwin")
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        mac = {k for k, _ in gui.backend_choices()}
+        monkeypatch.setattr(gui.sys, "platform", "win32")
+        monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        win = {k for k, _ in gui.backend_choices()}
+        from localm import hwdetect
+        import inspect
+        import re
+        src = inspect.getsource(hwdetect.recommended_install_backend)
+        for rec in set(re.findall(r'return "([a-z-]+)"', src)):
+            assert rec in mac or rec in win, f"nothing offers {rec}"
+
+
+class TestPluginChoices:
+    def test_the_picker_reads_the_real_catalog(self, gui):
+        from localm.plugins import catalog
+        offered = [n for n, _ in gui.plugin_choices()]
+        assert offered, "no optional features are offered"
+        assert set(offered) == set(catalog.names()) - set(catalog.preinstalled())
+
+    def test_chat_is_never_offered_because_it_is_always_installed(self, gui):
+        assert "chat" not in [n for n, _ in gui.plugin_choices()]
+
+    def test_the_recommended_set_matches_the_console_installer(self, gui):
+        from localm.cli import plugins as cli_plugins
+        assert set(gui.RECOMMENDED_PLUGINS) == set(cli_plugins._SETUP_DEFAULTS)
+
+
+class TestPosixShortcut:
+    def test_the_launcher_choice_is_honoured(self, gui, tmp_path, monkeypatch):
+        """It used to write the same GUI entry whatever the user picked."""
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        gui.make_shortcut(gui.Plan(shortcut="launcher"), lambda s: None)
+        launcher = entry.read_text(encoding="utf-8")
+        gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        straight = entry.read_text(encoding="utf-8")
+        assert launcher != straight, "both choices wrote the same entry"
+        assert "localm-launcher.sh" in launcher
+        assert launcher.count("Exec=") == 1
+
+    def test_a_quote_in_the_path_is_escaped_for_powershell(
+            self, gui, tmp_path, monkeypatch):
+        """An unescaped quote ends the PowerShell string early and the command
+        fails to parse. A folder under a name like O'Brien reaches this."""
+        if not gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        root = tmp_path / "O'Brien" / "localm"
+        root.mkdir(parents=True)
+        monkeypatch.setattr(gui, "ROOT", root)
+        seen = {}
+
+        class Done:
+            stdout = "C:\\Users\\x\\Desktop\\LocaLM.lnk"
+
+        def fake(cmd, **kw):
+            seen["ps"] = cmd[-1]
+            return Done()
+
+        monkeypatch.setattr(gui.subprocess, "run", fake)
+        gui.make_shortcut(gui.Plan(shortcut="launcher"), lambda s: None)
+        ps = seen["ps"]
+        assert "O''Brien" in ps, ps
+        assert "O'Brien'" not in ps.replace("O''Brien", "")
+
+    def test_the_written_path_is_returned_for_the_manifest(
+            self, gui, tmp_path, monkeypatch):
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        written = gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        assert written and Path(written).is_file()
+        # One entry only: the manifest carries a single shortcut path, so a
+        # second file written here could never be removed on uninstall.
+        assert not (home / "Desktop" / "LocaLM.desktop").exists()
+
+
+# --------------------------------------------------------------------------- #
+#  The dialogue                                                                #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def wizard(gui):
+    """A real Tk wizard, skipped where there is no display to build one on."""
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    root.withdraw()
+    try:
+        yield gui.Wizard(root, tk, ttk, filedialog)
+    finally:
+        root.destroy()
+
+
+class TestWizard:
+    """It is a multi-page dialogue, so every question actually gets asked."""
+
+    def test_it_has_a_page_per_group_of_questions(self, wizard):
+        titles = [t for t, _ in wizard.pages]
+        assert titles == ["Inference runtime", "Where things live",
+                          "Optional features", "Options", "Installing"]
+
+    def test_next_and_back_walk_the_pages(self, wizard):
+        assert wizard.index == 0
+        wizard.next_page()
+        assert wizard.index == 1
+        wizard.next_page()
+        assert wizard.index == 2
+        wizard.prev_page()
+        assert wizard.index == 1
+        wizard.prev_page()
+        assert wizard.index == 0
+
+    def test_back_does_nothing_on_the_first_page(self, wizard):
+        wizard.prev_page()
+        assert wizard.index == 0
+
+    def test_the_last_question_page_installs_rather_than_advancing(
+            self, wizard, monkeypatch):
+        started = []
+        monkeypatch.setattr(wizard, "start_install", lambda: started.append(True))
+        for _ in range(len(wizard.pages)):
+            wizard.next_page()
+        assert started, "the dialogue never reaches the install"
+
+    def test_an_empty_custom_data_folder_is_refused_without_advancing(
+            self, wizard):
+        wizard.next_page()
+        assert wizard.pages[wizard.index][0] == "Where things live"
+        wizard.portable_var.set(False)
+        wizard.path_var.set("")
+        wizard.next_page()
+        assert wizard.index == 1, "advanced with no data folder chosen"
+        assert "folder" in wizard.status.cget("text")
+
+    def test_an_answer_survives_leaving_its_page(self, wizard):
+        wizard.backend_var.set("cpu")
+        wizard.next_page()
+        wizard.prev_page()
+        assert wizard.backend_var.get() == "cpu"
+        assert wizard.current_plan().backend == "cpu"
+
+    def test_every_page_feeds_the_plan(self, wizard):
+        wizard.backend_var.set("cpu")
+        wizard.store_var.set(False)
+        wizard.appwin_var.set(True)
+        wizard.path_cmd_var.set(True)
+        wizard.shortcut_var.set("gui")
+        wizard.deps_var.set(False)
+        for name in wizard.plugin_vars:
+            wizard.plugin_vars[name].set(False)
+        if "coder" in wizard.plugin_vars:
+            wizard.plugin_vars["coder"].set(True)
+        plan = wizard.current_plan()
+        assert plan.backend == "cpu"
+        assert plan.portable_store is False
+        assert plan.app_window is True
+        assert plan.add_to_path is True
+        assert plan.shortcut == "gui"
+        assert plan.plugin_deps is False
+        assert plan.plugins == ("coder",)
+
+    def test_the_default_plan_matches_the_console_recommendation(self, wizard, gui):
+        assert set(wizard.current_plan().plugins) == set(gui.RECOMMENDED_PLUGINS)

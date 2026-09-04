@@ -101,7 +101,7 @@ If localm ever fails to start (or setup itself fails), you can still file a bug 
 
 ### Prefer a window? Use the graphical installer
 
-Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS) and the whole install happens in a window: pick your inference runtime (your hardware's recommendation is preselected), where data should live, whether the GUI opens as an app window or a browser tab, and whether you want a desktop shortcut and a global `localm` command. Then it installs, with a progress bar and a live log, and offers to start LocaLM when it is done.
+Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS) and the whole install happens in a window, over four pages you can step back through: your inference runtime (your hardware's recommendation is preselected); where models and data live and whether the Python tooling stays inside the folder; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut, and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
 
 It performs exactly the same install as the console setup below, asking the same questions in the same order. Everything after this section describes the console path; if you used the window, you are already finished.
 
