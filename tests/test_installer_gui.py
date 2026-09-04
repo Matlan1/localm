@@ -222,6 +222,8 @@ class TestUvResolution:
 
         (gui.ROOT / ".venv").mkdir(exist_ok=True)
         monkeypatch.setattr(gui, "_run", fake_run)
+        monkeypatch.setattr(gui, "make_shortcut",
+                            lambda plan, emit: str(gui.ROOT / "LocaLM.lnk"))
         monkeypatch.setattr(gui, "torch_spec_for", lambda backend: ("torch", ""))
         for step in gui.build_steps(plan or gui.Plan()):
             try:
@@ -299,17 +301,29 @@ class TestUvResolution:
 #  The same install the console performs                                       #
 # --------------------------------------------------------------------------- #
 
-def _commands_for(gui, monkeypatch, plan, spec="torch"):
-    """Every command the install would run, without running any of them."""
+def _commands_for(gui, monkeypatch, plan, spec="torch", code_for=None):
+    """Every command the install would run, without running any of them.
+
+    code_for maps a substring of the command to the exit code it returns, so a
+    test can drive one step's outcome without affecting the others."""
     seen = []
 
     def fake_run(cmd, emit, plan, **kw):
-        seen.append([str(c) for c in cmd])
+        flat = [str(c) for c in cmd]
+        seen.append(flat)
+        for needle, code in (code_for or {}).items():
+            if any(needle in part for part in flat):
+                return code
         return 0
 
     (gui.ROOT / ".venv").mkdir(exist_ok=True)
     monkeypatch.setattr(gui, "_run", fake_run)
     monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+    # make_shortcut does NOT go through _run: it shells out to PowerShell on
+    # Windows and writes under Path.home() elsewhere, so stubbing _run alone
+    # lets it touch the real machine.
+    monkeypatch.setattr(gui, "make_shortcut",
+                        lambda plan, emit: str(gui.ROOT / "LocaLM.lnk"))
     monkeypatch.setattr(gui, "torch_spec_for", lambda b: (spec, ""))
     monkeypatch.setattr(gui, "_query", lambda args: "queried")
     for step in gui.build_steps(plan):
@@ -408,6 +422,57 @@ class TestInstallParity:
                              gui.Plan(backend="own", portable_store=False))
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert "--runtime-contained" not in rec
+
+
+class TestGlobalCommandExitCodes:
+    """globalcmd exit 20 means the command WAS created and its directory was
+    already on PATH. Both console installers record the shim on 20 and add
+    --path-modified only on 0."""
+
+    def test_the_command_is_recorded_when_path_already_had_its_directory(
+            self, gui, tmp_path, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(add_to_path=True, backend="own"),
+                             code_for={"localm.globalcmd": 20})
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert rec[rec.index("--command-shim") + 1] == "queried", (
+            "the shim was created and is not recorded, so uninstall leaves it")
+        assert "--path-modified" not in rec, (
+            "exit 20 did not change PATH, so nothing should claim it did")
+
+    def test_a_path_change_is_recorded_on_zero(self, gui, tmp_path, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(add_to_path=True, backend="own"),
+                             code_for={"localm.globalcmd": 0})
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--path-modified" in rec
+
+    def test_a_real_failure_still_reaches_the_summary(
+            self, gui, tmp_path, monkeypatch):
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        with pytest.raises(gui.StepFailed):
+            _step(gui, gui.Plan(add_to_path=True, backend="own"),
+                  "Adding 'localm'").run(lambda s: None)
+
+
+class TestToolingLocation:
+    """setup.sh and setup.bat pass --python-preference only-managed only for a
+    contained install, so a shared one may reuse an existing Python."""
+
+    def test_a_contained_install_forces_the_managed_python(
+            self, gui, tmp_path, monkeypatch):
+        venv_cmd = _commands_for(gui, monkeypatch,
+                                 gui.Plan(backend="own", portable_store=True))[0]
+        assert "--python-preference" in venv_cmd
+        assert venv_cmd[venv_cmd.index("--python-preference") + 1] == "only-managed"
+
+    def test_sharing_the_tooling_lets_uv_reuse_an_existing_python(
+            self, gui, tmp_path, monkeypatch):
+        venv_cmd = _commands_for(gui, monkeypatch,
+                                 gui.Plan(backend="own", portable_store=False))[0]
+        assert "--python-preference" not in venv_cmd, (
+            "the shared choice never reaches uv, so it always downloads one")
 
 
 class TestHonestFailures:
@@ -514,10 +579,11 @@ class TestPosixShortcut:
             monkeypatch.setattr(gui, "IS_WINDOWS", False)
         home = tmp_path / "h"
         monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        entry = home / ".local/share/applications" / "LocaLM.desktop"
         gui.make_shortcut(gui.Plan(shortcut="launcher"), lambda s: None)
-        launcher = (home / "Desktop" / "LocaLM.desktop").read_text(encoding="utf-8")
+        launcher = entry.read_text(encoding="utf-8")
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
-        straight = (home / "Desktop" / "LocaLM.desktop").read_text(encoding="utf-8")
+        straight = entry.read_text(encoding="utf-8")
         assert launcher != straight, "both choices wrote the same entry"
         assert "localm-launcher.sh" in launcher
         assert launcher.count("Exec=") == 1
@@ -554,6 +620,9 @@ class TestPosixShortcut:
         monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
         written = gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
         assert written and Path(written).is_file()
+        # One entry only: the manifest carries a single shortcut path, so a
+        # second file written here could never be removed on uninstall.
+        assert not (home / "Desktop" / "LocaLM.desktop").exists()
 
 
 # --------------------------------------------------------------------------- #

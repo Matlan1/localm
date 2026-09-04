@@ -264,8 +264,11 @@ def build_steps(plan: Plan) -> List[Step]:
     state: dict = {}
 
     def venv(emit):
-        _run(uv_argv("venv", "--python", PYVER, "--python-preference",
-                     "only-managed", "--clear", ".venv"), emit, plan)
+        args = ["venv", "--python", PYVER]
+        if plan.portable_store:
+            args += ["--python-preference", "only-managed"]
+        args += ["--clear", ".venv"]
+        _run(uv_argv(*args), emit, plan)
         # uninstall removes .venv only when this marker says setup created it.
         try:
             (ROOT / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
@@ -361,13 +364,15 @@ def build_steps(plan: Plan) -> List[Step]:
             code = _run([str(venv_python(ROOT)), "-m", "localm.globalcmd",
                          "install", "--root", ".", "--yes"], emit, plan,
                         allow_fail=True)
-            if code != 0:
+            # 20 = the command was created and its directory was already on
+            # PATH. Only 0 also changed PATH.
+            if code not in (0, 20):
                 raise StepFailed("the global localm command was not added")
             state["path_dir"] = _query(["-m", "localm.globalcmd",
                                         "path-dir", "--root", "."])
             state["command_shim"] = _query(["-m", "localm.globalcmd",
                                             "shim", "--root", "."])
-            state["path_modified"] = True
+            state["path_modified"] = code == 0
         steps.append(Step("Adding 'localm' to your PATH", global_cmd,
                           fatal=False))
 
@@ -458,21 +463,16 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
             f"Path={ROOT}\n"
             "Terminal=false\n"
             "Categories=Utility;Development;\n")
-    wrote = []
-    for d in (Path.home() / "Desktop", Path.home() / ".local/share/applications"):
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-            f = d / "LocaLM.desktop"
-            f.write_text(text, encoding="utf-8")
-            f.chmod(0o755)
-            wrote.append(str(f))
-        except OSError as e:
-            emit(f"[!] could not write {d}: {e}")
-    if not wrote:
-        raise StepFailed("no desktop entry could be written")
-    for w in wrote:
-        emit(f"Wrote {w}")
-    return wrote[0]
+    d = Path.home() / ".local/share/applications"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "LocaLM.desktop"
+        f.write_text(text, encoding="utf-8")
+        f.chmod(0o755)
+    except OSError as e:
+        raise StepFailed(f"no desktop entry could be written: {e}")
+    emit(f"Wrote {f}")
+    return str(f)
 
 
 # --------------------------------------------------------------------------- #
@@ -616,7 +616,7 @@ class Wizard:
                         variable=self.appwin_var).pack(anchor="w")
         ttk.Checkbutton(page, text="Make 'localm' runnable from any terminal",
                         variable=self.path_cmd_var).pack(anchor="w")
-        ttk.Label(page, text="Desktop shortcut:",
+        ttk.Label(page, text="Desktop shortcut:" if IS_WINDOWS else "Shortcut:",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(14, 0))
         for key, text in (("launcher", "Launcher menu (GUI / chat / server / coder)"),
                           ("gui", "Straight to the GUI"),
