@@ -183,7 +183,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             # model - indistinguishable from X answering. Refuse instead of
             # silently overriding the user's explicit choice; --no-server is the
             # way out.
-            if active and active != model:
+            from ..model_manager import names_same_model
+            if active and not names_same_model(active, model):
                 console.print(
                     f"[red]The localm server here serves "
                     f"[bold]{escape(active)}[/bold], not "

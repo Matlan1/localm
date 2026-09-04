@@ -1115,6 +1115,31 @@ def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
 #  Model identity - duplicate detection (two-tier: path, then sha256)  #
 # ------------------------------------------------------------------ #
 
+def names_same_model(a: str, b: str, reg: Optional[dict] = None) -> bool:
+    """True when two registered names are names for the SAME model file.
+
+    An alias is a second name for one file, so comparing the names alone
+    reports two names for one model as two different models. Callers guarding
+    "do not silently answer with a DIFFERENT model" need this, not ``==``.
+
+    False when either name is unregistered or its entry is malformed: an
+    unknown name is not evidence of sameness. See
+    tests/test_alias_is_not_a_different_model.py."""
+    if a and a == b:
+        return True
+    if not a or not b:
+        return False
+    reg = reg if reg is not None else _mm.load_registry()
+    pa = _entry_path(reg.get(a))
+    pb = _entry_path(reg.get(b))
+    if pa is None or pb is None:
+        return False
+    try:
+        return str(Path(pa).resolve()) == str(Path(pb).resolve())
+    except OSError:
+        return False
+
+
 def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> List[str]:
     """Registered names whose path resolves to the same file/dir as *path*."""
     reg = reg if reg is not None else _mm.load_registry()

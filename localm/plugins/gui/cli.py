@@ -357,7 +357,8 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
     # `localm run`; same model -> attach). Never silently serve a different model.
     if model and _explicit(ctx, "model"):
         active = _probe_active_model(existing)
-        if active and active != model:
+        from localm.model_manager import names_same_model
+        if active and not names_same_model(active, model):
             conflicts.append(
                 f"model {model} (the running server serves {active})")
     # everything else: an attach cannot retroactively set the running server's
