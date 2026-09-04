@@ -76,6 +76,10 @@ if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DIS
 fi
 
 echo "  Opening the setup window ..."
+# Keep the interpreter this window runs on inside the folder, so a portable
+# install reuses it rather than downloading a second copy.
+export UV_PYTHON_INSTALL_DIR="$PWD/.python"
+export UV_CACHE_DIR="$PWD/.cache"
 if ! "$UVEXE" run --no-project --python 3.12 python installer/gui.py; then
     echo
     echo "  [!] The setup window could not run."

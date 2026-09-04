@@ -160,6 +160,26 @@ def test_command_output_is_streamed_into_the_log(gui):
     assert any("hello from the step" in l for l in lines)
 
 
+def test_a_shared_install_drops_the_launchers_own_containment(gui, tmp_path,
+                                                             monkeypatch):
+    """The launcher points uv at the clone for the window's own interpreter.
+    A shared install must not inherit that, or the answer never takes effect."""
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(tmp_path / ".python"))
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / ".cache"))
+    env = gui._env_for(gui.Plan(portable_store=False))
+    assert "UV_PYTHON_INSTALL_DIR" not in env
+    assert "UV_CACHE_DIR" not in env
+
+
+def test_a_shared_install_keeps_a_directory_the_user_chose(gui, tmp_path,
+                                                           monkeypatch):
+    """Only the launcher's own value is dropped. A machine-wide choice is the
+    user's and is left alone."""
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "D:/elsewhere/pythons")
+    env = gui._env_for(gui.Plan(portable_store=False))
+    assert env["UV_PYTHON_INSTALL_DIR"] == "D:/elsewhere/pythons"
+
+
 def test_portable_store_contains_uv_inside_the_install(gui, tmp_path):
     """Portable means nothing is written to the user profile: uv's managed
     interpreter and its wheel cache both land inside the install.

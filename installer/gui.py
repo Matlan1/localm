@@ -211,9 +211,14 @@ def _env_for(plan: Plan) -> dict:
     same containment setup.bat's Portable option gives."""
     env = dict(os.environ)
     env["LOCALM_SETUP"] = "1"
-    if plan.portable_store:
-        env["UV_PYTHON_INSTALL_DIR"] = str(ROOT / ".python")
-        env["UV_CACHE_DIR"] = str(ROOT / ".cache")
+    ours = {"UV_PYTHON_INSTALL_DIR": str(ROOT / ".python"),
+            "UV_CACHE_DIR": str(ROOT / ".cache")}
+    for key, value in ours.items():
+        if plan.portable_store:
+            env[key] = value
+        elif env.get(key) == value:
+            # Inherited from the launcher, not chosen by the user.
+            env.pop(key)
     return env
 
 
