@@ -152,6 +152,14 @@ localm process's own permissions rather than a sandbox:
 - **`coder:full`** runs shell commands and reads/writes files (the `--scope` glob
   narrows *which* files; `run_shell` is intentionally unscoped). The plain **`coder`**
   scope is restricted - read plus confined file edits within the scope, no shell.
+- **`browser`** lets the coding agent drive a real, automated browser session -
+  navigate, read, click, fill forms, screenshot, and read the page's console and
+  network activity - separate from `coder`/`coder:full`'s shell and file access,
+  so a key can be granted one without the other. Every request the driven page
+  makes, including images and scripts it pulls in on its own and every hop of a
+  redirect, is checked against the same outbound network policy as
+  `fetch_url`/`web_search`, and a WebSocket connection is refused rather than
+  relayed. See [docs/network.md](docs/network.md).
 - **`rag`** indexing over the HTTP API is confined to your home folder, the
   working directory, and any folders you explicitly allow, and always refuses
   credential folders (`~/.ssh`, ...) wherever they appear, so an API client
@@ -222,6 +230,14 @@ clients you trust.
   file you already have, names a reserved Windows device, or ends in a dot or
   space (which Windows silently strips). This applies to `localm pull`, the
   same-repo vision-projector auto-attach, and `--mmproj`.
+- **Routing a chat request to a model loaded on another localm instance on
+  this machine** verifies the target before forwarding anything: accepting a
+  peer offer (Models page, when another running instance already has the
+  model loaded) sends that instance's own API key once, and every request
+  after that is only ever forwarded to a target confirmed to resolve to
+  loopback over plain HTTP or HTTPS - a forged or LAN-facing offer cannot
+  redirect your requests off this machine. The peer's key lives in this
+  process's memory only; it is never written to disk or logged.
 
 ## Outbound network policy
 

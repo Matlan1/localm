@@ -122,12 +122,45 @@ server log rather than to the client.
 
 When the memory plugin is active and recalls facts for a turn, the response also carries an `X-Localm-Memory` header (see [Memory endpoints](#memory-endpoints-memory-plugin)).
 
+### Capability-based model routing
+
+When a request leaves `model` unset, empty, or `"localm"`, the loaded model is
+not automatically who answers: localm checks what the request actually needs
+(an attached image, a request for structured tool calls, a longer
+conversation than the loaded model was trained to hold, or an explicit
+`required_capabilities` list on the request body - any of `vision`,
+`tool_use`, `reasoning`, `context_length`) against what the loaded model can
+do, and answers with an installed model that has it when the loaded one does
+not. **A model you named explicitly is never swapped out from under you** -
+naming one pins it, gap or no gap.
+
+The response body's own `"model"` field only reflects the model that actually
+answered when the request left `model` unset; a pinned request always echoes
+back the name you sent, whether or not it could fully meet what you asked
+for. Whenever there is something to explain - a swap happened, or a pinned
+model was missing something the request needed - the response also carries an
+`X-Localm-Model-Routing` header, a compact JSON object:
+
+```json
+{"resolved": "vision-model", "requested": "localm", "routed": true,
+ "pinned": false, "gaps": {"vision": "absent"}, "unmet": []}
+```
+
+`gaps` maps each unmet or unknown capability to `"absent"` or `"unknown"` (a
+model that has not been inspected yet); `unmet` lists what a *pinned* model
+still lacks after routing declined to touch it. The header is omitted
+entirely when nothing needs explaining.
+
 Multimodal input uses the standard multipart content format with base64
 data-URIs (`{"type": "image_url", "image_url": {"url": "data:image/..."}}`)
-and requires a vision-capable model (a GGUF paired with a multimodal projector
+and needs a vision-capable model (a GGUF paired with a multimodal projector
 via `localm run --mmproj` / `localm pull --mmproj`, or a HuggingFace-format
-vision model). A GGUF loaded without an mmproj is text-only and rejects an
-attached image with a clear error.
+vision model). Sending an image while a text-only model is loaded no longer
+just fails: if the request did not pin a model, localm looks for an installed
+model that can see and answers with that one instead (see routing above).
+Only when no such model is installed, or the request pinned the loaded
+text-only model by name, does it reject the attached image with a clear
+error.
 
 ### `POST /v1/completions`
 

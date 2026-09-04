@@ -131,6 +131,45 @@ localm search qwen2.5 7b instruct            # find GGUF repos
 localm search bartowski/Qwen2.5-7B-GGUF --files  # quants + sizes + VRAM fit
 ```
 
+### Search and pull from CivitAI
+
+CivitAI is a second, independent model source for checkpoints, LoRAs, VAEs,
+and textual inversions used by the media plugins - core CLI, no plugin
+required.
+
+```bash
+localm search --source civitai detail tweaker        # search CivitAI instead of HF
+localm search --source civitai --files 135867         # a version's downloadable files
+localm search --source civitai <query> --nsfw          # include NSFW results (off by default)
+localm search --source civitai --files <id> --legacy-formats  # include older, riskier file formats
+
+localm pull civitai:<versionId>              # download a specific model version
+localm pull civitai:<versionId>:<fileId>     # a specific file within that version
+```
+
+Content flagged as depicting a minor is always excluded, regardless of
+`--nsfw`. `--mmproj` and an explicit destination directory do not apply to a
+CivitAI pull: the downloaded file is verified against CivitAI's own checksum
+and placed automatically in the active ComfyUI's matching `models/<type>`
+folder (checkpoints, loras, embeddings, vae, controlnet, or upscale_models) -
+the managed ComfyUI's folder if one is active, otherwise your configured
+`comfy_workdir`. With neither configured, the pull fails outright rather than
+falling back to localm's own models folder.
+
+An optional CivitAI API token, and a matching one for HuggingFace, raise rate
+limits and reach gated or login-required models on search and download.
+Neither is required - both sources keep working anonymously with nothing
+set.
+
+```bash
+localm config civitai_api_key <key>          # or the CIVITAI_API_KEY env var
+localm config hf_token <token>               # or the HF_TOKEN env var
+```
+
+A stored value (via `localm config`, or Settings > Model > Library) takes
+precedence over the matching env var; setting either to a blank value clears
+it. Neither is ever echoed back by `localm info` or `localm config`.
+
 ### Register existing models
 
 ```bash
@@ -359,6 +398,7 @@ localm config port 8650
 localm config confirm_remove false
 localm config comfy_launch_cmd "D:\path\to\comfyui.bat"
 localm config autoprune_missing_models true
+localm config language de                        # interface language: en (default) or de
 ```
 
 Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; localm warns when binding to a non-loopback address without a key; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for LAN serving.
@@ -551,7 +591,7 @@ The agent auto-starts `localm serve` when needed and plans with tool calls: read
 
 ### Built-in tools
 
-The agent ships 34 built-in tools. "Confirms" means the agent stops and asks
+The agent ships 43 built-in tools. "Confirms" means the agent stops and asks
 before running it by default; "Restricted" means a shared, non-owner session may
 use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 
@@ -562,6 +602,7 @@ use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 | `tree` | Recursive tree with sizes, skipping noise dirs | no | yes |
 | `search_files` | Find files matching a glob | no | yes |
 | `grep` | Regex search over file contents, skipping noise dirs | no | yes |
+| `find_references` | Find call sites of a symbol across the indexed project (best-effort, regex-based) | no | yes |
 | `git_status` | Working-tree status | no | yes |
 | `git_diff` | Unstaged diff, or staged with `staged=true` | no | yes |
 | `git_log` | Recent commits, oneline | no | yes |
@@ -591,12 +632,26 @@ use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 | `generate_image` | Generate or refine an image with the local pipeline | no | no |
 | `rag_list_collections` | List indexed Knowledge collections and their stats | no | no |
 | `rag_search` | Search a named Knowledge collection for excerpts | yes | no |
+| `browser_navigate` | Open a URL in the automated browser (browser plugin) | see below | no |
+| `browser_click` | Click a CSS selector | see below | no |
+| `browser_fill` | Type into a form field | see below | no |
+| `browser_read` | Read the visible page text | no | no |
+| `browser_screenshot` | Save a PNG of the current page | no | no |
+| `browser_console` | Read the page's console messages | no | no |
+| `browser_network` | List requests the page made and any the network policy refused | no | no |
+| `browser_close` | Close the browser session | no | no |
+
+The eight `browser_*` tools appear only when the `browser` plugin is
+installed and enabled, and are always unavailable to a restricted session -
+"a restricted session never browses" is a deliberate exclusion, not an
+oversight. See [network.md](network.md#the-browser-plugin).
 
 Four things the table cannot express, and each of them matters:
 
-- **`fetch_url` and `web_search` follow the network policy, not this column.**
-  They confirm when `net_mode` is `ask` (the default) and run without asking when
-  it is `allow`. See [network.md](network.md).
+- **`fetch_url`, `web_search`, and `browser_navigate`/`browser_click`/`browser_fill`
+  follow the network policy, not this column.** They confirm when `net_mode` is
+  `ask` (the default) and run without asking when it is `allow`. See
+  [network.md](network.md).
 - **"Confirms: no" is not "harmless".** `run_tests` and `generate_image` both
   have real side effects and neither asks by default. `run_tests` runs your
   project's own test command, which can do anything that command does.
