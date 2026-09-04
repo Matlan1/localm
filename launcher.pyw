@@ -115,7 +115,7 @@ def _console_hold(cmd: list, env: dict | None) -> str:
     source = env if env is not None else os.environ
     if "--debug" in cmd or str(source.get("LOCALM_DEBUG", "")) == "1":
         return " & pause"
-    return " & if errorlevel 1 pause & if not errorlevel 0 pause"
+    return " || pause"
 
 
 def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
@@ -135,11 +135,11 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     process exits, so a crash closed the window before its last lines -
     including the error itself - could be read.
 
-    The hold tests BOTH signs. ``if errorlevel 1`` is a >= test against a
-    signed value, so it never matched a native fault's negative exit code (an
-    access violation exits -1073741819) - the crashes most worth reading, and
-    the ones whose trace file is least likely to have been written. ``if not
-    errorlevel 0`` catches those.
+    The hold is ``|| pause``, which runs on any non-zero exit whatever its
+    sign. ``if errorlevel 1`` is a >= test against a signed value and never
+    matched a native fault's negative exit code (an access violation exits
+    -1073741819), and chaining a second ``if`` after ``&`` does not help: cmd
+    folds it into the first one's branch, so neither test runs.
 
     In debug mode the window is held unconditionally: the log is the reason
     the console is open, and a clean exit would otherwise take it away.
