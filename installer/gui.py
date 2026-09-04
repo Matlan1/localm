@@ -407,12 +407,16 @@ def build_steps(plan: Plan) -> List[Step]:
             args.append("--data-created")
         if state.get("path_modified"):
             args.append("--path-modified")
-        if plan.portable_store:
-            args += ["--runtime-contained",
-                     "--python-dir", str(ROOT / ".python"),
-                     "--cache-dir", str(ROOT / ".cache")]
-            if (ROOT / ".uv").exists():
-                args += ["--uv-dir", str(ROOT / ".uv")]
+        # These sit inside the folder whichever way the tooling question was
+        # answered: the launcher puts the window's own interpreter there.
+        contained = [("--python-dir", ROOT / ".python"),
+                     ("--cache-dir", ROOT / ".cache"),
+                     ("--uv-dir", ROOT / ".uv")]
+        present = [(flag, d) for flag, d in contained if d.exists()]
+        if present:
+            args.append("--runtime-contained")
+            for flag, d in present:
+                args += [flag, str(d)]
         _run(args, emit, plan)
         emit("Recorded what this install created, so uninstall removes only that.")
     steps.append(Step("Writing the install record", manifest, fatal=False))

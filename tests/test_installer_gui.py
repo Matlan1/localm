@@ -427,21 +427,39 @@ class TestInstallParity:
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert "--data-created" in rec
 
-    def test_a_portable_install_records_its_tooling_dirs(
+    def test_the_tooling_inside_the_folder_is_recorded(
             self, gui, tmp_path, monkeypatch):
+        """The launcher puts the window's own interpreter inside the folder
+        whichever way the tooling question was answered, so uninstall has to
+        know about it."""
+        (tmp_path / ".python").mkdir()
+        (tmp_path / ".uv").mkdir()
         cmds = _commands_for(gui, monkeypatch,
                              gui.Plan(backend="own", portable_store=True))
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert "--runtime-contained" in rec
         assert rec[rec.index("--python-dir") + 1] == str(tmp_path / ".python")
+        assert rec[rec.index("--uv-dir") + 1] == str(tmp_path / ".uv")
+        assert "--cache-dir" not in rec, "a directory that does not exist"
 
-    def test_a_shared_install_does_not_claim_the_shared_dirs(
+    def test_it_is_recorded_for_a_shared_install_too(
             self, gui, tmp_path, monkeypatch):
-        """Uninstall must never delete a runtime other installs share."""
+        (tmp_path / ".python").mkdir()
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", portable_store=False))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--runtime-contained" in rec
+
+    def test_nothing_outside_the_folder_is_ever_claimed(
+            self, gui, tmp_path, monkeypatch):
+        """Uninstall must never delete a runtime other installs share, so a
+        folder holding none of its own tooling records none."""
         cmds = _commands_for(gui, monkeypatch,
                              gui.Plan(backend="own", portable_store=False))
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert "--runtime-contained" not in rec
+        assert "--python-dir" not in rec
+        assert "--cache-dir" not in rec
 
 
 class TestGlobalCommandExitCodes:
