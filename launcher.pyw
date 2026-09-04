@@ -101,6 +101,23 @@ def logo_parts() -> tuple:
     return LOGO_STYLES.get(style, LOGO_STYLES[LOGO_DEFAULT])
 
 
+def _console_hold(cmd: list, env: dict | None) -> str:
+    """The cmd.exe tail that decides whether the child's console window stays
+    open after the child exits.
+
+    Debug mode holds it whatever happened. Otherwise it is held for any
+    non-zero exit, testing both signs: "errorlevel 1" alone is a >= test on a
+    signed value and misses a native fault's negative code.
+
+    Debug is read from BOTH signals the launcher uses - the --debug flag, and
+    LOCALM_DEBUG for the coder mode, which has no such flag.
+    See tests/test_launcher_console_hold.py."""
+    source = env if env is not None else os.environ
+    if "--debug" in cmd or str(source.get("LOCALM_DEBUG", "")) == "1":
+        return " & pause"
+    return " & if errorlevel 1 pause & if not errorlevel 0 pause"
+
+
 def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     """Start a child mode process detached from the launcher, cross-platform.
 
@@ -113,18 +130,26 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     ``start_new_session=True`` so the child survives the launcher closing,
     without touching the Windows-only flag.
 
-    On Windows the child runs through ``cmd.exe /c`` with a trailing
-    ``if errorlevel 1 pause`` rather than directly: a console window closes
-    the instant its owning process exits, so a crash (including a native
-    fault, which still sets a nonzero exit code) previously closed the window
-    before its last lines - including the error itself - could be read. A
-    clean exit (errorlevel 0) still closes normally.
+    On Windows the child runs through ``cmd.exe /c`` with a trailing hold
+    rather than directly: a console window closes the instant its owning
+    process exits, so a crash closed the window before its last lines -
+    including the error itself - could be read.
+
+    The hold tests BOTH signs. ``if errorlevel 1`` is a >= test against a
+    signed value, so it never matched a native fault's negative exit code (an
+    access violation exits -1073741819) - the crashes most worth reading, and
+    the ones whose trace file is least likely to have been written. ``if not
+    errorlevel 0`` catches those.
+
+    In debug mode the window is held unconditionally: the log is the reason
+    the console is open, and a clean exit would otherwise take it away.
+    Outside debug mode a clean exit still closes normally.
     """
     kwargs: dict = {"cwd": cwd}
     if env is not None:
         kwargs["env"] = env
     if sys.platform == "win32":
-        cmd = ["cmd.exe", "/c", subprocess.list2cmdline(cmd) + " & if errorlevel 1 pause"]
+        cmd = ["cmd.exe", "/c", subprocess.list2cmdline(cmd) + _console_hold(cmd, env)]
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
     else:
         kwargs["start_new_session"] = True
