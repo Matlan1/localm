@@ -114,3 +114,39 @@ class TestHeadlessAutoStartSurfacesChildError:
             assert not (seen.get("creationflags", 0)
                         & subprocess.CREATE_NEW_CONSOLE), (
                 "a headless caller has no desktop for a new console window")
+
+
+class TestAutoStartedServerRunsInTheProjectDirectory:
+    """The server registers itself against ITS OWN working directory, and the
+    attach that follows looks for an instance registered against the project
+    directory. Spawning it without a cwd leaves it registered against whatever
+    directory the CLI happened to be run from, so the two never match and every
+    attach times out - taking the whole session with it and leaving the server
+    it started running.
+
+    That is every run started with --cwd, which includes the launcher's coder
+    mode: the launcher runs from the install folder and passes the folder the
+    user picked."""
+
+    def test_the_server_is_spawned_in_the_directory_it_will_be_looked_up_by(
+            self, monkeypatch, tmp_path):
+        _bypass_plugin_gate(monkeypatch)
+        project = tmp_path / "myproject"
+        project.mkdir()
+        monkeypatch.setattr(instances, "resolve_root_dir",
+                            lambda **kw: str(project))
+        monkeypatch.setattr(instances, "attach_target", lambda *a, **kw: None)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        seen = {}
+
+        def fake_popen(cmd, **kw):
+            seen.update(kw)
+            return _DeadProc(1)
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        CliRunner().invoke(ccli.main, ["--cwd", str(project), "--model", "m", "hi"])
+
+        assert "cwd" in seen, (
+            "the server was spawned with no working directory, so it registers "
+            "against the caller's directory and the attach can never match")
+        assert str(seen["cwd"]) == str(project), seen["cwd"]

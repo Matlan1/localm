@@ -825,6 +825,13 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
 
                 import os
                 kwargs = {}
+                # The server registers itself against ITS OWN working directory,
+                # and the attach below looks for an instance registered against
+                # work_dir. Without this the server inherits this process's
+                # directory instead, registers there, and the attach can never
+                # match - which is every run started with --cwd, including the
+                # launcher's coder mode.
+                kwargs["cwd"] = str(work_dir)
                 env = os.environ.copy()
                 env["LOCALM_OWN_CONSOLE"] = "1"
                 kwargs["env"] = env
