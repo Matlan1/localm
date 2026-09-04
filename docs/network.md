@@ -121,6 +121,23 @@ echoed to stderr (`[localm privacy] fetch_url: …`) so the session leaves a
 visible trace *on your terminal* of what went out, without writing anything
 to disk.
 
+## The browser plugin
+
+With the `browser` plugin installed and enabled, the coding agent gets tools
+to drive a real, automated browser (`browser_navigate`, `browser_click`,
+`browser_fill`, plus read-only `browser_read`/`browser_screenshot`/
+`browser_console`/`browser_network`/`browser_close`). It reaches only what
+this same policy already allows: every request the driven page makes -
+including images and scripts the page pulls in on its own, and every hop of
+a redirect - is checked, and anything refused is reported with the reason
+instead of silently dropped. WebSocket connections are refused rather than
+relayed. `browser_navigate`, `browser_click`, and `browser_fill` confirm in
+`ask` mode like `fetch_url`/`web_search` above; the read-only tools do not.
+Off by default - install the `browser` extra, download the browser it
+drives, and switch it on in Settings. An API key needs the separate
+`browser` scope (see [SECURITY.md](../SECURITY.md)), independent of the
+coding agent's shell access, so you can grant one without the other.
+
 ## What the policy does NOT govern
 
 - **Child processes.** `run_shell` commands like `pip install`, `npm install`,

@@ -9,9 +9,9 @@ inference knows nothing about CLI. They communicate through `Engine`, with
 a couple of narrow, deliberate exceptions (`localm/cli/doctor.py` imports
 the llama.cpp loader directly for GPU-probe diagnostics; `localm/cli/chat.py`
 catches specific backend exception types). CHAT
-is the protected, preinstalled plugin (#0); coder, image, music, video, rag,
-web, memory, voice (Whisper STT), tts (Kokoro in-browser TTS), jobs
-(scheduled tasks), and mcp are all plugins layered on top.
+is the protected, preinstalled plugin (#0); coder, browser, image, music,
+video, rag, web, memory, voice (Whisper STT), tts (Kokoro in-browser TTS),
+jobs (scheduled tasks), and mcp are all plugins layered on top.
 
 ```
 CLI (localm/cli/)                  Plugin engine (localm/plugins/)
@@ -123,6 +123,15 @@ stream out as SSE. Inference is serialised per loaded model (an asyncio
 semaphore per display name), not globally - two concurrently loaded models
 can generate at once. Endpoints are documented in
 [server-api.md](server-api.md).
+
+`inference/capability_routing.py` decides, for a chat request that did not
+pin a model by name, whether the loaded model can actually serve it (vision,
+tool use, reasoning, context length) and picks an installed one that can when
+it cannot; `http_server.plan_capability_route()` builds the request's
+`CapabilityNeeds` and `routes/chat.py` applies the decision. `peer_routing.py`
+is a separate, unrelated mechanism: it forwards a chat request straight to
+another localm instance on this machine that already has the model loaded,
+after verifying the forward target resolves to loopback.
 
 ## Conversation compaction
 

@@ -96,6 +96,13 @@ native model-sharing mechanism: no copy, no symlink, no re-download, no admin
 rights. The generated file has a header showing how to add more model sources by
 hand.
 
+A CivitAI pull (`localm pull civitai:<versionId>`, or the Models page's
+CivitAI search) lands directly in one of these same folders -
+`<data dir>/comfyui-models/<type>` when the managed instance is active,
+`<comfy_workdir>/models/<type>` otherwise - so it is picked up the same way,
+with no extra copy or scan step. See
+[cli.md](cli.md#search-and-pull-from-civitai).
+
 ### Registering ComfyUI's models in localm
 
 To make ComfyUI's own models show up in localm's model browser, the GUI Models

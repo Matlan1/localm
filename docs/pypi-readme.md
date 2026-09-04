@@ -38,8 +38,10 @@ missing at any point.
 
 ## Where data lives
 
-Set `LOCALM_HOME` to choose where models, chats and settings are stored. It
-defaults to a per-user directory; `localm doctor` prints the path in use.
+Set `LOCALM_HOME` to choose where models, chats and settings are stored. Left
+unset, it defaults to a directory inside the Python environment you installed
+into (not a per-user directory); `localm info` prints the path actually in
+use.
 
 ## The self-contained installer
 
