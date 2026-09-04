@@ -211,6 +211,14 @@ def _env_for(plan: Plan) -> dict:
     same containment setup.bat's Portable option gives."""
     env = dict(os.environ)
     env["LOCALM_SETUP"] = "1"
+    # Put the uv being used on PATH for everything the steps run. localm's own
+    # plugin dependency installer shells out to a bare uv, and a portable copy
+    # inside the folder is not on PATH; its fallback cannot help either,
+    # because a uv-created environment has no pip.
+    exe = find_uv(ROOT)
+    uv_bin = os.path.dirname(exe) if exe else ""
+    if uv_bin:
+        env["PATH"] = uv_bin + os.pathsep + env.get("PATH", "")
     ours = {"UV_PYTHON_INSTALL_DIR": str(ROOT / ".python"),
             "UV_CACHE_DIR": str(ROOT / ".cache")}
     for key, value in ours.items():

@@ -12,6 +12,7 @@ step list, and the data-directory write - not the widgets.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -158,6 +159,30 @@ def test_command_output_is_streamed_into_the_log(gui):
     gui._run([gui.sys.executable, "-c", "print('hello from the step')"],
              lines.append, gui.Plan())
     assert any("hello from the step" in l for l in lines)
+
+
+def test_the_uv_being_used_is_on_the_path_the_steps_inherit(gui, tmp_path,
+                                                            monkeypatch):
+    """localm's own plugin dependency installer shells out to a bare uv, and a
+    portable copy is not on PATH. Its fallback cannot help: an environment uv
+    created has no pip."""
+    d = tmp_path / ".uv"
+    d.mkdir()
+    exe = d / ("uv.exe" if gui.IS_WINDOWS else "uv")
+    exe.write_bytes(b"")
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
+    env = gui._env_for(gui.Plan())
+    first = env["PATH"].split(os.pathsep)[0]
+    assert first == str(d), env["PATH"]
+
+
+def test_no_uv_leaves_the_path_alone(gui, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
+    env = gui._env_for(gui.Plan())
+    assert env["PATH"] == str(tmp_path / "nothing")
 
 
 def test_a_shared_install_drops_the_launchers_own_containment(gui, tmp_path,
