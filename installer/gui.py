@@ -425,13 +425,17 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
         else:
             target, args = str(ROOT / "localm-launcher.bat"), ""
         ico = ROOT / "assets" / "localm.ico"
+        # A single quote inside a PowerShell single-quoted string is doubled.
+        # Paths under a name like O'Brien reach here.
+        def q(value) -> str:
+            return str(value).replace("'", "''")
         ps = (
             "$p = [Environment]::GetFolderPath('Desktop') + '\\LocaLM.lnk';"
             "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);"
-            f"$s.TargetPath = '{target}';"
-            + (f"$s.Arguments = '{args}';" if args else "")
-            + f"$s.WorkingDirectory = '{ROOT}';"
-            + (f"$s.IconLocation = '{ico}';" if ico.exists() else "")
+            f"$s.TargetPath = '{q(target)}';"
+            + (f"$s.Arguments = '{q(args)}';" if args else "")
+            + f"$s.WorkingDirectory = '{q(ROOT)}';"
+            + (f"$s.IconLocation = '{q(ico)}';" if ico.exists() else "")
             + "$s.Description = 'LocaLM';$s.Save();Write-Output $p"
         )
         out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],

@@ -522,6 +522,30 @@ class TestPosixShortcut:
         assert "localm-launcher.sh" in launcher
         assert launcher.count("Exec=") == 1
 
+    def test_a_quote_in_the_path_is_escaped_for_powershell(
+            self, gui, tmp_path, monkeypatch):
+        """An unescaped quote ends the PowerShell string early and the command
+        fails to parse. A folder under a name like O'Brien reaches this."""
+        if not gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        root = tmp_path / "O'Brien" / "localm"
+        root.mkdir(parents=True)
+        monkeypatch.setattr(gui, "ROOT", root)
+        seen = {}
+
+        class Done:
+            stdout = "C:\\Users\\x\\Desktop\\LocaLM.lnk"
+
+        def fake(cmd, **kw):
+            seen["ps"] = cmd[-1]
+            return Done()
+
+        monkeypatch.setattr(gui.subprocess, "run", fake)
+        gui.make_shortcut(gui.Plan(shortcut="launcher"), lambda s: None)
+        ps = seen["ps"]
+        assert "O''Brien" in ps, ps
+        assert "O'Brien'" not in ps.replace("O''Brien", "")
+
     def test_the_written_path_is_returned_for_the_manifest(
             self, gui, tmp_path, monkeypatch):
         if gui.IS_WINDOWS:
