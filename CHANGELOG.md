@@ -11,6 +11,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- Rotated the release signing key. The previous key stays pinned alongside the new one for this
+  release so existing installations can still verify and apply the update; it is removed in the
+  release after.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added
