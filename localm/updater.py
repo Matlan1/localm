@@ -45,6 +45,11 @@ _ORDER = ("reboot", "deps", "runtime", "setup")
 # non-matching signature is refused before any swap. An EMPTY tuple fails open
 # (transport trust only).
 _UPDATE_PUBKEYS: tuple = (
+    # Current signing key. Sign new releases with this one.
+    "3fbfccffd49975ef1d70459be2def339da85be20a1c40cea4ec93726e257123b",
+    # Superseded 2026-09-07. Installs in the field pin ONLY this key, so removing it
+    # before a release signed by it has carried the key above to them makes every
+    # such install refuse the next update. Remove it in the release AFTER that one.
     "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
 )
 
