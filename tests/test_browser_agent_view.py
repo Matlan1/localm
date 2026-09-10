@@ -157,3 +157,51 @@ def test_nothing_to_watch_when_the_agent_has_no_browser(app, monkeypatch):
     with TestClient(app) as c:
         assert c.get("/api/browser/agent").json()["available"] is False
         assert c.post("/api/browser/agent").status_code == 404
+
+
+class TestWatchAgentTargetsOneSession:
+    """coder_session_id (NEW-CAP-BROWSER item 1's inline mirror) narrows which
+    of the caller's already-scoped agent browsers is watched. Needed once a
+    caller can run more than one coder session at a time - without it,
+    /api/browser/agent always returns whichever the caller's browsers happen
+    to list first, so a second session's inline mirror would show the
+    FIRST session's browser instead of its own."""
+
+    def test_watch_agent_targets_one_session_among_several(self, app, monkeypatch):
+        _enable()
+        sessions = [_FakeSession("s1", "job-1", "my-key"),
+                   _FakeSession("s2", "job-2", "my-key")]
+        plug, browsers = _wire(
+            app, monkeypatch, sessions=sessions,
+            live_ids=["coder-job-1", "coder-job-2"],
+            is_owner=False, principal="my-key")
+
+        with TestClient(app) as c:
+            r = c.post("/api/browser/agent", json={"coder_session_id": "s2"})
+            assert r.status_code == 200, r.text
+            job_id = r.json()["job_id"]
+            try:
+                assert r.json()["session_id"] == "s2"
+                assert browsers["coder-job-2"].viewer is not None, (
+                    "the targeted session's browser was never attached")
+                assert browsers["coder-job-1"].viewer is None, (
+                    "watching s2 also attached to s1's browser")
+            finally:
+                c.post(f"/api/jobs/{job_id}/cancel")
+
+    def test_watch_agent_cannot_target_a_session_outside_the_scoped_list(
+            self, app, monkeypatch):
+        """The filter is applied AFTER _viewable_agent_browsers' own
+        principal-scoping, so a targeted id outside the caller's own list
+        stays 404 - narrowing can never widen what a scoped key may reach."""
+        _enable()
+        sessions = [_FakeSession("s1", "owner-job", None)]      # the OWNER's
+        _wire(app, monkeypatch, sessions=sessions,
+              live_ids=["coder-owner-job"],
+              is_owner=False, principal="a-handed-out-key")
+
+        with TestClient(app) as c:
+            r = c.post("/api/browser/agent", json={"coder_session_id": "s1"})
+        assert r.status_code == 404, (
+            f"a scoped key reached the owner's browser by targeting its id: "
+            f"{r.status_code}")
