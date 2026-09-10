@@ -136,6 +136,7 @@
   "coder.bg.turnsCount.other": "{count} Runden",
   "coder.bg.unsupportedHint": "Eine Sitzung mit gemeinsamem Schlüssel führt nichts im Hintergrund aus - sie hat weder Shell- noch Unteragenten-Tools.",
   "coder.bg.unsupportedTitle": "In dieser Sitzung nicht verfügbar",
+  "coder.browser.liveViewAlt": "Live-Ansicht des Browsers, den diese Sitzung steuert",
   "coder.compact.done": "Verlauf verdichtet",
   "coder.compact.feedNote": "Gesprächsverlauf verdichtet.",
   "coder.compact.nothing": "Nichts zu verdichten",
