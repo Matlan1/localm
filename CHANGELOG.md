@@ -16,6 +16,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   needs. Previously this required a separate, undocumented-in-app
   `python -m playwright install chromium` step after installing the browser
   extra; it is now a regular localm command that respects the network policy.
+- **The automated browser can now mirror its live view directly inside the
+  coder session driving it, in addition to the dedicated Browser tab.** Off by
+  default; turn on "Show the agent's browser inline in the coder session" in
+  Settings > Network.
 
 ### Changed
 - **Settings translates more of itself into German.** Server controls, other
