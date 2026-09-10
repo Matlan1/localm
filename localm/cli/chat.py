@@ -754,12 +754,13 @@ def _cmd_save(arg: str, messages: list, console) -> None:
     try:
         resolved = (cwd / target).resolve()
     except (OSError, ValueError) as e:
-        console.print(f"[red]Invalid save path: {escape(str(e))}[/red]")
+        console.print(f"[red]Invalid save path: {escape(str(e))}[/red]", soft_wrap=True)
         return
     if resolved == cwd or cwd not in resolved.parents:
         console.print(
             f"[red]Refusing to save outside the current directory:[/red] "
-            f"{escape(target)}\n[dim]Use a path inside {escape(str(cwd))}[/dim]"
+            f"{escape(target)}\n[dim]Use a path inside {escape(str(cwd))}[/dim]",
+            soft_wrap=True,
         )
         return
     _save_chat(messages, str(resolved))
@@ -821,16 +822,18 @@ def _handle_command(
         else:
             p = Path(arg)
             if not p.exists():
-                console.print(f"[red]File not found:[/red] {escape(arg)}")
+                console.print(f"[red]File not found:[/red] {escape(arg)}", soft_wrap=True)
             else:
                 pending_images.append(str(p.resolve()))
                 console.print(
                     f"[dim]Queued {escape(p.name)} - will attach to your next "
-                    f"message[/dim]")
+                    f"message[/dim]",
+                    soft_wrap=True,
+                )
     elif cmd == "images":
         if pending_images:
             for f in pending_images:
-                console.print(f"[dim]  {escape(f)}[/dim]")
+                console.print(f"[dim]  {escape(f)}[/dim]", soft_wrap=True)
         else:
             console.print("[dim]No images queued.[/dim]")
     elif cmd == "system":
@@ -919,6 +922,6 @@ def _save_chat(messages: list, filepath: str) -> None:
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(messages, f, indent=2, ensure_ascii=False)
-        console.print(f"[green]✓[/green] Saved: {escape(filepath)}")
+        console.print(f"[green]✓[/green] Saved: {escape(filepath)}", soft_wrap=True)
     except Exception as e:
-        console.print(f"[red]Save failed: {escape(str(e))}[/red]")
+        console.print(f"[red]Save failed: {escape(str(e))}[/red]", soft_wrap=True)
