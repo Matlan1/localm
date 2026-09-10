@@ -72,9 +72,7 @@ def _child_identity_env() -> dict:
     boundary: the data home falls back to a contained default derived from the
     running code's location when nothing is configured, and ``-m`` puts the
     child's cwd first on ``sys.path``, where a ``localm/`` directory in that
-    cwd (any other checkout) silently swaps which CODE runs. run_coder_task
-    runs its child in the TASK's directory, so without this a server whose own
-    home came from ITS location hands the coder chain a different, empty home.
+    cwd (any other checkout) silently swaps which CODE runs.
 
     LOCALM_HOME pins the data home; PYTHONSAFEPATH stops ``-m`` from putting
     the child's cwd on ``sys.path``; the PYTHONPATH entry keeps this server's
@@ -163,6 +161,28 @@ class EngineCache:
     def resident(self) -> list:
         """Resident display names, least-recently-used first."""
         return list(self._lru)
+
+    @staticmethod
+    def pin(engine) -> None:
+        """Count one in-flight request on *engine*. A pinned engine
+        (``active_requests > 0``) is never chosen as an eviction victim."""
+        if isinstance(getattr(engine, "active_requests", None), int):
+            engine.active_requests += 1
+
+    @staticmethod
+    def unpin(engine) -> None:
+        """Release one pin taken by ``pin``."""
+        if isinstance(getattr(engine, "active_requests", None), int):
+            engine.active_requests = max(0, engine.active_requests - 1)
+
+    @contextlib.contextmanager
+    def serving(self, engine):
+        """Pin *engine* for the duration of the block."""
+        self.pin(engine)
+        try:
+            yield engine
+        finally:
+            self.unpin(engine)
 
     def _operator_supplied(self, model_name) -> bool:
         """True only for the model the OPERATOR named when starting this server.
@@ -635,7 +655,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         for key in ("max_tokens", "temperature", "seed"):
             if args.get(key) is not None:
                 gen[key] = args[key]
-        text = "".join(engine.chat_stream(messages, **gen))
+        with engines.serving(engine):
+            text = "".join(engine.chat_stream(messages, **gen))
         return _text_result(text)
 
     def memory_recall(args: dict) -> dict:
@@ -1004,7 +1025,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         with _quiet_stdout():
             engine = engines.get(args.get("model"))
         try:
-            vecs = engine.embed(texts)
+            with engines.serving(engine):
+                vecs = engine.embed(texts)
         except NotImplementedError as e:
             return _text_result(str(e), is_error=True)
         return _text_result(json.dumps(vecs))
@@ -1094,78 +1116,74 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         if not cwd_path.is_dir():
             return _text_result(f"cwd is not a directory: {cwd_path}", is_error=True)
 
-        # Shells out to the `localm coder` single-shot CLI, which reuses the
-        # CLI's own project-config resolution and instance attach/spawn logic,
-        # and keeps this MCP server's own EngineCache (used by chat/embed) from
-        # fighting the coder's separate server process over the same model load.
-        cmd = [sys.executable, "-m", "localm", "coder", task,
-               "--cwd", str(cwd_path), "--output-format", "json"]
-        if args.get("model"):
-            # A MODEL NAME FROM A CLIENT IS NOT OPERATOR INPUT, even though it
-            # is about to become argv. The coder CLI spawns `localm gui <model>`
-            # when no instance is attached for this cwd, and that positional
-            # reaches the startup resolver, which opts into allow_direct_path.
-            # This string came from an MCP tool call, and the client also
-            # chooses `cwd`, so it can select the spawn branch at will.
-            from localm.model_manager import unregistered_model_error
-            bad = unregistered_model_error(args["model"])
-            if bad:
-                return _text_result(bad, is_error=True)
-            cmd += ["--model", args["model"]]
-        if args.get("max_turns") is not None:
-            cmd += ["--max-turns", str(args["max_turns"])]
-        # Default OFF, matching the CLI's own fail-closed default: without this,
-        # file writes still happen but run_shell is denied for lack of a TTY to
-        # confirm it.
-        if args.get("yes"):
-            cmd.append("--yes")
+        # The coder Agent runs IN THIS PROCESS on an engine from this server's
+        # own EngineCache: one resident model serves chat, embed and every
+        # coder task, and no per-project server is spawned. The project's own
+        # .localcoder/config.toml is honoured exactly as `localm coder` does.
+        from localm.plugins.coder import runner as coder_runner
+        from localm.plugins.coder.backends.shared_engine import SharedEngineBackend
+        from localm.plugins.coder.project_config import ProjectConfigUnreadable
+
+        work_dir = cwd_path.resolve()
+        max_turns = args.get("max_turns")
+        if max_turns is not None:
+            try:
+                max_turns = int(max_turns)
+            except (TypeError, ValueError):
+                return _text_result("'max_turns' must be an integer", is_error=True)
+        try:
+            cfg = coder_runner.resolve_task_config(
+                work_dir, model=args.get("model") or None, max_turns=max_turns,
+                yes=bool(args.get("yes")))
+        except ProjectConfigUnreadable as e:
+            return _text_result(f"Project config could not be read: {e}", is_error=True)
+        except coder_runner.InvalidSessionMode as e:
+            return _text_result(str(e), is_error=True)
         timeout = args.get("timeout_seconds") or 900
 
+        # A model name from the client or the project config is registry-gated
+        # by resolve_model; the operator's own --model default is the only path
+        # allowed through.
         try:
-            # cwd=cwd_path matters beyond the coder's own file/shell tool scope:
-            # if no server is already running for this project, the coder CLI
-            # auto-spawns one and identifies "this project" by the SPAWNING
-            # process's OS working directory, not just the --cwd flag above. Omit
-            # this and the auto-spawned server registers under the MCP server's
-            # own directory instead, so the coder's own attach-back lookup can
-            # never find it (looks like a timeout; it is a project-root mismatch).
-            # env=_child_identity_env(): that cwd change must NOT drag the child
-            # onto a different data home or different localm code.
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                                  cwd=str(cwd_path), env=_child_identity_env())
-        except subprocess.TimeoutExpired:
-            return _text_result(f"coder task timed out after {timeout}s", is_error=True)
+            with _quiet_stdout():
+                model_name = engines.resolve_model(cfg.model)
+                engine = engines.get(model_name)
+        except ValueError as e:
+            return _text_result(str(e), is_error=True)
+        backend = SharedEngineBackend(engine, model_name)
 
-        # --output-format json pretty-prints with indent=2 (multi-line), and
-        # console messages print to stdout BOTH BEFORE it ("attached to running
-        # server", the auto-start banner) AND AFTER it (`--mode full`'s "Session
-        # transcript saved -> <path>") - so the JSON is neither the whole stdout
-        # nor anchored to either end. Find each line that is a lone "{" (the
-        # JSON dict is always non-empty, so indent=2 always opens it on its own
-        # line), newest first, and raw_decode from there: unlike json.loads,
-        # raw_decode stops at the object's closing brace and tolerates whatever
-        # trailing console text follows it.
-        stdout = proc.stdout.strip()
-        payload = None
-        if stdout:
-            lines = stdout.splitlines()
-            decoder = json.JSONDecoder()
-            for i in reversed([n for n, ln in enumerate(lines) if ln == "{"]):
-                try:
-                    payload, _ = decoder.raw_decode("\n".join(lines[i:]))
-                    break
-                except json.JSONDecodeError:
-                    continue
+        # Default OFF, matching the CLI's own fail-closed default: without
+        # `yes` file writes still happen but run_shell is denied, since there
+        # is nobody to confirm it.
+        if coder_runner.unattended_shell_gated(task, cfg.auto_approve):
+            _log("coder task: run_shell is denied for this run (no 'yes')")
 
-        if payload is None:
-            detail = proc.stderr.strip() or stdout or f"exit code {proc.returncode}"
-            return _text_result(f"coder task failed to run: {detail}", is_error=True)
+        # Pinned for the whole run so the residency gate never evicts the
+        # engine under the agent; released on the worker thread when the run
+        # actually ends, even after a timeout abandons it.
+        engines.pin(engine)
+        try:
+            with _quiet_stdout():
+                agent = coder_runner.build_agent(
+                    backend, work_dir, task=task, max_turns=cfg.max_turns,
+                    auto_approve=cfg.auto_approve,
+                    always_confirm=cfg.always_confirm,
+                    session_mode=cfg.session_mode, gen_kw=cfg.gen_kw,
+                    browser_enabled=coder_runner.browser_enabled())
+        except Exception as e:
+            engines.unpin(engine)
+            return _text_result(f"coder task failed to start: {e}", is_error=True)
+        try:
+            with _quiet_stdout():
+                result = coder_runner.run_task_with_timeout(
+                    agent, task, float(timeout),
+                    on_finished=lambda: engines.unpin(engine))
+        except Exception as e:
+            return _text_result(f"coder task failed to run: {e}", is_error=True)
 
-        text = payload.get("response", "")
-        meta = (f"\n\n[turns={payload.get('turns')} "
-                f"tokens={payload.get('total_tokens')} "
-                f"success={payload.get('success')}]")
-        return _text_result(text + meta, is_error=not payload.get("success", False))
+        meta = (f"\n\n[turns={result.turns} tokens={result.total_tokens} "
+                f"success={result.success}]")
+        return _text_result(result.response + meta, is_error=not result.success)
 
     def setup_embeddings(args: dict) -> dict:
         model = args.get("model")
@@ -1801,8 +1819,12 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
         engines, enable_images=enable_images, enable_coder=enable_coder,
         enable_memory=enable_memory,
         enable_memory_write=enable_memory_write))
+    # The protocol stream keeps the real stdout; every other print in this
+    # process, on any thread, lands on stderr from here on.
+    protocol_out = sys.stdout
+    sys.stdout = sys.stderr
     try:
-        server.run_stdio()
+        server.run_stdio(stdout=protocol_out)
     finally:
         # Every resident engine, not just the most recent one: freeing one of N
         # would leave the rest holding VRAM past exit.

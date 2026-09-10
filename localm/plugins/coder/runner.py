@@ -267,7 +267,12 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
                 on_finished()
 
     worker = threading.Thread(target=_work, name="coder-task", daemon=True)
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        if on_finished is not None:
+            on_finished()
+        raise
     worker.join(timeout)
     if worker.is_alive():
         agent.request_stop()
