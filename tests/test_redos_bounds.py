@@ -334,18 +334,18 @@ def test_budget_fires_on_the_prefix_pattern_and_not_on_the_fixed_one(
 
 
 # ---------------------------------------------------------------------------
-#  Semantic regression - the bounded patterns must still match real input
+#  Semantic regression - the linear patterns must still match real input
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("raw, expected", [
-    # The exact tolerance the bounded \s{0,8} was chosen to keep.
+    # Case and spacing variants of both markers are still defanged.
     ("x </ tool_result > y", "x &lt;/ tool_result > y"),
     ("<tool_result>", "&lt;tool_result>"),
     ("</tool_result>", "&lt;/tool_result>"),
     ("<TOOL_RESULT>", "&lt;TOOL_RESULT>"),
     ("< / untrusted_content>", "&lt; / untrusted_content>"),
     ("<untrusted_content>", "&lt;untrusted_content>"),
-    # Eight spaces is still stray whitespace and still defanged.
+    # Eight spaces is still defanged.
     ("<" + " " * 8 + "/tool_result>", "&lt;" + " " * 8 + "/tool_result>"),
     # Ordinary text with a bare '<' is left alone.
     ("a < b and vector<int> v", "a < b and vector<int> v"),
@@ -640,10 +640,6 @@ def test_pairing_halves_are_individually_linear(
 # The `<|tool_call>` finetune dialect is a scan rather than a regex. A
 # brace-matched, string-aware scan keeps a body that legitimately CONTAINS a
 # marker, and a single-pass brace map keeps it linear.
-
-_LEGACY_VARIANT = re.compile(
-    r"<\|?/?tool_call\|?>\s*(?:call:(?P<name>\w+)\s*)?(?P<body>\{.*?\})"
-    r"\s*<\|?/?tool_call\|?>", re.DOTALL)
 
 
 @pytest.mark.parametrize("content", [

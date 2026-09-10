@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Regression test for app/main.js's window-export loop: `export let` bindings
-// (modelCache and ~20 siblings across app/*+pages/*) are REASSIGNED at
+// (modelCache and its siblings across app/*+pages/*) are REASSIGNED at
 // runtime, not mutated, so a one-time `window[name] = mod[name]` snapshot
 // freezes forever at the first-load value - the actual bug this loop fixes
 // (window.modelCache stayed {models:[],active:""} even after a model loaded).
 //
 // main.js can't be imported directly here: it statically imports the whole
-// 20-module app/pages graph, and several of those modules touch
+// app/pages graph, and several of those modules touch
 // `document`/`window` at TOP LEVEL (e.g. models-sidebar.js's
 // `modelSelect = $("model-select")`) - only jsdom's harness.mjs can satisfy
 // that, and jsdom does not execute `<script type="module">` at all, which is
@@ -37,12 +37,13 @@ assert.notEqual(loopStart, -1,
   "main.js's window-export loop anchor not found - did its shape change? update this test's anchor to match.");
 const LOOP_SRC = MAIN_JS.slice(loopStart); // the loop is the file's last statement
 
-// main.js iterates a fixed list of 26 imported namespace objects (m0, m1,
-// mI18nEn, mI18n, mIcons, mPk, m2..m21); alias every one of them to the same
-// fixture module so the extracted loop runs, unmodified, against a real live
-// namespace.
-const MOD_PARAM_NAMES = ["m0", "m1", "mI18nEn", "mI18n", "mIcons", "mPk", "m2", "m3", "m4", "m5", "m6", "m7",
-  "m8", "m9", "m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19", "m20", "m21"];
+// Alias every `import * as` namespace main.js imports to the same fixture
+// module, so the extracted loop runs, unmodified, against a real live
+// namespace. Derived from the source so this list tracks main.js's actual
+// import block instead of drifting from a hand-copied count.
+const MOD_PARAM_NAMES = [...MAIN_JS.matchAll(/^import \* as (\w+) from /gm)].map((m) => m[1]);
+assert.ok(MOD_PARAM_NAMES.length > 0,
+  "no `import * as` namespace imports found in main.js - did its shape change?");
 
 test("window.X tracks a reassigned `export let` binding (RED against a one-time value copy, GREEN against a live getter)", async () => {
   const fixture = await import("./fixtures/reassignable-export.mjs");

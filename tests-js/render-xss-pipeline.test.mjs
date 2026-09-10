@@ -91,12 +91,12 @@ test("no payload survives renderMarkdown as an executable or hijacking node", ()
   assert.deepEqual(survivors, {},
     "renderMarkdown left executable or document-hijacking nodes in the DOM. "
     + "Each key is a payload class that got through the marked -> DOMPurify "
-    + "pipeline at helpers.js:290.");
+    + "pipeline at renderMarkdown()'s main sink, main.innerHTML.");
   assert.equal(win.__xss, undefined, "a payload actually executed during render");
 });
 
 test("the <think> block sink is sanitized on the same terms as the main body", () => {
-  // helpers.js:276 is a second innerHTML sink, fed by splitThink()
+  // renderMarkdown()'s think-block sink, det innerHTML, is a second innerHTML sink, fed by splitThink()
   const win = loadRealPipeline();
   const survivors = {};
   for (const [name, payload] of Object.entries(PAYLOADS)) {
@@ -107,7 +107,7 @@ test("the <think> block sink is sanitized on the same terms as the main body", (
     if (threats.length) survivors[name] = threats;
   }
   assert.deepEqual(survivors, {},
-    "the think-block sink (helpers.js:276) let a payload through");
+    "the think-block sink (renderMarkdown()'s det innerHTML) let a payload through");
   assert.equal(win.__xss, undefined, "a payload executed while rendering a think block");
 });
 
@@ -121,8 +121,8 @@ test("both sinks write into a normal HTML element, never a rawtext one", () => {
   const main = target.querySelector(".md-main");
   const think = target.querySelector("details.think-block div");
   assert.ok(main && think, "expected both render destinations to exist");
-  for (const [what, node] of [["main body (helpers.js:290)", main],
-                              ["think block (helpers.js:276)", think]]) {
+  for (const [what, node] of [["main body (renderMarkdown()'s main innerHTML sink)", main],
+                              ["think block (renderMarkdown()'s det innerHTML sink)", think]]) {
     assert.equal(node.tagName, "DIV", `${what} destination is <${node.tagName}>, expected DIV`);
     assert.ok(!RAWTEXT.has(node.tagName), `${what} writes into a rawtext element`);
     // a rawtext ancestor would re-parse the subtree just the same

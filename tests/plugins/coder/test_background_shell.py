@@ -120,8 +120,7 @@ def _pid_alive(pid: int) -> bool:
 
 def _unexplained_taskkill_failures(warnings: list) -> list:
     """taskkill "exited" warnings whose reason is NOT the one known-benign
-    race documented at background.py:593-608 (and its grandchild variant,
-    background.py's later comment in the same method): a descendant that
+    race documented at ShellJob._terminate_tree_windows: a descendant that
     legitimately exits between taskkill's tree snapshot and taskkill
     reaching that specific pid, reported as "There is no running instance
     of the task" even though the whole tree ends up fully dead. Anything
@@ -1190,8 +1189,8 @@ def test_the_benign_taskkill_descendant_race_is_not_flagged_unexplained(
     can legitimately exit in that gap. Windows then reports exit 255 naming
     that one pid as "There is no running instance of the task" even though
     the fallback sweep (asserted below) still runs and the tree ends up fully
-    dead - this is background.py:593-608's documented race recurring against
-    a descendant instead of the root pid, not a partial failure."""
+    dead - this is ShellJob._terminate_tree_windows's documented race recurring
+    against a descendant instead of the root pid, not a partial failure."""
     import subprocess as _sp
 
     reg = make_registry()
@@ -1381,11 +1380,12 @@ def test_tree_snapshot_pins_a_REAL_descendant_and_clears_once_it_dies(tmp_path, 
     # know to be benign, every kill would start telling the model "the process
     # tree may not be fully dead" and nothing else would notice.
     #
-    # It must NOT flag the ONE race background.py:593-608 already documents and
-    # designs for: taskkill's /T walk snapshots the descendant tree once and
-    # then terminates each pid in turn, so under heavy scheduler contention (a
-    # full -n auto suite on a shared box) a descendant can legitimately exit in
-    # the gap between that snapshot and taskkill reaching its specific pid.
+    # It must NOT flag the ONE race ShellJob._terminate_tree_windows already
+    # documents and designs for: taskkill's /T walk snapshots the descendant
+    # tree once and then terminates each pid in turn, so under heavy scheduler
+    # contention (a full -n auto suite on a shared box) a descendant can
+    # legitimately exit in the gap between that snapshot and taskkill reaching
+    # its specific pid.
     # Windows then reports exit 255 naming that one pid with "There is no
     # running instance of the task" even though the tree as a whole - verified
     # above, independently, by (pid, create_time), not by taskkill's own say-so
