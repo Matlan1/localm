@@ -5,6 +5,7 @@
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { $ } from "./helpers.js";
+import { t } from "./i18n.js";
 
 // Kernel pages are always present; plugin views (coder, images, music, video,
 // knowledge) are added to VIEWS by renderNav() while their plugin is active.
@@ -34,7 +35,7 @@ export function showView(name) {
   // Leaving Settings with unsaved edits asks for confirmation first.
   if (name !== "settings" && isSettingsView() &&
       window.settingsDirty && window.settingsDirty()) {
-    if (!confirm("You have unsaved settings changes. Leave without saving?")) return;
+    if (!confirm(t("settings.unsavedConfirm"))) return;
   }
   _applyActiveClasses(name);
   // Remembered across reloads.

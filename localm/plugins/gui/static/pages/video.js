@@ -6,6 +6,7 @@
 "use strict";
 
 import { MIB, $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
@@ -61,7 +62,7 @@ bindReloadToggle("video", "video-reload-llm");
 
 $("video-generate").onclick = async () => {
   const promptText = $("video-prompt").value.trim();
-  if (!promptText) { toast("Enter a prompt first", true); return; }
+  if (!promptText) { toast(t("video.enterPrompt"), true); return; }
   const body = { prompt: promptText };
   const negative = $("video-negative").value.trim();
   if (negative) body.negative_prompt = negative;
@@ -96,20 +97,20 @@ $("video-generate").onclick = async () => {
       log.scrollTop = log.scrollHeight;
     });
     if (end.status === "done" && end.result) {
-      toast("Clip finished");
+      toast(t("video.generatedToast"));
       const player = document.createElement("video");
       player.controls = true;
       player.style.width = "100%";
-      reportMediaLoadFailure(player, "the clip");
+      reportMediaLoadFailure(player, t("video.mediaWhat"));
       player.src = await fetchImageURL(
         "/api/video/file/" + encodeURIComponent(end.result));
       $("video-result").appendChild(player);
       refreshVideoHistory();
     } else {
-      toast("Generation " + jobStatusWord(end.status), end.status !== "cancelled");
+      toast(t("video.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
     }
   } catch (e) {
-    toast("Video generation failed: " + e.message, true);
+    toast(t("video.generationFailed", { message: e.message }), true);
   } finally {
     $("video-generate").disabled = false;
     hideStop("video-stop");

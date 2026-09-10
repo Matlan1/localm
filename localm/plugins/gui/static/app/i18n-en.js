@@ -1183,6 +1183,7 @@ export const I18N_EN = {
   "settings.search": "Search all settings",
   "settings.sections": "Settings sections",
   "settings.title": "Settings",
+  "settings.unsavedConfirm": "You have unsaved settings changes. Leave without saving?",
 
   // ---- Settings > Appearance ----
   "appearance.language": "Interface language",
@@ -1265,9 +1266,46 @@ export const I18N_EN = {
   "mediaGallery.trackLoadFailed": "Could not load the track: {message}",
   "mediaGallery.workflowHeading": "Workflow",
 
-  // ---- Workflow card (shared markup; workflow.js itself migrates in Batch 2) ----
+  // ---- Workflow panel (pages/workflow.js) + its shared index.html markup ----
+  "workflow.builtinDefault": "Built-in default",
+  "workflow.chooseFileFirst": "Choose a .json file first",
+  "workflow.comfyUnreachable": "ComfyUI is not running - launch it to pick models.",
+  "workflow.confirmDelete.body": "This can't be undone.",
+  "workflow.confirmDelete.title": "Delete workflow \"{name}\"?",
+  "workflow.delete": "Delete",
+  "workflow.deleteTitle": "Delete this workflow file",
+  "workflow.deletedToast": "Deleted",
+  "workflow.genericFailed": "Failed",
+  "workflow.inUse": "In use",
   "workflow.intro":
     "The ComfyUI workflow this page uses. Upload one (in ComfyUI: Save -> API format) and select it, or keep the built-in default.",
+  "workflow.invalidJson": "That file is not valid JSON",
+  "workflow.launchComfy": "Launch ComfyUI",
+  "workflow.launchError": "Launch failed: {message}",
+  "workflow.launchFailedFallback": "Could not start ComfyUI",
+  "workflow.launchSuccess": "ComfyUI is running",
+  "workflow.launching": "Launching…",
+  "workflow.loadFailed": "Could not load workflows",
+  "workflow.missingModelFiles.one": "{count} required model file not found in ComfyUI - see below.",
+  "workflow.missingModelFiles.other": "{count} required model files not found in ComfyUI - see below.",
+  "workflow.modelSlotLabel": "{role} ({input})",
+  "workflow.modelsCheckFailed": "Could not check ComfyUI models",
+  "workflow.modelsHeading": "Models",
+  "workflow.modelsNeededHeading": "Models this needs",
+  "workflow.noSelectableModels": "This workflow has no selectable model files.",
+  "workflow.noSlotFor": "This workflow has no slot for: {labels}.",
+  "workflow.noneRegistered": "none registered in localm",
+  "workflow.notInstalled": "{value} (not installed)",
+  "workflow.registeredCount": "{count} registered: {names}",
+  "workflow.registryExactHint":
+    "{filename} IS registered in localm (as \"{name}\") but is not in a folder ComfyUI reads - copy it into ComfyUI's models folder.",
+  "workflow.registryOtherHint":
+    "Registered in localm but not offered by ComfyUI: {names} - copy one into ComfyUI's models folder to use it here.",
+  "workflow.selectedToast": "Workflow selected",
+  "workflow.uploadFailed": "Upload failed",
+  "workflow.uploadUse": "Upload + use",
+  "workflow.uploadedToast": "Uploaded and selected",
+  "workflow.useThisWorkflow": "Use this workflow",
 
   // ---- Images page ----
   "images.advancedHint": "seed, guidance, denoise, CFG, LoRA strength",
@@ -1316,17 +1354,61 @@ export const I18N_EN = {
   "images.useAsInput": "use as input",
   "images.useAsInputTitle": "Use this image as the img2img input",
 
-  // ---- Music page (item/empty-state keys only; the rest of music.js migrates in Batch 2) ----
+  // ---- Music page ----
+  "music.advancedHint": "seed, steps, CFG",
+  "music.cfgPlaceholder": "default (5.0)",
   "music.empty.hint": "Generate one above; your tracks appear here.",
   "music.empty.title": "No tracks yet",
+  "music.enterTags": "Enter style tags first",
+  "music.generatedToast": "Track finished",
+  "music.generationFailed": "Music generation failed: {message}",
+  "music.generationStatus": "Generation {status}",
+  "music.historyHint":
+    "Tick a card to select it for bulk actions; click one for details, metadata, and per-track actions.",
+  "music.intro":
+    "Runs the ACE-Step workflow on your local ComfyUI (same VRAM handover as image generation). Track length is arbitrary; longer tracks just take longer.",
   "music.item.one": "track",
   "music.item.other": "tracks",
+  "music.lyricsLabel": "Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)",
+  "music.lyricsPlaceholder": "[verse]\nNeon lights across the bay…",
+  "music.mediaWhat": "the track",
+  "music.reloadCheckboxTitle":
+    "Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.",
+  "music.stepsPlaceholder": "default (50)",
+  "music.styleTagsLabel": "Style tags - genre, mood, instruments, BPM, vocal type",
+  "music.styleTagsPlaceholder": "synthwave, 80s, female vocals, 120 bpm, dreamy",
+  "music.title": "Music generation",
 
-  // ---- Video page (item/empty-state keys only; the rest of video.js migrates in Batch 2) ----
+  // ---- Video page ----
+  "video.advancedHint": "resolution, seed, steps, CFG",
+  "video.cfgPlaceholder": "default (5.0)",
   "video.empty.hint": "Generate one above; your clips appear here.",
   "video.empty.title": "No clips yet",
+  "video.enterPrompt": "Enter a prompt first",
+  "video.fpsLabel": "FPS",
+  "video.generatedToast": "Clip finished",
+  "video.generationFailed": "Video generation failed: {message}",
+  "video.generationStatus": "Generation {status}",
+  "video.heightLabel": "Height",
+  "video.heightPlaceholder": "default (704, native)",
+  "video.historyHint":
+    "Tick a card to select it for bulk actions; click one for details, metadata, and per-clip actions.",
+  "video.intro":
+    "Slowest generator here: minutes to hours per clip, so iterate with short durations and fewer steps. Keep the native 1280×704 resolution or quality collapses. Runs Wan 2.2 on your local ComfyUI.",
   "video.item.one": "clip",
   "video.item.other": "clips",
+  "video.mediaWhat": "the clip",
+  "video.negativePromptLabel": "Negative prompt (optional - default suppresses blur/distortion/watermarks)",
+  "video.promptLabel": "Prompt - subject, motion, camera, lighting (motion verbs matter)",
+  "video.promptPlaceholder": "a red fox running through fresh snow, low camera tracking shot, golden hour",
+  "video.reloadCheckboxTitle":
+    "Applies to video generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.",
+  "video.startImageLabel": "Start image (optional, image-to-video)",
+  "video.startImagePlaceholder": "path on this machine",
+  "video.stepsPlaceholder": "default (30)",
+  "video.title": "Video generation",
+  "video.widthLabel": "Width",
+  "video.widthPlaceholder": "default (1280, native)",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
 };
