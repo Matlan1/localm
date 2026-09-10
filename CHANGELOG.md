@@ -59,6 +59,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   you typed, leaving you signed out with no explanation. A rejected key now
   shows an error and keeps what you entered so you can correct it. Clearing
   the field to sign out no longer reports that a key was saved.
+- **Scheduled coding jobs no longer fail on a server whose API key was set from the terminal.**
+  A job could only authenticate with a key supplied through the environment, so a key stored on
+  disk was ignored and every scheduled run was rejected as unauthorized.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
@@ -73,6 +76,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   written. A hostile or tampered model could name a file anywhere on the machine, and loading it
   would open that file, or hang on it. Such a model is now refused before it loads, and the
   refusal names the model.
+- **`localm memory` no longer writes to your memory in privacy mode.** Adding a fact, restoring an
+  archived one, or resolving a suggested correction from the terminal wrote to disk even in privacy
+  mode, where nothing durable is meant to be written. These are now refused, with a message saying
+  which setting turns them back on. Listing suggested corrections no longer rewrites their file
+  either. Deleting facts and clearing your memory are unchanged and still work in every mode.
 
 ## [0.2.0] - 2026-09-04
 
