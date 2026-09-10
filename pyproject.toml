@@ -332,7 +332,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 # Declare the rule set EXPLICITLY rather than inheriting ruff's default, because
