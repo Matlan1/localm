@@ -16,6 +16,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the rest of a session.** If its very first load hit a brief server or
   network error, it was never retried; it now loads again the next time the
   page refreshes.
+- **A long file path shown by the interactive chat CLI's `/image`, `/images`,
+  or `/save` commands could get wrapped onto extra lines partway through a
+  word, making it unreadable and impossible to copy-paste correctly.** Such a
+  path now always renders on a single line, however long.
 
 ### Security
 - Rotated the release signing key. The previous key stays pinned alongside the new one for this
