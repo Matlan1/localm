@@ -116,3 +116,33 @@ def test_instance_token_survives_the_backend_seam(
 
     spy.assert_called_once()
     assert spy.call_args.kwargs.get("instance_token") == "tok-xyz"
+
+
+@pytest.mark.parametrize("backend_mod, gen_args, underlying_mod, underlying_fn", [
+    (image_backend, ("a cat", Path("o.png")), _image_comfy, "generate_image"),
+    (music_backend, ("lofi", Path("o.flac")), _music_gen_pkg, "generate_music"),
+    (video_backend, ("a cat walks", Path("o.mp4")), _video_gen_pkg, "generate_video"),
+])
+@pytest.mark.parametrize("policy, caller_swap", [
+    ("auto", False),
+    ("auto", True),
+    ("never", True),
+    ("always", False),
+])
+def test_backend_forwards_the_callers_swap_decision(
+        backend_mod, gen_args, underlying_mod, underlying_fn,
+        policy, caller_swap, monkeypatch):
+    """plug.py decides whether to unload the chat model, reports that decision to
+    the user, and passes it as ``swap``. The backend seam forwards that value to
+    the transport unchanged and never re-derives one from ``swap_policy``."""
+    spy = MagicMock(return_value=(True, "ok"))
+    monkeypatch.setattr(underlying_mod, underlying_fn, spy)
+
+    backend_mod.generate(dict(_S, swap_policy=policy), *gen_args,
+                         self_url="http://127.0.0.1:8642/v1",
+                         write_sidecar=False, swap=caller_swap)
+
+    spy.assert_called_once()
+    assert spy.call_args.kwargs.get("swap") is caller_swap, (
+        f"forwarded swap={spy.call_args.kwargs.get('swap')!r} "
+        f"for caller swap={caller_swap!r} under policy {policy!r}")
