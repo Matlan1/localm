@@ -31,7 +31,6 @@ from ..backends.http import (
     make_openai_backend,
     CoderAuthError,
 )
-from ..agent.constants import _SHELL_EXEC_TOOLS
 from ..audit import SessionMode
 from ..privacy import (
     clear_shell_history_traces,
@@ -46,7 +45,7 @@ from ..runner import (
     finish_agent,
     resolve_task_config,
     run_single_task,
-    warn_sensitive_changes as _warn_sensitive_changes,
+    warn_sensitive_changes as _warn_sensitive_changes,  # noqa: F401  (re-exported by the cli package)
     warn_unfinished_background as _warn_unfinished_background,
 )
 from ..display import (

@@ -18,6 +18,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   extra; it is now a regular localm command that respects the network policy.
 
 ### Fixed
+- **The MCP server's `run_coder_task` no longer starts a separate localm server
+  for every project.** It used to launch `localm coder`, which attached to or
+  spawned a server per project directory, each loading its own copy of the
+  model: two tasks in two folders meant two model loads, a spare console
+  window, and on a card that fits one copy a native fault. The coder now runs
+  inside the MCP server on the model it already has loaded, so any number of
+  projects share one load, no window opens, and the model stays put while a
+  task is running. A task that outlives its timeout is asked to stop and
+  reported as timed out instead of being killed mid-edit.
 - **The curated model shortcuts picker on the Models page could stay empty for
   the rest of a session.** If its very first load hit a brief server or
   network error, it was never retried; it now loads again the next time the

@@ -136,7 +136,7 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
     them instead of executing unconfirmed."""
     always_confirm = set(always_confirm or ())
     if unattended_shell_gated(task, auto_approve):
-        always_confirm |= set(_SHELL_EXEC_TOOLS)
+        always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
     return Agent(
         backend=backend,
         cwd=work_dir,

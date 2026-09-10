@@ -734,11 +734,13 @@ def test_starting_and_killing_are_gated_but_polling_is_not(tmp_path):
 def test_unattended_one_shot_gate_covers_the_background_variant():
     """R19a: the CLI forces confirmation on shell execution for an unattended
     one-shot. A background variant outside that set would bypass the gate."""
+    from localm.plugins.coder import runner
     from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
-    from localm.plugins.coder.cli import _main
 
     assert _SHELL_EXEC_TOOLS == frozenset({"run_shell", "run_shell_background"})
-    src = inspect.getsource(_main)
+    # The CLI builds its Agent and resolves its config through the runner, so
+    # both gates live there.
+    src = inspect.getsource(runner)
     assert "always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)" in src, (
         "the R19a unattended gate no longer covers the whole shell-exec family")
     assert "always_confirm.update(_SHELL_EXEC_TOOLS)" in src, (

@@ -1826,6 +1826,7 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
     try:
         server.run_stdio(stdout=protocol_out)
     finally:
+        sys.stdout = protocol_out
         # Every resident engine, not just the most recent one: freeing one of N
         # would leave the rest holding VRAM past exit.
         engines.unload_all()
