@@ -1162,6 +1162,72 @@ class TestGenerateImageSafety:
         assert "PROGRESS_NOISE_ON_STDOUT" in captured.err
 
 
+def _use_config(monkeypatch, tmp_path, data):
+    """Point config.py's frozen module paths at a throwaway home holding *data*."""
+    import localm.config as C
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(C, "HOME_DIR", home)
+    monkeypatch.setattr(C, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(C, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(C, "REGISTRY_FILE", home / "registry.json")
+
+
+class TestGenerateImageTarget:
+    """The MCP image tool targets the ComfyUI the owner configured, resolved
+    through the image plugin's own backend, so an MCP client and the GUI reach
+    the same instance."""
+
+    def _kwargs(self, monkeypatch, tmp_path, data, managed=False):
+        monkeypatch.delenv("FLUX_API_URL", raising=False)
+        _use_config(monkeypatch, tmp_path, data)
+        if managed:
+            import localm.media.managed_comfy as mc
+            monkeypatch.setattr(mc, "is_managed_comfy_installed", lambda: True)
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            r = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": "generate_image",
+                                          "arguments": {"prompt": "a cat"}}})
+        assert r["result"].get("isError") is not True, r["result"]
+        return mock_gen.call_args.kwargs
+
+    def test_per_plugin_comfy_url_wins(self, monkeypatch, tmp_path):
+        kw = self._kwargs(monkeypatch, tmp_path, {
+            "comfy_target": "user",
+            "comfy_api_url": "http://192.0.2.7:9999",
+            "plugins": {"image": {"comfy": {"api_url": "http://192.0.2.9:7777"}}}})
+        got = kw.get("api_url")
+        assert got is not None and got.rstrip("/") == "http://192.0.2.9:7777", (
+            f"the MCP image tool targeted {got!r} instead of the ComfyUI the "
+            "owner configured")
+
+    def test_shared_comfy_url_reaches_generate_image(self, monkeypatch, tmp_path):
+        kw = self._kwargs(monkeypatch, tmp_path, {
+            "comfy_target": "user", "comfy_api_url": "http://192.0.2.7:9999"})
+        got = kw.get("api_url")
+        assert got is not None and got.rstrip("/") == "http://192.0.2.7:9999", (
+            f"the MCP image tool targeted {got!r} instead of the ComfyUI the "
+            "owner configured")
+
+    def test_managed_instance_url_reaches_generate_image(self, monkeypatch, tmp_path):
+        import localm.media.managed_comfy as mc
+        kw = self._kwargs(monkeypatch, tmp_path, {"comfy_target": "own"}, managed=True)
+        got = kw.get("api_url")
+        assert got is not None and got.rstrip("/") == mc.MANAGED_COMFY_API_URL, (
+            f"the MCP image tool targeted {got!r} instead of the managed ComfyUI")
+
+    def test_managed_routing_left_to_ensure_comfy(self, monkeypatch, tmp_path):
+        kw = self._kwargs(monkeypatch, tmp_path, {"comfy_target": "own"}, managed=True)
+        assert kw.get("launch_cmd") is None and kw.get("workdir") is None, (
+            "ensure_comfy adopts the managed launch command only when the caller "
+            f"passes neither; got launch_cmd={kw.get('launch_cmd')!r} "
+            f"workdir={kw.get('workdir')!r}")
+
+
 class TestChatEmbedStdoutSafety:
     """chat/embed/pull_model's own engines.get() call (a fresh model load, e.g.
     the first turn of a new MCP session) must not leak native load-time
