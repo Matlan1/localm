@@ -35,11 +35,11 @@ function makeRaceHarness(resultFor) {
         ungatedExactCalls++;
       } else {
         const i = pageCallIndex++;
+        gatedCalls++;
         if (i >= gates.length) {
           throw new Error(`unexpected gated /api/models caller #${i + 1} for ${u} ` +
             `(only ${gates.length} gates provisioned)`);
         }
-        gatedCalls++;
         await gates[i].promise;
         return resultFor(i);
       }
