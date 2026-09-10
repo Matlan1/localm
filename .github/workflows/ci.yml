@@ -294,7 +294,7 @@ jobs:
 
       # Runs `npm run lint` (eslint.config.mjs) and reports but never fails the
       # job. One host only: matches the ruff job's "result does not vary by
-      # host" below. (#PLACEHOLDER)
+      # host" below. (#1780)
       - name: Lint (eslint, non-blocking)
         if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
