@@ -36,14 +36,29 @@ STACK_OVERRUN = "-1073740791"
 #  The launcher's own console hold                                             #
 # --------------------------------------------------------------------------- #
 
+def _load_launcher_pyw(module_name):
+    """Import launcher.pyw under *module_name*.
+
+    ``.pyw`` is in ``importlib.machinery.SOURCE_SUFFIXES`` only on Windows, so
+    ``spec_from_file_location`` returns None elsewhere and ``spec.loader``
+    raises AttributeError. Naming the loader keeps the import working on every
+    platform. See test_launcher_pyw_loads_without_the_pyw_suffix.
+    """
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    path = str(ROOT / "launcher.pyw")
+    spec = importlib.util.spec_from_file_location(
+        module_name, path, loader=SourceFileLoader(module_name, path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _hold(cmd, env=None):
     sys.path.insert(0, str(ROOT))
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "localm_launcher_pyw", ROOT / "launcher.pyw")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["localm_launcher_pyw"] = mod
-    spec.loader.exec_module(mod)
+    mod = _load_launcher_pyw("localm_launcher_pyw")
     return mod._console_hold(cmd, env)
 
 

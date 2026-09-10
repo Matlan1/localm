@@ -23,12 +23,52 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_launcher():
+    """Import launcher.pyw.
+
+    ``.pyw`` is in ``importlib.machinery.SOURCE_SUFFIXES`` only on Windows, so
+    ``spec_from_file_location`` returns None elsewhere and ``spec.loader``
+    raises AttributeError. Naming the loader keeps the import working on every
+    platform. See test_launcher_pyw_loads_without_the_pyw_suffix.
+    """
+    from importlib.machinery import SourceFileLoader
+
+    name = "localm_launcher_scan_probe"
+    path = str(ROOT / "launcher.pyw")
     spec = importlib.util.spec_from_file_location(
-        "localm_launcher_scan_probe", ROOT / "launcher.pyw")
+        name, path, loader=SourceFileLoader(name, path))
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["localm_launcher_scan_probe"] = mod
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def test_launcher_pyw_loads_without_the_pyw_suffix(monkeypatch):
+    """Both launcher helpers must import launcher.pyw on a platform where
+    ``.pyw`` is not a source suffix, which is every platform except Windows.
+
+    SOURCE_SUFFIXES is mutated IN PLACE rather than rebound: the import
+    machinery holds the original list object, so rebinding the name leaves the
+    real suffix set untouched and the simulation silently does nothing.
+    """
+    import importlib.machinery as machinery
+
+    for name in ("localm_launcher_scan_probe", "localm_launcher_pyw"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    original = list(machinery.SOURCE_SUFFIXES)
+    try:
+        machinery.SOURCE_SUFFIXES[:] = [s for s in original if s != ".pyw"]
+        assert importlib.util.spec_from_file_location(
+            "probe", str(ROOT / "launcher.pyw")) is None, (
+            "without an explicit loader the spec must be None here, or this "
+            "test is not exercising the failure it exists for")
+
+        from tests.test_launcher_console_hold import _load_launcher_pyw
+
+        assert _load_launcher() is not None
+        assert _load_launcher_pyw("localm_launcher_pyw") is not None
+    finally:
+        machinery.SOURCE_SUFFIXES[:] = original
 
 
 class _ClosedWindow:
