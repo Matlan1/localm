@@ -205,18 +205,35 @@ def test_is_newer_pinned_to_shipped_tag_shape():
     assert _version.is_newer("v0.1.5rc2", "v0.1.5rc3") is False
 
 
-def test_shipping_version_is_offered_as_an_update_to_every_earlier_tag():
-    """The version in VERSION must compare NEWER than every published tag before
-    it, or `localm update` silently never offers this release to the users
-    already on one of them. `_refuse_downgrade` is gated on the same call, so a
-    break here is quiet in both directions.
+def _published_versions() -> set:
+    """Every released version, derived from CHANGELOG.md's own `## [x.y.z]`
+    section headers (skipping `[Unreleased]`, whose bracket text never starts
+    with a digit) so the set extends itself at every release cut instead of
+    going stale the way a hard-coded literal does."""
+    import re
+    from pathlib import Path
+    changelog = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+    text = changelog.read_text(encoding="utf-8")
+    return {_version.normalize(m.group(1))
+            for m in re.finditer(r"^## \[(\d[^\]]*)\]", text, re.M)}
 
-    Reads VERSION rather than hard-coding a pair: a hard-coded one stops
-    describing the release the moment someone bumps VERSION without touching
-    this file, which is exactly when the check is load-bearing."""
+
+def test_shipping_version_is_offered_as_an_update_to_every_earlier_tag():
+    """The version in VERSION must compare NEWER than every published version
+    before it, or `localm update` silently never offers this release to the
+    users already on one of them. `_refuse_downgrade` is gated on the same
+    call, so a break here is quiet in both directions.
+
+    Reads the published set from CHANGELOG.md rather than hard-coding it: a
+    hard-coded list stops describing the release the moment a new one is cut
+    without touching this file, which is exactly when the check is
+    load-bearing."""
     shipping = _version.read_version()
-    for earlier in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4",
-                    "0.1.5rc1", "0.1.5rc2"):
+    published = _published_versions()
+    # Past releases never go stale; a broken parser must fail loudly here
+    # rather than assert nothing over an empty set.
+    assert {"0.1.0", "0.1.4", "0.2.0"} <= published, published
+    for earlier in sorted(published):
         if _version.normalize(shipping) == earlier:
             continue    # re-cutting an existing tag: nothing to order against
         assert _version.is_newer(shipping, earlier) is True, (

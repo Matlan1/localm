@@ -402,8 +402,8 @@ def test_add_load_save_round_trip_preserves_a_u0085_bearing_episode(home, tmp_pa
 
 def test_forget_and_restore_preserve_a_u0085_bearing_episode(home, tmp_path):
     """The archive sidecar (_archive()/forgotten()/restore()) carries the identical
-    U+0085 hazard as the live log above - see the why-comments at _archive(),
-    forgotten() and restore() in episodes.py."""
+    U+0085 hazard as the live log above: all three read with split_jsonl and
+    write with dumps_line/dumps_lines, exactly like the live log."""
     sep = "\x85"
     store = EpisodeStore(tmp_path)
     keep = store.add(Episode(task="keep this one", lesson="keep"))

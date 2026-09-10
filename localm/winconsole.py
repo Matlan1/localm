@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import sys
 
+from localm.debuglog import logger
+
 # Windows console control event codes (wincon.h).
 CTRL_C_EVENT = 0
 CTRL_BREAK_EVENT = 1
@@ -49,7 +51,7 @@ def _dispatch(ctrl_type: int, cleanup) -> bool:
         try:
             cleanup()
         except Exception:
-            pass
+            logger.warning("winconsole: console-close cleanup raised", exc_info=True)
     return False
 
 

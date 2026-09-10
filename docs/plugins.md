@@ -160,8 +160,8 @@ that has to happen regardless of install path.
 | `mount_static(directory, *, url_prefix="")` | Serve a static dir at `/plugins/<name>/` (the SPA import()s `client_entry` from here). Returns the URL prefix. |
 | `add_settings(fields)` | Add fields to the plugin's settings section in the GUI (see [Settings fields](#settings-fields)). |
 | `register_tab(surface)` | Register a GUI tab in the SPA. |
-| `plugin_config(name=None)` | Read this (or another) plugin's config block (`config["plugins"][name]`). |
-| `save_plugin_config(name, cfg)` | Write a plugin's config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). |
+| `plugin_config(name=None)` | Read this plugin's own config block (`config["plugins"][<own name>]`). Passing another plugin's name is refused: it is confined to the caller's own block instead, and the attempt is logged. |
+| `save_plugin_config(name=None, cfg=None)` | Write this plugin's own config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). Passing another plugin's name is confined and logged the same way as `plugin_config`. |
 | `engine()` | Handle to the inference engine. |
 | `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. |
 | `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |

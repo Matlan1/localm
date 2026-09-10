@@ -16,6 +16,7 @@ one withholds the numerator.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 
@@ -156,10 +157,34 @@ class TestAnInProcessJobCanReportAPercentage:
             f"an in-process job's percentage never reached the listing: {row}")
         assert row["phase"] == "re-embedding"
 
-    def test_it_also_streams_to_a_subscriber(self):
-        """The same event must reach an attached viewer, not only the listing -
-        that is what a reattaching browser tab reads."""
-        job = _job()
-        job.progress(phase="indexing", done=3, total=9, unit="files")
-        evs = [e for e in job._history if e.get("type") == "progress"]
-        assert evs and evs[-1]["pct"] == 33.3
+    def test_it_also_streams_to_a_subscriber_via_backlog_replay(self):
+        """A subscriber that attaches AFTER the event fires must still receive
+        it from the backlog replay - that is what a reattaching browser tab
+        reads."""
+        async def run():
+            job = _job()
+            job.progress(phase="indexing", done=3, total=9, unit="files")
+            q = job.subscribe()
+            events = []
+            while not q.empty():
+                events.append(q.get_nowait())
+            return events
+        events = asyncio.run(run())
+        progress = [e for e in events if e.get("type") == "progress"]
+        assert progress and progress[-1]["pct"] == 33.3, events
+
+    def test_it_also_streams_to_a_subscriber_live(self):
+        """A subscriber attached BEFORE the event fires must receive it live,
+        through push()'s fan-out, not only on a later reattach."""
+        async def run():
+            job = _job()
+            q = job.subscribe()
+            job.progress(phase="indexing", done=3, total=9, unit="files")
+            await asyncio.sleep(0)
+            events = []
+            while not q.empty():
+                events.append(q.get_nowait())
+            return events
+        events = asyncio.run(run())
+        progress = [e for e in events if e.get("type") == "progress"]
+        assert progress and progress[-1]["pct"] == 33.3, events

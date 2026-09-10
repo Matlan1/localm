@@ -94,6 +94,7 @@ elif mode != "plain":
 if mode.startswith("configure"):
     print("EXPECTED=" + str(module._expected_temp_root))
     print("COMPLAINT=" + ("yes" if module._wrong_temp_root else "no"))
+    print("COMPLAINT_TEXT=" + str(module._wrong_temp_root))
 '''
 
 
@@ -235,7 +236,7 @@ class TestAWrongTempRootIsDetectedAndItsEvidenceKept:
         home, out = _run_probe(tmp_path, "configure-worker", temp_root=root,
                                stamped_root="-")           # workerinput, no key
         assert "COMPLAINT=yes" in out
-        assert "NOT ARMED" in out or os.path.exists(home)
+        assert "NOT ARMED" in out, out
         assert os.path.exists(home)
         os.rmdir(home)
 

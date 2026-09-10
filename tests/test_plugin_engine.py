@@ -6,6 +6,7 @@ Uses a synthetic plugin written to a temp dir; runs open-mode (no API key) so
 the mounted, auto-scoped routes are reachable.
 """
 
+import logging
 import os
 import textwrap
 
@@ -54,10 +55,11 @@ def _ping(name):
     ''')
 
 
-def test_plugin_config_is_confined_to_own_block(env):
+def test_plugin_config_is_confined_to_own_block(env, caplog):
     """Plugin isolation: a plugin's Host config r/w is CONFINED to its own block.
     It cannot read or tamper with another plugin's persisted config, even though
-    plugins are trusted at install time."""
+    plugins are trusted at install time. Confinement is surfaced (a WARNING
+    naming both plugins), never silent."""
     from unittest.mock import MagicMock
 
     from localm.config import load_config, save_config
@@ -73,22 +75,31 @@ def test_plugin_config_is_confined_to_own_block(env):
     spec.name = "alpha"
     host = PluginHost(MagicMock(), MagicMock(), spec)
 
-    # Own config is readable, with or without the explicit own name.
-    assert host.plugin_config()["secret"] == "alpha-owns-this"
-    assert host.plugin_config("alpha")["secret"] == "alpha-owns-this"
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        # Own config is readable, with or without the explicit own name.
+        assert host.plugin_config()["secret"] == "alpha-owns-this"
+        assert host.plugin_config("alpha")["secret"] == "alpha-owns-this"
 
-    # A cross-plugin READ is confined to self, never beta's block.
-    assert host.plugin_config("beta") == {"secret": "alpha-owns-this"}
+        # A cross-plugin READ is confined to self, never beta's block.
+        assert host.plugin_config("beta") == {"secret": "alpha-owns-this"}
 
-    # A cross-plugin WRITE lands in alpha's own block; beta stays untouched.
-    host.save_plugin_config("beta", {"secret": "attacker"})
-    plugins = load_config()["plugins"]
-    assert plugins["beta"]["secret"] == "beta-owns-this"     # NOT tampered
-    assert plugins["alpha"]["secret"] == "attacker"          # own block updated
+        # A cross-plugin WRITE lands in alpha's own block; beta stays untouched.
+        host.save_plugin_config("beta", {"secret": "attacker"})
+        plugins = load_config()["plugins"]
+        assert plugins["beta"]["secret"] == "beta-owns-this"     # NOT tampered
+        assert plugins["alpha"]["secret"] == "attacker"          # own block updated
 
-    # An own-config save (no name) works.
-    host.save_plugin_config(cfg={"secret": "self-set"})
-    assert load_config()["plugins"]["alpha"]["secret"] == "self-set"
+        # An own-config save (no name) works.
+        host.save_plugin_config(cfg={"secret": "self-set"})
+        assert load_config()["plugins"]["alpha"]["secret"] == "self-set"
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2, (
+        "expected exactly 2 WARNING records (the cross-plugin read and the "
+        "cross-plugin write); an own-name call must emit none: "
+        f"{[r.getMessage() for r in warnings]}")
+    assert all("alpha" in r.getMessage() and "beta" in r.getMessage()
+               for r in warnings), warnings
 
 
 def test_register_chat_hook_is_traceable(env):

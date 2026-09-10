@@ -296,13 +296,8 @@ def test_malformed_chunks_jsonl_count_surfaces_in_stats(base, docs):
     reloaded._save()
     assert reloaded.stats()["chunks_bad_lines"] == 0, (
         "_save() rewrites chunks.jsonl from the valid chunks only, so THIS "
-        "instance's own corrupt/chunks_bad_lines must clear immediately - "
-        "not just on a later fresh reload. Caught live: a repair "
-        "(add_paths(force=True) -> this same _save()) left the CACHED "
-        "corrupt/chunks_bad_lines stale forever, because peek_stats()'s "
-        "fingerprint check still matched what THIS save just wrote, so the "
-        "GUI badge and CLI marker never cleared even though the fault was "
-        "fixed - see _save()'s own reset and its why-comment")
+        "instance's own corrupt/chunks_bad_lines must clear immediately, "
+        "not just on a later fresh reload")
     assert reloaded.stats()["corrupt"] is False
     assert Collection("kb", base=base).stats()["chunks_bad_lines"] == 0, (
         "a real _save() rewrites chunks.jsonl from the valid chunks only, "
