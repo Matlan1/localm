@@ -1,0 +1,139 @@
+name: llama.cpp pin currency
+
+# WHAT THIS FILE DOES
+#
+#   currency             compares setup_llama._PINNED_TAG against upstream's
+#                        newest release with assets and FAILS once the pin is
+#                        older than the tolerance in scripts/check_llama_pin.py.
+#                        Runs on every push to master, on its own weekly cron
+#                        (a different weekday from ci.yml's), and on dispatch.
+#                        Never on pull_request: a stale pin is never a PR's
+#                        failure. One API call, no clone of upstream, no
+#                        prebuilt download, no install; about twenty seconds.
+#   candidate-preflight  dispatch-only, given `candidate_tag`: runs the bump
+#                        pre-flight scripts against that tag on windows-latest,
+#                        which carries the MSVC toolchain the pre-tokenizer
+#                        check needs. Writes nothing to the repository.
+#
+# EXIT-CODE CONTRACT the currency step relies on (scripts/check_llama_pin.py
+# --gate): 0 current or within tolerance, 1 stale, 2 could not compare. 2 is
+# turned into a warning annotation and a green step, never into a pass claim
+# and never into a red.
+#
+# A red run here reaches the merge actor through the workflow-failure
+# notification and the commit's red status on master. That is the whole
+# delivery mechanism, and it needs no write permission.
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "53 4 * * 4"
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        description: "Also run the bump pre-flight against this upstream tag (bNNNNN). Writes nothing."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llama-pin-currency-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  currency:
+    name: pin currency gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compare the pinned llama.cpp build against upstream
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python scripts/check_llama_pin.py --gate
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "::warning::the llama.cpp pin could not be compared against upstream this run (see above); this is NOT 'current'"
+            exit 0
+          fi
+          exit "$rc"
+
+  candidate-preflight:
+    name: bump pre-flight for the candidate tag
+    if: github.event_name == 'workflow_dispatch' && inputs.candidate_tag != ''
+    runs-on: windows-latest
+    env:
+      CANDIDATE: ${{ inputs.candidate_tag }}
+    steps:
+      - name: Validate the candidate tag shape
+        shell: bash
+        run: |
+          if [[ ! "$CANDIDATE" =~ ^b[0-9]+$ ]]; then
+            echo "::error::candidate_tag must be an upstream build tag like b10883, got '$CANDIDATE'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "."
+
+      - name: Header ABI diff against the candidate
+        shell: bash
+        run: python scripts/check_llama_abi.py --ref "$CANDIDATE"
+
+      # Exit 1 means the build is bad. Exit 2 means it could not be measured and
+      # is neither a confirmation nor a failure of the build.
+      - name: Confirm the candidate loads AND generates (cpu only on a runner)
+        shell: bash
+        run: |
+          set +e
+          python scripts/confirm_llama_runtime.py --tag "$CANDIDATE" --backend cpu --receipt confirm-cpu.json
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "::warning::could not measure $CANDIDATE here (see above); this is NOT a confirmation and NOT a failure of the build"
+            exit 0
+          fi
+          exit "$rc"
+
+      - name: Pre-tokenizer regex check under MSVC at the candidate
+        shell: bash
+        run: python scripts/check_pretokenizer_redos.py --ref "$CANDIDATE" --out pretokenizer-report.json
+
+      - name: Dry-run the mechanical half of the bump
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/bump_llama_pin.py --tag "$CANDIDATE" --receipt confirm-cpu.json --require cpu
+
+      - name: Keep the pre-flight evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: llama-pin-preflight-${{ inputs.candidate_tag }}
+          path: |
+            confirm-cpu.json
+            pretokenizer-report.json
+          if-no-files-found: warn
