@@ -433,17 +433,45 @@ class TestDetectHome:
         # inside the install, surfaced on stderr, never a shared ~/.localm.
         from localm import config as cfg
         monkeypatch.delenv("LOCALM_HOME", raising=False)
+        monkeypatch.delenv("LOCALM_SETUP", raising=False)
+        (tmp_path / "pyproject.toml").write_text("[project]\n")
+        fake_file = tmp_path / "localm" / "config.py"
+        fake_file.parent.mkdir()
+        fake_file.write_text("# stub")
+        monkeypatch.setattr(cfg, "__file__", str(fake_file))
         # Point Path.home() at an obvious dir, so a fallback to ~/.localm would
         # show up as this path.
-        monkeypatch.setattr(cfg.Path, "home", staticmethod(lambda: tmp_path))
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(cfg.Path, "home", staticmethod(lambda: fake_home))
         monkeypatch.setattr(cfg, "_warned_unconfigured_home", False)
         result = cfg._detect_home()
-        repo_root = cfg.Path(cfg.__file__).resolve().parents[1]
-        assert result != tmp_path / ".localm"          # never the shared user dir
-        if not (repo_root / "localm-home.cfg").is_file():
-            assert result == repo_root / "home"        # contained fallback in the install
-            if not (repo_root / "home").is_dir():
-                assert "no data directory is configured" in capsys.readouterr().err
+        assert result == tmp_path / "home"              # contained fallback in the install
+        assert result != fake_home / ".localm"           # never the shared user dir
+        err = capsys.readouterr().err
+        assert "no data directory is configured" in err
+        assert str(result) in err
+
+    def test_default_is_contained_never_user_localm_outside_a_checkout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # No pyproject.toml at all: the fallback still applies, since
+        # config.py only gates the portable lookups on being in a checkout.
+        from localm import config as cfg
+        monkeypatch.delenv("LOCALM_HOME", raising=False)
+        monkeypatch.delenv("LOCALM_SETUP", raising=False)
+        fake_file = tmp_path / "localm" / "config.py"
+        fake_file.parent.mkdir()
+        fake_file.write_text("# stub")
+        monkeypatch.setattr(cfg, "__file__", str(fake_file))
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(cfg.Path, "home", staticmethod(lambda: fake_home))
+        monkeypatch.setattr(cfg, "_warned_unconfigured_home", False)
+        result = cfg._detect_home()
+        assert result == tmp_path / "home"
+        assert result != fake_home / ".localm"
+        err = capsys.readouterr().err
+        assert "no data directory is configured" in err
+        assert str(result) in err
 
     def test_portable_marker_file(self, tmp_path, monkeypatch):
         from localm import config as cfg
