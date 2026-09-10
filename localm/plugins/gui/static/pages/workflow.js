@@ -4,6 +4,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders, confirmDanger, el, toast } from "../app/helpers.js";
+import { t, tn } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
 import { MEDIA_PLUGIN_ORDER } from "./settings.js";
@@ -39,13 +40,13 @@ export async function refreshWorkflowPanel(media) {
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    box.replaceChildren(emptyState("warning", "Could not load workflows", e.message));
+    box.replaceChildren(emptyState("warning", t("workflow.loadFailed"), e.message));
     return;
   }
   box.replaceChildren();
   const list = el("div", "workflow-list");
   // "Built-in default" = no selection, falling back to the bundled template.
-  list.appendChild(workflowRow(media, null, "Built-in default",
+  list.appendChild(workflowRow(media, null, t("workflow.builtinDefault"),
                                data.selected == null, false));
   for (const w of (data.workflows || [])) {
     list.appendChild(workflowRow(media, w.name, w.name, !!w.is_active, true));
@@ -56,7 +57,7 @@ export async function refreshWorkflowPanel(media) {
   const file = document.createElement("input");
   file.type = "file";
   file.accept = ".json,application/json";
-  const btn = el("button", "btn-secondary", "Upload + use");
+  const btn = el("button", "btn-secondary", t("workflow.uploadUse"));
   btn.type = "button";
   btn.onclick = () => uploadWorkflow(media, file);
   up.append(file, btn);
@@ -71,27 +72,27 @@ export async function refreshWorkflowPanel(media) {
  *  on success and refreshes the panel. */
 function comfyLaunchRow(media) {
   const row = el("div", "comfy-launch-row");
-  const launchBtn = el("button", "btn-secondary", "Launch ComfyUI");
+  const launchBtn = el("button", "btn-secondary", t("workflow.launchComfy"));
   launchBtn.type = "button";
   launchBtn.onclick = async () => {
     launchBtn.disabled = true;
-    launchBtn.textContent = "Launching…";
+    launchBtn.textContent = t("workflow.launching");
     try {
       const r = await fetch(`/api/${GENERATE_PREFIX[media]}/comfy-launch`,
         { method: "POST", headers: authHeaders() });
       const data = await r.json().catch(() => ({}));
       if (data.ok) {
-        toast("ComfyUI is running");
+        toast(t("workflow.launchSuccess"));
         if (data.api_url) window.open(data.api_url, "_blank", "noopener");
         refreshWorkflowPanel(media);
       } else {
-        toast(data.message || "Could not start ComfyUI", true);
+        toast(data.message || t("workflow.launchFailedFallback"), true);
       }
     } catch (e) {
-      toast("Launch failed: " + e.message, true);
+      toast(t("workflow.launchError", { message: e.message }), true);
     } finally {
       launchBtn.disabled = false;
-      launchBtn.textContent = "Launch ComfyUI";
+      launchBtn.textContent = t("workflow.launchComfy");
     }
   };
   row.appendChild(launchBtn);
@@ -109,29 +110,28 @@ async function comfyModelPicker(media) {
       { headers: authHeaders() });
     data = await r.json();
   } catch (e) {
-    wrap.appendChild(emptyState("warning", "Could not check ComfyUI models", e.message));
+    wrap.appendChild(emptyState("warning", t("workflow.modelsCheckFailed"), e.message));
     return wrap;
   }
   if (!data.reachable) {
     wrap.appendChild(el("div", "sub", data.message
-      || "ComfyUI is not running - launch it to pick models."));
+      || t("workflow.comfyUnreachable")));
     // Show what the workflow needs and what is registered on this machine,
     // from localm's own registry.
     appendRegistryFallback(wrap, data);
     return wrap;
   }
   if (!data.slots || !data.slots.length) {
-    wrap.appendChild(el("div", "sub", "This workflow has no selectable model files."));
+    wrap.appendChild(el("div", "sub", t("workflow.noSelectableModels")));
     return wrap;
   }
-  wrap.appendChild(el("h5", "comfy-model-picker-head", "Models"));
+  wrap.appendChild(el("h5", "comfy-model-picker-head", t("workflow.modelsHeading")));
   // A slot with zero live options means ComfyUI has none of that file type
   // installed.
   const missing = data.slots.filter((s) => !s.options || !s.options.length);
   if (missing.length) {
     wrap.appendChild(el("div", "sub comfy-model-missing",
-      `${missing.length} required model file${missing.length === 1 ? "" : "s"} `
-      + "not found in ComfyUI - see below."));
+      tn("workflow.missingModelFiles", missing.length, { count: missing.length })));
   }
   const overrides = (modelOverrides[media] ??= {});
   const roleById = new Map((data.roles || []).map((r) => [r.role_id, r]));
@@ -141,12 +141,12 @@ async function comfyModelPicker(media) {
     // alongside it. The server pairs roles to slots positionally within a
     // model type.
     const label = el("label", "comfy-model-label",
-      slot.role_label ? `${slot.role_label} (${slot.input_name})` : slot.input_name);
+      slot.role_label ? t("workflow.modelSlotLabel", { role: slot.role_label, input: slot.input_name }) : slot.input_name);
     row.appendChild(label);
     if (!slot.options || !slot.options.length) {
       // No live choices: name the workflow's own current value instead of
       // rendering an empty select.
-      row.appendChild(el("span", "comfy-model-missing-value job-state st-error", `${slot.current} (not installed)`));
+      row.appendChild(el("span", "comfy-model-missing-value job-state st-error", t("workflow.notInstalled", { value: slot.current })));
       wrap.appendChild(row);
       // Before the continue, so a slot with no options still gets the hint.
       appendRegistryOnlyHint(wrap, roleById.get(slot.role_id), slot.current);
@@ -161,7 +161,7 @@ async function comfyModelPicker(media) {
       // select with no matching option displays the first one instead.
       const cur = document.createElement("option");
       cur.value = chosen;
-      cur.textContent = `${chosen} (not installed)`;
+      cur.textContent = t("workflow.notInstalled", { value: chosen });
       cur.disabled = true;
       cur.selected = true;
       sel.appendChild(cur);
@@ -192,11 +192,8 @@ function appendRegistryOnlyHint(wrap, role, current) {
   if (!extra.length) return;
   const exact = extra.find((m) => m.filename === current);
   wrap.appendChild(el("div", "sub comfy-model-registry-hint", exact
-    ? `${exact.filename} IS registered in localm (as "${exact.name}") but is not `
-      + "in a folder ComfyUI reads - copy it into ComfyUI's models folder."
-    : "Registered in localm but not offered by ComfyUI: "
-      + extra.map((m) => m.filename).join(", ")
-      + " - copy one into ComfyUI's models folder to use it here."));
+    ? t("workflow.registryExactHint", { filename: exact.filename, name: exact.name })
+    : t("workflow.registryOtherHint", { names: extra.map((m) => m.filename).join(", ") })));
 }
 
 /** Roles the plugin declares that the ACTIVE workflow has no slot for. Shown
@@ -206,7 +203,7 @@ function appendUnusedRoles(wrap, roles) {
   const absent = (roles || []).filter((r) => r.in_workflow === false && r.required);
   if (!absent.length) return;
   wrap.appendChild(el("div", "sub comfy-model-missing",
-    `This workflow has no slot for: ${absent.map((r) => r.label).join(", ")}.`));
+    t("workflow.noSlotFor", { labels: absent.map((r) => r.label).join(", ") })));
 }
 
 /** With ComfyUI unreachable, report the workflow's declared roles and which of
@@ -214,14 +211,14 @@ function appendUnusedRoles(wrap, roles) {
 function appendRegistryFallback(wrap, data) {
   const roles = data.roles || [];
   if (!roles.length) return;
-  wrap.appendChild(el("h5", "comfy-model-picker-head", "Models this needs"));
+  wrap.appendChild(el("h5", "comfy-model-picker-head", t("workflow.modelsNeededHeading")));
   for (const role of roles) {
     const row = el("div", "comfy-model-row");
     row.appendChild(el("label", "comfy-model-label", role.label));
     const known = role.registry_models || [];
     row.appendChild(el("span", "comfy-model-known", known.length
-      ? `${known.length} registered: ${known.map((m) => m.name).join(", ")}`
-      : "none registered in localm"));
+      ? t("workflow.registeredCount", { count: known.length, names: known.map((m) => m.name).join(", ") })
+      : t("workflow.noneRegistered")));
     wrap.appendChild(row);
   }
 }
@@ -234,13 +231,13 @@ export function workflowRow(media, name, label, active, deletable) {
   pick.appendChild(document.createTextNode(label));
   pick.type = "button";
   if (active) pick.setAttribute("aria-current", "true");
-  pick.title = active ? "In use" : "Use this workflow";
+  pick.title = active ? t("workflow.inUse") : t("workflow.useThisWorkflow");
   pick.onclick = () => selectWorkflow(media, name);
   row.appendChild(pick);
   if (deletable) {
-    const del = el("button", "btn-secondary btn-danger workflow-del", "Delete");
+    const del = el("button", "btn-secondary btn-danger workflow-del", t("workflow.delete"));
     del.type = "button";
-    del.title = "Delete this workflow file";
+    del.title = t("workflow.deleteTitle");
     del.onclick = () => deleteWorkflow(media, name);
     row.appendChild(del);
   }
@@ -255,30 +252,30 @@ export async function selectWorkflow(media, name) {
     // A different workflow can use different node IDs, so drop the overrides
     // keyed by the old graph.
     modelOverrides[media] = {};
-    toast("Workflow selected");
+    toast(t("workflow.selectedToast"));
     refreshWorkflowPanel(media);
-  } else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
+  } else toast((await r.json().catch(() => ({}))).detail || t("workflow.genericFailed"), true);
 }
 
 export function deleteWorkflow(media, name) {
-  confirmDanger(`Delete workflow "${name}"?`, "This can't be undone.",
-    "Delete", async () => {
+  confirmDanger(t("workflow.confirmDelete.title", { name }), t("workflow.confirmDelete.body"),
+    t("workflow.delete"), async () => {
       const r = await fetch(`/api/${media}/workflows/${encodeURIComponent(name)}`, {
         method: "DELETE", headers: authHeaders(),
       });
-      if (r.ok) { toast("Deleted"); refreshWorkflowPanel(media); }
-      else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
+      if (r.ok) { toast(t("workflow.deletedToast")); refreshWorkflowPanel(media); }
+      else toast((await r.json().catch(() => ({}))).detail || t("workflow.genericFailed"), true);
     });
 }
 
 export async function uploadWorkflow(media, fileInput) {
   const f = fileInput.files && fileInput.files[0];
-  if (!f) { toast("Choose a .json file first", true); return; }
+  if (!f) { toast(t("workflow.chooseFileFirst"), true); return; }
   let wf;
   try {
     wf = JSON.parse(await f.text());
   } catch (e) {
-    toast("That file is not valid JSON", true);
+    toast(t("workflow.invalidJson"), true);
     return;
   }
   const r = await fetch(`/api/${media}/workflows`, {
@@ -288,11 +285,11 @@ export async function uploadWorkflow(media, fileInput) {
   const d = await r.json().catch(() => ({}));
   if (r.ok) {
     modelOverrides[media] = {};   // new graph - see selectWorkflow
-    toast("Uploaded and selected");
+    toast(t("workflow.uploadedToast"));
     fileInput.value = "";
     refreshWorkflowPanel(media);
   } else {
-    toast(d.detail || "Upload failed", true);
+    toast(d.detail || t("workflow.uploadFailed"), true);
   }
 }
 
@@ -316,7 +313,14 @@ $("gui-key-save").onclick = async () => {
       await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
     } catch (e) { /* offline / already cleared */ }
   }
-  toast("Key saved - reloading");
+  toast(t("settings.guiKeySaved"));
   setTimeout(() => location.reload(), 600);
 };
+
+// The workflow panels are painted from fetched data, not marked up in
+// index.html, so re-fetch and redraw whichever ones are on the page when the
+// interface language changes.
+document.addEventListener("localm:language", () => {
+  for (const media of MEDIA_PLUGIN_ORDER) refreshWorkflowPanel(media);
+});
 

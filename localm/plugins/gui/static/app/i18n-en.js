@@ -1178,6 +1178,7 @@ export const I18N_EN = {
   "settings.group.security": "Security",
   "settings.group.server": "Server & network",
   "settings.group.system": "System",
+  "settings.guiKeySaved": "Key saved - reloading",
   "settings.intro":
     "Stored in <code>config.json</code> in your data directory. Pick a section on the left; each one saves on its own. Engine values apply on the next model load.",
   "settings.search": "Search all settings",
@@ -1266,9 +1267,46 @@ export const I18N_EN = {
   "mediaGallery.trackLoadFailed": "Could not load the track: {message}",
   "mediaGallery.workflowHeading": "Workflow",
 
-  // ---- Workflow card (shared markup; workflow.js itself migrates in Batch 2) ----
+  // ---- Workflow panel (pages/workflow.js) + its shared index.html markup ----
+  "workflow.builtinDefault": "Built-in default",
+  "workflow.chooseFileFirst": "Choose a .json file first",
+  "workflow.comfyUnreachable": "ComfyUI is not running - launch it to pick models.",
+  "workflow.confirmDelete.body": "This can't be undone.",
+  "workflow.confirmDelete.title": "Delete workflow \"{name}\"?",
+  "workflow.delete": "Delete",
+  "workflow.deleteTitle": "Delete this workflow file",
+  "workflow.deletedToast": "Deleted",
+  "workflow.genericFailed": "Failed",
+  "workflow.inUse": "In use",
   "workflow.intro":
     "The ComfyUI workflow this page uses. Upload one (in ComfyUI: Save -> API format) and select it, or keep the built-in default.",
+  "workflow.invalidJson": "That file is not valid JSON",
+  "workflow.launchComfy": "Launch ComfyUI",
+  "workflow.launchError": "Launch failed: {message}",
+  "workflow.launchFailedFallback": "Could not start ComfyUI",
+  "workflow.launchSuccess": "ComfyUI is running",
+  "workflow.launching": "Launching…",
+  "workflow.loadFailed": "Could not load workflows",
+  "workflow.missingModelFiles.one": "{count} required model file not found in ComfyUI - see below.",
+  "workflow.missingModelFiles.other": "{count} required model files not found in ComfyUI - see below.",
+  "workflow.modelSlotLabel": "{role} ({input})",
+  "workflow.modelsCheckFailed": "Could not check ComfyUI models",
+  "workflow.modelsHeading": "Models",
+  "workflow.modelsNeededHeading": "Models this needs",
+  "workflow.noSelectableModels": "This workflow has no selectable model files.",
+  "workflow.noSlotFor": "This workflow has no slot for: {labels}.",
+  "workflow.noneRegistered": "none registered in localm",
+  "workflow.notInstalled": "{value} (not installed)",
+  "workflow.registeredCount": "{count} registered: {names}",
+  "workflow.registryExactHint":
+    "{filename} IS registered in localm (as \"{name}\") but is not in a folder ComfyUI reads - copy it into ComfyUI's models folder.",
+  "workflow.registryOtherHint":
+    "Registered in localm but not offered by ComfyUI: {names} - copy one into ComfyUI's models folder to use it here.",
+  "workflow.selectedToast": "Workflow selected",
+  "workflow.uploadFailed": "Upload failed",
+  "workflow.uploadUse": "Upload + use",
+  "workflow.uploadedToast": "Uploaded and selected",
+  "workflow.useThisWorkflow": "Use this workflow",
 
   // ---- Images page ----
   "images.advancedHint": "seed, guidance, denoise, CFG, LoRA strength",
