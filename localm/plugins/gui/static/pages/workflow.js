@@ -305,15 +305,20 @@ $("gui-key-save").onclick = async () => {
   const key = $("gui-api-key").value.trim();
   if (key) {
     const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
-    // Record the successful login for the boot check after the reload.
-    if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
-  } else {
-    // Empty -> sign out (clear the session cookie).
-    try {
-      await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
-    } catch (e) { /* offline / already cleared */ }
+    if (!ok) { toast("Key was not accepted", true); return; }
+    try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ }
+    toast("Key saved - reloading");
+    setTimeout(() => location.reload(), 600);
+    return;
   }
-  toast("Key saved - reloading");
+  // Empty -> sign out (clear the session cookie).
+  let signedOut = false;
+  try {
+    const r = await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
+    signedOut = r.ok;
+  } catch (e) { /* fetch failed */ }
+  if (!signedOut) { toast("Could not sign out", true); return; }
+  toast("Signed out - reloading");
   setTimeout(() => location.reload(), 600);
 };
 
