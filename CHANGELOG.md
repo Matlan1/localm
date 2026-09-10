@@ -15,6 +15,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - Rotated the release signing key. The previous key stays pinned alongside the new one for this
   release so existing installations can still verify and apply the update; it is removed in the
   release after.
+- **A downloaded model can no longer make localm read a file from outside its own folder.** A
+  model split across several files lists those files in an index, and that list was trusted as
+  written. A hostile or tampered model could name a file anywhere on the machine, and loading it
+  would open that file, or hang on it. Such a model is now refused before it loads, and the
+  refusal names the model.
 
 ## [0.2.0] - 2026-09-04
 
