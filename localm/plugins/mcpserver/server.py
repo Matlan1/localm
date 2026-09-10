@@ -392,9 +392,8 @@ class EngineCache:
             victim = residency.pick_eviction_victim(
                 self._lru, self._engines, requested=name, pinned=pinned)
             if victim is None:
-                # A resident that is only unavailable because it is SERVING a
-                # request frees itself when that request ends: wait for it,
-                # bounded, instead of loading on top of it.
+                # Wait, bounded, for a resident that is serving a request to
+                # finish; once free it becomes a victim on the next pass.
                 busy = [n for n in self._lru
                         if n != name and n not in pinned
                         and residency.is_serving(self._engines.get(n))]
@@ -1200,9 +1199,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         if coder_runner.unattended_shell_gated(task, cfg.auto_approve):
             _log("coder task: run_shell is denied for this run (no 'yes')")
 
-        # Pinned for the whole run so the residency gate never evicts the
-        # engine under the agent; released on the worker thread when the run
-        # actually ends, even after a timeout abandons it.
+        # Pinned for the whole run; released on the worker thread when the run
+        # ends, even after a timeout has abandoned it.
         engines.pin(engine)
         try:
             with _quiet_stdout():
