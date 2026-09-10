@@ -29,6 +29,65 @@ export function frameSrc(data) {
   return "data:image/jpeg;base64," + data;
 }
 
+/** Read one job's SSE stream and dispatch each event. Exported so a second
+ *  caller (the coder session's opt-in inline mirror) reuses the exact same
+ *  parsing rather than a second copy of it - a job's own replay history never
+ *  keeps more than the latest frame (see jobs.FRAME_EVENT), so a caller with
+ *  its own re-derived parser is the only way this could quietly diverge.
+ *
+ *  Resolves once the stream ends (aborted, disconnected, or an "end" event).
+ *  onFetchFailed and onUnavailable are two different failures a caller may
+ *  want to tell apart: the first is the network request itself failing
+ *  (offline, aborted before a response arrived), the second is a response
+ *  that arrived but refused the request (job not found, not owned). */
+export async function watchFrames(jobId, {
+  authHeaders, signal, onFrame, onLine, onEnd, onFetchFailed, onUnavailable,
+} = {}) {
+  let res;
+  try {
+    res = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/events",
+                      { headers: authHeaders ? authHeaders() : {}, signal });
+  } catch (e) {
+    if (onFetchFailed) onFetchFailed(e);
+    return;
+  }
+  if (!res.ok || !res.body) {
+    if (onUnavailable) onUnavailable(res.status);
+    return;
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (e) {
+      break;                            // aborted, or the connection dropped
+    }
+    if (chunk.done) break;
+    buf += dec.decode(chunk.value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop();
+    for (const part of parts) {
+      const line = part.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      let ev;
+      try {
+        ev = JSON.parse(line.slice(5).trim());
+      } catch (e) {
+        continue;
+      }
+      if (ev.type === "frame") { if (onFrame) onFrame(ev.data); }
+      else if (ev.type === "line" && (ev.line || ev.text)) {
+        if (onLine) onLine(ev.line || ev.text);
+      } else if (ev.type === "end") {
+        if (onEnd) onEnd(ev);
+      }
+    }
+  }
+}
+
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -134,58 +193,27 @@ export function register(ctx) {
   /** Read the job's SSE stream and paint each frame. */
   async function stream(id) {
     abort = new AbortController();
-    let res;
-    try {
-      res = await fetch("/api/jobs/" + encodeURIComponent(id) + "/events",
-                        { headers: authHeaders(), signal: abort.signal });
-    } catch (e) {
-      status.textContent = "Live view disconnected.";
-      return;
-    }
-    if (!res.ok || !res.body) {
-      status.textContent = "Live view unavailable (" + res.status + ").";
-      return;
-    }
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
     let lastLine = "";
-    for (;;) {
-      let chunk;
-      try {
-        chunk = await reader.read();
-      } catch (e) {
-        break;                            // aborted, or the connection dropped
-      }
-      if (chunk.done) break;
-      buf += dec.decode(chunk.value, { stream: true });
-      const parts = buf.split("\n\n");
-      buf = parts.pop();
-      for (const part of parts) {
-        const line = part.split("\n").find((l) => l.startsWith("data:"));
-        if (!line) continue;
-        let ev;
-        try {
-          ev = JSON.parse(line.slice(5).trim());
-        } catch (e) {
-          continue;
+    await watchFrames(id, {
+      authHeaders,
+      signal: abort.signal,
+      onFrame: showFrame,
+      onLine: (text) => { lastLine = text; status.textContent = text; },
+      onEnd: (ev) => {
+        setMode("idle");
+        const failed = ev.status && ev.status !== "done" && ev.status !== "cancelled";
+        if (failed) {
+          status.textContent = lastLine || ("Browser stopped: " + ev.status);
+          toast(status.textContent, true);
+        } else {
+          status.textContent = "Browser closed.";
         }
-        if (ev.type === "frame") showFrame(ev.data);
-        else if (ev.type === "line" && (ev.line || ev.text)) {
-          lastLine = ev.line || ev.text;
-          status.textContent = lastLine;
-        } else if (ev.type === "end") {
-          setMode("idle");
-          const failed = ev.status && ev.status !== "done" && ev.status !== "cancelled";
-          if (failed) {
-            status.textContent = lastLine || ("Browser stopped: " + ev.status);
-            toast(status.textContent, true);
-          } else {
-            status.textContent = "Browser closed.";
-          }
-        }
-      }
-    }
+      },
+      onFetchFailed: () => { status.textContent = "Live view disconnected."; },
+      onUnavailable: (code) => {
+        status.textContent = "Live view unavailable (" + code + ").";
+      },
+    });
   }
 
   async function open() {
