@@ -60,6 +60,14 @@ def _require_enabled() -> None:
                  "Settings > Network before opening a browser.")
 
 
+def _inline_live_view() -> bool:
+    from localm.config import load_config
+    try:
+        return bool(load_config().get("browser_inline_live_view", False))
+    except Exception:
+        return False
+
+
 def _settings() -> dict:
     from localm.config import load_config
     try:
@@ -235,10 +243,12 @@ async def stop_browser(request: Request):
 async def state(request: Request):
     live = bsession.get(_gui_session_id(request))
     if live is None:
-        return {"open": False, "enabled": _enabled()}
+        return {"open": False, "enabled": _enabled(),
+                "inlineLiveView": _inline_live_view()}
     return {
         "open": True,
         "enabled": _enabled(),
+        "inlineLiveView": _inline_live_view(),
         "headless": live.headless,
         "engine": live.engine,
         "blocked": live.blocked_requests()[-50:],

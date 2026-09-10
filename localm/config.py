@@ -720,6 +720,7 @@ DEFAULT_CONFIG: dict = {
     "browser_custom_domain_rules": False,
     "browser_allow": [],
     "browser_deny": [],
+    "browser_inline_live_view": False,
     "gui_preview_enabled": True,
     "gui_preview_owner_only": False,
     "coder_rail_side": "right",
