@@ -416,6 +416,14 @@ def test_the_currency_workflow_runs_the_gate_where_a_red_reaches_someone():
                    "check_pretokenizer_redos.py", "bump_llama_pin.py"):
         assert script in runs, f"the pre-flight must run {script}"
     assert "--write" not in runs, "the pre-flight writes nothing"
+    dry_run = [s for s in preflight["steps"] if "bump_llama_pin.py" in s.get("run", "")]
+    assert len(dry_run) == 1
+    assert "--receipt" not in dry_run[0]["run"], (
+        "a dry run needs no receipt; requiring one turns a could-not-measure "
+        "confirm (exit 2, kept green above) into a red job one step later")
+    redos = [s for s in preflight["steps"] if "check_pretokenizer_redos.py" in s.get("run", "")]
+    assert len(redos) == 1 and "--gate" in redos[0]["run"], (
+        "without --gate that script exits 0 on a flagged pattern, so the step could never fail")
 
 
 def test_the_abi_check_pin_report_survives_a_failure_earlier_in_the_job():

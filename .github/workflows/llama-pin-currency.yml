@@ -120,13 +120,15 @@ jobs:
 
       - name: Pre-tokenizer regex check under MSVC at the candidate
         shell: bash
-        run: python scripts/check_pretokenizer_redos.py --ref "$CANDIDATE" --out pretokenizer-report.json
+        run: python scripts/check_pretokenizer_redos.py --ref "$CANDIDATE" --gate --out pretokenizer-report.json
 
+      # A dry run needs no receipt; the receipt above is uploaded as evidence for
+      # the person who runs the write.
       - name: Dry-run the mechanical half of the bump
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/bump_llama_pin.py --tag "$CANDIDATE" --receipt confirm-cpu.json --require cpu
+        run: python scripts/bump_llama_pin.py --tag "$CANDIDATE"
 
       - name: Keep the pre-flight evidence
         if: always()

@@ -247,6 +247,18 @@ def rewrite(setup_text: str, api_text: str, tag: str, digests: dict,
 #  Entry point                                                                 #
 # --------------------------------------------------------------------------- #
 
+def _read(path: Path) -> "tuple[str, str]":
+    """(text with LF newlines, the newline sequence the file uses)."""
+    data = path.read_bytes().decode("utf-8")
+    newline = "\r\n" if "\r\n" in data else "\n"
+    return data.replace("\r\n", "\n"), newline
+
+
+def _write(path: Path, text: str, newline: str) -> None:
+    """Write *text* (LF newlines) using the file's own newline sequence."""
+    path.write_bytes(text.replace("\n", newline).encode("utf-8"))
+
+
 def checklist(tag: str) -> str:
     return "\n".join([
         "REMAINING STEPS, not automated - each has its own check:",
@@ -288,8 +300,8 @@ def main(argv=None) -> int:
     try:
         if not _TAG_RE.match(tag):
             raise Refused(f"{tag!r} is not an upstream build tag (bNNNNN)")
-        setup_text = SETUP_PATH.read_text(encoding="utf-8")
-        api_text = API_PATH.read_text(encoding="utf-8")
+        setup_text, setup_nl = _read(SETUP_PATH)
+        api_text, api_nl = _read(API_PATH)
 
         passed = None
         if args.receipt:
@@ -324,13 +336,14 @@ def main(argv=None) -> int:
         return 1
 
     changed = False
-    for path, old, new in ((SETUP_PATH, setup_text, new_setup), (API_PATH, api_text, new_api)):
+    for path, old, new, newline in ((SETUP_PATH, setup_text, new_setup, setup_nl),
+                                    (API_PATH, api_text, new_api, api_nl)):
         if old == new:
             continue
         changed = True
         rel = path.relative_to(REPO).as_posix()
         if args.write:
-            path.write_text(new, encoding="utf-8")
+            _write(path, new, newline)
             print(f"wrote {rel}")
         else:
             sys.stdout.writelines(difflib.unified_diff(

@@ -317,6 +317,29 @@ def test_a_receipt_for_the_wrong_backend_set_refuses_by_default(bump, tree, tmp_
     assert "does not confirm b200 on vulkan" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+def test_write_keeps_the_files_own_line_endings(bump, tree, tmp_path, newline):
+    """A --write must change the edited lines and nothing else: a file that is
+    LF-only stays LF-only and a CRLF file stays CRLF, byte for byte outside the
+    edit. Checked on bytes, since a text read normalises newlines away."""
+    setup, api = tree
+    for path, text in ((setup, SETUP_FIXTURE), (api, API_FIXTURE)):
+        path.write_bytes(text.encode("utf-8").replace(b"\n", newline))
+    before = {p: p.read_bytes().split(newline) for p in (setup, api)}
+    receipt = _receipt(tmp_path, "b200", {"cpu": "PASS", "vulkan": "PASS"})
+    assert bump.main(["--tag", "b200", "--receipt", str(receipt), "--write"]) == 0
+    for p in (setup, api):
+        data = p.read_bytes()
+        assert data.count(newline) == data.count(b"\n"), "every line keeps the original ending"
+        if newline == b"\n":
+            assert b"\r" not in data
+        lines = data.split(newline)
+        unchanged = [line for line in lines if line in before[p]]
+        assert len(lines) - len(unchanged) <= 6, "only the pin, digests and allowlist lines moved"
+    assert b'_PINNED_TAG = "b200"' in setup.read_bytes()
+    assert b'MTP_ARCH_SOURCE_TAG = "b200"' in api.read_bytes()
+
+
 def test_a_malformed_tag_is_refused_before_anything_is_read(bump, tree, capsys):
     assert bump.main(["--tag", "latest"]) == 1
     assert "not an upstream build tag" in capsys.readouterr().out
