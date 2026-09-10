@@ -99,9 +99,10 @@ export async function runWebInChat(query) {
   }
   saveConversations(conv);
   renderChat();
-  let note;
+  let note, untrusted_spans = [];
   try {
-    note = await requestWebTool({ name: "web_search", args: { query } });
+    ({ content: note, untrusted_spans } =
+      await requestWebTool({ name: "web_search", args: { query } }));
     // Model-directed text, appended to the message the model reads next; left untranslated.
     note += `\n\nUsing these results, answer: ${query}\nName the sources you used.`;
   } catch (e) {
@@ -110,7 +111,9 @@ export async function runWebInChat(query) {
     note = `[Web search failed: ${e.message}] Tell the user, and answer ` +
            "from your own knowledge if you can.";
   }
-  conv.messages.push({ role: "user", content: note, web: true });
+  const webMsg = { role: "user", content: note, web: true };
+  if (untrusted_spans.length) webMsg.untrusted_spans = untrusted_spans;
+  conv.messages.push(webMsg);
   saveConversations(conv);
   renderChat();
   await runCompletion(conv);

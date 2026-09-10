@@ -22,6 +22,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   path now always renders on a single line, however long.
 
 ### Security
+- **A malicious search result or fetched web page could still attempt to forge a model role
+  marker.** Web content was already stripped of literal control-token text before reaching the
+  model; the chat now also marks exactly which characters of a search result or page came from
+  the remote source, so the model backend refuses to parse them as anything but plain text.
 - Rotated the release signing key. The previous key stays pinned alongside the new one for this
   release so existing installations can still verify and apply the update; it is removed in the
   release after.
