@@ -169,8 +169,9 @@ test("index.html ships the pre-SW /?localm_reset=1 kill switch inside <head>", (
 });
 
 test("activate purges only OLD shell caches, never the transformers model cache (REC-KOKORO-RELOAD)", async () => {
-  // Read the current shell cache name straight from the source so this test
-  // does not need updating on every version bump.
+  // CACHE in the source is a placeholder the GUI server replaces with a
+  // content digest on every /sw.js request; read it from the source so this
+  // test tracks whatever placeholder shape check_hygiene enforces.
   const m = SW_SRC.match(/const CACHE = "([^"]+)"/);
   assert.ok(m, "sw.js must define a CACHE constant");
   const current = m[1];

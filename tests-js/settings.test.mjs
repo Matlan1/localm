@@ -151,7 +151,7 @@ test("group nav shows all of a group's sections; require_auth + keys live in Sec
   // Jumping to the keys card (command palette) activates the Security group.
   win.gotoSettingsSection("keys-card");
   assert.ok(reqSec.classList.contains("active"), "gotoSettingsSection(keys-card) shows Security");
-  assert.ok(!webSec.classList.contains("active"), "and hides the Plugins group");
+  assert.ok(!webSec.classList.contains("active"), "and hides the Outbound access section");
 });
 
 test("pathlist renders a folder-row editor and reads back an array", async () => {
