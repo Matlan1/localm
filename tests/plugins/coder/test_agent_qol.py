@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from localm.plugins.coder.audit import SessionMode
 from localm.plugins.coder.tools import ToolDef, ToolResult
@@ -370,6 +371,11 @@ class TestUndoStack:
 # ---------------------------------------------------------------------------
 
 class TestCheckpoint:
+    @pytest.fixture(autouse=True)
+    def _home(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+
     def test_save_load_resume_roundtrip(self, tmp_path):
         agent = _make_agent(tmp_path, mode=SessionMode.LOG)
         agent._messages = [{"role": "user", "content": "hello"}]
@@ -377,6 +383,7 @@ class TestCheckpoint:
         agent._total_tokens = 99
         agent.save_checkpoint()
         assert agent._checkpoint_path.is_file()
+        assert tmp_path / "home" in agent._checkpoint_path.parents
 
         fresh = _make_agent(tmp_path, mode=SessionMode.LOG)
         data = fresh.load_checkpoint()

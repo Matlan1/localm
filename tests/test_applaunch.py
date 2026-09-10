@@ -148,14 +148,39 @@ def test_apply_window_identity_never_raises():
 
 
 def test_apply_window_identity_skips_console_own_in_debug(monkeypatch):
-    monkeypatch.delenv("LOCALM_OWN_CONSOLE", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALM_OWN_CONSOLE", "x")
+    monkeypatch.delenv("LOCALM_OWN_CONSOLE")  # restore-to-absent survives the setdefault below
     monkeypatch.setenv("LOCALM_DEBUG", "1")
-    # Mock sys.executable basename to be localm.exe
-    monkeypatch.setattr(os.path, "basename", lambda path: "localm.exe" if "python" not in path else os.path.basename(path))
-    # Mock sys.executable itself.
-    monkeypatch.setattr(sys, "executable", "Z:\\some\\path\\localm.exe")
+    monkeypatch.setattr(sys, "executable", "Z:/some/path/localm.exe")
     monkeypatch.setattr(applaunch, "_owns_console", lambda: True)
-    
+
+    applaunch.apply_window_identity()
+    assert os.environ.get("LOCALM_OWN_CONSOLE") is None
+
+
+def test_apply_window_identity_owns_console_outside_debug(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALM_OWN_CONSOLE", "x")
+    monkeypatch.delenv("LOCALM_OWN_CONSOLE")  # restore-to-absent survives the setdefault below
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["localm"])
+    monkeypatch.setattr(sys, "executable", "Z:/some/path/localm.exe")
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: True)
+
+    applaunch.apply_window_identity()
+    assert os.environ.get("LOCALM_OWN_CONSOLE") == "1"
+
+
+def test_apply_window_identity_skips_console_own_with_debug_flag(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALM_OWN_CONSOLE", "x")
+    monkeypatch.delenv("LOCALM_OWN_CONSOLE")  # restore-to-absent survives the setdefault below
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["localm", "--debug"])
+    monkeypatch.setattr(sys, "executable", "Z:/some/path/localm.exe")
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: True)
+
     applaunch.apply_window_identity()
     assert os.environ.get("LOCALM_OWN_CONSOLE") is None
 

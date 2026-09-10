@@ -700,6 +700,12 @@ def _isolate_localm_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_owner_key_env(monkeypatch):
+    """Every test starts in open mode: the invoking shell's LOCALM_API_KEY is not visible to it."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_comfy_readiness_cache():
     """comfy_client.py's ComfyUI readiness cache (_confirmed_alive) is a
     module-level set, so it persists across tests in one pytest session. Clear
