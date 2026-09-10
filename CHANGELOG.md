@@ -48,6 +48,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The MCP image tool now uses the ComfyUI you configured.** It always talked
   to the default local port instead, so an MCP client could miss a ComfyUI
   running anywhere else, including the one localm manages itself.
+- **Music generation no longer unloads the chat model after saying it would
+  keep it loaded.** When there was room for both, the job said it was
+  keeping the chat model in VRAM and then unloaded it anyway, so the next
+  message had to load it again. It now does what it says. With swapping
+  turned off, the safety unload that prevents the two models colliding in
+  VRAM also works again.
+- **Saving an API key that the server rejects now says so.** A wrong or
+  expired key was reported as saved and the page reloaded, discarding what
+  you typed, leaving you signed out with no explanation. A rejected key now
+  shows an error and keeps what you entered so you can correct it. Clearing
+  the field to sign out no longer reports that a key was saved.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
