@@ -1290,8 +1290,7 @@ def _child_process_console_print_violations() -> list[str]:
 #
 # A tier carries exactly the keys name, role and units. An unknown key, a
 # repeated tier name, a unit placed twice, a placed unit that is not on disk and
-# an on-disk unit that is not placed each fail, so the map cannot rot silently
-# and has nowhere to hold an exception.
+# an on-disk unit that is not placed each fail.
 
 _LAYERING_MAP = "docs/layering.toml"
 _LAYERING_TIER_KEYS = {"name", "role", "units"}
@@ -1299,8 +1298,7 @@ _LAYERING_TIER_KEYS = {"name", "role", "units"}
 
 def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
     """Parse the layering map: ``([(tier name, units), ...] top to bottom,
-    problems)``. Any problem yields an EMPTY tier list, so a malformed map can
-    never read as "nothing placed, nothing to check"."""
+    problems)``. Any problem yields an EMPTY tier list."""
     try:
         import tomllib
     except ImportError:
@@ -1348,8 +1346,7 @@ def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
 
 def _tracked_localm_files(pkg_root: Path) -> "list[Path] | None":
     """Every git-tracked file under *pkg_root*, with no directory filtered out.
-    None when git cannot answer (no checkout, no git) or tracks nothing there,
-    so the caller falls back to the disk inventory."""
+    None when git cannot answer (no checkout, no git) or tracks nothing there."""
     try:
         out = subprocess.run(["git", "ls-files", "-z", "--", pkg_root.name],
                              cwd=REPO, capture_output=True, check=True).stdout
