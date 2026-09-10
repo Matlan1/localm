@@ -17,6 +17,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `python -m playwright install chromium` step after installing the browser
   extra; it is now a regular localm command that respects the network policy.
 
+### Changed
+- **Settings translates more of itself into German.** Server controls, other
+  running instances, Report a bug, Changelog, Updates (app update, roll back,
+  the app launcher and the inference runtime), Issues, Logs and Upload files
+  now show in German too, alongside the rest of the Settings page.
+
 ### Fixed
 - **The curated model shortcuts picker on the Models page could stay empty for
   the rest of a session.** If its very first load hit a brief server or
