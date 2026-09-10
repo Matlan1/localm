@@ -45,6 +45,20 @@ def test_local_backend_filters_unsupported_gen_kwargs(monkeypatch):
     assert kwargs == {"max_tokens": 600, "temperature": 0.2}   # bogus/None dropped
 
 
+def test_local_backend_forwards_the_lazy_grammar_pair(monkeypatch):
+    """A trigger-gated grammar arrives as grammar + grammar_lazy +
+    grammar_triggers; dropping the last two turns it into a grammar that binds
+    from the first token."""
+    from localm.plugins.coder.backends.local_engine import LocalEngineBackend
+    eng = _patched_engine(monkeypatch, ["ok"])
+    b = LocalEngineBackend("/models/mini.gguf")
+    b.chat([{"role": "user", "content": "x"}], grammar="root ::= x",
+           grammar_lazy=True, grammar_triggers=["<tool_call>"])
+    _, kwargs = eng.chat_stream.call_args
+    assert kwargs == {"grammar": "root ::= x", "grammar_lazy": True,
+                      "grammar_triggers": ["<tool_call>"]}
+
+
 def test_local_backend_loads_only_once(monkeypatch):
     from localm.plugins.coder.backends.local_engine import LocalEngineBackend
     eng = _patched_engine(monkeypatch, ["a"])
