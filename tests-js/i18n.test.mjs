@@ -538,6 +538,30 @@ test("the coder state pill, usage line and remote badge redraw when the language
     assert.equal(remote(), "extern: api.anthropic.com", "the remote badge must be rebuilt in German");
   });
 
+test("the Settings > Other running instances empty state redraws when the language changes",
+  async () => {
+    const fetchImpl = async (url) => {
+      const u = String(url);
+      if (u.includes("/i18n/de.json")) return { ok: true, status: 200, json: async () => DE };
+      if (u.includes("/i18n/")) return { ok: false, status: 404, json: async () => ({}) };
+      if (u === "/api/instances") return { ok: true, status: 200, json: async () => ({ instances: [] }) };
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadAppWithPages({ fetchImpl });
+
+    await window.refreshInstancesCard();
+    await settle(20);
+
+    const text = () => window.document.querySelector("#instances-list .empty-state-text");
+    assert.equal(text() && text().textContent, "No other instances running", "starts in English");
+
+    runScript(window, 'window.__p = applyLanguage("de");');
+    await window.__p;
+    assert.ok(
+      await waitFor(() => text() && text().textContent === "Keine anderen Instanzen laufen"),
+      "the empty state must be rebuilt in German without a manual refresh");
+  });
+
 /* ================================================================ */
 /*  Drift gates                                                      */
 /* ================================================================ */

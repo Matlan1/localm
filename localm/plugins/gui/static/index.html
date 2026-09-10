@@ -963,30 +963,30 @@
 
             <section class="card settings-section" id="sec-server" data-group="server" data-sec-label="Server controls">
               <div class="card-head"><span class="ic cat-ic cat-cyan" data-icon="refresh"></span>
-                <div class="card-head-text"><h3>Server controls</h3></div></div>
-              <div class="sub">Control this LocaLM server from here instead of force-closing
+                <div class="card-head-text"><h3 data-i18n="settings.server.title">Server controls</h3></div></div>
+              <div class="sub" data-i18n="settings.server.help">Control this LocaLM server from here instead of force-closing
               the window (which can crash without a clean unload). The model is unloaded first
               either way. Restart brings the server back automatically; Shut down stops it (start
               it again from your launcher or terminal).</div>
               <div class="actions">
-                <button class="btn-secondary" id="server-restart">Restart server</button>
+                <button class="btn-secondary" id="server-restart" data-i18n="settings.server.restartButton">Restart server</button>
                 <!-- btn-danger: gui-design.md rule 3 reserves it for destructive
                      actions; shutting down the server is irreversible from this
                      page (it has to be started again from the launcher/terminal),
                      unlike Restart right beside it. -->
-                <button class="btn-secondary btn-danger" id="server-shutdown">Shut down server</button>
+                <button class="btn-secondary btn-danger" id="server-shutdown" data-i18n="settings.server.shutdownButton">Shut down server</button>
               </div>
             </section>
 
             <section class="card settings-section" id="sec-instances" data-group="server" data-sec-label="Other running instances">
               <div class="card-head"><span class="ic cat-ic cat-cyan" data-icon="folder"></span>
-                <div class="card-head-text"><h3>Other running instances</h3></div></div>
-              <div class="sub">Each <code>localm gui</code>/<code>localm serve</code> you start
+                <div class="card-head-text"><h3 data-i18n="settings.instances.title">Other running instances</h3></div></div>
+              <div class="sub" data-i18n-rich="settings.instances.help">Each <code>localm gui</code>/<code>localm serve</code> you start
               advertises itself, so other launches can find it instead of double-loading a model.
               This lists every one running on this machine right now (the server behind this page
               is not shown here - use Server controls above for that). A server started from a
               different LocaLM install keeps its own data folder, so it is listed as
-              <em>other install</em> and has to be stopped from that install.</div>
+              <b>other install</b> and has to be stopped from that install.</div>
               <div id="instances-list"></div>
             </section>
 
@@ -1005,32 +1005,32 @@
 
             <section class="card settings-section" id="sec-bugreport" data-group="system" data-sec-label="Report a bug">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="send"></span>
-                <div class="card-head-text"><h3>Report a bug</h3></div></div>
-              <div class="sub">Describe what went wrong. We save an editable report to your
+                <div class="card-head-text"><h3 data-i18n="settings.bug.title">Report a bug</h3></div></div>
+              <div class="sub" data-i18n="settings.bug.help">Describe what went wrong. We save an editable report to your
               data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model,
               settings subset, dependency versions, recent activity, and any browser console
               errors) - never your API key, config secrets, or chat content. You can review
               and send it to the maintainer.</div>
-              <textarea id="bug-desc" rows="3" placeholder="What were you doing?"></textarea>
-              <textarea id="bug-expected" rows="2" placeholder="What did you expect to happen? (optional)"></textarea>
-              <textarea id="bug-happened" rows="3" placeholder="What actually happened?"></textarea>
-              <label class="check"><input type="checkbox" id="bug-include-log" checked> Attach this session's debug log tail, if one exists (debug mode only; scrubbed, never chat content)</label>
-              <label class="check"><input type="checkbox" id="bug-autoretry" checked> Automatically retry if rate limited</label>
+              <textarea id="bug-desc" rows="3" placeholder="What were you doing?" data-i18n-placeholder="settings.bug.descPlaceholder"></textarea>
+              <textarea id="bug-expected" rows="2" placeholder="What did you expect to happen? (optional)" data-i18n-placeholder="settings.bug.expectedPlaceholder"></textarea>
+              <textarea id="bug-happened" rows="3" placeholder="What actually happened?" data-i18n-placeholder="settings.bug.happenedPlaceholder"></textarea>
+              <label class="check" data-i18n="settings.bug.includeLogLabel"><input type="checkbox" id="bug-include-log" checked> Attach this session's debug log tail, if one exists (debug mode only; scrubbed, never chat content)</label>
+              <label class="check" data-i18n="settings.bug.autoRetryLabel"><input type="checkbox" id="bug-autoretry" checked> Automatically retry if rate limited</label>
               <div class="actions">
                 <!-- btn-SECONDARY: with an upload endpoint configured both this and
                      bug-upload are visible at once, and rule 3 allows one primary
                      per card. Same shape as the Updates card below - a persistent
                      secondary check plus a primary that appears when the real
                      action exists. -->
-                <button class="btn-secondary" id="bug-send">Save report</button>
+                <button class="btn-secondary" id="bug-send" data-i18n="settings.bug.saveButton">Save report</button>
                 <!-- Shown only when an upload endpoint is configured (capabilities
                      .bugreport_upload); files the report as a GitHub issue via the
                      proxy so no GitHub account is needed. -->
-                <button class="btn-primary" id="bug-upload" hidden>Send to maintainer</button>
+                <button class="btn-primary" id="bug-upload" hidden data-i18n="settings.bug.sendButton">Send to maintainer</button>
                 <!-- Revealed only after a failed send: retry creating the issue, or
                      download the saved report to send it manually (email/Discord). -->
-                <button class="btn-secondary" id="bug-retry" hidden>Retry send</button>
-                <button class="btn-secondary" id="bug-download" hidden>Download report</button>
+                <button class="btn-secondary" id="bug-retry" hidden data-i18n="settings.bug.retryButton">Retry send</button>
+                <button class="btn-secondary" id="bug-download" hidden data-i18n="settings.bug.downloadButton">Download report</button>
               </div>
               <div id="bug-result" class="sub" hidden></div>
             </section>
@@ -1042,11 +1042,11 @@
                  via the same DOMPurify markdown path as chat. -->
             <section class="card settings-section" id="sec-changelog" data-group="system" data-sec-label="Changelog">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="clock"></span>
-                <div class="card-head-text"><h3>Changelog</h3></div></div>
-              <div class="sub">See what changed in each localm release - the full version
+                <div class="card-head-text"><h3 data-i18n="settings.changelog.title">Changelog</h3></div></div>
+              <div class="sub" data-i18n="settings.changelog.help">See what changed in each localm release - the full version
               history, newest first.</div>
               <div class="actions">
-                <button class="btn-secondary" id="changelog-show">Show changelog</button>
+                <button class="btn-secondary" id="changelog-show" data-i18n="settings.changelog.showButton">Show changelog</button>
               </div>
             </section>
 
@@ -1068,15 +1068,15 @@
                  no update proxy configured. Only the app-update sub-block gates. -->
             <section class="card settings-section" id="sec-updates" data-group="system" data-sec-label="Updates">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="download"></span>
-                <div class="card-head-text"><h3>Updates</h3></div></div>
+                <div class="card-head-text"><h3 data-i18n="settings.update.title">Updates</h3></div></div>
 
               <div class="update-subsection" id="app-update-block" hidden>
-                <h4 class="update-sub-head">App update</h4>
-                <div class="sub">Check for a newer localm build. You always start it - localm
+                <h4 class="update-sub-head" data-i18n="settings.update.appSubHead">App update</h4>
+                <div class="sub" data-i18n="settings.update.appHelp">Check for a newer localm build. You always start it - localm
                 never updates itself. Most updates apply with just a restart.</div>
                 <div class="actions">
-                  <button class="btn-secondary" id="update-check">Check for updates</button>
-                  <button class="btn-primary" id="update-apply" hidden>Update now</button>
+                  <button class="btn-secondary" id="update-check" data-i18n="settings.update.checkButton">Check for updates</button>
+                  <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
                 <div id="update-status" class="sub" hidden></div>
               </div>
@@ -1088,13 +1088,13 @@
                    a backup actually exists (GET /api/update/rollback), so on an
                    install that has never updated it is simply not there. -->
               <div class="update-subsection" id="app-rollback-block" hidden>
-                <h4 class="update-sub-head">Roll back</h4>
-                <div class="sub">Restore the build you were running before the last update,
+                <h4 class="update-sub-head" data-i18n="settings.rollback.subHead">Roll back</h4>
+                <div class="sub" data-i18n="settings.rollback.help">Restore the build you were running before the last update,
                 then restart. This is for an update that applied cleanly but turned out worse.
                 It restores that build's files; it does not undo package installs an update
                 made along the way.</div>
                 <div class="actions">
-                  <button class="btn-secondary" id="update-rollback">Roll back</button>
+                  <button class="btn-secondary" id="update-rollback" data-i18n="settings.rollback.rollbackButton">Roll back</button>
                 </div>
                 <div id="update-rollback-status" class="sub" hidden></div>
               </div>
@@ -1107,13 +1107,13 @@
                    after a Python upgrade, which is precisely when only the GUI (not
                    a fresh terminal) is available to ask for it. -->
               <div class="update-subsection" id="app-launcher-block">
-                <h4 class="update-sub-head">App launcher</h4>
-                <div class="sub">Rebuild the native launcher (LocaLM.exe on Windows, the
+                <h4 class="update-sub-head" data-i18n="settings.launcher.subHead">App launcher</h4>
+                <div class="sub" data-i18n="settings.launcher.help">Rebuild the native launcher (LocaLM.exe on Windows, the
                 LocaLM menu entry on Linux) so Task Manager and the taskbar show LocaLM
                 instead of python. Needed again after a Python upgrade, which replaces
                 the interpreter this launcher is a copy of.</div>
                 <div class="actions">
-                  <button class="btn-secondary" id="rebuild-launcher">Rebuild launcher</button>
+                  <button class="btn-secondary" id="rebuild-launcher" data-i18n="settings.launcher.rebuildButton">Rebuild launcher</button>
                 </div>
                 <div id="rebuild-launcher-status" class="sub" hidden></div>
               </div>
@@ -1129,31 +1129,31 @@
                    bound to it by tests/test_gui_runtime_backend_options.py, which
                    reads THIS file. Do not add, rename or drop one here alone. -->
               <div class="update-subsection">
-                <h4 class="update-sub-head">Inference runtime</h4>
-                <div class="sub">Check for a newer llama.cpp runtime build for your installed
+                <h4 class="update-sub-head" data-i18n="settings.runtime.subHead">Inference runtime</h4>
+                <div class="sub" data-i18n="settings.runtime.help">Check for a newer llama.cpp runtime build for your installed
                 backend, or install one on a machine that has none yet. You always start it -
                 it never re-provisions on its own. A build that fails to load on this machine
                 is never kept: setup-llama walks back to an older one that does.</div>
                 <div id="runtime-update-status" class="sub" hidden></div>
-                <label for="runtime-backend">Backend</label>
+                <label for="runtime-backend" data-i18n="settings.runtime.backendLabel">Backend</label>
                 <select id="runtime-backend" style="max-width:340px">
-                  <option value="">Keep the installed backend</option>
-                  <option value="auto">auto - detect this machine's GPU</option>
-                  <option value="vulkan">vulkan - any GPU vendor, via the display driver</option>
-                  <option value="cuda">cuda - NVIDIA</option>
-                  <option value="sycl">sycl - Intel</option>
-                  <option value="hip">hip - AMD, with a system ROCm/HIP toolkit</option>
-                  <option value="cpu">cpu - no GPU</option>
-                  <option value="metal">metal - Apple Silicon</option>
-                  <option value="amd-rocm">amd-rocm - AMD RX 6000, self-contained</option>
+                  <option value="" data-i18n="settings.runtime.optKeepBackend">Keep the installed backend</option>
+                  <option value="auto" data-i18n="settings.runtime.optAuto">auto - detect this machine's GPU</option>
+                  <option value="vulkan" data-i18n="settings.runtime.optVulkan">vulkan - any GPU vendor, via the display driver</option>
+                  <option value="cuda" data-i18n="settings.runtime.optCuda">cuda - NVIDIA</option>
+                  <option value="sycl" data-i18n="settings.runtime.optSycl">sycl - Intel</option>
+                  <option value="hip" data-i18n="settings.runtime.optHip">hip - AMD, with a system ROCm/HIP toolkit</option>
+                  <option value="cpu" data-i18n="settings.runtime.optCpu">cpu - no GPU</option>
+                  <option value="metal" data-i18n="settings.runtime.optMetal">metal - Apple Silicon</option>
+                  <option value="amd-rocm" data-i18n="settings.runtime.optAmdRocm">amd-rocm - AMD RX 6000, self-contained</option>
                 </select>
-                <div class="sub">Which prebuilt to install. Changing this re-downloads the
+                <div class="sub" data-i18n="settings.runtime.backendHelp">Which prebuilt to install. Changing this re-downloads the
                 runtime; nothing is replaced while a model is loaded, and your pick is never
                 swapped silently if it turns out not to load here.</div>
-                <label for="runtime-tag">Build</label>
+                <label for="runtime-tag" data-i18n="settings.runtime.buildLabel">Build</label>
                 <input type="text" id="runtime-tag" style="max-width:340px"
-                       placeholder="leave blank to keep the current build">
-                <div class="sub">Optional. A llama.cpp release tag such as
+                       placeholder="leave blank to keep the current build" data-i18n-placeholder="settings.runtime.tagPlaceholder">
+                <div class="sub" data-i18n-rich="settings.runtime.tagHelp">Optional. A llama.cpp release tag such as
                 <code>b10355</code> installs exactly that build and pins it;
                 <code>default</code> returns to the build localm ships and confirmed, and
                 <code>latest</code> tracks upstream's newest, which localm has not tested.</div>
@@ -1163,13 +1163,13 @@
                      user who picks a backend and then has to scroll back up to press
                      it has been made to work for no reason. -->
                 <div class="actions">
-                  <button class="btn-secondary" id="runtime-update-check">Check for runtime update</button>
-                  <button class="btn-primary" id="runtime-update-apply" hidden>Update runtime</button>
+                  <button class="btn-secondary" id="runtime-update-check" data-i18n="settings.runtime.checkButton">Check for runtime update</button>
+                  <button class="btn-primary" id="runtime-update-apply" hidden data-i18n="settings.runtime.labelUpdate">Update runtime</button>
                   <!-- The GUI form of `setup-llama --rollback`. Shown only when
                        /api/runtime/check reports a "previous" build for the
                        installed backend - unlike the two controls above, it acts
                        on neither of them and needs no field filled in first. -->
-                  <button class="btn-secondary" id="runtime-rollback" hidden>Roll back</button>
+                  <button class="btn-secondary" id="runtime-rollback" hidden data-i18n="settings.runtime.rollbackButton">Roll back</button>
                 </div>
                 <div id="runtime-rollback-status" class="sub" hidden></div>
                 <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
@@ -1192,10 +1192,10 @@
                    instead of saving these toggles. The more specific class must
                    win. -->
               <div class="update-subsection" id="update-toggles-block" hidden>
-                <h4 class="update-sub-head">Update behavior</h4>
+                <h4 class="update-sub-head" data-i18n="settings.update.toggleHeading">Update behavior</h4>
                 <div id="settings-sec-core-Updates" class="settings-fields"></div>
                 <div class="actions">
-                  <button class="btn-primary settings-section-save" id="update-toggles-save">Save Updates</button>
+                  <button class="btn-primary settings-section-save" id="update-toggles-save" data-i18n="settings.update.saveButton">Save Updates</button>
                 </div>
               </div>
             </section>
@@ -1229,38 +1229,38 @@
 
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="book"></span>
-                <div class="card-head-text"><h3>Issues</h3></div></div>
-              <div class="sub">Open and resolved issues for this project (read-only) - see
+                <div class="card-head-text"><h3 data-i18n="settings.issues.title">Issues</h3></div></div>
+              <div class="sub" data-i18n="settings.issues.help">Open and resolved issues for this project (read-only) - see
               whether a bug you reported has been fixed.</div>
               <div class="actions">
-                <button class="btn-secondary" id="issues-refresh">Refresh</button>
+                <button class="btn-secondary" id="issues-refresh" data-i18n="settings.issues.refreshButton">Refresh</button>
               </div>
               <div id="issues-list" class="sub"></div>
             </section>
 
             <section class="card settings-section" id="sec-logs" data-group="system" data-sec-label="Logs">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="file"></span>
-                <div class="card-head-text"><h3>Logs</h3></div></div>
-              <div class="sub">Copy every log file of this running instance into a folder you
+                <div class="card-head-text"><h3 data-i18n="settings.logs.title">Logs</h3></div></div>
+              <div class="sub" data-i18n="settings.logs.help">Copy every log file of this running instance into a folder you
               choose - handy when sending diagnostics. Each export goes into its own
               timestamped subfolder, so nothing is overwritten.</div>
               <div class="actions">
-                <button class="btn-secondary" id="logs-export">Export logs to a folder…</button>
+                <button class="btn-secondary" id="logs-export" data-i18n="settings.logs.exportButton">Export logs to a folder…</button>
               </div>
               <div id="logs-result" class="sub" hidden></div>
             </section>
 
             <section class="card settings-section" id="sec-uploads" data-group="system" data-sec-label="Upload files">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="attach"></span>
-                <div class="card-head-text"><h3>Upload files</h3></div></div>
-              <div class="sub">Send files from this device or your phone into localm's
+                <div class="card-head-text"><h3 data-i18n="settings.uploads.title">Upload files</h3></div></div>
+              <div class="sub" data-i18n-rich="settings.uploads.help">Send files from this device or your phone into localm's
               <code>uploads</code> folder, so models and tools can read them. They are stored
               on the host, separate from chat attachments. Large model weights use the model
               downloader instead.</div>
               <div class="actions">
                 <input type="file" id="upload-input" multiple style="display:none">
-                <button class="btn-secondary" id="upload-choose">Choose files…</button>
-                <button class="btn-primary" id="upload-send">Upload</button>
+                <button class="btn-secondary" id="upload-choose" data-i18n="settings.uploads.chooseFiles">Choose files…</button>
+                <button class="btn-primary" id="upload-send" data-i18n="settings.uploads.uploadButton">Upload</button>
               </div>
               <div id="upload-selected" class="sub"></div>
               <div id="upload-result" class="sub" hidden></div>

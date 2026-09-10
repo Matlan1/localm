@@ -1378,16 +1378,14 @@ document.addEventListener("click", async (e) => {
 // re-execs the same process, so it comes back on the same port.
 if ($("server-restart")) {
   $("server-restart").onclick = () => {
-    confirmDanger("Restart the server?",
-      "This restarts the LocaLM server (the model is unloaded first, then reloaded). " +
-      "It will be briefly unavailable, then reconnect automatically.",
-      "Restart", async () => {
+    confirmDanger(t("settings.server.restartTitle"), t("settings.server.restartBody"),
+      t("settings.server.restartConfirm"), async () => {
         const before = window.fetchWhoami ? await window.fetchWhoami() : null;
         try {
           const r = await fetch("/v1/server/restart",
                                 { method: "POST", headers: authHeaders() });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-          toast("Server restarting…");
+          toast(t("settings.server.restartingToast"));
           // The reconnect overlay polls /whoami's instance_id until a NEW
           // process answers, rather than reloading on a bounded count of
           // reachable polls that the still-shutting-down old process can
@@ -1397,7 +1395,7 @@ if ($("server-restart")) {
               priorInstanceId: before && before.instance_id
             }), 800);
           }
-        } catch (e) { toast("Could not restart: " + e.message, true); }
+        } catch (e) { toast(t("settings.server.restartFailed", { message: e.message }), true); }
       });
   };
 }
@@ -1406,18 +1404,16 @@ if ($("server-restart")) {
 // before exit.
 if ($("server-shutdown")) {
   $("server-shutdown").onclick = () => {
-    confirmDanger("Shut down the server?",
-      "This stops the LocaLM server (the model is unloaded first). You will need to " +
-      "start it again from your launcher or terminal.",
-      "Shut down", async () => {
+    confirmDanger(t("settings.server.shutdownTitle"), t("settings.server.shutdownBody"),
+      t("settings.server.shutdownConfirm"), async () => {
         try {
           const r = await fetch("/v1/server/shutdown",
                                 { method: "POST", headers: authHeaders() });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-          toast("Server shutting down…");
+          toast(t("settings.server.shuttingDownToast"));
           // Show the reconnect overlay while the server goes away.
           if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
-        } catch (e) { toast("Could not shut down: " + e.message, true); }
+        } catch (e) { toast(t("settings.server.shutdownFailed", { message: e.message }), true); }
       });
   };
 }
@@ -1449,43 +1445,42 @@ export async function refreshInstancesCard() {
   if (myGen !== _instancesRenderGen) return;
 
   if (!rows.length) {
-    box.replaceChildren(emptyState("folder", "No other instances running",
-      "Only the server behind this page is running right now."));
+    box.replaceChildren(emptyState("folder", t("settings.instances.emptyTitle"),
+      t("settings.instances.emptyBody")));
     return;
   }
 
   const table = el("table", "data-table");
   const thead = el("thead");
   const hr = el("tr");
-  for (const label of ["Directory", "Surface", "Address", "Status", ""]) {
+  for (const label of [t("settings.instances.colDirectory"), t("settings.instances.colSurface"),
+    t("settings.instances.colAddress"), t("settings.instances.colStatus"), ""]) {
     hr.appendChild(el("th", "", label));
   }
   thead.appendChild(hr);
   const tbody = el("tbody");
   for (const inst of rows) {
     const tr = el("tr");
-    tr.appendChild(el("td", "", inst.root_dir || "(not reported)"));
+    tr.appendChild(el("td", "", inst.root_dir || t("settings.instances.notReported")));
     tr.appendChild(el("td", "", inst.mode || "?"));
     tr.appendChild(el("td", "", inst.address || ""));
-    tr.appendChild(el("td", "", inst.alive ? "live" : "no answer"));
+    tr.appendChild(el("td", "",
+      inst.alive ? t("settings.instances.live") : t("settings.instances.noAnswer")));
     const actionsTd = el("td");
     if (inst.same_install === false) {
-      const note = el("span", "instances-foreign", "other install");
-      note.title = "This server belongs to a different LocaLM install, which " +
-        "keeps its own data folder. Stop it from that install's own window, or " +
-        "from the terminal it was started in.";
+      const note = el("span", "instances-foreign", t("settings.instances.otherInstall"));
+      note.title = t("settings.instances.otherInstallTitle");
       actionsTd.appendChild(note);
       tr.appendChild(actionsTd);
       tbody.appendChild(tr);
       continue;
     }
-    const stopBtn = el("button", "btn-secondary btn-danger", "Stop");
+    const stopBtn = el("button", "btn-secondary btn-danger", t("settings.instances.stop"));
     stopBtn.onclick = () => {
-      confirmDanger("Stop this instance?",
-        `This stops the LocaLM server at ${inst.address} (serving ` +
-        `${inst.root_dir || "an unknown directory"}). Its model is unloaded ` +
-        "first when possible.",
-        "Stop", async () => {
+      const dir = inst.root_dir || t("settings.instances.unknownDir");
+      confirmDanger(t("settings.instances.stopTitle"),
+        t("settings.instances.stopBody", { address: inst.address, dir }),
+        t("settings.instances.stop"), async () => {
           stopBtn.disabled = true;
           try {
             const resp = await fetch(
@@ -1493,10 +1488,11 @@ export async function refreshInstancesCard() {
               { method: "POST", headers: authHeaders() });
             const d = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(d.detail || resp.statusText);
-            toast(`Stopped ${inst.root_dir || inst.instance_id}`);
+            toast(t("settings.instances.stoppedToast",
+              { name: inst.root_dir || inst.instance_id }));
             refreshInstancesCard();
           } catch (e) {
-            toast("Could not stop: " + e.message, true);
+            toast(t("settings.instances.stopFailed", { message: e.message }), true);
             stopBtn.disabled = false;
           }
         });
@@ -1545,7 +1541,7 @@ export async function submitBugReport(upload, isRetry = false) {
   const happened = (($("bug-happened") && $("bug-happened").value) || "").trim();
   // Either "what were you doing" or "what happened" alone is enough to send,
   // mirroring the server's own "description or what_happened" check.
-  if (!desc && !happened) { toast("Describe the problem first", true); return; }
+  if (!desc && !happened) { toast(t("settings.bug.describeFirst"), true); return; }
   const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
   const saveBtn = $("bug-send"), upBtn = $("bug-upload");
   if (saveBtn) saveBtn.disabled = true;
@@ -1579,7 +1575,7 @@ export async function submitBugReport(upload, isRetry = false) {
       await countdownRetryBugReport(secs, out);
       return;   // the retry (and the finally below) re-enable the buttons
     }
-    const where = data.path || data.filename || "report";
+    const where = data.path || data.filename || t("settings.bug.unnamedReport");
     const sent = upload && data.uploaded;
     const uploadFailed = upload && data.upload_error && !data.rate_limited;
     // Stash the saved report so "Download report" can hand it to the tester.
@@ -1592,21 +1588,21 @@ export async function submitBugReport(upload, isRetry = false) {
     if (out) {
       out.hidden = false;
       if (sent) {
-        out.textContent = "Sent." +
-          (data.issue_url ? " Tracking issue: " + data.issue_url : "");
+        out.textContent = t("settings.bug.sent") +
+          (data.issue_url ? t("settings.bug.trackingIssue", { url: data.issue_url }) : "");
       } else if (data.rate_limited) {
-        out.textContent = "Saved: " + where +
-          "  -  rate limited; wait a bit and click Send again.";
+        out.textContent = t("settings.bug.savedRateLimited", { where });
       } else if (uploadFailed) {
         // Name where it failed (the diagnosed message) and that the report is
         // kept, so it can be retried, downloaded or emailed.
-        out.textContent = "Could not send: " +
-          (data.upload_message || data.upload_error) +
-          "  The report is saved" + (where ? " (" + where + ")" : "") +
-          " - retry, download it, or email " + (data.maintainer || "the maintainer") + ".";
+        const message = data.upload_message || data.upload_error;
+        const whereSuffix = where ? t("settings.bug.whereSuffix", { where }) : "";
+        const maintainer = data.maintainer || t("settings.bug.defaultMaintainer");
+        out.textContent = t("settings.bug.couldNotSend", { message, whereSuffix, maintainer });
       } else {
-        out.textContent = "Saved: " + where +
-          (data.maintainer ? "  -  send it to " + data.maintainer : "");
+        const maintainerSuffix = data.maintainer
+          ? t("settings.bug.maintainerSuffix", { maintainer: data.maintainer }) : "";
+        out.textContent = t("settings.bug.saved", { where }) + maintainerSuffix;
       }
     }
     // Keep the description on ANY failed send so Retry re-uses it; clear it once
@@ -1616,12 +1612,14 @@ export async function submitBugReport(upload, isRetry = false) {
       if ($("bug-expected")) $("bug-expected").value = "";
       if ($("bug-happened")) $("bug-happened").value = "";
     }
-    if (sent) toast("Bug report sent");
-    else if (data.rate_limited) toast("Rate limited; wait a bit and click Send again", true);
-    else if (uploadFailed) toast("Could not send: " + (data.upload_message || data.upload_error), true);
-    else toast("Bug report saved");
+    if (sent) toast(t("settings.bug.sentToast"));
+    else if (data.rate_limited) toast(t("settings.bug.rateLimitedToast"), true);
+    else if (uploadFailed) {
+      toast(t("settings.bug.couldNotSendToast",
+        { message: data.upload_message || data.upload_error }), true);
+    } else toast(t("settings.bug.savedToast"));
   } catch (e) {
-    toast("Could not file report: " + e.message, true);
+    toast(t("settings.bug.fileFailed", { message: e.message }), true);
   } finally {
     if (saveBtn) saveBtn.disabled = false;
     if (upBtn) upBtn.disabled = false;
@@ -1635,11 +1633,11 @@ async function countdownRetryBugReport(secs, out) {
   for (let s = secs; s > 0; s--) {
     if (out) {
       out.hidden = false;
-      out.textContent = "Rate limited - retrying in " + s + "s...";
+      out.textContent = t("settings.bug.retryingIn", { secs: s });
     }
     await new Promise((res) => setTimeout(res, 1000));
   }
-  if (out) out.textContent = "Retrying...";
+  if (out) out.textContent = t("settings.bug.retrying");
   await submitBugReport(true, true);
 }
 
@@ -1658,14 +1656,15 @@ export async function updateCheck() {
     const d = await r.json().catch(() => ({}));
     if (out) out.hidden = false;
     if (!r.ok) throw new Error(d.detail || r.statusText);
-    if (d.error) { if (out) out.textContent = "Could not check: " + d.error; return; }
-    if (!d.available) { if (out) out.textContent = "The updater is not configured."; return; }
+    if (d.error) { if (out) out.textContent = t("settings.update.checkFailed", { message: d.error }); return; }
+    if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
     if (d.newer && d.asset && d.asset.id) {
-      if (out) out.textContent = "Update available: " + d.latest + " (you have " + d.current +
-        ")." + (d.notes ? "  " + String(d.notes).slice(0, 200) : "");
+      if (out) out.textContent = t("settings.update.available",
+        { latest: d.latest, current: d.current }) +
+        (d.notes ? "  " + String(d.notes).slice(0, 200) : "");
       if (applyBtn) applyBtn.hidden = false;
     } else if (d.newer) {
-      if (out) out.textContent = "Update " + d.latest + " is available but has no build attached.";
+      if (out) out.textContent = t("settings.update.availableNoAsset", { latest: d.latest });
       if (applyBtn) applyBtn.hidden = true;
     } else if (d.comparable === false) {
       // is_newer() returns False both for a genuine tie or older release and for
@@ -1673,38 +1672,43 @@ export async function updateCheck() {
       // release-5). Keyed like cli/maintenance.py's .get("comparable", True):
       // strict === false, so an absent key means comparable. The wording carries
       // no "up to date" substring.
-      if (out) out.textContent = "Could not tell whether " + d.latest +
-        " is newer than your version " + d.current +
-        " (unrecognized version format) - check the release notes yourself" +
-        " before assuming there is nothing newer.";
+      if (out) out.textContent = t("settings.update.uncomparable",
+        { latest: d.latest, current: d.current });
       if (applyBtn) applyBtn.hidden = true;
     } else {
-      if (out) out.textContent = "localm is up to date (running " + d.current + ").";
+      if (out) out.textContent = t("settings.update.upToDate", { current: d.current });
       if (applyBtn) applyBtn.hidden = true;
     }
-  } catch (e) { if (out) { out.hidden = false; out.textContent = "Could not check: " + e.message; } }
+  } catch (e) {
+    if (out) { out.hidden = false; out.textContent = t("settings.update.checkFailed", { message: e.message }); }
+  }
 }
 window.__localmUpdateCheck = updateCheck;
 
 export async function updateApply() {
   const out = $("update-status"), btn = $("update-apply");
   if (btn) btn.disabled = true;
-  if (out) { out.hidden = false; out.textContent = "Downloading and applying ..."; }
+  if (out) { out.hidden = false; out.textContent = t("settings.update.downloading"); }
   try {
     const r = await fetch("/api/update/apply", { method: "POST", headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
     if (d.applied) {
-      if (out) out.textContent = "Updated to " + (d.version || "") +
-        (d.restarting ? ". Restarting ..." :
-          (d.klass === "setup" ? ". Re-run setup.bat to finish." : "."));
+      const version = d.version || "";
+      if (out) {
+        out.textContent = d.restarting
+          ? t("settings.update.updatedRestarting", { version })
+          : (d.klass === "setup"
+            ? t("settings.update.updatedSetup", { version })
+            : t("settings.update.updatedPlain", { version }));
+      }
       if (btn) btn.hidden = true;
     } else if (d.error) {
-      if (out) out.textContent = "Update failed (rolled back): " + d.error;
+      if (out) out.textContent = t("settings.update.failedRolledBack", { error: d.error });
     } else {
-      if (out) out.textContent = d.reason || "Nothing to apply.";
+      if (out) out.textContent = d.reason || t("settings.update.nothingToApply");
     }
-  } catch (e) { if (out) out.textContent = "Update failed: " + e.message; }
+  } catch (e) { if (out) out.textContent = t("settings.update.applyFailed", { message: e.message }); }
   finally { if (btn) btn.disabled = false; }
 }
 if ($("update-check")) $("update-check").onclick = updateCheck;
@@ -1724,8 +1728,10 @@ export async function updateRollbackCheck() {
     block.hidden = false;
     if (out) {
       out.hidden = false;
-      out.textContent = "This restores " + (d.version || "the previous build") +
-        (d.current ? " (you are running " + d.current + ")" : "") + ".";
+      const version = d.version || t("settings.rollback.unknownBuild");
+      const runningSuffix = d.current
+        ? t("settings.rollback.runningSuffix", { current: d.current }) : "";
+      out.textContent = t("settings.rollback.availableBase", { version }) + runningSuffix + ".";
     }
   } catch (e) {
     // Unconfirmed: stay hidden rather than offer a rollback that may not exist,
@@ -1738,25 +1744,25 @@ window.__localmRollbackCheck = updateRollbackCheck;
 
 export async function updateRollback() {
   const out = $("update-rollback-status"), btn = $("update-rollback");
-  confirmDanger("Roll back to the previous build?",
-    "This replaces the running LocaLM code with the build from before the last " +
-    "update, then restarts the server. Anything the newer build fixed comes back.",
-    "Roll back", async () => {
+  confirmDanger(t("settings.rollback.confirmTitle"), t("settings.rollback.confirmBody"),
+    t("settings.rollback.confirmLabel"), async () => {
       if (btn) btn.disabled = true;
-      if (out) { out.hidden = false; out.textContent = "Rolling back..."; }
+      if (out) { out.hidden = false; out.textContent = t("settings.rollback.rollingBack"); }
       try {
         const r = await fetch("/api/update/rollback",
                               { method: "POST", headers: authHeaders() });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
-        if (out) out.textContent = "Rolled back to " + (d.version || "the previous build") +
-          ". Restarting...";
+        if (out) {
+          out.textContent = t("settings.rollback.rolledBackTo",
+            { version: d.version || t("settings.rollback.unknownBuild") });
+        }
         // Not re-enabled: the server is re-execing and the reconnect overlay
         // takes over from here.
         if (btn) btn.hidden = true;
         if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
       } catch (e) {
-        if (out) out.textContent = "Roll back failed: " + e.message;
+        if (out) out.textContent = t("settings.rollback.failed", { message: e.message });
         if (btn) btn.disabled = false;
       }
     });
@@ -1770,7 +1776,7 @@ if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 export async function rebuildLauncher() {
   const out = $("rebuild-launcher-status"), btn = $("rebuild-launcher");
   if (btn) btn.disabled = true;
-  if (out) { out.hidden = false; out.textContent = "Rebuilding..."; }
+  if (out) { out.hidden = false; out.textContent = t("settings.launcher.rebuilding"); }
   try {
     const r = await fetch("/api/app/rebuild-launcher?force=true",
                           { method: "POST", headers: authHeaders() });
@@ -1781,11 +1787,14 @@ export async function rebuildLauncher() {
     const notes = (d.notes || []).join(" ");
     if (out) {
       out.textContent = d.ok
-        ? "Launcher rebuilt" + (d.path ? ": " + d.path : "") + (notes ? " (" + notes + ")" : ".")
-        : "Could not rebuild the launcher" + (notes ? ": " + notes : ".");
+        ? t("settings.launcher.rebuilt") +
+          (d.path ? t("settings.launcher.pathSuffix", { path: d.path }) : "") +
+          (notes ? t("settings.launcher.notesParenSuffix", { notes }) : ".")
+        : t("settings.launcher.couldNotRebuild") +
+          (notes ? t("settings.launcher.notesColonSuffix", { notes }) : ".");
     }
   } catch (e) {
-    if (out) out.textContent = "Rebuild failed: " + e.message;
+    if (out) out.textContent = t("settings.launcher.failed", { message: e.message });
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1835,12 +1844,16 @@ export async function postRuntimeUpdate(backend, tag, rollback) {
  *  not knowable and the label stays neutral. */
 export function runtimeApplyLabel(wanted, tag, state) {
   const installed = state && state.installed ? state.backend : null;
-  if (wanted === "auto") return installed ? "Re-detect and reinstall" : "Detect and install";
-  if (wanted && installed && wanted !== installed) return "Switch to " + wanted;
-  if (wanted && installed) return "Reinstall " + wanted;
-  if (wanted) return "Install " + wanted;
-  if (tag) return "Install build " + tag;
-  return installed ? "Update runtime" : "Install runtime";
+  if (wanted === "auto") {
+    return installed ? t("settings.runtime.labelReinstallAuto") : t("settings.runtime.labelInstallAuto");
+  }
+  if (wanted && installed && wanted !== installed) {
+    return t("settings.runtime.labelSwitchTo", { backend: wanted });
+  }
+  if (wanted && installed) return t("settings.runtime.labelReinstall", { backend: wanted });
+  if (wanted) return t("settings.runtime.labelInstall", { backend: wanted });
+  if (tag) return t("settings.runtime.labelInstallBuild", { tag });
+  return installed ? t("settings.runtime.labelUpdate") : t("settings.runtime.labelInstallRuntime");
 }
 
 /** Show or hide the action button, and label it for what it would do now.
@@ -1862,25 +1875,24 @@ export function syncRuntimeApply() {
 
 export async function runtimeUpdateCheck() {
   const out = $("runtime-update-status");
-  if (out) { out.hidden = false; out.textContent = "Checking..."; }
+  if (out) { out.hidden = false; out.textContent = t("settings.runtime.checking"); }
   try {
     const d = await fetchRuntimeCheck();
     runtimeCheckState = d;
     if (out) {
       if (!d.installed) {
-        out.textContent = "No llama.cpp runtime is installed yet - choose a backend below and install one.";
+        out.textContent = t("settings.runtime.notInstalled");
       } else {
-        const current = d.current || "an unrecorded build";
+        const current = d.current || t("settings.runtime.unrecordedBuild");
+        const pinnedSuffix = d.pinned ? t("settings.runtime.pinnedSuffix", { pinned: d.pinned }) : "";
         out.textContent = (d.newer
-          ? "A different build is available for " + d.backend + ": " + d.target +
-            " (you have " + current + ")."
-          : "Up to date (" + d.backend + " " + current + ").") +
-          (d.pinned ? " Pinned to " + d.pinned + "." : "");
+          ? t("settings.runtime.availableBuild", { backend: d.backend, target: d.target, current })
+          : t("settings.runtime.upToDate", { backend: d.backend, current })) + pinnedSuffix;
       }
     }
   } catch (e) {
     runtimeCheckState = null;
-    if (out) { out.hidden = false; out.textContent = "Could not check: " + e.message; }
+    if (out) { out.hidden = false; out.textContent = t("settings.runtime.checkFailed", { message: e.message }); }
   }
   syncRuntimeApply();
   syncRuntimeRollback();
@@ -1894,7 +1906,7 @@ export function syncRuntimeRollback() {
   if (btn) btn.hidden = !prev;
   if (out) {
     out.hidden = !prev;
-    if (prev) out.textContent = "A previous build is on record: " + prev + ".";
+    if (prev) out.textContent = t("settings.runtime.previousBuild", { previous: prev });
   }
 }
 
@@ -1910,14 +1922,19 @@ export async function runtimeProvision(backend, tag, rollback) {
   if (rbBtn) rbBtn.disabled = true;
   if (out) {
     out.hidden = false;
-    out.textContent = rollback ? "Rolling back the runtime..." : "Provisioning the runtime...";
+    out.textContent = rollback
+      ? t("settings.runtime.rollingBack") : t("settings.runtime.provisioning");
   }
   if (log) { log.style.display = ""; log.textContent = ""; }
   let jobId;
   try {
     jobId = await postRuntimeUpdate(backend, tag, rollback);
   } catch (e) {
-    if (out) out.textContent = (rollback ? "Roll back failed: " : "Update failed: ") + e.message;
+    if (out) {
+      out.textContent = rollback
+        ? t("settings.runtime.rollbackFailed", { message: e.message })
+        : t("settings.runtime.updateFailed", { message: e.message });
+    }
     if (btn) btn.disabled = false;
     if (rbBtn) rbBtn.disabled = false;
     if (log) log.style.display = "none";
@@ -1932,8 +1949,9 @@ export async function runtimeProvision(backend, tag, rollback) {
   });
   const ok = !!(end && end.status === "done");
   if (out) {
-    out.textContent = ok ? (rollback ? "Rolled back." : "Runtime provisioned.") :
-      (tail.join(" ").trim() || "The update did not finish. See the log below.");
+    out.textContent = ok
+      ? (rollback ? t("settings.runtime.rolledBack") : t("settings.runtime.provisioned"))
+      : (tail.join(" ").trim() || t("settings.runtime.didNotFinish"));
   }
   if (btn) btn.disabled = false;
   if (rbBtn) rbBtn.disabled = false;
@@ -1959,14 +1977,13 @@ export function runtimeUpdateApply() {
   // counts as different: it resolves from hardware detection and can land on
   // another backend.
   if (installed && wanted && wanted !== installed) {
+    const target = wanted === "auto"
+      ? t("settings.runtime.switchTargetAuto")
+      : t("settings.runtime.switchTargetNamed", { wanted });
     confirmDanger(
-      "Switch the inference runtime",
-      "This replaces the installed " + installed + " runtime with " +
-      (wanted === "auto" ? "whichever backend localm detects for this machine"
-                         : "a " + wanted + " build") +
-      ". It cannot run while a model is loaded, and if the new build does not " +
-      "work here localm says so rather than leaving it installed.",
-      "Switch", () => runtimeProvision(wanted, tag));
+      t("settings.runtime.switchTitle"),
+      t("settings.runtime.switchBody", { installed, target }),
+      t("settings.runtime.switchConfirm"), () => runtimeProvision(wanted, tag));
     return;
   }
   runtimeProvision(wanted, tag);
@@ -1977,10 +1994,9 @@ export function runtimeRollbackApply() {
   const state = runtimeCheckState;
   if (!state || !state.installed || !state.previous) return;
   confirmDanger(
-    "Roll back the inference runtime",
-    "This replaces the installed " + state.backend + " runtime with the " +
-    "previous build (" + state.previous + ") and restarts loading with it.",
-    "Roll back", () => runtimeProvision("", "", true));
+    t("settings.runtime.rollbackTitle"),
+    t("settings.runtime.rollbackBody", { backend: state.backend, previous: state.previous }),
+    t("settings.runtime.rollbackConfirm"), () => runtimeProvision("", "", true));
 }
 if ($("runtime-update-check")) $("runtime-update-check").onclick = runtimeUpdateCheck;
 if ($("runtime-update-apply")) $("runtime-update-apply").onclick = runtimeUpdateApply;
@@ -1995,19 +2011,19 @@ if ($("runtime-tag")) $("runtime-tag").oninput = syncRuntimeApply;
 // DOMPurify(marked) path chat uses. A missing or failed fetch is shown in the
 // modal, never left blank.
 export async function showChangelog() {
-  openModal("Changelog", (body) => {
+  openModal(t("settings.changelog.title"), (body) => {
     const md = el("div", "changelog-md");
-    md.textContent = "Loading the changelog...";
+    md.textContent = t("settings.changelog.loading");
     body.appendChild(md);
     fetch("/api/changelog", { headers: authHeaders() })
       .then(async (r) => {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
-        if (!d.available) { md.textContent = "No changelog is available in this build."; return; }
+        if (!d.available) { md.textContent = t("settings.changelog.none"); return; }
         md.textContent = "";
         renderMarkdown(md, d.markdown || "");
       })
-      .catch((e) => { md.textContent = "Could not load the changelog: " + e.message; });
+      .catch((e) => { md.textContent = t("settings.changelog.failed", { message: e.message }); });
   });
 }
 if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
@@ -2015,19 +2031,19 @@ if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
 // Issues: read-only list (textContent only - never raw innerHTML for proxy data).
 export async function issuesRefresh() {
   const out = $("issues-list");
-  if (out) out.textContent = "Loading ...";
+  if (out) out.textContent = t("settings.issues.loading");
   try {
     const r = await fetch("/api/issues", { headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
     if (!out) return;
-    if (d.error) { out.textContent = "Could not load: " + d.error; return; }
+    if (d.error) { out.textContent = t("settings.issues.loadError", { error: d.error }); return; }
     const list = d.issues || [];
     // Reached only on a SUCCESSFUL fetch of an empty list; the error paths above
     // and below say "could not load" instead.
     if (!list.length) {
-      out.replaceChildren(emptyState("book", "No open issues",
-        "Reported bugs that are still open show up here."));
+      out.replaceChildren(emptyState("book", t("settings.issues.emptyTitle"),
+        t("settings.issues.emptyBody")));
       return;
     }
     out.textContent = "";
@@ -2037,12 +2053,12 @@ export async function issuesRefresh() {
       if (it.html_url) {
         const a = document.createElement("a");
         a.href = it.html_url; a.target = "_blank"; a.rel = "noopener";
-        a.textContent = " (open)";
+        a.textContent = t("settings.issues.openSuffix");
         row.appendChild(a);
       }
       out.appendChild(row);
     }
-  } catch (e) { if (out) out.textContent = "Could not load issues: " + e.message; }
+  } catch (e) { if (out) out.textContent = t("settings.issues.loadFailed", { message: e.message }); }
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
 
@@ -2050,7 +2066,7 @@ if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
 // directory-picker modal, then POST the chosen path to /api/logs/export.
 if ($("logs-export")) {
   $("logs-export").onclick = async () => {
-    const dest = await pickDirectory("Choose a folder for the exported logs");
+    const dest = await pickDirectory(t("settings.logs.pickTitle"));
     if (!dest) return;                       // dismissed
     const btn = $("logs-export");
     btn.disabled = true;
@@ -2066,15 +2082,15 @@ if ($("logs-export")) {
       if (out) {
         out.hidden = false;
         out.textContent = data.copied
-          ? `Exported ${data.copied} log file(s) to: ${data.dest}`
-          : (data.message || "No logs found to export.");
+          ? tn("settings.logs.exported", data.copied, { dest: data.dest })
+          : (data.message || t("settings.logs.none"));
         // A partial export names which files failed.
         if (data.warning) out.textContent += `  (${data.warning})`;
       }
-      toast(data.copied ? `Exported ${data.copied} log file(s)` : "No logs to export",
+      toast(data.copied ? tn("settings.logs.exportedToast", data.copied) : t("settings.logs.noneToast"),
         !data.copied || !!data.warning);
     } catch (e) {
-      toast("Could not export logs: " + e.message, true);
+      toast(t("settings.logs.failed", { message: e.message }), true);
     } finally {
       btn.disabled = false;
     }
@@ -2097,8 +2113,8 @@ export async function refreshUploadsList() {
     // The empty state for a readable but empty list, distinct from the
     // read-only-key early return above, which leaves the list blank.
     if (!(data.items || []).length) {
-      list.appendChild(emptyState("attach", "No uploaded files",
-        "Files you send here are readable by models and tools."));
+      list.appendChild(emptyState("attach", t("settings.uploads.emptyTitle"),
+        t("settings.uploads.emptyBody")));
       return;
     }
     for (const it of (data.items || [])) {
@@ -2108,7 +2124,7 @@ export async function refreshUploadsList() {
       span.textContent = `${it.name}  ·  ${fmtBytes(it.bytes)}`;
       const del = document.createElement("button");
       del.className = "btn-secondary upload-del";
-      del.textContent = "Remove";
+      del.textContent = t("settings.uploads.remove");
       del.onclick = () => deleteUpload(it.name);
       li.appendChild(span);
       li.appendChild(del);
@@ -2126,10 +2142,10 @@ export async function deleteUpload(name) {
       const d = await r.json().catch(() => ({}));
       throw new Error(d.detail || r.statusText);
     }
-    toast("Removed " + name);
+    toast(t("settings.uploads.removedToast", { name }));
     refreshUploadsList();
   } catch (e) {
-    toast("Could not remove: " + e.message, true);
+    toast(t("settings.uploads.removeFailed", { message: e.message }), true);
   }
 }
 window.deleteUpload = deleteUpload;
@@ -2143,7 +2159,8 @@ if ($("upload-input")) {
     const label = $("upload-selected");
     if (label) {
       label.textContent = files.length
-        ? `${files.length} file(s) selected: ${files.map((f) => f.name).join(", ")}`
+        ? t("settings.uploads.selectedLabel",
+          { count: files.length, names: files.map((f) => f.name).join(", ") })
         : "";
     }
   };
@@ -2153,7 +2170,7 @@ if ($("upload-send")) {
   $("upload-send").onclick = async () => {
     const input = $("upload-input");
     const files = input && input.files ? Array.from(input.files) : [];
-    if (!files.length) { toast("Choose a file to upload first", true); return; }
+    if (!files.length) { toast(t("settings.uploads.chooseFirst"), true); return; }
     const fd = new FormData();
     for (const f of files) fd.append("file", f, f.name);
     const headers = authHeaders();
@@ -2168,15 +2185,16 @@ if ($("upload-send")) {
       const out = $("upload-result");
       if (out) {
         out.hidden = false;
-        out.textContent = `Uploaded ${n} file(s) to: ${data.dir || "uploads"}`;
+        out.textContent = tn("settings.uploads.uploadedResult", n,
+          { dir: data.dir || t("settings.uploads.unnamedDir") });
       }
       input.value = "";
       const label = $("upload-selected");
       if (label) label.textContent = "";
-      toast(`Uploaded ${n} file(s)`);
+      toast(tn("settings.uploads.uploadedToast", n));
       refreshUploadsList();
     } catch (e) {
-      toast("Upload failed: " + e.message, true);
+      toast(t("settings.uploads.uploadFailed", { message: e.message }), true);
     } finally {
       btn.disabled = false;
     }
@@ -2739,9 +2757,13 @@ if (unloadAllBtn) {
 
 // The table is painted from a fetched /api/models response, not marked up in
 // index.html, so it is redrawn when the interface language changes.
-// applyDiscSource() re-derives the search placeholder.
+// applyDiscSource() re-derives the search placeholder. The three Settings
+// lists redrawn alongside it are fetched the same way (onViewShown, dispatch.js).
 document.addEventListener("localm:language", () => {
   refreshModelsPage();
   applyDiscSource();
+  refreshInstancesCard();
+  refreshUploadsList();
+  runtimeUpdateCheck();
 });
 
