@@ -134,11 +134,17 @@ jobs:
     name: lint + hygiene + tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # A wedged pytest run makes no progress and never exits, so without this the
-    # job holds a runner for GitHub's 360-minute default, on both platforms. The
-    # suite takes about 10 minutes; 45 leaves room for a slow runner while still
-    # failing a hang in a readable time. The hang shape is real and documented:
-    # a worker at 0.00s CPU with no step movement.
-    timeout-minutes: 45
+    # job holds a runner for GitHub's 360-minute default, on both platforms at
+    # once (the matrix does not fail fast). MEASURED whole-job durations, which
+    # are what this bounds - the tests STEP alone is roughly half:
+    #   ubuntu   11m20s (2026-09-07 schedule), 13m03s (PR 1775)
+    #   windows  20m58s (2026-09-07 schedule), 20m03s (PR 1775)
+    # Windows is the leg that varies and it sets the floor. 60 is ~2.9x its
+    # observed worst, so an unusually slow runner does not trip it: a false
+    # timeout reads as a hang and sends someone chasing one, while an extra
+    # quarter hour on a genuine hang costs almost nothing. Retune from the
+    # numbers above, not from the tests step.
+    timeout-minutes: 60
     # Never on the abi-drift push trigger (that runs abi-check only), and on a
     # pull_request only when the PR carries the `full-ci` label. Unconditional
     # for workflow_dispatch and schedule.
