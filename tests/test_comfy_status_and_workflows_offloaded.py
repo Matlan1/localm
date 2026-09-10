@@ -261,6 +261,10 @@ def test_routes_serialize_concurrent_delete_and_list_via_real_http(tmp_path, mon
 
     import localm.media_workflows as mw
 
+    # Below the 10s join window: a stalled lock then surfaces as a 504 inside
+    # the join instead of a 60s wait that would also stall TestClient.__exit__.
+    monkeypatch.setattr(mw, "_WORKFLOW_RMW_TIMEOUT_S", 5.0)
+
     app = _media_app(tmp_path, monkeypatch)
     d = mw.workflows_dir("image")
     d.mkdir(parents=True, exist_ok=True)
@@ -299,6 +303,12 @@ def test_routes_serialize_concurrent_delete_and_list_via_real_http(tmp_path, mon
             t.join(timeout=10)
 
     assert not errors, f"a request raised instead of returning a response: {errors!r}"
-    assert 500 not in statuses, (
-        f"a concurrent delete/list race produced a 500 - the routes are not "
-        f"actually serialized: {statuses}")
+    assert all(not t.is_alive() for t in threads), (
+        "a request thread did not finish within the join timeout - the "
+        "per-media lock may be deadlocked")
+    assert len(statuses) == len(threads), (
+        f"expected {len(threads)} responses, got {len(statuses)}: {statuses}")
+    assert set(statuses) == {200}, (
+        f"a concurrent delete/list race did not return a clean 200 for every "
+        f"request - the routes are not actually serialized (a 504 here is the "
+        f"stall signature): {statuses}")

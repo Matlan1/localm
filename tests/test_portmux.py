@@ -107,9 +107,22 @@ def test_tls_on_plain_port_is_handled_and_server_survives(plain_server):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    with pytest.raises((ssl.SSLError, OSError, ConnectionError)):
-        tls_sock = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
-        tls_sock.do_handshake()
+
+    exc = None
+    start = time.monotonic()
+    try:
+        ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+    except OSError as e:
+        exc = e
+    elapsed = time.monotonic() - start
+    assert exc is not None, "the plain-HTTP port completed a TLS handshake"
+    assert not isinstance(exc, TimeoutError), (
+        "the server left the wrong-scheme TLS connection dangling instead of "
+        f"closing it (client hit its socket timeout): {exc!r}")
+    assert elapsed < 10.0, (
+        f"the handshake took {elapsed:.1f}s to fail - the server is stalling "
+        f"the close instead of refusing it cleanly")
+
     try:
         raw.close()
     except OSError:
