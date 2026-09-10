@@ -31,6 +31,13 @@ Scans tracked files and fails on:
      and peers (image_gen / music_gen / video_gen -> media) are unordered, so
      neither can form a cycle and neither needs an allowlist. Function-local
      imports are ignored: only eager module-level edges count.
+  8. A console.print call site inside a module that runs in an isolated child
+     process (a spawned worker returns facts as data; the parent renders them).
+  9. A module-level import that goes UP the layering declared in
+     docs/layering.toml, or between two peers in the same tier. Every top-level
+     unit under localm/ must be placed in exactly one tier; a unit missing from
+     the map, a stale entry and a duplicate placement fail too. Function-local
+     imports are not counted, as in check 7.
 
 It also runs the release-file manifest gate (scripts/check_manifest.py): every
 tracked file must be classified release-include or release-exclude, nothing
@@ -882,10 +889,12 @@ def _install_hook() -> int:
 # imports are not counted: they are the intended way to break a cycle here.
 #
 # "MODULE-LEVEL" means "runs during import", not "unindented". A ``def``/``async
-# def``/``class`` body is deferred; a module-level ``try:``/``if:`` body is not, so
-# both branches of an ``if``/``try`` are walked, while ``def``/``class`` bodies
-# nested inside one are still skipped. ``if TYPE_CHECKING:`` is excluded: that
-# guard is False at runtime, so an import inside it never executes.
+# def`` body is deferred; a module-level ``if``/``try``/``with``/``for``/``while``/
+# ``match``/``class`` body is not, so all of those are walked (both branches of an
+# ``if``/``try``, the ``else`` of a loop, every ``match`` case, a class body),
+# while ``def`` bodies nested inside any of them are still skipped. An
+# ``if TYPE_CHECKING:`` body is excluded (that guard is False at runtime) and its
+# ``else`` branch is walked.
 #
 # RELATIVE IMPORTS (``from . import x``, ``from ..config import y``, ...) are
 # resolved to their absolute ``localm.x.y`` target the way Python does at runtime,
@@ -901,9 +910,48 @@ def _import_unit(module: str) -> str:
     return parts[1] if len(parts) > 1 else "<root>"
 
 
+def _is_localm_module(name: str) -> bool:
+    """True for ``localm`` and ``localm.<anything>``; False for a foreign package
+    that merely shares the prefix (``localm_llama_runtime``)."""
+    return name == "localm" or name.startswith("localm.")
+
+
+def _units_on_disk(pkg_root: Path) -> set[str]:
+    """Top-level units under *pkg_root*: a top-level module other than
+    ``__init__.py``, or a directory with a ``.py`` file anywhere beneath it
+    (with or without ``__init__.py``: a namespace package imports too)."""
+    units = {p.stem for p in pkg_root.glob("*.py") if p.name != "__init__.py"}
+    units |= {p.name for p in pkg_root.iterdir()
+              if p.is_dir() and p.name != "__pycache__" and any(p.rglob("*.py"))}
+    return units
+
+
+def _import_targets(node: ast.stmt, own_module: str, is_package: bool,
+                    units: set[str]) -> list[str]:
+    """Absolute ``localm...`` modules that import statement *node* names.
+    ``from localm import x`` names the unit ``x`` when ``x`` is a unit on disk
+    and the package root otherwise."""
+    if isinstance(node, ast.Import):
+        return [a.name for a in node.names if _is_localm_module(a.name)]
+    if not isinstance(node, ast.ImportFrom):
+        return []
+    if node.level == 0:
+        module = node.module
+    else:
+        module = _resolve_relative_import(node, own_module, is_package)
+    if module is None or not _is_localm_module(module):
+        return []
+    if module == "localm":
+        return [f"localm.{a.name}" if a.name in units else "localm"
+                for a in node.names]
+    return [module]
+
+
 def _module_name(path: Path, pkg_root: Path) -> str:
     rel = path.relative_to(pkg_root).as_posix()[: -len(".py")]
-    if rel.endswith("/__init__"):
+    if rel == "__init__":
+        rel = ""
+    elif rel.endswith("/__init__"):
         rel = rel[: -len("/__init__")]
     return "localm" + ("." + rel.replace("/", ".") if rel else "")
 
@@ -919,31 +967,57 @@ def _is_type_checking_guard(test: ast.expr) -> bool:
     return False
 
 
+def _type_checking_branches(test: ast.expr) -> tuple[bool, bool]:
+    """``(body can run, else can run)`` for an ``if`` whose test involves
+    ``TYPE_CHECKING``: ``if TYPE_CHECKING:`` and ``if TYPE_CHECKING and x:``
+    never run their body; ``if not TYPE_CHECKING:`` always does and never runs
+    its ``else``. Any other test can run either branch."""
+    if _is_type_checking_guard(test):
+        return False, True
+    if (isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And)
+            and any(_is_type_checking_guard(v) for v in test.values)):
+        return False, True
+    if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and _is_type_checking_guard(test.operand)):
+        return True, False
+    return True, True
+
+
 def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
     """Statements in *body* that run EAGERLY at module-import time: direct
-    statements plus, recursively, anything inside a module-level ``try``/
-    ``except``/``else``/``finally`` or ``if``/``elif``/``else`` block. Both
-    branches of an ``if``/``try`` are included - either can run depending on
-    the runtime condition or exception. ``def``/``async def``/``class`` bodies
-    are never recursed into (deferred / separately-scoped, regardless of what
-    encloses them), and neither is an ``if TYPE_CHECKING:`` body (never True at
-    runtime)."""
+    statements plus, recursively, anything inside a module-level ``if``/
+    ``elif``/``else``, ``try``/``except``/``else``/``finally``, ``with``,
+    ``for``/``while`` (body and ``else``), ``match`` case or ``class`` body.
+    Both branches of an ``if``/``try`` are included - either can run depending
+    on the runtime condition or exception. ``def``/``async def`` bodies are
+    never recursed into (deferred, regardless of what encloses them). A branch
+    that ``TYPE_CHECKING`` makes unreachable at runtime is skipped (see
+    ``_type_checking_branches``)."""
     out: list[ast.stmt] = []
     for stmt in body:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             out.append(stmt)
         elif isinstance(stmt, ast.If):
-            if _is_type_checking_guard(stmt.test):
-                continue
-            out.extend(_eager_module_statements(stmt.body))
-            out.extend(_eager_module_statements(stmt.orelse))
+            body_runs, else_runs = _type_checking_branches(stmt.test)
+            if body_runs:
+                out.extend(_eager_module_statements(stmt.body))
+            if else_runs:
+                out.extend(_eager_module_statements(stmt.orelse))
         elif isinstance(stmt, (ast.Try, ast.TryStar)):
             out.extend(_eager_module_statements(stmt.body))
             for handler in stmt.handlers:
                 out.extend(_eager_module_statements(handler.body))
             out.extend(_eager_module_statements(stmt.orelse))
             out.extend(_eager_module_statements(stmt.finalbody))
-        # def/async def/class: deferred or separately-scoped; do not recurse.
+        elif isinstance(stmt, (ast.With, ast.AsyncWith, ast.ClassDef)):
+            out.extend(_eager_module_statements(stmt.body))
+        elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+            out.extend(_eager_module_statements(stmt.body))
+            out.extend(_eager_module_statements(stmt.orelse))
+        elif isinstance(stmt, ast.Match):
+            for case in stmt.cases:
+                out.extend(_eager_module_statements(case.body))
+        # def/async def: deferred; do not recurse.
     return out
 
 
@@ -976,6 +1050,7 @@ def _module_level_import_edges(pkg_root: Path) -> dict[str, dict[str, str]]:
     A parse failure is REPORTED by the caller, never skipped: treating an
     unreadable file as edge-free would let a cycle hide behind a syntax error."""
     edges: dict[str, dict[str, str]] = {}
+    units = _units_on_disk(pkg_root)
     for path in sorted(pkg_root.rglob("*.py")):
         own_module = _module_name(path, pkg_root)
         unit = _import_unit(own_module)
@@ -986,18 +1061,7 @@ def _module_level_import_edges(pkg_root: Path) -> dict[str, dict[str, str]]:
             edges.setdefault(unit, {})["<unparseable>"] = f"{path}: {e}"
             continue
         for node in _eager_module_statements(tree.body):
-            targets: list[str] = []
-            if isinstance(node, ast.ImportFrom):
-                if node.level == 0:
-                    if node.module and node.module.startswith("localm"):
-                        targets = [node.module]
-                else:
-                    resolved = _resolve_relative_import(node, own_module, is_package)
-                    if resolved is not None and resolved.startswith("localm"):
-                        targets = [resolved]
-            elif isinstance(node, ast.Import):
-                targets = [a.name for a in node.names if a.name.startswith("localm")]
-            for target in targets:
+            for target in _import_targets(node, own_module, is_package, units):
                 other = _import_unit(target)
                 if other != unit:
                     rel = path.relative_to(REPO).as_posix()
@@ -1216,6 +1280,180 @@ def _child_process_console_print_violations() -> list[str]:
     return problems
 
 
+# ---- check 9: module-level imports never go UP the declared layering -------
+#
+# docs/layering.toml lists the tiers top to bottom and places every top-level
+# unit under localm/ in exactly one of them. A module-level import may target
+# only a unit in a LOWER tier. Units that share a tier are peers and do not
+# import each other at module level. The package's own __init__ sits below every
+# tier. Function-local imports are not counted, as in check 7.
+#
+# A tier carries exactly the keys name, role and units. An unknown key, a
+# repeated tier name, a unit placed twice, a placed unit that is not on disk and
+# an on-disk unit that is not placed each fail.
+
+_LAYERING_MAP = "docs/layering.toml"
+_LAYERING_TIER_KEYS = {"name", "role", "units"}
+
+
+def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """Parse the layering map: ``([(tier name, units), ...] top to bottom,
+    problems)``. Any problem yields an EMPTY tier list."""
+    try:
+        import tomllib
+    except ImportError:
+        return [], ["tomllib is unavailable (Python 3.11+ is required); the "
+                    "layering map was not read"]
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        return [], [f"not valid TOML: {e}"]
+    if set(data) != {"tier"} or not isinstance(data["tier"], list) or not data["tier"]:
+        return [], ["expected a non-empty [[tier]] list and nothing else at the "
+                    f"top level (got {sorted(data)})"]
+    tiers: list[tuple[str, list[str]]] = []
+    problems: list[str] = []
+    seen_names: set[str] = set()
+    seen_units: set[str] = set()
+    for i, tier in enumerate(data["tier"], start=1):
+        if not isinstance(tier, dict) or set(tier) != _LAYERING_TIER_KEYS:
+            got = sorted(tier) if isinstance(tier, dict) else type(tier).__name__
+            problems.append(f"tier #{i} must carry exactly the keys name, role, "
+                            f"units (got {got})")
+            continue
+        name, role, units = tier["name"], tier["role"], tier["units"]
+        if not isinstance(name, str) or not name:
+            problems.append(f"tier #{i}: name must be a non-empty string")
+            continue
+        if name in seen_names:
+            problems.append(f"tier {name!r} is declared twice")
+            continue
+        seen_names.add(name)
+        if not isinstance(role, str) or not role:
+            problems.append(f"tier {name!r}: role must be a non-empty string")
+        if (not isinstance(units, list) or not units
+                or not all(isinstance(u, str) and u for u in units)):
+            problems.append(f"tier {name!r}: units must be a non-empty list of "
+                            "unit names")
+            continue
+        for u in units:
+            if u in seen_units:
+                problems.append(f"unit {u!r} is placed twice (again in tier {name!r})")
+            seen_units.add(u)
+        tiers.append((name, list(units)))
+    return ([], problems) if problems else (tiers, [])
+
+
+def _tracked_localm_files(pkg_root: Path) -> "list[Path] | None":
+    """Every git-tracked file under *pkg_root*, with no directory filtered out.
+    None when git cannot answer (no checkout, no git) or tracks nothing there."""
+    try:
+        out = subprocess.run(["git", "ls-files", "-z", "--", pkg_root.name],
+                             cwd=REPO, capture_output=True, check=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    files = [REPO / rel for rel in out.decode("utf-8").split("\0") if rel]
+    return files or None
+
+
+def _layering_units(pkg_root: Path, tracked: "list[Path] | None") -> set[str]:
+    """The units the map must place: from the tracked file list when given
+    (a generated, untracked module is not one), else from disk. A directory
+    counts when any tracked ``.py`` sits beneath it, ``__init__.py`` or not."""
+    if tracked is None:
+        return _units_on_disk(pkg_root)
+    units: set[str] = set()
+    for path in tracked:
+        if path.suffix != ".py":
+            continue
+        try:
+            parts = path.relative_to(pkg_root).parts
+        except ValueError:
+            continue
+        if len(parts) == 1:
+            if path.name != "__init__.py":
+                units.add(path.stem)
+        elif len(parts) >= 2:
+            units.add(parts[0])
+    return units
+
+
+def _import_direction_violations(tracked: "list[Path] | None" = None) -> list[str]:
+    """Module-level imports that go up the declared layering or between peers,
+    and a layering map that is malformed, incomplete, stale or duplicated.
+
+    *tracked* is the file list the unit inventory is taken from; None means
+    the unfiltered git-tracked files under localm/, or the disk when git cannot
+    answer. An untracked top-level unit's own imports are not judged (a
+    module inside a tracked unit is walked whether tracked or not); a placed
+    unit that imports an untracked one is."""
+    pkg_root = REPO / "localm"
+    if not pkg_root.is_dir():
+        return []          # not a localm checkout; other gates report that
+    if tracked is None:
+        tracked = _tracked_localm_files(pkg_root)
+    map_path = REPO / _LAYERING_MAP
+    try:
+        text = map_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return [f"{_LAYERING_MAP} could not be read ({e}); the import-direction "
+                "check did not run"]
+    tiers, problems = _layering_tiers(text)
+    if problems:
+        return [f"{_LAYERING_MAP}: {p}" for p in problems]
+    names = [name for name, _ in tiers]
+    index = {u: i for i, (_, units) in enumerate(tiers) for u in units}
+    root_index = len(tiers)
+    present = _layering_units(pkg_root, tracked)
+    for u in sorted(present - set(index)):
+        problems.append(
+            f"localm/{u} is not placed in {_LAYERING_MAP}; every top-level unit "
+            "under localm/ sits in exactly one tier")
+    for u in sorted(set(index) - present):
+        problems.append(
+            f"{_LAYERING_MAP} places {u!r}, which is not a unit under localm/ "
+            "(renamed or removed?); drop or correct the entry")
+    edges = _module_level_import_edges(pkg_root)
+    for u in sorted(edges):
+        for v, loc in sorted(edges[u].items()):
+            if v == "<unparseable>":
+                problems.append(f"could not parse {loc}")
+                continue
+            if v == "<root>":
+                continue
+            if u != "<root>" and u not in index:
+                continue
+            iu = root_index if u == "<root>" else index[u]
+            iv = index.get(v)
+            if iv is None:
+                if v not in present:
+                    problems.append(
+                        f"module-level import of an unplaced unit: {u} -> {v} ({loc})"
+                        f"\n      localm/{v} is not tracked and not in {_LAYERING_MAP}; "
+                        "import a generated or local-only module inside a function, "
+                        "never at module level")
+                continue
+            if iv > iu:
+                continue
+            if iv == iu:
+                problems.append(
+                    f"module-level import between peers: {u} -> {v} ({loc})"
+                    f"\n      both sit in tier {names[iu]!r} of {_LAYERING_MAP}; peers "
+                    f"never import each other at module level. If {u} genuinely "
+                    f"depends on {v}, {u} belongs in a higher tier.")
+            else:
+                where = ("the package root" if u == "<root>"
+                         else f"tier {names[iu]!r}")
+                problems.append(
+                    f"module-level import goes UP the declared layering: {u} -> {v} "
+                    f"({loc})\n      {u} sits in {where}, {v} in tier {names[iv]!r} "
+                    f"above it ({_LAYERING_MAP}). Move the shared code down to a "
+                    "unit both can import, or re-tier in the map and say why in the "
+                    "pull request. Deferring the import into a function hides it "
+                    "from this check; do that only to break a genuine import cycle.")
+    return problems
+
+
 def _strict_env() -> bool:
     """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but a
     recognized OFF value behaves like passing --strict (an env knob because a CI
@@ -1326,6 +1564,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_derivation_violations())
     problems.extend(_import_cycle_violations())
+    problems.extend(_import_direction_violations())
     problems.extend(_child_process_console_print_violations())
     manifest_failures, manifest_warnings = _release_manifest_gate()
     problems.extend(manifest_failures)

@@ -23,6 +23,26 @@ CLI (localm/cli/)                  Plugin engine (localm/plugins/)
                     (+ native AWQ)
 ```
 
+## Layering
+
+[layering.toml](layering.toml) declares the package's tiers, top to bottom,
+and places every top-level unit under `localm/` in exactly one of them. The
+rule is small: a module-level import may target only a unit in a lower tier;
+units that share a tier are peers and never import each other at module
+level; the package root (`localm/__init__.py`, which holds only the version)
+sits below every tier. Only import statements that run at module import
+time are covered: a function-local import (how a genuine import cycle is
+broken), an `importlib` call, and a plugin loaded under its own module name
+are outside it, and so are tests and scripts.
+
+`scripts/check_hygiene.py` enforces the map on every commit and in CI. It
+also fails on a unit the map does not place, on a placed unit that no longer
+exists, and on a unit placed twice, so the map cannot rot silently. There is
+no allow-list: a tier carries exactly `name`, `role` and `units`, and any
+other key is rejected. A new module goes in the lowest tier whose role fits
+and that sits above everything the module imports at module level; moving an
+existing unit between tiers is a design change and the pull request says why.
+
 ## Engine
 
 `Engine` auto-detects the backend from the model path (`.gguf` file or

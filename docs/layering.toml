@@ -1,0 +1,86 @@
+# The declared layering of the localm package.
+#
+# Tiers are listed TOP to BOTTOM. Every top-level unit under localm/ (a package
+# directory, or a top-level module) is placed in exactly one tier.
+#
+# The rule, enforced by scripts/check_hygiene.py (check 9):
+#   - A module-level import may target only a unit in a LOWER tier.
+#   - Units that share a tier are PEERS: they never import each other at module
+#     level. What two peers both need lives in a lower tier.
+#   - localm/__init__.py (the package root) sits below every tier. It holds only
+#     __version__, which any unit may read.
+#   - Only an import statement that runs at module import time is seen. A
+#     function-local import (the way a genuine import cycle is broken, and it may
+#     point upward), an importlib.import_module or __import__ call, and a plugin
+#     loaded under its own synthetic module name are outside the check.
+#   - Only the units under localm/ are checked; tests and scripts are not.
+#
+# A tier carries exactly three keys: name, role, units. There is no key for an
+# exception, and an unknown key fails the check.
+#
+# Placing a new unit: put it in the lowest tier whose role fits and that sits
+# above everything it imports at module level. Re-tiering an existing unit is a
+# design change; say why in the pull request.
+
+[[tier]]
+name = "entry"
+role = "Process entry points. python -m localm resolves to the cli; nothing sits above this."
+units = ["__main__"]
+
+[[tier]]
+name = "cli"
+role = "The localm command: argument parsing, the doctor, chat and model commands, starting the server. Loads plugins, so it sits above them."
+units = ["cli"]
+
+[[tier]]
+name = "plugins"
+role = "The plugin engine and every shipped plugin (chat, coder, gui, mcpserver, media, memory, rag, tts, voice, ...). Everything a plugin may see at module level is below this line."
+units = ["plugins"]
+
+[[tier]]
+name = "introspection"
+role = "Self-checks and live statistics read from the running engine, presented by the plugins and the cli."
+units = ["diagnostics", "sysstats"]
+
+[[tier]]
+name = "engine"
+role = "Model inference (engine, backends, the HTTP server and its routes) and GPU/backend discovery. Peers: discovery enumerates devices through the llama.cpp loader and the engine sizes itself from discovery, so neither is above the other."
+units = ["inference", "discover"]
+
+[[tier]]
+name = "models"
+role = "The model registry (selection, pull, scan) and the ComfyUI generation backends. Peers: the three generators share the media runtime below and never import each other or the registry at module level."
+units = ["model_manager", "image_gen", "music_gen", "video_gen"]
+
+[[tier]]
+name = "runtimes"
+role = "External runtimes localm provisions and drives: the shared ComfyUI client and managed install, per-plugin ComfyUI workflow files, the native llama.cpp binaries, headless Chromium, Whisper speech-to-text."
+units = ["media", "media_workflows", "setup_llama", "browser", "voice"]
+
+[[tier]]
+name = "services"
+role = "Host services composed from one or more platform units: browser sessions over the key store, the cross-install GPU registry over instance discovery, agent memory over the rag store, the self-updater and the proxy client over failure reporting, the native app identity, the remote-model gate, the issue tracker."
+units = [
+    "sessions", "gpu_registry", "memory", "updater", "_apply_update", "_proxy",
+    "issue_tracker", "applaunch", "remotegate",
+]
+
+[[tier]]
+name = "platform"
+role = "The host as localm sees it, built on the foundation alone: identity and keys, the audit and session mode, TLS and the verified HTTPS opener, network policy, DNS pinning, naming, the port multiplexer, peer routing, the self client, instance discovery, hardware and VRAM facts, native-app, shell and Windows console integration, the install ledger, the settings schema, model-source credentials, the model metadata and rag stores, failure reporting and its log digest."
+units = [
+    "auth", "audit", "tls", "http_ssl", "netpolicy", "netpin", "netname", "portmux",
+    "peer_routing", "selfclient", "instances", "gpu_usage", "hwdetect",
+    "cpu_backend_select", "_torch_gpu_probe", "vram", "appface", "install_manifest",
+    "globalcmd", "winconsole", "settings_schema", "model_source_credentials", "model_meta", "rag",
+    "bugreport", "_log_digest",
+]
+
+[[tier]]
+name = "foundation"
+role = "Primitives that import nothing from localm at module level: configuration, the debug log, the shared console, JSONL and store mechanics, path and text helpers, the bounded thread pool, the bind-host and listening-socket helpers, scopes, readline privacy, the version, the venv guard, the spawn fix."
+units = [
+    "config", "debuglog", "console", "jsonl", "storekit", "pathsafe", "pathscrub",
+    "textguard", "textnorm", "executor", "bindhost", "netlisten", "scopes",
+    "readline_privacy", "_version", "_venvguard", "_mp_spawn",
+]

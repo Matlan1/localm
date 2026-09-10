@@ -789,6 +789,7 @@ def test_release_manifest_gate_failures_fail_the_build(monkeypatch):
     monkeypatch.setattr(ch, "_big_test_write_violations", lambda t: [])
     monkeypatch.setattr(ch, "_sw_cache_derivation_violations", lambda: [])
     monkeypatch.setattr(ch, "_import_cycle_violations", lambda: [])
+    monkeypatch.setattr(ch, "_import_direction_violations", lambda *a: [])
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
     monkeypatch.setattr(ch, "_release_manifest_gate",
                         lambda: (["release.exclude pattern 'X' matches no tracked file"], []))
@@ -808,6 +809,7 @@ def test_release_manifest_gate_warns_but_passes_by_default_and_strict_escalates(
     monkeypatch.setattr(ch, "_big_test_write_violations", lambda t: [])
     monkeypatch.setattr(ch, "_sw_cache_derivation_violations", lambda: [])
     monkeypatch.setattr(ch, "_import_cycle_violations", lambda: [])
+    monkeypatch.setattr(ch, "_import_direction_violations", lambda *a: [])
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     # Stubs the gate to WARN and asserts the warn-vs-strict escalation. A neutral
