@@ -115,13 +115,21 @@ _BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
 
 def _tracked_files() -> list[Path]:
     try:
-        # Decode git's UTF-8 output explicitly rather than by locale codepage.
-        out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True,
-                             text=True, encoding="utf-8", check=True).stdout
+        # -z, and decode git's UTF-8 output explicitly rather than by locale
+        # codepage. Without -z, core.quotePath renders a non-ASCII path as an
+        # escaped, quoted string ("caf\303\251.py"), which names no file on
+        # disk, so _scan's OSError guard drops it and every check below reports
+        # clean on a file it never opened.
+        # See test_non_ascii_tracked_path_is_scanned.
+        raw = subprocess.run(["git", "ls-files", "-z"], cwd=REPO,
+                             capture_output=True, check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
+    out = raw.decode("utf-8", "surrogateescape")
     files = []
-    for rel in out.splitlines():
+    for rel in out.split("\0"):
+        if not rel:
+            continue
         p = REPO / rel
         if any(part in _SKIP_DIRS for part in p.parts):
             continue
