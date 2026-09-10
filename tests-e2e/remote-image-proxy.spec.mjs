@@ -12,7 +12,7 @@
 // matters: img-src 'self' data: blob: is the barrier the OFF state rests on, and
 // it is enforced by the browser rather than by localm.
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures.mjs";
 import http from "node:http";
 import zlib from "node:zlib";
 import { BASE_URL } from "./_env.mjs";

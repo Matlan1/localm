@@ -17,7 +17,7 @@
 // A cross-origin beacon is deliberately NOT asserted: the shell's connect-src
 // would block it in BOTH arms, so it could not tell the arms apart.
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures.mjs";
 import { BASE_URL } from "./_env.mjs";
 
 const SECRET = "LOCALM-E2E-PREVIEW-COOKIE-7Q4M";

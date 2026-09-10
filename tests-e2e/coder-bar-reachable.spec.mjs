@@ -6,7 +6,7 @@
 // no way to scroll to them. jsdom cannot see this: it has no layout engine, so
 // every one of these buttons "exists" there whatever the CSS does.
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures.mjs";
 
 const BUTTONS = [
   "coder-undo", "coder-files", "coder-controls", "coder-memory",

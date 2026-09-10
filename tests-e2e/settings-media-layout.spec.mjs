@@ -4,7 +4,7 @@
 // engine, so a broken grid-template-columns still passes every jsdom assertion
 // that merely checks the DOM structure exists.
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures.mjs";
 
 function rectsOverlap(a, b) {
   return a.x < b.x + b.width && b.x < a.x + a.width
