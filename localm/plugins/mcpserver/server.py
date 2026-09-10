@@ -58,6 +58,11 @@ PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
 SERVER_VERSION = "0.2.0"
 
+# How long a load waits for a resident that is still serving a request to
+# free itself before the residency policy is reported as missed.
+BUSY_WAIT_SECONDS = 600.0
+BUSY_POLL_SECONDS = 1.0
+
 
 def _log(msg: str) -> None:
     """Server-side logging - stderr only, stdout belongs to the protocol."""
@@ -166,23 +171,36 @@ class EngineCache:
     def pin(engine) -> None:
         """Count one in-flight request on *engine*. A pinned engine
         (``active_requests > 0``) is never chosen as an eviction victim."""
-        if isinstance(getattr(engine, "active_requests", None), int):
-            engine.active_requests += 1
+        from localm.inference.residency import pin_engine
+        pin_engine(engine)
 
     @staticmethod
     def unpin(engine) -> None:
         """Release one pin taken by ``pin``."""
-        if isinstance(getattr(engine, "active_requests", None), int):
-            engine.active_requests = max(0, engine.active_requests - 1)
+        from localm.inference.residency import unpin_engine
+        unpin_engine(engine)
+
+    def generation_lock(self, engine):
+        """The lock that serialises generations on *engine*: one per engine
+        object, shared by every request and coder run that drives it."""
+        from localm.plugins.coder.backends.shared_engine import engine_lock
+        return engine_lock(engine)
 
     @contextlib.contextmanager
     def serving(self, engine):
-        """Pin *engine* for the duration of the block."""
+        """Hold *engine* for one generation: pinned against eviction, and
+        the only generation running on it. Waits for an in-flight generation
+        on the same engine to finish first."""
         self.pin(engine)
         try:
-            yield engine
+            with self.generation_lock(engine):
+                yield engine
         finally:
             self.unpin(engine)
+
+    def is_resident(self, name: str, engine) -> bool:
+        """True while *engine* is the cache's resident for *name*."""
+        return self._engines.get(name) is engine
 
     def _operator_supplied(self, model_name) -> bool:
         """True only for the model the OPERATOR named when starting this server.
@@ -359,6 +377,7 @@ class EngineCache:
         cap = residency.resident_cap(cfg)
         pinned = residency.pinned_model_names(cfg)
         required = self._model_required_bytes(name)
+        waited = 0.0
         while self._lru:
             over_cap = residency.exceeds_resident_cap(self._lru, name, cap)
             # Only probe when the cap is satisfied: being over cap already means
@@ -373,8 +392,22 @@ class EngineCache:
             victim = residency.pick_eviction_victim(
                 self._lru, self._engines, requested=name, pinned=pinned)
             if victim is None:
-                # Nothing evictable (all pinned, or all busy). Load anyway and
-                # SAY the policy was missed, rather than pretending it held.
+                # A resident that is only unavailable because it is SERVING a
+                # request frees itself when that request ends: wait for it,
+                # bounded, instead of loading on top of it.
+                busy = [n for n in self._lru
+                        if n != name and n not in pinned
+                        and residency.is_serving(self._engines.get(n))]
+                if busy and waited < BUSY_WAIT_SECONDS:
+                    if waited == 0.0:
+                        _log(f"waiting for {busy} to finish serving before "
+                             f"making room for {name}")
+                    time.sleep(BUSY_POLL_SECONDS)
+                    waited += BUSY_POLL_SECONDS
+                    continue
+                # Nothing evictable (all pinned, or still busy past the wait).
+                # Load anyway and SAY the policy was missed, rather than
+                # pretending it held.
                 reasons = []
                 if over_cap:
                     reasons.append("the resident cap")
@@ -384,6 +417,8 @@ class EngineCache:
                     # check there would report a measurement never taken.
                     reasons.append("the free-VRAM check" if required is not None
                                    else "an unsizeable model")
+                if busy:
+                    reasons.append(f"a resident still serving after {waited:g}s")
                 _log(f"warning: {' and '.join(reasons)} wanted room for {name} "
                      f"but no resident model could be evicted "
                      f"(resident={self._lru}, pinned={sorted(pinned)}) - "
@@ -1140,6 +1175,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         except coder_runner.InvalidSessionMode as e:
             return _text_result(str(e), is_error=True)
         timeout = args.get("timeout_seconds") or 900
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or timeout <= 0):
+            return _text_result("'timeout_seconds' must be a positive number",
+                                is_error=True)
+        timeout = float(timeout)
 
         # A model name from the client or the project config is registry-gated
         # by resolve_model; the operator's own --model default is the only path
@@ -1150,7 +1190,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 engine = engines.get(model_name)
         except ValueError as e:
             return _text_result(str(e), is_error=True)
-        backend = SharedEngineBackend(engine, model_name)
+        backend = SharedEngineBackend(
+            engine, model_name, lock=engines.generation_lock(engine),
+            still_resident=lambda: engines.is_resident(model_name, engine))
 
         # Default OFF, matching the CLI's own fail-closed default: without
         # `yes` file writes still happen but run_shell is denied, since there
@@ -1176,7 +1218,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         try:
             with _quiet_stdout():
                 result = coder_runner.run_task_with_timeout(
-                    agent, task, float(timeout),
+                    agent, task, timeout,
                     on_finished=lambda: engines.unpin(engine))
         except Exception as e:
             return _text_result(f"coder task failed to run: {e}", is_error=True)

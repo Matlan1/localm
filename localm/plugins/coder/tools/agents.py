@@ -225,6 +225,11 @@ def _prepare_child(
 
     backend = parent.backend
     if model and model != backend.model_id:
+        if not getattr(backend, "supports_model_override", True):
+            return None, ToolResult.error(
+                f"{tool}: this session runs every sub-agent on its own model "
+                f"({backend.model_id}); the 'model' override is not available "
+                "here. Call again without 'model'.")
         from ..backends.http import make_localm_backend
         raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
         try:

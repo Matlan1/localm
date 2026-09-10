@@ -552,7 +552,11 @@ class TestEngineCacheMultiResidency:
         a.unload.assert_not_called()
         assert cache._factory.loads == ["a"]
 
-    def test_a_busy_engine_is_not_evicted(self):
+    def test_a_busy_engine_is_not_evicted(self, monkeypatch):
+        import localm.plugins.mcpserver.server as srv
+        # 'a' never frees, so the room wait runs to its bound; keep it short.
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
         cache = _resident_cache()
         with _fits(), _sized(), _cfg():
             a, b = cache.get("a"), cache.get("b")
@@ -561,6 +565,52 @@ class TestEngineCacheMultiResidency:
             cache.get("c")
         a.unload.assert_not_called()
         b.unload.assert_called_once()
+
+    def test_room_wait_lets_a_serving_resident_free_itself(self, monkeypatch):
+        """The only candidate is serving a request: the load WAITS for it to
+        finish, then evicts it, instead of loading on top of it."""
+        import threading
+        import localm.plugins.mcpserver.server as srv
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 5.0)
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        a.active_requests = 1
+        polls = []
+        real_fits = srv.EngineCache._fits_alongside
+
+        def counting_fits(self, name, required):
+            polls.append(name)
+            return real_fits(self, name, required)
+
+        monkeypatch.setattr(srv.EngineCache, "_fits_alongside", counting_fits)
+        threading.Timer(0.1, lambda: setattr(a, "active_requests", 0)).start()
+        logged = []
+        with _too_tight(), _sized(), _cfg(), _no_vram_wait(), \
+             patch.object(srv, "_log", logged.append):
+            cache.get("b")
+        a.unload.assert_called_once()
+        assert cache.resident == ["b"]
+        assert len(polls) > 1, "the load did not wait at all"
+        assert any("waiting for ['a']" in m for m in logged), logged
+        assert not any("loading it anyway" in m for m in logged), logged
+
+    def test_room_wait_gives_up_after_the_bound_and_says_so(self, monkeypatch):
+        import localm.plugins.mcpserver.server as srv
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        a.active_requests = 1
+        logged = []
+        with _too_tight(), _sized(), _cfg(), _no_vram_wait(), \
+             patch.object(srv, "_log", logged.append):
+            cache.get("b")
+        a.unload.assert_not_called()
+        assert cache.resident == ["a", "b"]
+        assert any("still serving" in m and "loading it anyway" in m for m in logged), logged
 
     def test_unmeasurable_vram_falls_back_to_single_resident(self):
         """A box that cannot report free VRAM must behave exactly as before:
@@ -1801,7 +1851,8 @@ class TestRunCoderTaskInProcess:
         server, engines = _coder_server(factory)
         _run_task(server, _project(tmp_path))
         engine = engines._engines["stub-model"]
-        assert seen and all(n == 1 for n in seen), seen
+        # The run's own pin plus the pin each generation takes while it runs.
+        assert seen and all(n == 2 for n in seen), seen
         assert engine.active_requests == 0
 
     def test_a_pinned_engine_is_not_an_eviction_victim(self, coder_env, tmp_path):
@@ -1941,6 +1992,43 @@ class TestRunCoderTaskInProcess:
         assert resp["result"]["isError"] is False, resp
         assert factory.loads[len(loads_before):] == ["cfg-model"]
 
+    @pytest.mark.parametrize("bad", ["soon", [5], -5, True])
+    def test_bad_timeout_is_refused_before_anything_is_pinned(
+            self, coder_env, tmp_path, bad):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        engine = engines._engines["stub-model"]
+        resp = _run_task(server, _project(tmp_path), timeout_seconds=bad)
+        assert resp["result"]["isError"] is True
+        assert "timeout_seconds" in resp["result"]["content"][0]["text"]
+        assert engine.active_requests == 0
+        assert engine.calls == []
+
+    def test_chat_waits_for_an_in_flight_generation_on_the_same_engine(
+            self, coder_env):
+        import threading
+        import time
+        factory = _scripted_engine_factory(["reply"])
+        server, engines = _coder_server(factory)
+        engine = engines._engines["stub-model"]
+        lock = engines.generation_lock(engine)
+        done = {}
+
+        def _chat():
+            _req(server, "tools/call", {"name": "chat", "arguments": {"prompt": "hi"}})
+            done["at"] = time.monotonic()
+
+        with lock:
+            t = threading.Thread(target=_chat)
+            t.start()
+            t.join(0.3)
+            assert t.is_alive(), "chat generated while another generation held the engine"
+            released = time.monotonic()
+        t.join(5)
+        assert not t.is_alive()
+        assert done["at"] >= released
+        assert engine.active_requests == 0
+
     def test_timeout_reports_and_keeps_the_pin_until_the_worker_ends(
             self, coder_env, tmp_path, monkeypatch):
         import threading
@@ -1955,9 +2043,10 @@ class TestRunCoderTaskInProcess:
             assert result["isError"] is True
             assert "timed out" in result["content"][0]["text"]
             engine = engines._engines["stub-model"]
-            # Still generating: the pin stays, so the residency gate cannot
-            # evict the engine from under the abandoned run.
-            assert engine.active_requests == 1
+            # Still generating: the run's pin and the generation's pin both
+            # stay, so the residency gate cannot evict the engine from under
+            # the abandoned run.
+            assert engine.active_requests == 2
         finally:
             gate.set()
         assert _wait_until(lambda: engine.active_requests == 0), \

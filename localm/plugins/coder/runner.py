@@ -270,8 +270,11 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
     try:
         worker.start()
     except BaseException:
-        if on_finished is not None:
-            on_finished()
+        try:
+            finish_agent(agent)
+        finally:
+            if on_finished is not None:
+                on_finished()
         raise
     worker.join(timeout)
     if worker.is_alive():

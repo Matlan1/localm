@@ -114,7 +114,10 @@ class TestResolveTaskConfig:
         assert "max_tokens" in cfg.gen_kw
         assert "seed" not in cfg.gen_kw
 
-    def test_matches_the_cli_helper_on_a_full_project_config(self, home, project):
+    def test_cli_helper_passes_the_runners_values_through_unchanged(self, home, project):
+        """The CLI wrapper delegates to resolve_task_config; this pins that it
+        hands every field back untouched (the resolution itself is asserted
+        directly below, and the CLI's own tests cover its behaviour)."""
         (project / ".localcoder").mkdir()
         (project / ".localcoder" / "config.toml").write_text(
             'model = "cfg-model"\nmax_turns = 7\nmax_tokens = 321\n'
