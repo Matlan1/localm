@@ -1178,7 +1178,6 @@ export const I18N_EN = {
   "settings.group.security": "Security",
   "settings.group.server": "Server & network",
   "settings.group.system": "System",
-  "settings.guiKeySaved": "Key saved - reloading",
   "settings.intro":
     "Stored in <code>config.json</code> in your data directory. Pick a section on the left; each one saves on its own. Engine values apply on the next model load.",
   "settings.search": "Search all settings",

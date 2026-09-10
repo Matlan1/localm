@@ -1062,7 +1062,6 @@
   "settings.group.security": "Sicherheit",
   "settings.group.server": "Server & Netzwerk",
   "settings.group.system": "System",
-  "settings.guiKeySaved": "Schlüssel gespeichert - wird neu geladen",
   "settings.intro": "Gespeichert in <code>config.json</code> in Ihrem Datenverzeichnis. Wählen Sie links einen Bereich; jeder speichert für sich. Engine-Werte greifen beim nächsten Laden des Modells.",
   "settings.search": "Alle Einstellungen durchsuchen",
   "settings.sections": "Einstellungsbereiche",

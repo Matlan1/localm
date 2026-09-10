@@ -313,7 +313,7 @@ $("gui-key-save").onclick = async () => {
       await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
     } catch (e) { /* offline / already cleared */ }
   }
-  toast(t("settings.guiKeySaved"));
+  toast("Key saved - reloading");
   setTimeout(() => location.reload(), 600);
 };
 
