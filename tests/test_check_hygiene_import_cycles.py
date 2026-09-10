@@ -418,3 +418,16 @@ def test_the_package_root_init_is_the_root_unit(tmp_path, monkeypatch):
     monkeypatch.setattr(ch, "REPO", tmp_path)
     problems = ch._import_cycle_violations()
     assert problems and "<root>" in problems[0], problems
+
+
+def test_class_body_import_closes_a_cycle(tmp_path, monkeypatch):
+    """A class body runs at import time, so an import inside it is eager."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "a/x.py": "class A:\n    from localm.b.y import B\n",
+        "b/y.py": "from localm.a.x import A\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "a cycle closed inside a class body must be reported"
+    assert "a/x.py:2" in problems[0], problems

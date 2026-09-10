@@ -196,6 +196,112 @@ def test_eager_import_of_an_untracked_module_fires(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  NEGATIVE: every block that runs at import time is walked                    #
+# --------------------------------------------------------------------------- #
+
+def test_class_body_import_fires(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch,
+                         {"util.py": "class C:\n    from localm.app import run\n"})
+    assert len(problems) == 1 and "util -> app" in problems[0], problems
+
+
+def test_with_block_import_fires(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "import contextlib\nwith contextlib.suppress(ImportError):\n"
+                   "    from localm.app import run\n"})
+    assert len(problems) == 1 and "util -> app" in problems[0], problems
+
+
+def test_loop_body_and_loop_else_imports_fire(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "for _ in ():\n    pass\nelse:\n    from localm.app import run\n",
+        "svc.py": "while False:\n    from localm.app import run\n"})
+    assert len(problems) == 2, problems
+    assert any("util -> app" in p for p in problems), problems
+    assert any("svc -> app" in p for p in problems), problems
+
+
+def test_match_case_import_fires(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "match 1:\n    case 1:\n        from localm.app import run\n"})
+    assert len(problems) == 1 and "util -> app" in problems[0], problems
+
+
+def test_type_checking_else_branch_import_fires(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    pass\n"
+                   "else:\n    from localm.app import run\n"})
+    assert len(problems) == 1 and "util -> app" in problems[0], problems
+
+
+def test_def_nested_in_a_class_body_stays_deferred(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "class C:\n    def m(self):\n        from localm.app import run\n"
+                   "        return run\n"})
+    assert problems == []
+
+
+def test_namespace_directory_without_init_is_a_unit(tmp_path, monkeypatch):
+    """A directory with no __init__.py still imports (a namespace package), so
+    it must be placed like any other unit."""
+    _, problems = _check(tmp_path, monkeypatch,
+                         {"nspkg/mod.py": "from localm.app import run\n"})
+    assert len(problems) == 1, problems
+    assert "localm/nspkg is not placed" in problems[0]
+
+
+def test_namespace_directory_placed_in_the_map_is_judged(tmp_path, monkeypatch):
+    layering = _tiers(("top", ["app"]), ("mid", ["svc", "svc2"]),
+                      ("low", ["util", "nspkg"]))
+    _, problems = _check(tmp_path, monkeypatch,
+                         {"nspkg/mod.py": "from localm.app import run\n"}, layering)
+    assert len(problems) == 1, problems
+    assert "goes UP" in problems[0] and "nspkg -> app" in problems[0]
+
+
+def test_tracked_inventory_counts_a_directory_by_any_tracked_module(tmp_path, monkeypatch):
+    """The tracked-mode inventory needs no __init__.py either, and a directory
+    named like one of the hygiene scanner's skipped directories still counts."""
+    ch, _ = _check(tmp_path, monkeypatch, {"lib/x.py": "from localm.app import run\n"})
+    tracked = [tmp_path / "localm" / f for f in (*_THREE_TIER_FILES, "lib/x.py")]
+    assert ch._layering_units(tmp_path / "localm", tracked) == {
+        "app", "svc", "svc2", "util", "lib"}
+    problems = ch._import_direction_violations(tracked)
+    assert len(problems) == 1 and "localm/lib is not placed" in problems[0], problems
+
+
+def test_default_inventory_is_the_unfiltered_git_list(tmp_path, monkeypatch):
+    """main() passes no list: the inventory is `git ls-files -- localm` with
+    nothing filtered out, so a unit named vendor or lib is required too."""
+    ch, _ = _check(tmp_path, monkeypatch, {"vendor/x.py": ""})
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+
+        class R:
+            stdout = ("localm/app.py\nlocalm/svc.py\nlocalm/svc2.py\n"
+                      "localm/util.py\nlocalm/vendor/x.py\n")
+        return R()
+
+    monkeypatch.setattr(ch.subprocess, "run", fake_run)
+    problems = ch._import_direction_violations()
+    assert seen and seen[0][:3] == ["git", "ls-files", "--"], seen
+    assert len(problems) == 1 and "localm/vendor is not placed" in problems[0], problems
+
+
+def test_default_inventory_falls_back_to_disk_without_git(tmp_path, monkeypatch):
+    ch, _ = _check(tmp_path, monkeypatch, {"extra.py": ""})
+
+    def no_git(cmd, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(ch.subprocess, "run", no_git)
+    problems = ch._import_direction_violations()
+    assert len(problems) == 1 and "localm/extra is not placed" in problems[0], problems
+
+
+# --------------------------------------------------------------------------- #
 #  POSITIVE: legal shapes stay legal, with no allowlist anywhere              #
 # --------------------------------------------------------------------------- #
 

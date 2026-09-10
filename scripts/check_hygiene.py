@@ -889,10 +889,12 @@ def _install_hook() -> int:
 # imports are not counted: they are the intended way to break a cycle here.
 #
 # "MODULE-LEVEL" means "runs during import", not "unindented". A ``def``/``async
-# def``/``class`` body is deferred; a module-level ``try:``/``if:`` body is not, so
-# both branches of an ``if``/``try`` are walked, while ``def``/``class`` bodies
-# nested inside one are still skipped. ``if TYPE_CHECKING:`` is excluded: that
-# guard is False at runtime, so an import inside it never executes.
+# def`` body is deferred; a module-level ``if``/``try``/``with``/``for``/``while``/
+# ``match``/``class`` body is not, so all of those are walked (both branches of an
+# ``if``/``try``, the ``else`` of a loop, every ``match`` case, a class body),
+# while ``def`` bodies nested inside any of them are still skipped. An
+# ``if TYPE_CHECKING:`` body is excluded (that guard is False at runtime) and its
+# ``else`` branch is walked.
 #
 # RELATIVE IMPORTS (``from . import x``, ``from ..config import y``, ...) are
 # resolved to their absolute ``localm.x.y`` target the way Python does at runtime,
@@ -915,11 +917,12 @@ def _is_localm_module(name: str) -> bool:
 
 
 def _units_on_disk(pkg_root: Path) -> set[str]:
-    """Top-level units under *pkg_root*: a package directory holding
-    ``__init__.py``, or a top-level module other than ``__init__.py``."""
+    """Top-level units under *pkg_root*: a top-level module other than
+    ``__init__.py``, or a directory with a ``.py`` file anywhere beneath it
+    (with or without ``__init__.py``: a namespace package imports too)."""
     units = {p.stem for p in pkg_root.glob("*.py") if p.name != "__init__.py"}
     units |= {p.name for p in pkg_root.iterdir()
-              if p.is_dir() and (p / "__init__.py").is_file()}
+              if p.is_dir() and p.name != "__pycache__" and any(p.rglob("*.py"))}
     return units
 
 
@@ -966,21 +969,21 @@ def _is_type_checking_guard(test: ast.expr) -> bool:
 
 def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
     """Statements in *body* that run EAGERLY at module-import time: direct
-    statements plus, recursively, anything inside a module-level ``try``/
-    ``except``/``else``/``finally`` or ``if``/``elif``/``else`` block. Both
-    branches of an ``if``/``try`` are included - either can run depending on
-    the runtime condition or exception. ``def``/``async def``/``class`` bodies
-    are never recursed into (deferred / separately-scoped, regardless of what
-    encloses them), and neither is an ``if TYPE_CHECKING:`` body (never True at
-    runtime)."""
+    statements plus, recursively, anything inside a module-level ``if``/
+    ``elif``/``else``, ``try``/``except``/``else``/``finally``, ``with``,
+    ``for``/``while`` (body and ``else``), ``match`` case or ``class`` body.
+    Both branches of an ``if``/``try`` are included - either can run depending
+    on the runtime condition or exception. ``def``/``async def`` bodies are
+    never recursed into (deferred, regardless of what encloses them). An
+    ``if TYPE_CHECKING:`` body is skipped (never True at runtime); its ``else``
+    branch is walked."""
     out: list[ast.stmt] = []
     for stmt in body:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             out.append(stmt)
         elif isinstance(stmt, ast.If):
-            if _is_type_checking_guard(stmt.test):
-                continue
-            out.extend(_eager_module_statements(stmt.body))
+            if not _is_type_checking_guard(stmt.test):
+                out.extend(_eager_module_statements(stmt.body))
             out.extend(_eager_module_statements(stmt.orelse))
         elif isinstance(stmt, (ast.Try, ast.TryStar)):
             out.extend(_eager_module_statements(stmt.body))
@@ -988,7 +991,15 @@ def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
                 out.extend(_eager_module_statements(handler.body))
             out.extend(_eager_module_statements(stmt.orelse))
             out.extend(_eager_module_statements(stmt.finalbody))
-        # def/async def/class: deferred or separately-scoped; do not recurse.
+        elif isinstance(stmt, (ast.With, ast.AsyncWith, ast.ClassDef)):
+            out.extend(_eager_module_statements(stmt.body))
+        elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+            out.extend(_eager_module_statements(stmt.body))
+            out.extend(_eager_module_statements(stmt.orelse))
+        elif isinstance(stmt, ast.Match):
+            for case in stmt.cases:
+                out.extend(_eager_module_statements(case.body))
+        # def/async def: deferred; do not recurse.
     return out
 
 
@@ -1317,30 +1328,55 @@ def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
     return ([], problems) if problems else (tiers, [])
 
 
+def _tracked_localm_files(pkg_root: Path) -> "list[Path] | None":
+    """Every git-tracked file under *pkg_root*, with no directory filtered out.
+    None when git cannot answer (no checkout, no git) or tracks nothing there,
+    so the caller falls back to the disk inventory."""
+    try:
+        out = subprocess.run(["git", "ls-files", "--", pkg_root.name], cwd=REPO,
+                             capture_output=True, text=True, encoding="utf-8",
+                             check=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    files = [REPO / rel for rel in out.splitlines() if rel]
+    return files or None
+
+
 def _layering_units(pkg_root: Path, tracked: "list[Path] | None") -> set[str]:
     """The units the map must place: from the tracked file list when given
-    (a generated, untracked module is not one), else from disk."""
+    (a generated, untracked module is not one), else from disk. A directory
+    counts when any tracked ``.py`` sits beneath it, ``__init__.py`` or not."""
     if tracked is None:
         return _units_on_disk(pkg_root)
     units: set[str] = set()
     for path in tracked:
+        if path.suffix != ".py":
+            continue
         try:
             parts = path.relative_to(pkg_root).parts
         except ValueError:
             continue
-        if len(parts) == 1 and path.suffix == ".py" and path.name != "__init__.py":
-            units.add(path.stem)
-        elif len(parts) == 2 and parts[1] == "__init__.py":
+        if len(parts) == 1:
+            if path.name != "__init__.py":
+                units.add(path.stem)
+        elif len(parts) >= 2:
             units.add(parts[0])
     return units
 
 
 def _import_direction_violations(tracked: "list[Path] | None" = None) -> list[str]:
     """Module-level imports that go up the declared layering or between peers,
-    and a layering map that is malformed, incomplete, stale or duplicated."""
+    and a layering map that is malformed, incomplete, stale or duplicated.
+
+    *tracked* is the file list the unit inventory is taken from; None means
+    the unfiltered git-tracked files under localm/, or the disk when git cannot
+    answer. An untracked module's own imports are not judged; a tracked unit
+    that imports one is."""
     pkg_root = REPO / "localm"
     if not pkg_root.is_dir():
         return []          # not a localm checkout; other gates report that
+    if tracked is None:
+        tracked = _tracked_localm_files(pkg_root)
     map_path = REPO / _LAYERING_MAP
     try:
         text = map_path.read_text(encoding="utf-8")
@@ -1510,7 +1546,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_derivation_violations())
     problems.extend(_import_cycle_violations())
-    problems.extend(_import_direction_violations(tracked))
+    problems.extend(_import_direction_violations())
     problems.extend(_child_process_console_print_violations())
     manifest_failures, manifest_warnings = _release_manifest_gate()
     problems.extend(manifest_failures)
