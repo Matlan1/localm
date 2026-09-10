@@ -31,18 +31,22 @@ def _load_wd():
     return mod
 
 
-def _free_port() -> int:
+def _held_port() -> tuple[socket.socket, int]:
+    """Bind a TCP socket to 127.0.0.1 without listening on it. The port stays
+    reserved (no other process can bind it) and refuses connections until the
+    socket is closed or handed to a listener via ``_whoami_server(sock=...)``.
+    Caller must close the returned socket when done, unless it is handed off."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    return s, s.getsockname()[1]
 
 
-def _whoami_server(responder, port: int = 0):
+def _whoami_server(responder, port: int = 0, sock: socket.socket | None = None):
     """A ThreadingHTTPServer on 127.0.0.1 whose /whoami handler calls
     ``responder() -> dict`` per request. Returns (server, thread, port); caller
-    must call server.shutdown() when done."""
+    must call server.shutdown() when done. When ``sock`` is given (from
+    ``_held_port()``), the server listens on that already-bound socket instead
+    of binding its own, so there is no gap where the port is unreserved."""
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path != "/whoami":
@@ -58,7 +62,15 @@ def _whoami_server(responder, port: int = 0):
         def log_message(self, *_a):
             pass   # keep test output quiet
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if sock is not None:
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), Handler, bind_and_activate=False)
+        server.socket.close()
+        server.socket = sock
+        server.server_address = sock.getsockname()
+        server.server_activate()
+    else:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread, server.server_address[1]
@@ -130,13 +142,13 @@ def test_wrong_version_then_correct_eventually_succeeds(tmp_path):
 
 def test_connection_refused_then_recovers(tmp_path):
     wd = _load_wd()
-    port = _free_port()   # nothing listens here yet
+    held, port = _held_port()   # reserved, not listening yet: refuses connects
     result = {}
 
     def _start_late():
         time.sleep(0.6)
         server, thread, _ = _whoami_server(
-            lambda: {"app": "localm", "version": "0.2.0"}, port=port)
+            lambda: {"app": "localm", "version": "0.2.0"}, sock=held)
         result["server"], result["thread"] = server, thread
 
     starter = threading.Thread(target=_start_late, daemon=True)
@@ -159,16 +171,19 @@ def test_connection_refused_then_recovers(tmp_path):
 def test_timeout_triggers_rollback_and_restores_backup(tmp_path, monkeypatch):
     wd = _load_wd()
     inst, _home = _stage(tmp_path, monkeypatch, manifest=["existing.txt"])
-    closed_port = _free_port()   # nothing listens here for the duration of this test
-    logfile = tmp_path / "watchdog.log"
-    code = wd.main([
-        "--host", "127.0.0.1", "--port", str(closed_port),
-        "--expect-version", "9.9.9", "--install-root", str(inst),
-        "--timeout", "1.0", "--poll-interval", "0.2", "--request-timeout", "0.3",
-        "--log-file", str(logfile)])
-    assert code == wd.EXIT_ROLLED_BACK
-    assert (inst / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"
-    assert "watchdog exiting with code 1" in logfile.read_text(encoding="utf-8")
+    held, closed_port = _held_port()   # reserved, never listening for this test
+    try:
+        logfile = tmp_path / "watchdog.log"
+        code = wd.main([
+            "--host", "127.0.0.1", "--port", str(closed_port),
+            "--expect-version", "9.9.9", "--install-root", str(inst),
+            "--timeout", "1.0", "--poll-interval", "0.2", "--request-timeout", "0.3",
+            "--log-file", str(logfile)])
+        assert code == wd.EXIT_ROLLED_BACK
+        assert (inst / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"
+        assert "watchdog exiting with code 1" in logfile.read_text(encoding="utf-8")
+    finally:
+        held.close()
 
 
 def test_rollback_itself_failing_returns_distinct_code(tmp_path, monkeypatch):
@@ -177,15 +192,18 @@ def test_rollback_itself_failing_returns_distinct_code(tmp_path, monkeypatch):
     wd = _load_wd()
     inst, _home = _stage(tmp_path, monkeypatch, manifest=["existing.txt"],
                          with_helper=False)
-    closed_port = _free_port()
-    code = wd.main([
-        "--host", "127.0.0.1", "--port", str(closed_port),
-        "--expect-version", "9.9.9", "--install-root", str(inst),
-        "--timeout", "1.0", "--poll-interval", "0.2", "--request-timeout", "0.3"])
-    assert code == wd.EXIT_ROLLBACK_FAILED
-    assert code != wd.EXIT_ROLLED_BACK
-    # The install was never touched (rollback couldn't even load).
-    assert (inst / "existing.txt").read_text(encoding="utf-8") == "NEW-from-update"
+    held, closed_port = _held_port()   # reserved, never listening for this test
+    try:
+        code = wd.main([
+            "--host", "127.0.0.1", "--port", str(closed_port),
+            "--expect-version", "9.9.9", "--install-root", str(inst),
+            "--timeout", "1.0", "--poll-interval", "0.2", "--request-timeout", "0.3"])
+        assert code == wd.EXIT_ROLLBACK_FAILED
+        assert code != wd.EXIT_ROLLED_BACK
+        # The install was never touched (rollback couldn't even load).
+        assert (inst / "existing.txt").read_text(encoding="utf-8") == "NEW-from-update"
+    finally:
+        held.close()
 
 
 # -------------------------------- misc units --------------------------------
@@ -205,47 +223,50 @@ def test_survives_after_launcher_process_exits(tmp_path):
     after spawning it. A throwaway launcher spawns the watchdog with the exact
     same detachment flags updater.spawn_health_watchdog() uses, then exits
     immediately; the watchdog must keep running (and finish) afterward."""
-    closed_port = _free_port()
-    logfile = tmp_path / "watchdog.log"
-    inst = tmp_path / "install"   # no rollback helper here - this test only cares
-    inst.mkdir()                  # that the watchdog ran to completion.
-    launcher = tmp_path / "launcher.py"
-    launcher.write_text(
-        "import subprocess, sys\n"
-        f"argv = [sys.executable, {str(WATCHDOG_SCRIPT)!r}, "
-        "'--host', '127.0.0.1', '--port', " + repr(str(closed_port)) + ", "
-        "'--expect-version', 'irrelevant', "
-        f"'--install-root', {str(inst)!r}, "
-        "'--timeout', '1.5', '--poll-interval', '0.3', "
-        "'--request-timeout', '0.3', "
-        f"'--log-file', {str(logfile)!r}]\n"
-        "kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
-        "stderr=subprocess.DEVNULL, close_fds=True)\n"
-        "if sys.platform == 'win32':\n"
-        "    kwargs['creationflags'] = 0x00000008 | 0x00000200\n"
-        "else:\n"
-        "    kwargs['start_new_session'] = True\n"
-        "subprocess.Popen(argv, **kwargs)\n",
-        encoding="utf-8")
+    held, closed_port = _held_port()   # reserved, never listening for this test
+    try:
+        logfile = tmp_path / "watchdog.log"
+        inst = tmp_path / "install"   # no rollback helper here - this test only cares
+        inst.mkdir()                  # that the watchdog ran to completion.
+        launcher = tmp_path / "launcher.py"
+        launcher.write_text(
+            "import subprocess, sys\n"
+            f"argv = [sys.executable, {str(WATCHDOG_SCRIPT)!r}, "
+            "'--host', '127.0.0.1', '--port', " + repr(str(closed_port)) + ", "
+            "'--expect-version', 'irrelevant', "
+            f"'--install-root', {str(inst)!r}, "
+            "'--timeout', '1.5', '--poll-interval', '0.3', "
+            "'--request-timeout', '0.3', "
+            f"'--log-file', {str(logfile)!r}]\n"
+            "kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL, close_fds=True)\n"
+            "if sys.platform == 'win32':\n"
+            "    kwargs['creationflags'] = 0x00000008 | 0x00000200\n"
+            "else:\n"
+            "    kwargs['start_new_session'] = True\n"
+            "subprocess.Popen(argv, **kwargs)\n",
+            encoding="utf-8")
 
-    subprocess.run([sys.executable, str(launcher)], check=True, timeout=10)
-    # subprocess.run() has now returned, so the launcher process is confirmed
-    # gone. The watchdog it spawned must keep running independently and finish on
-    # its own.
-    #
-    # The window is generous: a detached low-priority background process can go
-    # unscheduled for several seconds under heavy parallel load. The uncontended
-    # case exits this loop in well under a second via the early break.
-    deadline = time.monotonic() + 45.0
-    content = ""
-    while time.monotonic() < deadline:
-        if logfile.exists():
-            content = logfile.read_text(encoding="utf-8")
-            if "watchdog exiting with code" in content:
-                break
-        time.sleep(0.2)
-    assert "watchdog exiting with code" in content, (
-        f"watchdog did not complete after its launcher exited; log so far: {content!r}")
+        subprocess.run([sys.executable, str(launcher)], check=True, timeout=10)
+        # subprocess.run() has now returned, so the launcher process is confirmed
+        # gone. The watchdog it spawned must keep running independently and finish on
+        # its own.
+        #
+        # The window is generous: a detached low-priority background process can go
+        # unscheduled for several seconds under heavy parallel load. The uncontended
+        # case exits this loop in well under a second via the early break.
+        deadline = time.monotonic() + 45.0
+        content = ""
+        while time.monotonic() < deadline:
+            if logfile.exists():
+                content = logfile.read_text(encoding="utf-8")
+                if "watchdog exiting with code" in content:
+                    break
+            time.sleep(0.2)
+        assert "watchdog exiting with code" in content, (
+            f"watchdog did not complete after its launcher exited; log so far: {content!r}")
+    finally:
+        held.close()
 
 
 # ---------------------- proxy env must not break the probe ------------------
@@ -269,7 +290,7 @@ def test_probe_ignores_http_proxy_env(monkeypatch):
     import urllib.request
     wd = _load_wd()
     server, thread, port = _whoami_server(lambda: {"app": "localm", "version": "9.9.9"})
-    dead = _free_port()          # nothing listens here: a proxy pointed at it always fails
+    held, dead = _held_port()    # reserved, not listening: a proxy pointed at it always fails
     try:
         monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead}")
         monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead}")
@@ -285,9 +306,10 @@ def test_probe_ignores_http_proxy_env(monkeypatch):
         urllib.request.install_opener(None)   # never leak a poisoned opener onward
         server.shutdown()
         thread.join(timeout=2)
+        held.close()
 
 
-def test_healthy_check_survives_a_poisoned_global_opener(monkeypatch):
+def test_healthy_check_survives_a_poisoned_global_opener(tmp_path, monkeypatch):
     """The end-to-end shape of the CI failure, not just the unit.
 
     Simulates the cross-test pollution directly: build urllib's global opener
@@ -297,22 +319,25 @@ def test_healthy_check_survives_a_poisoned_global_opener(monkeypatch):
     """
     import urllib.request
     wd = _load_wd()
-    dead = _free_port()
-    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead}")
-    urllib.request.install_opener(urllib.request.build_opener())   # capture the bad env
-    monkeypatch.delenv("http_proxy", raising=False)
-    monkeypatch.delenv("HTTP_PROXY", raising=False)
-    server, thread, port = _whoami_server(lambda: {"app": "localm", "version": "1.2.3"})
+    held, dead = _held_port()   # reserved, not listening: a dead proxy target
     try:
-        def _boom(_install_root):
-            raise AssertionError("rollback must not be invoked on a healthy check")
-        monkeypatch.setattr(wd, "_load_rollback_module", _boom)
-        code = wd.main([
-            "--host", "127.0.0.1", "--port", str(port),
-            "--expect-version", "1.2.3", "--install-root", str(REPO),
-            "--timeout", "5", "--poll-interval", "0.2", "--request-timeout", "1"])
-        assert code == wd.EXIT_HEALTHY
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead}")
+        urllib.request.install_opener(urllib.request.build_opener())   # capture the bad env
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        server, thread, port = _whoami_server(lambda: {"app": "localm", "version": "1.2.3"})
+        try:
+            def _boom(_install_root):
+                raise AssertionError("rollback must not be invoked on a healthy check")
+            monkeypatch.setattr(wd, "_load_rollback_module", _boom)
+            code = wd.main([
+                "--host", "127.0.0.1", "--port", str(port),
+                "--expect-version", "1.2.3", "--install-root", str(tmp_path),
+                "--timeout", "5", "--poll-interval", "0.2", "--request-timeout", "1"])
+            assert code == wd.EXIT_HEALTHY
+        finally:
+            urllib.request.install_opener(None)      # never leak it to other tests
+            server.shutdown()
+            thread.join(timeout=2)
     finally:
-        urllib.request.install_opener(None)      # never leak it to other tests
-        server.shutdown()
-        thread.join(timeout=2)
+        held.close()
