@@ -517,8 +517,10 @@ def generate_image(
     output_path
         Destination file (PNG).  Parent directories are created if needed.
     api_url
-        ComfyUI base URL.  Defaults to ``http://127.0.0.1:8188``.
-        Override with the ``FLUX_API_URL`` environment variable before calling.
+        ComfyUI base URL.  Defaults to ``http://127.0.0.1:8188``.  A value passed
+        here is used as given: the FLUX_API_URL, managed-instance and configured-URL
+        resolution happens in ``default_api_url()``, which a caller that passes this
+        parameter bypasses.
     guidance
         FluxGuidance scale.  None keeps the workflow's own default (~3.5).
     negative_prompt

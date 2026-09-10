@@ -1070,11 +1070,23 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
         from localm.audit import SessionMode, effective_mode
-        from localm.config import home_dir
+        from localm.config import home_dir, load_config
         from localm.image_gen.comfy import generate_image as gen_img
         from localm.media import paths as _media_paths
 
         home = home_dir().resolve()
+
+        try:
+            from localm.plugins.builtin.image import backend as _image_backend
+            api_url = _image_backend.settings(load_config()).get("api_url") or None
+        except Exception as exc:                     # noqa: BLE001
+            from localm.debuglog import logger
+            logger.debug("could not resolve the image plugin ComfyUI url (%s); "
+                         "using the shared default", exc)
+            api_url = None
+        if not api_url:
+            from localm.media.comfy_client import default_api_url
+            api_url = default_api_url()
 
         def _confine(raw: str, label: str):
             """Keep an MCP OUTPUT path inside the localm data dir - this tool is
@@ -1121,6 +1133,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         with _quiet_stdout():
             ok, message = gen_img(
                 prompt, out,
+                api_url=api_url,
                 guidance=args.get("guidance"),
                 negative_prompt=args.get("negative_prompt"),
                 seed=args.get("seed"),

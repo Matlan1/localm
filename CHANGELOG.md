@@ -45,6 +45,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   you pasted into it.** At common desktop widths it shared the "Add a model"
   row equally with the shorter, optional name and sha256 fields; it now gets
   the larger share.
+- **The MCP image tool now uses the ComfyUI you configured.** It always talked
+  to the default local port instead, so an MCP client could miss a ComfyUI
+  running anywhere else, including the one localm manages itself.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
