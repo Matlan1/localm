@@ -64,12 +64,11 @@ test("a single detected GPU keeps the selector hidden", async () => {
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, mainGpuIndex: null }) });
   const row = window.document.getElementById("perf-gpu-select-row");
   const sel = window.document.getElementById("perf-main-gpu");
-  // Let the async populate run before asserting the row stayed hidden.
-  await waitFor(() => calls.some((c) => c.u.includes("/api/gpus")));
-  await settle(30);
-  assert.equal(row.hidden, true, "no useful choice on a single-GPU box");
-  // The row starts `hidden` in the markup, so also check the populate ran and
-  // returned early.
+  // The row starts `hidden` in the markup; poison it visible so the wait
+  // below can only succeed if the refresher actually ran and hid it again.
+  row.hidden = false;
+  assert.ok(await waitFor(() => row.hidden === true),
+    "refresher ran and hid the row on a single-GPU box");
   assert.equal(sel.options.length, 0, "selector left unpopulated for a single GPU");
 });
 
@@ -78,9 +77,9 @@ test("no GPUs detected (endpoint reachable but empty) keeps the selector hidden"
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus: [], mainGpuIndex: null }) });
   const row = window.document.getElementById("perf-gpu-select-row");
   const sel = window.document.getElementById("perf-main-gpu");
-  await waitFor(() => calls.some((c) => c.u.includes("/api/gpus")));
-  await settle(30);
-  assert.equal(row.hidden, true);
+  row.hidden = false;
+  assert.ok(await waitFor(() => row.hidden === true),
+    "refresher ran and hid the row on an empty GPU list");
   assert.equal(sel.options.length, 0);
 });
 

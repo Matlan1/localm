@@ -6,14 +6,17 @@ import { loadAppWithPages, runScript } from "./harness.mjs";
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 const NOT_INSTALLED = { status: "not_installed", model: "bge-small-en-v1.5", dim: null, internal: [], error: null };
+const READY = { status: "ready", model: "bge-small-en-v1.5", dim: 384, internal: [], error: null };
 
-function setupTable(collections) {
+function setupTable(collections, embedding = NOT_INSTALLED) {
   const fetchImpl = async (url) => {
     const u = String(url);
     if (/\/api\/rag\/collections$/.test(u))
       return { ok: true, status: 200, text: async () => "", json: async () => ({ collections }) };
     if (u.includes("/api/rag/embedding"))
-      return { ok: true, status: 200, text: async () => "", json: async () => NOT_INSTALLED };
+      return { ok: true, status: 200, text: async () => "", json: async () => embedding };
+    if (u.includes("/api/models"))
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ models: [] }) };
     return { ok: true, status: 200, text: async () => "", json: async () => ({}) };
   };
   const { window } = loadAppWithPages({ fetchImpl });
@@ -61,7 +64,7 @@ test("a healthy collection gets no corrupt badge", async () => {
   assert.equal(table.querySelector(".corrupt-badge"), null);
 });
 
-test("corrupt and re-embed badges can both show at once, distinctly", async () => {
+test("a corrupt BM25 row shows only the corrupt badge when no embedding model is installed", async () => {
   const window = setupTable([{ name: "kb", n_docs: 1, n_chunks: 2, has_vectors: false,
                                 vector_degrade_reason: null, corrupt: true }]);
   runScript(window, "refreshKnowledgePage();");
@@ -71,6 +74,27 @@ test("corrupt and re-embed badges can both show at once, distinctly", async () =
   // embedding not installed -> no re-embed badge here, only the corrupt one
   assert.ok(table.querySelector(".corrupt-badge"));
   assert.equal(table.querySelector(".retrieval-badge"), null);
+});
+
+test("corrupt and re-embed badges can both show at once, distinctly", async () => {
+  const window = setupTable([{ name: "kb", n_docs: 1, n_chunks: 2, has_vectors: false,
+                                vector_degrade_reason: null, corrupt: true, chunks_bad_lines: 0 }],
+                             READY);
+  runScript(window, "refreshKnowledgePage();");
+  await tick(); await tick(); await tick();
+
+  const table = window.document.getElementById("kb-table");
+  const corruptBadge = table.querySelector(".corrupt-badge");
+  const retrievalBadge = table.querySelector(".retrieval-badge");
+  assert.ok(corruptBadge, "the corrupt badge is rendered");
+  assert.ok(retrievalBadge, "the re-embed badge is rendered alongside it");
+  assert.notEqual(corruptBadge, retrievalBadge, "the two badges are distinct nodes");
+  assert.equal(corruptBadge.textContent, "index damaged");
+  assert.equal(retrievalBadge.textContent, "re-embed needed");
+  assert.equal(corruptBadge.parentElement, retrievalBadge.parentElement,
+    "both badges live in the same retrieval cell");
+  assert.ok(table.querySelector("button.corrupt-fix"), "the repair button is offered");
+  assert.ok(table.querySelector("button.warn"), "the re-embed button is highlighted too");
 });
 
 function setupDetail(collData) {

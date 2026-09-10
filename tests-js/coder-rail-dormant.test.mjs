@@ -408,16 +408,25 @@ test("rail: re-clicking the session that is already open still reuses it", async
   await settle();
   await window.refreshDormant();
 
-  rowNamed(window, "build a calculator").onclick();
+  // Captured BEFORE the first click: the rail drops this row from "Past
+  // sessions" the moment the session opens (next test), so the DOM node is no
+  // longer findable by rowNamed() afterwards. `handler` simulates the stale
+  // row a user's own click still reaches even though the rail has moved on.
+  const handler = rowNamed(window, "build a calculator").onclick;
+  handler();
   await settle();
   assert.equal(posts.length, 1);
 
-  // The row list is a snapshot taken before the session opened, so the row the
-  // user can still click is the one for the session now running.
-  const stale = rowNamed(window, "build a calculator");
-  if (stale) { stale.onclick(); await settle(); stale.onclick(); await settle(); }
+  handler();
+  await settle();
+  handler();
+  await settle();
   assert.equal(posts.length, 1,
     `re-opening the session already running must not start another - got ${posts.length} POSTs`);
+  assert.ok(!modalButton(window, "End it and continue"),
+    "the same conversation must JOIN the open session, not be offered a swap");
+  assert.equal(window.document.getElementById("coder-cwd").textContent, "/work/here",
+    "and the open session stays active");
 });
 
 test("rail: the session that is open is not also listed as a past session", async () => {

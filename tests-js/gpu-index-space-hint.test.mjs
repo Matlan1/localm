@@ -97,6 +97,9 @@ test("a single-GPU box hides the rows, so the shared hint stays hidden too", asy
   });
   const doc = window.document;
   const selRow = doc.getElementById("perf-gpu-select-row");
+  // The row starts `hidden` in the markup; poison it visible so the wait
+  // below can only succeed if the refresher actually ran and hid it again.
+  selRow.hidden = false;
   assert.ok(await waitFor(() => selRow.hidden === true), "selector row hidden");
   await settle(30);
   assert.equal(hintVisible(doc), false,

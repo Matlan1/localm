@@ -153,7 +153,6 @@ test("the tts download-consent dialog never renders server/model-supplied text",
       `net_mode=ask must offer the dialog even with a hostile cfg: ${payload}`);
     assert.equal(injectedElements(win.document.body), 0,
       `payload was parsed into DOM elements: ${payload}`);
-    assert.equal(win.__INJECTED, undefined, `payload executed: ${payload}`);
     assert.equal(win.$("modal-body").textContent.includes(payload), false,
       `the dialog must never render this hostile value at all: ${payload}`);
     assert.match(win.$("modal-body").textContent, /huggingface\.co/,

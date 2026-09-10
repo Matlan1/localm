@@ -332,9 +332,11 @@ test("a single detected GPU keeps the split checkbox row hidden", async () => {
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: null }) });
   const row = window.document.getElementById("perf-gpu-split-row");
   const list = window.document.getElementById("perf-gpu-split-list");
-  await waitFor(() => calls.some((c) => c.u.includes("/api/gpus")));
-  await settle(30);
-  assert.equal(row.hidden, true, "no useful split on a single-GPU box");
+  // The row starts `hidden` in the markup; poison it visible so the wait
+  // below can only succeed if the refresher actually ran and hid it again.
+  row.hidden = false;
+  assert.ok(await waitFor(() => row.hidden === true),
+    "refresher ran and hid the split row on a single-GPU box");
   assert.equal(list.querySelectorAll("input[type=checkbox]").length, 0,
     "checkbox list left unpopulated for a single GPU");
 });
