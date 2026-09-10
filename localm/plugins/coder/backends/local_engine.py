@@ -24,7 +24,8 @@ from .base import BaseLLMBackend
 # coder passes (it forwards arbitrary gen_kwargs) is dropped so the call cannot
 # raise a TypeError.
 _ENGINE_GEN_KWARGS = frozenset({
-    "max_tokens", "temperature", "top_p", "top_k", "repeat_penalty", "grammar", "seed",
+    "max_tokens", "temperature", "top_p", "top_k", "repeat_penalty", "grammar",
+    "grammar_lazy", "grammar_triggers", "seed",
 })
 
 
