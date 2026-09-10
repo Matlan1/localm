@@ -292,6 +292,14 @@ jobs:
           npm ci
           npm test
 
+      # Runs `npm run lint` (eslint.config.mjs) and reports but never fails the
+      # job. One host only: matches the ruff job's "result does not vary by
+      # host" below. (#1780)
+      - name: Lint (eslint, non-blocking)
+        if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        run: npm run lint
+
   # ruff is configured (pyproject [tool.ruff]) and blocking: a new lint
   # regression fails CI. One host only; ruff's result does not vary by host.
   lint:
