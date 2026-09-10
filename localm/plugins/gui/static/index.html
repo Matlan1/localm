@@ -554,34 +554,34 @@
     <!-- ============ MUSIC ============ -->
     <section id="view-music" class="view">
       <div class="page">
-        <h2>Music generation</h2>
-        <div class="sub">Runs the ACE-Step workflow on your local ComfyUI (same VRAM
+        <h2 data-i18n="music.title">Music generation</h2>
+        <div class="sub" data-i18n="music.intro">Runs the ACE-Step workflow on your local ComfyUI (same VRAM
         handover as image generation). Track length is arbitrary; longer tracks just
         take longer.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
-            <div class="card-head-text"><h3>Generate</h3></div></div>
-          <label>Style tags - genre, mood, instruments, BPM, vocal type</label>
-          <textarea id="music-tags" rows="2" placeholder="synthwave, 80s, female vocals, 120 bpm, dreamy"></textarea>
-          <label>Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)</label>
-          <textarea id="music-lyrics" rows="4" placeholder="[verse]&#10;Neon lights across the bay…"></textarea>
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.generate">Generate</h3></div></div>
+          <label data-i18n="music.styleTagsLabel">Style tags - genre, mood, instruments, BPM, vocal type</label>
+          <textarea id="music-tags" rows="2" placeholder="synthwave, 80s, female vocals, 120 bpm, dreamy" data-i18n-placeholder="music.styleTagsPlaceholder"></textarea>
+          <label data-i18n="music.lyricsLabel">Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)</label>
+          <textarea id="music-lyrics" rows="4" placeholder="[verse]&#10;Neon lights across the bay…" data-i18n-placeholder="music.lyricsPlaceholder"></textarea>
           <div class="grid2">
-            <div><label>Duration (seconds)</label><input type="number" id="music-duration" value="120" min="5" max="3600" step="5"></div>
+            <div><label data-i18n="mediaGallery.durationLabel">Duration (seconds)</label><input type="number" id="music-duration" value="120" min="5" max="3600" step="5"></div>
           </div>
           <!-- Duration stays out: it ships a real value="120" the form expects you
                to read and change. These three are placeholder-defaulted. -->
           <details class="adv-fold" id="music-advanced">
-            <summary>Advanced <span class="adv-fold-hint">seed, steps, CFG</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="music.advancedHint">seed, steps, CFG</span><span class="job-state adv-fold-count" hidden></span></summary>
             <div class="adv-fold-body grid2">
-              <div><label>Seed</label><input type="number" id="music-seed" placeholder="random"></div>
-              <div><label>Steps</label><input type="number" id="music-steps" placeholder="default (50)"></div>
-              <div><label>CFG</label><input type="number" id="music-cfg" step="0.5" placeholder="default (5.0)"></div>
+              <div><label data-i18n="chat.seed">Seed</label><input type="number" id="music-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
+              <div><label data-i18n="mediaGallery.stepsLabel">Steps</label><input type="number" id="music-steps" placeholder="default (50)" data-i18n-placeholder="music.stepsPlaceholder"></div>
+              <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="music-cfg" step="0.5" placeholder="default (5.0)" data-i18n-placeholder="music.cfgPlaceholder"></div>
             </div>
           </details>
           <div class="actions">
-            <button class="btn-primary" id="music-generate">Generate</button>
-            <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
-            <label class="inline-check" title="Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
+            <button class="btn-primary" id="music-generate" data-i18n="mediaGallery.generate">Generate</button>
+            <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <label class="inline-check" title="Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="music.reloadCheckboxTitle">
               <input type="checkbox" id="music-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -590,16 +590,16 @@
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
-            <div class="card-head-text"><h3>History</h3></div></div>
-          <div class="sub">Tick a card to select it for bulk actions; click one for
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.history">History</h3></div></div>
+          <div class="sub" data-i18n="music.historyHint">Tick a card to select it for bulk actions; click one for
           details, metadata, and per-track actions.</div>
           <div id="music-bulk" class="media-bulk" style="display:none"></div>
           <div id="music-history" class="media-grid"></div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
-            <div class="card-head-text"><h3>Workflow</h3></div></div>
-          <div class="sub">The ComfyUI workflow this page uses. Upload one (in
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
+          <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="music-workflows" data-media="music"></div>
         </div>
@@ -609,40 +609,40 @@
     <!-- ============ VIDEO ============ -->
     <section id="view-video" class="view">
       <div class="page">
-        <h2>Video generation</h2>
-        <div class="sub">Slowest generator here: minutes to hours per clip, so iterate
+        <h2 data-i18n="video.title">Video generation</h2>
+        <div class="sub" data-i18n="video.intro">Slowest generator here: minutes to hours per clip, so iterate
         with short durations and fewer steps. Keep the native 1280&times;704 resolution
         or quality collapses. Runs Wan 2.2 on your local ComfyUI.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="video"></span>
-            <div class="card-head-text"><h3>Generate</h3></div></div>
-          <label>Prompt - subject, motion, camera, lighting (motion verbs matter)</label>
-          <textarea id="video-prompt" rows="2" placeholder="a red fox running through fresh snow, low camera tracking shot, golden hour"></textarea>
-          <label>Negative prompt (optional - default suppresses blur/distortion/watermarks)</label>
-          <textarea id="video-negative" rows="1" placeholder="default"></textarea>
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.generate">Generate</h3></div></div>
+          <label data-i18n="video.promptLabel">Prompt - subject, motion, camera, lighting (motion verbs matter)</label>
+          <textarea id="video-prompt" rows="2" placeholder="a red fox running through fresh snow, low camera tracking shot, golden hour" data-i18n-placeholder="video.promptPlaceholder"></textarea>
+          <label data-i18n="video.negativePromptLabel">Negative prompt (optional - default suppresses blur/distortion/watermarks)</label>
+          <textarea id="video-negative" rows="1" placeholder="default" data-i18n-placeholder="mediaGallery.defaultPlaceholder"></textarea>
           <div class="grid2">
-            <div><label>Duration (seconds)</label><input type="number" id="video-seconds" value="5" min="1" max="20" step="1"></div>
-            <div><label>FPS</label><input type="number" id="video-fps" value="24" min="8" max="60" step="1"></div>
-            <div><label>Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="path on this machine" spellcheck="false"></div>
+            <div><label data-i18n="mediaGallery.durationLabel">Duration (seconds)</label><input type="number" id="video-seconds" value="5" min="1" max="20" step="1"></div>
+            <div><label data-i18n="video.fpsLabel">FPS</label><input type="number" id="video-fps" value="24" min="8" max="60" step="1"></div>
+            <div><label data-i18n="video.startImageLabel">Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="path on this machine" spellcheck="false" data-i18n-placeholder="video.startImagePlaceholder"></div>
           </div>
           <!-- Width and Height are folded even though they look load-bearing: the
                blurb above this form tells you to KEEP the native 1280x704 and
                iterate on duration and steps instead. A field the page tells you
                not to touch is the definition of rarely touched. -->
           <details class="adv-fold" id="video-advanced">
-            <summary>Advanced <span class="adv-fold-hint">resolution, seed, steps, CFG</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="video.advancedHint">resolution, seed, steps, CFG</span><span class="job-state adv-fold-count" hidden></span></summary>
             <div class="adv-fold-body grid2">
-              <div><label>Width</label><input type="number" id="video-width" step="16" placeholder="default (1280, native)"></div>
-              <div><label>Height</label><input type="number" id="video-height" step="16" placeholder="default (704, native)"></div>
-              <div><label>Seed</label><input type="number" id="video-seed" placeholder="random"></div>
-              <div><label>Steps</label><input type="number" id="video-steps" placeholder="default (30)"></div>
-              <div><label>CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)"></div>
+              <div><label data-i18n="video.widthLabel">Width</label><input type="number" id="video-width" step="16" placeholder="default (1280, native)" data-i18n-placeholder="video.widthPlaceholder"></div>
+              <div><label data-i18n="video.heightLabel">Height</label><input type="number" id="video-height" step="16" placeholder="default (704, native)" data-i18n-placeholder="video.heightPlaceholder"></div>
+              <div><label data-i18n="chat.seed">Seed</label><input type="number" id="video-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
+              <div><label data-i18n="mediaGallery.stepsLabel">Steps</label><input type="number" id="video-steps" placeholder="default (30)" data-i18n-placeholder="video.stepsPlaceholder"></div>
+              <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)" data-i18n-placeholder="video.cfgPlaceholder"></div>
             </div>
           </details>
           <div class="actions">
-            <button class="btn-primary" id="video-generate">Generate</button>
-            <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
-            <label class="inline-check" title="Applies to video generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
+            <button class="btn-primary" id="video-generate" data-i18n="mediaGallery.generate">Generate</button>
+            <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <label class="inline-check" title="Applies to video generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="video.reloadCheckboxTitle">
               <input type="checkbox" id="video-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -651,16 +651,16 @@
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="video"></span>
-            <div class="card-head-text"><h3>History</h3></div></div>
-          <div class="sub">Tick a card to select it for bulk actions; click one for
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.history">History</h3></div></div>
+          <div class="sub" data-i18n="video.historyHint">Tick a card to select it for bulk actions; click one for
           details, metadata, and per-clip actions.</div>
           <div id="video-bulk" class="media-bulk" style="display:none"></div>
           <div id="video-history" class="media-grid"></div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
-            <div class="card-head-text"><h3>Workflow</h3></div></div>
-          <div class="sub">The ComfyUI workflow this page uses. Upload one (in
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
+          <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="video-workflows" data-media="video"></div>
         </div>

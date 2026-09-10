@@ -6,6 +6,7 @@
 "use strict";
 
 import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
@@ -56,7 +57,7 @@ bindReloadToggle("music", "music-reload-llm");
 
 $("music-generate").onclick = async () => {
   const tags = $("music-tags").value.trim();
-  if (!tags) { toast("Enter style tags first", true); return; }
+  if (!tags) { toast(t("music.enterTags"), true); return; }
   const body = { tags };
   const lyrics = $("music-lyrics").value.trim();
   if (lyrics) body.lyrics = lyrics;
@@ -89,20 +90,20 @@ $("music-generate").onclick = async () => {
       log.scrollTop = log.scrollHeight;
     });
     if (end.status === "done" && end.result) {
-      toast("Track finished");
+      toast(t("music.generatedToast"));
       const player = document.createElement("audio");
       player.controls = true;
       player.style.width = "100%";
-      reportMediaLoadFailure(player, "the track");
+      reportMediaLoadFailure(player, t("music.mediaWhat"));
       player.src = await fetchImageURL(
         "/api/music/file/" + encodeURIComponent(end.result));
       $("music-result").appendChild(player);
       refreshMusicHistory();
     } else {
-      toast("Generation " + jobStatusWord(end.status), end.status !== "cancelled");
+      toast(t("music.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
     }
   } catch (e) {
-    toast("Music generation failed: " + e.message, true);
+    toast(t("music.generationFailed", { message: e.message }), true);
   } finally {
     $("music-generate").disabled = false;
     hideStop("music-stop");

@@ -1183,6 +1183,7 @@ export const I18N_EN = {
   "settings.search": "Search all settings",
   "settings.sections": "Settings sections",
   "settings.title": "Settings",
+  "settings.unsavedConfirm": "You have unsaved settings changes. Leave without saving?",
 
   // ---- Settings > Appearance ----
   "appearance.language": "Interface language",
@@ -1316,17 +1317,61 @@ export const I18N_EN = {
   "images.useAsInput": "use as input",
   "images.useAsInputTitle": "Use this image as the img2img input",
 
-  // ---- Music page (item/empty-state keys only; the rest of music.js migrates in Batch 2) ----
+  // ---- Music page ----
+  "music.advancedHint": "seed, steps, CFG",
+  "music.cfgPlaceholder": "default (5.0)",
   "music.empty.hint": "Generate one above; your tracks appear here.",
   "music.empty.title": "No tracks yet",
+  "music.enterTags": "Enter style tags first",
+  "music.generatedToast": "Track finished",
+  "music.generationFailed": "Music generation failed: {message}",
+  "music.generationStatus": "Generation {status}",
+  "music.historyHint":
+    "Tick a card to select it for bulk actions; click one for details, metadata, and per-track actions.",
+  "music.intro":
+    "Runs the ACE-Step workflow on your local ComfyUI (same VRAM handover as image generation). Track length is arbitrary; longer tracks just take longer.",
   "music.item.one": "track",
   "music.item.other": "tracks",
+  "music.lyricsLabel": "Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)",
+  "music.lyricsPlaceholder": "[verse]\nNeon lights across the bay…",
+  "music.mediaWhat": "the track",
+  "music.reloadCheckboxTitle":
+    "Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.",
+  "music.stepsPlaceholder": "default (50)",
+  "music.styleTagsLabel": "Style tags - genre, mood, instruments, BPM, vocal type",
+  "music.styleTagsPlaceholder": "synthwave, 80s, female vocals, 120 bpm, dreamy",
+  "music.title": "Music generation",
 
-  // ---- Video page (item/empty-state keys only; the rest of video.js migrates in Batch 2) ----
+  // ---- Video page ----
+  "video.advancedHint": "resolution, seed, steps, CFG",
+  "video.cfgPlaceholder": "default (5.0)",
   "video.empty.hint": "Generate one above; your clips appear here.",
   "video.empty.title": "No clips yet",
+  "video.enterPrompt": "Enter a prompt first",
+  "video.fpsLabel": "FPS",
+  "video.generatedToast": "Clip finished",
+  "video.generationFailed": "Video generation failed: {message}",
+  "video.generationStatus": "Generation {status}",
+  "video.heightLabel": "Height",
+  "video.heightPlaceholder": "default (704, native)",
+  "video.historyHint":
+    "Tick a card to select it for bulk actions; click one for details, metadata, and per-clip actions.",
+  "video.intro":
+    "Slowest generator here: minutes to hours per clip, so iterate with short durations and fewer steps. Keep the native 1280×704 resolution or quality collapses. Runs Wan 2.2 on your local ComfyUI.",
   "video.item.one": "clip",
   "video.item.other": "clips",
+  "video.mediaWhat": "the clip",
+  "video.negativePromptLabel": "Negative prompt (optional - default suppresses blur/distortion/watermarks)",
+  "video.promptLabel": "Prompt - subject, motion, camera, lighting (motion verbs matter)",
+  "video.promptPlaceholder": "a red fox running through fresh snow, low camera tracking shot, golden hour",
+  "video.reloadCheckboxTitle":
+    "Applies to video generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.",
+  "video.startImageLabel": "Start image (optional, image-to-video)",
+  "video.startImagePlaceholder": "path on this machine",
+  "video.stepsPlaceholder": "default (30)",
+  "video.title": "Video generation",
+  "video.widthLabel": "Width",
+  "video.widthPlaceholder": "default (1280, native)",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
 };

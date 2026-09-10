@@ -562,7 +562,8 @@ const T_CALL_FILES = ["app/chat.js", "app/models-sidebar.js", "app/logo.js",
                       "app/settings-perf.js", "app/helpers.js", "app/media-gallery.js",
                       "pages/settings.js", "pages/plugins.js", "pages/images.js",
                       "app/slash.js", "app/cmdk.js", "app/picker.js",
-                      "pages/models.js", "pages/knowledge.js", "app/coder.js"];
+                      "pages/models.js", "pages/knowledge.js", "app/coder.js",
+                      "app/tabs.js", "pages/video.js", "pages/music.js"];
 
 /** Key-shaped string literals inside a balanced t(...) / tn(...) call. */
 function tCallKeys(src) {
