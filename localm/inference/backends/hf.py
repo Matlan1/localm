@@ -258,13 +258,17 @@ class HFBackend(BaseBackend):
     # ------------------------------------------------------------------ #
 
     def load(self) -> None:
-        # Two pre-flight refusals, before a child is ever spawned:
+        # Three pre-flight refusals, before a child is ever spawned:
         #   1. Custom code (auto_map) the user has not explicitly trusted.
         #   2. A tokenizer.json regex pattern that fails the Oniguruma safety
         #      probe.
+        #   3. A shard index whose weight_map points outside the model
+        #      directory. See test_hf_shard_index_safety.py.
         _check_custom_code_allowed(self.model_path)
         from localm.inference.hf_tokenizer_safety import validate_tokenizer_json
         validate_tokenizer_json(self.model_path)
+        from localm.inference.hf_shard_index_safety import validate_shard_index
+        validate_shard_index(self.model_path)
 
         self._runner = HFRunner()
         params = {"model_path": self.model_path, "device": self._device}
