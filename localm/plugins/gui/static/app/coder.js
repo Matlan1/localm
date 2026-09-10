@@ -271,9 +271,17 @@ export function showCoderUI(hasSession) {
 }
 
 export function activateSession(id) {
+  const previousId = coder.activeId;
   coder.activeId = id;
   for (const [sid, s] of coder.sessions) {
     s.feedEl.classList.toggle("active", sid === id);
+  }
+  // The inline browser mirror only streams for the session on screen: a
+  // session with several coder sessions open must not hold N live
+  // screencasts running for the N-1 nobody is looking at.
+  if (previousId && previousId !== id) {
+    const prev = coder.sessions.get(previousId);
+    if (prev) stopInlineBrowserStream(prev);
   }
   const s = coder.sessions.get(id);
   if (s) {
@@ -281,6 +289,7 @@ export function activateSession(id) {
     setCoderState(s.busy ? "working" : "idle");
     $("coder-usage").textContent = s.info.total_tokens
       ? t("coder.usage.tokTurn", { tokens: s.info.total_tokens, turn: s.info.turns }) : "";
+    if (s.inlineBrowser) startInlineBrowserStream(s);
   }
   // "patch" only exists for a patch-mode session: in any other session the
   // writes went to disk, so the button would download an empty file and read
@@ -325,6 +334,8 @@ export function registerSession(info, { replay }) {
     pendingCards: [],
     confirmCards: new Map(),   // confirm_id → {card, title, buttons, tool}
     closed: false,
+    inlineBrowserAttempted: false,
+    inlineBrowser: null,       // {mod, img, status, abort, jobId} once attached
   };
   coder.sessions.set(info.id, s);
   streamSession(s, replay);
@@ -337,6 +348,99 @@ export function feedAppend(s, node) {
   const stick = nearBottom(s.feedEl);
   s.feedEl.appendChild(node);
   if (stick) s.feedEl.scrollTop = s.feedEl.scrollHeight;
+}
+
+/* -------------------------------------------------------------------- */
+/*  Opt-in inline mirror of the browser the coding agent drives          */
+/*  (browser_inline_live_view, off by default). Loads the browser         */
+/*  plugin's own client_entry at runtime, the same pattern               */
+/*  loadClientPlugins() uses for every optional plugin - this module      */
+/*  must keep loading cleanly on an install with no browser plugin at    */
+/*  all, so it never imports that module at the top of this file.        */
+/* -------------------------------------------------------------------- */
+
+const BROWSER_PLUGIN_URL = "/plugins/browser/browser.js";
+
+/** Reassignable so a test can substitute a fake module without a real
+ *  dynamic import. Exported for the same reason. */
+export let loadBrowserPluginModule = () => import(BROWSER_PLUGIN_URL);
+
+/** Attach the inline panel the first time a session's transcript shows a
+ *  browser_* tool call, if the setting allows it. Guarded by the caller
+ *  (s.inlineBrowserAttempted) so this only ever runs once per session; also
+ *  checks s.inlineBrowser itself so two overlapping calls cannot build two
+ *  panels. */
+export async function maybeAttachInlineBrowser(s) {
+  let enabled = false;
+  try {
+    const r = await fetch("/api/browser/state", { headers: authHeaders() });
+    const data = await r.json().catch(() => ({}));
+    enabled = data.inlineLiveView === true;
+  } catch (e) { /* server unreachable; nothing to show */ }
+  if (!enabled || s.closed || s.inlineBrowser) return;
+  let mod;
+  try {
+    mod = await loadBrowserPluginModule();
+  } catch (e) {
+    return;                            // the browser plugin is not installed
+  }
+  if (s.closed || s.inlineBrowser) return;   // the session moved on while this awaited
+
+  const panel = el("div", "inline-browser-panel");
+  const img = el("img", "inline-browser-frame");
+  img.alt = t("coder.browser.liveViewAlt");
+  img.hidden = true;
+  const status = el("div", "inline-browser-status", "");
+  panel.append(img, status);
+  feedAppend(s, panel);
+  s.inlineBrowser = { mod, img, status, abort: null, jobId: null };
+  if (coder.activeId === s.info.id) startInlineBrowserStream(s);
+}
+
+/** Start (or resume) streaming this session's already-attached panel.
+ *  A no-op when there is no panel yet, or one is already streaming. */
+export function startInlineBrowserStream(s) {
+  const ib = s.inlineBrowser;
+  if (!ib || ib.abort || s.closed) return;
+  const abort = new AbortController();
+  ib.abort = abort;
+  fetch("/api/browser/agent", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ coder_session_id: s.info.id }),
+    signal: abort.signal,
+  }).then(async (r) => {
+    if (abort.signal.aborted || s.inlineBrowser !== ib) return;
+    if (!r.ok) return;      // no agent browser to watch yet; stays quiet
+    const data = await r.json().catch(() => ({}));
+    if (!data.job_id) return;
+    ib.jobId = data.job_id;
+    await ib.mod.watchFrames(data.job_id, {
+      authHeaders,
+      signal: abort.signal,
+      onFrame: (frame) => {
+        const src = ib.mod.frameSrc(frame);
+        if (src) { ib.img.src = src; ib.img.hidden = false; }
+      },
+      onLine: (text) => { ib.status.textContent = text; },
+    });
+  }).catch(() => { /* aborted, or the server dropped the connection */ });
+}
+
+/** Stop streaming (abort the fetch) and tell the server to end the viewer
+ *  job, so a session nobody is looking at does not keep a screencast
+ *  running. The agent's own browsing is untouched - watch_agent_browser
+ *  only ever turns the VIEWER off. A no-op when nothing is streaming. */
+export function stopInlineBrowserStream(s) {
+  const ib = s.inlineBrowser;
+  if (!ib || !ib.abort) return;
+  ib.abort.abort();
+  ib.abort = null;
+  if (ib.jobId) {
+    const jobId = ib.jobId;
+    ib.jobId = null;
+    fetch(`/api/jobs/${encodeURIComponent(jobId)}/cancel`,
+         { method: "POST", headers: authHeaders() }).catch(() => {});
+  }
 }
 
 export function startAssistantBlock(s) {
@@ -578,6 +682,10 @@ export function handleCoderEvent(s, ev) {
       const card = buildToolCard(ev);
       feedAppend(s, card);
       s.pendingCards.push(card);
+      if (!s.inlineBrowserAttempted && String(ev.tool || "").startsWith("browser_")) {
+        s.inlineBrowserAttempted = true;
+        maybeAttachInlineBrowser(s);
+      }
       break;
     }
     case "tool_result": {
@@ -696,6 +804,7 @@ export function handleCoderEvent(s, ev) {
     }
     case "closed": {
       s.busy = false;
+      stopInlineBrowserStream(s);
       s.closed = true;
       break;
     }
@@ -708,7 +817,7 @@ export async function streamSession(s, replay) {
       const r = await fetch(
         `/api/coder/sessions/${s.info.id}/events${replay ? "?replay=true" : ""}`,
         { headers: authHeaders() });
-      if (r.status === 404) { s.closed = true; break; }
+      if (r.status === 404) { stopInlineBrowserStream(s); s.closed = true; break; }
       if (!r.ok) throw new Error(r.statusText);
       replay = false;   // only the first connection replays
       await readSSE(r, (payload) => {
@@ -1095,6 +1204,7 @@ export async function closeCoderSession(s) {
     await fetch(`/api/coder/sessions/${s.info.id}`, {
       method: "DELETE", headers: authHeaders() });
   } catch (e) { /* server may already be gone */ }
+  stopInlineBrowserStream(s);
   s.closed = true;
   s.feedEl.remove();
   coder.sessions.delete(s.info.id);

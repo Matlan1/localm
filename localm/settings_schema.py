@@ -1164,6 +1164,12 @@ CORE_FIELDS: list = [
                  "Only used when browser-specific rules are on. Refused on top "
                  "of the main deny list.",
                  group="Network", owner="browser", admin_only=True),
+    SettingField("browser_inline_live_view", Widget.TOGGLE,
+                 "Show the agent's browser inline in the coder session",
+                 "Off by default. On mirrors the same live view the Browser "
+                 "tab already offers directly inside the coder session that "
+                 "triggered it, in addition to the tab.",
+                 group="Network", owner="browser"),
     # ---- Preview (GUI renderer, core) ----
     # owner="core": the artifact canvas is the GUI's own renderer and stays
     # visible on an install with no plugin beyond chat.

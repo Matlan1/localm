@@ -45,6 +45,16 @@ class NavigateRequest(BaseModel):
     url: str
 
 
+class WatchAgentRequest(BaseModel):
+    # None (the default, and an empty or absent POST body) watches whichever
+    # agent-driven browser this caller may see first. An explicit id narrows
+    # to one coder session's own browser, applied after
+    # _viewable_agent_browsers' own scoping. See
+    # test_watch_agent_targets_one_session_among_several and
+    # test_watch_agent_cannot_target_a_session_outside_the_scoped_list.
+    coder_session_id: str | None = None
+
+
 def _enabled() -> bool:
     from localm.config import load_config
     try:
@@ -58,6 +68,14 @@ def _require_enabled() -> None:
         raise HTTPException(
             409, "Browser automation is switched off. Turn it on in "
                  "Settings > Network before opening a browser.")
+
+
+def _inline_live_view() -> bool:
+    from localm.config import load_config
+    try:
+        return bool(load_config().get("browser_inline_live_view", False))
+    except Exception:
+        return False
 
 
 def _settings() -> dict:
@@ -170,7 +188,8 @@ async def agent_browser_status(request: Request):
 
 
 @_router.post("/api/browser/agent")
-async def watch_agent_browser(request: Request):
+async def watch_agent_browser(request: Request,
+                              req: WatchAgentRequest | None = None):
     """Stream the browser the coding agent is driving, to this caller.
 
     The agent's session emits no frames until a viewer asks for them, so this
@@ -183,6 +202,9 @@ async def watch_agent_browser(request: Request):
                                  "background job registry, which is "
                                  "unavailable.")
     found = _viewable_agent_browsers(request)
+    target = req.coder_session_id if req is not None else None
+    if target:
+        found = [f for f in found if f["session_id"] == target]
     if not found:
         raise HTTPException(404, "No agent is driving a browser right now.")
     entry = found[0]
@@ -235,10 +257,12 @@ async def stop_browser(request: Request):
 async def state(request: Request):
     live = bsession.get(_gui_session_id(request))
     if live is None:
-        return {"open": False, "enabled": _enabled()}
+        return {"open": False, "enabled": _enabled(),
+                "inlineLiveView": _inline_live_view()}
     return {
         "open": True,
         "enabled": _enabled(),
+        "inlineLiveView": _inline_live_view(),
         "headless": live.headless,
         "engine": live.engine,
         "blocked": live.blocked_requests()[-50:],

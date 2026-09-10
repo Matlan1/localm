@@ -68,15 +68,89 @@ class TestTheSwitchGuardsTheRoutes:
     def test_state_reports_the_switch_without_opening_anything(self, app):
         with TestClient(app) as c:
             body = c.get("/api/browser/state").json()
-            assert body == {"open": False, "enabled": False}
+            assert body == {"open": False, "enabled": False,
+                            "inlineLiveView": False}
             _set(browser_enabled=True)
             assert c.get("/api/browser/state").json()["enabled"] is True
+
+    def test_state_reports_the_inline_live_view_setting(self, app):
+        with TestClient(app) as c:
+            assert c.get("/api/browser/state").json()["inlineLiveView"] is False
+            _set(browser_inline_live_view=True)
+            assert c.get("/api/browser/state").json()["inlineLiveView"] is True
 
     def test_stopping_when_nothing_is_open_is_not_an_error(self, app):
         with TestClient(app) as c:
             r = c.post("/api/browser/stop")
             assert r.status_code == 200
             assert r.json() == {"closed": False}
+
+
+class _FakeSession:
+    """Stands in for a real BrowserSession: no Chromium, no Playwright."""
+
+    def __init__(self, sid, **kw):
+        self.session_id = sid
+
+    def start(self):
+        pass
+
+    def navigate(self, url):
+        return {"ok": True, "url": url}
+
+    def stop(self):
+        pass
+
+
+def _h(key):
+    return {"Authorization": f"Bearer {key}"}
+
+
+class TestLiveViewJobOwnership:
+    """The ADR's live-view auth follow-up (issues.txt NEW-CAP-BROWSER item 2):
+    the browser plugin adds no ownership logic of its own for streaming a live
+    view. It creates its job with owner=principal_id(request) and leaves
+    streaming entirely to the kernel's job_owner_ok gate
+    (tests/test_key_scope_jobs.py::TestJobOwnerBinding pins that gate
+    generically, including that a non-creator gets 404 on
+    /api/jobs/{id}/events). This is the ONE test that exercises the browser
+    plugin's OWN job-creation path rather than a synthetic injected job, so
+    the claim "the existing owner check is sufficient" rests on something
+    more direct than the generic test alone.
+
+    Asserts the job's owner attribute directly rather than actually
+    streaming /api/jobs/{id}/events as a foreign key: this job's worker
+    loops until cancelled and never sends an "end" event on its own, and
+    starlette's TestClient does not hand back a response until the ASGI
+    cycle progresses past that, so a real stream read here - correct or
+    refused - blocks the test runner indefinitely. Confirmed live: with
+    owner deliberately set to None, both client.get() and client.stream()
+    on this route hung past 20 seconds instead of returning 200. The
+    generic 404-on-mismatch behaviour itself is what
+    TestJobOwnerBinding already covers with a short-lived synthetic job."""
+
+    def test_the_job_is_owned_by_the_key_that_opened_it(self, app, monkeypatch):
+        from localm import auth
+        from localm import scopes as S
+        from localm.browser import session as bsession
+        monkeypatch.setattr(bsession, "BrowserSession", _FakeSession)
+        _set(browser_enabled=True)
+        a = auth.create_key("A", [S.BROWSER])["key"]
+        b = auth.create_key("B", [S.BROWSER])["key"]
+        with TestClient(app) as c:
+            r = c.post("/api/browser/session", headers=_h(a), json={})
+            assert r.status_code == 200, r.text
+            job_id = r.json()["job_id"]
+            try:
+                job = app.state.jobs.get(job_id)
+                assert job is not None, "the job vanished right after creation"
+                assert job.owner == auth._hash_key(a), (
+                    "the browser session's job is not bound to the key that "
+                    "opened it, so job_owner_ok's creator-or-admin gate would "
+                    "not restrict who may stream it")
+                assert job.owner != auth._hash_key(b)
+            finally:
+                c.post(f"/api/jobs/{job_id}/cancel", headers=_h(a))
 
 
 class TestTheManifest:

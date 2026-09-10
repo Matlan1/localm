@@ -141,6 +141,96 @@ test("the image starts with no source at all", async () => {
 
 
 // --------------------------------------------------------------------------- //
+//  watchFrames: the reusable SSE-frame reader coder.js's inline mirror also   //
+//  calls. None of the tab-level tests above exercise the reader loop at all - //
+//  they hand back body: null, which short-circuits before it - so this is the //
+//  only coverage of the actual event dispatch.                                //
+// --------------------------------------------------------------------------- //
+
+function fakeSSEBody(events) {
+  const enc = new TextEncoder();
+  const chunks = events.map((ev) => enc.encode("data: " + JSON.stringify(ev) + "\n\n"));
+  let i = 0;
+  return {
+    getReader() {
+      return {
+        async read() {
+          if (i < chunks.length) return { done: false, value: chunks[i++] };
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+}
+
+test("watchFrames dispatches frame, line and end events in order", async () => {
+  makeEnv();
+  const mod = await load();
+  const events = [
+    { type: "frame", data: "AAA" },
+    { type: "line", line: "hello" },
+    { type: "frame", data: "BBB" },
+    { type: "end", status: "done" },
+  ];
+  global.fetch = async () => ({ ok: true, status: 200, body: fakeSSEBody(events) });
+  const frames = [];
+  const lines = [];
+  let endEv = null;
+  await mod.watchFrames("j1", {
+    authHeaders: () => ({ Authorization: "Bearer x" }),
+    onFrame: (d) => frames.push(d),
+    onLine: (t) => lines.push(t),
+    onEnd: (ev) => { endEv = ev; },
+  });
+  assert.deepEqual(frames, ["AAA", "BBB"]);
+  assert.deepEqual(lines, ["hello"]);
+  assert.deepEqual(endEv, { type: "end", status: "done" });
+});
+
+test("watchFrames tells a fetch failure and a refused response apart", async () => {
+  makeEnv();
+  const mod = await load();
+
+  global.fetch = async () => { throw new Error("network down"); };
+  let failed = false;
+  let unavailable = null;
+  await mod.watchFrames("j1", {
+    onFetchFailed: () => { failed = true; },
+    onUnavailable: (code) => { unavailable = code; },
+  });
+  assert.equal(failed, true, "a thrown fetch must call onFetchFailed");
+  assert.equal(unavailable, null, "onUnavailable fired for a fetch that never returned");
+
+  global.fetch = async () => ({ ok: false, status: 404, body: null });
+  failed = false;
+  await mod.watchFrames("j1", {
+    onFetchFailed: () => { failed = true; },
+    onUnavailable: (code) => { unavailable = code; },
+  });
+  assert.equal(failed, false, "onFetchFailed fired for a response that DID arrive");
+  assert.equal(unavailable, 404, "the refusing status code was not passed through");
+});
+
+test("watchFrames requests the job's own events route with the caller's auth", async () => {
+  makeEnv();
+  const mod = await load();
+  const calls = [];
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return { ok: true, status: 200, body: fakeSSEBody([]) };
+  };
+  const signal = new AbortController().signal;
+  await mod.watchFrames("job-42", {
+    authHeaders: () => ({ Authorization: "Bearer tok" }),
+    signal,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/jobs/job-42/events");
+  assert.deepEqual(calls[0].opts.headers, { Authorization: "Bearer tok" });
+  assert.equal(calls[0].opts.signal, signal);
+});
+
+// --------------------------------------------------------------------------- //
 //  Watching the browser the coding agent drives.                              //
 // --------------------------------------------------------------------------- //
 

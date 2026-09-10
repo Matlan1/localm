@@ -1009,6 +1009,27 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 .tool-card.open .body { display: block; }
 
+/* inline browser mirror (browser_inline_live_view opt-in) */
+
+.inline-browser-panel {
+  max-width: var(--thread-max);
+  margin: 0 auto 10px;
+  padding: 0 24px;
+}
+.inline-browser-frame {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.inline-browser-status {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 4px 2px;
+}
+
 /* confirm card */
 
 .confirm-card {

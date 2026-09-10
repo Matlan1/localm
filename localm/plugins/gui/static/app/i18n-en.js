@@ -244,6 +244,7 @@ export const I18N_EN = {
   "coder.bg.unsupportedHint":
     "A shared-key session runs nothing in the background - it has no shell or sub-agent tools at all.",
   "coder.bg.unsupportedTitle": "Not available in this session",
+  "coder.browser.liveViewAlt": "Live view of the browser this session is driving",
   "coder.compact.done": "History compacted",
   "coder.compact.feedNote": "Conversation history compacted.",
   "coder.compact.nothing": "Nothing to compact",
