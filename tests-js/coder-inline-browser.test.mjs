@@ -90,6 +90,13 @@ test("the setting off: no panel is built, but the gate itself was checked", asyn
       json: async () => ({ open: false, enabled: true, inlineLiveView: false }) })],
   ]);
   const { window } = loadApp({ fetchImpl: impl });
+  // A WORKING fake module, installed even though the panel must not use it:
+  // without this, a real dynamic import always rejects under jsdom (verified
+  // live), so s.inlineBrowser stays null whether the gate refused or the
+  // gate itself is broken - the two are indistinguishable unless the module
+  // load can actually succeed for the assertion to mean anything.
+  const { mod } = fakeBrowserModule();
+  useFakeModule(window, mod);
   const s = makeSession(window, "s1");
 
   await window.maybeAttachInlineBrowser(s);
