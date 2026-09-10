@@ -186,16 +186,20 @@ def test_corrections_prints_the_privacy_note_and_leaves_the_sidecar_untouched(ho
     assert before, "precondition: the sidecar has content"
 
     res = _run("corrections")
+    after = _safe_read_bytes(corrections_file)
+    assert after == before, (
+        f"listing corrections in privacy mode rewrote the sidecar "
+        f"({len(before)} -> {len(after)} bytes)")
     assert "privacy mode" in res.output
     assert "No pending corrections." not in res.output
-    assert _safe_read_bytes(corrections_file) == before, (
-        "listing corrections in privacy mode rewrote the sidecar")
 
     res_json = _run("corrections", "--json")
+    after_json = _safe_read_bytes(corrections_file)
+    assert after_json == before, (
+        f"listing corrections --json in privacy mode rewrote the sidecar "
+        f"({len(before)} -> {len(after_json)} bytes)")
     assert _json.loads(res_json.stdout) == []
     assert "privacy mode" in res_json.stderr
-    assert _safe_read_bytes(corrections_file) == before, (
-        "listing corrections --json in privacy mode rewrote the sidecar")
 
 
 # --------------------------------------------------------------------------- #
