@@ -112,13 +112,24 @@ class TestLiveViewJobOwnership:
     view. It creates its job with owner=principal_id(request) and leaves
     streaming entirely to the kernel's job_owner_ok gate
     (tests/test_key_scope_jobs.py::TestJobOwnerBinding pins that gate
-    generically). This is the ONE test that exercises the browser plugin's
-    OWN job-creation path rather than a synthetic injected job, so the claim
-    "the existing owner check is sufficient" rests on something more direct
-    than the generic test alone."""
+    generically, including that a non-creator gets 404 on
+    /api/jobs/{id}/events). This is the ONE test that exercises the browser
+    plugin's OWN job-creation path rather than a synthetic injected job, so
+    the claim "the existing owner check is sufficient" rests on something
+    more direct than the generic test alone.
 
-    def test_a_scoped_key_cannot_stream_another_principals_own_browser_session(
-            self, app, monkeypatch):
+    Asserts the job's owner attribute directly rather than actually
+    streaming /api/jobs/{id}/events as a foreign key: this job's worker
+    loops until cancelled and never sends an "end" event on its own, and
+    starlette's TestClient does not hand back a response until the ASGI
+    cycle progresses past that, so a real stream read here - correct or
+    refused - blocks the test runner indefinitely. Confirmed live: with
+    owner deliberately set to None, both client.get() and client.stream()
+    on this route hung past 20 seconds instead of returning 200. The
+    generic 404-on-mismatch behaviour itself is what
+    TestJobOwnerBinding already covers with a short-lived synthetic job."""
+
+    def test_the_job_is_owned_by_the_key_that_opened_it(self, app, monkeypatch):
         from localm import auth
         from localm import scopes as S
         from localm.browser import session as bsession
@@ -131,10 +142,13 @@ class TestLiveViewJobOwnership:
             assert r.status_code == 200, r.text
             job_id = r.json()["job_id"]
             try:
-                # A 404, not a 403: a foreign key must not even be able to
-                # confirm the (unguessable) job id exists.
-                got = c.get(f"/api/jobs/{job_id}/events", headers=_h(b))
-                assert got.status_code == 404, got.text
+                job = app.state.jobs.get(job_id)
+                assert job is not None, "the job vanished right after creation"
+                assert job.owner == auth._hash_key(a), (
+                    "the browser session's job is not bound to the key that "
+                    "opened it, so job_owner_ok's creator-or-admin gate would "
+                    "not restrict who may stream it")
+                assert job.owner != auth._hash_key(b)
             finally:
                 c.post(f"/api/jobs/{job_id}/cancel", headers=_h(a))
 
