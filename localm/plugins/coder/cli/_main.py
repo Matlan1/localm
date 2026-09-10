@@ -31,15 +31,23 @@ from ..backends.http import (
     make_openai_backend,
     CoderAuthError,
 )
-from ..agent import Agent
-from ..agent.constants import _SHELL_EXEC_TOOLS
-from ..audit import SessionMode, parse_mode
+from ..audit import SessionMode
 from ..privacy import (
     clear_shell_history_traces,
     suppress_readline_history,
     warn_external_provider,
 )
-from ..project_config import ProjectConfigUnreadable, load_project_config
+from ..project_config import ProjectConfigUnreadable
+from ..runner import (
+    InvalidSessionMode,
+    browser_enabled as _browser_enabled,
+    build_agent,
+    finish_agent,
+    resolve_task_config,
+    run_single_task,
+    warn_sensitive_changes as _warn_sensitive_changes,  # noqa: F401  (re-exported by the cli package)
+    warn_unfinished_background as _warn_unfinished_background,
+)
 from ..display import (
     console,
     print_banner,
@@ -55,24 +63,6 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-def _browser_enabled() -> bool:
-    """Whether this terminal session may drive the browser.
-
-    The GUI gates the browser tools on TWO things: the caller holds the browser
-    capability, and browser_enabled is on. A terminal session is the owner and
-    holds every capability, so only the setting is left to check. Without this
-    the Agent default (off) applied to every terminal session and the setting
-    had no effect there at all.
-
-    An unreadable config answers False, matching the GUI.
-    """
-    try:
-        from localm.config import load_config
-        return bool(load_config().get("browser_enabled", False))
-    except Exception:
-        return False
-
-
 def _complete_model(ctx, param, incomplete):
     """Shell completion callback: suggest registered localm model names."""
     try:
@@ -84,52 +74,6 @@ def _complete_model(ctx, param, incomplete):
         ]
     except Exception:
         return []
-
-
-def _warn_unfinished_background(agent) -> None:
-    """Report background sub-agents this one-shot run is about to abandon.
-
-    The turn-boundary drain only fires at the START of a turn, so a child that is
-    still running (or that finished after the final turn) is never folded in, and
-    a one-shot process then exits and takes its daemon threads with it. Exiting
-    silently would drop work the user explicitly asked for. What survives is
-    stated exactly: a committed branch does, a running child does not.
-    """
-    try:
-        from ..background import get_registry
-        registry = get_registry()
-        running = [j for j in registry.list_status(kind="agent")
-                   if j["state"] == "running"]
-        pending = registry.drain_finished(kind="agent")
-    except Exception:
-        return
-
-    # Completions evicted before any drain saw them. Its OWN try, after the drain:
-    # drain_finished CONSUMES, so a failure folded into the same try would discard
-    # completions already handed over.
-    try:
-        lost = registry.take_dropped_undrained("agent")
-    except Exception:
-        lost = 0
-
-    if lost:
-        print_warning(
-            f"{lost} background sub-agent completion(s) were discarded before "
-            "they could be collected, so their results are lost.")
-    for st in pending:
-        branch = (st.get("result") or {}).get("branch")
-        where = (f" Its work is committed on branch '{branch}'."
-                 if branch else "")
-        print_warning(
-            f"background sub-agent '{st.get('label')}' ({st.get('id')}) finished "
-            f"after the last turn, so its result was not folded into this run."
-            f"{where}")
-    for st in running:
-        print_warning(
-            f"background sub-agent '{st.get('label')}' ({st.get('id')}) is STILL "
-            "RUNNING and will be killed when this one-shot run exits. Use an "
-            "interactive session for background delegation, or spawn_agent "
-            "(synchronous) for a one-shot.")
 
 
 @click.command("coder", context_settings={"help_option_names": ["-h", "--help"]})
@@ -363,9 +307,8 @@ def main(
     # confirmation unless --yes was passed, and a non-interactive run cannot
     # confirm, so the gate in execution.py fails CLOSED.
     if task and not yes:
-        # run_shell_background is the same capability as run_shell, just without
-        # the wait, so it carries the same gate.
-        always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
+        # build_agent adds run_shell and run_shell_background to always_confirm
+        # for this case.
         print_warning(
             "Unattended one-shot: run_shell is code execution and the web tools "
             "egress data. run_shell and run_shell_background now require --yes "
@@ -376,21 +319,20 @@ def main(
     # ------------------------------------------------------------------ #
     #  Create agent
     # ------------------------------------------------------------------ #
-    agent = Agent(
-        backend=backend,
-        cwd=work_dir,
-        name="localcoder",
+    agent = build_agent(
+        backend, work_dir,
+        task=task,
         max_turns=max_turns,
-        verbose=verbose,
-        auto_approve=yes or (task != ""),
+        auto_approve=yes,
         always_confirm=always_confirm,
+        session_mode=session_mode,
+        gen_kw=gen_kw,
+        verbose=verbose,
         dry_run=dry_run,
-        mode=session_mode,
         scope=scope,
         custom_instructions=system_instructions,
         verify_cmd=session_verify,
         browser_enabled=_browser_enabled(),
-        **gen_kw,
     )
 
     if patch_mode:
@@ -409,15 +351,14 @@ def main(
             if until_cmd:
                 success, response = _run_goal_loop(
                     agent, task, until_cmd, goal_max_iters, work_dir)
+                # A one-shot run has no NEXT turn, so a background sub-agent that
+                # is still going never reaches the turn-boundary drain, and this
+                # process is about to exit with its daemon threads. Report it: the
+                # committed branch survives, the running child does not.
+                _warn_unfinished_background(agent)
             else:
-                response = agent.run_task(task)
-                success  = agent.last_run_ok
-
-            # A one-shot run has no NEXT turn, so a background sub-agent that is
-            # still going never reaches the turn-boundary drain, and this process is
-            # about to exit with its daemon threads. Report it: the committed branch
-            # survives, the running child does not.
-            _warn_unfinished_background(agent)
+                outcome = run_single_task(agent, task)
+                success, response = outcome.success, outcome.response
 
             if output_format == "json":
                 import json as _json
@@ -472,8 +413,7 @@ def main(
                 out.write_text(patch_content, encoding="utf-8")
                 print_info(f"Patch written to {out}")
 
-        _warn_sensitive_changes(agent)
-        md_path = agent.close()
+        md_path = finish_agent(agent)
         if md_path:
             print_info(f"Session transcript saved → {md_path}")
         if session_mode == SessionMode.PRIVACY:
@@ -636,7 +576,10 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
 
     # Project-level config (.localcoder/config.toml) - CLI flags override
     try:
-        proj_cfg = load_project_config(work_dir)
+        cfg = resolve_task_config(
+            work_dir, model=model, max_turns=max_turns, max_tokens=max_tokens,
+            temperature=temperature, seed=seed, yes=yes,
+            interactive_confirm=interactive_confirm, mode=mode)
     except ProjectConfigUnreadable as e:
         # Refuse rather than start with the file's settings silently dropped: it
         # can set always_confirm and mode = "privacy", both safety settings.
@@ -646,51 +589,20 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
             f"because it may set 'always_confirm' or 'mode' and starting "
             f"without them would silently drop protections you configured.")
         sys.exit(2 if ci else 1)
-    if model is None:
-        model = proj_cfg.get("model")
-    if max_turns is None:
-        max_turns = int(proj_cfg.get("max_turns", 40))
-    if max_tokens is None:
-        _cfg_max_tokens = proj_cfg.get("max_tokens")
-        if _cfg_max_tokens is not None:
-            max_tokens = int(_cfg_max_tokens)
-        else:
-            # No explicit value: a per-model default, else the baseline cap.
-            from localm.plugins.coder.harness_profiles import cli_max_tokens
-            max_tokens = cli_max_tokens(model)
-    if temperature is None and "temperature" in proj_cfg:
-        temperature = float(proj_cfg["temperature"])
-    if seed is None and "seed" in proj_cfg:
-        seed = int(proj_cfg["seed"])
-    if seed is not None and provider == "anthropic":
+    except InvalidSessionMode as exc:
+        print_error(str(exc))
+        sys.exit(2 if ci else 1)
+    model, max_turns, yes = cfg.model, cfg.max_turns, cfg.auto_approve
+    always_confirm = set(cfg.always_confirm)
+    session_mode = cfg.session_mode
+    gen_kw = dict(cfg.gen_kw)
+    if "seed" in gen_kw and provider == "anthropic":
         # The Anthropic Messages API has no seed parameter, so the flag is dropped
         # and reported.
         print_warning(
             "--seed is ignored with --anthropic: the Anthropic Messages API has "
             "no seed parameter, so this run is not reproducible.")
-        seed = None
-    # auto_approve: config applies only when --yes flag was NOT passed
-    if not yes and proj_cfg.get("auto_approve"):
-        yes = True
-    # always_confirm: tools that prompt even under --yes
-    # --interactive-confirm sets the shell-execution tools; config can extend the list
-    always_confirm: set[str] = set()
-    if interactive_confirm:
-        always_confirm.update(_SHELL_EXEC_TOOLS)
-    cfg_confirm = proj_cfg.get("always_confirm", [])
-    if isinstance(cfg_confirm, list):
-        always_confirm.update(cfg_confirm)
-    # mode: CLI > project config > global config (coder_mode/mode) > privacy
-    if mode is None:
-        mode = proj_cfg.get("mode")
-    if mode is None:
-        from localm.audit import effective_mode
-        mode = effective_mode("coder").value
-    try:
-        session_mode = parse_mode(mode)
-    except ValueError as exc:
-        print_error(str(exc))
-        sys.exit(2 if ci else 1)
+        del gen_kw["seed"]
 
     # Privacy-mode setup - suppress readline history as early as possible
     if session_mode == SessionMode.PRIVACY:
@@ -698,12 +610,6 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
     # Warn when privacy mode is requested but prompts leave the machine
     if session_mode == SessionMode.PRIVACY and provider in ("openai", "anthropic"):
         warn_external_provider(provider)
-
-    gen_kw   = {k: v for k, v in [
-        ("temperature", temperature),
-        ("max_tokens",  max_tokens),
-        ("seed",        seed),
-    ] if v is not None}
     return model, max_turns, yes, always_confirm, session_mode, gen_kw
 
 
@@ -932,19 +838,6 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     sys.exit(2 if ci else 1)
 
     return backend
-
-
-def _warn_sensitive_changes(agent: Agent) -> None:
-    """Surface test / CI-config edits so a green check over rewritten tests is
-    reviewed, not trusted. Best-effort: never let this advisory break the
-    session."""
-    try:
-        from ..review_guard import classify_sensitive_changes, render_warning
-        message = render_warning(classify_sensitive_changes(agent.changed_files()))
-        if message:
-            print_warning(message)
-    except Exception:                                       # noqa: BLE001
-        pass
 
 
 def console_main() -> None:

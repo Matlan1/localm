@@ -552,7 +552,11 @@ class TestEngineCacheMultiResidency:
         a.unload.assert_not_called()
         assert cache._factory.loads == ["a"]
 
-    def test_a_busy_engine_is_not_evicted(self):
+    def test_a_busy_engine_is_not_evicted(self, monkeypatch):
+        import localm.plugins.mcpserver.server as srv
+        # 'a' never frees, so the room wait runs to its bound; keep it short.
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
         cache = _resident_cache()
         with _fits(), _sized(), _cfg():
             a, b = cache.get("a"), cache.get("b")
@@ -561,6 +565,52 @@ class TestEngineCacheMultiResidency:
             cache.get("c")
         a.unload.assert_not_called()
         b.unload.assert_called_once()
+
+    def test_room_wait_lets_a_serving_resident_free_itself(self, monkeypatch):
+        """The only candidate is serving a request: the load WAITS for it to
+        finish, then evicts it, instead of loading on top of it."""
+        import threading
+        import localm.plugins.mcpserver.server as srv
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 5.0)
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        a.active_requests = 1
+        polls = []
+        real_fits = srv.EngineCache._fits_alongside
+
+        def counting_fits(self, name, required):
+            polls.append(name)
+            return real_fits(self, name, required)
+
+        monkeypatch.setattr(srv.EngineCache, "_fits_alongside", counting_fits)
+        threading.Timer(0.1, lambda: setattr(a, "active_requests", 0)).start()
+        logged = []
+        with _too_tight(), _sized(), _cfg(), _no_vram_wait(), \
+             patch.object(srv, "_log", logged.append):
+            cache.get("b")
+        a.unload.assert_called_once()
+        assert cache.resident == ["b"]
+        assert len(polls) > 1, "the load did not wait at all"
+        assert any("waiting for ['a']" in m for m in logged), logged
+        assert not any("loading it anyway" in m for m in logged), logged
+
+    def test_room_wait_gives_up_after_the_bound_and_says_so(self, monkeypatch):
+        import localm.plugins.mcpserver.server as srv
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        a.active_requests = 1
+        logged = []
+        with _too_tight(), _sized(), _cfg(), _no_vram_wait(), \
+             patch.object(srv, "_log", logged.append):
+            cache.get("b")
+        a.unload.assert_not_called()
+        assert cache.resident == ["a", "b"]
+        assert any("still serving" in m and "loading it anyway" in m for m in logged), logged
 
     def test_unmeasurable_vram_falls_back_to_single_resident(self):
         """A box that cannot report free VRAM must behave exactly as before:
@@ -1411,9 +1461,10 @@ class TestModelDiscoveryTools:
 
 
 class TestRunCoderTask:
-    """run_coder_task shells out to `localm coder --output-format json` and is
-    only advertised when the coder plugin is installed+enabled (mirrors the
-    embed tool's capability-gated advertisement)."""
+    """run_coder_task validates its client-supplied arguments and is only
+    advertised when the coder plugin is installed+enabled (mirrors the embed
+    tool's capability-gated advertisement). The in-process run itself is
+    covered by TestRunCoderTaskInProcess below."""
 
     @pytest.fixture
     def coder_active(self):
@@ -1471,144 +1522,6 @@ class TestRunCoderTask:
         assert bad not in r["result"]["content"][0]["text"]
         assert _unc_calls(seen) == []
 
-    def test_successful_run_parses_json_payload(self, coder_active, tmp_path):
-        # Real `--output-format json` pretty-prints (indent=2, multi-line), so a
-        # single-line json.dumps() here would not exercise the same parsing.
-        server, _ = _server()
-        payload = {"success": True, "response": "done: added type hints",
-                   "turns": 3, "total_tokens": 512}
-        fake = MagicMock(stdout=json.dumps(payload, indent=2) + "\n", stderr="", returncode=0)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake) as mock_run:
-            r = self._call(server, {"task": "add type hints", "cwd": str(tmp_path)})
-        assert r["result"]["isError"] is False
-        assert "done: added type hints" in r["result"]["content"][0]["text"]
-        assert "turns=3" in r["result"]["content"][0]["text"]
-        cmd = mock_run.call_args.args[0]
-        assert cmd[:4] == [sys.executable, "-m", "localm", "coder"]
-        assert "add type hints" in cmd
-        assert "--cwd" in cmd and str(tmp_path) in cmd
-        assert "--output-format" in cmd and "json" in cmd
-        assert "--yes" not in cmd            # default off
-        # The subprocess's OWN OS cwd must also be the task dir, not just the
-        # --cwd flag: if the coder auto-spawns a background server, it identifies
-        # "this project" by ITS OWN inherited working directory, so --cwd alone
-        # registers the auto-spawned server under the wrong project root.
-        assert mock_run.call_args.kwargs["cwd"] == str(tmp_path)
-
-    def test_subprocess_env_pins_the_servers_home_and_code(self, coder_active, tmp_path):
-        """The coder chain re-resolves BOTH the localm data home and (via
-        `-m`'s cwd-first sys.path) the localm PACKAGE from ambient state at
-        every process boundary, and this handler runs the child in the TASK's
-        directory (the cwd assertion above). A server whose own home came from
-        ITS cwd would otherwise hand the chain a different, empty home. The
-        handler must pin ITS OWN resolved identity into the child env:
-        LOCALM_HOME (same data home), plus PYTHONSAFEPATH and a PYTHONPATH entry
-        for its own package root (same code, whatever the task directory
-        contains)."""
-        import os
-        from pathlib import Path
-        import localm as _pkg
-        from localm.config import home_dir
-        server, _ = _server()
-        payload = {"success": True, "response": "ok", "turns": 1, "total_tokens": 1}
-        fake = MagicMock(stdout=json.dumps(payload, indent=2) + "\n", stderr="", returncode=0)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake) as mock_run:
-            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
-        assert r["result"]["isError"] is False
-        env = mock_run.call_args.kwargs["env"]
-        assert env["LOCALM_HOME"] == str(home_dir())
-        assert env["PYTHONSAFEPATH"] == "1"
-        pkg_root = str(Path(_pkg.__file__).resolve().parent.parent)
-        assert pkg_root in env.get("PYTHONPATH", "").split(os.pathsep)
-
-    def test_agent_reported_failure_is_surfaced_as_error(self, coder_active, tmp_path):
-        server, _ = _server()
-        payload = {"success": False, "response": "hit max turns", "turns": 40,
-                   "total_tokens": 9001}
-        fake = MagicMock(stdout=json.dumps(payload, indent=2) + "\n", stderr="", returncode=1)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
-            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
-        assert r["result"]["isError"] is True
-        assert "hit max turns" in r["result"]["content"][0]["text"]
-
-    def test_yes_model_max_turns_thread_through_to_cmd(self, coder_active, tmp_path):
-        server, _ = _server()
-        fake = MagicMock(stdout=json.dumps({"success": True, "response": "ok"}, indent=2) + "\n",
-                         stderr="", returncode=0)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake) as mock_run:
-            self._call(server, {"task": "x", "cwd": str(tmp_path), "model": "qwen2.5-7b",
-                                "max_turns": 10, "yes": True})
-        cmd = mock_run.call_args.args[0]
-        assert "--model" in cmd and "qwen2.5-7b" in cmd
-        assert "--max-turns" in cmd and "10" in cmd
-        assert "--yes" in cmd
-
-    def test_console_messages_before_json_are_ignored(self, coder_active, tmp_path):
-        """Regression guard: a live run against a real model produced exactly
-        this shape - console.print() messages (e.g. attaching to a running
-        server) print to stdout BEFORE the final --output-format json dump.
-        Parsing must find the JSON, not mistake the console text or the bare
-        closing brace for the payload."""
-        server, _ = _server()
-        payload = {"success": True, "response": "created hello.txt", "turns": 2,
-                   "total_tokens": 123}
-        stdout = (
-            "Using the localm already running for /some/project "
-            "(port 8642, mode api) - sharing its loaded model.\n"
-            + json.dumps(payload, indent=2) + "\n"
-        )
-        fake = MagicMock(stdout=stdout, stderr="", returncode=0)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
-            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
-        assert r["result"]["isError"] is False
-        assert "created hello.txt" in r["result"]["content"][0]["text"]
-
-    def test_console_messages_after_json_are_ignored(self, coder_active, tmp_path):
-        """The mirror of the before-json guard above: with the coder session in
-        `--mode full`, "Session transcript saved -> <path>" prints AFTER the
-        --output-format json dump, and a successful task must not be reported as
-        an error because of that trailing text."""
-        server, _ = _server()
-        payload = {"success": True, "response": "IDENTITY-FIX-OK", "turns": 1,
-                   "total_tokens": 1988}
-        stdout = (
-            "No server running. Starting one in the background...\n"
-            "connected to newly started server at a loopback address\n"
-            + json.dumps(payload, indent=2) + "\n"
-            + "Session transcript saved ->\n"
-            "some/project/.localcoder/sessions/2026-07-22_101521.md\n"
-        )
-        fake = MagicMock(stdout=stdout, stderr="", returncode=0)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
-            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
-        assert r["result"]["isError"] is False
-        assert "IDENTITY-FIX-OK" in r["result"]["content"][0]["text"]
-
-    def test_no_json_object_in_stdout_falls_back_cleanly(self, coder_active, tmp_path):
-        server, _ = _server()
-        fake = MagicMock(stdout="some console message, no JSON at all\n",
-                         stderr="", returncode=1)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
-            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
-        assert r["result"]["isError"] is True
-        assert "some console message" in r["result"]["content"][0]["text"]
-
-    def test_timeout_is_reported_not_raised(self, coder_active, tmp_path):
-        import subprocess as _sp
-        server, _ = _server()
-        with patch("localm.plugins.mcpserver.server.subprocess.run",
-                   side_effect=_sp.TimeoutExpired(cmd="x", timeout=5)):
-            r = self._call(server, {"task": "x", "cwd": str(tmp_path), "timeout_seconds": 5})
-        assert r["result"]["isError"] is True
-        assert "timed out" in r["result"]["content"][0]["text"]
-
-    def test_non_json_output_falls_back_to_stderr_detail(self, coder_active, tmp_path):
-        server, _ = _server()
-        fake = MagicMock(stdout="", stderr="coder plugin is not active\n", returncode=1)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
-            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
-        assert r["result"]["isError"] is True
-        assert "coder plugin is not active" in r["result"]["content"][0]["text"]
 
 
 class TestMcpCliWiring:
@@ -1783,3 +1696,358 @@ class TestNewToolCalls:
         assert "could not be fully removed" in text
         assert "successfully uninstalled" not in text
         mock_uninstall.assert_called_once_with("coder", delete_data=False)
+
+
+# --------------------------------------------------------------------------- #
+#  run_coder_task runs the coder IN THIS PROCESS on the shared EngineCache    #
+# --------------------------------------------------------------------------- #
+
+def _tool_call(name: str, **args) -> str:
+    return "<tool_call>" + json.dumps({"name": name, "args": args}) + "</tool_call>"
+
+
+def _scripted_engine_factory(script, *, gate=None, seen=None):
+    """A stub engine whose chat_stream answers one canned reply per call,
+    repeating the last. ``gate`` blocks every reply until set; ``seen``
+    collects the engine's own active_requests at each call."""
+    loads = []
+
+    def factory(model_name):
+        loads.append(model_name)
+        engine = MagicMock()
+        engine.display_name = model_name
+        engine.active_requests = 0
+        engine.unloading = False
+        engine.supports_grammar = False
+        engine.context_capacity.return_value = 8192
+        engine.count_messages_tokens.return_value = 10
+        engine.count_tokens.return_value = 2
+        engine.embed.return_value = [[0.1, 0.2]]
+        replies = list(script)
+        calls = []
+
+        def chat_stream(messages, **kw):
+            if gate is not None:
+                gate.wait()
+            if seen is not None:
+                seen.append(engine.active_requests)
+            reply = replies[min(len(calls), len(replies) - 1)]
+            calls.append(messages)
+            return iter([reply])
+
+        engine.chat_stream.side_effect = chat_stream
+        engine.calls = calls
+        return engine
+
+    factory.loads = loads
+    return factory
+
+
+@pytest.fixture
+def coder_env(tmp_path, monkeypatch):
+    """A registered coder plugin, an isolated home, and no way to spawn a
+    process: the in-process path must never reach subprocess."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr("localm.plugins.engine.PluginManager.is_active",
+                        lambda self, name: True)
+
+    # Trap the OLD shape only (a `-m localm coder` / `localm gui` child); the
+    # coder's own tools may still spawn git or a shell command.
+    import subprocess as _sp
+    real_run, real_popen = _sp.run, _sp.Popen
+
+    def _is_localm_child(cmd) -> bool:
+        argv = [str(c) for c in cmd] if isinstance(cmd, (list, tuple)) else [str(cmd)]
+        joined = " ".join(argv)
+        return "-m localm" in joined or " localm gui" in joined or "localm coder" in joined
+
+    def _run(cmd, *a, **k):
+        if _is_localm_child(cmd):
+            raise AssertionError(f"run_coder_task spawned a localm child: {cmd}")
+        return real_run(cmd, *a, **k)
+
+    def _popen(cmd, *a, **k):
+        if _is_localm_child(cmd):
+            raise AssertionError(f"run_coder_task spawned a localm child: {cmd}")
+        return real_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(_sp, "run", _run)
+    monkeypatch.setattr(_sp, "Popen", _popen)
+    return home
+
+
+def _project(tmp_path, name="proj"):
+    p = tmp_path / name
+    p.mkdir()
+    (p / "a.py").write_text("x = 1\n", encoding="utf-8")
+    return p
+
+
+def _coder_server(factory, default_model="stub-model"):
+    engines = EngineCache(default_model=default_model, engine_factory=factory)
+    return MCPStdioServer(build_tools(engines, enable_images=False)), engines
+
+
+def _run_task(server, cwd, mid=1, **extra):
+    args = {"task": "do the thing", "cwd": str(cwd)}
+    args.update(extra)
+    with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        MockPM.build.return_value.file_count.return_value = 0
+        return _req(server, "tools/call",
+                    {"name": "run_coder_task", "arguments": args}, mid=mid)
+
+
+def _wait_until(pred, timeout=10.0) -> bool:
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+class TestRunCoderTaskInProcess:
+    def test_tool_is_listed_when_the_coder_plugin_is_active(self, coder_env):
+        server, _ = _coder_server(_scripted_engine_factory(["done"]))
+        names = {t["name"] for t in _req(server, "tools/list")["result"]["tools"]}
+        assert "run_coder_task" in names
+
+    def test_runs_in_process_on_the_cached_engine(self, coder_env, tmp_path):
+        factory = _scripted_engine_factory(["all done"])
+        server, engines = _coder_server(factory)
+        resp = _run_task(server, _project(tmp_path))
+        result = resp["result"]
+        assert result["isError"] is False, result
+        text = result["content"][0]["text"]
+        assert "all done" in text
+        assert "success=True" in text
+        assert factory.loads == ["stub-model"]
+        assert engines.resident == ["stub-model"]
+
+    def test_three_projects_share_one_model_load(self, coder_env, tmp_path):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        for i in range(3):
+            resp = _run_task(server, _project(tmp_path, f"proj{i}"), mid=i + 1)
+            assert resp["result"]["isError"] is False, resp
+        assert factory.loads == ["stub-model"]
+        engine = engines._engines["stub-model"]
+        assert len(engine.calls) >= 3
+
+    def test_engine_is_pinned_during_the_run_and_released_after(
+            self, coder_env, tmp_path):
+        seen = []
+        factory = _scripted_engine_factory(["done"], seen=seen)
+        server, engines = _coder_server(factory)
+        _run_task(server, _project(tmp_path))
+        engine = engines._engines["stub-model"]
+        # The run's own pin plus the pin each generation takes while it runs.
+        assert seen and all(n == 2 for n in seen), seen
+        assert engine.active_requests == 0
+
+    def test_a_pinned_engine_is_not_an_eviction_victim(self, coder_env, tmp_path):
+        from localm.inference.residency import pick_eviction_victim
+        verdicts = []
+        real = _scripted_engine_factory(["done"])
+        holder = {}
+
+        def spying_factory(name):
+            engine = real(name)
+            inner = engine.chat_stream.side_effect
+
+            def chat_stream(messages, **kw):
+                engines = holder["engines"]
+                verdicts.append(pick_eviction_victim(
+                    engines.resident, engines._engines, requested="other"))
+                return inner(messages, **kw)
+            engine.chat_stream.side_effect = chat_stream
+            return engine
+
+        server, engines = _coder_server(spying_factory)
+        holder["engines"] = engines
+        _run_task(server, _project(tmp_path))
+        assert verdicts and all(v is None for v in verdicts), verdicts
+        assert pick_eviction_victim(engines.resident, engines._engines,
+                                    requested="other") == "stub-model"
+
+    def test_pin_is_released_when_the_run_raises(self, coder_env, tmp_path):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        engine = factory("stub-model")
+        engine.chat_stream.side_effect = RuntimeError("worker died")
+        engines._engines["stub-model"] = engine
+        engines._touch("stub-model")
+        resp = _run_task(server, _project(tmp_path))
+        assert resp["result"]["isError"] is True
+        assert "worker died" in resp["result"]["content"][0]["text"]
+        assert engine.active_requests == 0
+
+    def test_chat_and_embed_pin_the_engine_while_serving(self, coder_env):
+        seen = []
+        factory = _scripted_engine_factory(["reply"], seen=seen)
+        server, engines = _coder_server(factory)
+        engine = engines._engines["stub-model"]
+        embed_seen = []
+        engine.embed.side_effect = lambda texts: embed_seen.append(
+            engine.active_requests) or [[0.5]]
+        _req(server, "tools/call", {"name": "chat", "arguments": {"prompt": "hi"}})
+        _req(server, "tools/call", {"name": "embed", "arguments": {"texts": ["a"]}},
+             mid=2)
+        assert seen == [1], seen
+        assert embed_seen == [1], embed_seen
+        assert engine.active_requests == 0
+
+    def test_chat_and_embed_still_work_after_a_coder_run(self, coder_env, tmp_path):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        _run_task(server, _project(tmp_path))
+        chat = _req(server, "tools/call",
+                    {"name": "chat", "arguments": {"prompt": "hi"}}, mid=2)
+        assert chat["result"]["isError"] is False
+        assert "done" in chat["result"]["content"][0]["text"]
+        emb = _req(server, "tools/call",
+                   {"name": "embed", "arguments": {"texts": ["a"]}}, mid=3)
+        assert json.loads(emb["result"]["content"][0]["text"]) == [[0.1, 0.2]]
+        assert factory.loads == ["stub-model"]
+        assert engines._engines["stub-model"].active_requests == 0
+
+    def test_shell_tool_is_denied_without_yes_and_runs_with_it(
+            self, coder_env, tmp_path, monkeypatch):
+        project = _project(tmp_path)
+        marker = project / "marker.txt"
+        cmd = f'"{sys.executable}" -c "open(\'marker.txt\', \'w\').close()"'
+        script = [_tool_call("run_shell", command=cmd), "finished"]
+
+        class _Stdin:
+            def readline(self, *a):
+                raise AssertionError("the coder read the protocol stdin")
+            read = readline
+
+            def isatty(self):
+                return False
+
+        monkeypatch.setattr(sys, "stdin", _Stdin())
+
+        server, _ = _coder_server(_scripted_engine_factory(script))
+        _run_task(server, project)
+        assert not marker.exists(), "run_shell ran without a confirmation channel"
+
+        server, _ = _coder_server(_scripted_engine_factory(script))
+        _run_task(server, project, yes=True)
+        assert marker.exists(), "run_shell did not run under yes=true"
+
+    def test_max_turns_caps_the_run_and_a_capped_run_is_an_error(
+            self, coder_env, tmp_path):
+        # A model that never stops calling tools hits the cap, which the agent
+        # reports as a failed run.
+        script = [_tool_call("read_file", path="a.py")]
+        server, engines = _coder_server(_scripted_engine_factory(script))
+        resp = _run_task(server, _project(tmp_path), max_turns=2)
+        result = resp["result"]
+        assert result["isError"] is True
+        text = result["content"][0]["text"]
+        assert "success=False" in text
+        assert "turns=2" in text
+        assert engines._engines["stub-model"].active_requests == 0
+
+    def test_explicit_model_argument_selects_the_engine(self, coder_env, tmp_path):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        loads_before = list(factory.loads)
+        resp = _run_task(server, _project(tmp_path), model="other-model")
+        assert resp["result"]["isError"] is False, resp
+        assert factory.loads[len(loads_before):] == ["other-model"]
+
+    def test_unregistered_model_is_refused_before_any_load(self, coder_env, tmp_path):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        # build_tools already probed the default model for embed capability.
+        loads_before = list(factory.loads)
+        with patch("localm.model_manager.unregistered_model_error",
+                   return_value="not a registered model: nope"):
+            resp = _run_task(server, _project(tmp_path), model="nope")
+        assert resp["result"]["isError"] is True
+        assert "not a registered model" in resp["result"]["content"][0]["text"]
+        assert factory.loads == loads_before
+
+    def test_project_config_model_is_honoured(self, coder_env, tmp_path):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        project = _project(tmp_path)
+        (project / ".localcoder").mkdir()
+        (project / ".localcoder" / "config.toml").write_text(
+            'model = "cfg-model"\n', encoding="utf-8")
+        loads_before = list(factory.loads)
+        resp = _run_task(server, project)
+        assert resp["result"]["isError"] is False, resp
+        assert factory.loads[len(loads_before):] == ["cfg-model"]
+
+    @pytest.mark.parametrize("bad", ["soon", [5], -5, True])
+    def test_bad_timeout_is_refused_before_anything_is_pinned(
+            self, coder_env, tmp_path, bad):
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        engine = engines._engines["stub-model"]
+        resp = _run_task(server, _project(tmp_path), timeout_seconds=bad)
+        assert resp["result"]["isError"] is True
+        assert "timeout_seconds" in resp["result"]["content"][0]["text"]
+        assert engine.active_requests == 0
+        assert engine.calls == []
+
+    def test_chat_waits_for_an_in_flight_generation_on_the_same_engine(
+            self, coder_env):
+        import threading
+        import time
+        factory = _scripted_engine_factory(["reply"])
+        server, engines = _coder_server(factory)
+        engine = engines._engines["stub-model"]
+        lock = engines.generation_lock(engine)
+        done = {}
+
+        def _chat():
+            _req(server, "tools/call", {"name": "chat", "arguments": {"prompt": "hi"}})
+            done["at"] = time.monotonic()
+
+        with lock:
+            t = threading.Thread(target=_chat)
+            t.start()
+            t.join(0.3)
+            assert t.is_alive(), "chat generated while another generation held the engine"
+            released = time.monotonic()
+        t.join(5)
+        assert not t.is_alive()
+        assert done["at"] >= released
+        assert engine.active_requests == 0
+
+    def test_timeout_reports_and_keeps_the_pin_until_the_worker_ends(
+            self, coder_env, tmp_path, monkeypatch):
+        import threading
+        from localm.plugins.coder import runner as coder_runner
+        monkeypatch.setattr(coder_runner, "STOP_GRACE_SECONDS", 0.2)
+        gate = threading.Event()
+        factory = _scripted_engine_factory(["done"], gate=gate)
+        server, engines = _coder_server(factory)
+        try:
+            resp = _run_task(server, _project(tmp_path), timeout_seconds=0.3)
+            result = resp["result"]
+            assert result["isError"] is True
+            assert "timed out" in result["content"][0]["text"]
+            engine = engines._engines["stub-model"]
+            # Still generating: the run's pin and the generation's pin both
+            # stay, so the residency gate cannot evict the engine from under
+            # the abandoned run.
+            assert engine.active_requests == 2
+        finally:
+            gate.set()
+        assert _wait_until(lambda: engine.active_requests == 0), \
+            "the worker never released its pin"

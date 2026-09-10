@@ -29,6 +29,7 @@ Two optional knobs sit on top of the VRAM arithmetic, both OFF by default:
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -131,6 +132,31 @@ def fits_alongside_residents(
     if shortfall:
         return False
     return free_vram >= vram_required + headroom
+
+
+_PIN_LOCK = threading.Lock()
+
+
+def pin_engine(engine) -> None:
+    """Count one in-flight request on *engine*. A pinned engine
+    (``active_requests > 0``) is never chosen by ``pick_eviction_victim``.
+    An engine without an integer ``active_requests`` is left untouched."""
+    with _PIN_LOCK:
+        if isinstance(getattr(engine, "active_requests", None), int):
+            engine.active_requests += 1
+
+
+def unpin_engine(engine) -> None:
+    """Release one pin taken by ``pin_engine``; never goes below zero."""
+    with _PIN_LOCK:
+        if isinstance(getattr(engine, "active_requests", None), int):
+            engine.active_requests = max(0, engine.active_requests - 1)
+
+
+def is_serving(engine) -> bool:
+    """True while at least one request is pinned on *engine*."""
+    active = getattr(engine, "active_requests", 0)
+    return isinstance(active, int) and active > 0
 
 
 def pick_eviction_victim(

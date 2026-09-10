@@ -429,25 +429,29 @@ def test_run_coder_task_refuses_unregistered_model(home, evil_gguf, monkeypatch)
 
 def test_run_coder_task_allows_a_registered_model(home, monkeypatch):
     """The gate must not break the legitimate call: a registered name proceeds
-    to the subprocess."""
-    import subprocess
-    spawned = []
+    to the engine cache and the coder runs on it, in this process."""
+    from unittest.mock import MagicMock
+    import localm.plugins.mcpserver.server as srv
+    built = []
 
-    class _Proc:
-        returncode = 0
-        # Must be the REAL shape the handler parses: it scans for a line that is
-        # exactly "{" (indent=2 output) and raw_decodes from there. A bare "{}"
-        # never matches.
-        stdout = ('{\n  "response": "done",\n  "turns": 1,\n'
-                  '  "total_tokens": 2,\n  "success": true\n}')
-        stderr = ""
+    def _stub_engine(self, name):
+        built.append(name)
+        engine = MagicMock()
+        engine.display_name = name
+        engine.active_requests = 0
+        engine.unloading = False
+        engine.supports_grammar = False
+        engine.context_capacity.return_value = 4096
+        engine.chat_stream.side_effect = lambda messages, **kw: iter(["done"])
+        return engine
 
-    monkeypatch.setattr(subprocess, "run",
-                        lambda *a, **k: spawned.append(a) or _Proc())
+    monkeypatch.setattr(srv.EngineCache, "_build_engine", _stub_engine)
+    project = home / "proj"
+    project.mkdir()
     handler = _mcp_handler("run_coder_task", monkeypatch)
-    handler({"task": "x", "cwd": str(home), "model": "good-model"})
-    assert spawned, "a registered model must reach the coder subprocess"
-    assert "--model" in spawned[0][0]
+    out = handler({"task": "x", "cwd": str(project), "model": "good-model"})
+    assert built == ["good-model"], "a registered model must reach the engine cache"
+    assert not out.get("isError"), out
 
 
 def test_pull_model_refuses_a_local_path_repo(home, evil_hf_dir, monkeypatch):

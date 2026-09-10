@@ -1,0 +1,293 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""
+One-shot coder runs, shared by the CLI and the in-process MCP tool.
+
+``resolve_task_config`` turns a project directory plus caller overrides into
+the settings a run needs: the project's ``.localcoder/config.toml`` first, then
+the same defaults the CLI applies. ``build_agent`` constructs the Agent from
+them, ``run_single_task`` runs one task and reports the outcome, and
+``finish_agent`` closes it. The CLI wires its flags into these; the MCP server
+calls them with an engine it already holds.
+"""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from .agent import Agent
+from .agent.constants import _SHELL_EXEC_TOOLS
+from .audit import SessionMode, parse_mode
+from .display import print_warning
+from .project_config import load_project_config
+
+DEFAULT_MAX_TURNS = 40
+
+# Grace after a stop request before a timed-out run is reported as abandoned.
+STOP_GRACE_SECONDS = 30.0
+
+
+class InvalidSessionMode(ValueError):
+    """The requested session mode is not one of privacy, log or full."""
+
+
+@dataclass(frozen=True)
+class TaskConfig:
+    """Resolved settings for one coder run."""
+    model: Optional[str]
+    max_turns: int
+    auto_approve: bool
+    always_confirm: frozenset
+    session_mode: SessionMode
+    gen_kw: dict
+
+
+@dataclass(frozen=True)
+class TaskResult:
+    """Outcome of one task: the agent's final text plus its counters."""
+    success: bool
+    response: str
+    turns: int
+    total_tokens: int
+    timed_out: bool = False
+
+    def as_dict(self) -> dict:
+        return {
+            "success": self.success,
+            "response": self.response,
+            "turns": self.turns,
+            "total_tokens": self.total_tokens,
+        }
+
+
+def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
+                        max_turns: Optional[int] = None,
+                        max_tokens: Optional[int] = None,
+                        temperature: Optional[float] = None,
+                        seed: Optional[int] = None, yes: bool = False,
+                        interactive_confirm: bool = False,
+                        mode: Optional[str] = None) -> TaskConfig:
+    """Resolve a run's settings: explicit arguments win, then the project's
+    ``.localcoder/config.toml``, then the defaults.
+
+    Raises ``ProjectConfigUnreadable`` when the project config exists but
+    cannot be read, and ``InvalidSessionMode`` for an unknown mode."""
+    proj_cfg = load_project_config(work_dir)
+    if model is None:
+        model = proj_cfg.get("model")
+    if max_turns is None:
+        max_turns = int(proj_cfg.get("max_turns", DEFAULT_MAX_TURNS))
+    if max_tokens is None:
+        cfg_max_tokens = proj_cfg.get("max_tokens")
+        if cfg_max_tokens is not None:
+            max_tokens = int(cfg_max_tokens)
+        else:
+            from .harness_profiles import cli_max_tokens
+            max_tokens = cli_max_tokens(model)
+    if temperature is None and "temperature" in proj_cfg:
+        temperature = float(proj_cfg["temperature"])
+    if seed is None and "seed" in proj_cfg:
+        seed = int(proj_cfg["seed"])
+    if not yes and proj_cfg.get("auto_approve"):
+        yes = True
+    always_confirm: set = set()
+    if interactive_confirm:
+        always_confirm.update(_SHELL_EXEC_TOOLS)
+    cfg_confirm = proj_cfg.get("always_confirm", [])
+    if isinstance(cfg_confirm, list):
+        always_confirm.update(cfg_confirm)
+    if mode is None:
+        mode = proj_cfg.get("mode")
+    if mode is None:
+        from localm.audit import effective_mode
+        mode = effective_mode("coder").value
+    try:
+        session_mode = parse_mode(mode)
+    except ValueError as exc:
+        raise InvalidSessionMode(str(exc)) from exc
+    gen_kw = {k: v for k, v in [
+        ("temperature", temperature),
+        ("max_tokens", max_tokens),
+        ("seed", seed),
+    ] if v is not None}
+    return TaskConfig(model=model, max_turns=max_turns, auto_approve=yes,
+                      always_confirm=frozenset(always_confirm),
+                      session_mode=session_mode, gen_kw=gen_kw)
+
+
+def unattended_shell_gated(task: str, auto_approve: bool) -> bool:
+    """True when a one-shot task runs without ``--yes``: the shell tools then
+    need a confirmation the run cannot give, so they are denied."""
+    return bool(task) and not auto_approve
+
+
+def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
+                auto_approve: bool, always_confirm, session_mode: SessionMode,
+                gen_kw: Optional[dict] = None, verbose: bool = False,
+                dry_run: bool = False, scope: Optional[str] = None,
+                custom_instructions: Optional[str] = None, verify_cmd=None,
+                browser_enabled: bool = False, on_event=None) -> Agent:
+    """Construct the Agent for a session the way the CLI does.
+
+    A one-shot task auto-approves file writes; without ``auto_approve`` the
+    shell tools are added to ``always_confirm`` so an unattended run denies
+    them instead of executing unconfirmed."""
+    always_confirm = set(always_confirm or ())
+    if unattended_shell_gated(task, auto_approve):
+        always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
+    return Agent(
+        backend=backend,
+        cwd=work_dir,
+        name="localcoder",
+        max_turns=max_turns,
+        verbose=verbose,
+        auto_approve=auto_approve or (task != ""),
+        always_confirm=always_confirm,
+        dry_run=dry_run,
+        mode=session_mode,
+        scope=scope,
+        custom_instructions=custom_instructions,
+        verify_cmd=verify_cmd,
+        browser_enabled=browser_enabled,
+        on_event=on_event,
+        **(gen_kw or {}),
+    )
+
+
+def warn_unfinished_background(agent) -> None:
+    """Report background sub-agents this one-shot run is about to abandon.
+
+    The turn-boundary drain only fires at the START of a turn, so a child that is
+    still running (or that finished after the final turn) is never folded in, and
+    a one-shot process then exits and takes its daemon threads with it. Exiting
+    silently would drop work the user explicitly asked for. What survives is
+    stated exactly: a committed branch does, a running child does not.
+    """
+    try:
+        from .background import get_registry
+        registry = get_registry()
+        running = [j for j in registry.list_status(kind="agent")
+                   if j["state"] == "running"]
+        pending = registry.drain_finished(kind="agent")
+    except Exception:
+        return
+
+    # Completions evicted before any drain saw them. Its OWN try, after the drain:
+    # drain_finished CONSUMES, so a failure folded into the same try would discard
+    # completions already handed over.
+    try:
+        lost = registry.take_dropped_undrained("agent")
+    except Exception:
+        lost = 0
+
+    if lost:
+        print_warning(
+            f"{lost} background sub-agent completion(s) were discarded before "
+            "they could be collected, so their results are lost.")
+    for st in pending:
+        branch = (st.get("result") or {}).get("branch")
+        where = (f" Its work is committed on branch '{branch}'."
+                 if branch else "")
+        print_warning(
+            f"background sub-agent '{st.get('label')}' ({st.get('id')}) finished "
+            f"after the last turn, so its result was not folded into this run."
+            f"{where}")
+    for st in running:
+        print_warning(
+            f"background sub-agent '{st.get('label')}' ({st.get('id')}) is STILL "
+            "RUNNING and will be killed when this one-shot run exits. Use an "
+            "interactive session for background delegation, or spawn_agent "
+            "(synchronous) for a one-shot.")
+
+
+def warn_sensitive_changes(agent) -> None:
+    """Surface test / CI-config edits so a green check over rewritten tests is
+    reviewed, not trusted. Best-effort: never let this advisory break the
+    session."""
+    try:
+        from .review_guard import classify_sensitive_changes, render_warning
+        message = render_warning(classify_sensitive_changes(agent.changed_files()))
+        if message:
+            print_warning(message)
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
+def browser_enabled() -> bool:
+    """Whether a session that holds every capability may drive the browser:
+    only the ``browser_enabled`` setting is left to check. An unreadable
+    config answers False."""
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("browser_enabled", False))
+    except Exception:
+        return False
+
+
+def run_single_task(agent: Agent, task: str) -> TaskResult:
+    """Run one task to completion and report the outcome."""
+    response = agent.run_task(task)
+    success = agent.last_run_ok
+    warn_unfinished_background(agent)
+    return TaskResult(success=success, response=response, turns=agent.turns,
+                      total_tokens=agent.total_tokens)
+
+
+def finish_agent(agent: Agent) -> Optional[Path]:
+    """Close the agent: surface sensitive edits, then finalise the session.
+    Returns the transcript path when the mode writes one."""
+    warn_sensitive_changes(agent)
+    return agent.close()
+
+
+def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
+                          *, on_finished=None) -> TaskResult:
+    """Run one task on a worker thread, then close the agent there.
+
+    ``on_finished`` runs on the worker thread once the agent is closed, whether
+    or not the caller is still waiting. When ``timeout`` elapses the agent is
+    asked to stop; if it has not stopped within STOP_GRACE_SECONDS the run is
+    reported as timed out and left to finish its current step and close on
+    its own."""
+    box: dict = {}
+
+    def _work():
+        try:
+            box["result"] = run_single_task(agent, task)
+        except BaseException as e:     # noqa: BLE001
+            box["error"] = e
+        finally:
+            try:
+                finish_agent(agent)
+            except Exception as e:     # noqa: BLE001
+                box["close_error"] = e
+            if on_finished is not None:
+                on_finished()
+
+    worker = threading.Thread(target=_work, name="coder-task", daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        try:
+            finish_agent(agent)
+        finally:
+            if on_finished is not None:
+                on_finished()
+        raise
+    worker.join(timeout)
+    if worker.is_alive():
+        agent.request_stop()
+        worker.join(STOP_GRACE_SECONDS)
+    if worker.is_alive():
+        return TaskResult(
+            success=False,
+            response=(f"coder task timed out after {timeout:g}s; it was asked "
+                      "to stop and is finishing its current step"),
+            turns=agent.turns, total_tokens=agent.total_tokens, timed_out=True)
+    if "error" in box:
+        raise box["error"]
+    if "close_error" in box:
+        raise box["close_error"]
+    return box["result"]
