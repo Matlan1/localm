@@ -162,10 +162,8 @@ def test_forget_refuses_an_unknown_id_without_touching_anything(home):
     assert [r.text for r in _cli_store().all()] == ["keep me"]
 
 
-def test_forgotten_lists_what_localm_dropped_itself_and_restore_brings_it_back(home,
-                                                                              monkeypatch):
+def test_forgotten_lists_what_localm_dropped_itself_and_restore_brings_it_back(home):
     """The archive is filled by prune eviction, not by `forget`."""
-    import localm.memory.store as _st
     for i in range(3):
         _run("add", f"fact number {i}")
     store = _cli_store()
@@ -184,7 +182,6 @@ def test_forgotten_lists_what_localm_dropped_itself_and_restore_brings_it_back(h
 
     _run("restore", gone_id)
     assert gone_id in [r.id for r in _cli_store().all()]
-    assert _st.N_MAX  # the module really is the one we patched in the cap test
 
 
 def test_restore_refuses_an_id_that_was_never_archived(home):

@@ -3,6 +3,8 @@
 context rather than freeing it during interpreter teardown. Ctrl+C / Ctrl+Break
 stay on Python's default path."""
 
+import logging
+
 from localm import winconsole
 
 
@@ -28,11 +30,17 @@ def test_dispatch_runs_cleanup_only_on_terminating_events():
     assert len(calls) == 1  # unchanged - Ctrl+C did not run cleanup
 
 
-def test_dispatch_swallows_cleanup_errors():
+def test_dispatch_swallows_cleanup_errors(caplog):
     def _boom():
         raise RuntimeError("cleanup blew up")
     # Must not propagate - the OS handler cannot raise.
-    assert winconsole._dispatch(winconsole.CTRL_CLOSE_EVENT, _boom) is False
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert winconsole._dispatch(winconsole.CTRL_CLOSE_EVENT, _boom) is False
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, (
+        f"the swallowed cleanup error must be logged, not silent: {caplog.records}")
+    assert "console-close cleanup raised" in warnings[0].getMessage()
+    assert warnings[0].exc_info is not None, "the exception must be logged, not just noted"
 
 
 def test_register_console_handler_returns_bool():

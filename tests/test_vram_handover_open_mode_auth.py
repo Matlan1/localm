@@ -131,6 +131,10 @@ def test_reload_chat_after_media_authenticates_with_instance_token_open_mode():
         assert "HTTP 403" not in text, (
             f"reload_chat_after_media was refused by the open-mode gate "
             f"despite a valid instance_token: {text!r}")
+        assert "Reload deferred to the next message (HTTP 503)." in text, (
+            f"expected the real /v1/models/load route to answer 503 (no "
+            f"model configured), which proves the authenticated request "
+            f"passed the open-mode gate and reached the handler: {text!r}")
     finally:
         _shutdown(server, th)
 
