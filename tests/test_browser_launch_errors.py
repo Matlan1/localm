@@ -51,7 +51,7 @@ def test_bundled_launch_failure_names_the_chromium_download(monkeypatch):
         asyncio.run(sess._launch())
 
     msg = str(ei.value)
-    assert "playwright install chromium" in msg, (
+    assert "localm setup-browser" in msg, (
         f"a bundled-engine launch failure must name the download command: {msg}")
 
 
@@ -67,4 +67,4 @@ def test_system_launch_failure_still_points_at_the_system_browser(monkeypatch):
 
     msg = str(ei.value)
     assert "Google Chrome" in msg
-    assert "playwright install chromium" not in msg
+    assert "localm setup-browser" not in msg

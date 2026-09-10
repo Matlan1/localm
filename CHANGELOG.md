@@ -11,6 +11,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **`localm setup-browser`** downloads the Chromium build the automated browser
+  needs. Previously this required a separate, undocumented-in-app
+  `python -m playwright install chromium` step after installing the browser
+  extra; it is now a regular localm command that respects the network policy.
+
 ### Fixed
 - **The curated model shortcuts picker on the Models page could stay empty for
   the rest of a session.** If its very first load hit a brief server or
