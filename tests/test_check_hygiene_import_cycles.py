@@ -2,10 +2,11 @@
 """scripts/check_hygiene.py check 7: no module-level import cycles between the
 top-level units under localm/.
 
-Acyclicity rather than a declared tier map: localm has no declared layering, and
-acyclicity needs no map and no allowlist. The two shapes a tier map would have to
-carve out - an entry point, and unordered peers - are legal by construction,
-because neither can form a cycle.
+Acyclicity is a different property from import direction. The declared layering
+in docs/layering.toml is enforced separately (check 9,
+tests/test_check_hygiene_layering.py); a cycle is a violation under either. This
+check needs no map and no allowlist: an entry point and unordered peers are legal
+by construction, because neither can form a cycle.
 
 These tests pin the things that make the check worth having: it FIRES on a real
 cycle, it does NOT fire on the entry-point and peer shapes, and it ignores
@@ -83,15 +84,11 @@ def test_three_unit_cycle_is_detected(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  POSITIVE: the shapes a tier map would have to allowlist must be legal       #
+#  POSITIVE: the entry-point and peer shapes are legal by construction         #
 # --------------------------------------------------------------------------- #
 
 def test_entry_point_importing_downward_is_legal(tmp_path, monkeypatch):
-    """localm/__main__.py -> localm.cli is a source node, never a cycle.
-
-    This is the shape that would force an exception list into a hand-written
-    tier map.
-    """
+    """localm/__main__.py -> localm.cli is a source node, never a cycle."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {
         "__main__.py": "from localm.cli import main\n",
@@ -103,8 +100,8 @@ def test_entry_point_importing_downward_is_legal(tmp_path, monkeypatch):
 
 
 def test_peers_sharing_a_lower_unit_are_legal(tmp_path, monkeypatch):
-    """image_gen / music_gen / video_gen all importing media is not an ordering
-    violation - they are unordered peers, and no cycle exists."""
+    """image_gen / music_gen / video_gen all importing media: unordered peers
+    sharing a lower unit, and no cycle exists."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {
         "image_gen/comfy.py": "from localm.media.comfy_client import C\n",
@@ -373,3 +370,51 @@ def test_the_shipped_tree_has_no_module_level_cycles():
     """
     ch = _load_check_hygiene()
     assert ch._import_cycle_violations() == []
+
+
+# --------------------------------------------------------------------------- #
+#  Import shapes the edge extractor must attribute to the right unit          #
+# --------------------------------------------------------------------------- #
+
+def test_from_localm_import_shape_closes_a_cycle(tmp_path, monkeypatch):
+    """``from localm import b`` is an import of unit b, not of the package root."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "a/__init__.py": "",
+        "a/x.py": "from localm import b\n",
+        "b/__init__.py": "",
+        "b/y.py": "from localm.a.x import A\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "a cycle closed through `from localm import b` must be reported"
+    assert "a/x.py:1" in problems[0] and "b/y.py:1" in problems[0], problems
+
+
+def test_from_localm_import_of_a_non_unit_name_is_the_root(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    root = _pkg(tmp_path, {"a/x.py": "from localm import __version__\n"})
+    (root / "__init__.py").write_text('__version__ = "0"\n', encoding="utf-8")
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._module_level_import_edges(root) == {"a": {"<root>": "localm/a/x.py:1"}}
+
+
+def test_foreign_package_sharing_the_localm_prefix_is_not_an_edge(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    root = _pkg(tmp_path, {"a/x.py": "import localm_llama_runtime\n"})
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._module_level_import_edges(root) == {}
+
+
+def test_the_package_root_init_is_the_root_unit(tmp_path, monkeypatch):
+    """localm/__init__.py is the root, keyed the same way on both ends of an
+    edge, so a cycle through it is visible."""
+    ch = _load_check_hygiene()
+    root = _pkg(tmp_path, {
+        "__init__.py": "from localm.a.x import A\n",
+        "a/x.py": "import localm\n",
+    })
+    assert ch._module_name(root / "__init__.py", root) == "localm"
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems and "<root>" in problems[0], problems
