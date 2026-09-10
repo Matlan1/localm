@@ -27,10 +27,12 @@ from click.testing import CliRunner
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
-    """A throwaway LOCALM_HOME the CLI and the store both resolve to."""
+    """A throwaway LOCALM_HOME in a writable (non-privacy) mode, which the CLI
+    and the store both resolve to."""
     h = tmp_path / ".localm"
     h.mkdir()
     monkeypatch.setenv("LOCALM_HOME", str(h))
+    monkeypatch.setenv("LOCALM_MODE", "log")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     import localm.config as _cfg
     monkeypatch.setattr(_cfg, "HOME_DIR", h)

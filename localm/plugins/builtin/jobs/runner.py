@@ -686,14 +686,16 @@ def _coder_backend(job: Job):
 
     URL resolution, most-authoritative first: LOCALM_SELF_URL (the live server
     publishes its OWN bind coordinates here at scheduler start, so an auto-bumped
-    port is honoured), else the configured port. In open mode any api_key is
-    accepted; in keyed mode the launcher injects LOCALM_API_KEY, so that is
-    preferred over the open-mode placeholder."""
+    port is honoured), else the configured port. The bearer is the owner key
+    (the environment variable, else the persisted auth.key), else the
+    discovered instance's own attach token in open mode, else the open-mode
+    placeholder."""
     import os
 
     from localm.plugins.coder.backends.http import HTTPBackend
 
     self_url = os.environ.get("LOCALM_SELF_URL")
+    entry = None
     if not self_url:
         # The instance registry knows the address AND the port the server is really
         # on; the configured port is only a guess, and the IPv4 loopback is wrong for
@@ -705,12 +707,14 @@ def _coder_backend(job: Job):
                                             instances.resolve_root_dir())
             self_url = entry.get("base_url") if entry else None
         except Exception:
+            entry = None
             self_url = None
     if not self_url:
         from localm.config import load_config
         port = load_config().get("port", 8642)
         self_url = f"http://127.0.0.1:{port}/v1"
-    api_key = os.environ.get("LOCALM_API_KEY") or "localm"
+    from localm.auth import resolve_bearer_token
+    api_key = resolve_bearer_token(entry.get("token") if entry else None) or "localm"
     # self-connection: grammar sampling available
     return HTTPBackend(self_url, model=job.model or "localm", api_key=api_key,
                        localm_server=True)

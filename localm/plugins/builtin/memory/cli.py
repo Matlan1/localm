@@ -206,6 +206,14 @@ def memory_forgotten() -> None:
 #  Writing                                                            #
 # ------------------------------------------------------------------ #
 
+def _require_writable() -> None:
+    """Exit non-zero when durable memory writes are off for the chat surface."""
+    from localm.memory import writes_allowed
+    if not writes_allowed("chat"):
+        _fail("Memory writes are off in privacy mode (no new traces). "
+              "Set mode/chat_mode to 'log' or 'full' to enable them.")
+
+
 @main.command("add")
 @click.argument("text")
 @click.option("--kind", type=click.Choice(["semantic", "episodic"]),
@@ -224,6 +232,7 @@ def memory_add(text: str, kind: str, importance: float) -> None:
     user-fact eviction reporting would stop seeing it. Both coercions are silent,
     so the choices here are constrained rather than free text.
     """
+    _require_writable()
     if not text.strip():
         _fail("Refusing to save an empty memory.")
     from localm.memory.store import N_MAX, MemoryRecord
@@ -268,6 +277,7 @@ def memory_forget(mem_id: str, yes: bool) -> None:
 @click.argument("mem_id")
 def memory_restore(mem_id: str) -> None:
     """Bring a forgotten fact back into recall."""
+    _require_writable()
     rec = _store().restore_forgotten(mem_id, embed_fn=_embed_fn())
     if rec is None:
         _fail(f"No forgotten memory with id {mem_id}. "
@@ -315,6 +325,15 @@ def memory_corrections(as_json: bool) -> None:
 
     `localm job add --memory` schedules the consolidation that CREATES these.
     """
+    from localm.memory import writes_allowed
+    if not writes_allowed("chat"):
+        if as_json:
+            click.echo(_json.dumps([]))
+        click.echo("Corrections cannot be reviewed in privacy mode: listing "
+                   "them prunes the proposal file, and accepting or rejecting "
+                   "one is a write. Set mode/chat_mode to 'log' or 'full' to "
+                   "review them.", err=True)
+        return
     rows = _store().corrections()
     if as_json:
         click.echo(_json.dumps([c.to_dict() for c in rows], indent=2))
@@ -333,6 +352,7 @@ def memory_corrections(as_json: bool) -> None:
 
 
 def _resolve(correction_id: str, accept: bool) -> None:
+    _require_writable()
     if not _store().resolve_correction(correction_id, accept,
                                        embed_fn=_embed_fn()):
         # `resolve_correction` returns None for TWO different reasons: the id is
