@@ -51,6 +51,7 @@ from . import (  # noqa: F401
     doctor as _doctor,
     maintenance as _maint,
     plugins as _plugins,
+    browser as _browser,
 )
 
 # Re-export the names tests (and other callers) import directly from localm.cli.

@@ -59,8 +59,8 @@ def _require_playwright():
     except ImportError as exc:
         raise BrowserUnavailableError(
             'The browser automation extra is not installed. Install it with '
-            'pip install "localm[browser]" then download the browser it drives '
-            "with:  python -m playwright install chromium") from exc
+            'pip install "localm[browser]" then download the browser it '
+            "drives with:  localm setup-browser") from exc
     return async_playwright
 
 
@@ -154,7 +154,7 @@ class BrowserSession:
             raise BrowserUnavailableError(
                 "Could not start the bundled browser. Its Chromium build is "
                 "downloaded separately from the Python package; get it with:  "
-                "python -m playwright install chromium. " + str(exc)) from exc
+                "localm setup-browser. " + str(exc)) from exc
         self._ctx = await self._browser.new_context()
         self._page = await self._ctx.new_page()
         self._page.on("console", self._on_console)
