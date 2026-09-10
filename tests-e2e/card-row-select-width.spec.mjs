@@ -4,7 +4,7 @@
 // `width: 100%` flex-basis starving its siblings still passes every jsdom
 // assertion that only checks the DOM structure exists.
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures.mjs";
 
 async function widthOf(page, id) {
   return await page.locator(`#${id}`).evaluate((el) => el.getBoundingClientRect().width);

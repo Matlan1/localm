@@ -16,7 +16,7 @@
 // Each test gets a fresh browser context, so every navigation below is a genuine
 // COLD boot with empty localStorage - the exact condition that reproduces it.
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures.mjs";
 import { EXPECTED_TABS } from "./_env.mjs";
 
 // Kernel views (tabs.js CORE_VIEWS) are in VIEWS from module-eval, so they never

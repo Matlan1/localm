@@ -9,7 +9,7 @@
 //   * #358 - a top-level JSON.parse of corrupt localStorage aborted the module
 //     graph and blanked the shell (caught by the corrupt-storage boot test).
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures.mjs";
 import { EXPECTED_TABS } from "./_env.mjs";
 
 // Attach uncaught-error listeners BEFORE navigating. A read-only-import
