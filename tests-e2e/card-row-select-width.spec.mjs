@@ -61,3 +61,25 @@ test("every select in a card row sizes to its content", async ({ page }) => {
   expect(offenders, "a card-row select must not grow or shrink against its siblings")
     .toEqual([]);
 });
+
+test("the model spec field is not narrower than the shortcuts select beside it", async ({ page }) => {
+  await page.goto("/?view=models");
+  // Onboarding install-gate modal, when shown, covers the page - dismiss it if present.
+  try { await page.locator("#install-gate-continue").click({ timeout: 5_000 }); }
+  catch (e) { /* gate not shown on this run */ }
+  await expect(page.locator("#pull-spec")).toBeVisible({ timeout: 30_000 });
+
+  const shortcut = await widthOf(page, "pull-shortcut");
+  const spec = await widthOf(page, "pull-spec");
+  const name = await widthOf(page, "pull-name");
+  const sha256 = await widthOf(page, "pull-sha256");
+
+  expect(spec, "the primary spec field must not be narrower than the shortcuts select beside it")
+    .toBeGreaterThan(shortcut);
+  expect(spec, "the primary spec field must take a clearly larger share than the optional name/sha256 fields")
+    .toBeGreaterThan(name * 2);
+  expect(name, "the optional name field must stay above the unusable floor")
+    .toBeGreaterThan(60);
+  expect(sha256, "the optional sha256 field must stay above the unusable floor")
+    .toBeGreaterThan(60);
+});

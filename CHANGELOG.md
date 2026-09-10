@@ -26,6 +26,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   or `/save` commands could get wrapped onto extra lines partway through a
   word, making it unreadable and impossible to copy-paste correctly.** Such a
   path now always renders on a single line, however long.
+- **The model spec field on the Models page could be too narrow to read what
+  you pasted into it.** At common desktop widths it shared the "Add a model"
+  row equally with the shorter, optional name and sha256 fields; it now gets
+  the larger share.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
