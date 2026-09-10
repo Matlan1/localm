@@ -30,8 +30,10 @@ and places every top-level unit under `localm/` in exactly one of them. The
 rule is small: a module-level import may target only a unit in a lower tier;
 units that share a tier are peers and never import each other at module
 level; the package root (`localm/__init__.py`, which holds only the version)
-sits below every tier. Function-local imports are not covered, because they
-are how a genuine import cycle is broken.
+sits below every tier. Only import statements that run at module import
+time are covered: a function-local import (how a genuine import cycle is
+broken), an `importlib` call, and a plugin loaded under its own module name
+are outside it, and so are tests and scripts.
 
 `scripts/check_hygiene.py` enforces the map on every commit and in CI. It
 also fails on a unit the map does not place, on a placed unit that no longer
