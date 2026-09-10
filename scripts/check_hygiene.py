@@ -967,6 +967,22 @@ def _is_type_checking_guard(test: ast.expr) -> bool:
     return False
 
 
+def _type_checking_branches(test: ast.expr) -> tuple[bool, bool]:
+    """``(body can run, else can run)`` for an ``if`` whose test involves
+    ``TYPE_CHECKING``: ``if TYPE_CHECKING:`` and ``if TYPE_CHECKING and x:``
+    never run their body; ``if not TYPE_CHECKING:`` always does and never runs
+    its ``else``. Any other test can run either branch."""
+    if _is_type_checking_guard(test):
+        return False, True
+    if (isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And)
+            and any(_is_type_checking_guard(v) for v in test.values)):
+        return False, True
+    if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and _is_type_checking_guard(test.operand)):
+        return True, False
+    return True, True
+
+
 def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
     """Statements in *body* that run EAGERLY at module-import time: direct
     statements plus, recursively, anything inside a module-level ``if``/
@@ -974,17 +990,19 @@ def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
     ``for``/``while`` (body and ``else``), ``match`` case or ``class`` body.
     Both branches of an ``if``/``try`` are included - either can run depending
     on the runtime condition or exception. ``def``/``async def`` bodies are
-    never recursed into (deferred, regardless of what encloses them). An
-    ``if TYPE_CHECKING:`` body is skipped (never True at runtime); its ``else``
-    branch is walked."""
+    never recursed into (deferred, regardless of what encloses them). A branch
+    that ``TYPE_CHECKING`` makes unreachable at runtime is skipped (see
+    ``_type_checking_branches``)."""
     out: list[ast.stmt] = []
     for stmt in body:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             out.append(stmt)
         elif isinstance(stmt, ast.If):
-            if not _is_type_checking_guard(stmt.test):
+            body_runs, else_runs = _type_checking_branches(stmt.test)
+            if body_runs:
                 out.extend(_eager_module_statements(stmt.body))
-            out.extend(_eager_module_statements(stmt.orelse))
+            if else_runs:
+                out.extend(_eager_module_statements(stmt.orelse))
         elif isinstance(stmt, (ast.Try, ast.TryStar)):
             out.extend(_eager_module_statements(stmt.body))
             for handler in stmt.handlers:
@@ -1323,7 +1341,7 @@ def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
         for u in units:
             if u in seen_units:
                 problems.append(f"unit {u!r} is placed twice (again in tier {name!r})")
-        seen_units.update(units)
+            seen_units.add(u)
         tiers.append((name, list(units)))
     return ([], problems) if problems else (tiers, [])
 
@@ -1333,12 +1351,11 @@ def _tracked_localm_files(pkg_root: Path) -> "list[Path] | None":
     None when git cannot answer (no checkout, no git) or tracks nothing there,
     so the caller falls back to the disk inventory."""
     try:
-        out = subprocess.run(["git", "ls-files", "--", pkg_root.name], cwd=REPO,
-                             capture_output=True, text=True, encoding="utf-8",
-                             check=True).stdout
+        out = subprocess.run(["git", "ls-files", "-z", "--", pkg_root.name],
+                             cwd=REPO, capture_output=True, check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
-    files = [REPO / rel for rel in out.splitlines() if rel]
+    files = [REPO / rel for rel in out.decode("utf-8").split("\0") if rel]
     return files or None
 
 
@@ -1370,8 +1387,9 @@ def _import_direction_violations(tracked: "list[Path] | None" = None) -> list[st
 
     *tracked* is the file list the unit inventory is taken from; None means
     the unfiltered git-tracked files under localm/, or the disk when git cannot
-    answer. An untracked module's own imports are not judged; a tracked unit
-    that imports one is."""
+    answer. An untracked top-level unit's own imports are not judged (a
+    module inside a tracked unit is walked whether tracked or not); a placed
+    unit that imports an untracked one is."""
     pkg_root = REPO / "localm"
     if not pkg_root.is_dir():
         return []          # not a localm checkout; other gates report that
@@ -1401,7 +1419,10 @@ def _import_direction_violations(tracked: "list[Path] | None" = None) -> list[st
     edges = _module_level_import_edges(pkg_root)
     for u in sorted(edges):
         for v, loc in sorted(edges[u].items()):
-            if v in ("<unparseable>", "<root>"):
+            if v == "<unparseable>":
+                problems.append(f"could not parse {loc}")
+                continue
+            if v == "<root>":
                 continue
             if u != "<root>" and u not in index:
                 continue

@@ -150,6 +150,17 @@ def test_unit_placed_twice_rejects_the_map(tmp_path, monkeypatch):
     assert "goes UP" not in problems[0]
 
 
+def test_unit_placed_twice_within_one_tier_rejects_the_map(tmp_path, monkeypatch):
+    layering = _tiers(("top", ["app"]), ("mid", ["svc", "svc2", "svc"]), ("low", ["util"]))
+    _, problems = _check(tmp_path, monkeypatch, {}, layering)
+    assert len(problems) == 1 and "placed twice" in problems[0], problems
+
+
+def test_unparseable_file_is_reported(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {"util.py": "from localm.app import (\n"})
+    assert len(problems) == 1 and "could not parse" in problems[0], problems
+
+
 def test_repeated_tier_name_rejects_the_map(tmp_path, monkeypatch):
     layering = _tiers(("top", ["app"]), ("top", ["svc", "svc2"]), ("low", ["util"]))
     _, problems = _check(tmp_path, monkeypatch, {}, layering)
@@ -280,14 +291,30 @@ def test_default_inventory_is_the_unfiltered_git_list(tmp_path, monkeypatch):
         seen.append(list(cmd))
 
         class R:
-            stdout = ("localm/app.py\nlocalm/svc.py\nlocalm/svc2.py\n"
-                      "localm/util.py\nlocalm/vendor/x.py\n")
+            stdout = ("localm/app.py\0localm/svc.py\0localm/svc2.py\0"
+                      "localm/util.py\0localm/vendor/x.py\0").encode("utf-8")
         return R()
 
     monkeypatch.setattr(ch.subprocess, "run", fake_run)
     problems = ch._import_direction_violations()
-    assert seen and seen[0][:3] == ["git", "ls-files", "--"], seen
+    assert seen and seen[0][:4] == ["git", "ls-files", "-z", "--"], seen
     assert len(problems) == 1 and "localm/vendor is not placed" in problems[0], problems
+
+
+def test_git_inventory_keeps_a_non_ascii_unit_name(tmp_path, monkeypatch):
+    """git quotes a non-ASCII path in its default output; the NUL-separated form
+    is raw, so the unit is still required and still matches the map."""
+    layering = _tiers(("top", ["app"]), ("mid", ["svc", "svc2"]), ("low", ["util", "café"]))
+    ch, _ = _check(tmp_path, monkeypatch, {"café.py": ""}, layering)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            stdout = ("localm/app.py\0localm/svc.py\0localm/svc2.py\0"
+                      "localm/util.py\0localm/café.py\0").encode("utf-8")
+        return R()
+
+    monkeypatch.setattr(ch.subprocess, "run", fake_run)
+    assert ch._import_direction_violations() == []
 
 
 def test_default_inventory_falls_back_to_disk_without_git(tmp_path, monkeypatch):
@@ -347,6 +374,28 @@ def test_type_checking_guarded_upward_import_does_not_count(tmp_path, monkeypatc
         "util.py": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n"
                    "    from localm.app import App\n"})
     assert problems == []
+
+
+def test_not_type_checking_body_fires_and_its_else_does_not(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "from typing import TYPE_CHECKING\nif not TYPE_CHECKING:\n"
+                   "    from localm.app import run\nelse:\n    from localm.svc import x\n"})
+    assert len(problems) == 1 and "util -> app" in problems[0], problems
+
+
+def test_type_checking_and_clause_body_does_not_count(tmp_path, monkeypatch):
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "import os\nfrom typing import TYPE_CHECKING\n"
+                   "if TYPE_CHECKING and os.name:\n    from localm.app import run\n"})
+    assert problems == []
+
+
+def test_type_checking_or_clause_body_counts(tmp_path, monkeypatch):
+    """``TYPE_CHECKING or x`` can be True at runtime, so its body is walked."""
+    _, problems = _check(tmp_path, monkeypatch, {
+        "util.py": "import os\nfrom typing import TYPE_CHECKING\n"
+                   "if TYPE_CHECKING or os.name:\n    from localm.app import run\n"})
+    assert len(problems) == 1 and "util -> app" in problems[0], problems
 
 
 def test_reading_the_root_package_is_always_legal(tmp_path, monkeypatch):
