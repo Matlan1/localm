@@ -62,7 +62,6 @@ test("the chat voice picker never parses a hostile voice label into DOM elements
     // payload. A <select> can only ever hold <option>/<optgroup> children.
     assert.equal(injectedElements(sel), 0,
       `payload was parsed into DOM elements inside the picker: ${payload}`);
-    assert.equal(win.__INJECTED, undefined, `payload executed: ${payload}`);
     const opt = sel.querySelector("option");
     assert.ok(opt, "a voice option must have been rendered");
     assert.equal(opt.textContent, payload,

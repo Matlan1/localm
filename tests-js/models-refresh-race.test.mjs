@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// init.js fires its own unrelated fetch("/api/models") calls during startup on
-// the same URL as this page's default fetch, so the harness below only gates
-// "/api/models" once startRacing() is called, after those ticks have drained.
+// init.js's own boot-time fetch("/api/models") (bootAuthProbe) runs
+// synchronously inside its top-level IIFE while harness.mjs is still
+// injecting scripts, i.e. before loadAppWithPages() returns and before
+// racing is ever armed below - so it is never gated. tick(5) only lets the
+// rest of the boot chain settle before startRacing() is called.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
@@ -16,16 +18,31 @@ async function tick(n = 2) { for (let i = 0; i < n; i++) await new Promise((r) =
 
 // Gates only the page-level fetch (exact "/api/models", no query), and only
 // once startRacing() has been called. Everything else resolves immediately.
+// A gated call beyond the number of gates provisioned throws immediately,
+// naming the URL and count, instead of awaiting an undefined gate silently -
+// so a test that gains an extra exact-URL caller fails loudly rather than
+// having its gate indices quietly lie.
 function makeRaceHarness(resultFor) {
   const gates = [deferred(), deferred()];
   let pageCallIndex = 0;
   let racing = false;
+  let gatedCalls = 0;
+  let ungatedExactCalls = 0;
   const fetchImpl = async (url) => {
     const u = String(url);
-    if (racing && u === "/api/models") {
-      const i = pageCallIndex++;
-      await gates[i].promise;
-      return resultFor(i);
+    if (u === "/api/models") {
+      if (!racing) {
+        ungatedExactCalls++;
+      } else {
+        const i = pageCallIndex++;
+        gatedCalls++;
+        if (i >= gates.length) {
+          throw new Error(`unexpected gated /api/models caller #${i + 1} for ${u} ` +
+            `(only ${gates.length} gates provisioned)`);
+        }
+        await gates[i].promise;
+        return resultFor(i);
+      }
     }
     return { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" };
   };
@@ -33,6 +50,8 @@ function makeRaceHarness(resultFor) {
     fetchImpl,
     startRacing: () => { racing = true; },
     resolve: (i) => gates[i].resolve(),
+    gatedCount: () => gatedCalls,
+    ungatedExact: () => ungatedExactCalls,
   };
 }
 
@@ -59,6 +78,11 @@ test("refreshModelsPage: two overlapping refreshes leave exactly one table (the 
   await tick();
   const p2 = win.refreshModelsPage();                // call B: starts while A is still in flight
   await tick();
+
+  assert.equal(harness.gatedCount(), 2,
+    "the harness must have gated exactly the two refreshModelsPage() calls " +
+    "this test issued - a third exact /api/models caller would make the gate " +
+    "indices lie");
 
   // B (started second) resolves first; A (started first) resolves last
   harness.resolve(1);
@@ -89,6 +113,11 @@ test("refreshModelsPage: a stale call's error path does not overwrite a newer ca
   await tick();
   const p2 = win.refreshModelsPage();   // call B: succeeds, resolves FIRST
   await tick();
+
+  assert.equal(harness.gatedCount(), 2,
+    "the harness must have gated exactly the two refreshModelsPage() calls " +
+    "this test issued - a third exact /api/models caller would make the gate " +
+    "indices lie");
 
   harness.resolve(1);
   await tick();

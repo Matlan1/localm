@@ -16,7 +16,7 @@ function setup(fetchImpl) {
   return window;
 }
 
-function recorder(extra = {}) {
+function recorder(extra = {}, { docs } = {}) {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
     calls.push({ url: String(url), opts });
@@ -24,6 +24,10 @@ function recorder(extra = {}) {
     if (u.includes("/reembed"))
       return { ok: true, status: 200, text: async () => "",
                json: async () => ({ job_id: "j1" }), ...extra };
+    if (docs && /\/api\/rag\/collections\/[^/]+$/.test(u) && (opts.method || "GET") === "GET")
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ name: "mycoll", docs, n_docs: docs.length,
+                                     n_chunks: docs.length * 2, has_vectors: false }) };
     return { ok: true, status: 200, text: async () => "",
              json: async () => ({ collections: [] }) };
   };
@@ -73,8 +77,14 @@ test("re-embed does not fetch the collection's document list first", async () =>
 
 test("an uploaded-only collection IS re-embedded, not refused", async () => {
   // Uploaded documents have no path on the server disk; the endpoint works
-  // from stored chunk text, so they re-embed like any other document.
-  const { calls, fetchImpl } = recorder();
+  // from stored chunk text, so they re-embed like any other document. The
+  // doc list is served here, with every entry uploaded-only, but must never
+  // be fetched - a regression back to fetching and filtering `!d.uploaded`
+  // would find nothing to send and silently refuse instead.
+  const { calls, fetchImpl } = recorder({}, { docs: [
+    { path: null, uploaded: true, name: "a.pdf" },
+    { path: null, uploaded: true, name: "b.md" },
+  ] });
   const window = setup(fetchImpl);
   runScript(window, `kbConfirmReembed = () => Promise.resolve(true);`);
   runScript(window, "kbReembedCollection('mycoll');");
@@ -82,6 +92,11 @@ test("an uploaded-only collection IS re-embedded, not refused", async () => {
 
   assert.equal(reembedCalls(calls).length, 1,
     "an uploaded-only collection must still reach the server");
+  assert.equal(calls.filter((c) => c.url.includes("/add")).length, 0,
+    "must not fall back to filtering and re-adding documents");
+  assert.equal(calls.filter((c) =>
+    c.url === "/api/rag/collections/mycoll" && (c.opts.method || "GET") === "GET").length, 0,
+    "the doc list is available but must never be fetched");
 });
 
 test("declining the confirm sends nothing at all", async () => {

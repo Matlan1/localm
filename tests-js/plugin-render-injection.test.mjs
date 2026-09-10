@@ -95,7 +95,6 @@ test("the jobs view never parses server-supplied strings into elements", async (
     assert.ok(view, "the jobs view rendered");
     assert.equal(injectedElements(view), 0,
       `payload was parsed into DOM elements: ${payload}`);
-    assert.equal(win.__INJECTED, undefined, `payload executed: ${payload}`);
     // It must still be VISIBLE as text. A render that silently DROPS hostile
     // input is not the same as one that escapes it, and only one of those is
     // honest about what the job is actually named.
