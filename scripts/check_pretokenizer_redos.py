@@ -41,6 +41,7 @@ Usage:
     python scripts/check_pretokenizer_redos.py                  # the pinned tag
     python scripts/check_pretokenizer_redos.py --ref b10375      # a specific tag
     python scripts/check_pretokenizer_redos.py --out report.json # full JSON dump
+    python scripts/check_pretokenizer_redos.py --gate            # exit 1 if any probe is flagged
 """
 
 from __future__ import annotations
@@ -414,6 +415,8 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ref", default=None, help="llama.cpp tag/commit (default: the pin)")
     ap.add_argument("--out", default=None, help="write the full JSON report here")
+    ap.add_argument("--gate", action="store_true",
+                    help="exit 1 when any probe verdict is not linear-ish (default: always exit 0)")
     args = ap.parse_args()
 
     ref = args.ref or _pinned_tag()
@@ -464,7 +467,12 @@ def main() -> int:
         print(f"  [{bait}] {verdict}")
         print(f"    {pattern[:100]}")
 
-    return 0
+    return _exit_code(concerning, args.gate)
+
+
+def _exit_code(concerning: list, gate: bool) -> int:
+    """0 without *gate*; with it, 1 when *concerning* is non-empty."""
+    return 1 if (gate and concerning) else 0
 
 
 if __name__ == "__main__":

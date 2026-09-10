@@ -389,6 +389,25 @@ def _report(summary: dict, backends: "list[str]") -> int:
     return 0
 
 
+def _write_receipt(path: Path, summary: dict, backends: "list[str]", rc: int) -> None:
+    """Write the run's verdicts as JSON: tag, exit code, per-backend verdict
+    dicts for every requested backend, the llama library digest per backend, and
+    the UTC time of writing. Written for every outcome, including FAIL and
+    INCONCLUSIVE, so a refusal downstream can quote the reason."""
+    import datetime as _dt
+    receipt = {
+        "tag": summary["tag"],
+        "exit_code": rc,
+        "written_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "backends": {b: summary["results"].get(b, {"verdict": INCONCLUSIVE,
+                                                   "why": "not run"})
+                     for b in backends},
+        "lib_sha256": summary["lib_sha256"],
+    }
+    path.write_text(json.dumps(receipt, indent=2, default=str), encoding="utf-8")
+    print(f"receipt written: {path}")
+
+
 _ALL_BACKENDS = ("cpu", "vulkan", "cuda", "sycl", "hip", "metal")
 
 
@@ -405,6 +424,10 @@ def main(argv=None) -> int:
                     help="keep the downloaded builds instead of deleting them")
     ap.add_argument("--workdir", default=None,
                     help="where to place the throwaway builds (default: a temp dir)")
+    ap.add_argument("--receipt", default=None,
+                    help="write the per-backend verdicts as JSON here; "
+                         "scripts/bump_llama_pin.py reads it as the evidence that "
+                         "a tag was confirmed")
     args = ap.parse_args(argv)
 
     try:
@@ -422,7 +445,10 @@ def main(argv=None) -> int:
     print(f"Throwaway build dir: {workdir}")
     try:
         summary = confirm(tag, backends, workdir)
-        return _report(summary, backends)
+        rc = _report(summary, backends)
+        if args.receipt:
+            _write_receipt(Path(args.receipt), summary, backends, rc)
+        return rc
     finally:
         if args.keep:
             print(f"\nKept: {workdir}")
