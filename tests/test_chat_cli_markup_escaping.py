@@ -37,6 +37,11 @@ import pytest
 BRACKET_DROP_NAME = "report[draft].txt"
 BRACKET_STYLE_NAME = "notes[bold red].md"
 
+# A single unbroken run with no whitespace to break at, long enough to force a
+# mid-word wrap on any console narrower than it, short enough to stay well
+# under Windows' MAX_PATH once joined to a real tmp_path.
+LONG_TOKEN = "x" * 120
+
 
 @pytest.fixture(autouse=True)
 def _wide_console(monkeypatch):
@@ -275,3 +280,58 @@ class TestInteractiveBannerMarkupEscaping:
         assert prompt in out, (
             f"the 'system: ...' line must echo the -s/--system text verbatim, "
             f"not have a bracketed segment consumed as styling: {out!r}")
+
+
+class TestLongPathDoesNotWrapMidWord:
+    """`TestImageCommandMarkupEscaping`'s file-not-found/images-listing tests
+    and `TestSaveCommandMarkupEscaping`'s saved-confirmation test only ever
+    exercise wrapping incidentally, through whatever length pytest's own
+    tmp_path happens to have. These pin the console far narrower than a
+    deliberately constructed long token, so the wrap fires the same way on
+    every platform regardless of tmp_path length."""
+
+    def test_file_not_found_survives_a_token_longer_than_the_console(
+            self, chat_mod, tmp_path, monkeypatch, capsys):
+        from localm.cli import _core
+        monkeypatch.setattr(_core.console, "_width", 20)
+        monkeypatch.setattr(_core.console, "_height", 25)
+        missing = str(tmp_path / f"{LONG_TOKEN}.png")
+
+        chat_mod._handle_command(f"/image {missing}", [], {}, [], engine=None)
+
+        out = capsys.readouterr().out
+        assert missing in out, (
+            f"a path far longer than the console width must still appear on "
+            f"one unbroken line, not be wrapped mid-word: {out!r}")
+
+    def test_images_listing_survives_a_token_longer_than_the_console(
+            self, chat_mod, monkeypatch, capsys):
+        from localm.cli import _core
+        monkeypatch.setattr(_core.console, "_width", 20)
+        monkeypatch.setattr(_core.console, "_height", 25)
+        long_path = f"/some/dir/{LONG_TOKEN}.png"
+
+        chat_mod._handle_command("/images", [], {}, [long_path], engine=None)
+
+        out = capsys.readouterr().out
+        assert long_path in out, (
+            f"a queued path far longer than the console width must still "
+            f"appear on one unbroken line, not be wrapped mid-word: {out!r}")
+
+    def test_saved_confirmation_survives_a_token_longer_than_the_console(
+            self, chat_mod, tmp_path, monkeypatch, capsys):
+        from localm.cli import _core
+        monkeypatch.setattr(_core.console, "_width", 20)
+        monkeypatch.setattr(_core.console, "_height", 25)
+        monkeypatch.chdir(tmp_path)
+        filename = f"{LONG_TOKEN}.json"
+        messages = [{"role": "user", "content": "hi"}]
+
+        chat_mod._handle_command(f"/save {filename}", messages, {}, [], engine=None)
+
+        out = capsys.readouterr().out
+        saved_path = str((tmp_path / filename).resolve())
+        assert saved_path in out, (
+            f"the full saved path, far longer than the console width, must "
+            f"still appear on one unbroken line, not be wrapped mid-word: "
+            f"{out!r}")
