@@ -11,6 +11,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **The curated model shortcuts picker on the Models page could stay empty for
+  the rest of a session.** If its very first load hit a brief server or
+  network error, it was never retried; it now loads again the next time the
+  page refreshes.
+
 ### Security
 - Rotated the release signing key. The previous key stays pinned alongside the new one for this
   release so existing installations can still verify and apply the update; it is removed in the
