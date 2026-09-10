@@ -213,14 +213,19 @@ export function sortModels(models, sortKey, sortDir) {
 // single write into the shared `box`: a call superseded by a newer one discards
 // its own render. Each render path writes with ONE replaceChildren().
 let _modelsRenderGen = 0;
-let _pullShortcutsLoaded = false;   // guards _loadPullShortcuts() below, fetched once
+// True while _loadPullShortcuts() below is in flight, or once it has
+// succeeded; false again after a failed fetch.
+let _pullShortcutsLoaded = false;
 
 export async function refreshModelsPage() {
   const myGen = ++_modelsRenderGen;
-  // Fire-and-forget, once per page lifetime. This authenticated read must run
-  // only after the boot auth probe has confirmed the client is authed, which is
-  // what onViewShown (dispatch.js) gates refreshModelsPage() on.
-  if (!_pullShortcutsLoaded) { _pullShortcutsLoaded = true; _loadPullShortcuts(); }
+  // Fire-and-forget. This authenticated read must run only after the boot auth
+  // probe has confirmed the client is authed, which is what onViewShown
+  // (dispatch.js) gates refreshModelsPage() on.
+  if (!_pullShortcutsLoaded) {
+    _pullShortcutsLoaded = true;
+    _loadPullShortcuts().then((ok) => { if (!ok) _pullShortcutsLoaded = false; });
+  }
   await refreshModels();
 
   const box = $("models-table");
@@ -1321,23 +1326,29 @@ if ($("disc-civitai-legacy")) _syncChip($("disc-civitai-legacy"));
 // Fetched from refreshModelsPage() above, not eagerly at module load: this is an
 // authenticated read (MODELS_READ) and must not run before the boot path
 // confirms this client is authed. onchange fires no request of its own and is
-// wired here unconditionally.
+// wired here unconditionally. Returns whether the shortcuts loaded. The caller
+// clears _pullShortcutsLoaded when this returns false.
 async function _loadPullShortcuts() {
   const sel = $("pull-shortcut");
-  if (!sel) return;
+  if (!sel) return true;
   try {
     const r = await fetch("/api/models/shortcuts", { headers: authHeaders() });
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const data = await r.json();
     const shortcuts = Array.isArray(data.shortcuts) ? data.shortcuts : [];
+    // Appended as one fragment; a mid-loop throw leaves `sel` unmodified.
+    const frag = document.createDocumentFragment();
     for (const s of shortcuts) {
       const opt = el("option", null, `${s.alias} (${s.size || t("models.sizeUnknown")})`);
       opt.value = s.spec;
       opt.dataset.alias = s.alias;
-      sel.appendChild(opt);
+      frag.appendChild(opt);
     }
+    sel.appendChild(frag);
+    return true;
   } catch (e) {
     // Best-effort convenience list - the spec field still works typed by hand.
+    return false;
   }
 }
 
