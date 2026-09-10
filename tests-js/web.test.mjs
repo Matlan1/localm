@@ -75,7 +75,7 @@ const eq = (out, expected) => assert.equal(JSON.stringify(out), JSON.stringify(e
 test("requestWebTool: search results are wrapped in the untrusted_content fence", async () => {
   const { impl } = recordingFetch([{ title: "T", url: "https://example.com/", snippet: "S" }]);
   const { window: w } = loadApp({ fetchImpl: impl });
-  const note = await w.requestWebTool({ name: "web_search", args: { query: "x" } });
+  const { content: note } = await w.requestWebTool({ name: "web_search", args: { query: "x" } });
   assert.match(note, /<untrusted_content>[\s\S]*T[\s\S]*<\/untrusted_content>/);
   assert.match(note, /UNTRUSTED EXTERNAL CONTENT/);
 });
@@ -83,9 +83,126 @@ test("requestWebTool: search results are wrapped in the untrusted_content fence"
 test("requestWebTool: fetched page text is wrapped in the untrusted_content fence", async () => {
   const { impl } = recordingFetch([]);
   const { window: w } = loadApp({ fetchImpl: impl });
-  const note = await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } });
+  const { content: note } = await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } });
   assert.match(note, /<untrusted_content>\npage text\n<\/untrusted_content>/);
   assert.match(note, /UNTRUSTED EXTERNAL CONTENT/);
+});
+
+// ---------------------------------------------------------------------------
+//  AUD-PROVDEFANG: the server declares WHICH response fields are remote-
+//  controlled (untrusted_fields, web/plug.py); the client must turn that into
+//  untrusted_spans on the outgoing request (Message.untrusted_spans,
+//  protocol.py) so the backend tokenises exactly those ranges with special-
+//  token parsing off - the same wire contract the coder path already ships
+//  (localm/plugins/coder/backends/http.py:_with_untrusted_spans).
+// ---------------------------------------------------------------------------
+
+test("requestWebTool: web_search untrusted_spans cover exactly title+snippet, never the url", async () => {
+  const { impl } = recordingFetch([
+    { title: "EVIL_TITLE", url: "https://example.com/page", snippet: "EVIL_SNIPPET",
+      untrusted_fields: ["title", "snippet"] },
+  ]);
+  const { window: w } = loadApp({ fetchImpl: impl });
+  const { content: note, untrusted_spans } =
+    await w.requestWebTool({ name: "web_search", args: { query: "x" } });
+  assert.equal(untrusted_spans.length, 2, "one span for title, one for snippet");
+  // untrusted_spans is created inside the jsdom realm (requestWebTool runs
+  // injected into window), so .map() over it still yields a jsdom-realm
+  // array - eq() (see top of file) compares by value via JSON instead.
+  const covered = untrusted_spans.map(([a, b]) => note.slice(a, b)).sort();
+  eq(covered, ["EVIL_SNIPPET", "EVIL_TITLE"]);
+  assert.ok(!untrusted_spans.some(([a, b]) => note.slice(a, b).includes("example.com")),
+    "the url must never fall inside an untrusted span");
+});
+
+test("requestWebTool: fetch_url untrusted_spans cover exactly the fetched text", async () => {
+  const impl = async (url) => {
+    if (String(url) === "/api/web/fetch")
+      return jsonResp({ url: "https://example.com/", text: "EVIL_PAGE_TEXT", truncated: false,
+                         untrusted_fields: ["text"] });
+    return jsonResp({});
+  };
+  const { window: w } = loadApp({ fetchImpl: impl });
+  const { content: note, untrusted_spans } =
+    await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } });
+  assert.equal(untrusted_spans.length, 1);
+  const [a, b] = untrusted_spans[0];
+  assert.equal(note.slice(a, b), "EVIL_PAGE_TEXT");
+});
+
+test("requestWebTool: a response with no untrusted_fields degrades to no spans (never crashes)", async () => {
+  const { impl } = recordingFetch([{ title: "T", url: "https://example.com/", snippet: "S" }]);
+  const { window: w } = loadApp({ fetchImpl: impl });
+  const { content: note, untrusted_spans } =
+    await w.requestWebTool({ name: "web_search", args: { query: "x" } });
+  eq(untrusted_spans, []);
+  assert.match(note, /<untrusted_content>[\s\S]*T[\s\S]*<\/untrusted_content>/);
+});
+
+test("web ON: the search-result message sent to the model carries untrusted_spans over exactly the remote text", async () => {
+  const { impl, calls } = recordingFetch([
+    { title: "EVIL_TITLE", url: "https://example.com/page", snippet: "EVIL_SNIPPET",
+      untrusted_fields: ["title", "snippet"] },
+  ]);
+  const { window } = loadApp({ fetchImpl: impl });
+  window.maybeCompactConversation = async () => {};
+  const queue = [
+    content('<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>'),
+    content("done"),
+  ];
+  window.readSSE = async (_r, onData) => {
+    const deltas = queue.shift() || [{ choices: [{ delta: {}, finish_reason: "stop" }] }];
+    for (const d of deltas) onData(JSON.stringify(d));
+  };
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;
+  doc.getElementById("p-web").checked = true;
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  await window.runCompletion(conv);
+
+  const completions = calls.filter((c) => c.url === "/v1/chat/completions");
+  const resultMsg = completions[1].body.messages.find(
+    (m) => m.role === "user" && /Results of web_search/.test(m.content));
+  assert.ok(resultMsg, "the search-result message was sent to the model");
+  assert.ok(Array.isArray(resultMsg.untrusted_spans) && resultMsg.untrusted_spans.length,
+    "untrusted_spans travelled over the wire");
+  const covered = resultMsg.untrusted_spans.map(([a, b]) => resultMsg.content.slice(a, b));
+  assert.ok(covered.includes("EVIL_TITLE"));
+  assert.ok(covered.includes("EVIL_SNIPPET"));
+  assert.ok(!resultMsg.untrusted_spans.some(
+    ([a, b]) => resultMsg.content.slice(a, b).includes("example.com")),
+    "the url must not be marked untrusted");
+});
+
+test("runCompletion: merging a plain user row into an untrusted-spans row shifts the spans correctly", async () => {
+  const { impl, calls } = recordingFetch([]);
+  const { window } = loadApp({ fetchImpl: impl });
+  window.maybeCompactConversation = async () => {};
+  window.readSSE = async (_r, onData) =>
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;
+  doc.getElementById("p-web").checked = false;
+
+  const prefix = "look at this doc first";
+  const conv = {
+    id: "c1", title: "t",
+    messages: [
+      { role: "user", content: prefix },
+      // Simulates a persisted web-result row (LM-DA-014) landing right after a
+      // plain user row - the two get merged for strict role alternation.
+      { role: "user", content: "before EVILTEXT after", web: true, untrusted_spans: [[7, 15]] },
+    ],
+  };
+  await window.runCompletion(conv);
+
+  const completion = calls.find((c) => c.url === "/v1/chat/completions");
+  const merged = completion.body.messages.find((m) => m.role === "user");
+  assert.equal(merged.content, prefix + "\n\n" + "before EVILTEXT after");
+  assert.deepEqual(merged.untrusted_spans, [[7 + prefix.length + 2, 15 + prefix.length + 2]]);
+  assert.equal(merged.content.slice(...merged.untrusted_spans[0]), "EVILTEXT");
 });
 
 // ---------------------------------------------------------------------------
