@@ -133,6 +133,12 @@ jobs:
     # process spawning) must be caught here, not by a user on the other OS.
     name: lint + hygiene + tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A wedged pytest run makes no progress and never exits, so without this the
+    # job holds a runner for GitHub's 360-minute default, on both platforms. The
+    # suite takes about 10 minutes; 45 leaves room for a slow runner while still
+    # failing a hang in a readable time. The hang shape is real and documented:
+    # a worker at 0.00s CPU with no step movement.
+    timeout-minutes: 45
     # Never on the abi-drift push trigger (that runs abi-check only), and on a
     # pull_request only when the PR carries the `full-ci` label. Unconditional
     # for workflow_dispatch and schedule.
@@ -273,6 +279,9 @@ jobs:
   gui-tests:
     name: GUI tests (jsdom, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The other job that runs a test suite, and jsdom has its own documented
+    # hang. It finishes in a couple of minutes, so 20 fails a hang quickly.
+    timeout-minutes: 20
     # Cheap and independent of the Python suite: runs on every PR, not only
     # under the `full-ci` label that gates the two-platform test matrix.
     if: github.event_name != 'push'
