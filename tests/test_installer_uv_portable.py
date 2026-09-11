@@ -40,7 +40,8 @@ def test_sh_asks_portable_vs_shared_before_installing_uv():
 
 def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
     text = _bat()
-    contained_set_idx = text.index('set "UV_INSTALL_DIR=%CD%\\.uv"')
+    # See TestCdDerivedVarsSurviveBangInInstallPath.
+    contained_set_idx = text.index('set "UV_INSTALL_DIR=%CD:!=^!%\\.uv"')
     # Match the real invocation, not the install-it-yourself messages that echo
     # the identical URL as plain text: the `-NoProfile ... -Command` prefix is
     # carried only by the real invocation.

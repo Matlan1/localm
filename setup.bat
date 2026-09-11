@@ -20,7 +20,9 @@ title LocaLM setup
 set "HBSEQ=0"
 
 echo.
+setlocal DisableDelayedExpansion
 echo  LocaLM setup - self-contained install in: %CD%
+endlocal
 echo.
 
 rem ---- uninstall / rollback (report first, then remove) ---------------------
@@ -66,8 +68,8 @@ set "PYPREF="
 set "UVDIR="
 if "%STOREPICK%"=="1" (
     set "CONTAINED=1"
-    set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
-    set "UV_CACHE_DIR=%CD%\.cache"
+    set "UV_PYTHON_INSTALL_DIR=%CD:!=^!%\.python"
+    set "UV_CACHE_DIR=%CD:!=^!%\.cache"
     set "PYPREF=--python-preference only-managed"
     echo  Portable: uv, Python, and downloads all under this folder
 ) else (
@@ -96,8 +98,8 @@ goto uv_missing
 
 :uv_check_portable
 if exist ".uv\uv.exe" (
-    set "PATH=%CD%\.uv;%PATH%"
-    set "UVDIR=%CD%\.uv"
+    set "PATH=%CD:!=^!%\.uv;%PATH%"
+    set "UVDIR=%CD:!=^!%\.uv"
     goto uv_ready
 )
 
@@ -115,8 +117,8 @@ if "%CONTAINED%"=="1" (
     rem  Portable was picked: confine uv's OWN binary to this folder too, not just
     rem  the Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
     rem  override for the installer's target dir.
-    set "UV_INSTALL_DIR=%CD%\.uv"
-    set "UVDIR=%CD%\.uv"
+    set "UV_INSTALL_DIR=%CD:!=^!%\.uv"
+    set "UVDIR=%CD:!=^!%\.uv"
     echo  Portable: installing uv itself under .\.uv
 )
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
@@ -130,14 +132,15 @@ rem  persistent PATH the installer set.
 rem  Harmless caveat (AGENTS.md rule 5): under this file's EnableDelayedExpansion a
 rem  `!` inside the user's INHERITED PATH is dropped when PATH is re-assigned here.
 rem  Proven harmless: this runs only in the uv-missing branch, the change is
-rem  process-local (never the persistent PATH), and every tool the rest of setup runs
-rem  resolves via an explicit path (.venv\Scripts, System32) or the uv dirs prepended
-rem  above, none of which live in a `!`-named directory. A dir literally named with
-rem  `!` is exotic, and a bulletproof-preserving assignment needs fragile batch not
-rem  worth it here (an endlocal-transport re-enables expansion and strips it anyway).
+rem  process-local (never the persistent PATH), and every OTHER tool the rest of
+rem  setup runs resolves via an explicit path (.venv\Scripts, System32). A dir
+rem  literally named with `!` in the inherited PATH is exotic, and a bulletproof-
+rem  preserving assignment needs fragile batch not worth it here.
 set "UVDIRS=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin"
-if defined UV_INSTALL_DIR set "UVDIRS=%UV_INSTALL_DIR%;%UVDIRS%"
 set "PATH=%UVDIRS%;%PATH%"
+rem  UV_INSTALL_DIR itself is prepended fresh from %CD:!=^!% here rather than
+rem  read back - see test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install.
+if defined UV_INSTALL_DIR set "PATH=%CD:!=^!%\.uv;%PATH%"
 where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
 
@@ -473,14 +476,14 @@ set /p "DATAPICK=  Pick 1 or 2 [1]: "
 if not defined DATAPICK set "DATAPICK=1"
 rem DATADIR + DATACREATED feed the install manifest (DATACREATED=1 only when WE
 rem made the dir, so uninstall --purge-data never removes a pre-existing folder).
-set "DATADIR=%CD%\home"
+set "DATADIR=%CD:!=^!%\home"
 set "DATACREATED=0"
 if "%DATAPICK%"=="1" (
     if not exist "home" mkdir "home"
     if exist "localm-home.cfg" del "localm-home.cfg"
-    set "DATADIR=%CD%\home"
+    set "DATADIR=%CD:!=^!%\home"
     set "DATACREATED=1"
-    echo  Data directory: %CD%\home
+    echo  Data directory: !DATADIR!
 )
 rem  Single-line `if ... call` into a goto/label subroutine (defined at the end):
 rem  a `call` plus nested if/else INSIDE this `if (...)` block trips cmd.exe's
@@ -573,10 +576,10 @@ rem  already set (record the command but NOT --path-modified, so the manifest ne
 rem  claims a change it did not make); anything else = failed (record nothing). Flat
 rem  single-line ifs, not a paren block, to dodge cmd.exe's nested-paren parser.
 if "!GCRC!"=="0" set "PATHMOD=--path-modified"
-if "!GCRC!"=="0" set "PATHDIR=%CD%\bin"
-if "!GCRC!"=="0" set "CMDSHIM=%CD%\bin\localm.cmd"
-if "!GCRC!"=="20" set "PATHDIR=%CD%\bin"
-if "!GCRC!"=="20" set "CMDSHIM=%CD%\bin\localm.cmd"
+if "!GCRC!"=="0" set "PATHDIR=%CD:!=^!%\bin"
+if "!GCRC!"=="0" set "CMDSHIM=%CD:!=^!%\bin\localm.cmd"
+if "!GCRC!"=="20" set "PATHDIR=%CD:!=^!%\bin"
+if "!GCRC!"=="20" set "CMDSHIM=%CD:!=^!%\bin\localm.cmd"
 
 rem ---- choose which plugins to enable ---------------------------------------
 rem  `localm plugin setup` prints its own header (it states chat is always on),
@@ -593,8 +596,8 @@ set "PYDIR="
 set "CACHEDIR="
 if "%CONTAINED%"=="1" (
     set "RCFLAG=--runtime-contained"
-    set "PYDIR=%CD%\.python"
-    set "CACHEDIR=%CD%\.cache"
+    set "PYDIR=%CD:!=^!%\.python"
+    set "CACHEDIR=%CD:!=^!%\.cache"
 )
 setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
@@ -625,7 +628,9 @@ rem ===========================================================================
 :uninstall
 echo.
 echo  LocaLM uninstall / rollback for this clone:
+setlocal DisableDelayedExpansion
 echo    %CD%
+endlocal
 echo.
 set "PYBIN=.venv\Scripts\python.exe"
 set "PFLAG="
@@ -763,7 +768,7 @@ exit /b 0
 echo  [!] No path given - using the portable .\home instead.
 if exist "localm-home.cfg" del "localm-home.cfg"
 if not exist "home" mkdir "home"
-set "DATADIR=%CD%\home"
+set "DATADIR=%CD:!=^!%\home"
 set "DATACREATED=1"
 exit /b 0
 
