@@ -43,6 +43,16 @@ def _shortcut_blocks(bat_text):
     return b1, b2
 
 
+def _manifest_record_block(bat_text):
+    """The `setlocal DisableDelayedExpansion` / install-manifest-record /
+    `endlocal` wrapper, sliced out of the real setup.bat text by its own
+    boundaries."""
+    start = bat_text.index(
+        'setlocal DisableDelayedExpansion\n.venv\\Scripts\\python -m localm.install_manifest record')
+    end = bat_text.index('\nif errorlevel 1 echo  [!] Could not record the install manifest', start)
+    return bat_text[start:end]
+
+
 def test_window_mode_is_captured_where_it_is_chosen(bat):
     """WINMODE must be set from WPICK, before anything describes the GUI."""
     assert 'set "WINMODE=in your browser"' in bat
@@ -348,6 +358,139 @@ class TestShortcutSurvivesBangInInstallPath:
         assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (
             "delayed expansion was left disabled after a failed shortcut "
             "write in a bang path: {}".format(out.stdout))
+
+
+def test_manifest_record_line_isolates_the_bang_hazard(bat):
+    """The install-manifest record line embeds %CD% directly twice (--venv,
+    --lib-dir) on one top-level line, outside any block - the same multi-
+    occurrence delayed-expansion hazard the shortcut blocks had - so it must
+    be isolated the same way: setlocal DisableDelayedExpansion immediately
+    before the command, endlocal immediately after, before the pre-existing
+    errorlevel check runs. See TestManifestRecordSurvivesBangInInstallPath
+    for the executing proof."""
+    block = _manifest_record_block(bat)
+    lines = block.splitlines()
+    assert lines[0] == "setlocal DisableDelayedExpansion"
+    assert lines[-1] == "endlocal"
+    assert lines[1].startswith(".venv\\Scripts\\python -m localm.install_manifest record")
+    assert bat.index(block) < bat.index("if errorlevel 1 echo  [!] Could not record the install manifest")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestManifestRecordSurvivesBangInInstallPath:
+    """The install-manifest record line embeds %CD% directly twice (--venv,
+    --lib-dir) on one top-level line, outside any block - the same multi-
+    occurrence delayed-expansion hazard the shortcut blocks had, where cmd's
+    scanner pairs up 2+ literal `!` characters left on one already-
+    substituted line and merges or drops whatever text sits between them.
+    `echo` replaces the real `.venv\\Scripts\\python -m
+    localm.install_manifest record` invocation so the substituted text can
+    be inspected directly: a stub .bat invoked here without `call` would
+    hand control to the stub and never return to this probe - a harness
+    artefact unrelated to this defect, since the real command is an .exe,
+    not a .bat."""
+
+    def _echoed_block(self, bat):
+        block = _manifest_record_block(bat)
+        target = ".venv\\Scripts\\python -m localm.install_manifest record"
+        assert target in block, "the manifest-record invocation text moved; update this test"
+        assert block.endswith(" >nul 2>nul\nendlocal"), \
+            "the manifest-record line's shape changed; update this test"
+        echoed = block[: -len(" >nul 2>nul\nendlocal")] + "\nendlocal"
+        return echoed.replace(target, "echo MANIFEST_ARGS", 1)
+
+    def _run(self, directory, block_text, extra_setup):
+        probe = directory / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            + extra_setup +
+            "{block}\r\n"
+            'echo AFTER_MARK\r\n'
+            'set "PROBEVAR=still-here"\r\n'
+            'echo DELAYED_EXPANSION_OK=[!PROBEVAR!]\r\n'
+            "exit /b 0\r\n".format(block=block_text),
+            encoding="utf-8")
+        return subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(directory))
+
+    def test_command_text_survives_a_bang_in_the_install_path_flags_set(self, bat, tmp_path):
+        """Every optional field populated (a global+contained install with a
+        shortcut) - the highest-risk shape, since it puts the most text
+        between the two %CD% occurrences."""
+        echoed = self._echoed_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        extra_setup = (
+            'set "DATADIR=C:\\FakeData"\r\nset "CRD=--data-created"\r\n'
+            'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\nset "RCFLAG=--runtime-contained"\r\n'
+            'set "PYDIR=C:\\FakePython"\r\nset "CACHEDIR=C:\\FakeCache"\r\n'
+            'set "UVDIR=C:\\FakeUv"\r\nset "PATHDIR=C:\\FakeBin"\r\n'
+            'set "CMDSHIM=C:\\FakeBin\\localm.cmd"\r\nset "PATHMOD=--path-modified"\r\n')
+        out = self._run(bangdir, echoed, extra_setup)
+        expected = (
+            'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --lib-dir '
+            '"{bang}\\runtime\\localm_llama_runtime\\lib" --data-dir "C:\\FakeData" '
+            '--data-created --shortcut "C:\\FakeDesktop\\LocaLM.lnk" --runtime-contained '
+            '--python-dir "C:\\FakePython" --cache-dir "C:\\FakeCache" --uv-dir "C:\\FakeUv" '
+            '--path-dir "C:\\FakeBin" --command-shim "C:\\FakeBin\\localm.cmd" --path-modified'
+        ).format(bang=bangdir)
+        assert expected in out.stdout, (out.stdout, out.stderr)
+        assert "AFTER_MARK" in out.stdout, (out.stdout, out.stderr)
+        assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
+
+    def test_command_text_survives_a_bang_in_the_install_path_flags_empty(self, bat, tmp_path):
+        """The common case: no global install, no contained runtime, no
+        shortcut - CRD/RCFLAG/PYDIR/CACHEDIR/PATHDIR/CMDSHIM/PATHMOD are all
+        empty, so the substituted line carries several adjacent-space and
+        empty-quote gaps around the two %CD% occurrences."""
+        echoed = self._echoed_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        extra_setup = (
+            'set "DATADIR=C:\\FakeData"\r\nset "CRD="\r\n'
+            'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\nset "RCFLAG="\r\n'
+            'set "PYDIR="\r\nset "CACHEDIR="\r\n'
+            'set "UVDIR=C:\\FakeUv"\r\nset "PATHDIR="\r\n'
+            'set "CMDSHIM="\r\nset "PATHMOD="\r\n')
+        out = self._run(bangdir, echoed, extra_setup)
+        expected = (
+            'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --lib-dir '
+            '"{bang}\\runtime\\localm_llama_runtime\\lib" --data-dir "C:\\FakeData"  '
+            '--shortcut "C:\\FakeDesktop\\LocaLM.lnk"  --python-dir "" --cache-dir "" '
+            '--uv-dir "C:\\FakeUv" --path-dir "" --command-shim "" '
+        ).format(bang=bangdir)
+        assert expected in out.stdout, (out.stdout, out.stderr)
+        assert "AFTER_MARK" in out.stdout, (out.stdout, out.stderr)
+        assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
+
+    @pytest.mark.parametrize("exit_code,expect_flagged", [(0, False), (3, True)])
+    def test_errorlevel_survives_the_disabled_expansion_scope(
+            self, bat, tmp_path, exit_code, expect_flagged):
+        """The pre-existing `if errorlevel 1 echo ...` guard right after this
+        block must still see the wrapped command's real exit code, not one
+        reset by entering or leaving the new setlocal scope."""
+        block = _manifest_record_block(bat)
+        lines = block.splitlines()
+        assert lines[0] == "setlocal DisableDelayedExpansion"
+        assert lines[-1] == "endlocal"
+        substituted = "\r\n".join([lines[0], "cmd /c exit {}".format(exit_code), lines[-1]])
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        probe = bangdir / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            + substituted + "\r\n"
+            'if errorlevel 1 (echo FLAGGED) else (echo NOT_FLAGGED)\r\n'
+            'set "PROBEVAR=still-here"\r\n'
+            'echo DELAYED_EXPANSION_OK=[!PROBEVAR!]\r\n'
+            "exit /b 0\r\n",
+            encoding="utf-8")
+        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
+        lines_out = out.stdout.splitlines()
+        assert ("FLAGGED" in lines_out) == expect_flagged, (out.stdout, out.stderr)
+        assert ("NOT_FLAGGED" in lines_out) == (not expect_flagged), (out.stdout, out.stderr)
+        assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
 
 
 def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
