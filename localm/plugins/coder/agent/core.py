@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 import localm.plugins.coder.agent as _agent
+from localm.textguard import GuardedText, compose, compose_join, untrusted_span
 from ..backends.base import BaseLLMBackend
 from ..indexer import ProjectMap
 from ..tools import SAFE_RESTRICTED_TOOLS
@@ -33,6 +34,17 @@ from .context import _ContextMixin
 from .persistence import _PersistenceMixin
 from .session import _SessionMixin
 from .tooldefs import _build_openai_tool_defs
+
+
+def _foreign_tool_docs(heading: str, names, registry) -> GuardedText:
+    """*heading* followed by one ``- name: description`` line per registered
+    tool in *names*, as a ``GuardedText`` whose untrusted ranges cover each
+    line's name and description (they came from the MCP server or plugin)."""
+    lines = [
+        compose("- ", untrusted_span(f"{n}: {registry[n].description}"))
+        for n in names if n in registry
+    ]
+    return compose(heading, compose_join("\n", lines))
 
 
 class Agent(
@@ -547,14 +559,9 @@ class Agent(
             for w in mcp_warnings:
                 print_warning(w)
             if mcp_names:
-                lines = [
-                    f"- {n}: {TOOL_REGISTRY[n].description}"
-                    for n in mcp_names if n in TOOL_REGISTRY
-                ]
-                self._mcp_docs = (
-                    "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n"
-                    + "\n".join(lines)
-                )
+                self._mcp_docs = _foreign_tool_docs(
+                    "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
+                    mcp_names, TOOL_REGISTRY)
         except Exception as e:
             print_warning(f"MCP setup failed: {e}")
 
@@ -571,14 +578,9 @@ class Agent(
             for w in plugin_warnings:
                 print_warning(w)
             if plugin_names:
-                lines = [
-                    f"- {n}: {TOOL_REGISTRY[n].description}"
-                    for n in plugin_names if n in TOOL_REGISTRY
-                ]
-                self._plugin_docs = (
-                    "EXTERNAL PLUGIN TOOLS (call exactly like built-in tools)\n"
-                    + "\n".join(lines)
-                )
+                self._plugin_docs = _foreign_tool_docs(
+                    "EXTERNAL PLUGIN TOOLS (call exactly like built-in tools)\n",
+                    plugin_names, TOOL_REGISTRY)
         except Exception as e:
             print_warning(f"Plugin tool setup failed: {e}")
 

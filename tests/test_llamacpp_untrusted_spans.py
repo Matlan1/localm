@@ -219,17 +219,36 @@ def test_spans_are_located_exactly_for_a_normal_render():
         spans = _content_spans_in_prompt(object(), messages, prompt, reason)
 
     assert spans is not None
-    assert [prompt[a:b] for a, b in spans] == ["sys", "hello"]
+    assert [prompt[a:b] for a, b, _lead in spans] == ["sys", "hello"]
 
 
-def test_a_template_that_trims_content_yields_no_spans():
-    """A render that does not reproduce the content verbatim must refuse."""
+def test_a_template_that_trims_content_is_located_on_the_trimmed_text():
+    """llama.cpp's built-in llama3 and gemma formatters trim every content, so
+    a verbatim-only locate would drop the whole request's ranges there."""
     def trimming(pairs):
         return "".join("<|im_start|>" + r + "\n" + c.strip() + "<|im_end|>\n"
                        for r, c in pairs)
 
     messages = [{"role": "user", "content": "  padded  "}]
     native = FakeNative(render=trimming)
+    with native.patches()[0], native.patches()[1]:
+        prompt, reason = _apply_model_template(object(), messages)
+        spans = _content_spans_in_prompt(object(), messages, prompt, reason)
+
+    assert spans is not None
+    (start, end, lead), = spans
+    assert prompt[start:end] == "padded"
+    assert lead == 2
+
+
+def test_a_template_that_rewrites_content_yields_no_spans():
+    """A render that does not reproduce the content, trimmed or verbatim, must refuse."""
+    def escaping(pairs):
+        return "".join("<|im_start|>" + r + "\n" + c.replace("<", "&lt;") + "<|im_end|>\n"
+                       for r, c in pairs)
+
+    messages = [{"role": "user", "content": "a < b"}]
+    native = FakeNative(render=escaping)
     with native.patches()[0], native.patches()[1]:
         prompt, reason = _apply_model_template(object(), messages)
         spans = _content_spans_in_prompt(object(), messages, prompt, reason)
@@ -256,17 +275,36 @@ def test_a_template_that_drops_a_message_yields_no_spans():
 
 def test_unlocatable_spans_fall_back_to_one_special_parsing_call():
     """A refusal degrades to today's behaviour, never to something weaker."""
-    def trimming(pairs):
-        return "".join("<|im_start|>" + r + "\n" + c.strip() + "<|im_end|>\n"
+    def escaping(pairs):
+        return "".join("<|im_start|>" + r + "\n" + c.replace("<", "&lt;") + "<|im_end|>\n"
                        for r, c in pairs)
 
     guarded = compose("head ", untrusted_span(ATTACK), " tail  ")
-    native = FakeNative(render=trimming)
+    native = FakeNative(render=escaping)
     _prompt, ranges, _ids = _encode_conversation(
         native, [{"role": "user", "content": guarded}])
 
     assert ranges == ()
     assert [ps for _t, ps in native.calls] == [True]
+
+
+def test_a_trimming_template_still_stops_the_exotic_token_end_to_end():
+    """The whole point of tolerating a trim: on a llama3/gemma-shaped render the
+    untrusted body must still be tokenised with special parsing off."""
+    def trimming(pairs):
+        return "".join("<|im_start|>" + r + "\n" + c.strip() + "<|im_end|>\n"
+                       for r, c in pairs)
+
+    head, tail = _fenced()
+    guarded = compose(head, untrusted_span(ATTACK), tail + "\n")
+    native = FakeNative(render=trimming)
+    prompt, ranges, ids = _encode_conversation(
+        native, [{"role": "user", "content": guarded}])
+
+    assert ranges, "the trimmed render was not located"
+    assert "".join(prompt[a:b] for a, b in ranges) == neutralise(ATTACK)
+    assert _SPECIAL_IDS[EXOTIC] not in ids
+    assert _SPECIAL_IDS["<|im_start|>"] in ids
 
 
 # --------------------------------------------------------------------------- #

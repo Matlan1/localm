@@ -40,7 +40,9 @@ def register_foreign_tool(
 
     *description* is neutralised (defangs any chat-template control token /
     frame marker a foreign name/description could carry into the system
-    prompt - the model's highest-trust context) before insertion.
+    prompt - the model's highest-trust context) before insertion, and the
+    entry is flagged ``untrusted_docs=True`` so prompts.py records its
+    catalogue block as an untrusted range of the system prompt.
     """
     if reg_name in TOOL_REGISTRY:
         if reuse_if_already_ours is not None and reuse_if_already_ours(TOOL_REGISTRY[reg_name]):
@@ -55,5 +57,6 @@ def register_foreign_tool(
         description=neutralise(description.strip()),
         params=params,
         destructive=destructive,
+        untrusted_docs=True,
     )
     registered.append(reg_name)

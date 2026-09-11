@@ -74,6 +74,12 @@ class ToolDef:
     # detected by name instead, so this is the seam a plugin tool uses to flag
     # itself.
     untrusted_output: bool = False
+    # Marks a tool whose name, description and params were reported by an
+    # external source (an MCP server's tools/list, a plugin's exported function)
+    # rather than written in localm's own source. prompts.py records that tool's
+    # catalogue block as an untrusted range of the system prompt, so the backend
+    # tokenises it with special-token parsing off. Set by register_foreign_tool.
+    untrusted_docs: bool = False
     # A NON-mutating tool that should still ask before running, ORed into
     # execution.py's needs_confirm alongside destructive and the ask network mode.
     # Separate from destructive, which also triggers dry-run-skip and an undo

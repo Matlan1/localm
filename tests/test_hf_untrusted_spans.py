@@ -113,6 +113,35 @@ def test_ranges_land_on_the_untrusted_body_only(tokenizer):
     assert text[ranges[0][0]:ranges[0][1]] == neutralise(BODY)
 
 
+_TRIMMING_TEMPLATE = (
+    "{% for m in messages %}<|im_start|>{{ m['role'] }}\n"
+    "{{ m['content'] | trim }}<|im_end|>\n"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+)
+
+
+def test_a_trimming_template_still_stops_the_exotic_token(tokenizer):
+    """Llama-3.1's own Jinja template applies |trim to every message. The
+    locator must find the trimmed text, or every range of the request is
+    silently dropped on that family."""
+    from localm.inference.backends._hf_worker import _untrusted_prompt_ranges
+
+    tokenizer.chat_template = _TRIMMING_TEMPLATE
+    guarded = compose("<fence>\n", untrusted_span(BODY), "\n</fence>\n")
+    messages = [{"role": "user", "content": guarded}]
+    text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True)
+    assert str(guarded) not in text, "the fixture template did not trim"
+    ranges = _untrusted_prompt_ranges(tokenizer, messages, text)
+    assert len(ranges) == 1
+    assert text[ranges[0][0]:ranges[0][1]] == neutralise(BODY)
+
+    _text, ids = _ids_for(tokenizer, guarded)
+    assert _sid(tokenizer, EXOTIC) not in ids
+    assert _sid(tokenizer, "<|im_start|>") in ids
+
+
 def test_no_annotation_produces_no_ranges(tokenizer):
     from localm.inference.backends._hf_worker import _untrusted_prompt_ranges
 
