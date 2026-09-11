@@ -31,7 +31,7 @@ test("install gate UI: a captured prompt reveals the Install button only", () =>
 test("install gate UI: iOS shows Add-to-Home-Screen steps (no install prompt)", () => {
   const { window } = loadApp({ fetchImpl: allOk });
   window.applyInstallGateUI({ ios: true });
-  const { install, ios, hint } = gateEls(window);
+  const { install, ios } = gateEls(window);
   assert.ok(shown(ios), "iOS steps shown");
   assert.ok(!shown(install), "no Install button on iOS");
   assert.match(ios.textContent, /Add to Home Screen/i);

@@ -376,12 +376,12 @@ export async function maybeAttachInlineBrowser(s) {
     const r = await fetch("/api/browser/state", { headers: authHeaders() });
     const data = await r.json().catch(() => ({}));
     enabled = data.inlineLiveView === true;
-  } catch (e) { /* server unreachable; nothing to show */ }
+  } catch { /* server unreachable; nothing to show */ }
   if (!enabled || s.closed || s.inlineBrowser) return;
   let mod;
   try {
     mod = await loadBrowserPluginModule();
-  } catch (e) {
+  } catch {
     return;                            // the browser plugin is not installed
   }
   if (s.closed || s.inlineBrowser) return;   // the session moved on while this awaited
@@ -825,7 +825,7 @@ export async function streamSession(s, replay) {
         try { ev = JSON.parse(payload); } catch { return; }
         if (coder.sessions.has(s.info.id)) handleCoderEvent(s, ev);
       }, () => { s.lastEventAt = Date.now(); });
-    } catch (e) {
+    } catch {
       if (!coder.sessions.has(s.info.id) || s.closed) return;
       await new Promise((res) => setTimeout(res, 1500));
     }
@@ -1095,7 +1095,7 @@ export async function reattachSessions() {
       renderSessionSelect();
       if (coder.sessions.size > 0) $("coder-bar").classList.add("open");
     }
-  } catch (e) { /* server unreachable; startup poller will retry models anyway */ }
+  } catch { /* server unreachable; startup poller will retry models anyway */ }
 }
 
 /* coder file attachments - extracted to text server-side (same in-memory
@@ -1203,7 +1203,7 @@ export async function closeCoderSession(s) {
   try {
     await fetch(`/api/coder/sessions/${s.info.id}`, {
       method: "DELETE", headers: authHeaders() });
-  } catch (e) { /* server may already be gone */ }
+  } catch { /* server may already be gone */ }
   stopInlineBrowserStream(s);
   s.closed = true;
   s.feedEl.remove();
@@ -1792,7 +1792,7 @@ export async function openSessionHistory() {
   try {
     const r = await fetch("/api/coder/history", { headers: authHeaders() });
     if (r.ok) data = await r.json();
-  } catch (e) { /* handled below */ }
+  } catch { /* handled below */ }
   if (!data) { toast(t("coder.history.loadFailed"), true); return; }
   openModal(t("coder.history.modalTitle"), (body) => {
     if (data.authorized === false) {

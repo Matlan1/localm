@@ -285,7 +285,7 @@ test("stopping when nothing is streaming is a no-op", async () => {
 });
 
 test("switching the active session stops the old stream and starts the new one", async () => {
-  const { calls, impl } = fetchLog([
+  const { impl } = fetchLog([
     ["/api/browser/agent", async (u, m, opts) => {
       const body = JSON.parse(opts.body);
       return { ok: true, status: 200,

@@ -155,7 +155,7 @@ test("refreshModels() does NOT refetch the VRAM estimate when the active model i
   // Negative case for the fix above: a routine poll tick with nothing changed
   // must not turn into an extra estimate fetch every 30s.
   const calls = [];
-  const fetchImpl = async (url, opts = {}) => {
+  const fetchImpl = async (url, _opts = {}) => {
     const u = String(url);
     calls.push({ u });
     if (u.includes("/api/vram-estimate"))
@@ -189,7 +189,7 @@ test("refreshModels() refreshes the estimate when the active model is externally
   // just outdated) numbers while the status line correctly says "no model".
   const calls = [];
   let active = "m1";
-  const fetchImpl = async (url, opts = {}) => {
+  const fetchImpl = async (url, _opts = {}) => {
     const u = String(url);
     calls.push({ u });
     if (u.includes("/api/vram-estimate"))
@@ -225,7 +225,7 @@ test("refreshModels() refreshes the estimate when a model is loaded after being 
   // on the model that was active before the unload, forever.
   const calls = [];
   let active = "";
-  const fetchImpl = async (url, opts = {}) => {
+  const fetchImpl = async (url, _opts = {}) => {
     const u = String(url);
     calls.push({ u });
     if (u.includes("/api/vram-estimate"))

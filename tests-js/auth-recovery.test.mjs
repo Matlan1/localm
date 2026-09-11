@@ -16,7 +16,7 @@ const down = () => Promise.reject(new Error("ECONNREFUSED"));
 // Best-effort: jsdom's location.reload cannot always be redefined.
 function stubReload(window) {
   try { Object.defineProperty(window.location, "reload", { configurable: true, value: () => {} }); }
-  catch (e) { /* jsdom no-op nav */ }
+  catch { /* jsdom no-op nav */ }
 }
 function stubSWAndCaches(window) {
   const unregistered = [];

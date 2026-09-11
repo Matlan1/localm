@@ -43,7 +43,7 @@ test("the reconnect overlay offers a reset escape hatch", () => {
 test("reset clears local client state (so nothing local can permanently wedge it)", async () => {
   const { window } = loadApp();
   runScript(window, `localStorage.setItem("a", "1"); sessionStorage.setItem("b", "2");`);
-  try { await window.resetClientState(); } catch (e) { /* jsdom location.reload is a noop */ }
+  try { await window.resetClientState(); } catch { /* jsdom location.reload is a noop */ }
   assert.equal(window.localStorage.length, 0, "localStorage cleared");
   assert.equal(window.sessionStorage.length, 0, "sessionStorage cleared");
 });

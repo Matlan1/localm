@@ -10,7 +10,7 @@ import { loadAppWithPages, runScript } from "./harness.mjs";
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 function setup({ collections, embedding }) {
-  const fetchImpl = async (url, opts = {}) => {
+  const fetchImpl = async (url, _opts = {}) => {
     const u = String(url);
     if (/\/api\/rag\/collections$/.test(u))
       return { ok: true, status: 200, text: async () => "", json: async () => ({ collections }) };

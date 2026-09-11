@@ -17,8 +17,8 @@ const jsonResp = (obj) => ({
 function recordingFetch(webResults) {
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
-    try { body = opts.body ? JSON.parse(opts.body) : null; } catch (e) { body = opts.body; }
+    let body;
+    try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
     if (String(url) === "/api/web/search") return jsonResp({ query: "q", results: webResults });
     if (String(url) === "/api/web/fetch")
@@ -349,8 +349,8 @@ test("web ON: a backend that refuses the grammar falls back to unconstrained and
   let chatCalls = 0;
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
-    try { body = opts.body ? JSON.parse(opts.body) : null; } catch (e) { body = opts.body; }
+    let body;
+    try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/chat/completions") {
       chatCalls += 1;
@@ -491,7 +491,7 @@ const searchCall = (q) =>
   content(`<tool_call>{"name": "web_search", "args": {"query": "${q}"}}</tool_call>`);
 
 test("R36: a repeated identical search is not re-run; the model is told to answer", async () => {
-  const { conv, calls, completions } = await runChat({
+  const { conv, calls } = await runChat({
     web: true,
     rounds: [
       searchCall("weather today"),
@@ -625,8 +625,8 @@ test("web ON: an ordinary ONE-call reply gets no ignored-call notice", async () 
 function askFetch(netMode, webResults = [{ title: "T", url: "https://example.com/", snippet: "S" }]) {
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
-    try { body = opts.body ? JSON.parse(opts.body) : null; } catch (e) { body = opts.body; }
+    let body;
+    try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/config") return jsonResp({ net_mode: netMode });
     if (String(url) === "/api/web/search") return jsonResp({ query: "q", results: webResults });

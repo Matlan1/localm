@@ -77,7 +77,7 @@ function hasKey(key) {
 export function pluralCategory(count) {
   try {
     return new Intl.PluralRules(_language).select(count);
-  } catch (e) {
+  } catch {
     return count === 1 ? "one" : "other";
   }
 }
@@ -187,7 +187,7 @@ export async function fetchCatalog(id) {
     if (!r.ok) return null;
     const data = await r.json();
     return (data && typeof data === "object" && !Array.isArray(data)) ? data : null;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -212,7 +212,7 @@ export async function applyLanguage(id) {
   document.documentElement.lang = want;
   applyI18n(document);
   try { localStorage.setItem(LANGUAGE_STORAGE_KEY, want); }
-  catch (e) { /* storage full or blocked - the server config still holds it */ }
+  catch { /* storage full or blocked - the server config still holds it */ }
   document.dispatchEvent(new CustomEvent("localm:language", { detail: { language: want } }));
   return true;
 }
@@ -220,9 +220,9 @@ export async function applyLanguage(id) {
 /** Read the language cached in this browser and apply it. Runs at load so a
  *  returning visitor never sees English first. */
 export function storedLanguage() {
-  let id = null;
+  let id;
   try { id = localStorage.getItem(LANGUAGE_STORAGE_KEY); }
-  catch (e) { return LANGUAGE_DEFAULT; }
+  catch { return LANGUAGE_DEFAULT; }
   return isKnownLanguage(id) ? id : LANGUAGE_DEFAULT;
 }
 
@@ -245,7 +245,7 @@ export async function setLanguage(id) {
       body: JSON.stringify({ language: currentLanguage() }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  } catch (e) {
+  } catch {
     toast(t("appearance.language.saveFailed"), true);
     return false;
   }
@@ -261,7 +261,7 @@ export async function syncLanguageFromConfig() {
     if (cfg && typeof cfg.language === "string" && cfg.language !== _language) {
       await applyLanguage(cfg.language);
     }
-  } catch (e) { /* ignored */ }
+  } catch { /* ignored */ }
   renderLanguagePicker();
 }
 

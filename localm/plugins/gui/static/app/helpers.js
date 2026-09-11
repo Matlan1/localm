@@ -74,7 +74,7 @@ const INSTANCE_ID_KEY = "localm.instanceId";
  *  origin/port (AUD-INSTANCEID). */
 export function instanceCacheTrusted() {
   try { return !!localStorage.getItem(INSTANCE_ID_KEY); }
-  catch (e) { return false; }
+  catch { return false; }
 }
 
 /** Reconcile the cached instance id against the one the connected backend just
@@ -97,13 +97,13 @@ export function reconcileInstanceId(serverInstanceId) {
   if (!serverInstanceId) return "unknown";
   let cached;
   try { cached = localStorage.getItem(INSTANCE_ID_KEY); }
-  catch (e) { return "unknown"; }   // localStorage unavailable - nothing to protect or confirm
+  catch { return "unknown"; }   // localStorage unavailable - nothing to protect or confirm
   if (cached === serverInstanceId) return "confirmed";
   for (const key of INSTANCE_SCOPED_KEYS) {
-    try { localStorage.removeItem(key); } catch (e) { /* best-effort wipe */ }
+    try { localStorage.removeItem(key); } catch { /* best-effort wipe */ }
   }
   try { localStorage.setItem(INSTANCE_ID_KEY, serverInstanceId); }
-  catch (e) { /* storage full/blocked - callers still correct in-memory state */ }
+  catch { /* storage full/blocked - callers still correct in-memory state */ }
   return "mismatched";
 }
 
@@ -123,7 +123,7 @@ export function readCookie(name) {
   // "unreachable" (reconnect overlay, no way out). A bad cookie must never brick
   // the client, so decode best-effort and fall back to the raw value on failure.
   try { return decodeURIComponent(m[1]); }
-  catch (e) { return m[1]; }
+  catch { return m[1]; }
 }
 
 export function authHeaders(extra = {}) {
@@ -175,7 +175,7 @@ export async function refreshCsrf() {
     const j = await r.json();
     window.__LOCALM_CSRF__ = (j && j.csrf) || "";
     return window.__LOCALM_CSRF__;
-  } catch (e) {
+  } catch {
     return "";
   }
 }
@@ -469,7 +469,7 @@ function _requestProxiedImage(href, consented) {
       // net_allow list, the image is over the size cap, the response was not an
       // image. Read it here, because after this it is gone.
       let detail = "";
-      try { detail = (await r.json()).detail || ""; } catch (e) { /* no JSON body */ }
+      try { detail = (await r.json()).detail || ""; } catch { /* no JSON body */ }
       return Promise.reject(new ImageProxyRefused(r.status, detail));
     });
 }
@@ -548,7 +548,7 @@ function proxyRemoteImages(root, scope) {
     const raw = img.getAttribute("src") || "";
     if (!/^https?:\/\//i.test(raw)) return;          // data:/blob:/relative: already fine
     let u;
-    try { u = new URL(raw, window.location.href); } catch (e) { return; }
+    try { u = new URL(raw, window.location.href); } catch { return; }
     if (u.origin === window.location.origin) return; // our own bytes, no detour
     img.dataset.lmProxySrc = u.href;                 // what the model asked for
     // Drop the remote src so no broken load stays pending. The browser has not
@@ -682,14 +682,14 @@ export function renderMarkdown(target, text, opts = {}) {
         trust: false,
         ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
       });
-    } catch (e) { /* malformed TeX mid-stream - final render fixes it */ }
+    } catch { /* malformed TeX mid-stream - final render fixes it */ }
   }
   target.querySelectorAll("pre code").forEach((block) => {
     // Record the source language BEFORE hljs rewrites the class list, so the
     // artifact detector still knows this block was ```html / ```svg.
     const m = (block.className || "").match(/language-([\w-]+)/);
     if (m && block.dataset) block.dataset.lang = m[1];
-    try { hljs.highlightElement(block); } catch (e) { /* unknown lang */ }
+    try { hljs.highlightElement(block); } catch { /* unknown lang */ }
   });
   target.querySelectorAll("pre").forEach(enhanceCodeBlock);
 }
@@ -1083,7 +1083,7 @@ export async function cancelJob(jobId) {
   try {
     await fetch(`/api/jobs/${jobId}/cancel`,
                 { method: "POST", headers: authHeaders() });
-  } catch (e) { /* best-effort - the stream will still end */ }
+  } catch { /* best-effort - the stream will still end */ }
 }
 
 // Reconnect tuning for streamJob, below - overridable by a test so it does not
@@ -1139,7 +1139,7 @@ export async function streamJob(jobId, onLine, onProgress) {
       if (endEvent) return endEvent;
       // Stream ended with no "end" frame - lost connection, not a job
       // outcome. Fall through to retry below.
-    } catch (e) {
+    } catch {
       // Thrown network/abort error - the other shape of the same lost
       // connection. Same treatment: retry rather than claim failure.
     }
@@ -1399,7 +1399,7 @@ export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
     });
     if (!r.ok) return true;
     data = await r.json();
-  } catch (e) {
+  } catch {
     return true;
   }
   const missing = (data && data.missing) || [];

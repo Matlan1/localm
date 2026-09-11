@@ -62,6 +62,6 @@ export async function presetCoderMode() {
     const cfg = await r.json();
     const sel = $("setup-mode");
     if (sel && cfg.effective_coder_mode) sel.value = cfg.effective_coder_mode;
-  } catch (e) { /* keep form default */ }
+  } catch { /* keep form default */ }
 }
 

@@ -43,7 +43,7 @@ function okEndFrames() {
 }
 
 function makeFetch(calls, { local = true } = {}) {
-  return async (url, opts = {}) => {
+  return async (url, _opts = {}) => {
     if (url === "/api/plugins") {
       return { ok: true, status: 200, json: async () => pluginsPayload(), text: async () => "" };
     }

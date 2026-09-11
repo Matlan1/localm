@@ -21,7 +21,7 @@ const SCHEMA_WITH_LINK = {
 };
 
 function makeFetch(schema) {
-  return async (url, opts = {}) => {
+  return async (url, _opts = {}) => {
     if (url === "/v1/config/schema") {
       return { ok: true, status: 200, json: async () => schema, text: async () => "" };
     }

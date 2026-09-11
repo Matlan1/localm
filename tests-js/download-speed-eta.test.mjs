@@ -84,7 +84,7 @@ test("fmtDuration formats seconds / minutes / hours", () => {
 // --------------------------------------------------------------------------- //
 
 function makeFetch() {
-  return async (url, opts = {}) => {
+  return async (url, _opts = {}) => {
     if (url === "/api/models/pull") {
       return { ok: true, status: 200, json: async () => ({ job_id: "j1" }), text: async () => "" };
     }

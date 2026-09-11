@@ -11,7 +11,7 @@ function fireStorage(window, key, value) {
   let ev;
   try {
     ev = new window.StorageEvent("storage", { key, newValue: value });
-  } catch (e) {
+  } catch {
     ev = new window.Event("storage");
     Object.defineProperty(ev, "key", { value: key, configurable: true });
   }

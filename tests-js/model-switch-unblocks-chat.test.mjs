@@ -8,7 +8,7 @@ import { loadApp, runScript } from "./harness.mjs";
 // a fetch stub that answers the model load and records every call
 function _stub(window, { loadedName = "my-model" } = {}) {
   const calls = [];
-  window.fetch = (url, opts) => {
+  window.fetch = (url, _opts) => {
     const u = String(url);
     calls.push(u);
     if (u.includes("/api/models/load")) {

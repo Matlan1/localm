@@ -8,9 +8,8 @@ import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDura
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
-import { modelCache, refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
+import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
 import { refreshPerfEstimate } from "../app/settings-perf.js";
-import { showView } from "../app/tabs.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -25,7 +24,7 @@ export function fmtSize(bytes) {
 export function fmtModelDate(mtime) {
   if (mtime == null) return "";
   try { return new Date(mtime * 1000).toISOString().slice(0, 10); }
-  catch (_) { return ""; }
+  catch { return ""; }
 }
 
 // The Registered-models table tab (All/LLMs/Embedding/...). Scopes only the
@@ -235,7 +234,7 @@ export async function refreshModelsPage() {
 
   // Fetched unfiltered and narrowed to the active tab below, so the per-type tab
   // counts can cover the whole registry.
-  let models = [];
+  let models;
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
     if (r.status === 401) {
@@ -712,7 +711,7 @@ async function _gpuInfo() {
       gpus: Array.isArray(data.gpus) ? data.gpus : [],
       gpu_split_indices: Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [],
     };
-  } catch (e) { return { gpus: [], gpu_split_indices: [] }; }
+  } catch { return { gpus: [], gpu_split_indices: [] }; }
 }
 
 /** The GPU array alone, for the split hint and row rendering. */
@@ -1346,7 +1345,7 @@ async function _loadPullShortcuts() {
     }
     sel.appendChild(frag);
     return true;
-  } catch (e) {
+  } catch {
     // Best-effort convenience list - the spec field still works typed by hand.
     return false;
   }
@@ -1439,7 +1438,7 @@ export async function refreshInstancesCard() {
     if (!r.ok) { box.replaceChildren(); return; }   // e.g. a read-only key: hide
     const data = await r.json().catch(() => ({ instances: [] }));
     rows = (data.instances || []).filter((i) => !i.self);
-  } catch (e) {
+  } catch {
     return;   // transient error - leave the card as it was
   }
   if (myGen !== _instancesRenderGen) return;
@@ -2130,7 +2129,7 @@ export async function refreshUploadsList() {
       li.appendChild(del);
       list.appendChild(li);
     }
-  } catch (e) { /* leave the list as-is on a transient error */ }
+  } catch { /* leave the list as-is on a transient error */ }
 }
 window.refreshUploadsList = refreshUploadsList;
 
@@ -2527,7 +2526,7 @@ async function fetchManagedComfyPath() {
     if (!r.ok) return null;
     const d = await r.json().catch(() => ({}));
     return d && d.installed && d.path ? d.path : null;
-  } catch (e) {
+  } catch {
     return null;
   }
 }

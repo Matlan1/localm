@@ -8,6 +8,11 @@ export default [
   },
   js.configs.recommended,
   {
+    rules: {
+      "no-empty": ["error", { allowEmptyCatch: true }],
+    },
+  },
+  {
     // First-party GUI app code, shipped as native ES modules (index.html
     // loads app/main.js with type="module"; pages/* are dynamically
     // imported). vendor/*, loaded as classic <script> tags, put marked,
@@ -54,6 +59,9 @@ export default [
       globals: {
         ...globals.node,
       },
+    },
+    rules: {
+      "no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
     },
   },
 ];

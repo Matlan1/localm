@@ -72,7 +72,7 @@ function fmtSize(n) {
 function fmtDate(mtime) {
   if (!mtime) return "";
   try { return new Date(mtime * 1000).toISOString().slice(0, 10); }
-  catch (_) { return ""; }
+  catch { return ""; }
 }
 function extOf(name) {
   const i = name.lastIndexOf(".");
@@ -567,7 +567,7 @@ export function pickPath(opts = {}) {
         }).catch((e) => {
           // Hide the rail and log the reason.
           rail.style.display = "none";
-          try { console.debug("picker: places unavailable:", e && e.message); } catch (_) {}
+          try { console.debug("picker: places unavailable:", e && e.message); } catch {}
         });
       }
       function highlightPlace() {
@@ -682,7 +682,7 @@ export function pickPath(opts = {}) {
       updateCount();
       loadPlaces();
       navigate(opts.startPath || "", { push: false });
-      setTimeout(() => { try { filterIn.focus(); } catch (_) {} }, 0);
+      setTimeout(() => { try { filterIn.focus(); } catch {} }, 0);
     });
   });
 }

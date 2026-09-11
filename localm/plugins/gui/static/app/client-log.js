@@ -13,7 +13,7 @@ export function __localmPushClientError(msg) {
     const log = window.__localmClientLog;
     log.push(new Date().toISOString().slice(11, 19) + "  " + line);
     if (log.length > 50) log.splice(0, log.length - 50);
-  } catch (_) { /* ignored */ }
+  } catch { /* ignored */ }
 }
 window.addEventListener("error", (e) => {
   __localmPushClientError(
@@ -29,7 +29,7 @@ window.addEventListener("unhandledrejection", (e) => {
   console.error = function (...args) {
     __localmPushClientError(args.map((a) => {
       try { return typeof a === "string" ? a : (a && a.message) || JSON.stringify(a); }
-      catch (_) { return String(a); }
+      catch { return String(a); }
     }).join(" "));
     return orig.apply(console, args);
   };
