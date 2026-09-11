@@ -218,7 +218,8 @@ class TestRunSingleTask:
         assert result.timed_out is False
         assert result.as_dict() == {
             "success": True, "response": result.response,
-            "turns": result.turns, "total_tokens": result.total_tokens}
+            "turns": result.turns, "total_tokens": result.total_tokens,
+            "denied": []}
 
     def test_a_run_leaves_no_checkpoint_claimed(self, home, project):
         from localm.plugins.coder.agent.checkpoint import checkpoint_info

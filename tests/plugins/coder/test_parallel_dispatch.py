@@ -985,3 +985,26 @@ def test_a_real_dispatch_marks_the_diff_and_keeps_the_footer_copy_raw(repo):
     assert "NOTHING HAS BEEN MERGED" not in covered
     assert "branch:" not in covered
     assert "merge --no-ff" not in covered
+
+
+def test_a_childs_denied_calls_reach_the_parent_and_the_report(repo):
+    """A child that was denied a tool call for want of a confirmation publishes
+    the record; the parent folds it into its own run (prefixed with the
+    child's name) and the report names it."""
+    folded = []
+
+    class _Parent(DummyParent):
+        def _absorb_denials(self, denied, label=""):
+            folded.append((label, list(denied)))
+
+    def denied_child(agent):
+        agent._denied_unconfirmed = [("write_file", '{"path": "a"}', "lenient")]
+        return "could not write"
+
+    FakeAgent.behaviour["child1"] = denied_child
+    parent = _Parent(repo)
+    res = par.tool_dispatch_parallel(repo, tasks=["a", "b"], _parent_agent=parent)
+    assert res.ok, res.output
+    assert folded == [("child1", [("write_file", '{"path": "a"}', "lenient")])]
+    assert "DENIED: 1 tool call was denied and did not run" in res.output
+    assert "write_file: the call was not written in the <tool_call> format" in res.output

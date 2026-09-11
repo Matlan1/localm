@@ -6,6 +6,7 @@ confirm prompt, scope resolution, and the per-write map refresh. Mixed into Agen
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -69,6 +70,15 @@ def _is_path_like(tok: str) -> bool:
     return (norm.startswith(("./", "../", "~/", "/"))
             or "/../" in norm
             or _looks_like_drive_path(tok))
+
+
+def _call_key(call) -> str:
+    """Canonical JSON of a call's arguments, for matching a denied call
+    against a later identical one."""
+    try:
+        return json.dumps(getattr(call, "args", None), sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(getattr(call, "args", None))
 
 
 class _ExecutionMixin:
@@ -502,11 +512,19 @@ class _ExecutionMixin:
         # confirmation for every such double. Only a genuine ToolCall's lenient
         # field (dataclass default False) is trusted; anything else counts as
         # non-lenient.
+        gated = tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
+        lenient_call = isinstance(call, ToolCall) and call.lenient
         needs_confirm = shell_unchecked or (
-            (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default) and (
+            gated and (
                 not self.auto_approve or call.name in self.always_confirm
-                or (isinstance(call, ToolCall) and call.lenient)
+                or lenient_call
             )
+        )
+        # True when the loose call format is the ONLY reason confirmation is
+        # required: the same call in the <tool_call> wrapper would run.
+        lenient_only = (
+            lenient_call and gated and not shell_unchecked
+            and self.auto_approve and call.name not in self.always_confirm
         )
         if needs_confirm:
             if self.confirm_handler is not None:
@@ -521,10 +539,26 @@ class _ExecutionMixin:
                 # treated as passed, so a configured always_confirm or
                 # auto_approve=off is honoured and an unattended run cannot be
                 # steered into an unconfirmed destructive or network action.
-                result = ToolResult.error(
-                    f"{call.name} requires confirmation, but this run is "
-                    "non-interactive with no approval handler - denied. Run "
-                    "interactively, or use the restricted coder for unattended runs.")
+                # The denial is recorded on the run (Agent.denied_unconfirmed).
+                if lenient_only:
+                    result = ToolResult.error(
+                        f"{call.name} requires confirmation: the call was not "
+                        "written in the <tool_call> format, and a loosely "
+                        "formatted call needs a confirmation this "
+                        "non-interactive run cannot give - denied. Re-emit it "
+                        "with the same arguments, exactly as\n"
+                        '<tool_call>\n{"name": "' + call.name + '", "args": '
+                        "{...}}\n</tool_call>\nand it will run.")
+                    reason = "lenient"
+                else:
+                    result = ToolResult.error(
+                        f"{call.name} requires confirmation, but this run is "
+                        "non-interactive with no approval handler - denied. Run "
+                        "interactively, or use the restricted coder for unattended runs.")
+                    reason = "unconfirmable"
+                with self._denied_lock:
+                    self._denied_unconfirmed.append((call.name, _call_key(call), reason))
+                self._audit.notice("confirmation_denied", result.output)
                 self._emit("tool_result", tool=call.name, ok=False,
                            summary="denied: confirmation required, none available")
                 return result
@@ -608,6 +642,12 @@ class _ExecutionMixin:
         duration_s = time.monotonic() - t_start
 
         result = self._track_tool_failure(call, result)
+        if result.ok and self._denied_unconfirmed:
+            key = _call_key(call)
+            with self._denied_lock:
+                self._denied_unconfirmed[:] = [
+                    d for d in self._denied_unconfirmed
+                    if not (d[0] == call.name and d[1] == key)]
 
         self._audit.tool_result(call.name, result.ok, result.summary)
         if interactive:

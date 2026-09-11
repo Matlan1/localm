@@ -37,6 +37,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   sentence: they could be loaded but not actually talked to, and their own
   replies would poison the next turn. The refusal comes before the model is
   loaded and says plainly that no setting changes it.
+- **An unattended coder run (the MCP server's `run_coder_task`, or
+  `localm coder TASK`) could not write files with a model that formats its
+  tool calls as ```` ```json ```` fences or bare JSON instead of the
+  `<tool_call>` wrapper (Qwen2.5-Coder does), and then reported success
+  anyway.** Such a call is now applied when the model's whole reply is nothing
+  but exact call objects; a call quoted inside prose, a heading, a wrapper tag
+  or a thinking block still needs a confirmation. A call denied for want of a
+  confirmation is now named in the result and the run is no longer reported as
+  a success: the MCP result is an error, the CLI warns (and exits non-zero
+  under `--ci`), `--output-format json` lists it under `denied`, and a
+  sub-agent's denied calls reach the parent's outcome.
 - **A vision-input failure, or a model load / embedding request that timed out
   and looked hung, pointed you at a debug log even when debug mode was off and
   no such log existed.** Those messages now say how to turn one on

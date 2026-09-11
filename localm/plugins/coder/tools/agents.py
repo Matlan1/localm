@@ -324,7 +324,7 @@ def tool_spawn_agent(
     # episode omits all delegated work and its failures. Best-effort - never let
     # episodic bookkeeping break the tool.
     try:
-        _parent_agent._absorb_child_state(child)
+        _parent_agent._absorb_child_state(child, name)
     except Exception:
         pass
 
@@ -347,9 +347,15 @@ def tool_spawn_agent(
     child_ok = getattr(child, "last_run_ok", True)
     verdict = ("finished in" if child_ok else
                "DID NOT COMPLETE its task, stopping after")
+    denied = list(getattr(child, "denied_unconfirmed", None) or [])
+    note = ""
+    if denied:
+        from ..runner import describe_denied
+        note = f"[sub-agent '{name}': {describe_denied(denied)}]\n\n"
     return ToolResult.success(
-        compose(untrusted_span(result_text)),
-        summary=f"sub-agent '{name}' {verdict} {turns_used} turn(s)",
+        compose(note, untrusted_span(result_text)),
+        summary=f"sub-agent '{name}' {verdict} {turns_used} turn(s)"
+                + (f", {len(denied)} tool call(s) denied" if denied else ""),
     )
 
 

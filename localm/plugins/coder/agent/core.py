@@ -310,6 +310,11 @@ class Agent(
         # turn and a destructive tool would launch straight into the
         # still-running peer.
         self._abandoned_peers: list = []
+        # Per-run: tool calls denied because they needed a confirmation the run
+        # could not obtain, as (tool name, canonical args, reason). An entry is
+        # removed when the identical call later runs. _loop re-arms it.
+        self._denied_unconfirmed: list[tuple[str, str, str]] = []
+        self._denied_lock = threading.Lock()
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
         # Changed-files tracker: rel path -> {original: bytes|None, writes: int,
@@ -816,6 +821,15 @@ class Agent(
         in the same session reports ok. ``_had_any_failure`` is the session-wide
         answer."""
         return self._last_run_ok
+
+    @property
+    def denied_unconfirmed(self) -> list[tuple[str, str]]:
+        """Tool calls the LAST run denied for want of a confirmation, as
+        ``(tool name, reason)`` in call order, minus any call that later ran
+        with identical arguments. ``reason`` is ``"lenient"`` when only the
+        call's loose format required confirmation, else ``"unconfirmable"``.
+        Per-run, like ``last_run_ok``."""
+        return [(name, reason) for name, _key, reason in self._denied_unconfirmed]
 
     @property
     def last_verify_state(self) -> Optional[str]:

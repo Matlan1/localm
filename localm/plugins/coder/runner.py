@@ -46,12 +46,21 @@ class TaskConfig:
 
 @dataclass(frozen=True)
 class TaskResult:
-    """Outcome of one task: the agent's final text plus its counters."""
+    """Outcome of one task: the agent's final text plus its counters.
+
+    ``success`` is True only when the run completed normally AND no tool call
+    was denied for want of a confirmation (see ``denied``). ``denied`` lists
+    those calls as ``(tool name, reason)``, reason ``"lenient"`` (the call was
+    not in the <tool_call> format) or ``"unconfirmable"`` (the tool always
+    needs a confirmation this run could not give); a denied call that later
+    ran with identical arguments is not listed. A sub-agent's denied calls
+    are listed with their tool name prefixed ``sub-agent:``."""
     success: bool
     response: str
     turns: int
     total_tokens: int
     timed_out: bool = False
+    denied: tuple[tuple[str, str], ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -59,7 +68,39 @@ class TaskResult:
             "response": self.response,
             "turns": self.turns,
             "total_tokens": self.total_tokens,
+            "denied": [{"tool": name, "reason": reason} for name, reason in self.denied],
         }
+
+
+_DENIED_REASONS = {
+    "lenient": ("the call was not written in the <tool_call> format, and a "
+                "loosely formatted call needs a confirmation an unattended "
+                "run cannot give"),
+    "unconfirmable": ("the tool needs a confirmation an unattended run cannot "
+                      "give"),
+}
+
+
+def describe_denied(denied) -> str:
+    """One paragraph naming every denied call and why, or "" when none.
+
+    Each entry of *denied* is ``(tool name, reason)`` as in
+    ``TaskResult.denied``. Nothing a denied call would have done happened,
+    and the text says so."""
+    if not denied:
+        return ""
+    counts: dict[tuple[str, str], int] = {}
+    for name, reason in denied:
+        counts[(name, reason)] = counts.get((name, reason), 0) + 1
+    parts = []
+    for (name, reason), n in counts.items():
+        times = f" x{n}" if n > 1 else ""
+        parts.append(f"{name}{times}: {_DENIED_REASONS.get(reason, reason)}")
+    total = sum(counts.values())
+    calls = "call was" if total == 1 else "calls were"
+    return (f"{total} tool {calls} denied and did not run, so nothing "
+            f"{'it' if total == 1 else 'they'} would have done happened: "
+            + "; ".join(parts) + ".")
 
 
 def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
@@ -227,12 +268,14 @@ def browser_enabled() -> bool:
 
 
 def run_single_task(agent: Agent, task: str) -> TaskResult:
-    """Run one task to completion and report the outcome."""
+    """Run one task to completion and report the outcome. A run in which a
+    tool call was denied for want of a confirmation is not a success."""
     response = agent.run_task(task)
-    success = agent.last_run_ok
+    denied = tuple(agent.denied_unconfirmed)
+    success = agent.last_run_ok and not denied
     warn_unfinished_background(agent)
     return TaskResult(success=success, response=response, turns=agent.turns,
-                      total_tokens=agent.total_tokens)
+                      total_tokens=agent.total_tokens, denied=denied)
 
 
 def finish_agent(agent: Agent) -> Optional[Path]:
@@ -285,7 +328,8 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
             success=False,
             response=(f"coder task timed out after {timeout:g}s; it was asked "
                       "to stop and is finishing its current step"),
-            turns=agent.turns, total_tokens=agent.total_tokens, timed_out=True)
+            turns=agent.turns, total_tokens=agent.total_tokens, timed_out=True,
+            denied=tuple(agent.denied_unconfirmed))
     if "error" in box:
         raise box["error"]
     if "close_error" in box:

@@ -2171,3 +2171,36 @@ class TestRunCoderTaskInProcess:
             gate.set()
         assert _wait_until(lambda: engine.active_requests == 0), \
             "the worker never released its pin"
+
+    def test_an_exact_json_fenced_write_runs_unattended(self, coder_env, tmp_path):
+        """A model that formats its calls as ```json fences (Qwen2.5-Coder
+        does) can still write files with nobody to confirm."""
+        project = _project(tmp_path)
+        fence = "```"
+        call = (fence + "json\n" + json.dumps(
+            {"name": "write_file", "args": {"path": "NOTE.txt", "content": "hi\n"}},
+            indent=2) + "\n" + fence)
+        server, _ = _coder_server(_scripted_engine_factory([call, "Done."]))
+        resp = _run_task(server, project)
+        assert (project / "NOTE.txt").read_text(encoding="utf-8") == "hi\n"
+        result = resp["result"]
+        assert result["isError"] is False, result
+        text = result["content"][0]["text"]
+        assert "success=True" in text and "denied=0" in text
+        assert "[denied]" not in text
+
+    def test_a_denied_write_is_an_error_that_names_the_call(self, coder_env, tmp_path):
+        """A call denied for want of a confirmation is reported on the
+        result, never hidden behind success."""
+        project = _project(tmp_path)
+        headed = "## write_file\n" + json.dumps(
+            {"name": "write_file", "args": {"path": "NOTE.txt", "content": "hi\n"}})
+        server, _ = _coder_server(_scripted_engine_factory([headed, "Done."]))
+        resp = _run_task(server, project)
+        assert not (project / "NOTE.txt").exists(), "a headed bare JSON call wrote unconfirmed"
+        result = resp["result"]
+        assert result["isError"] is True, result
+        text = result["content"][0]["text"]
+        assert "[denied] 1 tool call was denied and did not run" in text
+        assert "write_file: the call was not written in the <tool_call> format" in text
+        assert "success=False" in text and "denied=1" in text

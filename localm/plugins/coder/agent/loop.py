@@ -189,6 +189,7 @@ class _LoopMixin:
                                            # the session-wide flag, set in the finally.
         self._last_verify_state = None     # per-run: this run is unverified until
                                            # its own gate says otherwise
+        self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
         start_turns = self._turns          # turns used by *this* task only
         budget_escalated = False           # uncertainty escalation fires at most once per task
         # Per-task one-shot flags for the no-tool-calls handler: self-verification
