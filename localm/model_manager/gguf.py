@@ -1310,6 +1310,44 @@ def _gguf_metadata_probe(path: Path) -> dict:
     return {"architecture": architecture, "has_pooling_type": has_pooling_type}
 
 
+_GGUF_PRE_TOKENIZER_KEY = "tokenizer.ggml.pre"
+
+
+def gguf_pretokenizer(path: Path) -> Optional[str]:
+    """The ``tokenizer.ggml.pre`` string a GGUF declares, or ``None`` when the
+    file declares none within the bounded read or the header could not be
+    read or parsed.
+
+    Reads only ``_GGUF_META_PROBE_BYTES`` and stops at the key, so a file whose
+    metadata puts the key after a large array reports ``None`` rather than the
+    value. Never raises.
+    """
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return None
+    try:
+        if buf[:4] != b"GGUF":
+            return None
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return None
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == _GGUF_PRE_TOKENIZER_KEY and vtype == _GGUF_TYPE_STRING:
+                value, _off = _gguf_read_string(buf, off)
+                return value
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+    return None
+
+
 def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     """True when *path*'s own GGUF metadata marks it as an embedding/pooling
     model rather than a causal-chat LLM: either its ``general.architecture`` is

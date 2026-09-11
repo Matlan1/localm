@@ -49,7 +49,9 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
                                              re-raised as that type by the parent.
                                              Recognised: "InvalidGrammarError",
                                              "UnsupportedInputError",
-                                             "GrammarUnsupportedError". An
+                                             "GrammarUnsupportedError", and on
+                                             a load reply
+                                             "PretokenizerUnusableModelError". An
                                              UNTAGGED error becomes a
                                              RuntimeError, which GgufBackend
                                              reads as "the isolated worker
@@ -101,7 +103,8 @@ from typing import Optional
 from localm.inference.backends.base import (
     ContextCapacityExceededError,
     GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
-    PretokenizerUnsafeInputError, UnsupportedInputError)
+    PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
+    UnsupportedInputError)
 
 
 class RunnerBusy(Exception):
@@ -306,6 +309,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("ok", meta))
             except ModelLoadCancelled as e:
                 resp_q.put(("cancelled", str(e)))
+            except PretokenizerUnusableModelError as e:
+                resp_q.put(("error", str(e), "PretokenizerUnusableModelError"))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # A hard native abort during worker.load() is NOT caught here -
@@ -675,7 +680,8 @@ class ModelRunner:
         (``n_layers``/``kv_bytes_per_token``/``supports_images``) on success.
 
         Raises :class:`ModelLoadCancelled` if *cancel_event* fires during the
-        load, or :class:`RuntimeError` on a genuine load failure, a child
+        load, :class:`PretokenizerUnusableModelError` when the child refused
+        the model's pre-tokenizer, or :class:`RuntimeError` on a genuine load failure, a child
         crash (native abort - detected via ``is_alive()``, never an
         exception this process had to catch), or a timeout (the child is
         killed; a load has no safe "unmeasurable" fallback, so this always
@@ -754,6 +760,8 @@ class ModelRunner:
         if kind == "cancelled":
             raise ModelLoadCancelled(result[1])
         if kind == "error":
+            if len(result) > 2 and result[2] == "PretokenizerUnusableModelError":
+                raise PretokenizerUnusableModelError(result[1])
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the model-loading process: {result!r}")
 

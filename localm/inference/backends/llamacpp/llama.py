@@ -1180,6 +1180,15 @@ class LlamaCpp:
             raise RuntimeError(
                 f"Failed to load model: {model_path}{hint}{suffix}")
 
+        # Refuse a model whose declared pre-tokenizer cannot hold a
+        # conversation, before a context is allocated for it.
+        refusal = pretokenizer_guard.load_refusal(
+            pretokenizer_guard.read_pre_type(self._model_ptr, api))
+        if refusal is not None:
+            api.llama_free_model(self._model_ptr)
+            self._model_ptr = None
+            raise pretokenizer_guard.PretokenizerUnusableModelError(refusal)
+
         # Model's true transformer layer count, read once here from the loaded
         # model. This is the only place it is currently EXPOSED, which is NOT the
         # same as the only place it is knowable: model_manager/gguf.py parses the
