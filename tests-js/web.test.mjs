@@ -724,6 +724,136 @@ test("R27: ticking 'don't ask again' stops the approval popup re-firing", async 
 });
 
 // ---------------------------------------------------------------------------
+//  confirmWebRequest: dismissing the modal (the x, or the backdrop) must
+//  settle the promise instead of leaving runCompletion()'s await hanging
+//  forever. On unfixed code an unbounded await of a dismissed promise hangs
+//  the test runner rather than failing it, so every await below goes through
+//  a bounded race instead of a plain await.
+// ---------------------------------------------------------------------------
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const race = (p) => Promise.race([p.then((v) => ({ v })), wait(1500).then(() => null)]);
+
+test("confirmWebRequest: dismissing via the shared modal chrome (x/backdrop) resolves false", async () => {
+  const { window } = loadApp();
+  const modal = window.document.getElementById("modal");
+
+  const p = window.confirmWebRequest({ name: "web_search", args: { query: "x" } });
+  assert.notEqual(modal.style.display, "none", "the approval modal opened");
+  // Neither button was clicked - simulate the shared chrome's own dismiss,
+  // which only ever sets display:none (see helpers.js's modal-close wiring).
+  modal.style.display = "none";
+
+  const settled = await race(p);
+  assert.ok(settled, "confirmWebRequest never settled after the modal was dismissed");
+  assert.strictEqual(settled.v, false);
+});
+
+test("confirmWebRequest: dismissing with the remember checkbox ticked must not remember", async () => {
+  const { window } = loadApp();
+  const modal = window.document.getElementById("modal");
+
+  const p1 = window.confirmWebRequest({ name: "web_search", args: { query: "x" } });
+  const cb = modal.querySelector(".web-ask-remember input[type=checkbox]");
+  assert.ok(cb, "the remember checkbox is present");
+  cb.checked = true;
+  // Dismissed via the shared chrome, not a button - ticking the box and then
+  // escaping the dialog must not count as having made a choice.
+  modal.style.display = "none";
+
+  const s1 = await race(p1);
+  assert.ok(s1, "confirmWebRequest never settled after a ticked-then-dismissed modal");
+  assert.strictEqual(s1.v, false);
+
+  // The observable that matters: a LATER request must still open a fresh
+  // modal. If the dismissal had written webAskSession, this would
+  // short-circuit instead of opening one.
+  modal.style.display = "none";
+  const p2 = window.confirmWebRequest({ name: "web_search", args: { query: "y" } });
+  assert.notEqual(modal.style.display, "none",
+    "a second modal opened - the ticked-then-dismissed choice was not remembered");
+
+  modal.style.display = "none";
+  const s2 = await race(p2);
+  assert.ok(s2, "the second prompt never settled");
+  assert.strictEqual(s2.v, false);
+});
+
+test("confirmWebRequest: Deny and Allow still resolve correctly, remembering only when ticked", async () => {
+  // Deny, unticked: resolves false, does not remember - a later call opens a fresh modal.
+  {
+    const { window } = loadApp();
+    const modal = window.document.getElementById("modal");
+    const denyBtn = () => [...modal.querySelectorAll("button")].find((b) => b.textContent === "Deny");
+    const p1 = window.confirmWebRequest({ name: "web_search", args: { query: "x" } });
+    denyBtn().click();
+    const s1 = await race(p1);
+    assert.ok(s1, "Deny never settled");
+    assert.strictEqual(s1.v, false);
+
+    modal.style.display = "none";
+    const p2 = window.confirmWebRequest({ name: "web_search", args: { query: "y" } });
+    assert.notEqual(modal.style.display, "none", "an unticked Deny does not remember");
+    denyBtn().click();
+    await race(p2);
+  }
+
+  // Allow, unticked: resolves true, does not remember.
+  {
+    const { window } = loadApp();
+    const modal = window.document.getElementById("modal");
+    const allowBtn = () => [...modal.querySelectorAll("button")].find((b) => b.textContent === "Allow");
+    const p1 = window.confirmWebRequest({ name: "web_search", args: { query: "x" } });
+    allowBtn().click();
+    const s1 = await race(p1);
+    assert.ok(s1, "Allow never settled");
+    assert.strictEqual(s1.v, true);
+
+    modal.style.display = "none";
+    const p2 = window.confirmWebRequest({ name: "web_search", args: { query: "y" } });
+    assert.notEqual(modal.style.display, "none", "an unticked Allow does not remember");
+    allowBtn().click();
+    await race(p2);
+  }
+
+  // Deny, ticked: resolves false AND remembers - a later call auto-denies without reopening.
+  {
+    const { window } = loadApp();
+    const modal = window.document.getElementById("modal");
+    const p1 = window.confirmWebRequest({ name: "web_search", args: { query: "x" } });
+    modal.querySelector(".web-ask-remember input[type=checkbox]").checked = true;
+    [...modal.querySelectorAll("button")].find((b) => b.textContent === "Deny").click();
+    const s1 = await race(p1);
+    assert.ok(s1, "ticked Deny never settled");
+    assert.strictEqual(s1.v, false);
+
+    modal.style.display = "none";
+    const p2 = window.confirmWebRequest({ name: "web_search", args: { query: "y" } });
+    assert.equal(modal.style.display, "none", "a ticked Deny remembers - no second modal opens");
+    const s2 = await race(p2);
+    assert.strictEqual(s2.v, false);
+  }
+
+  // Allow, ticked: resolves true AND remembers.
+  {
+    const { window } = loadApp();
+    const modal = window.document.getElementById("modal");
+    const p1 = window.confirmWebRequest({ name: "web_search", args: { query: "x" } });
+    modal.querySelector(".web-ask-remember input[type=checkbox]").checked = true;
+    [...modal.querySelectorAll("button")].find((b) => b.textContent === "Allow").click();
+    const s1 = await race(p1);
+    assert.ok(s1, "ticked Allow never settled");
+    assert.strictEqual(s1.v, true);
+
+    modal.style.display = "none";
+    const p2 = window.confirmWebRequest({ name: "web_search", args: { query: "y" } });
+    assert.equal(modal.style.display, "none", "a ticked Allow remembers - no second modal opens");
+    const s2 = await race(p2);
+    assert.strictEqual(s2.v, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
 //  CHAT-TOOL-1: defang EVERY tool-call dialect parseWebCall executes, in the
 //  display AND in the context re-sent to the model. A model must never see its
 //  own raw <|tool_call> control tokens echoed back - that destabilised some
