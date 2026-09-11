@@ -72,9 +72,13 @@ selection substitutes straight into a pytest command:
 
 `--why` prints the reason next to each file, `--files` takes an explicit
 list instead of git, and `--depth 1` also follows the modules that import a
-changed one. When the selection exceeds a quarter of the suite the script
-exits 3: the change touches a module most tests import, and no targeted
-run stands in for the suite there.
+changed one. When nothing is affected the script prints
+`tests/NO_TEST_FILE_IS_AFFECTED`, a path that does not exist, so the
+substitution above makes pytest stop with "file or directory not found"
+rather than collect the whole suite from an empty argument list. When the
+selection exceeds a quarter of the suite the script exits 3: the change
+touches a module most tests import, and no targeted run stands in for the
+suite there.
 
 So before removing or renaming a config key, a route, or a response field:
 search for the old name and for every field name the route derives from

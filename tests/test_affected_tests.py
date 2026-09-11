@@ -210,6 +210,27 @@ def test_cli_lists_paths_one_per_line_and_reasons_on_request(repo):
     assert "2 of 10 test files affected by 1 changed file(s)" in out.stderr
 
 
+def test_cli_output_is_lf_terminated_and_never_empty(repo):
+    _, root = repo
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import importlib.util, sys\n"
+         f"spec = importlib.util.spec_from_file_location('m', {str(_SCRIPT)!r})\n"
+         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+         "from pathlib import Path\n"
+         f"m.REPO = Path({str(root)!r})\n"
+         "raise SystemExit(m.main(sys.argv[1:]))",
+         "--files", "localm/routes.py"],
+        capture_output=True, env={**os.environ, **_GIT_ENV})
+    assert out.returncode == 0
+    assert out.stdout == b"tests/test_param.py\ntests/test_url.py\n"
+    nothing = _run_cli(root, "--files", "README.md")
+    assert nothing.returncode == 0
+    assert nothing.stdout == "tests/NO_TEST_FILE_IS_AFFECTED\n"
+    assert not (root / "tests" / "NO_TEST_FILE_IS_AFFECTED").exists()
+    assert "0 of 10 test files affected" in nothing.stderr
+
+
 def test_cli_exits_3_on_a_wide_selection_but_still_prints_it(repo):
     _, root = repo
     out = _run_cli(root, "--files", "tests/conftest.py")

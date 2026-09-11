@@ -27,10 +27,12 @@ an explicit list instead.
     pytest $(python scripts/affected_tests.py) -m "not integration"
 
 The selection is printed one path per line so it can be substituted into a
-pytest command line; the summary goes to stderr. Exit status 0, or 3 when the
-selection is wider than --max-share of all test files: the change touches a
-module most tests import, and a run that wide is not a targeted run any more.
-The list is still printed.
+pytest command line; the summary goes to stderr. When nothing is affected the
+one line printed is tests/NO_TEST_FILE_IS_AFFECTED, a path that does not
+exist, so pytest refuses it instead of collecting the whole suite from an
+empty substitution. Exit status 0, or 3 when the selection is wider than
+--max-share of all test files: the change touches a module most tests import,
+and a run that wide is not a targeted run any more. The list is still printed.
 
 Stdlib only.
 """
@@ -51,6 +53,7 @@ _SOURCE_ROOTS = ("localm", "scripts", "tests")
 _TESTS_ROOT = "tests"
 _TEST_FILE = re.compile(r"(^|/)test_[^/]*\.py$")
 _WIDE_EXIT = 3
+_NOTHING_AFFECTED = "tests/NO_TEST_FILE_IS_AFFECTED"
 
 
 def _git(*args: str) -> str:
@@ -285,6 +288,9 @@ def main(argv: list[str]) -> int:
                     help="exit 3 when the selection exceeds this share of all test files")
     args = ap.parse_args(argv)
 
+    # One path per line, LF-terminated on every platform, so a shell's $(...)
+    # substitution yields clean paths.
+    sys.stdout.reconfigure(newline="\n")
     graph = Graph()
     if args.files is not None:
         changed, base_ref = sorted(f.replace("\\", "/") for f in args.files), "HEAD"
@@ -297,6 +303,8 @@ def main(argv: list[str]) -> int:
 
     for t in selected:
         print(f"{t}  # {'; '.join(reasons[t])}" if args.why else t)
+    if not selected:
+        print(_NOTHING_AFFECTED)
     print(f"{len(selected)} of {total} test files affected by {len(changed)} changed file(s)",
           file=sys.stderr)
     if share > args.max_share:
