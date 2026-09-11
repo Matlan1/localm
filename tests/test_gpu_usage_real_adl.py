@@ -198,6 +198,7 @@ def _production_adapters(adl) -> list:
     adapter table carries no AMD PCI marker at all, or carries it only in
     adapters that are not present, and fails when it carries one the production
     filter cannot see."""
+    assert adl.adapter_rc == gu._ADL_OK, "the adapter table was not filled"
     adapters = _present_amd(adl)
     if adapters:
         return adapters
