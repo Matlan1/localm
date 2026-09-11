@@ -234,18 +234,27 @@ def install_ring_buffer(capacity: int = _RING_CAPACITY) -> bool:
     Idempotent. Captures INFO and above (never DEBUG, so no raw model output /
     chat content) into a bounded ring the bug reporter can dump. Returns True if
     it installed on this call.
+
+    Also ensures a WARNING+ console mirror exists (via ``_add_console_handler``)
+    so a WARNING or above still reaches stderr on an ordinary, non-debug run:
+    this is the only handler this logger gets outside debug mode, and without
+    it the record is captured here but never shown live. INFO stays
+    console-silent, matching the previous behaviour. A later ``enable_debug()``
+    or ``attach_child_logging()`` lowers that same handler's level further
+    (never raises it), so the debug-mode mirror still shows everything.
     """
     global _ring_handler
     if _ring_handler is not None:
         return False
     handler = _RingBufferHandler(capacity)
     logger.addHandler(handler)
+    _add_console_handler(logging.WARNING)
     # The localm logger otherwise inherits the root's WARNING threshold, which
-    # would drop the INFO breadcrumbs we want. Lower it to INFO. This adds NO
-    # console output: a non-debug run has no stream handler on this logger, and
-    # INFO is below the root's WARNING lastResort, so nothing new is printed.
-    # A later enable_debug() drops the level further to DEBUG; the handler's own
-    # INFO level still keeps DEBUG (chat content) out of the buffer.
+    # would drop the INFO breadcrumbs we want. Lower it to INFO. The ring
+    # handler and the WARNING console handler each apply their own level on
+    # top of this, so lowering the logger here does not add console output.
+    # A later enable_debug() drops the level further to DEBUG; the ring
+    # handler's own INFO level still keeps DEBUG (chat content) out of the buffer.
     if logger.level == logging.NOTSET or logger.level > logging.INFO:
         logger.setLevel(logging.INFO)
     _ring_handler = handler
@@ -301,11 +310,13 @@ def _stable_console_stream():
         return None
 
 
-def _add_console_handler() -> None:
-    """Mirror debug logs to the server console (stderr), so a --debug run shows
-    activity live in the window instead of only in the log file.
+def _add_console_handler(level: int = logging.NOTSET) -> None:
+    """Mirror logs to the server console (stderr) at *level* and above.
     Idempotent: a real (non-file) StreamHandler is added at most once. A
     FileHandler is a StreamHandler subclass, so it is explicitly excluded.
+    If one already exists, its level is LOWERED to *level* when that is more
+    permissive, and never raised - so a later, stricter caller can never
+    silence a broader mirror an earlier caller already installed.
 
     The stream is a private duplicate of stderr (see ``_stable_console_stream``)
     so the mirror is NOT disrupted by the fd-2 redirection that silences native
@@ -314,6 +325,8 @@ def _add_console_handler() -> None:
     ever does fail (logging then reports that failure loudly)."""
     for h in logger.handlers:
         if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            if level < h.level:
+                h.setLevel(level)
             return
     stream = _stable_console_stream()
     if stream is None:
@@ -322,6 +335,7 @@ def _add_console_handler() -> None:
         # every record - this fallback never silences anything.
         stream = sys.stderr
     handler = logging.StreamHandler(stream)
+    handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
 
@@ -349,8 +363,13 @@ def suppress_console_mirror():
     ``llamacpp/llama.py``'s ``LlamaCpp.__init__``, which pairs this with its
     merged native-call redirect scope).
 
-    A no-op when no console mirror is currently attached (debug mode off, or
-    never enabled) - nothing to suppress, nothing to restore."""
+    A no-op only when no console mirror exists at all (before
+    ``install_ring_buffer()`` has ever run). In an ordinary non-debug run the
+    paused handler is the WARNING-and-above mirror ``install_ring_buffer()``
+    installs, not a debug-only one; a record emitted inside this block still
+    reaches the ring buffer (a different handler) either way, and reaches the
+    file handler too when debug mode is on - only the live console view is
+    paused."""
     mirror = None
     for h in logger.handlers:
         if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
