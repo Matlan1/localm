@@ -1003,11 +1003,22 @@ class PluginManager:
         _installed_set() uses (a directory need not equal any manifest name),
         without requiring plugin.toml to be present.
 
-        Confined by RESOLVED PARENT, exactly like _remove_installed_dir: a
-        traversing name (e.g. '../outside') must never read as present just
-        because the path it happens to resolve to exists on disk."""
+        LEXICAL first, before any syscall: *name* must be exactly one path
+        component (``name == Path(name).name``, the same rule
+        _is_valid_plugin_name applies, without ITS added identifier-shape
+        requirement - an odd but legitimate basename like 'coolplugin-1.0'
+        must still pass). Without this, a UNC-shaped name (``\\\\host\\share``)
+        joined with ``/`` onto root does not stay confined - an ABSOLUTE
+        right-hand operand makes pathlib's ``/`` discard the left side
+        entirely - and the is_dir()/resolve() below would dial that host on
+        Windows before the resolved-parent check below ever runs.
+
+        Confined AGAIN by RESOLVED PARENT after that, exactly like
+        _remove_installed_dir: a traversing name that is lexically one
+        component but resolves outside root (e.g. a symlink) is still
+        refused."""
         root = self._installed_root
-        if not root:
+        if not root or not name or name != Path(name).name:
             return False
         d = Path(root) / name
         try:

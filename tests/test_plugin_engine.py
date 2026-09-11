@@ -1483,6 +1483,54 @@ def test_manifestless_chat_self_heals_through_discover(env):
         f"chat failed to self-heal: {mgr._discover_errors.get('chat')!r}")
 
 
+def test_installed_dir_on_disk_refuses_a_unc_name_before_any_syscall(env, monkeypatch):
+    """A UNC-shaped name ('\\\\host\\share') joined onto root with pathlib's /
+    does not stay confined - an absolute right-hand operand discards the
+    left side entirely - so an unguarded is_dir()/resolve() on the join
+    would dial that host on Windows: the same SSRF/credential-leak class the
+    relocate route's own lexical guard exists to prevent. uninstall() and
+    set_installed_state(on=False) must refuse a UNC name before any
+    filesystem call ever sees it, not merely raise afterward."""
+    from pathlib import Path
+
+    from localm.plugins.engine import PluginManager
+
+    inst = env / "installed"
+    inst.mkdir(parents=True)
+    mgr = PluginManager(FastAPI(), store_root=env / "store", installed_root=inst)
+
+    seen: list = []
+    real_is_dir = Path.is_dir
+    real_resolve = Path.resolve
+
+    def spy_is_dir(self, *a, **kw):
+        seen.append(str(self))
+        if str(self).startswith("\\\\"):
+            raise AssertionError(f"is_dir() reached a UNC string: {self!r}")
+        return real_is_dir(self, *a, **kw)
+
+    def spy_resolve(self, *a, **kw):
+        seen.append(str(self))
+        if str(self).startswith("\\\\"):
+            raise AssertionError(f"resolve() reached a UNC string: {self!r}")
+        return real_resolve(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "is_dir", spy_is_dir)
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+
+    unc = r"\\192.0.2.1\share"
+    with pytest.raises(KeyError):
+        mgr.uninstall(unc)
+    assert not any(s.startswith("\\\\") for s in seen), (
+        f"a filesystem call reached the UNC string: {seen!r}")
+
+    seen.clear()
+    with pytest.raises(KeyError):
+        mgr.set_installed_state(unc, False)
+    assert not any(s.startswith("\\\\") for s in seen), (
+        f"a filesystem call reached the UNC string: {seen!r}")
+
+
 def test_provision_from_store_rmtree_failure_stays_honest(env, monkeypatch):
     """When the stale directory cannot be removed (a locked file, an AV
     hold), _provision_from_store must raise rather than merge the store copy
