@@ -322,9 +322,12 @@ class TestRealAdlDriverAgreesWithDeclaredLayouts:
         _poison(data)
         rc = adl.dll.ADL2_New_QueryPMLogData_Get(adl.ctx, adapters[0].iAdapterIndex,
                                                  ctypes.byref(data))
-        if rc != gu._ADL_OK or not data.sensors[gu._ADL_PMLOG_ACTIVITY_GFX].supported:
-            pytest.skip(f"this board does not publish the PMLog activity sensor "
-                        f"(rc {rc}); the legacy test covers it")
+        if rc != gu._ADL_OK:
+            pytest.skip(f"this board declines PMLog (rc {rc}); the legacy test covers it")
+        assert data.size == ctypes.sizeof(gu._ADLPMLogDataOutput)
+        if not data.sensors[gu._ADL_PMLOG_ACTIVITY_GFX].supported:
+            pytest.skip("this board does not publish the PMLog activity sensor; "
+                        "the legacy test covers it")
         pct = gu._adl_pmlog_activity(adl.dll, adl.ctx, adapters[0].iAdapterIndex)
         assert isinstance(pct, float)
         assert 0.0 <= pct <= 100.0
