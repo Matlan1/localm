@@ -189,6 +189,33 @@ def platform_shell(command: str) -> Union[list, str]:
 _CANCEL_POLL_SECONDS = 0.25
 
 
+def _kill_tree(proc) -> None:
+    """Kill *proc* and every process it started, so a shell-routed command's
+    real process dies with its shell instead of running on and holding the
+    output pipes open. Best-effort at every step; never raises."""
+    children = []
+    try:
+        import psutil
+        children = psutil.Process(proc.pid).children(recursive=True)
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+    for child in children:
+        try:
+            child.kill()
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 def run_subprocess(
     argv_or_cmd: Union[list, str],
     cwd: Path,
@@ -259,12 +286,12 @@ def _run_cancellable(argv, cwd: Path, *, timeout: float, env: Optional[dict],
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                proc.kill()
+                _kill_tree(proc)
                 stdout, stderr = proc.communicate()
                 return SubprocessResult(
                     ok=False, timed_out=True, stdout=stdout, stderr=stderr)
             if cancel():
-                proc.kill()
+                _kill_tree(proc)
                 stdout, stderr = proc.communicate()
                 return SubprocessResult(
                     ok=False, cancelled=True, stdout=stdout, stderr=stderr)
@@ -275,11 +302,11 @@ def _run_cancellable(argv, cwd: Path, *, timeout: float, env: Optional[dict],
                 continue
             break
     except Exception as e:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        _kill_tree(proc)
         return SubprocessResult(ok=False, error=str(e))
+    except BaseException:
+        _kill_tree(proc)
+        raise
 
     return SubprocessResult(
         ok=(proc.returncode == 0), returncode=proc.returncode,

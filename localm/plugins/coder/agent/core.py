@@ -166,6 +166,9 @@ class Agent(
         self.browser_enabled = bool(browser_enabled)
         # Tools removed from THIS session: hidden from the model and hard-refused
         # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
+        # Read through the disabled_tools property, which also hides every
+        # mcp_* tool this agent did not register itself.
+        self._mcp_tool_names: frozenset = frozenset()
         self.disabled_tools = expand_shell_disable(frozenset(disabled_tools or ()))
         # Sub-agent role preset (reviewer / researcher / test-writer): a focused
         # mission plus a narrowed toolset. Resolved here so an unknown name fails
@@ -587,10 +590,6 @@ class Agent(
             self._mcp_tool_names = frozenset(mcp_names)
         except Exception as e:
             print_warning(f"MCP setup failed: {e}")
-        foreign = frozenset(n for n in TOOL_REGISTRY
-                            if n.startswith("mcp_") and n not in self._mcp_tool_names)
-        if foreign:
-            self.disabled_tools = self.disabled_tools | foreign
 
     def _init_plugin_tools(self) -> None:
         print_warning = _agent.print_warning
@@ -905,6 +904,22 @@ class Agent(
         if len(self._error_trace) > _MAX_ERROR_TRACE:
             self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
 
+    @property
+    def disabled_tools(self) -> frozenset:
+        """Tools this session may never run: the explicit set, plus every
+        ``mcp_*`` tool in the live registry that this agent did not register
+        itself (another project's server), read fresh on every access."""
+        return self._disabled_tools | self._foreign_mcp_names()
+
+    @disabled_tools.setter
+    def disabled_tools(self, value) -> None:
+        self._disabled_tools = frozenset(value or ())
+
+    def _foreign_mcp_names(self) -> frozenset:
+        mine = getattr(self, "_mcp_tool_names", frozenset())
+        return frozenset(n for n in _agent.TOOL_REGISTRY
+                         if n.startswith("mcp_") and n not in mine)
+
     def request_stop(self) -> None:
         """Ask the loop to stop at the next safe point (turn or token boundary)."""
         self._stop_requested = True
@@ -930,14 +945,17 @@ class Agent(
         return ""
 
     def cancel(self, reason: str = "cancelled") -> None:
-        """Cancel this run and every child of it: no further tool call runs,
-        the generation in flight is aborted when the backend can abort one,
-        and the loop stops at its next check. Cancelling a root agent also
-        kills the session's running background shell jobs. Irreversible for
-        this agent tree."""
+        """Cancel this run and every child of it: no further tool call runs
+        and the loop stops at its next check. Cancelling a ROOT agent also
+        aborts the generation in flight on a backend that can abort one (the
+        backend is shared by the whole tree) and kills the session's running
+        background shell jobs; a child's cancel leaves both to the root.
+        Irreversible for this agent tree."""
         self._cancel_reason = reason or "cancelled"
         self._cancel_event.set()
         self._stop_requested = True
+        if self.parent is not None:
+            return
         abort = getattr(self.backend, "cancel", None)
         if callable(abort):
             try:
@@ -945,8 +963,6 @@ class Agent(
             except Exception as e:                        # noqa: BLE001
                 from localm.debuglog import logger
                 logger.debug("cancel: backend abort raised: %s", e)
-        if self.parent is not None:
-            return
         try:
             from ..background import get_registry
             registry = get_registry()

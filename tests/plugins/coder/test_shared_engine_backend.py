@@ -390,20 +390,26 @@ def test_cancel_aborts_the_generation_in_flight_and_refuses_the_next():
     engine = _engine()
     produced = []
 
+    closed = []
+
     def chat_stream(messages, **kw):
         def gen():
-            for i in range(1000):
-                produced.append(i)
-                yield f"p{i} "
-                if i == 3:
-                    backend.cancel("timed out")
+            try:
+                for i in range(1000):
+                    produced.append(i)
+                    yield f"p{i} "
+                    if i == 3:
+                        backend.cancel("timed out")
+            finally:
+                closed.append(True)
         return gen()
 
     engine.chat_stream.side_effect = chat_stream
     backend = SharedEngineBackend(engine, "m")
     text = backend.chat(MSG)
     assert text.startswith("p0 p1 p2 p3")
-    assert len(produced) <= 5, "the engine stream was not closed on cancel"
+    assert len(produced) <= 5
+    assert closed == [True], "the engine stream was not closed on cancel"
     assert backend.cancelled
     with pytest.raises(CoderServerError, match="cancelled"):
         backend.chat(MSG)

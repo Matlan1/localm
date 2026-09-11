@@ -523,3 +523,53 @@ class TestBackgroundChildrenOfAOneShot:
         finally:
             reg.shutdown_all()
         assert "STILL RUNNING" in text or "kid" in text
+
+
+    def test_stopping_a_background_child_leaves_the_shared_backend_usable(
+            self, home, project, monkeypatch):
+        """The parent and its background child share ONE backend; cancelling
+        the child at the end of the run must not refuse the parent's own
+        close-time reflection on that backend."""
+        from localm.plugins.coder import background as bg
+        from localm.plugins.coder.agent import Agent
+        from localm.plugins.coder.background import AgentJob, JobRegistry
+        from localm.plugins.coder.backends.shared_engine import SharedEngineBackend
+        from localm.plugins.coder.tools.agents import inherited_child_kwargs
+        from unittest.mock import MagicMock
+        reg = JobRegistry(kind_caps={"agent": 4})
+        monkeypatch.setattr(bg, "_registry", reg)
+        engine = MagicMock()
+        engine.active_requests = 0
+        engine.unloading = False
+        engine.supports_grammar = False
+        engine.count_messages_tokens.return_value = 1
+        engine.count_tokens.return_value = 1
+        child_replies = iter([_tc("run_shell", command=_SLEEP_CMD, timeout=60),
+                              "child done"])
+
+        def chat_stream(messages, **kw):
+            if "slow" in str(messages):
+                return iter([next(child_replies, "child done")])
+            return iter(["parent done"])
+
+        engine.chat_stream.side_effect = chat_stream
+        backend = SharedEngineBackend(engine, "m")
+        parent = _build(backend, project, "t", auto_approve=True)
+        pm, audit, mem = _agent_patches()
+        with pm as MockPM, audit, mem:
+            MockPM.build.return_value.file_count.return_value = 0
+            child = Agent(**inherited_child_kwargs(
+                parent, backend=backend, cwd=project, name="kid",
+                max_turns=3, confirm_handler=None))
+        job = reg.submit(lambda: AgentJob(child, "slow", label="kid",
+                                          owner=parent.job_owner), kind="agent")
+        try:
+            result = runner.run_single_task(parent, "t")
+            assert result.success is True
+            assert child.cancelled is True and parent.cancelled is False
+            assert backend.cancelled is False, "a child cancel aborted the shared backend"
+            # The parent can still generate on it (its reflection would).
+            assert backend.chat([{"role": "user", "content": "reflect"}]) == "parent done"
+            assert _wait_until(lambda: job.state != "running")
+        finally:
+            reg.shutdown_all()

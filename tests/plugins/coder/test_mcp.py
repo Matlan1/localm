@@ -423,3 +423,35 @@ class TestPooledServers:
             assert "mcp_other_read" not in str(agent._build_messages()[0]["content"])
         finally:
             TOOL_REGISTRY.pop("mcp_other_read", None)
+
+    def test_the_foreign_mcp_disable_follows_the_live_registry(self, tmp_path):
+        """A server another project registers AFTER this agent was built is
+        invisible to it too: the disable is read off the live registry."""
+        from unittest.mock import patch
+        from localm.plugins.coder.agent import Agent
+        from localm.plugins.coder.parser import parse_tool_calls
+        from localm.plugins.coder.tool_registration import register_foreign_tool
+        backend = MagicMock()
+        backend.model_id = "m"
+        backend.native_tools = False
+        with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+             patch("localm.plugins.coder.agent.make_audit_log"), \
+             patch("localm.plugins.coder.agent.load_memory", return_value=""):
+            MockPM.build.return_value.file_count.return_value = 0
+            MockPM.build.return_value.dirty = False
+            agent = Agent(backend=backend, cwd=tmp_path)
+        assert "mcp_late_read" not in agent.disabled_tools
+        reg, warn = [], []
+        register_foreign_tool("mcp_late_read", fn=lambda cwd, **a: None,
+                              description="[MCP:late] reads", params={},
+                              destructive=False, source_label="MCP",
+                              registered=reg, warnings=warn)
+        try:
+            assert "mcp_late_read" in agent.disabled_tools
+            call, = parse_tool_calls(
+                "<tool_call>" + json.dumps({"name": "mcp_late_read", "args": {}})
+                + "</tool_call>", tool_names={"mcp_late_read"})
+            result = agent._execute_tool(call, interactive=False)
+            assert result.ok is False and "disabled" in result.output
+        finally:
+            TOOL_REGISTRY.pop("mcp_late_read", None)
