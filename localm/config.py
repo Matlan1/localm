@@ -1013,8 +1013,9 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     mode survives O_CREAT.
 
     Call sites: ``auth.key``, ``auth.json`` and the owner-KDF file in auth.py;
-    ``sessions.json``; the instance registry entry from both
-    ``register_instance`` and ``set_mode``; the GPU coordination entry.
+    ``model_source_credentials.json``; ``sessions.json``; the instance
+    registry entry from both ``register_instance`` and ``set_mode``; the GPU
+    coordination entry.
 
     The RETURN VALUE is the pre-rename ``ok``, so a caller that logs its own
     subsystem-named warning on failure (``gpu_registry.write_entry``) keeps that
