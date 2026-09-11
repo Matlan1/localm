@@ -106,6 +106,10 @@ def _drain_all(timeout=20.0):
 
 class TestNonBlocking:
     def test_background_dispatch_returns_before_the_child_finishes(self, repo):
+        """ORDER, not a clock: the dispatch returns while the child is still
+        held on ``release``, so the poll reads "still running". The same poll
+        then reports the finished child once ``release`` is set, which proves
+        the first read was a live signal and not a stale string."""
         started = threading.Event()
         release = threading.Event()
 
@@ -116,22 +120,23 @@ class TestNonBlocking:
 
         parent = _parent(repo)
         with patch.object(Agent, "run_task", _slow_run_task):
-            t0 = time.time()
             res = tool_spawn_agent_background(repo, "work", name="bg",
                                               _parent_agent=parent)
-            elapsed = time.time() - t0
             assert res.ok, res.output
+            assert not release.is_set()
             assert started.wait(timeout=10), "child never started"
-            assert elapsed < 2.0, f"dispatch took {elapsed:.2f}s"
             job_id = res.output.split("as ")[1].split(",")[0]
             poll = tool_check_agent_job(repo, job_id)
-            assert "still running" in poll.output
+            assert "still running" in poll.output, poll.output
             release.set()
             _drain_all()
+        poll = tool_check_agent_job(repo, job_id)
+        assert "still running" not in poll.output, poll.output
+        assert "finished" in poll.output and "child done" in poll.output
 
     def test_SIBLING_synchronous_spawn_does_NOT_return_early(self, repo):
-        """The live detector for the timing assertion above: the same clock,
-        the same child, on the synchronous path, MUST show the blocking."""
+        """The live detector for the ordering assertion above: the same child,
+        on the synchronous path, MUST block the caller until it returns."""
         def _slow_run_task(self, task):
             time.sleep(0.6)
             return "child done"
