@@ -162,6 +162,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   whole document unbounded.
 - **Setup and the graphical installer now install the same HuggingFace/transformers version
   pyproject specifies, instead of an older version of their own that could go out of sync with it.**
+- **The whole server could freeze for up to ten seconds, every request included, while a
+  settings or model-registry save waited for another localm process.** A save that found the
+  file busy (for example a model download the app itself started, or one interrupted mid-write)
+  used to block every read of the settings, including the check on each incoming request, for
+  as long as it waited. Readers are no longer held up by a waiting writer, and a lock file a
+  waiting reader briefly pinned on Windows is now released instead of being left behind.
+- **Several embedding requests arriving together with the embedding model not yet loaded, on a
+  card too small for both models, could stall all inference (chat included) for five minutes.**
+  Embedding requests on the dedicated embedding model now queue one at a time, and an unload
+  the request gave up waiting for no longer runs later on its own.
+- **Clicking Remove on the managed ComfyUI while an Update (or Setup) was still running could
+  destroy the install.** Remove now refuses while an update or setup is in progress, and the
+  `localm comfy remove` command refuses while another localm process is updating the same
+  install, naming the process to wait for.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
