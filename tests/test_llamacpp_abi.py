@@ -593,17 +593,94 @@ def test_v3_detection_survives_a_drift_in_each_fingerprinted_field(drift):
     assert not any("symbol probe alone" in n for n in notes), notes
 
 
-def test_v3_with_two_drifted_defaults_binds_v2_on_symbols_alone():
-    """Pins the LIMIT of the byte-only V2/V3 split: with two of the three
-    fingerprinted defaults drifted the bytes are inconclusive, and the
-    symbols can only say 'V2 or V3', so the family binds V2 and says so."""
+def test_load_mode_family_with_inconclusive_bytes_is_refused():
+    """Every V2 build fingerprints conclusively as V2, so bytes that carry the
+    llama_load_mode_* symbols yet match neither V2 nor V3 are a layout this
+    module does not bind: a V3 with two drifted defaults, or something newer.
+    Binding V2 there would be the silent misbind; it refuses instead."""
     mp = good_model_v3()
     mp.lazy_mode = 0
     mp.use_extra_bufts = False
-    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(
-        _FakeLib(mp, good_ctx()))
+    lib = _FakeLib(mp, good_ctx())
+    assert _abi._fingerprint_layout(_raw_model(mp)) is None, "fixture must be inconclusive"
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert contradiction is not None and "neither" in contradiction
+    assert (layout, assumed) == (MODEL_PARAMS_V2, False)
+    assert not any("symbol probe alone" in n for n in notes), notes
+    with pytest.raises(AbiMismatch) as ei:
+        verify_abi(lib)
+    assert "neither" in ei.value.reason
+
+
+class _RaisingFn:
+    """A bound-function stand-in whose call raises, like a symbol whose ABI
+    the receptacle cannot satisfy."""
+
+    def __init__(self):
+        self.restype = None
+        self.argtypes = None
+
+    def __call__(self, *args):
+        raise OSError("exception: access violation reading 0x0")
+
+
+def test_family_symbols_with_an_unreadable_fingerprint_still_fail_open():
+    """A mechanism failure is not a contradiction: bytes that could not be
+    READ say nothing, so the family binds V2 on the symbols with a note and
+    the whole check reports unchecked rather than refusing."""
+    lib = _FakeLib(good_model_v2(), good_ctx())
+    lib.llama_model_default_params = _RaisingFn()
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
     assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False)
+    assert any("could not be read" in n for n in notes), notes
     assert any("symbol probe alone" in n and "v3" in n for n in notes), notes
+    v = verify_abi(lib)
+    assert v.status == "unchecked"
+    assert v.layout == MODEL_PARAMS_V2
+
+
+def test_v1_symbols_with_inconclusive_bytes_still_bind_v1_on_symbols_alone():
+    """The refusal above is scoped to the load_mode family. A build with no
+    llama_load_mode_* symbols and inconclusive bytes keeps binding V1 on the
+    symbols alone, as before."""
+    mp = good_model_v1()
+    mp.use_mmap = False
+    mp.use_extra_bufts = False
+    lib = _FakeLib(mp, good_ctx())
+    assert _abi._fingerprint_layout(_raw_model(mp)) is None, "fixture must be inconclusive"
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V1, None, False)
+    assert any("symbol probe alone" in n for n in notes), notes
+    assert verify_abi(lib).status == "ok"
+
+
+@pytest.mark.parametrize("fill", [0x01, 0xff, 0x7f])
+def test_v3_fingerprint_is_immune_to_garbage_past_the_v2_struct(fill):
+    """A V1/V2 build writes 72 bytes; the receptacle's bytes past that are
+    whatever the return buffer already held. V3's check at offset 74 reads
+    that garbage, so with byte 74 == 1 V3 gains one point on a V2 build and
+    must still lose: the two in-struct V3 checks are deterministic misses."""
+    mp = good_model_v2()
+    mp.load_mode = -1                  # the b10373+ default, V2 scores 2 not 3
+    mp._reserved = (ctypes.c_uint8 * 32)(*([fill] * 32))
+    raw = _raw_model(mp)
+    assert raw[74] == fill and len(raw) == 104
+    assert _abi._fingerprint_layout(raw) == MODEL_PARAMS_V2
+    lib = _FakeLib(mp, good_ctx())
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False), notes
+    assert not any("symbol probe alone" in n for n in notes), notes
+
+    # A V1 build's bytes past 72 are equally unwritten, and so is its 4-byte
+    # alignment pad at 28, which V3 reads as lazy_mode. Even with both holding
+    # V3's wanted values the build resolves to V1: the symbols say V1, and V1's
+    # three in-struct checks all hit.
+    v1 = good_model_v1()
+    v1._pad0 = fill
+    v1._reserved = (ctypes.c_uint8 * 32)(*([fill] * 32))
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(
+        _FakeLib(v1, good_ctx()))
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V1, None, False), notes
 
 
 def test_v3_dispatch_reaches_every_consumer(monkeypatch):
@@ -1093,21 +1170,18 @@ def test_evaluate_cannot_discriminate_the_two_layouts():
     assert evaluate(as_v2, good_ctx()).status == "ok"
 
 
-def test_unknown_fourth_model_params_layout_is_not_caught():
-    """Pins the LIMIT of verify_abi's fail-safe on the model_params axis.
+def test_unknown_fourth_model_params_layout_is_refused_not_misbound():
+    """A hypothetical fourth model_params layout (one more 4-byte field
+    inserted directly before split_mode) carries the llama_load_mode_* symbols,
+    so the symbol probe says the V2/V3 family; its bytes score V2 and V3
+    alike, so the fingerprint is inconclusive. evaluate() could never catch
+    the misbind (every model_params check is a RANGE check and every shifted
+    value here is still in range), so the detector refuses on the family plus
+    inconclusive bytes instead of binding V2 on the symbols alone.
 
     test_unknown_third_layout_still_fails_safe covers the context_params axis,
-    where evaluate() re-reads the -1 keystones at wherever the bound class puts
-    them. That is a property of that ONE axis; this is its counter-example.
-
-    A hypothetical fourth model_params layout (one more 4-byte field inserted
-    directly before split_mode) carries the llama_load_mode_* symbols, so the
-    symbol probe says the V2/V3 family; its bytes score V2 and V3 alike, so the
-    fingerprint is inconclusive and V2 is bound on the symbols with no
-    contradiction to refuse on. It then sails through evaluate(), because every
-    model_params check is a RANGE check and every shifted value here is still
-    in range. The struct is bound and crossed over the FFI by value: a silent
-    misbind."""
+    where evaluate() does re-read the -1 keystones; this is the model_params
+    counterpart, closed at detection time."""
     v2 = _raw(good_model_v2())[:72]
     raw4 = v2[:20] + b"\x00\x00\x00\x00" + v2[20:68]
     assert len(raw4) == 72, "the receptacle hands back a fixed-size buffer"
@@ -1115,21 +1189,22 @@ def test_unknown_fourth_model_params_layout_is_not_caught():
     fake_v4 = LlamaModelParamsV2()
     ctypes.memmove(ctypes.byref(fake_v4), raw4, 72)
     lib = _FakeLib(fake_v4, good_ctx())
+    assert _abi._fingerprint_layout(_raw(fake_v4)) is None, "fixture must be inconclusive"
 
     layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
-    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False), (
-        f"fixture must exercise the misdetection path; got {notes}")
+    assert (layout, assumed) == (MODEL_PARAMS_V2, False)
+    assert contradiction is not None and "neither" in contradiction
+    with pytest.raises(AbiMismatch):
+        verify_abi(lib)
 
-    v = verify_abi(lib)                       # the point: it does NOT raise
-    assert v.status == "ok", v.failures
-    assert v.layout == MODEL_PARAMS_V2
-
-    # And it really is a misbind rather than a harmless relabel: the bound
+    # The would-be misbind is real rather than a harmless relabel: the V2
     # class reads split_mode at offset 20, where the inserted field now sits,
     # while this build's actual split_mode has moved to 24.
     assert fake_v4.split_mode == 0
     assert int.from_bytes(raw4[24:28], "little", signed=True) == 1, (
         "the real split_mode must have moved, or this pins nothing")
+    assert evaluate(fake_v4, good_ctx()).status == "ok", (
+        "evaluate() cannot see this misbind; the detector is the only guard")
 
 
 def test_ctx_v2_with_a_minus_one_ctx_type_is_a_known_undetectable_misbind():
@@ -1427,12 +1502,14 @@ def test_abi_report_still_reports_ok_when_the_check_actually_ran(monkeypatch):
 def test_abi_report_carries_the_probe_notes_a_re_derivation_would_drop():
     """The stored verdict is strictly more informative than a re-derived one:
     it keeps the layout-probe notes, which evaluate() never sees."""
-    # TWO of the three v2 fingerprint checks must break to reach "inconclusive".
+    # TWO of the three v1 fingerprint checks must break to reach "inconclusive".
     # The fingerprint is SCORED, not all-or-nothing, so a single drifted default
-    # still leaves a 2-0 winner and resolves conclusively.
-    mp = good_model_v2()
-    mp.load_mode = 3                # breaks the load_mode@24 check
-    mp.use_extra_bufts = False      # and the use_extra_bufts@66 check
+    # still leaves a clear winner and resolves conclusively. (Under the
+    # load_mode symbols an inconclusive fingerprint refuses, so the ok-with-a-
+    # note path exists only for a V1 build.)
+    mp = good_model_v1()
+    mp.use_mmap = False             # breaks the use_mmap@65 check
+    mp.use_extra_bufts = False      # and the use_extra_bufts@69 check
     lib = _FakeLib(mp, good_ctx())
     v = verify_abi(lib)
     assert v.status == "ok"

@@ -98,10 +98,13 @@ _SYMBOL_FAMILY = {
 #   V2: load_mode@24 == 1 (MMAP), check_tensors@65 == 0, use_extra_bufts@66 == 1
 #   V3: lazy_mode@28 == 1 (AUTO), kv_overrides low byte@66 == 0,
 #       use_extra_bufts@74 == 1
-# Each V3 offset holds a different value under the V2 defaults (main_gpu 0,
-# use_extra_bufts 1, padding 0), so V2 default bytes score 0 against V3 and V3
-# default bytes score at most 1 against V2. See
-# test_v3_default_bytes_never_resolve_to_v2.
+# Offsets 28 and 66 hold a different value under the V2 defaults (main_gpu 0,
+# use_extra_bufts 1) and are always misses on a V2 build. Offset 74 lies past
+# the 72 bytes a V1/V2 build writes and reads whatever the return buffer held
+# (stack, never zeroed), so it can add ONE spurious V3 point on such a build and
+# never a second; V3 default bytes score at most 1 against V2. See
+# test_v3_default_bytes_never_resolve_to_v2 and
+# test_v3_fingerprint_is_immune_to_garbage_past_the_v2_struct.
 _FINGERPRINT = {
     MODEL_PARAMS_V1: ((24, "i", 0), (65, "B", 1), (69, "B", 1)),
     MODEL_PARAMS_V2: ((24, "i", 1), (65, "B", 0), (66, "B", 1)),
@@ -295,9 +298,13 @@ def detect_model_params_layout(
 
     The structural signal decides V1 versus the V2/V3 family; the value signal
     decides V2 versus V3 within it. The value signal can agree, be
-    inconclusive (defaults are allowed to drift; the family then binds V2), or
-    CONTRADICT the family. A contradiction is returned to the caller, which
-    turns it into a refusal.
+    inconclusive, or CONTRADICT. Under the V1 symbols an inconclusive
+    fingerprint binds V1 on the symbols alone; under the load_mode symbols it
+    is itself a contradiction, because every V2 build fingerprints
+    conclusively, so such bytes belong to a layout this module does not bind.
+    Bytes that could not be READ at all (a mechanism failure) never
+    contradict: the family then binds V2 with a note. A contradiction is
+    returned to the caller, which turns it into a refusal.
     """
     notes: List[str] = []
 
@@ -313,8 +320,10 @@ def detect_model_params_layout(
             "the symbol-based layout probe is inconclusive")
 
     by_value: Optional[str] = None
+    bytes_read = False
     try:
         by_value = _fingerprint_layout(_read_raw(lib, "llama_model_default_params"))
+        bytes_read = True
     except Exception as e:  # noqa: BLE001 - probe failure must not condemn the lib
         notes.append(f"model_params fingerprint could not be read ({e})")
 
@@ -322,6 +331,17 @@ def detect_model_params_layout(
         return by_symbol, notes, (
             f"the llama_load_mode symbols say {by_symbol} but "
             f"llama_model_default_params()'s bytes say {by_value}"), False
+
+    # Every V2 build's default bytes fingerprint conclusively as V2 (the V2
+    # set is closed: upstream b10105..b10649 and lemonade b1307), so bytes that
+    # were read and match neither V2 nor V3 under the load_mode symbols belong
+    # to a layout this module does not bind. See
+    # test_load_mode_family_with_inconclusive_bytes_is_refused.
+    if by_symbol == MODEL_PARAMS_V2 and bytes_read and by_value is None:
+        return by_symbol, notes, (
+            "the llama_load_mode symbols are present but "
+            "llama_model_default_params()'s bytes match neither the "
+            f"{MODEL_PARAMS_V2} nor the {MODEL_PARAMS_V3} layout"), False
 
     layout = by_value or by_symbol
     assumed = layout is None
@@ -333,7 +353,7 @@ def detect_model_params_layout(
     elif by_value is None:
         notes.append(
             f"model_params layout {layout} rests on the symbol probe alone "
-            "(the default-value fingerprint was inconclusive"
+            "(the default-value fingerprint could not be read"
             + (f"; the symbols cannot tell {MODEL_PARAMS_V2} from "
                f"{MODEL_PARAMS_V3})" if layout == MODEL_PARAMS_V2 else ")"))
     return layout, notes, None, assumed
@@ -728,9 +748,12 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
       the FFI by value. What protects model_params is DETECTION: the
       llama_load_mode_* symbols split V1 from the V2/V3 family with
       disagreement itself a refusal, and the value fingerprint splits V2
-      from V3 on its own (the V3 insertion added no symbol), so a V3 build
-      whose defaults drift in two fingerprinted fields at once reads as
-      inconclusive and binds V2.
+      from V3 on its own (the V3 insertion added no symbol). Under the
+      load_mode symbols an inconclusive fingerprint is ALSO a refusal
+      (every V2 build fingerprints conclusively, so such bytes are a layout
+      this module does not bind); the residual is a future layout whose
+      default bytes still satisfy two of V3's three checks, which binds V3
+      silently.
 
     So a new model_params layout needs its OWN detection signal; nothing
     downstream will catch a wrong choice on that axis."""
