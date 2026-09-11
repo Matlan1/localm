@@ -302,6 +302,15 @@ async function applyEmbeddingModel(model) {
  *  collections' semantic search. */
 export function kbConfirmEmbeddingSwitch(model, report) {
   return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
     openModal(t("knowledge.embedSwitch.title", { model }), (body) => {
       body.appendChild(el("p", "", report.note));
       const list = el("ul", "kb-addroots");
@@ -314,12 +323,17 @@ export function kbConfirmEmbeddingSwitch(model, report) {
       body.appendChild(el("p", "sub", t("knowledge.embedSwitch.reembedHint")));
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", t("knowledge.cancel"));
-      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      cancel.onclick = () => finish(false);
       const ok = el("button", "btn-primary", t("knowledge.embedSwitch.confirm"));
-      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      ok.onclick = () => finish(true);
       row.append(cancel, ok);
       body.appendChild(row);
     });
+    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // as a decline.
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
   });
 }
 
@@ -505,17 +519,31 @@ export async function kbReembedCollection(name) {
 /** In-page confirm before a full re-embed. */
 export function kbConfirmReembed(name) {
   return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
     openModal(t("knowledge.reembedConfirm.title", { name }), (body) => {
       body.appendChild(el("p", "", t("knowledge.reembedConfirm.body1", { name })));
       body.appendChild(el("p", "sub", t("knowledge.reembedConfirm.body2")));
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", t("knowledge.cancel"));
-      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      cancel.onclick = () => finish(false);
       const ok = el("button", "btn-primary", t("knowledge.reembedConfirm.confirm"));
-      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      ok.onclick = () => finish(true);
       row.append(cancel, ok);
       body.appendChild(row);
     });
+    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // as a decline.
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
   });
 }
 
@@ -523,16 +551,30 @@ export function kbConfirmReembed(name) {
  *  repair route returns instead of starting a job. */
 function kbConfirmRepair(name, detail) {
   return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
     openModal(t("knowledge.repairConfirm.title", { name }), (body) => {
       body.appendChild(el("p", "", detail));
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", t("knowledge.cancel"));
-      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      cancel.onclick = () => finish(false);
       const ok = el("button", "btn-primary", t("knowledge.repairConfirm.confirm"));
-      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      ok.onclick = () => finish(true);
       row.append(cancel, ok);
       body.appendChild(row);
     });
+    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // as a decline.
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
   });
 }
 
@@ -591,6 +633,15 @@ export async function kbRepairCollection(name) {
  *  allowed list and continue. */
 export function kbConfirmAddRoots(folders) {
   return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
     openModal(t("knowledge.addRoots.title"), (body) => {
       body.appendChild(el("p", "", tn("knowledge.addRoots.intro", folders.length)));
       const list = el("ul", "kb-addroots");
@@ -599,12 +650,17 @@ export function kbConfirmAddRoots(folders) {
       body.appendChild(el("p", "sub", tn("knowledge.addRoots.confirm", folders.length)));
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", t("knowledge.cancel"));
-      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      cancel.onclick = () => finish(false);
       const ok = el("button", "btn-primary", t("knowledge.addRoots.confirmButton"));
-      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      ok.onclick = () => finish(true);
       row.append(cancel, ok);
       body.appendChild(row);
     });
+    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // as a decline.
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
   });
 }
 

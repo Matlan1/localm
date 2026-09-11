@@ -983,10 +983,24 @@ export async function refreshOwnerKeyPanel() {
           toast(e.detail || "Could not remove the owner key", true);
           return;
         }
-        toast("Owner key removed - this server is open again");
-        // That call invalidates this session cookie, so re-read the page state
-        // rather than leaving a view authed by a session that no longer exists.
-        window.location.reload();
+        const out = await r.json().catch(() => ({}));
+        if (out.cleared === true) {
+          toast("Owner key removed - this server is open again");
+          // That call invalidates this session cookie, so re-read the page state
+          // rather than leaving a view authed by a session that no longer exists.
+          window.location.reload();
+          return;
+        }
+        // Not fully cleared. The session cookie is already gone regardless (the
+        // route drops it either way), so a reload here would only discard the
+        // warnings below without restoring anything.
+        toast("Owner key was not fully removed", true);
+        box.replaceChildren();
+        for (const w of out.warnings || []) box.appendChild(el("div", "key-warn", w));
+        box.appendChild(el("div", "sub",
+          "The server may still require the previous owner key. You have been "
+          + "signed out in this browser and will need to sign in again with it."));
+        box.style.display = "";
       });
   };
 
@@ -1245,6 +1259,15 @@ function settingsTargetGroup(content) {
  *  key and needed the same pre-switch warning). */
 function confirmEmbeddingModelSwitch(model, report) {
   return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
     openModal(`Switch embedding model to '${model}'?`, (body) => {
       body.appendChild(el("p", "", report.note));
       const list = el("ul", "");
@@ -1259,12 +1282,17 @@ function confirmEmbeddingModelSwitch(model, report) {
         + "search if it does turn out to need it."));
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
-      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      cancel.onclick = () => finish(false);
       const ok = el("button", "btn-primary", "Switch anyway");
-      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      ok.onclick = () => finish(true);
       row.append(cancel, ok);
       body.appendChild(row);
     });
+    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // as a decline.
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
   });
 }
 
