@@ -232,8 +232,10 @@ class TestRealAdlDriverAgreesWithDeclaredLayouts:
         rc = adl.dll.ADL2_Adapter_AdapterInfo_Get(adl.ctx, ctypes.byref(arr),
                                                   ctypes.sizeof(arr) - 1)
         if rc == gu._ADL_OK:
-            pytest.skip("this driver does not validate the AdapterInfo buffer "
-                        "size, so acceptance of the declared size proves nothing")
+            pytest.skip("the driver accepted a table one byte short of the declared "
+                        "size: either it does not validate the size or the declared "
+                        "struct is larger than its own; the allocation test settles "
+                        "which")
         assert adl.adapter_rc == gu._ADL_OK
 
     def test_driver_allocates_adapter_records_at_exactly_the_declared_size(self, adl):
