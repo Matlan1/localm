@@ -697,7 +697,29 @@ def pytest_runtest_setup(item):
 
 @pytest.fixture(autouse=True)
 def _isolate_localm_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCALM_HOME", str(tmp_path / ".localm"))
+    """Give every test its own LOCALM_HOME.
+
+    Setting the env var alone reaches only callers that resolve the home
+    directory dynamically (``config.home_dir()``); ``config.HOME_DIR`` and
+    everything derived from it at import time (``MODELS_DIR``,
+    ``REGISTRY_FILE``, ``CONFIG_FILE``) are plain module constants frozen at
+    ``config`` import, before this fixture ever runs, so they keep pointing
+    at whatever LOCALM_HOME was ambient at collection time - a real,
+    shared, non-isolated directory - unless patched here too. Without this,
+    any code path that reads those constants directly (``ensure_dirs()``,
+    which several write paths call right before taking a lock on a sibling
+    of ``CONFIG_FILE``/``REGISTRY_FILE``) creates or checks the WRONG
+    directory, while a caller using ``home_dir()`` to build the actual
+    target path computes the right one - the mismatch surfaces as a
+    ``FileNotFoundError`` on a `*.lock` file whose parent was never
+    created. See test_config_home_isolation_reaches_the_frozen_constants."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    from localm import config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
 
 
 @pytest.fixture(autouse=True)

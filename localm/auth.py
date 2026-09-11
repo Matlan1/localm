@@ -1197,7 +1197,7 @@ def _keystore_configured() -> bool:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return False                       # absent -> no scoped keys
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return True                        # exists but unreadable -> fail closed
     try:
         data = json.loads(raw)

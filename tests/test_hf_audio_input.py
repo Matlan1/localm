@@ -12,12 +12,13 @@ call rather than a wrong assertion about intent.
 import base64
 import io
 
-import numpy as np
 import pytest
-import soundfile as sf
 
-from localm.inference.backends._hf_worker import HFWorker
-from localm.inference.backends.base import UnsupportedInputError
+np = pytest.importorskip("numpy")
+sf = pytest.importorskip("soundfile")
+
+from localm.inference.backends._hf_worker import HFWorker  # noqa: E402
+from localm.inference.backends.base import UnsupportedInputError  # noqa: E402
 
 
 def _audio_message(rate=8000, duration_s=0.1):

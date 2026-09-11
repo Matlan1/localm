@@ -84,6 +84,7 @@ def test_http_backend_context_capacity_reads_effective_ctx_max(monkeypatch):
 
     class _Resp:
         ok = True
+        status_code = 200   # _raise_on_redirect reads this before resp.json()
 
         def json(self):
             return {"effective_ctx_max": 32768, "n_ctx": 4096}
