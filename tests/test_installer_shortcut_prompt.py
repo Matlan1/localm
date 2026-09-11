@@ -192,6 +192,164 @@ class TestShortcutBlockDerivesScmadeFromThePath:
         assert scmade == "", (out.stdout, out.stderr)
 
 
+def test_cd_bootstrap_precedes_delayed_expansion(bat):
+    """`cd /d "%~dp0"` must run BEFORE delayed expansion is enabled: a `!` in
+    the install path is silently dropped by cmd's delayed-expansion scanner
+    when this line runs under EnableDelayedExpansion, and `cd /d` then fails
+    outright ("The system cannot find the path specified")."""
+    assert bat.index('cd /d "%~dp0"') < bat.index("setlocal EnableDelayedExpansion")
+
+
+def test_shortcut_blocks_isolate_the_bang_hazard_and_close_it_on_failure(bat):
+    """Each shortcut block's FOR /F embeds `%CD%` several times in one
+    PowerShell command; a literal `!` in the install path is silently eaten
+    by cmd's delayed-expansion scanner once those are substituted in, unless
+    delayed expansion is disabled for that FOR /F. The scope must also close
+    when the loop captures nothing (a failed write), or delayed expansion
+    stays disabled for the rest of the script - see
+    TestShortcutSurvivesBangInInstallPath for the executing proof of both."""
+    for block in _shortcut_blocks(bat):
+        assert "setlocal DisableDelayedExpansion" in block
+        assert 'set "SC_STILL_OPEN=1"' in block
+        assert 'endlocal & set "SCPATH=%%p"' in block
+        assert "if defined SC_STILL_OPEN endlocal" in block
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestBootstrapSurvivesBangInInstallPath:
+    """Drives the REAL bootstrap lines of setup.bat (through `set
+    LOCALM_SETUP=1`) from a directory whose name contains a literal `!`,
+    proving `cd /d` actually lands there rather than merely reading the
+    source order."""
+
+    def _bootstrap_lines(self, bat):
+        start = bat.index('cd /d "%~dp0"')
+        end = bat.index("set LOCALM_SETUP=1") + len("set LOCALM_SETUP=1")
+        return bat[start:end]
+
+    def test_cd_succeeds_and_lands_in_the_bang_directory(self, bat, tmp_path):
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        probe = bangdir / "probe.bat"
+        probe.write_text(
+            "@echo off\r\n" + self._bootstrap_lines(bat) + "\r\n"
+            'echo RC=[%errorlevel%]\r\n'
+            'setlocal DisableDelayedExpansion\r\n'
+            'echo TRUE_CD=[%CD%]\r\n'
+            "exit /b 0\r\n",
+            encoding="utf-8")
+        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL, timeout=15)
+        assert "RC=[0]" in out.stdout, (out.stdout, out.stderr)
+        assert "TRUE_CD=[{}]".format(bangdir) in out.stdout, (out.stdout, out.stderr)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestShortcutSurvivesBangInInstallPath:
+    """A literal `!` in the install directory name must not corrupt the
+    PowerShell command text (cmd's delayed-expansion scanner silently eats
+    exclamation marks out of already-substituted `%CD%` text), and a FAILED
+    write must still leave delayed expansion enabled for the rest of the
+    script. `powershell` is shadowed by a stub capturing its own argv so the
+    exact text cmd.exe hands it can be inspected directly, instead of
+    inferring correctness from a shortcut file nothing here writes."""
+
+    def _write_argv_capturing_stub(self, directory, argv_file, succeed):
+        directory.mkdir(parents=True, exist_ok=True)
+        stub = directory / "powershell.bat"
+        body = '@echo off\r\necho ARGV=[%*]>>"{}"\r\n'.format(argv_file)
+        body += ("echo C:\\FakeDesktop\\LocaLM.lnk\r\nexit /b 0\r\n" if succeed
+                 else "exit /b 1\r\n")
+        stub.write_text(body, encoding="utf-8")
+        return directory
+
+    def _write_probe(self, directory, block, scpick):
+        probe = directory / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            'set "SCPICK={scpick}"\r\nset "SCPATH="\r\nset "SCMADE="\r\n'
+            "{block}\r\n"
+            'echo RESULT SCPATH=[%SCPATH%] SCMADE=[%SCMADE%]\r\n'
+            'set "PROBEVAR=still-here"\r\n'
+            'echo DELAYED_EXPANSION_OK=[!PROBEVAR!]\r\n'
+            "exit /b 0\r\n".format(scpick=scpick, block=block),
+            encoding="utf-8")
+        return probe
+
+    def _run(self, probe, stub_dir, cwd):
+        env = dict(os.environ)
+        env["PATH"] = str(stub_dir) + ";" + env.get("PATH", "")
+        return subprocess.run(["cmd", "/c", str(probe)], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL, timeout=15,
+                              env=env, cwd=str(cwd))
+
+    def _result(self, stdout):
+        m = re.search(r"RESULT SCPATH=\[(.*?)\] SCMADE=\[(.*?)\]", stdout)
+        assert m, "RESULT line not found: {!r}".format(stdout)
+        return m.group(1), m.group(2)
+
+    @pytest.mark.parametrize("scpick,block_index", [("1", 0), ("2", 1)])
+    def test_command_text_survives_a_bang_in_the_install_path(
+            self, bat, tmp_path, scpick, block_index):
+        block = _shortcut_blocks(bat)[block_index]
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        argv_file = tmp_path / "argv.txt"
+        stub_dir = self._write_argv_capturing_stub(tmp_path / "stub", argv_file, succeed=True)
+        probe = self._write_probe(bangdir, block, scpick)
+        out = self._run(probe, stub_dir, cwd=bangdir)
+        assert argv_file.exists(), (out.stdout, out.stderr)
+        argv = argv_file.read_text(encoding="utf-8")
+        bang = str(bangdir)
+        # Each fragment embedding %CD% must survive as its OWN intact,
+        # separately-quoted argument with the `!` preserved - not merged
+        # into a neighbour by a corrupted delayed-expansion scan.
+        assert "\"$s.WorkingDirectory = '{}';\"".format(bang) in argv, argv
+        assert "\"$s.IconLocation = '{}\\assets\\localm.ico';\"".format(bang) in argv, argv
+        scpath, scmade = self._result(out.stdout)
+        assert scmade == "1", (out.stdout, out.stderr)
+
+    def test_scpick_2_targetpath_fragment_survives_a_bang_with_two_cd_occurrences(
+            self, bat, tmp_path):
+        """SCPICK==2's TargetPath fragment embeds %CD% TWICE in one PowerShell
+        statement (the LocaLM.exe branch and its Scripts\\localm.exe
+        fallback) - the highest-risk shape, since two exclamation marks from
+        one fragment are exactly what can pair up and consume everything
+        between them."""
+        block = _shortcut_blocks(bat)[1]
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        argv_file = tmp_path / "argv.txt"
+        stub_dir = self._write_argv_capturing_stub(tmp_path / "stub", argv_file, succeed=True)
+        probe = self._write_probe(bangdir, block, "2")
+        self._run(probe, stub_dir, cwd=bangdir)
+        argv = argv_file.read_text(encoding="utf-8")
+        bang = str(bangdir)
+        assert "$exe = '{}\\.venv\\localm-app\\LocaLM.exe'".format(bang) in argv, argv
+        assert "$s.TargetPath = '{}\\.venv\\Scripts\\localm.exe'".format(bang) in argv, argv
+
+    @pytest.mark.parametrize("scpick,block_index", [("1", 0), ("2", 1)])
+    def test_a_failed_write_in_a_bang_path_leaves_delayed_expansion_enabled(
+            self, bat, tmp_path, scpick, block_index):
+        """The nested `setlocal DisableDelayedExpansion` scope must close
+        even when the FOR /F loop captures zero lines (a failed write) - a
+        transport that only closes it inside the loop's own do-body leaves
+        the scope open, silently disabling delayed expansion for every line
+        the rest of the script runs afterward."""
+        block = _shortcut_blocks(bat)[block_index]
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        argv_file = tmp_path / "argv.txt"
+        stub_dir = self._write_argv_capturing_stub(tmp_path / "stub", argv_file, succeed=False)
+        probe = self._write_probe(bangdir, block, scpick)
+        out = self._run(probe, stub_dir, cwd=bangdir)
+        scpath, scmade = self._result(out.stdout)
+        assert scpath == "" and scmade == "", (out.stdout, out.stderr)
+        assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (
+            "delayed expansion was left disabled after a failed shortcut "
+            "write in a bang path: {}".format(out.stdout))
+
+
 def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
     """--quiet keeps the notes and the failure path, drops the hints."""
     import sys
