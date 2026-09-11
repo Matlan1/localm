@@ -25,8 +25,6 @@ and a failure there still rolls the source back and reports the failure.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -34,9 +32,9 @@ from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media.comfy_patches import apply_patches
-from localm.media.managed_comfy import (
-    _LOCK_OWNER, _acquire_update_lock, _lock_holder_pid, _release_update_lock,
-    _update_lock_path)
+from localm.media.managed_comfy import _LOCK_OWNER as _LOCK_OWNER
+from localm.media.managed_comfy import _acquire_update_lock, _release_update_lock
+from localm.media.managed_comfy import _update_lock_path as _update_lock_path
 from localm.media.managed_comfy_fresh import (
     COMFYUI_PINNED_COMMIT, COMFYUI_PINNED_VERSION, COMFYUI_REPO)
 from localm.media.managed_comfy_provision import (
@@ -49,8 +47,8 @@ from localm.media.managed_comfy_provision import (
 # The lock is an atomic mkdir at a sibling path of the checkout, shared with
 # remove_managed_comfy: the GUI route spawns `python -m localm comfy update` as
 # a CHILD PROCESS, so the contenders are separate interpreters. The helpers
-# (_update_lock_path, _acquire_update_lock, _release_update_lock, _LOCK_OWNER)
-# live in managed_comfy and are imported above.
+# live in managed_comfy and are imported above; _update_lock_path and
+# _LOCK_OWNER are re-exported from here.
 
 
 def _rev_parse_head(root: Path) -> Optional[str]:
