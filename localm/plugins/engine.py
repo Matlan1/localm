@@ -1432,6 +1432,12 @@ class PluginManager:
         """Active (loaded) iff installed (on disk) AND enabled."""
         return name in self._installed_set() and name in self._enabled_set()
 
+    def is_installed_or_on_disk(self, name: str) -> bool:
+        """True iff is_installed(name) or an installed directory named
+        *name* exists on disk without a manifest. The same union
+        uninstall() computes internally as its own "existed" check."""
+        return self.is_installed(name) or self._installed_dir_on_disk(name)
+
     def missing_requires(self, name: str) -> list:
         """Required plugins (declared) that are not currently installed."""
         spec = self._specs.get(name) or self.store_catalog().get(name)
@@ -1806,7 +1812,9 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def uninstall_plugin_engine(name: str, delete_data: bool = False):
         _valid_name_or_404(name)
-        was_installed = manager.is_installed(name)
+        # is_installed_or_on_disk(), not is_installed(): a manifest-less
+        # directory is something uninstall() below can still act on.
+        existed = manager.is_installed_or_on_disk(name)
         try:
             complete = manager.uninstall(name, delete_data=delete_data)
         except KeyError:
@@ -1817,7 +1825,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
             raise HTTPException(400, f"Uninstall failed: {e}")
         if complete:
             return {"status": "uninstalled", "name": name}
-        if not was_installed:
+        if not existed:
             raise HTTPException(404, f"No such plugin: {name}")
         detail = (
             f"Plugin {name!r} was disabled and unloaded, but it was not "

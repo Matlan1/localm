@@ -1785,6 +1785,38 @@ class TestNewToolCalls:
         assert "delete_data" in text
         mock_uninstall.assert_called_once_with("coder", delete_data=True)
 
+    def test_uninstall_plugin_reports_failure_for_a_manifestless_directory(
+            self, tmp_path, monkeypatch):
+        # A directory that exists on disk with no manifest (an interrupted or
+        # partial install) reads is_installed() == False, but uninstall()
+        # still attempts to remove it. The tool constructs its own
+        # PluginManager per call, so this drives a real one against a seeded
+        # directory rather than mocking is_installed()/uninstall() directly -
+        # it must not read that False as "nothing here" when removal fails.
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "HOME_DIR", tmp_path)
+        monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+        monkeypatch.setattr(_cfg, "CONFIG_FILE", tmp_path / "config.json")
+        monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+
+        stray = tmp_path / "plugins" / "p1"
+        stray.mkdir(parents=True)
+        (stray / "stray.py").write_text("# no manifest\n", encoding="utf-8")
+
+        from localm.plugins.engine import PluginManager
+        monkeypatch.setattr(PluginManager, "_remove_installed_dir",
+                            lambda self, name: False)
+
+        server, _ = _server()
+        resp = _req(server, "tools/call",
+                    {"name": "uninstall_plugin", "arguments": {"plugin": "p1"}})
+        assert resp["result"]["isError"] is True
+        text = resp["result"]["content"][0]["text"].lower()
+        assert "not fully uninstalled" in text
+        assert "successfully uninstalled" not in text
+        assert stray.is_dir(), "the injection did not take: removal succeeded"
+
 
 # --------------------------------------------------------------------------- #
 #  run_coder_task runs the coder IN THIS PROCESS on the shared EngineCache    #

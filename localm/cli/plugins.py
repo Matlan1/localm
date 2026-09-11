@@ -389,13 +389,15 @@ def plugin_uninstall_engine(name, delete_data):
 
     from localm import cli as _cli
     mgr = _cli._engine_manager()
-    was_installed = mgr.is_installed(name)
+    # is_installed_or_on_disk(), not is_installed(): a manifest-less
+    # directory is something uninstall() below can still act on.
+    existed = mgr.is_installed_or_on_disk(name)
     complete = run_or_die(mgr.uninstall, name, delete_data=delete_data,
                           missing_msg=f"No such plugin: {name}")
     if complete:
         console.print(f"[yellow]Uninstalled[/yellow] plugin [bold]{escape(name)}[/bold]")
         return
-    if not was_installed:
+    if not existed:
         console.print(f"[dim]Plugin {escape(repr(name))} was not installed.[/dim]")
         return
     console.print(f"[red]Plugin {escape(repr(name))} was disabled and unloaded, but it was "
