@@ -2205,7 +2205,7 @@ def _hang_restart_action(app) -> None:
     except Exception:
         pass
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
-    os.execv(sys.executable, _restart_argv(port))
+    os.execv(sys.executable, _execv_argv(_restart_argv(port)))
 
 
 def _diagnostics_allowed() -> bool:
@@ -3181,6 +3181,16 @@ def _restart_argv(port: Optional[int] = None) -> list:
     return argv
 
 
+def _execv_argv(argv: list) -> list:
+    """The argv list to hand os.execv. On Windows each element is wrapped in
+    the quoting the child's command-line parser reverses; on every other
+    platform the list is returned unchanged."""
+    import subprocess
+    if os.name != "nt":
+        return list(argv)
+    return [subprocess.list2cmdline([a]) for a in argv]
+
+
 def _do_restart(*, update_watchdog: Optional[dict] = None,
                 port: Optional[int] = None,
                 instance_id: Optional[str] = None) -> None:
@@ -3436,7 +3446,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # browser-open step checks and consumes this flag (never leaks into a
     # later, genuinely-fresh launch of the same process tree).
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
-    os.execv(sys.executable, _restart_argv(port))
+    os.execv(sys.executable, _execv_argv(_restart_argv(port)))
 
 
 def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,
@@ -4712,11 +4722,13 @@ async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[
         # producer thread holds - instead of one async-generator GC tick later.
         # No-op on a clean finish (the inner generator is already exhausted).
         try:
-            await gen.aclose()
-        except Exception:
-            from localm.debuglog import logger as _dbg
-            _dbg.exception("closing stream generator on unpin failed")
-        _unpin(engine)
+            try:
+                await gen.aclose()
+            except Exception:
+                from localm.debuglog import logger as _dbg
+                _dbg.exception("closing stream generator on unpin failed")
+        finally:
+            _unpin(engine)
 
 
 async def _stream_sse(
