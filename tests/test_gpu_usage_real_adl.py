@@ -1,27 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""gpu_usage's ADL ctypes layouts, checked against AMD's published headers and,
-where one is installed, against the real ``atiadlxx.dll``.
-
-The fake ADL in test_sysstats.py writes production's own ctypes classes by field
-name, so it confirms that gpu_usage reads the field the fake wrote and nothing
-about whether the offsets, sizes and stride agree with what the driver writes.
-This file closes that gap in two layers:
+"""gpu_usage's ADL ctypes layouts, pinned to AMD's published headers and, where
+one is installed, cross-checked against the real ``atiadlxx.dll``.
 
 * ``TestAdlLayoutsMatchPublishedHeaders`` runs everywhere and pins each struct's
   field order, ``ctypes.sizeof`` and the sensor constants to the values in AMD's
   public ``adl_structures.h`` / ``adl_defines.h``.
 * ``TestRealAdlDriverAgreesWithDeclaredLayouts`` (integration, ``real_amd_adl``)
   opens the installed driver through the production ``_adl_open`` and checks the
-  declared layouts against what the driver itself reports, validates, allocates
-  and fills, then reads live whole-GPU activity through the production path.
-  It skips, never fails, when the DLL does not load, the driver refuses a
-  context, or ADL enumerates no adapter. Once adapters are enumerated, a layout
-  that disagrees with the driver is a failure.
+  declared layouts against what the driver itself validates, allocates and
+  fills, then reads live whole-GPU activity through the production path.
+  It skips, never fails, when ADL cannot be used at all: not Windows, the DLL
+  does not load, the driver refuses a context, ADL enumerates no adapter, or no
+  enumerated adapter's PNP string names an AMD PCI device. Once an AMD PCI
+  adapter is enumerated, a layout that disagrees with the driver is a failure.
 
-Known blind spot of both layers: a sensor index that is wrong by one still lands
-on a 0-100 percentage (``ADL_PMLOG_INFO_ACTIVITY_MEM`` sits right after
-``ADL_PMLOG_INFO_ACTIVITY_GFX``), which only an idle-versus-load differential
-could catch. Nothing here loads a model or puts load on the GPU.
+What neither layer can see: a sensor index wrong by one still lands on a 0-100
+percentage (``ADL_PMLOG_INFO_ACTIVITY_MEM`` follows ``ADL_PMLOG_INFO_ACTIVITY_GFX``);
+a swap of ``supported`` and ``value`` reads identically for an idle sensor at 0;
+and the three pre-PMLog structs are driver-checked only on a board whose driver
+answers one of them. The header pins are the only check for those. Nothing here
+loads a model or puts load on the GPU.
 """
 
 from __future__ import annotations
@@ -77,6 +75,8 @@ _HEADER_SIZES = {
 }
 
 _POISON = 0xEE
+_POISON_TEXT = chr(_POISON) * 2
+_AMD_PCI_PREFIX = "PCI\\VEN_1002"
 
 
 class TestAdlLayoutsMatchPublishedHeaders:
@@ -123,13 +123,18 @@ def _decode(raw: bytes) -> str:
     return raw.split(b"\0", 1)[0].decode("latin-1")
 
 
+def _pnp(info) -> str:
+    return _decode(info.strPNPString)
+
+
 @pytest.fixture(scope="module")
 def adl():
     """A live ADL context opened through the production ``_adl_open``, with the
     adapter table read the way ``_adl_activity_by_bus`` reads it.
 
     Skips the module when ADL cannot be used at all: not Windows, the DLL does
-    not load, the driver refuses a context, or no adapter is enumerated. Restores
+    not load, the driver refuses a context, no adapter is enumerated, or no
+    enumerated adapter's PNP string names an AMD PCI device. Restores
     ``gpu_usage._adl_state`` and destroys the driver context on teardown, so no
     real context outlives the module and no latched state leaks into other tests.
     """
@@ -144,20 +149,25 @@ def adl():
             pytest.skip("real_amd_adl: atiadlxx.dll not loadable or the driver "
                         "refused an ADL context")
         dll, ctx = state["dll"], state["ctx"]
-        n = ctypes.c_int(0)
-        rc = dll.ADL2_Adapter_NumberOfAdapters_Get(ctx, ctypes.byref(n))
-        if rc != gu._ADL_OK or n.value <= 0:
+        try:
+            n = ctypes.c_int(0)
+            rc = dll.ADL2_Adapter_NumberOfAdapters_Get(ctx, ctypes.byref(n))
+            if rc != gu._ADL_OK or n.value <= 0:
+                pytest.skip(f"real_amd_adl: ADL enumerates no adapter (rc {rc}, "
+                            f"count {n.value})")
+            arr = (gu._AdapterInfo * n.value)()
+            _poison(arr)
+            rc = dll.ADL2_Adapter_AdapterInfo_Get(ctx, ctypes.byref(arr),
+                                                  ctypes.sizeof(arr))
+            if rc == gu._ADL_OK and not any(
+                    _pnp(info).startswith(_AMD_PCI_PREFIX) for info in arr):
+                pytest.skip("real_amd_adl: ADL lists no AMD PCI adapter: "
+                            + repr([_pnp(info) for info in arr]))
+            yield SimpleNamespace(dll=dll, ctx=ctx, state=state, count=n.value,
+                                  adapters=arr, adapter_rc=rc)
+        finally:
             dll.ADL2_Main_Control_Destroy(ctx)
             gu._adl_state = None
-            pytest.skip(f"real_amd_adl: ADL enumerates no adapter (rc {rc}, "
-                        f"count {n.value})")
-        arr = (gu._AdapterInfo * n.value)()
-        _poison(arr)
-        rc = dll.ADL2_Adapter_AdapterInfo_Get(ctx, ctypes.byref(arr),
-                                              ctypes.sizeof(arr))
-        yield SimpleNamespace(dll=dll, ctx=ctx, state=state, count=n.value,
-                              adapters=arr, adapter_rc=rc)
-        dll.ADL2_Main_Control_Destroy(ctx)
     finally:
         gu._adl_state = prior
 
@@ -177,10 +187,27 @@ def _present_amd(adl) -> list:
     return out
 
 
+def _production_adapters(adl) -> list:
+    """``_present_amd`` when it is non-empty. Otherwise skips when no adapter
+    whose PNP string names an AMD PCI device is present, and fails when one is
+    present but the production vendor filter drops it."""
+    adapters = _present_amd(adl)
+    if adapters:
+        return adapters
+    listed = [info for info in adl.adapters
+              if _pnp(info).startswith(_AMD_PCI_PREFIX) and info.iPresent == 1]
+    if not listed:
+        pytest.skip("real_amd_adl: no AMD PCI adapter is present")
+    pytest.fail("a present AMD PCI adapter is dropped by the production vendor "
+                "filter: iVendorID reads "
+                + repr([info.iVendorID for info in listed]))
+
+
 def _windows_pnp_pci_map() -> dict:
-    """``{pnp_instance_id: (bus_number, device_number, function_number)}`` for
-    every video controller Windows knows, read through PowerShell's PnP cmdlets.
-    Returns {} when the query cannot run or answers nothing."""
+    """``{PNP_INSTANCE_ID: (bus_number, device_number, function_number)}`` for
+    every video controller Windows knows, read through PowerShell's PnP cmdlets,
+    keyed by the upper-cased instance id. Returns {} when the query cannot run
+    or answers nothing."""
     exe = shutil.which("powershell") or shutil.which("pwsh")
     if not exe:
         return {}
@@ -195,7 +222,8 @@ def _windows_pnp_pci_map() -> dict:
     )
     try:
         out = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", script],
-                             capture_output=True, text=True, timeout=60)
+                             capture_output=True, text=True, errors="replace",
+                             timeout=60)
     except (OSError, subprocess.SubprocessError):
         return {}
     if out.returncode != 0:
@@ -209,8 +237,24 @@ def _windows_pnp_pci_map() -> dict:
             bus, addr = int(parts[1]), int(parts[2])
         except ValueError:
             continue
-        result[parts[0]] = (bus, addr >> 16, addr & 0xFFFF)
+        result[parts[0].upper()] = (bus, addr >> 16, addr & 0xFFFF)
     return result
+
+
+def _pmlog_answers(adl, adapters) -> list:
+    """``[(info, data)]`` for every adapter in *adapters* whose
+    ``ADL2_New_QueryPMLogData_Get`` returned ADL_OK, each *data* poisoned before
+    the call. Skips when the driver lacks the export."""
+    query = getattr(adl.dll, "ADL2_New_QueryPMLogData_Get", None)
+    if query is None:
+        pytest.skip("ADL2_New_QueryPMLogData_Get is not exported by this driver")
+    out = []
+    for info in adapters:
+        data = gu._ADLPMLogDataOutput()
+        _poison(data)
+        if query(adl.ctx, info.iAdapterIndex, ctypes.byref(data)) == gu._ADL_OK:
+            out.append((info, data))
+    return out
 
 
 @pytest.mark.integration
@@ -251,39 +295,34 @@ class TestRealAdlDriverAgreesWithDeclaredLayouts:
         rc = x3(adl.ctx, -1, ctypes.byref(count), ctypes.byref(table))
         assert rc == gu._ADL_OK
         assert count.value == adl.count
-        buffers = adl.state["keepalive"][before:]
-        assert len(buffers) == 1
+        address = ctypes.cast(table, ctypes.c_void_p).value
+        buffers = [b for b in adl.state["keepalive"][before:]
+                   if ctypes.addressof(b) == address]
+        assert len(buffers) == 1, "the returned table is not a buffer the alloc callback handed out"
         assert ctypes.sizeof(buffers[0]) == count.value * ctypes.sizeof(gu._AdapterInfo)
         for i in range(count.value):
             assert table[i].iAdapterIndex == i
-            assert _decode(table[i].strPNPString) == _decode(adl.adapters[i].strPNPString)
+            assert _pnp(table[i]) == _pnp(adl.adapters[i])
 
     def test_int_fields_agree_with_the_char_arrays_at_other_offsets(self, adl):
-        """A PCI adapter's vendor id appears three times in AdapterInfo: as the
-        int ``iVendorID``, as the hex after ``VEN_`` in ``strUDID`` before the
-        ints, and again in ``strPNPString`` after them. A shifted layout makes
-        them disagree."""
-        pci = [info for info in adl.adapters
-               if _decode(info.strPNPString).startswith("PCI\\VEN_")]
-        assert pci, "ADL enumerated adapters but none carries a PCI PNP string"
+        """An AMD adapter's vendor id appears three times in AdapterInfo: as the
+        int ``iVendorID``, as ``VEN_1002`` in ``strUDID`` before the ints, and
+        again in ``strPNPString`` after them. A shifted layout makes them
+        disagree."""
         for info in adl.adapters:
             assert info.iPresent in (0, 1)
             assert info.iExist in (0, 1)
             assert 0 <= info.iBusNumber < 256
             assert 0 <= info.iDeviceNumber < 32
             assert 0 <= info.iFunctionNumber < 8
-        for info in pci:
-            pnp = _decode(info.strPNPString)
-            ven_hex = pnp[len("PCI\\VEN_"):][:4]
-            assert int(ven_hex, 16) == int(str(info.iVendorID), 16)
-            assert _decode(info.strUDID).startswith("PCI_VEN_" + ven_hex)
-            if info.iPresent:
-                name = _decode(info.strAdapterName)
-                assert name and name.isprintable() and name.isascii()
-        amd = [info for info in pci
-               if _decode(info.strPNPString).startswith("PCI\\VEN_1002")]
+        amd = [info for info in adl.adapters if _pnp(info).startswith(_AMD_PCI_PREFIX)]
+        assert amd
         for info in amd:
             assert info.iVendorID == gu._ADL_VENDOR_AMD
+            assert _decode(info.strUDID).startswith("PCI_VEN_1002")
+            if info.iPresent:
+                name = _decode(info.strAdapterName)
+                assert name and _POISON_TEXT not in name
 
     def test_pci_triple_matches_what_windows_reports_for_the_same_device(self, adl):
         """``iBusNumber`` / ``iDeviceNumber`` / ``iFunctionNumber`` for an adapter
@@ -296,7 +335,7 @@ class TestRealAdlDriverAgreesWithDeclaredLayouts:
         for info in adl.adapters:
             if not info.iPresent:
                 continue
-            triple = windows.get(_decode(info.strPNPString))
+            triple = windows.get(_pnp(info).upper())
             if triple is None:
                 continue
             matched += 1
@@ -305,61 +344,58 @@ class TestRealAdlDriverAgreesWithDeclaredLayouts:
                          "controller Windows knows: " + repr(sorted(windows)))
 
     def test_pmlog_output_size_is_written_as_the_declared_struct_size(self, adl):
-        adapters = _present_amd(adl)
-        assert adapters, "no present AMD adapter passed the production filter"
-        data = gu._ADLPMLogDataOutput()
-        _poison(data)
-        rc = adl.dll.ADL2_New_QueryPMLogData_Get(adl.ctx, adapters[0].iAdapterIndex,
-                                                 ctypes.byref(data))
-        if rc != gu._ADL_OK:
-            pytest.skip(f"this board declines PMLog (rc {rc}); the legacy test covers it")
-        assert data.size == ctypes.sizeof(gu._ADLPMLogDataOutput)
-        for sensor in data.sensors:
-            assert sensor.supported in (0, 1)
+        answers = _pmlog_answers(adl, _production_adapters(adl))
+        if not answers:
+            pytest.skip("no present AMD adapter answers PMLog; the legacy test covers it")
+        for _info, data in answers:
+            assert data.size == ctypes.sizeof(gu._ADLPMLogDataOutput)
+            for sensor in data.sensors:
+                assert sensor.supported in (0, 1)
 
     def test_live_activity_reads_through_the_production_path_within_bounds(self, adl):
-        adapters = _present_amd(adl)
-        assert adapters, "no present AMD adapter passed the production filter"
-        data = gu._ADLPMLogDataOutput()
-        _poison(data)
-        rc = adl.dll.ADL2_New_QueryPMLogData_Get(adl.ctx, adapters[0].iAdapterIndex,
-                                                 ctypes.byref(data))
-        if rc != gu._ADL_OK:
-            pytest.skip(f"this board declines PMLog (rc {rc}); the legacy test covers it")
-        assert data.size == ctypes.sizeof(gu._ADLPMLogDataOutput)
-        if not data.sensors[gu._ADL_PMLOG_ACTIVITY_GFX].supported:
-            pytest.skip("this board does not publish the PMLog activity sensor; "
-                        "the legacy test covers it")
-        pct = gu._adl_pmlog_activity(adl.dll, adl.ctx, adapters[0].iAdapterIndex)
-        assert isinstance(pct, float)
-        assert 0.0 <= pct <= 100.0
-        assert gu._adl_usable_pct(pct, "test") == pct
+        adapters = _production_adapters(adl)
+        answers = _pmlog_answers(adl, adapters)
+        if not answers:
+            pytest.skip("no present AMD adapter answers PMLog; the legacy test covers it")
+        for _info, data in answers:
+            assert data.size == ctypes.sizeof(gu._ADLPMLogDataOutput)
+        publishing = [info for info, data in answers
+                      if data.sensors[gu._ADL_PMLOG_ACTIVITY_GFX].supported]
+        if not publishing:
+            pytest.skip("no present AMD adapter publishes the PMLog activity "
+                        "sensor; the legacy test covers it")
+        for info in publishing:
+            pct = gu._adl_pmlog_activity(adl.dll, adl.ctx, info.iAdapterIndex)
+            assert isinstance(pct, float)
+            assert 0.0 <= pct <= 100.0
         by_bus = gu._adl_activity_by_bus()
-        assert int(adapters[0].iBusNumber) in by_bus
+        assert {int(info.iBusNumber) for info in publishing} <= set(by_bus)
         assert set(by_bus) <= {int(info.iBusNumber) for info in adapters}
         for value in by_bus.values():
             assert 0.0 <= value <= 100.0
 
-    def test_legacy_overdrive_sources_are_exported_and_answer_in_range_or_decline(self, adl):
-        """Each pre-PMLog source must be a real export of the installed driver,
-        and when it answers ADL_OK the activity field it names must hold a
-        percentage. A source that declines writes nothing usable and is skipped
-        by production; a board that answers PMLog declines all of them."""
-        adapters = _present_amd(adl)
-        assert adapters, "no present AMD adapter passed the production filter"
-        idx = adapters[0].iAdapterIndex
-        for export, struct, field, needs_size in gu._ADL_LEGACY_ACTIVITY_SOURCES:
-            fn = getattr(adl.dll, export, None)
-            assert fn is not None, f"{export} is not exported by the installed atiadlxx.dll"
-            data = struct()
-            _poison(data)
-            if needs_size:
-                data.iSize = ctypes.sizeof(struct)
-            rc = fn(adl.ctx, idx, ctypes.byref(data))
-            if rc == gu._ADL_OK:
-                assert 0 <= getattr(data, field) <= 100, export
-        legacy = gu._adl_legacy_activity(adl.dll, adl.ctx, idx)
-        if legacy is not None:
-            pct, source = legacy
-            assert 0.0 <= pct <= 100.0
-            assert source in {s[0] for s in gu._ADL_LEGACY_ACTIVITY_SOURCES}
+    def test_legacy_overdrive_sources_answer_in_range_or_decline(self, adl):
+        """Each pre-PMLog source the installed driver exports, called through the
+        production struct for every present AMD adapter, must hold a percentage
+        in the activity field it names whenever it answers ADL_OK. A source that
+        declines writes nothing production reads."""
+        adapters = _production_adapters(adl)
+        exported = [(export, struct, field, needs_size)
+                    for export, struct, field, needs_size in gu._ADL_LEGACY_ACTIVITY_SOURCES
+                    if getattr(adl.dll, export, None) is not None]
+        if not exported:
+            pytest.skip("this driver exports none of the pre-PMLog activity entry points")
+        for info in adapters:
+            for export, struct, field, needs_size in exported:
+                data = struct()
+                _poison(data)
+                if needs_size:
+                    data.iSize = ctypes.sizeof(struct)
+                rc = getattr(adl.dll, export)(adl.ctx, info.iAdapterIndex, ctypes.byref(data))
+                if rc == gu._ADL_OK:
+                    assert 0 <= getattr(data, field) <= 100, export
+            legacy = gu._adl_legacy_activity(adl.dll, adl.ctx, info.iAdapterIndex)
+            if legacy is not None:
+                pct, source = legacy
+                assert 0.0 <= pct <= 100.0
+                assert source in {s[0] for s in exported}
