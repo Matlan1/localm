@@ -895,7 +895,8 @@ def _acquire_heavy_slot(slot: Path, stale_after: float = _HEAVY_SLOT_STALE_AFTER
     mtime is older than ``stale_after`` seconds is reclaimed: it is unlinked and
     the create retried, so a crashed holder's leftover, or a holder still
     running past ``stale_after``, hands the slot over. A slot that vanishes
-    between the failed create and the stat is retried immediately.
+    between the failed create and the stat is retried immediately; one whose
+    stat fails otherwise is waited on as if young.
 
     Returns None when the slot could not be owned within ``stale_after`` seconds
     of waiting (the reclaim's unlink keeps being refused, or fresh holders keep
@@ -918,8 +919,10 @@ def _acquire_heavy_slot(slot: Path, stale_after: float = _HEAVY_SLOT_STALE_AFTER
             return token
         try:
             age = time.time() - slot.stat().st_mtime
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            age = 0.0
         if age > stale_after:
             try:
                 slot.unlink()

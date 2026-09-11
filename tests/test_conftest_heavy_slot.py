@@ -33,7 +33,7 @@ def _live_conftest():
     """The tests/conftest.py module object loaded in THIS session."""
     for module in list(sys.modules.values()):
         file = getattr(module, "__file__", None)
-        if file and os.path.normcase(os.path.abspath(file)) == _REAL_CONFTEST:
+        if isinstance(file, str) and os.path.normcase(os.path.abspath(file)) == _REAL_CONFTEST:
             return module
     raise AssertionError("tests/conftest.py is not loaded in this session")
 
@@ -183,6 +183,28 @@ def test_un_owned_timeout_leaves_the_slot_alone(tmp_path, helpers, monkeypatch):
     release(slot, token)
     assert _content(slot) == "crashed-holder"
     assert len(refused) == attempts, "an un-owned release tried to unlink the slot"
+
+
+def test_slot_whose_stat_fails_is_waited_on_within_the_budget(tmp_path, helpers, monkeypatch):
+    """A slot that exists but cannot be stat-ed is neither reclaimed nor spun
+    on: acquire gives up within its budget without ownership."""
+    acquire, _ = helpers
+    slot = tmp_path / "slot"
+    slot.write_text("unreadable-holder", encoding="utf-8")
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError(13, "stat refused by the test", str(self))
+
+    monkeypatch.setattr(Path, "stat", refuse)
+    result: list = []
+    thread = threading.Thread(
+        target=lambda: result.append(acquire(slot, stale_after=0.5)), daemon=True)
+    thread.start()
+    thread.join(timeout=10.0)
+
+    assert _content(slot) == "unreadable-holder", "a slot that could not be stat-ed was taken"
+    assert not thread.is_alive(), "acquire did not give up within its budget"
+    assert result == [None], "reported ownership of a slot it never created"
 
 
 def test_fixture_takes_and_releases_the_shared_slot_name(tmp_path, monkeypatch, request):
