@@ -535,15 +535,18 @@ def _content_spans_in_prompt(
     messages: List[Dict],
     prompt: str,
     fallback_reason: Optional[str],
-) -> Optional[List[Tuple[int, int]]]:
+) -> Optional[List[Tuple[int, int, int]]]:
     """Character ranges in *prompt* holding each message's content, or ``None``.
 
     Renders *messages* a second time with every content replaced by a unique
     sentinel, then substitutes the real contents back into that skeleton and
     requires the result to equal *prompt*. The ranges are only returned when
-    that equality holds, so a template that trims, escapes, reorders, drops or
+    that equality holds, so a template that escapes, reorders, drops or
     duplicates content yields ``None`` rather than a wrong offset. Nothing is
-    searched for inside the rendered output.
+    searched for inside the rendered output. A template that trims a content's
+    surrounding whitespace (the built-in llama3 and gemma formatters) is
+    located with the trimmed text; each item carries the number of leading
+    characters stripped, see ``textguard.content_spans_via_sentinels``.
     """
     contents = [_extract_text(m.get("content", "")) for m in messages]
 

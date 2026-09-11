@@ -130,7 +130,7 @@ def _catalogue_entry(tool, text: str):
     """*text* as a ``compose()`` part: an untrusted range when *tool* is
     flagged ``untrusted_docs`` (its name, description and params came from an
     MCP server or a plugin), else a trusted plain string."""
-    if getattr(tool, "untrusted_docs", False):
+    if getattr(tool, "untrusted_docs", False) is True:
         return untrusted_span(text)
     return text
 

@@ -237,16 +237,35 @@ _SENTINEL_OPEN = "\ue000"
 _SENTINEL_CLOSE = "\ue001"
 
 
-def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tuple[int, int]]]":
+# The whitespace a chat template's trim removes from both ends of a message:
+# C isspace() for llama.cpp's built-in formatters, Jinja's |trim for an HF
+# template. ASCII only, so a non-ASCII space is never mistaken for trimming.
+_TRIM_CHARS = " \t\n\r\v\f"
+
+
+def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tuple[int, int, int]]]":
     """Locate each of *contents* inside *rendered*, or return ``None``.
 
     *render* takes a list of replacement contents and returns the template's
     output for them. This calls it once with a unique sentinel per content,
     substitutes the real contents back into that skeleton, and requires the
     result to EQUAL *rendered*. Offsets are only returned when that holds, so a
-    template that trims, escapes, reorders, drops or duplicates content yields
+    template that escapes, reorders, drops or duplicates content yields
     ``None`` instead of a wrong offset, and nothing is ever searched for inside
     the rendered output.
+
+    A template that TRIMS a content's leading and trailing whitespace
+    (llama.cpp's built-in llama3 and gemma formatters, Jinja's ``|trim``) is
+    located too: for each content the verbatim text is tried first and the
+    ``_TRIM_CHARS``-stripped text second, whichever the rendered text continues
+    with at that position (followed by the template's next wrapper, so trailing
+    whitespace the template emitted itself is not mistaken for the content's).
+    The equality check at the end still gates the result.
+
+    Each returned item is ``(start, end, lead)``: the rendered range holding
+    the content as it survived, and the number of leading characters the
+    template stripped (0 when the content is verbatim). :func:`map_untrusted_ranges`
+    uses *lead* to shift a content's own ranges and clips them to the range.
     """
     import uuid
 
@@ -262,22 +281,40 @@ def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tu
     if not isinstance(skeleton, str):
         return None
 
-    rebuilt: List[str] = []
-    spans: List[Tuple[int, int]] = []
-    out_len = 0
+    positions: List[int] = []
     pos = 0
-    for sentinel, content in zip(sentinels, contents):
+    for sentinel in sentinels:
         found = skeleton.find(sentinel, pos)
         if found < 0:
             return None
-        wrapper = skeleton[pos:found]
+        positions.append(found)
+        pos = found + len(sentinel)
+    wrappers = [skeleton[:positions[0]]] if sentinels else [skeleton]
+    for i in range(1, len(sentinels)):
+        wrappers.append(skeleton[positions[i - 1] + len(sentinels[i - 1]):positions[i]])
+    if sentinels:
+        wrappers.append(skeleton[positions[-1] + len(sentinels[-1]):])
+
+    rebuilt: List[str] = []
+    spans: List[Tuple[int, int, int]] = []
+    out_len = 0
+    for i, content in enumerate(contents):
+        wrapper = wrappers[i]
         rebuilt.append(wrapper)
         out_len += len(wrapper)
-        spans.append((out_len, out_len + len(content)))
-        rebuilt.append(content)
-        out_len += len(content)
-        pos = found + len(sentinel)
-    rebuilt.append(skeleton[pos:])
+        following = wrappers[i + 1]
+        if rendered.startswith(content + following, out_len):
+            piece, lead = content, 0
+        else:
+            stripped = content.strip(_TRIM_CHARS)
+            if stripped == content or not rendered.startswith(stripped + following, out_len):
+                return None
+            piece = stripped
+            lead = len(content) - len(content.lstrip(_TRIM_CHARS))
+        spans.append((out_len, out_len + len(piece), lead))
+        rebuilt.append(piece)
+        out_len += len(piece)
+    rebuilt.append(wrappers[-1])
 
     if "".join(rebuilt) != rendered:
         return None
@@ -285,10 +322,23 @@ def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tu
 
 
 def map_untrusted_ranges(content_spans, per_content_spans) -> Tuple[Tuple[int, int], ...]:
-    """Shift each content's own untrusted ranges into rendered-text coordinates."""
+    """Shift each content's own untrusted ranges into rendered-text coordinates.
+
+    A content span is ``(start, end)`` or ``(start, end, lead)`` as returned by
+    :func:`content_spans_via_sentinels`. A range is shifted by *lead* (the
+    characters a trimming template stripped from the front) and clipped to the
+    span, so a range over stripped whitespace maps to nothing rather than to
+    the template's own text.
+    """
     ranges: List[Tuple[int, int]] = []
-    for (start, _end), local in zip(content_spans, per_content_spans):
-        ranges.extend((start + a, start + b) for a, b in local)
+    for span, local in zip(content_spans, per_content_spans):
+        start, end = span[0], span[1]
+        lead = span[2] if len(span) > 2 else 0
+        for a, b in local:
+            lo = start + max(a - lead, 0)
+            hi = start + max(min(b - lead, end - start), 0)
+            if hi > lo:
+                ranges.append((lo, hi))
     return tuple(ranges)
 
 
