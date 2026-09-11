@@ -43,10 +43,11 @@ from localm.inference.http_server import principal_id, require_scope
 # ComfyUI's custom_nodes - potentially tens of thousands of files - with no
 # internal timeout of its own. 120s is generous for even a large tree on a slow
 # disk; exceeding it means a file lock held by a dead process or a hung
-# filesystem call, not ordinary deletion time. A second concurrent rmtree after
-# a client retries past this timeout is prevented by remove_managed_comfy()'s
-# own lock (managed_comfy.py's _remove_lock), held for the whole delete
-# regardless of whether the caller is still waiting on it.
+# filesystem call, not ordinary deletion time. A client retry past this timeout
+# queues behind the abandoned worker's rmtree on remove_managed_comfy()'s
+# in-process _remove_lock; a remove racing an update or setup CHILD PROCESS is
+# refused by the cross-process mkdir lock those share (managed_comfy.py), on
+# top of the in-flight-job checks in the routes below.
 _REMOVE_TIMEOUT_S = 120.0
 
 
@@ -196,7 +197,8 @@ def register(app: FastAPI, ctx) -> None:
         instance actually reads as installed (never repair-away a real one) or a
         setup job is already running (no double-launch)."""
         from localm.media.managed_comfy import (
-            is_managed_comfy_installed, managed_comfy_paths, remove_managed_comfy,
+            ManagedComfyBusy, is_managed_comfy_installed, managed_comfy_paths,
+            remove_managed_comfy,
         )
         if is_managed_comfy_installed():
             raise HTTPException(409, "This managed ComfyUI is already installed - "
@@ -211,6 +213,8 @@ def register(app: FastAPI, ctx) -> None:
                 remove_managed_comfy, False, timeout=_REMOVE_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Clearing the incomplete install timed out: {e}")
+        except ManagedComfyBusy as e:
+            raise HTTPException(409, e.reason)
         if failed:
             raise HTTPException(500, "Could not clear the incomplete install: "
                                 + "; ".join(failed))
@@ -272,13 +276,27 @@ def register(app: FastAPI, ctx) -> None:
         folder) via the shared remove_managed_comfy helper - the same removal the
         `localm comfy remove` CLI runs. The user's own ComfyUI is never touched. A
         delete that fails is surfaced (500), never reported as success; an honest
-        no-op is returned when nothing is installed."""
-        from localm.media.managed_comfy import remove_managed_comfy
+        no-op is returned when nothing is installed.
+
+        Refuses (409) while an update or setup/repair job is still in flight, and
+        when another localm process holds the managed-checkout lock - never a
+        delete under a checkout something else is rewriting."""
+        from localm.media.managed_comfy import ManagedComfyBusy, remove_managed_comfy
+        if jobs.has_running("comfy-update"):
+            raise HTTPException(
+                409, "A ComfyUI update is still running - wait for it to finish, then "
+                "remove.")
+        if jobs.has_running("comfy-setup"):
+            raise HTTPException(
+                409, "A ComfyUI setup is still running - wait for it to finish, then "
+                "remove.")
         try:
             removed, failed = await run_in_threadpool_bounded(
                 remove_managed_comfy, with_models, timeout=_REMOVE_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Removing the managed ComfyUI timed out: {e}")
+        except ManagedComfyBusy as e:
+            raise HTTPException(409, e.reason)
         if failed:
             raise HTTPException(500, "Could not remove: " + "; ".join(failed))
         if not removed:

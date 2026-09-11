@@ -34,6 +34,9 @@ from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media.comfy_patches import apply_patches
+from localm.media.managed_comfy import (
+    _LOCK_OWNER, _acquire_update_lock, _lock_holder_pid, _release_update_lock,
+    _update_lock_path)
 from localm.media.managed_comfy_fresh import (
     COMFYUI_PINNED_COMMIT, COMFYUI_PINNED_VERSION, COMFYUI_REPO)
 from localm.media.managed_comfy_provision import (
@@ -41,104 +44,13 @@ from localm.media.managed_comfy_provision import (
 
 
 # --------------------------------------------------------------------------- #
-#  Single-flight: only ONE update may mutate the managed checkout at a time.   #
+#  Single-flight: only ONE process may mutate the managed checkout at a time.  #
 # --------------------------------------------------------------------------- #
-# An update is a long MUTATION of one working tree: fetch, checkout to a new commit,
-# re-apply the patch set, and on failure roll the checkout back and re-apply the OLD
-# patch set. Two of those interleaved is a corrupted checkout, or one call's
-# rollback restoring over the other's in-flight update.
-#
-# It MUST be cross-process, not a threading.Lock: the GUI route does not call this
-# function in-process at all, it spawns `python -m localm comfy update` as a CHILD
-# PROCESS, so the two contenders are separate interpreters. (managed_comfy._remove_lock
-# is a threading.Lock and is correct for ITS job, which is in-process only - it
-# would guard nothing here.)
-#
-# mkdir is ATOMIC; stat-then-create is not - two callers can both observe "free" in
-# the gap and both proceed.
-_LOCK_OWNER = "owner.json"
-
-
-def _update_lock_path() -> Path:
-    """Where the update lock lives: a SIBLING of the managed checkout, never inside
-    it, so the update's own ``git checkout --force`` can never disturb the lock that
-    is protecting it."""
-    root = mc.managed_comfy_paths().root
-    return root.parent / (root.name + ".update.lock")
-
-
-def _lock_holder_pid(lock: Path) -> Optional[int]:
-    """The pid recorded in the lock, or None when it cannot be read."""
-    try:
-        data = json.loads((lock / _LOCK_OWNER).read_text(encoding="utf-8"))
-        pid = data.get("pid") if isinstance(data, dict) else None
-        return pid if isinstance(pid, int) else None
-    except (OSError, ValueError):
-        return None
-
-
-def _acquire_update_lock() -> tuple:
-    """Take the update lock. Returns ``(True, "")`` or ``(False, <honest reason>)``.
-
-    FAILS FAST rather than waiting: an update takes minutes, so a caller blocked on
-    the lock would be indistinguishable from a hang.
-
-    Staleness is judged by PID LIVENESS, never by elapsed time. The operation is
-    unbounded (a fetch over a slow link, a dependency reinstall), so any fixed
-    timeout would eventually reclaim a LIVE holder's lock and produce the exact
-    concurrent mutation this exists to prevent. ``pid_alive`` is conservative -
-    when it genuinely cannot tell it returns True - so an uncertain answer keeps
-    the lock rather than stealing it."""
-    from localm.instances import pid_alive
-    lock = _update_lock_path()
-    for attempt in (1, 2):
-        try:
-            lock.parent.mkdir(parents=True, exist_ok=True)
-            os.mkdir(str(lock))                      # ATOMIC: creates or raises
-        except FileExistsError:
-            pid = _lock_holder_pid(lock)
-            if pid is not None and not pid_alive(pid):
-                # The holder is provably gone (a crash, a killed process). Reclaim
-                # once, then retry the atomic create - never assume the retry wins,
-                # another caller may have taken it in between.
-                logger.debug("reclaiming stale comfy-update lock from dead pid %s", pid)
-                try:
-                    shutil.rmtree(str(lock))
-                except OSError as e:
-                    return False, (f"An earlier ComfyUI update left a lock at {lock} "
-                                   f"that could not be cleared ({e}). Remove that "
-                                   "folder and try again.")
-                if attempt == 1:
-                    continue
-                return False, "Another ComfyUI update is already running."
-            if pid is None:
-                # Cannot tell who holds it: do NOT steal (that is how two updates end
-                # up interleaved). Say exactly how to clear it by hand instead.
-                return False, (f"A ComfyUI update lock exists at {lock} but its owner "
-                               "could not be read. If no update is running, remove "
-                               "that folder and try again.")
-            return False, (f"Another ComfyUI update is already running (process {pid}). "
-                           "Wait for it to finish, then try again.")
-        except OSError as e:
-            return False, f"Could not take the ComfyUI update lock at {lock}: {e}"
-        # Won the create. Record the owner IMMEDIATELY so a contender can judge us.
-        try:
-            (lock / _LOCK_OWNER).write_text(
-                json.dumps({"pid": os.getpid()}), encoding="utf-8")
-        except OSError as e:
-            logger.debug("could not write comfy-update lock owner: %s", e)
-        return True, ""
-    return False, "Another ComfyUI update is already running."
-
-
-def _release_update_lock() -> None:
-    """Drop the lock. Never raises: a failure to clean up must not turn a SUCCESSFUL
-    update into a reported failure - and a leftover lock is self-healing anyway, since
-    the next caller finds our dead pid and reclaims it."""
-    try:
-        shutil.rmtree(str(_update_lock_path()))
-    except OSError as e:
-        logger.debug("could not remove comfy-update lock: %s", e)
+# The lock is an atomic mkdir at a sibling path of the checkout, shared with
+# remove_managed_comfy: the GUI route spawns `python -m localm comfy update` as
+# a CHILD PROCESS, so the contenders are separate interpreters. The helpers
+# (_update_lock_path, _acquire_update_lock, _release_update_lock, _LOCK_OWNER)
+# live in managed_comfy and are imported above.
 
 
 def _rev_parse_head(root: Path) -> Optional[str]:

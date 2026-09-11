@@ -26,6 +26,7 @@ Layout under LOCALM_HOME:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -35,15 +36,15 @@ from pathlib import Path
 from typing import Optional
 
 from localm.config import home_dir, load_config
+from localm.debuglog import logger
 
-# Serializes remove_managed_comfy() against itself. The CLI (`localm comfy
-# remove`) and the GUI's /api/comfy/remove + /api/comfy/repair routes are two
-# independent callers of the SAME rmtree target, and the GUI routes wrap their
-# call in run_in_threadpool_bounded, whose deadline only makes the AWAITING
-# request give up while the real rmtree keeps running on its abandoned worker
-# thread. Without this lock a retry after a timeout starts a SECOND concurrent
-# rmtree against the same tree. One lock is enough: there is only ever ONE
-# managed ComfyUI install, not one per media type.
+# Serializes remove_managed_comfy() callers WITHIN this process: a GUI retry
+# after a timed-out request queues behind the abandoned first call's rmtree
+# instead of starting a second one. Other localm processes (the CLI, the
+# update/setup children the GUI spawns) are serialized by the mkdir lock at
+# _update_lock_path(), which remove_managed_comfy takes inside this one.
+# LOCK ORDER: _remove_lock (outer) -> the mkdir lock (inner).
+# See test_remove_managed_comfy_lock_survives_an_abandoned_caller.
 _remove_lock = threading.Lock()
 
 # Directory names under LOCALM_HOME. Kept as constants so S2/S3 and the CLI all
@@ -156,6 +157,106 @@ def managed_comfy_remove_targets(with_models: bool = False) -> list:
     return targets
 
 
+# --------------------------------------------------------------------------- #
+#  Single-flight across PROCESSES: one mutation of the managed checkout at a   #
+#  time (update, remove).                                                      #
+# --------------------------------------------------------------------------- #
+# An atomic mkdir at a SIBLING path of the checkout, never inside it, so an
+# update's `git checkout --force` and a remove's rmtree never touch the lock
+# protecting them. Held by update_managed_comfy (managed_comfy_update.py) and
+# remove_managed_comfy below.
+_LOCK_OWNER = "owner.json"
+
+
+class ManagedComfyBusy(Exception):
+    """Another localm process holds the managed-checkout lock. ``reason`` names
+    the holder."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _update_lock_path() -> Path:
+    """Where the managed-checkout lock lives: ``<root>.update.lock``, a sibling
+    of the checkout."""
+    root = managed_comfy_paths().root
+    return root.parent / (root.name + ".update.lock")
+
+
+def _lock_holder(lock: Path) -> tuple:
+    """``(pid, op)`` recorded in the lock's owner file. ``pid`` is None when it
+    cannot be read; ``op`` is "update" when absent."""
+    try:
+        data = json.loads((lock / _LOCK_OWNER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "update"
+    if not isinstance(data, dict):
+        return None, "update"
+    pid = data.get("pid")
+    op = data.get("op")
+    return (pid if isinstance(pid, int) else None,
+            op if isinstance(op, str) and op else "update")
+
+
+def _lock_holder_pid(lock: Path) -> Optional[int]:
+    """The pid recorded in the lock, or None when it cannot be read."""
+    return _lock_holder(lock)[0]
+
+
+def _acquire_update_lock(op: str = "update") -> tuple:
+    """Take the managed-checkout lock for *op* ("update" or "remove"). Returns
+    ``(True, "")`` or ``(False, <reason>)``.
+
+    Fails fast rather than waiting. Staleness is judged by PID LIVENESS, never
+    by elapsed time: a lock whose recorded owner is provably dead is reclaimed
+    once, an unreadable owner is never stolen, and ``pid_alive``'s "cannot tell"
+    answer keeps the lock. The reason names the holder's pid and operation."""
+    from localm.instances import pid_alive
+    lock = _update_lock_path()
+    for attempt in (1, 2):
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            os.mkdir(str(lock))                      # ATOMIC: creates or raises
+        except FileExistsError:
+            pid, held_op = _lock_holder(lock)
+            if pid is not None and not pid_alive(pid):
+                logger.debug("reclaiming stale comfy-%s lock from dead pid %s", held_op, pid)
+                try:
+                    shutil.rmtree(str(lock))
+                except OSError as e:
+                    return False, (f"An earlier ComfyUI {held_op} left a lock at {lock} "
+                                   f"that could not be cleared ({e}). Remove that "
+                                   "folder and try again.")
+                if attempt == 1:
+                    continue
+                return False, f"Another ComfyUI {held_op} is already running."
+            if pid is None:
+                return False, (f"A ComfyUI {held_op} lock exists at {lock} but its owner "
+                               f"could not be read. If no {held_op} is running, remove "
+                               "that folder and try again.")
+            return False, (f"Another ComfyUI {held_op} is already running (process {pid}). "
+                           "Wait for it to finish, then try again.")
+        except OSError as e:
+            return False, f"Could not take the ComfyUI {op} lock at {lock}: {e}"
+        try:
+            (lock / _LOCK_OWNER).write_text(
+                json.dumps({"pid": os.getpid(), "op": op}), encoding="utf-8")
+        except OSError as e:
+            logger.debug("could not write comfy-%s lock owner: %s", op, e)
+        return True, ""
+    return False, f"Another ComfyUI {op} is already running."
+
+
+def _release_update_lock() -> None:
+    """Drop the managed-checkout lock. Never raises; a leftover lock is reclaimed
+    by the next caller once its recorded pid is dead."""
+    try:
+        shutil.rmtree(str(_update_lock_path()))
+    except OSError as e:
+        logger.debug("could not remove comfy lock: %s", e)
+
+
 def remove_managed_comfy(with_models: bool = False) -> tuple:
     """Delete the managed ComfyUI (and its models folder with ``with_models``) under
     the localm data dir. Returns ``(removed, failed)`` - the paths deleted and the
@@ -164,19 +265,29 @@ def remove_managed_comfy(with_models: bool = False) -> tuple:
     honest no-op, not a success). The single source of truth for the removal that
     ``localm comfy remove`` and the GUI remove route share.
 
-    Holds ``_remove_lock`` for the whole delete so two concurrent callers (the
-    CLI and a GUI retry, or two GUI clicks) can never rmtree the same tree at
-    once."""
+    Holds ``_remove_lock`` for the whole delete, so callers in this process
+    (a GUI retry after a timed-out request, two GUI clicks) queue behind the
+    running delete, and the mkdir lock at ``_update_lock_path()``, so other
+    localm processes (the CLI, an in-flight ``localm comfy update`` child) are
+    refused. Raises ``ManagedComfyBusy`` when that lock is held.
+    LOCK ORDER: _remove_lock (outer) -> the mkdir lock (inner).
+    See test_remove_refuses_while_another_process_holds_the_lock."""
     with _remove_lock:
-        removed = []
-        failed = []
-        for t in managed_comfy_remove_targets(with_models):
-            try:
-                rmtree_robust(t)
-                removed.append(t)
-            except OSError as e:
-                failed.append(f"{t} ({e})")
-        return removed, failed
+        acquired, busy = _acquire_update_lock(op="remove")
+        if not acquired:
+            raise ManagedComfyBusy(busy)
+        try:
+            removed = []
+            failed = []
+            for t in managed_comfy_remove_targets(with_models):
+                try:
+                    rmtree_robust(t)
+                    removed.append(t)
+                except OSError as e:
+                    failed.append(f"{t} ({e})")
+            return removed, failed
+        finally:
+            _release_update_lock()
 
 
 def managed_comfy_api_url() -> str:

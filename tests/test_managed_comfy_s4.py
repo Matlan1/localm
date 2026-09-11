@@ -663,3 +663,131 @@ def test_the_lock_lives_outside_the_checkout_git_force_cannot_disturb_it(home):
     lock = _lock_dir()
     assert root not in lock.parents, f"lock {lock} must not live inside {root}"
     assert lock.parent == root.parent
+
+
+# --------------------------------------------------------------------------- #
+#  remove_managed_comfy shares the SAME cross-process lock as update           #
+# --------------------------------------------------------------------------- #
+# A remove racing an in-flight `localm comfy update` CHILD PROCESS (or the CLI
+# racing the GUI) must be refused, fast and honestly, and must leave the tree
+# and the holder's lock alone. An in-process threading.Lock cannot see a second
+# interpreter, so the second arm below uses a REAL child process.
+
+def test_remove_refuses_while_another_process_holds_the_lock(home, monkeypatch):
+    """The lock is held by a LIVE holder (this process's own pid, recorded as an
+    update): remove must not delete a single path, must leave the lock in
+    place, and must say who holds it."""
+    import json as _json
+    from localm.media import managed_comfy_update as upd
+    paths = _installed_git_checkout(home)
+    lock = _lock_dir()
+    lock.mkdir(parents=True)
+    (lock / upd._LOCK_OWNER).write_text(
+        _json.dumps({"pid": os.getpid(), "op": "update"}), encoding="utf-8")
+
+    rm: list = []
+    monkeypatch.setattr(mc, "rmtree_robust", lambda p: rm.append(p))
+    exc = None
+    try:
+        mc.remove_managed_comfy(False)
+    except mc.ManagedComfyBusy as e:
+        exc = e
+    assert paths.root.exists(), "the tree was deleted under a live lock holder"
+    assert rm == [], f"rmtree ran under a live lock holder: {rm}"
+    assert lock.exists(), "a refused remove must not disturb the holder's lock"
+    assert exc is not None, "remove did not refuse"
+    assert "already running" in exc.reason and str(os.getpid()) in exc.reason, exc.reason
+    assert "update" in exc.reason, exc.reason
+
+
+# The child prints ITS OWN pid: sys.executable can be a venv launcher that runs
+# the real interpreter as a grandchild, so Popen.pid is not the lock's holder.
+_HOLDER = (
+    "import os, sys\n"
+    "from localm.media import managed_comfy as mc\n"
+    "ok, why = mc._acquire_update_lock(op='update')\n"
+    "print(('acquired ' + str(os.getpid())) if ok else 'busy:' + why, flush=True)\n"
+    "sys.stdin.readline()\n"          # hold the lock until the parent says so
+    "mc._release_update_lock()\n"
+)
+
+
+def test_remove_refuses_a_lock_held_by_a_REAL_separate_process(home, monkeypatch):
+    """A genuinely separate interpreter holds the lock (what an in-flight
+    `localm comfy update` child is). The parent's remove is refused and the
+    tree survives; once the child releases, the same remove succeeds and the
+    lock directory is gone. A threading.Lock cannot pass this arm."""
+    import sys
+    paths = _installed_git_checkout(home)
+    env = dict(os.environ)
+    env["LOCALM_HOME"] = str(cfg.HOME_DIR)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    child = subprocess.Popen([sys.executable, "-c", _HOLDER], env=env,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    try:
+        first = child.stdout.readline().strip()
+        assert first.startswith("acquired "), f"the child could not take the lock: {first!r}"
+        holder_pid = first.split()[1]
+        assert _lock_dir().exists(), "the child reported a lock that is not on disk"
+
+        exc = None
+        try:
+            mc.remove_managed_comfy(False)
+        except mc.ManagedComfyBusy as e:
+            exc = e
+        assert paths.root.exists(), "the tree was deleted under another process's lock"
+        assert exc is not None, "remove did not refuse a lock held by another process"
+        assert holder_pid in exc.reason, exc.reason
+
+        child.stdin.write("go\n")
+        child.stdin.flush()
+        out, err = child.communicate(timeout=60)
+        assert child.returncode == 0, err[-2000:]
+    finally:
+        if child.poll() is None:
+            child.kill()
+    assert not _lock_dir().exists(), "the child did not release the lock"
+
+    removed, failed = mc.remove_managed_comfy(False)
+    assert failed == []
+    assert paths.root in removed
+    assert not paths.root.exists()
+    assert not _lock_dir().exists(), "remove leaked the lock it took"
+
+
+def test_remove_releases_the_lock_on_success_and_on_failure(home, monkeypatch):
+    """The lock is released whether the delete succeeded or reported a failure."""
+    paths = _installed_git_checkout(home)
+
+    def _boom(p):
+        raise OSError("disk says no")
+    with monkeypatch.context() as m:
+        m.setattr(mc, "rmtree_robust", _boom)
+        removed, failed = mc.remove_managed_comfy(False)
+    assert removed == [] and failed and "disk says no" in failed[0]
+    assert paths.root.exists()
+    assert not _lock_dir().exists(), "lock leaked after a FAILED remove"
+
+    removed, failed = mc.remove_managed_comfy(False)
+    assert failed == [] and not paths.root.exists()
+    assert not _lock_dir().exists(), "lock leaked after a SUCCESSFUL remove"
+
+
+def test_remove_lock_names_a_remove_holder_to_a_contending_update(home, monkeypatch):
+    """A lock taken by remove records op="remove"; an update refused by it says
+    a remove is running, not an update."""
+    from localm.media import managed_comfy_update as upd
+    _installed_git_checkout(home)
+    monkeypatch.setattr(upd, "_rev_parse_head", lambda root: "abc123")
+    acquired, why = mc._acquire_update_lock(op="remove")
+    assert acquired, why
+    try:
+        ran = []
+        monkeypatch.setattr(upd, "_run", lambda *a, **k: (ran.append(a), (True, ""))[1])
+        res = upd.update_managed_comfy()
+        assert res.ok is False and res.status == "busy"
+        assert "remove" in res.message and str(os.getpid()) in res.message, res.message
+        assert ran == []
+    finally:
+        mc._release_update_lock()
