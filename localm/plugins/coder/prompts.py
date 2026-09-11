@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from localm.inference.model_family import is_thinking_model
+from localm.textguard import GuardedText, compose, compose_join, untrusted_span
 
 if TYPE_CHECKING:
     from .indexer import ProjectMap
@@ -125,10 +126,23 @@ def _example_args(name: str, tool) -> dict:
     }
 
 
-def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
+def _catalogue_entry(tool, text: str):
+    """*text* as a ``compose()`` part: an untrusted range when *tool* is
+    flagged ``untrusted_docs`` (its name, description and params came from an
+    MCP server or a plugin), else a trusted plain string."""
+    if getattr(tool, "untrusted_docs", False):
+        return untrusted_span(text)
+    return text
+
+
+def _full_tool_docs(disabled: frozenset = frozenset()) -> GuardedText:
     """One block per registered tool: description (the 'when to use this'
     signal), a concrete example call, and the optional params. Tools in
     *disabled* are omitted (e.g. run_shell for a restricted, shareable key).
+
+    Returns a ``GuardedText`` (a ``str``) whose untrusted ranges cover the
+    whole block of every tool flagged ``untrusted_docs``; a registry with no
+    such tool yields no ranges.
 
     Disabling a shell-execution tool expands to the whole family here, not only
     in the callers, because this function is also called directly rather than
@@ -147,13 +161,16 @@ def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
                     for n, s in _tool_params(tool).items() if not s.get("required")]
         if optional:
             lines.append(f"optional args: {', '.join(optional)}")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
+        blocks.append(_catalogue_entry(tool, "\n".join(lines)))
+    return compose_join("\n\n", blocks)
 
 
-def _brief_tool_docs(disabled: frozenset = frozenset()) -> str:
+def _brief_tool_docs(disabled: frozenset = frozenset()) -> GuardedText:
     """Condensed list for small models - one line per tool, no JSON examples.
-    Tools in *disabled* are omitted."""
+    Tools in *disabled* are omitted.
+
+    Returns a ``GuardedText`` (a ``str``) whose untrusted ranges cover the
+    line of every tool flagged ``untrusted_docs``."""
     from .agent.constants import expand_shell_disable
     from .tools import TOOL_REGISTRY
     disabled = expand_shell_disable(disabled)
@@ -166,8 +183,8 @@ def _brief_tool_docs(disabled: frozenset = frozenset()) -> str:
         opt = [f"[{n}]" for n, s in params.items() if not s.get("required")]
         sig = ", ".join(req + opt)
         first_sentence = str(tool.description).split(". ")[0].rstrip(".")
-        lines.append(f"{name}({sig}) - {first_sentence}")
-    return "\n".join(lines)
+        lines.append(_catalogue_entry(tool, f"{name}({sig}) - {first_sentence}"))
+    return compose_join("\n", lines)
 
 
 # ---------------------------------------------------------------------------
@@ -397,9 +414,15 @@ def build_system_prompt(
     untrusted_provenance: bool = True,
     custom_instructions: str = "",
     role_brief: str = "",
-) -> str:
+) -> GuardedText:
     """
     Build the system prompt for the main agent.
+
+    Returns a ``GuardedText`` (a ``str``). Its untrusted ranges cover the
+    catalogue block of every tool flagged ``untrusted_docs`` (MCP and plugin
+    tools) plus whatever ranges *extra_tool_docs* carries, so a backend
+    tokenises that text with special-token parsing off. With no foreign tool
+    the ranges are empty and the text is the plain rendering.
 
     Parameters
     ----------
@@ -416,7 +439,8 @@ def build_system_prompt(
         Used to select per-family prompt tuning (Gemma / thinking / small / default).
     extra_tool_docs:
         Additional tool documentation appended after the built-in tool list
-        (e.g. dynamically registered MCP tools).
+        (e.g. dynamically registered MCP tools). A ``GuardedText`` keeps its
+        untrusted ranges in the result.
     custom_instructions:
         User-authored guidance (the ``--system`` flag or ``.localcoder/system.md``);
         injected under "## User Instructions". Distinct from ``memory``: these are
@@ -484,22 +508,23 @@ def build_system_prompt(
             f"Working directory: {shown_cwd}{cwd_note}"
         )
 
-    extra_section = f"\n{extra_tool_docs}\n" if extra_tool_docs else ""
+    extra_section = (compose("\n", extra_tool_docs, "\n")
+                     if extra_tool_docs else "")
 
-    return (
-        f"{identity}"
-        f"{map_section}"
-        f"{memory_section}"
-        f"{custom_section}"
-        f"\n{think_hint}"
-        f"{tool_block}\n\n"
-        f"AVAILABLE TOOLS\n"
-        f"━━━━━━━━━━━━━━━\n\n"
-        f"{tool_docs}\n"
-        f"{extra_section}\n"
-        f"{rules}\n"
-        f"{role_brief}"
-        f"{untrusted}\n"
+    return compose(
+        identity,
+        map_section,
+        memory_section,
+        custom_section,
+        "\n", think_hint,
+        tool_block, "\n\n",
+        "AVAILABLE TOOLS\n",
+        "━━━━━━━━━━━━━━━\n\n",
+        tool_docs, "\n",
+        extra_section, "\n",
+        rules, "\n",
+        role_brief,
+        untrusted, "\n",
     )
 
 

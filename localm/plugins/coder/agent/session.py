@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import localm.plugins.coder.agent as _agent
+from localm.textguard import compose_join
 from ..display import print_info
 from ..memory import cap_user_instructions, forget, remember
 from ..parser import strip_tool_calls
@@ -76,9 +77,9 @@ class _SessionMixin:
             project_map=self._project_map,
             memory=self._memory,
             model_name=getattr(self, "_family_id", self._model_name),  # family id, not the alias
-            extra_tool_docs="\n\n".join(
+            extra_tool_docs=compose_join("\n\n", [
                 d for d in (self._mcp_docs, self._plugin_docs, self._skill_docs) if d
-            ),
+            ]),
             disabled_tools=self.disabled_tools,
             untrusted_provenance=self._untrusted_provenance,
             custom_instructions=self._custom_instructions,
