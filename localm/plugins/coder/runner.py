@@ -328,23 +328,30 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
                 on_finished()
         raise
     worker.join(timeout)
-    if worker.is_alive():
-        agent.cancel(f"timed out after {timeout:g}s")
-        worker.join(STOP_GRACE_SECONDS)
+    if not worker.is_alive():
+        if "error" in box:
+            raise box["error"]
+        if "close_error" in box:
+            raise box["close_error"]
+        return box["result"]
+    agent.cancel(f"timed out after {timeout:g}s")
+    worker.join(STOP_GRACE_SECONDS)
+    note = f"coder task timed out after {timeout:g}s and was cancelled"
     if worker.is_alive():
         box["abandoned"] = True
-        return TaskResult(
-            success=False,
-            response=(f"coder task timed out after {timeout:g}s and was "
-                      "cancelled: no further tool call will run; it is being "
-                      "wound down"),
-            turns=agent.turns, total_tokens=agent.total_tokens, timed_out=True,
-            denied=tuple(agent.denied_unconfirmed))
-    if "error" in box:
-        raise box["error"]
-    if "close_error" in box:
-        raise box["close_error"]
-    return box["result"]
+        response = (f"{note}: no further tool call will run; it is being "
+                    "wound down")
+    else:
+        tails = []
+        if "result" in box and box["result"].response:
+            tails.append(box["result"].response)
+        for key in ("error", "close_error"):
+            if key in box:
+                tails.append(f"{key} while winding down: {box[key]}")
+        response = "\n".join([note, *tails])
+    return TaskResult(success=False, response=response, turns=agent.turns,
+                      total_tokens=agent.total_tokens, timed_out=True,
+                      denied=tuple(agent.denied_unconfirmed))
 
 
 def _report_abandoned(box: dict) -> None:
