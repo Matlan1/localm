@@ -467,9 +467,7 @@ class _CancelCriteria:
 
 
 # Shown when audio is attached to a model whose processor has no audio
-# capability. Kept local to this module rather than in base.py: there is no
-# parent-side audio refusal to share it with, since hf.py refuses only
-# images.
+# capability.
 _AUDIO_UNSUPPORTED_MESSAGE = (
     "This model cannot accept audio input, so the attached clip would be "
     "ignored. Load a HuggingFace-format model whose processor exposes a "
