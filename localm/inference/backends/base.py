@@ -148,6 +148,21 @@ class PretokenizerUnsafeInputError(ValueError):
     """
 
 
+class PretokenizerUnusableModelError(RuntimeError):
+    """Raised by a load when the model declares a pre-tokenizer whose safe
+    input bound falls inside ordinary prose, so the model could not hold a
+    conversation and is refused up front instead of loaded.
+
+    ``pretokenizer_guard.load_refusal`` decides it and writes the message.
+    Raised from the parent's pre-load header read when the GGUF declares the
+    pre-tokenizer within the bounded read, and otherwise from the worker's own
+    metadata read after the native load, carried across IPC as a typed error.
+
+    A RuntimeError subclass, so every load path reports it the way it reports
+    any other load failure, with this message and no repair advice appended.
+    """
+
+
 class ModelLoadCancelled(Exception):
     """Raised by ``load()`` when an in-flight model load was aborted because a
     newer model selection superseded it (preemptive model switching).

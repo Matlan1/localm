@@ -28,6 +28,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **A model whose tokenizer cannot handle ordinary sentences is now refused
+  when you try to load it, with an explanation, instead of loading and then
+  rejecting most of what you type.** Models declaring the `exaone-moe`
+  pre-tokenizer (EXAONE 4.5, K-EXAONE) make the bundled llama.cpp runtime abort
+  on a long unpunctuated span of letters and spaces, and the longest span
+  localm can safely allow them is 64 characters, shorter than an ordinary
+  sentence: they could be loaded but not actually talked to, and their own
+  replies would poison the next turn. The refusal comes before the model is
+  loaded and says plainly that no setting changes it.
 - **A vision-input failure, or a model load / embedding request that timed out
   and looked hung, pointed you at a debug log even when debug mode was off and
   no such log existed.** Those messages now say how to turn one on

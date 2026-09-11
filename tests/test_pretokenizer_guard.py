@@ -21,6 +21,13 @@ to THROW, ``MEASURED_COST_CONCERN`` against lengths measured to be SLOW. The
 cost-bounded pre-tokenizers have never been observed to throw, so a test asserts
 their refusals never use crash language.
 
+A bound that falls inside ordinary prose makes a model unusable, not merely
+guarded: ``exaone-moe``'s run class includes the space, so its 64-character
+limit refuses an ordinary sentence. Such a policy is marked ``unusable`` and
+``load_refusal`` refuses to load the model at all; ``TestUnusablePolicies`` pins
+that the flag is set exactly where the premise holds. The load-path wiring lives
+in ``tests/test_pretokenizer_load_refusal.py``.
+
 Every "did it reach native code" assertion is made from OUTSIDE the call, with
 ``assert_not_called`` on a plain mock: raising from a ``side_effect`` would be an
 input to the code under test, which catches broadly on some paths and would
@@ -209,18 +216,85 @@ class TestCalibration:
 
     def test_exaone_counts_spaces_as_part_of_the_run(self):
         # Its regex alternates letters with single spaces, so a space does not
-        # end a run for it as it does for the others.
+        # end a run for it as it does for the others. That bound is the
+        # backstop behind a load refusal, not the product's answer: a policy
+        # whose run class includes the space is marked unusable, and a model
+        # declaring it is refused at load (TestUnusablePolicies).
         assert guard.UNSAFE_PRE_TYPES["exaone-moe"].char_class == \
             guard._CLASS_LETTER_SPACE
         assert guard.check_text("gpt-4o", " ".join("ab" for _ in range(200))) is None
         with pytest.raises(PretokenizerUnsafeInputError):
             guard.check_text("exaone-moe", " ".join("ab" for _ in range(200)))
+        assert guard.UNSAFE_PRE_TYPES["exaone-moe"].unusable
+        assert guard.load_refusal("exaone-moe") is not None
 
     def test_superbpe_runs_over_digits_not_letters(self):
         assert guard.UNSAFE_PRE_TYPES["superbpe"].char_class == guard._CLASS_DIGIT
         assert guard.check_text("superbpe", _letters(300)) is None
         with pytest.raises(PretokenizerUnsafeInputError):
             guard.check_text("superbpe", _digits(300))
+
+
+# One unpunctuated sentence of ordinary length. Any policy that refuses THIS is
+# a policy under which a model cannot hold a conversation.
+_ORDINARY_SENTENCE = ("the quick brown fox jumps over the lazy dog and keeps "
+                      "running through the forest until it reaches the river")
+_UNUSABLE = [p for p in _AFFECTED if guard.UNSAFE_PRE_TYPES[p].unusable]
+_USABLE = [p for p in _AFFECTED if not guard.UNSAFE_PRE_TYPES[p].unusable]
+
+
+class TestUnusablePolicies:
+    """``unusable`` is set on exactly the policies whose run bound falls inside
+    ordinary prose, and ``load_refusal`` refuses exactly those.
+
+    Pinned in BOTH directions against one ordinary sentence: an unusable
+    policy must refuse it (or the flag overstates the bound and refuses a
+    model that works), and a usable policy must accept it (or a model that
+    cannot chat would load with only a per-request refusal to show for it).
+    """
+
+    def test_exaone_moe_is_the_unusable_one(self):
+        assert _UNUSABLE == ["exaone-moe"]
+
+    @pytest.mark.parametrize("pre_type", _UNUSABLE)
+    def test_an_unusable_policy_refuses_an_ordinary_sentence(self, pre_type):
+        with pytest.raises(PretokenizerUnsafeInputError):
+            guard.check_text(pre_type, _ORDINARY_SENTENCE)
+
+    @pytest.mark.parametrize("pre_type", _USABLE)
+    def test_a_usable_policy_accepts_an_ordinary_sentence(self, pre_type):
+        assert guard.check_text(pre_type, _ORDINARY_SENTENCE) is None
+
+    @pytest.mark.parametrize("pre_type", _UNUSABLE)
+    def test_load_refusal_refuses_every_unusable_policy(self, pre_type):
+        policy = guard.UNSAFE_PRE_TYPES[pre_type]
+        msg = guard.load_refusal(pre_type)
+        assert msg is not None
+        assert policy.label in msg
+        assert str(policy.max_run) in msg
+        assert guard._RUN_KIND[policy.char_class] in msg
+        assert "refuses to load" in msg
+        assert "No setting changes this" in msg
+
+    @pytest.mark.parametrize("pre_type", _USABLE + _UNAFFECTED)
+    def test_load_refusal_lets_every_other_model_load(self, pre_type):
+        assert guard.load_refusal(pre_type) is None
+
+    def test_load_refusal_of_no_declared_pre_tokenizer_is_none(self):
+        assert guard.load_refusal(None) is None
+
+    def test_the_flag_needs_the_class_and_limit_its_message_quotes(self):
+        table = {"broken": guard.Policy(None, None, 1024, "broken", unusable=True)}
+        with patch.object(guard, "UNSAFE_PRE_TYPES", table):
+            with pytest.raises(ValueError, match="unusable without"):
+                guard._validate_table()
+
+    def test_the_sentence_is_ordinary(self):
+        # The premise both directions rest on: one sentence, no punctuation,
+        # longer than the letter-and-space limit and shorter than the length
+        # any policy was measured to abort at.
+        assert _ORDINARY_SENTENCE.replace(" ", "").isalpha()
+        assert 64 < len(_ORDINARY_SENTENCE) < TestCalibration.MEASURED_FIRST_CRASH["exaone-moe"]
 
 
 class TestTheRunIsAClassNotARepeatedCharacter:

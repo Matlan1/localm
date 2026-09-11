@@ -26,7 +26,8 @@ from typing import Iterator, List, Optional
 
 from localm.console import console
 
-from .base import BaseBackend, ModelLoadCancelled, PretokenizerUnsafeInputError
+from .base import (BaseBackend, ModelLoadCancelled, PretokenizerUnsafeInputError,
+                   PretokenizerUnusableModelError)
 from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
@@ -196,13 +197,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 f"Split GGUF is incomplete - missing part(s): {names}. "
                 f"Re-run 'localm pull' to download all parts."
             )
+        # A model whose declared pre-tokenizer cannot hold a conversation is
+        # refused here, before any VRAM probe or worker spawn. The worker's own
+        # metadata read refuses it again when the header read reports None.
+        from localm.inference import pretokenizer_guard
+        from localm.model_manager import gguf_pretokenizer
+        refusal = pretokenizer_guard.load_refusal(
+            gguf_pretokenizer(Path(self.model_path)))
+        if refusal is not None:
+            raise PretokenizerUnusableModelError(refusal)
         # Resolve the effective GPU-layer count once, so _check_vram and
         # _load_native both read the same value.
         self.effective_gpu_layers = self._effective_gpu_layers()
         self._check_vram()
         try:
             self._load_native()
-        except ModelLoadCancelled:
+        except (ModelLoadCancelled, PretokenizerUnusableModelError):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:

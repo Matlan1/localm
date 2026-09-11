@@ -587,6 +587,11 @@ class GGUFEmbedder:
             # metadata read needs no context.
             self.declared_pooling = declared_pooling_type(self._model, api)
             self._pre_type = pretokenizer_guard.read_pre_type(self._model, api)
+            refusal = pretokenizer_guard.load_refusal(self._pre_type)
+            if refusal is not None:
+                api.llama_free_model(self._model)
+                self._model = None
+                raise pretokenizer_guard.PretokenizerUnusableModelError(refusal)
             hazard = pretokenizer_guard.hazard_note(self._pre_type)
             if hazard is not None:
                 logger.warning(
@@ -933,6 +938,11 @@ class IsolatedEmbedder(VramSizingMixin):
         cpu_only is passed on EVERY reload once gpu_fallback_reason is set:
         n_gpu_layers=0 alone does not guarantee no GPU backend involvement
         (see _embedder_runner.py's cpu_only handling)."""
+        from localm.model_manager import gguf_pretokenizer
+        refusal = pretokenizer_guard.load_refusal(
+            gguf_pretokenizer(Path(self.model_path)))
+        if refusal is not None:
+            raise pretokenizer_guard.PretokenizerUnusableModelError(refusal)
         self._preflight_vram()
         from ._embedder_runner import EmbedderRunner
         # Same parent-pins-worker-consumes contract as GgufBackend._load_native:

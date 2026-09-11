@@ -15,6 +15,13 @@ text would reach one of those regexes with a run long enough to matter. It is a
 no-op for every ``tokenizer.ggml.pre`` value not in :data:`UNSAFE_PRE_TYPES`,
 which is all but a handful of them.
 
+``load_refusal`` answers the question one level up, at model LOAD: a policy
+marked ``unusable`` is one whose run bound falls inside ordinary prose, so a
+model declaring that pre-tokenizer could never hold a conversation. Both load
+paths (the parent's pre-load header read and the worker's own metadata read)
+raise :class:`PretokenizerUnusableModelError` with its message instead of
+loading such a model.
+
 Two of the bounds prevent a CRASH and two prevent unbounded COST; they are not
 the same claim and the refusal messages say which:
 
@@ -48,15 +55,18 @@ from typing import Dict, NamedTuple, Optional
 
 import regex
 
-from localm.inference.backends.base import PretokenizerUnsafeInputError
+from localm.inference.backends.base import (
+    PretokenizerUnsafeInputError, PretokenizerUnusableModelError)
 
 __all__ = [
     "PRE_TYPE_KEY",
     "Policy",
     "PretokenizerUnsafeInputError",
+    "PretokenizerUnusableModelError",
     "UNSAFE_PRE_TYPES",
     "check_text",
     "hazard_note",
+    "load_refusal",
     "policy_for",
     "read_pre_type",
 ]
@@ -104,6 +114,10 @@ class Policy(NamedTuple):
                      when a newline run does not throw for this pre-tokenizer.
     ``cost_budget``  cap on ``len(text)`` multiplied by the longest run carrying
                      no ASCII whitespace, or ``None`` when unbounded.
+    ``unusable``     ``True`` when ``max_run`` over ``char_class`` falls inside
+                     ordinary prose, so a model declaring this pre-tokenizer
+                     cannot hold a conversation; ``load_refusal`` then refuses
+                     to load it. Requires ``char_class`` and ``max_run``.
     """
 
     char_class: Optional[str]
@@ -112,6 +126,7 @@ class Policy(NamedTuple):
     label: str
     newline_run: Optional[int] = None
     cost_budget: Optional[int] = None
+    unusable: bool = False
 
 
 _LETTER_RUN_LIMIT = 64
@@ -139,9 +154,12 @@ def _letters(label: str) -> Policy:
 # one enum value and therefore one pattern.
 UNSAFE_PRE_TYPES: Dict[str, Policy] = {
     # LLAMA_VOCAB_PRE_TYPE_EXAONE_MOE. Its run alternates letters with single
-    # spaces, so a space does not end a run here as it does for the others.
+    # spaces, so a space does not end a run here as it does for the others,
+    # and the run bound falls inside an ordinary sentence: the model is
+    # refused at load. See TestUnusablePolicies.
     "exaone-moe": Policy(
-        _CLASS_LETTER_SPACE, _LETTER_RUN_LIMIT, _TOTAL_LIMIT, "exaone-moe"),
+        _CLASS_LETTER_SPACE, _LETTER_RUN_LIMIT, _TOTAL_LIMIT, "exaone-moe",
+        unusable=True),
     # LLAMA_VOCAB_PRE_TYPE_GPT4O.
     "gpt-4o": _letters("gpt-4o"),
     "llama4": _letters("llama4"),
@@ -191,6 +209,9 @@ def _validate_table() -> None:
         # load rather than one request.
         if p.char_class is not None and p.char_class not in _RUN_KIND:
             raise ValueError(f"{name}: char_class missing from _RUN_KIND")
+        # load_refusal names the class and the limit in its message.
+        if p.unusable and (p.char_class is None or p.max_run is None):
+            raise ValueError(f"{name}: unusable without char_class and max_run")
 
 
 _validate_table()
@@ -257,6 +278,30 @@ def hazard_note(pre_type: Optional[str]) -> Optional[str]:
     if slows:
         parts.append("becomes extremely slow on " + " or ".join(slows))
     return ", and ".join(parts)
+
+
+def load_refusal(pre_type: Optional[str]) -> Optional[str]:
+    """The message refusing to load a model that declares *pre_type*, or
+    ``None`` when a model declaring it may be loaded (including when
+    *pre_type* is ``None`` or unknown to the table).
+
+    Refuses exactly the policies marked ``unusable``. The message names the
+    pre-tokenizer, the run class and the limit, states that no setting lifts
+    it, and quotes nothing else.
+    """
+    policy = policy_for(pre_type)
+    if policy is None or not policy.unusable:
+        return None
+    return (
+        f"This model declares the {policy.label} pre-tokenizer, which the "
+        f"bundled llama.cpp runtime aborts on for a long unbroken run of "
+        f"{_RUN_KIND[policy.char_class]}. The longest run localm can safely "
+        f"allow it is {policy.max_run} characters, shorter than an ordinary "
+        f"sentence, so the model cannot hold a conversation under this "
+        f"runtime. localm refuses to load it rather than present it as "
+        f"working. No setting changes this; it needs a fix in the llama.cpp "
+        f"runtime."
+    )
 
 
 def check_text(pre_type: Optional[str], text: str) -> None:
