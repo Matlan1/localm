@@ -138,3 +138,84 @@ class TestEnvForwarding:
         with patch(_RUN, side_effect=fake_run):
             run_subprocess(["cmd"], tmp_path, timeout=5, env={"FOO": "bar"})
         assert captured.get("env") == {"FOO": "bar"}
+
+
+class TestCancellable:
+    """With a cancel check the process is killed the moment it answers True."""
+
+    def test_a_cancel_kills_the_process_and_keeps_its_output(self, tmp_path):
+        import sys
+        import threading
+        import time
+        flag = threading.Event()
+        threading.Timer(0.4, flag.set).start()
+        t0 = time.monotonic()
+        result = run_subprocess(
+            [sys.executable, "-c",
+             "import sys, time; print('started', flush=True); time.sleep(8)"],
+            tmp_path, timeout=60, cancel=flag.is_set)
+        elapsed = time.monotonic() - t0
+        assert result.cancelled is True
+        assert result.ok is False and result.timed_out is False
+        assert "started" in (result.stdout or "")
+        assert elapsed < 4.0, f"the process outlived the cancel ({elapsed:.1f}s)"
+
+    def test_without_a_cancel_the_timeout_still_bounds_the_process(self, tmp_path):
+        import sys
+        result = run_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(8)"],
+            tmp_path, timeout=0.5, cancel=lambda: False)
+        assert result.timed_out is True and result.cancelled is False
+
+    def test_a_finished_process_is_reported_as_before(self, tmp_path):
+        import sys
+        result = run_subprocess(
+            [sys.executable, "-c", "print('hi')"], tmp_path, timeout=30,
+            cancel=lambda: False)
+        assert result.ok is True and result.returncode == 0
+        assert result.stdout.strip() == "hi"
+
+
+    def test_a_shell_routed_command_is_killed_with_its_shell(self, tmp_path):
+        """`cmd /C` (or `sh -c`) is only the parent: the process doing the work
+        must die with it, or the cancel reports "killed" only once the work has
+        finished on its own."""
+        import sys
+        import threading
+        import time
+        flag = threading.Event()
+        threading.Timer(0.5, flag.set).start()
+        cmd = f'{sys.executable} -c "import time; time.sleep(8)" && echo done'
+        t0 = time.monotonic()
+        result = run_subprocess(cmd, tmp_path, timeout=60, shell_wrap=True,
+                                cancel=flag.is_set)
+        elapsed = time.monotonic() - t0
+        assert result.cancelled is True
+        assert elapsed < 4.0, f"the shell's child outlived the cancel ({elapsed:.1f}s)"
+
+    def test_an_interrupt_during_the_wait_kills_the_process(self, tmp_path):
+        import sys
+        import time
+        import psutil
+        import pytest
+        pid_file = tmp_path / "pid.txt"
+        calls = []
+
+        def cancel():
+            calls.append(1)
+            if len(calls) == 3:
+                raise KeyboardInterrupt
+            return False
+
+        with pytest.raises(KeyboardInterrupt):
+            run_subprocess(
+                [sys.executable, "-c",
+                 f"import os, time; open(r'{pid_file}', 'w').write(str(os.getpid())); "
+                 "time.sleep(8)"],
+                tmp_path, timeout=60, cancel=cancel)
+        assert pid_file.exists(), "the child never started"
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and psutil.pid_exists(pid):
+            time.sleep(0.05)
+        assert not psutil.pid_exists(pid), "the child survived the interrupt"

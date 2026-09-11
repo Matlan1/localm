@@ -117,6 +117,7 @@ def tool_run_shell(
     command: str,
     timeout: int = 30,
     _privacy: bool = False,
+    _cancel=None,
 ) -> ToolResult:
     """
     Execute a shell command and wait for it to finish.
@@ -124,13 +125,18 @@ def tool_run_shell(
     Argument-list vs shell routing is decided by :func:`_shell_argv`.
 
     In privacy mode (``_privacy=True``) the subprocess environment has
-    shell-history variables zeroed.
+    shell-history variables zeroed. ``_cancel`` is the run's cancel check: once
+    it answers True the command is killed and reported as cancelled.
     """
     shell_cmd = _shell_argv(command)
     env = _privacy_env(_privacy)
 
-    result = run_subprocess(shell_cmd, cwd, timeout=timeout, env=env)
+    result = run_subprocess(shell_cmd, cwd, timeout=timeout, env=env,
+                            cancel=_cancel)
 
+    if result.cancelled:
+        return ToolResult.error(
+            f"Command killed: the run was cancelled{_partial_on_timeout(result)}")
     if result.timed_out:
         return ToolResult.error(
             f"Command timed out after {timeout}s{_partial_on_timeout(result)}")
@@ -490,6 +496,7 @@ def tool_run_tests(
     runner: str = "auto",
     path: str = ".",
     extra_args: str = "",
+    _cancel=None,
 ) -> ToolResult:
     """
     Run the project's test suite and return the result.
@@ -532,13 +539,16 @@ def tool_run_tests(
     # do not follow its `--` separator (see _append_caller_args).
     cmd = _append_caller_args(cmd, caller_args)
 
-    result = run_subprocess(cmd, cwd, timeout=120)
+    result = run_subprocess(cmd, cwd, timeout=120, cancel=_cancel)
 
     if result.not_found:
         return ToolResult.error(
             f"Test runner not found: {cmd[0]}. "
             "Make sure it is installed and on PATH."
         )
+    if result.cancelled:
+        return ToolResult.error(
+            f"Test run killed: the run was cancelled{_partial_on_timeout(result)}")
     if result.timed_out:
         return ToolResult.error(
             f"Test run timed out after 120s{_partial_on_timeout(result)}")

@@ -25,7 +25,9 @@ from .project_config import load_project_config
 
 DEFAULT_MAX_TURNS = 40
 
-# Grace after a stop request before a timed-out run is reported as abandoned.
+# Grace after a timed-out run is cancelled before it is reported as abandoned
+# (still winding down: the tool call in flight is killed or refused, the loop
+# stops at its next check, then the agent closes).
 STOP_GRACE_SECONDS = 30.0
 
 
@@ -198,20 +200,22 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
 
 
 def warn_unfinished_background(agent) -> None:
-    """Report background sub-agents this one-shot run is about to abandon.
+    """Report background sub-agents this one-shot run is leaving behind.
 
     The turn-boundary drain only fires at the START of a turn, so a child that is
-    still running (or that finished after the final turn) is never folded in, and
-    a one-shot process then exits and takes its daemon threads with it. Exiting
-    silently would drop work the user explicitly asked for. What survives is
-    stated exactly: a committed branch does, a running child does not.
+    still running (or that finished after the final turn) is never folded in.
+    Ending silently would drop work the user explicitly asked for. What survives
+    is stated exactly: a committed branch does, a running child does not. Only
+    this run's own jobs are reported and drained: the registry is process-wide
+    and another run's completions belong to that run.
     """
     try:
         from .background import get_registry
         registry = get_registry()
-        running = [j for j in registry.list_status(kind="agent")
+        owner = getattr(agent, "job_owner", None)
+        running = [j for j in registry.list_status(kind="agent", owner=owner)
                    if j["state"] == "running"]
-        pending = registry.drain_finished(kind="agent")
+        pending = registry.drain_finished(kind="agent", owner=owner)
     except Exception:
         return
 
@@ -219,7 +223,7 @@ def warn_unfinished_background(agent) -> None:
     # drain_finished CONSUMES, so a failure folded into the same try would discard
     # completions already handed over.
     try:
-        lost = registry.take_dropped_undrained("agent")
+        lost = registry.take_dropped_undrained("agent", owner=owner)
     except Exception:
         lost = 0
 
@@ -238,9 +242,32 @@ def warn_unfinished_background(agent) -> None:
     for st in running:
         print_warning(
             f"background sub-agent '{st.get('label')}' ({st.get('id')}) is STILL "
-            "RUNNING and will be killed when this one-shot run exits. Use an "
-            "interactive session for background delegation, or spawn_agent "
-            "(synchronous) for a one-shot.")
+            "RUNNING: this one-shot run has ended, so it is being stopped and "
+            "its result will not be folded in. Use an interactive session for "
+            "background delegation, or spawn_agent (synchronous) for a one-shot.")
+
+
+def stop_unfinished_background(agent, reason: str = "the run that started it ended") -> int:
+    """Cancel this run's background sub-agents that are still running, so a
+    child never keeps writing after the run that asked for it has reported.
+    Returns how many were cancelled. Best-effort, never raises."""
+    stopped = 0
+    try:
+        from .background import get_registry
+        registry = get_registry()
+        owner = getattr(agent, "job_owner", None)
+        for st in registry.list_status(kind="agent", owner=owner):
+            if st.get("state") != "running":
+                continue
+            job = registry.get(st["id"])
+            child = getattr(job, "child", None)
+            cancel = getattr(child, "cancel", None)
+            if callable(cancel):
+                cancel(reason)
+                stopped += 1
+    except Exception:                                       # noqa: BLE001
+        return stopped
+    return stopped
 
 
 def warn_sensitive_changes(agent) -> None:
@@ -269,11 +296,14 @@ def browser_enabled() -> bool:
 
 def run_single_task(agent: Agent, task: str) -> TaskResult:
     """Run one task to completion and report the outcome. A run in which a
-    tool call was denied for want of a confirmation is not a success."""
+    tool call was denied for want of a confirmation is not a success. A
+    background sub-agent the run leaves behind is reported and then
+    cancelled."""
     response = agent.run_task(task)
     denied = tuple(agent.denied_unconfirmed)
     success = agent.last_run_ok and not denied
     warn_unfinished_background(agent)
+    stop_unfinished_background(agent)
     return TaskResult(success=success, response=response, turns=agent.turns,
                       total_tokens=agent.total_tokens, denied=denied)
 
@@ -290,11 +320,15 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
     """Run one task on a worker thread, then close the agent there.
 
     ``on_finished`` runs on the worker thread once the agent is closed, whether
-    or not the caller is still waiting. When ``timeout`` elapses the agent is
-    asked to stop; if it has not stopped within STOP_GRACE_SECONDS the run is
-    reported as timed out and left to finish its current step and close on
-    its own."""
+    or not the caller is still waiting. When ``timeout`` elapses the run is
+    CANCELLED (``Agent.cancel``): no further tool call runs, the tool call in
+    flight is killed or refused, the generation in flight is aborted, and every
+    child of the run is cancelled with it. If the worker has not closed within
+    STOP_GRACE_SECONDS the run is reported as timed out and left to wind down
+    and close on its own; an error it raises after that is logged. The host is
+    long-lived, so the close-time reflection runs on its own thread."""
     box: dict = {}
+    agent.reflect_in_background = True
 
     def _work():
         try:
@@ -308,6 +342,8 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
                 box["close_error"] = e
             if on_finished is not None:
                 on_finished()
+            if box.get("cancelled"):
+                _report_late_failure(box)
 
     worker = threading.Thread(target=_work, name="coder-task", daemon=True)
     try:
@@ -320,18 +356,38 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
                 on_finished()
         raise
     worker.join(timeout)
+    if not worker.is_alive():
+        if "error" in box:
+            raise box["error"]
+        if "close_error" in box:
+            raise box["close_error"]
+        return box["result"]
+    box["cancelled"] = True
+    agent.cancel(f"timed out after {timeout:g}s")
+    worker.join(STOP_GRACE_SECONDS)
+    note = f"coder task timed out after {timeout:g}s and was cancelled"
     if worker.is_alive():
-        agent.request_stop()
-        worker.join(STOP_GRACE_SECONDS)
-    if worker.is_alive():
-        return TaskResult(
-            success=False,
-            response=(f"coder task timed out after {timeout:g}s; it was asked "
-                      "to stop and is finishing its current step"),
-            turns=agent.turns, total_tokens=agent.total_tokens, timed_out=True,
-            denied=tuple(agent.denied_unconfirmed))
-    if "error" in box:
-        raise box["error"]
-    if "close_error" in box:
-        raise box["close_error"]
-    return box["result"]
+        response = (f"{note}: no further tool call will run; it is being "
+                    "wound down")
+    else:
+        tails = []
+        if "result" in box and box["result"].response:
+            tails.append(box["result"].response)
+        for key in ("error", "close_error"):
+            if key in box:
+                tails.append(f"{key} while winding down: {box[key]}")
+        response = "\n".join([note, *tails])
+    return TaskResult(success=False, response=response, turns=agent.turns,
+                      total_tokens=agent.total_tokens, timed_out=True,
+                      denied=tuple(agent.denied_unconfirmed))
+
+
+def _report_late_failure(box: dict) -> None:
+    """Log a failure raised by a cancelled run while it wound down, so it is
+    never silent even when the caller has already stopped listening."""
+    from localm.debuglog import logger
+    for key in ("error", "close_error"):
+        if key in box:
+            logger.warning("coder task (cancelled after its timeout): %s: %s",
+                           key, box[key])
+            print_warning(f"cancelled coder task: {key}: {box[key]}")

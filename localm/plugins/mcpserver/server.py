@@ -58,10 +58,17 @@ PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
 SERVER_VERSION = "0.2.0"
 
-# How long a load waits for a resident that is still serving a request to
-# free itself before the residency policy is reported as missed.
-BUSY_WAIT_SECONDS = 600.0
+# Wall-clock bound on how long a load waits for a resident that is still
+# serving a request to free itself before the load is refused as busy. The
+# wait runs on the protocol thread, so the whole server is unresponsive for
+# its duration.
+BUSY_WAIT_SECONDS = 30.0
 BUSY_POLL_SECONDS = 1.0
+
+
+class ModelBusyError(RuntimeError):
+    """A load was refused because every evictable resident is still serving a
+    request past BUSY_WAIT_SECONDS."""
 
 
 def _log(msg: str) -> None:
@@ -369,7 +376,10 @@ class EngineCache:
 
         Returns as soon as the model may load alongside what is already there,
         which on a measurable box with headroom is immediately and with zero
-        eviction.
+        eviction. A peer that is still serving a request is waited for, bounded
+        by BUSY_WAIT_SECONDS of wall clock (the VRAM probe's own cost counts);
+        past the bound the load is refused with ModelBusyError rather than
+        stacked on top of the busy peer.
         """
         from localm.config import load_config
         from localm.inference import residency
@@ -377,34 +387,45 @@ class EngineCache:
         cap = residency.resident_cap(cfg)
         pinned = residency.pinned_model_names(cfg)
         required = self._model_required_bytes(name)
+        started = time.monotonic()
         waited = 0.0
+        announced = False
+        vram_ok = None
+        # The resident set only changes through _evict, so the probe is taken
+        # once per change, never once per poll of a busy peer.
+        probe_pending = True
         while self._lru:
             over_cap = residency.exceeds_resident_cap(self._lru, name, cap)
             # Only probe when the cap is satisfied: being over cap already means
             # room is needed regardless of what VRAM says. vram_ok stays None to
-            # record that this pass did NOT measure, which the message below
-            # relies on so it never reports a shortfall nobody observed.
-            vram_ok = None
-            if not over_cap:
+            # record that no pass measured, which the message below relies on
+            # so it never reports a shortfall nobody observed.
+            if not over_cap and probe_pending:
                 vram_ok = self._fits_alongside(name, required)
-                if vram_ok:
-                    return
+                probe_pending = False
+            if not over_cap and vram_ok:
+                return
             victim = residency.pick_eviction_victim(
                 self._lru, self._engines, requested=name, pinned=pinned)
             if victim is None:
-                # Wait, bounded, for a resident that is serving a request to
-                # finish; once free it becomes a victim on the next pass.
                 busy = [n for n in self._lru
                         if n != name and n not in pinned
                         and residency.is_serving(self._engines.get(n))]
+                waited = time.monotonic() - started
                 if busy and waited < BUSY_WAIT_SECONDS:
-                    if waited == 0.0:
+                    if not announced:
+                        announced = True
                         _log(f"waiting for {busy} to finish serving before "
                              f"making room for {name}")
                     time.sleep(BUSY_POLL_SECONDS)
-                    waited += BUSY_POLL_SECONDS
                     continue
-                # Nothing evictable (all pinned, or still busy past the wait).
+                if busy:
+                    raise ModelBusyError(
+                        f"cannot load {name}: {', '.join(busy)} is still serving "
+                        f"a request after {waited:.0f}s and no other resident "
+                        f"model can be evicted. Retry once it finishes.")
+                # Nothing evictable and nothing busy: every remaining peer is
+                # pinned by configuration.
                 # Load anyway and SAY the policy was missed, rather than
                 # pretending it held.
                 reasons = []
@@ -416,22 +437,32 @@ class EngineCache:
                     # check there would report a measurement never taken.
                     reasons.append("the free-VRAM check" if required is not None
                                    else "an unsizeable model")
-                if busy:
-                    reasons.append(f"a resident still serving after {waited:g}s")
                 _log(f"warning: {' and '.join(reasons)} wanted room for {name} "
                      f"but no resident model could be evicted "
                      f"(resident={self._lru}, pinned={sorted(pinned)}) - "
                      f"loading it anyway")
                 return
-            self._evict(victim, loading=name)
+            if self._evict(victim, loading=name):
+                probe_pending = True
 
-    def _evict(self, victim: str, *, loading: str) -> None:
-        """Unload ``victim`` and wait for its VRAM to actually come back."""
-        engine = self._engines.pop(victim, None)
+    def _evict(self, victim: str, *, loading: str) -> bool:
+        """Unload ``victim`` and wait for its VRAM to actually come back.
+
+        Returns False, with nothing changed, when a request pinned the victim
+        between its selection and this call; the residency mark
+        (``begin_unload``) and that pin are decided under one lock, so an
+        evicted engine can never be claimed for a generation again."""
+        from localm.inference.residency import begin_unload
+        engine = self._engines.get(victim)
+        if engine is None:
+            if victim in self._lru:
+                self._lru.remove(victim)
+            return True
+        if not begin_unload(engine):
+            return False
+        self._engines.pop(victim, None)
         if victim in self._lru:
             self._lru.remove(victim)
-        if engine is None:
-            return
         _log(f"evicting {victim} to make room for {loading}")
         from localm.vram import _live_free_vram_bytes, _vram_free_reading
         # SEED the wait with the reading even when the probe was not fresh, and
@@ -473,6 +504,7 @@ class EngineCache:
             _log(f"warning: could not confirm the VRAM free after unloading "
                  f"{victim} (no live GPU reading) - loading "
                  f"{loading} anyway")
+        return True
 
     def unload_all(self) -> None:
         """Free every resident engine (shutdown). N resident means N to free."""

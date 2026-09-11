@@ -166,6 +166,9 @@ class Agent(
         self.browser_enabled = bool(browser_enabled)
         # Tools removed from THIS session: hidden from the model and hard-refused
         # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
+        # Read through the disabled_tools property, which also hides every
+        # mcp_* tool this agent did not register itself.
+        self._mcp_tool_names: frozenset = frozenset()
         self.disabled_tools = expand_shell_disable(frozenset(disabled_tools or ()))
         # Sub-agent role preset (reviewer / researcher / test-writer): a focused
         # mission plus a narrowed toolset. Resolved here so an unknown name fails
@@ -209,6 +212,15 @@ class Agent(
         # both interactive and non-interactive runs.
         self.confirm_handler = confirm_handler
         self._stop_requested = False
+        # Sticky run cancellation: set once by cancel(), never cleared, and
+        # read through the parent chain (see the cancelled property), so a
+        # cancelled root cancels every child it spawned.
+        self._cancel_event = threading.Event()
+        self._cancel_reason: str = ""
+        # Where the close-time episode reflection runs: True on a thread (a
+        # long-lived host), False synchronously with a deadline (a process
+        # about to exit), None to decide by whether an event sink is wired.
+        self.reflect_in_background: Optional[bool] = None
         self.gen_kwargs     = gen_kwargs
 
         # Stable identity for THIS conversation's resume checkpoint: generated
@@ -557,16 +569,25 @@ class Agent(
         # MCP: start configured servers and register their tools BEFORE the
         # system prompt is built so the model learns about them. Failures
         # warn and continue - external servers must never break the agent.
+        # A child inherits its parent's servers and bindings rather than
+        # spawning a second set. Every mcp_* name in the registry that this
+        # agent did not register (another project's server) is disabled for it.
         self._mcp_docs: str = ""
+        self._mcp_tool_names: frozenset = frozenset()
         try:
-            from ..mcp import register_mcp_tools
-            mcp_names, mcp_warnings = register_mcp_tools(cwd)
-            for w in mcp_warnings:
-                print_warning(w)
-            if mcp_names:
-                self._mcp_docs = _foreign_tool_docs(
-                    "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
-                    mcp_names, TOOL_REGISTRY)
+            if self.parent is not None:
+                self._mcp_docs = getattr(self.parent, "_mcp_docs", "") or ""
+                mcp_names = list(getattr(self.parent, "_mcp_tool_names", ()))
+            else:
+                from ..mcp import register_mcp_tools
+                mcp_names, mcp_warnings = register_mcp_tools(cwd)
+                for w in mcp_warnings:
+                    print_warning(w)
+                if mcp_names:
+                    self._mcp_docs = _foreign_tool_docs(
+                        "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
+                        mcp_names, TOOL_REGISTRY)
+            self._mcp_tool_names = frozenset(mcp_names)
         except Exception as e:
             print_warning(f"MCP setup failed: {e}")
 
@@ -883,9 +904,76 @@ class Agent(
         if len(self._error_trace) > _MAX_ERROR_TRACE:
             self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
 
+    @property
+    def disabled_tools(self) -> frozenset:
+        """Tools this session may never run: the explicit set, plus every
+        ``mcp_*`` tool in the live registry that this agent did not register
+        itself (another project's server), read fresh on every access."""
+        return self._disabled_tools | self._foreign_mcp_names()
+
+    @disabled_tools.setter
+    def disabled_tools(self, value) -> None:
+        self._disabled_tools = frozenset(value or ())
+
+    def _foreign_mcp_names(self) -> frozenset:
+        mine = getattr(self, "_mcp_tool_names", frozenset())
+        return frozenset(n for n in _agent.TOOL_REGISTRY
+                         if n.startswith("mcp_") and n not in mine)
+
     def request_stop(self) -> None:
         """Ask the loop to stop at the next safe point (turn or token boundary)."""
         self._stop_requested = True
+
+    @property
+    def cancelled(self) -> bool:
+        """True once this agent, or any ancestor, has been cancelled."""
+        agent = self
+        while agent is not None:
+            if agent._cancel_event.is_set():
+                return True
+            agent = getattr(agent, "parent", None)
+        return False
+
+    @property
+    def cancel_reason(self) -> str:
+        """Why this agent tree was cancelled; empty while it is not."""
+        agent = self
+        while agent is not None:
+            if agent._cancel_event.is_set():
+                return agent._cancel_reason
+            agent = getattr(agent, "parent", None)
+        return ""
+
+    def cancel(self, reason: str = "cancelled") -> None:
+        """Cancel this run and every child of it: no further tool call runs
+        and the loop stops at its next check. Cancelling a ROOT agent also
+        aborts the generation in flight on a backend that can abort one (the
+        backend is shared by the whole tree) and kills the session's running
+        background shell jobs; a child's cancel leaves both to the root.
+        Irreversible for this agent tree."""
+        self._cancel_reason = reason or "cancelled"
+        self._cancel_event.set()
+        self._stop_requested = True
+        if self.parent is not None:
+            return
+        abort = getattr(self.backend, "cancel", None)
+        if callable(abort):
+            try:
+                abort(self._cancel_reason)
+            except Exception as e:                        # noqa: BLE001
+                from localm.debuglog import logger
+                logger.debug("cancel: backend abort raised: %s", e)
+        try:
+            from ..background import get_registry
+            registry = get_registry()
+            for st in registry.list_status(kind="shell", owner=self.job_owner):
+                if st.get("state") == "running":
+                    job = registry.get(st["id"])
+                    if job is not None:
+                        job.kill()
+        except Exception as e:                            # noqa: BLE001
+            from localm.debuglog import logger
+            logger.debug("cancel: background shell jobs not killed: %s", e)
 
     def queue_message(self, text: str) -> None:
         """

@@ -561,10 +561,14 @@ class TestEngineCacheMultiResidency:
         with _fits(), _sized(), _cfg():
             a, b = cache.get("a"), cache.get("b")
         a.active_requests = 1                  # 'a' is mid-generation
-        with _too_tight(), _sized(), _cfg():
+        with _too_tight(), _sized(), _cfg(), _no_vram_wait(), \
+                pytest.raises(srv.ModelBusyError, match="a is still serving"):
             cache.get("c")
         a.unload.assert_not_called()
         b.unload.assert_called_once()
+        # Refused, not stacked: 'c' was never built.
+        assert cache._factory.loads == ["a", "b"]
+        assert cache.resident == ["a"]
 
     def test_room_wait_lets_a_serving_resident_free_itself(self, monkeypatch):
         """The only candidate is serving a request: the load WAITS for it to
@@ -592,11 +596,15 @@ class TestEngineCacheMultiResidency:
             cache.get("b")
         a.unload.assert_called_once()
         assert cache.resident == ["b"]
-        assert len(polls) > 1, "the load did not wait at all"
+        # One probe for the wait, not one per poll: the resident set does not
+        # change while a busy peer is merely being waited for.
+        assert polls == ["b"], polls
         assert any("waiting for ['a']" in m for m in logged), logged
         assert not any("loading it anyway" in m for m in logged), logged
 
-    def test_room_wait_gives_up_after_the_bound_and_says_so(self, monkeypatch):
+    def test_room_wait_gives_up_after_the_bound_and_refuses(self, monkeypatch):
+        """Past the bound the load is REFUSED, never stacked on the busy peer:
+        a wrong permit here is a native OOM, a refusal is a retry."""
         import localm.plugins.mcpserver.server as srv
         monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
         monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
@@ -606,11 +614,67 @@ class TestEngineCacheMultiResidency:
         a.active_requests = 1
         logged = []
         with _too_tight(), _sized(), _cfg(), _no_vram_wait(), \
-             patch.object(srv, "_log", logged.append):
+             patch.object(srv, "_log", logged.append), \
+             pytest.raises(srv.ModelBusyError) as excinfo:
             cache.get("b")
         a.unload.assert_not_called()
-        assert cache.resident == ["a", "b"]
-        assert any("still serving" in m and "loading it anyway" in m for m in logged), logged
+        assert cache.resident == ["a"]
+        assert cache._factory.loads == ["a"]
+        assert "still serving" in str(excinfo.value)
+        assert not any("loading it anyway" in m for m in logged), logged
+
+    def test_room_wait_is_bounded_by_wall_clock_including_the_probe(self, monkeypatch):
+        """The bound counts elapsed time, probe included, and the probe is not
+        repeated on every poll of a busy peer."""
+        import time
+        import localm.plugins.mcpserver.server as srv
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.3)
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        a.active_requests = 1
+        probes = []
+
+        def slow_fits(self, name, required):
+            probes.append(time.monotonic())
+            time.sleep(0.2)
+            return False
+
+        monkeypatch.setattr(srv.EngineCache, "_fits_alongside", slow_fits)
+        t0 = time.monotonic()
+        with _sized(), _cfg(), _no_vram_wait(), pytest.raises(srv.ModelBusyError):
+            cache.get("b")
+        elapsed = time.monotonic() - t0
+        assert len(probes) == 1, probes
+        assert elapsed < 1.5, f"the wait ran past its bound: {elapsed:.2f}s"
+        assert cache.resident == ["a"]
+
+    def test_a_pin_that_lands_before_the_eviction_keeps_the_engine(self, monkeypatch):
+        """The residency check and the pin are one operation: an eviction that
+        loses the race to a pin leaves the engine alone (and resident), and a
+        pin that loses to the eviction is refused."""
+        from localm.inference import residency
+        import localm.plugins.mcpserver.server as srv
+        monkeypatch.setattr(srv, "BUSY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        # Arm 1: the pin lands first.
+        assert residency.try_pin_engine(a, check=lambda: cache.is_resident("a", a))
+        assert cache._evict("a", loading="b") is False
+        a.unload.assert_not_called()
+        assert cache.resident == ["a"]
+        residency.unpin_engine(a)
+        # Arm 2: the eviction lands first.
+        with _no_vram_wait():
+            assert cache._evict("a", loading="b") is True
+        a.unload.assert_called_once()
+        assert cache.resident == []
+        assert a.unloading is True
+        assert residency.try_pin_engine(a, check=lambda: cache.is_resident("a", a)) is False
+        assert a.active_requests == 0
 
     def test_unmeasurable_vram_falls_back_to_single_resident(self):
         """A box that cannot report free VRAM must behave exactly as before:

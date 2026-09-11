@@ -1497,3 +1497,75 @@ def _job_id(result) -> str:
 
 def _argv(code: str) -> list:
     return [sys.executable, "-u", "-c", code]
+
+
+# --------------------------------------------------------------------------- #
+#  Drains are owner-scoped: one session never consumes another's completions  #
+# --------------------------------------------------------------------------- #
+
+class _OwnedAgentJob(_FakeAgentJob):
+    def __init__(self, label="child", owner=None):
+        BackgroundJob.__init__(self, label, owner=owner)
+        self._done_with = None
+        self.terminated = False
+        self.start_watcher()
+
+
+def test_drain_finished_by_owner_leaves_the_other_owners_completions(make_registry):
+    reg = make_registry(kind_caps={"agent": 50}, keep_finished=10)
+    a = reg.submit(lambda: _OwnedAgentJob("a-child", owner="task-a"), kind="agent")
+    b = reg.submit(lambda: _OwnedAgentJob("b-child", owner="task-b"), kind="agent")
+    a.finish_now("ra")
+    b.finish_now("rb")
+    assert _wait_for(lambda: a.state == "done" and b.state == "done")
+
+    got = reg.drain_finished(kind="agent", owner="task-b")
+    assert [j["label"] for j in got] == ["b-child"]
+    # A's completion is still waiting for A's own drain.
+    got = reg.drain_finished(kind="agent", owner="task-a")
+    assert [j["label"] for j in got] == ["a-child"]
+    assert reg.drain_finished(kind="agent") == []
+
+
+def test_take_dropped_undrained_by_owner_reports_only_that_owners_losses(make_registry):
+    reg = make_registry(kind_caps={"agent": 50}, keep_finished=1)
+    for i in range(3):
+        job = reg.submit(lambda i=i: _OwnedAgentJob(f"a{i}", owner="task-a"), kind="agent")
+        job.finish_now(f"r{i}")
+        assert _wait_for(lambda j=job: j.state == "done")
+    for i in range(3):
+        job = reg.submit(lambda i=i: _OwnedAgentJob(f"b{i}", owner="task-b"), kind="agent")
+        job.finish_now(f"r{i}")
+        assert _wait_for(lambda j=job: j.state == "done")
+    lost_a = reg.take_dropped_undrained("agent", owner="task-a")
+    lost_b = reg.take_dropped_undrained("agent", owner="task-b")
+    assert lost_a > 0 and lost_b > 0
+    assert lost_a + lost_b == reg.dropped_undrained
+    assert reg.take_dropped_undrained("agent", owner="task-a") == 0
+    assert reg.take_dropped_undrained("agent") == 0
+
+
+def test_the_one_shot_report_names_only_its_own_run(monkeypatch, capsys, make_registry):
+    from localm.plugins.coder.runner import warn_unfinished_background
+
+    class _Agent:
+        job_owner = "task-b"
+
+    reg = make_registry(kind_caps={"agent": 50}, keep_finished=10)
+    monkeypatch.setattr(bg, "_registry", reg)
+    a_running = reg.submit(lambda: _OwnedAgentJob("a-running", owner="task-a"), kind="agent")
+    a_done = reg.submit(lambda: _OwnedAgentJob("a-done", owner="task-a"), kind="agent")
+    b_done = reg.submit(lambda: _OwnedAgentJob("b-done", owner="task-b"), kind="agent")
+    a_done.finish_now("ra")
+    b_done.finish_now("rb")
+    assert _wait_for(lambda: a_done.state == "done" and b_done.state == "done")
+    try:
+        warn_unfinished_background(_Agent())
+        captured = capsys.readouterr()
+        text = captured.out + captured.err
+        assert "b-done" in text
+        assert "a-done" not in text and "a-running" not in text, text
+        # A's completion was NOT consumed by B's report.
+        assert [j["label"] for j in reg.drain_finished(kind="agent", owner="task-a")] == ["a-done"]
+    finally:
+        a_running.finish_now("done")

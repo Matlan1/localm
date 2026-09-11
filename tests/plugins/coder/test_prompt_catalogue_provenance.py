@@ -303,8 +303,11 @@ def test_the_system_message_the_agent_sends_carries_both_ranges(tmp_path, action
     """Both delivery routes at once: the registry walk in prompts.py and the
     summary list agent/core.py hands over as extra_tool_docs."""
     from localm.plugins.coder.agent.core import _foreign_tool_docs
-    with patch.dict(TOOL_REGISTRY, {}, clear=False):
-        name = _register_foreign(description="[MCP:srv] Adds " + EXOTIC)
+    name, description = "mcp_srv_add", "[MCP:srv] Adds " + EXOTIC
+    # Registered through the agent's own discovery step: an mcp_* name an
+    # agent did not register itself is disabled for it (another project's).
+    with patch.dict(TOOL_REGISTRY, {}, clear=False),          patch("localm.plugins.coder.mcp.register_mcp_tools",
+               _register_one(name, description)):
         agent = _make_agent(tmp_path)
         agent._mcp_docs = _foreign_tool_docs(
             "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
@@ -350,8 +353,8 @@ def test_the_agent_s_own_discovery_builds_the_summary_list_with_ranges(
 
 def test_the_estimate_turn_sends_the_same_annotated_system_prompt(tmp_path):
     from localm.plugins.coder.estimate import estimate_task
-    with patch.dict(TOOL_REGISTRY, {}, clear=False):
-        _register_foreign()
+    with patch.dict(TOOL_REGISTRY, {}, clear=False),          patch("localm.plugins.coder.mcp.register_mcp_tools",
+               _register_one("mcp_srv_add", "[MCP:srv] Adds " + EXOTIC)):
         agent = _make_agent(tmp_path)
         agent.backend.chat.return_value = "plan"
         agent.backend.last_usage = {}

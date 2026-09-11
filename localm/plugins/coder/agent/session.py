@@ -281,14 +281,18 @@ class _SessionMixin:
             not self._last_run_ok and not self._user_stopped)
         if not changed and not had_failure:
             return
-        if self.on_event is not None:
+        if self.cancelled:
+            return
+        in_background = self.reflect_in_background
+        if in_background is None:
+            in_background = self.on_event is not None
+        if in_background:
             threading.Thread(
                 target=self._reflect_into_episode, args=(changed,),
                 kwargs={"diff_override": diff_override}, daemon=True).start()
         else:
-            # CLI: the process is about to exit, so this runs SYNCHRONOUSLY - a
-            # daemon thread might never be scheduled again before exit. The wait is
-            # announced and capped rather than silent and unbounded.
+            # The process is about to exit, so this runs SYNCHRONOUSLY; the wait
+            # is announced and capped rather than silent and unbounded.
             print_info("Reflecting on this session before exiting...")
             self._reflect_into_episode(
                 changed, diff_override=diff_override,

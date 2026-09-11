@@ -1101,10 +1101,10 @@ def test_the_automatic_fold_in_keeps_the_range_on_the_parent_message():
     payload = {**_agent_job_payload("CHILD " + _EXOTIC), "ok": True}
 
     class _Reg:
-        def drain_finished(self, kind=None):
+        def drain_finished(self, kind=None, owner=None):
             return [{"id": "job_1", "label": "worker" + _EXOTIC, "result": payload,
                      "state": "done"}]
-        def take_dropped_undrained(self, kind):
+        def take_dropped_undrained(self, kind, owner=None):
             return 0
         def get(self, job_id):
             return None

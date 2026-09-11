@@ -169,7 +169,8 @@ class _PersistenceMixin:
         try:
             from ..background import get_registry
             registry = get_registry()
-            finished = registry.drain_finished(kind="agent")
+            owner = getattr(self, "job_owner", None)
+            finished = registry.drain_finished(kind="agent", owner=owner)
         except Exception:
             return []
 
@@ -181,7 +182,7 @@ class _PersistenceMixin:
         # drained), so a failure inside the same try would discard completions that
         # were already handed over.
         try:
-            lost = registry.take_dropped_undrained("agent")
+            lost = registry.take_dropped_undrained("agent", owner=owner)
         except Exception:
             lost = 0
 

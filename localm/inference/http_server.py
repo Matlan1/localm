@@ -4757,15 +4757,14 @@ def _pin(engine) -> None:
     no await in between, so the event loop cannot interleave an eviction before
     the pin lands. A pinned engine (active_requests > 0) is skipped by VRAM
     eviction, closing the window where a concurrent model load would unload an
-    engine out from under an in-flight request."""
-    if isinstance(getattr(engine, "active_requests", None), int):
-        engine.active_requests += 1
+    engine out from under an in-flight request. The count itself lives in
+    residency.pin_engine, the one guarded mutation site for active_requests."""
+    residency.pin_engine(engine)
 
 
 def _unpin(engine) -> None:
     """Release the request pin taken by _pin. Balanced exactly once per request."""
-    if isinstance(getattr(engine, "active_requests", None), int):
-        engine.active_requests = max(0, engine.active_requests - 1)
+    residency.unpin_engine(engine)
 
 
 @contextmanager

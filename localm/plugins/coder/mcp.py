@@ -19,6 +19,13 @@ newline-delimited JSON on stdin/stdout (the MCP stdio transport). Its tools
 are registered into TOOL_REGISTRY as ``mcp_<server>_<tool>`` so the agent
 can call them like any built-in tool. Everything is local and offline -
 whether a given server talks to the network is up to that server.
+
+Servers are pooled per declared spec (name, command, args, env, trusted) for
+the life of the process: a second registration of the same spec, by a later
+one-shot run or a second session on the same project, reuses the live server
+and its registry bindings instead of spawning another child. A registration
+whose spec differs from the live binding under the same tool name is refused
+with a warning, and the agent that was refused does not get that tool.
 """
 
 from __future__ import annotations
@@ -39,6 +46,10 @@ PROTOCOL_VERSION = "2025-03-26"
 
 _INIT_TIMEOUT = 15      # seconds for initialize + tools/list
 _CALL_TIMEOUT = 120     # seconds for a tool call
+
+# Live servers by spec key, shared by every registration in this process.
+_POOL: Dict[tuple, "MCPServer"] = {}
+_POOL_LOCK = threading.Lock()
 
 
 class MCPError(Exception):
@@ -252,10 +263,63 @@ def _schema_to_params(schema: dict) -> dict:
 
 
 def _make_tool_fn(server: MCPServer, tool_name: str):
-    """Wrap an MCP tool as a registry-compatible fn(cwd, **args)."""
+    """Wrap an MCP tool as a registry-compatible fn(cwd, **args). The function
+    carries the server it calls (``_mcp_server``) so a later registration of
+    the same spec can recognise its own binding."""
     def _fn(cwd: Path, **args) -> ToolResult:
         return server.call_tool(tool_name, args)
+    _fn._mcp_server = server
     return _fn
+
+
+def _spec_key(name: str, spec: dict) -> tuple:
+    env = spec.get("env") or {}
+    env_items: tuple = ()
+    if isinstance(env, dict):
+        env_items = tuple(sorted((str(k), str(v)) for k, v in env.items()))
+    return (name, spec["command"], tuple(str(a) for a in spec.get("args", [])),
+            env_items, bool(spec.get("trusted", False)))
+
+
+def pooled_server(name: str, spec: dict) -> MCPServer:
+    """The live server for *spec*, started on first use and reused after.
+    Raises MCPError (or the start failure) when a fresh start fails; nothing
+    is pooled then. The pool is process-wide and its entries stop at exit."""
+    key = _spec_key(name, spec)
+    with _POOL_LOCK:
+        server = _POOL.get(key)
+        if server is not None and server.alive:
+            return server
+        if server is not None:
+            _POOL.pop(key, None)
+        server = MCPServer(
+            name=name,
+            command=spec["command"],
+            args=spec.get("args", []),
+            env=spec.get("env"),
+            trusted=bool(spec.get("trusted", False)),
+        )
+        try:
+            server.start()
+        except BaseException:
+            server.stop()
+            raise
+        _POOL[key] = server
+        import atexit
+        atexit.register(server.stop)
+        return server
+
+
+def stop_pooled_servers() -> None:
+    """Stop and forget every pooled server."""
+    with _POOL_LOCK:
+        servers = list(_POOL.values())
+        _POOL.clear()
+    for server in servers:
+        try:
+            server.stop()
+        except Exception:
+            pass
 
 
 def load_mcp_config(cwd: Path) -> Dict[str, dict]:
@@ -291,22 +355,13 @@ def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
     warnings: List[str] = []
 
     for name, spec in load_mcp_config(cwd).items():
-        server = MCPServer(
-            name=name,
-            command=spec["command"],
-            args=spec.get("args", []),
-            env=spec.get("env"),
-            trusted=bool(spec.get("trusted", False)),
-        )
         try:
-            server.start()
+            server = pooled_server(name, spec)
         except MCPError as e:
             warnings.append(str(e))
-            server.stop()
             continue
         except Exception as e:
             warnings.append(f"MCP server '{name}' failed to start: {e}")
-            server.stop()
             continue
 
         for tool in server.tools:
@@ -329,9 +384,8 @@ def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
                 source_label="MCP",
                 registered=registered,
                 warnings=warnings,
+                reuse_if_already_ours=(
+                    lambda td, s=server: getattr(td.fn, "_mcp_server", None) is s),
             )
-
-        import atexit
-        atexit.register(server.stop)
 
     return registered, warnings

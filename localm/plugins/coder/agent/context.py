@@ -828,7 +828,7 @@ ws     ::= [ \t\n\r]*
                 full += piece
                 if not hidden:
                     on_token(piece)
-                if self._stop_requested:
+                if self._stop_requested or self.cancelled:
                     break
         except KeyboardInterrupt:
             if on_interrupt is None:

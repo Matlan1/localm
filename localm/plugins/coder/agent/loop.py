@@ -210,9 +210,9 @@ class _LoopMixin:
 
         try:
             while self._turns < self.max_turns:
-                if self._stop_requested:
+                if self._stop_requested or self.cancelled:
                     self._stop_requested = False
-                    final_response = "[stopped by user]"
+                    final_response = self._stopped_text()
                     self._last_run_ok = False
                     self._user_stopped = True
                     break
@@ -296,11 +296,11 @@ class _LoopMixin:
                 # consumes it, so no later path inherits a constrained sampler.
                 self._force_tool_grammar = False
 
-                if self._stop_requested:
+                if self._stop_requested or self.cancelled:
                     # Stopped mid-generation: keep the partial text, run nothing
                     self._stop_requested = False
                     self._add_assistant(response)
-                    final_response = response or "[stopped by user]"
+                    final_response = response or self._stopped_text()
                     self._last_run_ok = False
                     self._user_stopped = True
                     break
@@ -952,6 +952,12 @@ class _LoopMixin:
         from ..provenance import build_result_block, is_untrusted_tool
         untrusted = is_untrusted_tool(call.name, TOOL_REGISTRY.get(call.name))
         return build_result_block(call.name, result, untrusted)
+
+    def _stopped_text(self) -> str:
+        """The final response of a run that stopped before finishing."""
+        if self.cancelled:
+            return f"[stopped: {self.cancel_reason}]"
+        return "[stopped by user]"
 
     def _execute_tools(self, calls: list, interactive: bool) -> list[str]:
         """

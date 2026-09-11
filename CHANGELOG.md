@@ -65,8 +65,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
   window, and on a card that fits one copy a native fault. The coder now runs
   inside the MCP server on the model it already has loaded, so any number of
   projects share one load, no window opens, and the model stays put while a
-  task is running. A task that outlives its timeout is asked to stop and
-  reported as timed out instead of being killed mid-edit.
+  task is running. A task that reaches its timeout is cancelled and reported as
+  timed out: the command it was running is stopped, no further file write or
+  command runs, and the model stops generating.
+- **A thinking model's reasoning leaked into the MCP coder's answer and could
+  be acted on.** Over the MCP server's `run_coder_task`, a model that reasons in
+  `<think>` tags had its whole scratchpad treated as the answer: it entered the
+  conversation and the session log, and a tool call the model merely considered
+  while thinking was executed. The reasoning is now split off before the answer
+  is read, as the HTTP coder already did.
+- **Loading a second model in the MCP server while another was still serving a
+  coder task could hang the server for hours, then overcommit VRAM.** The wait
+  for the busy model counted only its own sleeps, not the GPU probe it ran on
+  every pass, and when it gave up it loaded the new model on top anyway. The
+  wait is now 30 seconds of wall clock, after which the load is refused with a
+  message to retry, and a model is never freed while a coder sub-agent is
+  claiming it.
+- **A background sub-agent started by an MCP coder task kept running after the
+  task had reported, and one task could collect another task's sub-agent
+  results.** A finished task now stops the background sub-agents it started,
+  and each task only sees its own.
+- **MCP servers configured for the coder were launched again for every task
+  and every sub-agent, and never stopped.** One server per configured entry is
+  now started and reused; sub-agents share their parent's.
 - **The curated model shortcuts picker on the Models page could stay empty for
   the rest of a session.** If its very first load hit a brief server or
   network error, it was never retried; it now loads again the next time the

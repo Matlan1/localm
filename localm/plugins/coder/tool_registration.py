@@ -33,10 +33,9 @@ def register_foreign_tool(
 
     A name clash with an unrelated entry warns and skips. When
     *reuse_if_already_ours* is given and returns True for the existing entry,
-    the clash is a harmless re-registration (e.g. a sub-agent re-running the
-    same discovery) and *reg_name* is silently reused instead of warned about
-    - the plugin adapter's own idempotent-reregistration behaviour, not shared
-    by the MCP adapter (which has no such re-init case today).
+    the clash is a harmless re-registration (a plugin re-running the same
+    discovery, or a later run reusing a pooled MCP server) and *reg_name* is
+    silently reused instead of warned about.
 
     *description* is neutralised (defangs any chat-template control token /
     frame marker a foreign name/description could carry into the system

@@ -194,3 +194,115 @@ class TestPinnedModels:
     def test_non_string_entries_are_dropped(self):
         assert residency.pinned_model_names(
             {"pinned_models": ["a", 7, None, ""]}) == frozenset({"a"})
+
+
+class TestPinSurface:
+    def test_pin_then_unpin_returns_to_zero(self):
+        e = _engine()
+        residency.pin_engine(e)
+        assert residency.is_serving(e) is True
+        residency.unpin_engine(e)
+        assert e.active_requests == 0
+        assert residency.is_serving(e) is False
+
+    def test_pin_twice_unpin_once_leaves_one(self):
+        e = _engine()
+        residency.pin_engine(e)
+        residency.pin_engine(e)
+        residency.unpin_engine(e)
+        assert e.active_requests == 1
+        assert residency.is_serving(e) is True
+
+    def test_unpin_at_zero_stays_zero_and_warns(self, caplog):
+        import logging
+        e = _engine()
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            residency.unpin_engine(e)
+        assert e.active_requests == 0
+        assert any("unbalanced unpin" in r.getMessage() for r in caplog.records)
+
+    def test_an_engine_without_the_counter_is_left_alone(self):
+        e = SimpleNamespace()
+        residency.pin_engine(e)
+        residency.unpin_engine(e)
+        assert not hasattr(e, "active_requests")
+        assert residency.is_serving(e) is False
+
+    def test_is_serving_and_the_victim_picker_agree(self):
+        for value in (0, 1, "1", None, object()):
+            e = SimpleNamespace(active_requests=value, unloading=False)
+            evictable = residency.pick_eviction_victim(["x"], {"x": e}) == "x"
+            assert evictable is (not residency.is_serving(e)), value
+
+    def test_try_pin_refuses_when_the_check_fails_and_pins_when_it_holds(self):
+        e = _engine()
+        assert residency.try_pin_engine(e, check=lambda: False) is False
+        assert e.active_requests == 0
+        assert residency.try_pin_engine(e, check=lambda: True) is True
+        assert e.active_requests == 1
+        assert residency.try_pin_engine(e) is True
+        assert e.active_requests == 2
+
+    def test_try_pin_refuses_an_engine_mid_unload(self):
+        e = _engine(unloading=True)
+        assert residency.try_pin_engine(e, check=lambda: True) is False
+        assert e.active_requests == 0
+
+    def test_begin_unload_marks_an_idle_engine_and_refuses_a_pinned_one(self):
+        e = _engine()
+        residency.pin_engine(e)
+        assert residency.begin_unload(e) is False
+        assert e.unloading is False
+        residency.unpin_engine(e)
+        assert residency.begin_unload(e) is True
+        assert e.unloading is True
+        assert residency.try_pin_engine(e, check=lambda: True) is False
+
+    def test_the_check_runs_under_the_pin_lock(self):
+        """A pin decided while the check runs cannot interleave with an unload
+        decided under the same lock: the eviction waits for the claim."""
+        import threading
+        e = _engine()
+        checking = threading.Event()
+        release = threading.Event()
+        outcome = {}
+
+        def check():
+            checking.set()
+            release.wait(5)
+            return True
+
+        def claim():
+            outcome["pinned"] = residency.try_pin_engine(e, check=check)
+
+        t = threading.Thread(target=claim)
+        t.start()
+        assert checking.wait(5)
+        evictor = threading.Thread(
+            target=lambda: outcome.__setitem__("unload", residency.begin_unload(e)))
+        evictor.start()
+        evictor.join(0.2)
+        assert evictor.is_alive(), "begin_unload did not wait for the claim"
+        release.set()
+        t.join(5)
+        evictor.join(5)
+        assert outcome == {"pinned": True, "unload": False}
+        assert e.unloading is False
+
+
+class TestSingleMutationSite:
+    def test_only_residency_mutates_an_engines_active_requests(self):
+        """Every pin and unpin of an Engine's active_requests goes through the
+        guarded pair here; a second copy elsewhere silently races it."""
+        import re
+        from pathlib import Path
+        root = Path(residency.__file__).resolve().parents[1]
+        pattern = re.compile(r"(?<!self\.)\bactive_requests\s*(\+=|-=|=\s*max\()")
+        offenders = []
+        for path in root.rglob("*.py"):
+            if path.name == "residency.py":
+                continue
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
+        assert offenders == [], "\n".join(offenders)
