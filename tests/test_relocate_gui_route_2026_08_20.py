@@ -230,7 +230,7 @@ class TestRelocatePathRejectedLexically:
 
     @pytest.mark.parametrize("bad_path", [UNC, DEVICE])
     def test_a_unc_or_device_path_never_reaches_the_filesystem(
-            self, relocate_app, fs_spy, bad_path):
+            self, relocate_app, fs_spy, bad_path):  # noqa: F811
         import localm.model_manager as mm
         app, tmp = relocate_app
         old = _gguf(tmp / "ext" / "m.gguf")
@@ -246,7 +246,7 @@ class TestRelocatePathRejectedLexically:
         assert elapsed < _NO_DIAL_SECONDS
         assert r.status_code == 400, r.text
 
-    def test_forward_slash_unc_platform_split(self, relocate_app, fs_spy):
+    def test_forward_slash_unc_platform_split(self, relocate_app, fs_spy):  # noqa: F811
         import localm.model_manager as mm
         app, tmp = relocate_app
         old = _gguf(tmp / "ext" / "m.gguf")
