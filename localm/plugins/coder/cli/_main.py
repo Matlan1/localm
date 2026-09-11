@@ -42,6 +42,7 @@ from ..runner import (
     InvalidSessionMode,
     browser_enabled as _browser_enabled,
     build_agent,
+    describe_denied,
     finish_agent,
     resolve_task_config,
     run_single_task,
@@ -356,9 +357,13 @@ def main(
                 # process is about to exit with its daemon threads. Report it: the
                 # committed branch survives, the running child does not.
                 _warn_unfinished_background(agent)
+                denied = tuple(agent.denied_unconfirmed)
             else:
                 outcome = run_single_task(agent, task)
                 success, response = outcome.success, outcome.response
+                denied = outcome.denied
+            if denied:
+                print_warning(describe_denied(denied))
 
             if output_format == "json":
                 import json as _json
@@ -367,6 +372,7 @@ def main(
                     "response":     response,
                     "turns":        agent.turns,
                     "total_tokens": agent.total_tokens,
+                    "denied":       [{"tool": n, "reason": r} for n, r in denied],
                 }
                 sys.stdout.write(_json.dumps(result, indent=2) + "\n")
 

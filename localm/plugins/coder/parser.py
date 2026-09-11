@@ -23,12 +23,19 @@ Supported formats (in priority order):
    {"name": "read_file", "args": {"path": "src/main.py"}}
    ```
 
-5. Name-gated lenient forms (only when the caller passes the set of real tool
-   names, and only when the parsed name is one of them - so a JSON example in
-   prose is never mistaken for a call):
+5. Name-gated forms (only when the caller passes the set of real tool names,
+   and only when the parsed name is one of them - so a JSON example in prose
+   is never mistaken for a call):
      - a ```json fence, or a bare ``` fence, wrapping the JSON above
      - a bare top-level JSON object with no wrapper at all:
        {"name": "read_file", "args": {"path": "src/main.py"}}
+   These are LENIENT (ToolCall.lenient is True), with one exception that is
+   trusted like the explicit forms: when every name-gated call in the
+   response is an EXACT call object (one JSON object that decodes with no
+   repair and carries only a string "name" plus an object "args" or
+   "arguments") AND the whole response consists of nothing but recognised
+   calls and whitespace. Prose, a heading, a wrapper tag or a thinking block
+   around the call keeps it lenient.
 
 Returns a list of (tool_name, args_dict, raw_match) tuples so the caller
 can reconstruct the text with results inserted in-place.
@@ -50,12 +57,14 @@ class ToolCall:
     start: int      # char offset in the full response
     end:   int
     # True when this call was recovered ONLY via a name-gated fallback path (a
-    # bare top-level JSON object, or a ```json/bare ``` fence) carrying no marker
-    # that the model meant to call a tool, and accepted purely because its shape
-    # matches a real tool name. False for every path that does carry such a
-    # marker, however mangled: the canonical <tool_call> XML wrapper, an explicit
-    # ```tool_call/```tool_code fence, and marker-variant dialects like
-    # <|tool_call>. execution.py's confirmation gate keys on this flag.
+    # bare top-level JSON object, or a ```json / bare ``` fence) carrying no
+    # marker that the model meant to call a tool, and accepted purely because
+    # its shape matches a real tool name, unless the response is nothing but
+    # exact call objects (see parse_tool_calls). False for every path that
+    # does carry such a marker, however mangled: the canonical <tool_call> XML
+    # wrapper, an explicit ```tool_call/```tool_code fence, and marker-variant
+    # dialects like <|tool_call>. execution.py's confirmation gate keys on
+    # this flag.
     lenient: bool = False
 
 
@@ -89,6 +98,9 @@ _RE_FENCE_CLOSE = re.compile(r"\r?\n[ \t]*```")
 
 # Fence languages that explicitly signal a tool call (no name gate needed).
 _EXPLICIT_FENCE_LANGS = frozenset({"tool_call", "tool_code", "tool"})
+
+# The only key sets an exact call object may carry (see _exact_call_object).
+_EXACT_CALL_KEY_SETS = (frozenset({"name", "args"}), frozenset({"name", "arguments"}))
 
 # Signals that the model TRIED to call a tool even when nothing parsed. Fires a
 # one-shot repair turn instead of printing the broken call as the final answer.
@@ -206,6 +218,26 @@ def _parse_gemma_args(body: str) -> Optional[dict]:
     # Convert bare keys to quoted keys
     repaired = re.sub(r'(\{|,)\s*([A-Za-z_]\w*)\s*:', r'\1"\2":', body)
     return _lenient_json(repaired)
+
+
+def _exact_call_object(body: str) -> Optional[tuple[str, dict]]:
+    """``(name, args)`` when *body* is exactly one JSON object that decodes
+    with no repair transform (plain ``json.loads``, control characters allowed
+    inside strings) and whose keys are exactly ``name`` plus ``args`` or
+    ``arguments``, with a string name and an object of args. None for
+    anything else, including every body only :func:`_lenient_json` recovers.
+    See test_json_fence_needing_a_repair_is_lenient."""
+    try:
+        obj = json.loads(body.strip(), strict=False)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or frozenset(obj) not in _EXACT_CALL_KEY_SETS:
+        return None
+    name = obj["name"]
+    args = obj["args"] if "args" in obj else obj["arguments"]
+    if not isinstance(name, str) or not isinstance(args, dict):
+        return None
+    return name, args
 
 
 def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, dict]]:
@@ -462,10 +494,15 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
       - ```` ```json ```` (or a bare ```` ``` ````) fenced blocks
       - a bare top-level JSON object: ``{"name": "...", "args": {...}}``
 
-    Passing *tool_names* is how the agent opts into the lenient, name-gated
-    formats; callers that omit it get only the explicit wrappers. Every call
-    recovered via one of those two name-gated formats has ``ToolCall.lenient``
-    set True.
+    Passing *tool_names* is how the agent opts into the name-gated formats;
+    callers that omit it get only the explicit wrappers. A call recovered via
+    one of those two name-gated formats has ``ToolCall.lenient`` set True,
+    with one exception that is trusted like the explicit wrappers: when every
+    name-gated call in the response is an exact, repair-free
+    ``{"name": ..., "args": {...}}`` object (see :func:`_exact_call_object`)
+    and the whole response is nothing but recognised calls and whitespace.
+    Prose, a heading, a wrapper tag or a thinking block anywhere in the
+    response keeps every name-gated call lenient.
     """
     calls: list[ToolCall] = []
     seen_spans: list[tuple[int, int]] = []
@@ -487,6 +524,10 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
         if parsed is not None:
             _accept(parsed[0], parsed[1], text[start:end], start, end)
 
+    # Name-gated calls (a ```json / bare ``` fence, or a bare object) with
+    # whether each body is an exact call object; resolved after pass 4.
+    gated: list[tuple[ToolCall, bool]] = []
+
     # 2. Fenced blocks: ```tool_call/```tool_code are explicit; ```json and a
     #    bare ``` are accepted only when the name matches a real tool.
     for start, end, lang, body in _iter_fenced_blocks(text):
@@ -499,6 +540,8 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
         if explicit or (tool_names is not None and parsed[0] in tool_names):
             _accept(parsed[0], parsed[1], text[start:end], start, end,
                     lenient=not explicit)
+            if not explicit:
+                gated.append((calls[-1], _exact_call_object(body) is not None))
 
     # The final "}" in the response, computed once and shared by passes 3 and 4:
     # it bounds every body scan, so text with no closing brace costs nothing.
@@ -528,6 +571,18 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
             parsed = _try_parse_body(chunk, None)
             if parsed is not None and parsed[0] in tool_names:
                 _accept(parsed[0], parsed[1], chunk, start, end, lenient=True)
+                gated.append((calls[-1], _exact_call_object(chunk) is not None))
+
+    # A name-gated call is trusted only when every name-gated call in the
+    # response is an exact call object AND the response holds nothing but the
+    # recognised calls and whitespace. See test_json_fence_inside_prose_is_lenient.
+    if gated and all(exact for _call, exact in gated):
+        leftover = text
+        for c_start, c_end in sorted(seen_spans, reverse=True):
+            leftover = leftover[:c_start] + leftover[c_end:]
+        if not leftover.strip():
+            for call, _exact in gated:
+                call.lenient = False
 
     # Sort by position in the response
     calls.sort(key=lambda c: c.start)

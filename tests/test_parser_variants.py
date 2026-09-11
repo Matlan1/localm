@@ -182,26 +182,183 @@ class TestLenientFlag:
     """ToolCall.lenient marks a call recovered ONLY because its JSON shape
     happened to match a real tool name, with no marker of its own signalling
     the model intended to call a tool at all (a bare top-level JSON object,
-    or a ```json/bare ``` fence). Every OTHER recognised shape carries such a
-    marker, however mangled, and must stay unflagged: execution.py keys a
+    or a ```json / bare ``` fence), unless the whole response is nothing but
+    exact call objects. Every OTHER recognised shape carries such a marker,
+    however mangled, and must stay unflagged: execution.py keys a
     confirmation requirement on this flag."""
 
     TOOLS = {"read_file", "write_file", "edit_files", "run_shell", "tree"}
+    F = "```"
 
-    def test_bare_json_object_is_lenient(self):
-        text = '{"name": "read_file", "args": {"path": "a.py"}}'
+    def test_bare_exact_call_alone_is_not_lenient(self):
+        """A response that is nothing but one exact call object (whitespace
+        aside) is trusted like the explicit forms."""
+        text = '\n{"name": "read_file", "args": {"path": "a.py"}}\n'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_qwen_coder_bare_call_alone_is_not_lenient(self):
+        # Shape observed live from Qwen2.5-Coder-1.5B-Instruct in an unattended
+        # run, on a sampling branch where it wrote no fence at all.
+        text = '{"name": "write_file", "args": {"path": "NOTE.txt", "content": "hello from the coder"}}'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert [(c.name, c.lenient) for c in calls] == [("write_file", False)]
+
+    def test_several_bare_exact_calls_alone_are_not_lenient(self):
+        text = ('{"name": "read_file", "args": {"path": "a.py"}}\n'
+                '{"name": "tree", "args": {}}')
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert [c.lenient for c in calls] == [False, False]
+
+    def test_bare_json_object_with_text_around_it_is_lenient(self):
+        for text in ('Sure, here:\n{"name": "read_file", "args": {"path": "a.py"}}',
+                     '{"name": "read_file", "args": {"path": "a.py"}}\nDone.',
+                     '<think>hmm</think>\n{"name": "read_file", "args": {"path": "a.py"}}'):
+            calls = parse_tool_calls(text, tool_names=self.TOOLS)
+            assert calls[0].lenient is True, text
+
+    def test_bare_object_needing_a_repair_is_lenient_even_alone(self):
+        text = '{"name": "read_file", "args": {"path": "a.py"},}'
         calls = parse_tool_calls(text, tool_names=self.TOOLS)
         assert calls[0].lenient is True
 
-    def test_bare_triple_fence_is_lenient(self):
+    def test_one_inexact_bare_object_keeps_every_bare_object_lenient(self):
+        text = ('{"name": "read_file", "args": {"path": "a.py"}}\n'
+                '{"name": "tree", "args": {}, "note": "example"}')
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert [c.lenient for c in calls] == [True, True]
+
+    def test_exact_object_inside_a_tool_result_wrapper_is_lenient(self):
+        """<tool_result> is the channel tool OUTPUT comes back on, and that
+        output is untrusted (file contents, shell output, fetched pages). A
+        call object inside it, bare or fenced, is what an injected call echoed
+        back from a read file looks like, so it keeps the confirmation gate.
+        Also a shape Qwen2.5-Coder-1.5B-Instruct emits live for its own calls."""
+        body = '{"name": "write_file", "args": {"path": "NOTE.txt", "content": "hello"}}'
+        for text in ("<tool_result>\n  " + body + "\n</tool_result>",
+                     '<tool_result name="read_file" status="ok">\n' + self.F + "json\n"
+                     + body + "\n" + self.F + "\n</tool_result>"):
+            calls = parse_tool_calls(text, tool_names=self.TOOLS)
+            assert [(c.name, c.lenient) for c in calls] == [("write_file", True)], text
+
+    def test_heading_plus_fenced_exact_object_is_lenient(self):
+        text = ("## write_file\n" + self.F + 'json\n{"name": "write_file", "args": '
+                '{"path": "a", "content": "x"}}\n' + self.F)
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert [(c.name, c.lenient) for c in calls] == [("write_file", True)]
+
+    def test_bare_triple_fence_inside_prose_is_lenient(self):
+        text = 'Try:\n```\n{"name": "read_file", "args": {"path": "x"}}\n```'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is True
+
+    def test_bare_triple_fence_alone_with_an_exact_object_is_not_lenient(self):
         text = '```\n{"name": "read_file", "args": {"path": "x"}}\n```'
         calls = parse_tool_calls(text, tool_names=self.TOOLS)
-        assert calls[0].lenient is True
+        assert calls[0].lenient is False
 
-    def test_json_fence_is_lenient(self):
-        text = '```json\n{"name": "tree", "args": {}}\n```'
+    def test_exact_json_fence_alone_is_not_lenient(self):
+        """A ```json fence whose body decodes with no repair into exactly
+        {"name": <real tool>, "args": {...}}, and nothing else in the
+        response, is trusted like the explicit forms."""
+        text = self.F + 'json\n{"name": "tree", "args": {}}\n' + self.F
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].name == "tree"
+        assert calls[0].lenient is False
+
+    def test_json_fence_inside_prose_is_lenient(self):
+        """Prose around the fence keeps it lenient: a fence is how a model
+        QUOTES JSON (an example, a summary of an earlier call, an alternative
+        it offers, a call it says it will not make), and none of those is
+        an invocation."""
+        for text in (
+            "Use this:\n" + self.F + 'json\n{"name": "tree", "args": {}}\n' + self.F,
+            self.F + 'json\n{"name": "tree", "args": {}}\n' + self.F + "\nThat lists the tree.",
+            "I already did this earlier:\n" + self.F + 'json\n{"name": "write_file", '
+            '"args": {"path": "a", "content": "x"}}\n' + self.F + "\nNothing more to do.",
+            "I will NOT run this:\n" + self.F + 'json\n{"name": "run_shell", '
+            '"args": {"command": "rm -rf ."}}\n' + self.F,
+            "<think>maybe " + self.F + 'json\n{"name": "tree", "args": {}}\n' + self.F
+            + " no</think>\nI will not.",
+        ):
+            calls = parse_tool_calls(text, tool_names=self.TOOLS)
+            assert len(calls) == 1, text
+            assert calls[0].lenient is True, text
+
+    def test_several_exact_fences_alone_are_not_lenient(self):
+        text = (self.F + 'json\n{"name": "tree", "args": {}}\n' + self.F + "\n"
+                + self.F + 'json\n{"name": "read_file", "args": {"path": "a"}}\n' + self.F)
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert [c.lenient for c in calls] == [False, False]
+
+    def test_an_explicit_fence_stays_trusted_inside_prose(self):
+        text = "Use:\n" + self.F + 'tool_call\n{"name": "tree", "args": {}}\n' + self.F + "\nok"
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_qwen_coder_pretty_printed_json_fence_is_not_lenient(self):
+        # Shape observed live from Qwen2.5-Coder-1.5B-Instruct in an unattended
+        # run: a pretty-printed ```json fence, never the <tool_call> wrapper.
+        text = (self.F + 'json\n{\n  "name": "write_file",\n  "args": {\n'
+                '    "path": "NOTE.txt",\n    "content": "hello from the coder"\n'
+                '  }\n}\n' + self.F)
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert [(c.name, c.lenient) for c in calls] == [("write_file", False)]
+        assert calls[0].args == {"path": "NOTE.txt", "content": "hello from the coder"}
+
+    def test_json_fence_with_the_arguments_alias_is_not_lenient(self):
+        text = self.F + 'json\n{"name": "tree", "arguments": {}}\n' + self.F
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_json_fence_with_a_raw_newline_in_a_string_is_not_lenient(self):
+        """A raw newline inside a string value decodes deterministically (no
+        guess is involved), so it does not make the fence lenient."""
+        text = (self.F + 'json\n{"name": "write_file", "args": {"path": "a", '
+                '"content": "l1\nl2"}}\n' + self.F)
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+        assert calls[0].args["content"] == "l1\nl2"
+
+    def test_uppercase_json_tag_is_not_lenient(self):
+        text = self.F + 'JSON\n{"name": "tree", "args": {}}\n' + self.F
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_json_fence_needing_a_repair_is_lenient(self):
+        """Every body that only the repair transforms recover stays lenient:
+        the exact rule is plain json.loads, nothing else."""
+        bodies = {
+            "trailing comma": '{"name": "tree", "args": {},}',
+            "single-quoted key": '{\'name\': "tree", "args": {}}',
+            "doubled braces": '{{"name": "tree", "args": {}}}',
+            "triple-quoted value":
+                '{"name": "write_file", "args": {"path": "a", "content": """x"""}}',
+            "unescaped backslash":
+                '{"name": "write_file", "args": {"path": "C:\\x\\y", "content": "z"}}',
+        }
+        for label, body in bodies.items():
+            calls = parse_tool_calls(self.F + "json\n" + body + "\n" + self.F,
+                                     tool_names=self.TOOLS)
+            assert len(calls) == 1, label
+            assert calls[0].lenient is True, label
+
+    def test_json_fence_with_extra_keys_is_lenient(self):
+        text = self.F + 'json\n{"name": "tree", "args": {}, "note": "example"}\n' + self.F
         calls = parse_tool_calls(text, tool_names=self.TOOLS)
         assert calls[0].lenient is True
+
+    def test_json_fence_with_non_object_args_is_not_a_call(self):
+        text = self.F + 'json\n{"name": "tree", "args": "x"}\n' + self.F
+        assert parse_tool_calls(text, tool_names=self.TOOLS) == []
+
+    def test_exact_json_fence_for_an_unknown_tool_is_not_a_call(self):
+        text = self.F + 'json\n{"name": "nope", "args": {}}\n' + self.F
+        assert parse_tool_calls(text, tool_names=self.TOOLS) == []
+
+    def test_exact_json_fence_without_tool_names_is_not_a_call(self):
+        text = self.F + 'json\n{"name": "tree", "args": {}}\n' + self.F
+        assert parse_tool_calls(text) == []
 
     def test_canonical_xml_wrapper_not_lenient(self):
         text = '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>'
@@ -230,7 +387,8 @@ class TestLenientFlag:
         # A model with no <tool_call> training free-runs past an unfired grammar
         # trigger, opens its own ## toolname heading instead of the real wrapper,
         # and the JSON body is still recovered by the bare-object fallback. It is
-        # flagged so execution.py can require a human look at it.
+        # flagged so execution.py can require a human look at it. The heading is
+        # what keeps it lenient under the whole-response rule.
         text = (
             '## edit_files\n'
             '{"name": "edit_files", "args": {"edits": ['

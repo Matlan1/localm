@@ -258,6 +258,7 @@ class _ChildOutcome:
         self.detail = ""
         self.errors: list = []   # the child's own _error_trace, folded into the
                                  # parent on the parent's thread after the wait
+        self.denied: list = []   # the child's _denied_unconfirmed, folded the same way
         self.branch = ""
         self.worktree = ""       # the worktree root (what we create and remove)
         self.child_cwd = None    # where the child actually runs inside it
@@ -409,6 +410,7 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
         turns=getattr(child, "turns", 0),
         status="ok" if getattr(child, "last_run_ok", True) else "error",
         errors=list(getattr(child, "_error_trace", None) or []),
+        denied=list(getattr(child, "_denied_unconfirmed", None) or []),
         detail=detail,
     )
 
@@ -645,6 +647,9 @@ def tool_dispatch_parallel(
         for outcome in outcomes:
             if outcome.errors:
                 _absorb_child_errors(_parent_agent, outcome.errors)
+            child_denied = getattr(outcome, "denied", None)
+            if child_denied:
+                _parent_agent._absorb_denials(child_denied, outcome.name)
 
         # 3. Commit each child's work and capture its diff BEFORE teardown. A child
         #    that never started has nothing to commit and no diff to read; running
@@ -813,6 +818,11 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path):
             lines.append(_stripped(o.detail))
         if o.cleanup_warning:
             lines.append(f"WARNING: {o.cleanup_warning}")
+        denied = getattr(o, "denied", None)
+        if denied:
+            from ..runner import describe_denied
+            lines.append("DENIED: " + describe_denied(
+                [(name, reason) for name, _key, reason in denied]))
         # A worker that finished after the parent gave up. Its result was refused
         # (the sealed verdict above is what stands), but refusing it silently would
         # hide both that the work exists and where it is.

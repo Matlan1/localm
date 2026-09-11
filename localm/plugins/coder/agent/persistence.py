@@ -103,9 +103,9 @@ class _PersistenceMixin:
             entry["writes"] += 1
             entry["last_tool"] = tool
 
-    def _absorb_child_state(self, child) -> None:
-        """Fold a spawned child agent's changed-files and error trace into this
-        parent.
+    def _absorb_child_state(self, child, label: str = "") -> None:
+        """Fold a spawned child agent's changed-files, error trace and
+        confirmation denials into this parent.
 
         A child from ``spawn_agent`` shares this cwd but is never ``close()``d, so
         without this its delegated file changes and failures would never reach an
@@ -128,6 +128,27 @@ class _PersistenceMixin:
             self._error_trace.extend(child_errors)
             if len(self._error_trace) > _MAX_ERROR_TRACE:
                 self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
+        self._absorb_child_denials(child, label)
+
+    def _absorb_child_denials(self, child, label: str = "") -> None:
+        """Fold a child's confirmation denials (``_denied_unconfirmed``) into
+        this run's record; see ``_absorb_denials``. Parent thread only."""
+        self._absorb_denials(
+            list(getattr(child, "_denied_unconfirmed", None) or []), label)
+
+    def _absorb_denials(self, denied: list, label: str = "") -> None:
+        """Fold *denied* entries (``(tool name, key, reason)`` as recorded on
+        a child) into this run's record, each tool name prefixed
+        ``sub-agent:``, so the parent's outcome reports them. The keys are
+        prefixed too, so a parent call never clears a child's denial. Parent
+        thread only."""
+        if not denied:
+            return
+        prefix = f"sub-agent {label}:" if label else "sub-agent:"
+        with self._denied_lock:
+            self._denied_unconfirmed.extend(
+                (f"{prefix}{name}", f"{prefix}{key}", reason)
+                for name, key, reason in denied)
 
     def _drain_background_agents(self) -> list:
         """Fold finished background sub-agents into this parent and describe them.
@@ -188,6 +209,8 @@ class _PersistenceMixin:
                     self._error_trace.extend(child_errors)
                     if len(self._error_trace) > _MAX_ERROR_TRACE:
                         self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
+                if child is not None:
+                    self._absorb_child_denials(child, label)
 
                 # Did the child actually succeed? A job reaches state done
                 # whenever its thread returned, and run_task RETURNS a failure

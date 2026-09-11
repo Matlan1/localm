@@ -44,3 +44,48 @@ def test_fires_control_the_same_call_not_flagged_lenient_still_auto_approves(tmp
     result = agent._execute_tool(_write_call(lenient=False), interactive=False)
     assert result.ok, result.output
     assert (tmp_path / "out.txt").read_text() == "hi"
+
+
+def test_a_lenient_denial_tells_the_model_the_format_and_is_recorded(tmp_path):
+    """When the loose format is the ONLY reason confirmation was required, the
+    denial names the <tool_call> format the same call would run in, and the
+    run records the call as denied for that reason."""
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
+    result = agent._execute_tool(_write_call(lenient=True), interactive=False)
+    assert not (tmp_path / "out.txt").exists()
+    assert not result.ok
+    assert "not written in the <tool_call> format" in result.output
+    assert '<tool_call>\n{"name": "write_file", "args": {...}}\n</tool_call>' in result.output
+    assert agent.denied_unconfirmed == [("write_file", "lenient")]
+
+
+def test_an_always_confirm_denial_is_recorded_as_unconfirmable(tmp_path):
+    """A tool the run must always confirm is denied for a reason the model
+    cannot fix by reformatting, and the record says so."""
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True,
+                  always_confirm={"write_file"})
+    result = agent._execute_tool(_write_call(lenient=True), interactive=False)
+    assert not (tmp_path / "out.txt").exists()
+    assert not result.ok
+    assert "requires confirmation" in result.output
+    assert "<tool_call>" not in result.output
+    assert agent.denied_unconfirmed == [("write_file", "unconfirmable")]
+
+
+def test_the_record_clears_when_the_identical_call_later_runs(tmp_path):
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
+    agent._execute_tool(_write_call(lenient=True), interactive=False)
+    assert agent.denied_unconfirmed == [("write_file", "lenient")]
+    result = agent._execute_tool(_write_call(lenient=False), interactive=False)
+    assert result.ok, result.output
+    assert (tmp_path / "out.txt").read_text() == "hi"
+    assert agent.denied_unconfirmed == []
+
+
+def test_the_record_keeps_a_denial_the_later_call_did_not_repeat(tmp_path):
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
+    agent._execute_tool(_write_call(lenient=True), interactive=False)
+    result = agent._execute_tool(_write_call(lenient=False, rel="other.txt"),
+                                 interactive=False)
+    assert result.ok, result.output
+    assert agent.denied_unconfirmed == [("write_file", "lenient")]

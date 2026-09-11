@@ -1234,9 +1234,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         except Exception as e:
             return _text_result(f"coder task failed to run: {e}", is_error=True)
 
+        denied = coder_runner.describe_denied(result.denied)
         meta = (f"\n\n[turns={result.turns} tokens={result.total_tokens} "
-                f"success={result.success}]")
-        return _text_result(result.response + meta, is_error=not result.success)
+                f"success={result.success} denied={len(result.denied)}]")
+        text = result.response + ("\n\n[denied] " + denied if denied else "") + meta
+        return _text_result(text, is_error=not result.success)
 
     def setup_embeddings(args: dict) -> dict:
         model = args.get("model")
@@ -1583,7 +1585,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 "git, tests) to localm's own offline agent, running entirely on a "
                 "local model. Blocks until the task finishes or times out, then "
                 "returns the agent's final result - use this to hand off a "
-                "self-contained sub-task instead of doing it turn-by-turn yourself."
+                "self-contained sub-task instead of doing it turn-by-turn yourself. "
+                "Nobody can confirm a tool call during the run: a call the agent "
+                "makes that needs a confirmation is denied, the result names it "
+                "and reports success=False."
             ),
             "inputSchema": {
                 "type": "object",
