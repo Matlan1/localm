@@ -793,6 +793,7 @@ def _stripped(value):
 
 
 def _render_report(outcomes: list[_ChildOutcome], repo: Path):
+    from localm.textguard import compose, compose_join, untrusted_span
     lines: list = [
         "Parallel dispatch finished. NOTHING HAS BEEN MERGED - each child's work is "
         "committed on its own branch for you to review and merge (or delete).",
@@ -819,7 +820,7 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path):
             lines.append(f"NOTE: {o.late_note}")
         if o.diff:
             lines.append("")
-            lines.append(o.diff.strip())
+            lines.append(_stripped(compose(untrusted_span(o.diff))))
         elif o.status == "ok":
             lines.append("(no file changes)")
         lines.append("")
@@ -842,5 +843,4 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path):
         lines.append("To take one of these, review the diff then merge its branch, "
                      "e.g.:")
         lines.append(f"    git -C {repo} merge --no-ff {merged[0]}")
-    from localm.textguard import compose_join
     return compose_join("\n", lines)

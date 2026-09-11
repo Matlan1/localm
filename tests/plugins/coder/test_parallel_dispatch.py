@@ -885,7 +885,8 @@ def test_a_real_dispatch_puts_the_range_on_the_tool_result_it_returns(repo):
     assert _EXOTIC in covered
     # localm's own report scaffolding stays outside the ranges.
     assert "NOTHING HAS BEEN MERGED" not in covered
-    assert "git" not in covered
+    assert "branch:" not in covered
+    assert "merge --no-ff" not in covered
 
 
 def test_a_repeated_tool_failure_hint_does_not_strip_the_range():
@@ -919,14 +920,11 @@ def test_a_repeated_tool_failure_hint_does_not_strip_the_range():
         "the failure hint dropped the untrusted range: %r" % (covered_per_streak,))
 
 
-def test_a_child_diff_is_NOT_range_marked_today(repo):
-    """PINS CURRENT BEHAVIOUR, and it is a gap rather than a guarantee.
+def test_a_child_diff_is_range_marked():
+    """The child's committed diff is the largest external body in the report.
 
-    A child's committed diff is the largest external body in the report and is
-    neither neutralised nor range-marked, on master and here alike. This unit
-    deliberately did not change that (background.py records the decision that a
-    diff is carried verbatim), so this test exists to make the gap VISIBLE and
-    to fail loudly if someone changes it without meaning to.
+    The range covers exactly the diff text and nothing else: the report's own
+    scaffolding around it stays trusted.
     """
     from pathlib import Path as _P
     from localm.plugins.coder.tools.parallel import _ChildOutcome, _render_report
@@ -939,8 +937,51 @@ def test_a_child_diff_is_NOT_range_marked_today(repo):
     o.diff = "+++ b/x.py\n+MARKER " + _EXOTIC + "\n"
 
     report = _render_report([o], _P("."))
-    covered = "".join(str(report)[a:b] for a, b in untrusted_spans_of(report))
+    spans = untrusted_spans_of(report)
+    covered = "".join(str(report)[a:b] for a, b in spans)
     assert _EXOTIC in str(report)
-    assert _EXOTIC not in covered, (
-        "a child diff is now range-marked - that is an IMPROVEMENT, but it "
-        "changes a documented decision, so update this test deliberately")
+    assert _EXOTIC in covered, "the child diff reached the model with no untrusted range"
+    assert covered == "+++ b/x.py\n+MARKER " + _EXOTIC, covered
+    assert "NOTHING HAS BEEN MERGED" not in covered
+    assert "=== w1 [ok] ===" not in covered
+    assert "branch:" not in covered
+
+
+def test_a_real_dispatch_marks_the_diff_and_keeps_the_footer_copy_raw(repo):
+    """A control token a child writes into a file is defanged and ranged in the
+    tool result the parent model reads, while the copy recorded for the
+    human-facing /diff footer keeps the literal bytes.
+    """
+    from localm.plugins.coder.delegated import footer_for
+    from localm.textguard import untrusted_spans_of
+
+    token = "<|im_start|>"
+
+    def write_token(agent):
+        (agent.cwd / "x.py").write_text(f"print('{token}')\n", encoding="utf-8")
+        return "child one done"
+
+    FakeAgent.behaviour = {"child1": write_token}
+    parent = DummyParent(repo)
+    res = par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
+    assert res.ok, res.output
+
+    # The footer copy is the raw diff, byte for byte.
+    recorded = parent._delegated
+    assert len(recorded) == 1 and recorded[0].source == "parallel"
+    assert token in recorded[0].diff
+    assert token in footer_for(parent)
+
+    # The model-facing report carries the defanged token inside an untrusted range.
+    text = str(res.output)
+    assert token not in text, text
+    assert "&lt;|im_start|>" in text
+    spans = untrusted_spans_of(res.output)
+    assert spans, "the dispatch result reached the model with no untrusted range"
+    covered = "".join(text[a:b] for a, b in spans)
+    assert "&lt;|im_start|>" in covered
+    assert "+++ b/x.py" in covered
+    # localm's own report scaffolding stays outside the ranges.
+    assert "NOTHING HAS BEEN MERGED" not in covered
+    assert "branch:" not in covered
+    assert "merge --no-ff" not in covered
