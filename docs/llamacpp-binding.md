@@ -154,9 +154,12 @@ V2/V3 family (their absence with V2- or V3-shaped bytes is a refusal), and the
 default-params value fingerprint splits V2 from V3, since the `lazy_mode`
 insertion added no symbol; `detect_context_params_layout()` has no marker
 symbol for its insertion either, so it rests on a value fingerprint alone. Both
-fall back to their historical V1 layout when inconclusive (a V2/V3-family
-build whose bytes are inconclusive binds V2), and callers must not treat that
-fallback as a determination.
+fall back to their historical V1 layout when inconclusive, and callers must
+not treat that fallback as a determination. Under the `llama_load_mode_*`
+symbols there is no fallback: default bytes that were read but match neither
+V2 nor V3 are refused (every V2 build fingerprints conclusively, so such bytes
+are a layout localm does not bind), while bytes that could not be read at all
+bind V2 with a note.
 
 It then calls `llama_model_default_params()` / `llama_context_default_params()`
 (no model, no GPU needed) using the DETECTED classes and checks a structural

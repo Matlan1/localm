@@ -254,8 +254,11 @@ def _fingerprint_layout(raw: bytes) -> Optional[str]:
     """Which layout the default-params BYTES are consistent with, or None.
 
     SCORED, not all-or-nothing: on real bytes the right layout scores 3/3 and
-    every wrong one at most 1/3, so one drifted default still leaves a clear
-    winner (2 against at most 1).
+    every wrong one at most 1/3 from the bytes the build writes, so one
+    drifted default still leaves a clear winner (2 against at most 1). Bytes
+    the build never writes (a V1 alignment pad, the tail past its native size)
+    can add spurious points to V3 alone and never carry it past a layout that
+    scores 3.
 
     Inconclusive (None) is a legitimate answer for a genuine tie or a weak
     winner, and must never be upgraded into a refusal on its own. It is only
@@ -353,7 +356,8 @@ def detect_model_params_layout(
     elif by_value is None:
         notes.append(
             f"model_params layout {layout} rests on the symbol probe alone "
-            "(the default-value fingerprint could not be read"
+            "(the default-value fingerprint "
+            + ("was inconclusive" if bytes_read else "could not be read")
             + (f"; the symbols cannot tell {MODEL_PARAMS_V2} from "
                f"{MODEL_PARAMS_V3})" if layout == MODEL_PARAMS_V2 else ")"))
     return layout, notes, None, assumed

@@ -448,7 +448,7 @@ def test_v2_load_mode_out_of_range_refuses():
     assert any("load_mode" in f for f in v.failures)
 
 
-@pytest.mark.parametrize("builder", [good_model_v1, good_model_v2])
+@pytest.mark.parametrize("builder", [good_model_v1, good_model_v2, good_model_v3])
 def test_main_gpu_garbage_refuses(builder):
     """A main_gpu holding a pointer low-word, which is what a shifted layout
     looks like, is refused as a mismatch."""
@@ -650,7 +650,9 @@ def test_v1_symbols_with_inconclusive_bytes_still_bind_v1_on_symbols_alone():
     assert _abi._fingerprint_layout(_raw_model(mp)) is None, "fixture must be inconclusive"
     layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
     assert (layout, contradiction, assumed) == (MODEL_PARAMS_V1, None, False)
-    assert any("symbol probe alone" in n for n in notes), notes
+    assert any("symbol probe alone" in n and "was inconclusive" in n
+               for n in notes), notes
+    assert not any("could not be read" in n for n in notes), notes
     assert verify_abi(lib).status == "ok"
 
 
