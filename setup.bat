@@ -596,7 +596,9 @@ if "%CONTAINED%"=="1" (
     set "PYDIR=%CD%\.python"
     set "CACHEDIR=%CD%\.cache"
 )
+setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
+endlocal
 if errorlevel 1 echo  [!] Could not record the install manifest (uninstall will be conservative).
 
 rem ---- done ------------------------------------------------------------------

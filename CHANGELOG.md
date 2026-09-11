@@ -123,7 +123,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The console setup script (`setup.bat`) failed at its very first step, with no explanation, when
   run from a folder path containing a literal `!` character.** If that step were skipped, the
   desktop-shortcut option later in the same script could also fail to create a working shortcut,
-  or create none at all. Both are fixed; a `!` anywhere in the install path no longer affects setup.
+  or create none at all. Both are fixed.
+- **A `!` in the install path could also corrupt the step at the end of `setup.bat` that records
+  what was installed, silently writing the wrong location (or none at all) for some of the
+  recorded items instead of the real ones.** That step is now insulated from the same handling
+  issue the bootstrap and desktop-shortcut steps were.
 - **Uninstalling could leave the Desktop shortcut behind on a machine with a redirected Desktop
   folder (for example OneDrive's "Back up your folders").** The installer recorded a guessed path
   instead of the one it actually wrote, so uninstall believed the shortcut was already gone and
