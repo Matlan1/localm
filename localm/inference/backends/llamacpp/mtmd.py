@@ -542,10 +542,10 @@ class MtmdContext:
                 rc = m.mtmd_tokenize(self._ctx, chunks, ctypes.addressof(itext),
                                      arr, len(bitmaps))
                 if rc != 0:
+                    from localm.debuglog import native_fault_hint
                     raise VisionInputError(
                         f"the vision projector could not process this image "
-                        f"(mtmd_tokenize rc={rc}). See the debug log for the "
-                        f"native reason.")
+                        f"(mtmd_tokenize rc={rc}); {native_fault_hint()}.")
                 new_n_past = ctypes.c_int32(0)
                 rc2 = m.mtmd_helper_eval_chunks(
                     self._ctx, llama_ctx, chunks, 0, 0, n_batch, True,

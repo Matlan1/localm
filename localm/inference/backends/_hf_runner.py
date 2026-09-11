@@ -666,9 +666,10 @@ class HFRunner:
                         "stayed up." + self._crash_detail())
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
+                    from localm.debuglog import native_fault_hint
                     raise RuntimeError(
                         f"HuggingFace model load timed out after {timeout:.0f}s "
-                        "- the worker process may be hung (see the debug log). "
+                        f"- the worker process may be hung ({native_fault_hint()}). "
                         "The server stayed up and the load was aborted; retry, "
                         "or raise hf_load_timeout_s if this model genuinely "
                         "needs longer to load.")

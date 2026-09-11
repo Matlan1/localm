@@ -179,6 +179,65 @@ def test_eval_into_raises_vision_input_error_on_a_nonzero_tokenize_rc():
         api.llama_n_ctx = orig
 
 
+def _tokenize_failing_ctx():
+    ctx = lmtmd.MtmdContext.__new__(lmtmd.MtmdContext)
+    ctx._ctx = 0x2000
+    ctx._input_text_class = lmtmd._MtmdInputTextV2
+
+    class _M:
+        def mtmd_bitmap_init(self, w, h, rgb):
+            return 0x3000
+
+        def mtmd_bitmap_free(self, b):
+            pass
+
+        def mtmd_input_chunks_init(self):
+            return 0x4000
+
+        def mtmd_input_chunks_free(self, c):
+            pass
+
+        def mtmd_tokenize(self, *a):
+            return 2
+
+    ctx._m = _M()
+    return ctx
+
+
+def test_eval_into_tokenize_failure_message_respects_debug_state(monkeypatch):
+    """The rc!=0 message must not claim a debug log exists when debug mode is
+    off, and must name one when it is on. Assertions run OUTSIDE pytest.raises
+    (the exception is caught into a variable) so they execute regardless of
+    which branch fires - see diff-review-discipline.md item 24a."""
+    import localm.inference.backends.llamacpp._api as api
+    orig = api.llama_n_ctx
+    api.llama_n_ctx = lambda _c: 4096
+    try:
+        monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+        exc = None
+        try:
+            _tokenize_failing_ctx().eval_into(
+                0x5000, "prompt <__media__>", [(4, 4, b"\0" * 48)], add_special=True)
+        except VisionInputError as e:
+            exc = e
+        assert exc is not None, "eval_into did not raise on a nonzero tokenize rc"
+        assert "debug log" not in str(exc), (
+            "must not claim a debug log exists when debug mode is off")
+        assert "--debug" in str(exc), "must say how to actually get one"
+
+        monkeypatch.setenv("LOCALM_DEBUG", "1")
+        exc = None
+        try:
+            _tokenize_failing_ctx().eval_into(
+                0x5000, "prompt <__media__>", [(4, 4, b"\0" * 48)], add_special=True)
+        except VisionInputError as e:
+            exc = e
+        assert exc is not None, "eval_into did not raise on a nonzero tokenize rc"
+        assert "full trace in the debug log" in str(exc)
+    finally:
+        api.llama_n_ctx = orig
+
+
 # --------------------------------------------------------------------------- #
 #  The projector runs on the GPU, and degrades only on a real failure          #
 # --------------------------------------------------------------------------- #

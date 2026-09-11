@@ -412,10 +412,11 @@ class EmbedderRunner:
                         "stayed up." + self._crash_detail())
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
+                    from localm.debuglog import native_fault_hint
                     raise RuntimeError(
                         f"Embedding worker '{label}' timed out after "
                         f"{timeout:.0f}s - the worker process may be hung "
-                        "(see the debug log). The server stayed up and the "
+                        f"({native_fault_hint()}). The server stayed up and the "
                         "worker was stopped; retry the request.")
         kind = result[0]
         if kind == "ok":

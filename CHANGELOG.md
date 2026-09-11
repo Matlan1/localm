@@ -28,6 +28,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **A vision-input failure, or a model load / embedding request that timed out
+  and looked hung, pointed you at a debug log even when debug mode was off and
+  no such log existed.** Those messages now say how to turn one on
+  (`--debug`) when it is off, and name it when it is already on.
 - **The MCP server's `run_coder_task` no longer starts a separate localm server
   for every project.** It used to launch `localm coder`, which attached to or
   spawned a server per project directory, each loading its own copy of the
