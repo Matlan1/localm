@@ -493,6 +493,364 @@ class TestManifestRecordSurvivesBangInInstallPath:
         assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
 
 
+def _top_install_message_block(bat_text):
+    """The `setlocal DisableDelayedExpansion` / echo / `endlocal` wrapper
+    around the very first line that names the install directory."""
+    literal = ('setlocal DisableDelayedExpansion\n'
+               'echo  LocaLM setup - self-contained install in: %CD%\n'
+               'endlocal')
+    assert literal in bat_text, "the top install-directory message wrapper moved"
+    i = bat_text.index(literal)
+    return bat_text[i:i + len(literal)]
+
+
+def _uv_dirs_block(bat_text):
+    """The `if "%STOREPICK%"=="1" ( ... ) else ( ... )` block that provisions
+    uv's managed-Python-install and cache dirs."""
+    start = bat_text.index('if "%STOREPICK%"=="1" (')
+    end = bat_text.index('rem ---- uv is required', start)
+    return bat_text[start:end]
+
+
+def _uv_check_portable_block(bat_text):
+    """The `:uv_check_portable` reuse-an-existing-portable-uv block."""
+    start = bat_text.index(':uv_check_portable')
+    end = bat_text.index(':uv_missing', start)
+    return bat_text[start:end]
+
+
+def _uv_missing_contained_block(bat_text):
+    """The CONTAINED-mode `if "%CONTAINED%"=="1" ( ... )` block inside
+    `:uv_missing` that confines uv's own binary under .\\.uv."""
+    marker = bat_text.index("rem  Portable was picked: confine uv's OWN binary")
+    start = bat_text.rindex('if "%CONTAINED%"=="1" (', 0, marker)
+    end = bat_text.index('powershell -NoProfile -ExecutionPolicy Bypass', start)
+    return bat_text[start:end]
+
+
+def _datadir_lines(bat_text):
+    """The DATADIR/DATACREATED default-plus-DATAPICK==1 span."""
+    start = bat_text.index('rem DATADIR + DATACREATED feed the install manifest')
+    end = bat_text.index(
+        "rem  Single-line `if ... call` into a goto/label subroutine", start)
+    return bat_text[start:end]
+
+
+def _pathdir_cmdshim_lines(bat_text):
+    """The four single-line `if ... set ...` PATHDIR/CMDSHIM lines."""
+    start = bat_text.index('if "!GCRC!"=="0" set "PATHMOD=--path-modified"')
+    marker = 'if "!GCRC!"=="20" set "CMDSHIM='
+    end = bat_text.index('\n', bat_text.index(marker, start))
+    return bat_text[start:end]
+
+
+def _pydir_cachedir_block(bat_text):
+    """The CONTAINED-mode `if "%CONTAINED%"=="1" ( ... )` block that computes
+    PYDIR/CACHEDIR for the install manifest. Ends at its own closing `)`, NOT
+    at the manifest-record line - that line's own `setlocal
+    DisableDelayedExpansion` wrap (a separate fix) sits between the two and
+    must not be swept into this block, or it leaks into the caller as an
+    unmatched setlocal."""
+    marker = bat_text.index('set "RCFLAG="\nset "PYDIR="\nset "CACHEDIR="')
+    start = bat_text.index('if "%CONTAINED%"=="1" (', marker)
+    end = bat_text.index('\n)\n', start) + len('\n)')
+    return bat_text[start:end]
+
+
+def _custom_home_blank_lines(bat_text):
+    """The `:custom_home_blank` fallback label body, up to but excluding its
+    own `exit /b 0` - the caller appends whatever readback it needs, then its
+    own exit."""
+    start = bat_text.index(':custom_home_blank')
+    end = bat_text.index('exit /b 0', start)
+    return bat_text[start:end]
+
+
+def _uninstall_header_block(bat_text):
+    """The `:uninstall` label's clone-path banner."""
+    literal = 'setlocal DisableDelayedExpansion\necho    %CD%\nendlocal'
+    assert literal in bat_text, "the uninstall banner's wrapper moved"
+    i = bat_text.index(literal)
+    return bat_text[i:i + len(literal)]
+
+
+def test_cd_derived_set_statements_escape_the_bang_before_delayed_expansion_scans_it(bat):
+    """Every plain `set VAR=%CD%\\...` statement outside a FOR loop or the
+    PowerShell shortcut blocks (each of those already has its own coverage)
+    has exactly ONE %CD% occurrence on its line, so cmd's delayed-expansion
+    scanner silently drops the lone `!` a bang-bearing install path
+    substitutes in - corrupting the variable at the point it is set, before
+    anything downstream (including the install manifest) ever reads it.
+
+    `%CD:!=^!%` replaces a literal `!` with the caret-escaped form as PART of
+    the same %-expansion pass that inserts %CD%'s value, so the delayed-
+    expansion scan that runs immediately after sees an escaped `^!`, not a
+    bare `!`, and resolves it back to a literal `!` in the value actually
+    stored - regardless of whether delayed expansion is enabled at that
+    line. No setlocal/endlocal is needed for these sites (unlike the
+    PowerShell shortcut blocks, nothing here needs to survive an `endlocal`
+    - see TestCdDerivedVarsSurviveBangInInstallPath for why that specific
+    transport does NOT preserve a bang, and the module docstring's note on
+    scope). The two direct, immediate `%CD%`-naming echoes (the opening
+    banner and the uninstall banner) are a different case - the escape alone
+    does not protect an unquoted echo - and keep their
+    setlocal-DisableDelayedExpansion/endlocal wrap instead. See
+    TestCdDerivedVarsSurviveBangInInstallPath for the executing proof of
+    both shapes."""
+    for extractor in (_top_install_message_block, _uninstall_header_block):
+        block = extractor(bat)
+        assert "setlocal DisableDelayedExpansion" in block, extractor.__name__
+        assert "endlocal" in block, extractor.__name__
+
+    for extractor in (
+            _uv_dirs_block,
+            _uv_check_portable_block,
+            _uv_missing_contained_block,
+            _datadir_lines,
+            _pathdir_cmdshim_lines,
+            _pydir_cachedir_block,
+            _custom_home_blank_lines,
+    ):
+        block = extractor(bat)
+        assert "%CD:!=^!%" in block, extractor.__name__
+        assert "%CD%" not in block, extractor.__name__
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestCdDerivedVarsSurviveBangInInstallPath:
+    """Drives each isolated block above through real cmd.exe from a directory
+    whose name contains a literal `!`, proving the recorded value keeps the
+    bang. Read back two ways per variable: `!VAR!` (delayed-expansion syntax,
+    proven safe for a value that already holds a genuine `!` - it is not
+    re-scanned the way an ordinary %-substitution is) as a quick sanity
+    check, and a %-substitution wrapped in its own
+    setlocal-DisableDelayedExpansion/endlocal - the shape the real
+    install-manifest-record consumer needs (that line's own protection is a
+    separate, already-tracked fix; this proves the value it will read is
+    correct once it has one)."""
+
+    def _run(self, directory, preamble, block_text, readback):
+        probe = directory / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            + preamble +
+            "{block}\r\n"
+            "{readback}"
+            "exit /b 0\r\n".format(block=block_text, readback=readback),
+            encoding="utf-8")
+        return subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(directory))
+
+    @staticmethod
+    def _protected_readback(pairs):
+        """pairs: [(label, varname), ...] -> a setlocal-DisableDelayedExpansion-
+        wrapped block of `echo LABEL=[%VAR%]` lines, the shape the real
+        manifest-record consumer will use once it is itself protected."""
+        lines = ["setlocal DisableDelayedExpansion\r\n"]
+        for label, varname in pairs:
+            lines.append('echo {}=[%{}%]\r\n'.format(label, varname))
+        lines.append("endlocal\r\n")
+        return "".join(lines)
+
+    @staticmethod
+    def _bang_readback(pairs):
+        return "".join('echo {}_BANG=[!{}!]\r\n'.format(label, varname)
+                        for label, varname in pairs)
+
+    def test_top_install_message_names_the_real_bang_path(self, bat, tmp_path):
+        block = _top_install_message_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        out = self._run(bangdir, "", block, "")
+        assert "self-contained install in: {}".format(bangdir) in out.stdout, out.stdout
+
+    def test_uv_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
+        block = _uv_dirs_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("UPI", "UV_PYTHON_INSTALL_DIR"), ("UCD", "UV_CACHE_DIR")]
+        out = self._run(bangdir, 'set "STOREPICK=1"\r\n', block,
+                         self._protected_readback(pairs) + self._bang_readback(pairs))
+        assert "UPI=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
+        assert "UCD=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
+        assert "UPI_BANG=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
+        assert "UCD_BANG=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
+
+    def test_uv_check_portable_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
+        block = _uv_check_portable_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        (bangdir / ".uv").mkdir()
+        (bangdir / ".uv" / "uv.exe").write_text("stub", encoding="utf-8")
+        pairs = [("UVDIR", "UVDIR")]
+        probe = bangdir / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            "{block}\r\n"
+            'echo NOT_REACHED_IF_GOTO_FAILED\r\n'
+            ":uv_ready\r\n"
+            "{protected}"
+            "{bang}"
+            'echo PATH_HAS=[%PATH%]\r\n'
+            "exit /b 0\r\n".format(
+                block=block, protected=self._protected_readback(pairs),
+                bang=self._bang_readback(pairs)),
+            encoding="utf-8")
+        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
+        assert "NOT_REACHED_IF_GOTO_FAILED" not in out.stdout, out.stdout
+        assert "{}\\.uv".format(bangdir) in out.stdout, out.stdout
+        assert "UVDIR=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+        assert "UVDIR_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+
+    def test_uv_missing_contained_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
+        block = _uv_missing_contained_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("UID", "UV_INSTALL_DIR"), ("UVDIR", "UVDIR")]
+        out = self._run(bangdir, 'set "CONTAINED=1"\r\n', block,
+                         self._protected_readback(pairs) + self._bang_readback(pairs))
+        assert "UID=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+        assert "UVDIR=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+        assert "UID_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+        assert "UVDIR_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+
+    def test_datadir_default_survives_a_bang_in_the_install_path(self, bat, tmp_path):
+        block = _datadir_lines(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("DATADIR", "DATADIR")]
+        out = self._run(bangdir, 'set "DATAPICK=other"\r\n', block,
+                         self._protected_readback(pairs) + self._bang_readback(pairs)
+                         + 'echo DATACREATED=[%DATACREATED%]\r\n')
+        assert "DATADIR=[{}\\home]".format(bangdir) in out.stdout, out.stdout
+        assert "DATADIR_BANG=[{}\\home]".format(bangdir) in out.stdout, out.stdout
+        assert "DATACREATED=[0]" in out.stdout, out.stdout
+
+    def test_datadir_datapick1_block_survives_a_bang_in_the_install_path(self, bat, tmp_path):
+        block = _datadir_lines(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("DATADIR", "DATADIR")]
+        out = self._run(bangdir, 'set "DATAPICK=1"\r\n', block,
+                         self._protected_readback(pairs) + self._bang_readback(pairs)
+                         + 'echo DATACREATED=[%DATACREATED%]\r\n')
+        assert "Data directory: {}\\home".format(bangdir) in out.stdout, out.stdout
+        assert "DATADIR=[{}\\home]".format(bangdir) in out.stdout, out.stdout
+        assert "DATADIR_BANG=[{}\\home]".format(bangdir) in out.stdout, out.stdout
+        assert "DATACREATED=[1]" in out.stdout, out.stdout
+
+    @pytest.mark.parametrize("gcrc", ["0", "20"])
+    def test_pathdir_cmdshim_survive_a_bang_in_the_install_path(self, bat, tmp_path, gcrc):
+        block = _pathdir_cmdshim_lines(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("PATHDIR", "PATHDIR"), ("CMDSHIM", "CMDSHIM")]
+        out = self._run(
+            bangdir,
+            'set "GCRC={}"\r\nset "PATHDIR="\r\nset "CMDSHIM="\r\n'.format(gcrc),
+            block, self._protected_readback(pairs) + self._bang_readback(pairs))
+        assert "PATHDIR=[{}\\bin]".format(bangdir) in out.stdout, out.stdout
+        assert "CMDSHIM=[{}\\bin\\localm.cmd]".format(bangdir) in out.stdout, out.stdout
+        assert "PATHDIR_BANG=[{}\\bin]".format(bangdir) in out.stdout, out.stdout
+        assert "CMDSHIM_BANG=[{}\\bin\\localm.cmd]".format(bangdir) in out.stdout, out.stdout
+
+    def test_pathdir_cmdshim_stay_empty_when_gcrc_matches_neither(self, bat, tmp_path):
+        block = _pathdir_cmdshim_lines(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("PATHDIR", "PATHDIR"), ("CMDSHIM", "CMDSHIM")]
+        out = self._run(bangdir, 'set "GCRC=99"\r\nset "PATHDIR="\r\nset "CMDSHIM="\r\n',
+                         block, self._protected_readback(pairs))
+        assert "PATHDIR=[]" in out.stdout, out.stdout
+        assert "CMDSHIM=[]" in out.stdout, out.stdout
+
+    def test_pydir_cachedir_survive_a_bang_in_the_install_path(self, bat, tmp_path):
+        block = _pydir_cachedir_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("PYDIR", "PYDIR"), ("CACHEDIR", "CACHEDIR")]
+        out = self._run(bangdir, 'set "CONTAINED=1"\r\nset "PYDIR="\r\nset "CACHEDIR="\r\n',
+                         block, self._protected_readback(pairs) + self._bang_readback(pairs))
+        assert "PYDIR=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
+        assert "CACHEDIR=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
+        assert "PYDIR_BANG=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
+        assert "CACHEDIR_BANG=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
+
+    def test_custom_home_blank_datadir_survives_a_bang_in_the_install_path(self, bat, tmp_path):
+        block = _custom_home_blank_lines(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        pairs = [("DATADIR", "DATADIR")]
+        probe = bangdir / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            "{block}\r\n"
+            "{protected}"
+            "{bang}"
+            'echo DATACREATED=[%DATACREATED%]\r\n'
+            "exit /b 0\r\n".format(
+                block=block, protected=self._protected_readback(pairs),
+                bang=self._bang_readback(pairs)),
+            encoding="utf-8")
+        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
+        assert "DATADIR=[{}\\home]".format(bangdir) in out.stdout, out.stdout
+        assert "DATADIR_BANG=[{}\\home]".format(bangdir) in out.stdout, out.stdout
+        assert "DATACREATED=[1]" in out.stdout, out.stdout
+
+    def test_uninstall_header_names_the_real_bang_path(self, bat, tmp_path):
+        block = _uninstall_header_block(bat)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        out = self._run(bangdir, "", block, "")
+        assert str(bangdir) in out.stdout, out.stdout
+
+    def test_manifest_record_line_reads_every_cd_derived_var_correctly_once_protected(
+            self, bat, tmp_path):
+        """End-to-end: every fixed site's value, fed into the REAL manifest-
+        record line's own argument text (not a paraphrase), wrapped in the
+        same setlocal-DisableDelayedExpansion/endlocal shape the manifest
+        line itself needs (tracked separately) - proving the two fixes
+        compose correctly rather than merely each looking right alone."""
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        block = _manifest_record_block(bat)
+        target = ".venv\\Scripts\\python -m localm.install_manifest record"
+        assert target in block, "the manifest-record invocation text moved; update this test"
+        assert block.endswith(" >nul 2>nul\nendlocal"), \
+            "the manifest-record line's shape changed; update this test"
+        echoed = (block[: -len(" >nul 2>nul\nendlocal")] + "\nendlocal").replace(
+            target, "echo MANIFEST_ARGS", 1)
+        script = (
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            'set "STOREPICK=1"\r\n' + _uv_dirs_block(bat) + "\r\n"
+            'set "DATAPICK=1"\r\n' + _datadir_lines(bat) + "\r\n"
+            'set "GCRC=0"\r\nset "PATHDIR="\r\nset "CMDSHIM="\r\n'
+            + _pathdir_cmdshim_lines(bat) + "\r\n"
+            'set "CONTAINED=1"\r\nset "PYDIR="\r\nset "CACHEDIR="\r\n'
+            + _pydir_cachedir_block(bat) + "\r\n"
+            'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\n'
+            'set "CRD=--data-created"\r\nset "RCFLAG=--runtime-contained"\r\n'
+            'set "UVDIR="\r\nset "PATHMOD=--path-modified"\r\n'
+            + echoed + "\r\n"
+            "exit /b 0\r\n")
+        probe = bangdir / "probe.bat"
+        probe.write_text(script, encoding="utf-8")
+        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
+        assert "MANIFEST_ARGS" in out.stdout, (out.stdout, out.stderr)
+        bang = str(bangdir)
+        for flag, suffix in [
+                ("--data-dir", "\\home"),
+                ("--python-dir", "\\.python"),
+                ("--cache-dir", "\\.cache"),
+                ("--path-dir", "\\bin"),
+        ]:
+            expected = '{} "{}{}"'.format(flag, bang, suffix)
+            assert expected in out.stdout, (expected, out.stdout, out.stderr)
+
+
 def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
     """--quiet keeps the notes and the failure path, drops the hints."""
     import sys
