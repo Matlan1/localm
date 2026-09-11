@@ -67,7 +67,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   projects share one load, no window opens, and the model stays put while a
   task is running. A task that reaches its timeout is cancelled and reported as
   timed out: the command it was running is stopped, no further file write or
-  command runs, and the model stops generating.
+  command runs, and the model stops generating. The timeout covers the whole
+  call, including loading the model, and may be at most 3600 seconds.
 - **A thinking model's reasoning leaked into the MCP coder's answer and could
   be acted on.** Over the MCP server's `run_coder_task`, a model that reasons in
   `<think>` tags had its whole scratchpad treated as the answer: it entered the
@@ -84,7 +85,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A background sub-agent started by an MCP coder task kept running after the
   task had reported, and one task could collect another task's sub-agent
   results.** A finished task now stops the background sub-agents it started,
-  and each task only sees its own.
+  and each task only sees its own; a sub-agent that itself runs turns no
+  longer takes its siblings' results away from the session that started them.
+- **The coder's separate reviewer model could return a verdict taken from its
+  own thinking.** With a thinking model as the reviewer, the `<think>`
+  scratchpad was read as the review, so a verdict the model merely considered
+  could block or approve the change. The reviewer now reads only the answer.
 - **MCP servers configured for the coder were launched again for every task
   and every sub-agent, and never stopped.** One server per configured entry is
   now started and reused; sub-agents share their parent's.
