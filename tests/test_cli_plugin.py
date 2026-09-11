@@ -115,6 +115,29 @@ def test_uninstall_failed_data_delete_does_not_claim_files_stayed(cli_env, monke
     assert r.exit_code != 0
 
 
+def test_uninstall_manifestless_directory_failed_removal_is_not_reported_as_not_installed(
+        cli_env, monkeypatch):
+    """A directory that exists on disk with no manifest (an interrupted or
+    partial install) reads is_installed() == False, but uninstall() still
+    attempts to remove it. When that removal fails, the command must not
+    read that False as "nothing was here" - the directory was there and it
+    is still there afterwards."""
+    import localm.cli as climod
+
+    stray = cli_env.installed / "p1"
+    stray.mkdir(parents=True)
+    (stray / "stray.py").write_text("# no manifest\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        climod, "_engine_manager",
+        _wedged_manager_factory(cli_env, _remove_installed_dir=lambda name: False))
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "uninstall", "p1"])
+    assert stray.is_dir(), "the injection did not take: removal succeeded"
+    assert "was not installed" not in r.output.lower()
+    assert r.exit_code != 0
+
+
 def test_uninstall_benign_not_installed_branch_still_reports_cleanly(cli_env):
     """A directory-name/manifest-name mismatch makes is_installed(<manifest
     name>) False while the directory itself is untouched - the benign branch

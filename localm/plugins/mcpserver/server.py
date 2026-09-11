@@ -1432,8 +1432,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         # Bypasses _run_mgr_action (unlike install/enable/disable above):
         # uninstall()'s bool is the only signal that the installed directory
         # actually came off disk (a locked file, an AV hold, a permission
-        # denial), so it is read here.
-        was_installed = mgr.is_installed(plugin)
+        # denial), so it is read here. is_installed_or_on_disk(), not
+        # is_installed(): a manifest-less directory is something uninstall()
+        # below can still act on.
+        existed = mgr.is_installed_or_on_disk(plugin)
         with _quiet_stdout():
             try:
                 removed = mgr.uninstall(plugin, delete_data=delete_data)
@@ -1441,7 +1443,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 return _text_result(f"No such plugin: {plugin}", is_error=True)
             except ValueError as e:
                 return _text_result(str(e), is_error=True)
-        if was_installed and not removed:
+        if existed and not removed:
             detail = (
                 f"Plugin '{plugin}' was disabled and unloaded, but it was not "
                 f"fully uninstalled: something it owns could not be removed "

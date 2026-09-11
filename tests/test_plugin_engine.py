@@ -1004,6 +1004,34 @@ def test_uninstall_http_benign_not_installed_mismatch_is_not_a_failed_removal(en
     assert foo_dir.is_dir()
 
 
+def test_uninstall_http_reports_failure_for_a_manifestless_directory(env, monkeypatch):
+    """A directory that exists on disk with no manifest (an interrupted or
+    partial install) reads is_installed() == False, but uninstall() still
+    attempts to remove it (see _installed_dir_on_disk). When that removal
+    fails, the route must not read the False from is_installed() as
+    "nothing here" and answer 404 - the directory was there, uninstall()
+    tried and failed to remove it, and it is still there afterwards."""
+    from pathlib import Path
+
+    from localm.plugins.engine import attach_engine
+
+    app = FastAPI()
+    manager = attach_engine(app)
+    stray_dir = Path(manager._installed_root) / "strayplugin"
+    stray_dir.mkdir(parents=True)
+    (stray_dir / "half_copied.py").write_text("# no manifest\n", encoding="utf-8")
+
+    monkeypatch.setattr(manager, "_remove_installed_dir", lambda name: False)
+
+    with TestClient(app) as c:
+        r = c.post("/api/plugins/strayplugin/uninstall")
+    assert r.status_code == 500, r.text
+    assert stray_dir.is_dir(), "the injection did not take: removal succeeded"
+    detail = r.json()["detail"].lower()
+    assert "not fully uninstalled" in detail
+    assert "no such plugin" not in detail
+
+
 def _make_legacy_plugin(root, name, *, exports='["tool_hello"]'):
     """A THIRD-PARTY legacy plugin source dir: the `entry = ` + `[tools] exports`
     shape the GUI's External plugins card exists for (a CLI command plus coder
