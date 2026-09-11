@@ -197,6 +197,16 @@ gpu = [
     "rocm-sdk-core; sys_platform == 'win32'",
     "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
 ]
+# The HF transformers/tokenizers/accelerate/psutil stack, platform-neutral
+# (no torch/ROCm pins). Must match [gpu]'s pins for those same four packages -
+# see test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins.
+# Install with:  uv pip install -e ".[hf]"
+hf = [
+    "transformers[kernels]~=5.15.1",
+    "tokenizers==0.22.2",
+    "accelerate>=1.14.0",
+    "psutil>=7.2.2",
+]
 # Audio multimodal (Gemma4 unified audio)
 audio = [
     "soundfile>=0.14.0",

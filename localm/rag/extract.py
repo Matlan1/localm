@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import zipfile
 from pathlib import Path
 
 from typing import Callable, Optional
 import io
+
+# Seam for tests: patch extract._monotonic, never time.monotonic globally.
+_monotonic = time.monotonic
 
 # Hard cap on extracted text per document.
 MAX_TEXT_CHARS = 8_000_000
@@ -23,6 +27,12 @@ MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
 # emitted when either that cap or the whole-archive text budget is reached.
 MAX_ARCHIVE_MEMBERS = 5_000
 _ARCHIVE_TRUNCATED_NOTE = "[archive truncated: content budget reached]"
+
+# Hard caps on PDF extraction: a page count and a wall-clock deadline,
+# checked between pages (a single page's own extract_text() call is not
+# interruptible).
+MAX_PDF_PAGES = 5_000
+MAX_PDF_EXTRACT_SECONDS = 30.0
 
 # Hard cap on the total bytes an archive extractor may INFLATE, across every
 # member, whether or not that member yielded any text.
@@ -799,6 +809,20 @@ def _extract_ipynb(data: bytes, filename: str) -> str:
     return "\n\n".join(parts)
 
 
+def _join_pdf(pages: list, note: Optional[str]) -> str:
+    """Same budget-reserving shape as _join_archive: the joined text is
+    trimmed to leave room for *note* so the note survives the outer
+    text[:MAX_TEXT_CHARS] cut. *note* is None when extraction was not
+    truncated."""
+    out = "\n\n".join(pages)
+    if note:
+        cap = max(0, MAX_TEXT_CHARS - len(note) - 4)
+        if len(out) > cap:
+            out = out[:cap]
+        out = (out + "\n\n" + note) if out else note
+    return out
+
+
 def _extract_pdf(data: bytes, filename: str) -> str:
     import io
     try:
@@ -810,10 +834,33 @@ def _extract_pdf(data: bytes, filename: str) -> str:
     try:
         reader = PdfReader(io.BytesIO(data))
         pages = []
+        total_chars = 0
+        deadline = _monotonic() + MAX_PDF_EXTRACT_SECONDS
+        note = None
+        # enumerate() calls len(reader.pages) once, up front, which walks
+        # pypdf's whole page tree (capped by its own page_tree_maximum_entries,
+        # raising past it - caught below). deadline is taken before this call
+        # so that walk counts against it rather than adding to it. See
+        # test_a_pathological_page_tree_is_caught_not_crashed.
         for i, page in enumerate(reader.pages):
+            if i >= MAX_PDF_PAGES:
+                note = f"[pdf truncated: page cap of {MAX_PDF_PAGES} pages reached]"
+                break
+            if _monotonic() >= deadline:
+                note = (f"[pdf truncated: time limit of "
+                        f"{MAX_PDF_EXTRACT_SECONDS:.0f}s reached after {i} pages]")
+                break
+            if total_chars >= _archive_budget():
+                note = "[pdf truncated: content budget reached]"
+                break
             txt = (page.extract_text() or "").strip()
             if txt:
-                pages.append(f"[page {i + 1}]\n{txt}")
-        return "\n\n".join(pages)
+                entry = f"[page {i + 1}]\n{txt}"
+                pages.append(entry)
+                total_chars += len(entry) + 2   # + the "\n\n" join separator
+        if note:
+            _archive_log().warning(
+                "rag: %s PDF extraction stopped early (%s)", filename, note)
+        return _join_pdf(pages, note)
     except Exception as e:
         raise ExtractError(f"Cannot extract text from {filename}: {e}")
