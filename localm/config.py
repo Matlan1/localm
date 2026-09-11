@@ -1486,9 +1486,9 @@ def _unlink_lock_file(lockpath: Path) -> None:
                 break
             _transient_backoff(attempt)
     from localm.debuglog import logger
-    logger.warning("could not remove released lock file %s (%s); other localm "
-                   "writers will wait on it until it is %.0fs old",
-                   lockpath.name, last, _CROSS_LOCK_STALE_AGE)
+    logger.warning("could not remove released lock file %s (%s); config/registry "
+                   "writes in every localm process fail on it until it is %.0fs "
+                   "old and reclaimed", lockpath.name, last, _CROSS_LOCK_STALE_AGE)
 
 
 @contextlib.contextmanager

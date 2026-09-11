@@ -98,8 +98,8 @@ _audit = None
 _inference_sems: dict[str, asyncio.Semaphore] = {}
 
 # Bounds the dedicated-embedder /v1/embeddings path to ONE default-pool worker
-# at a time. Kept apart from _inference_sems, whose entries follow the chat
-# engines' lifecycle (popped on evict, renamed on rename); cleared with it in
+# at a time. Not an _inference_sems entry: those follow the chat engines'
+# lifecycle (popped on evict, renamed on rename). Cleared with them in
 # create_app. See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
 _embedder_sem: asyncio.Semaphore | None = None
 
@@ -1285,6 +1285,62 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
             + "; ".join(reasons))
 
 
+async def _unload_engine_off_loop(loop, engine, on_unloaded) -> None:
+    """Run ``engine.unload()`` on the loop's default executor and call
+    ``on_unloaded()`` on the loop once it has completed.
+
+    Cancellation of the awaiting task: an unload still queued behind other
+    executor work is cancelled and never runs; an unload already running is
+    waited for (the caller's ``engine.unloading`` flag and per-model semaphore
+    stay held), ``on_unloaded()`` still runs when it succeeded, and the
+    CancelledError is then re-raised. A failure of a waited-for unload is
+    reported at WARNING. See test_cancelling_a_running_unload_keeps_its_bookkeeping."""
+    started = threading.Event()
+    abandoned = threading.Event()
+    finished = asyncio.Event()
+    outcome: dict = {}
+
+    def _run():
+        started.set()
+        try:
+            if abandoned.is_set():
+                return
+            engine.unload()
+            outcome["unloaded"] = True
+        except BaseException as e:
+            outcome["exc"] = e
+            raise
+        finally:
+            try:
+                loop.call_soon_threadsafe(finished.set)
+            except RuntimeError:
+                # The loop is closed: no coroutine is left to wake.
+                pass
+
+    try:
+        await loop.run_in_executor(None, _run)
+    except asyncio.CancelledError:
+        abandoned.set()
+        if started.is_set():
+            # Further cancellation requests arriving while the native unload
+            # runs are absorbed; the one caught above is re-raised afterwards.
+            while True:
+                try:
+                    await finished.wait()
+                    break
+                except asyncio.CancelledError:
+                    continue
+            if "exc" in outcome:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("unloading %s failed after its caller stopped waiting: %s",
+                             getattr(engine, "display_name", engine), outcome["exc"])
+            if outcome.get("unloaded"):
+                on_unloaded()
+        raise
+    if outcome.get("unloaded"):
+        on_unloaded()
+
+
 async def unload_all_models() -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
@@ -1310,6 +1366,69 @@ async def unload_all_models() -> dict:
     unloaded_models = []
     skipped_in_use = []
 
+    def _reset_active_pointers():
+        global _active_model_name, _last_active_model_name, _engine, _inference_sem
+        if _active_model_name:
+            # The Engine stays in _engines above for exactly this: a lazy
+            # reload on the next request. Keep its NAME alive too, or nothing
+            # can resolve an unnamed request back to it (see
+            # _last_active_model_name / _resolve_unnamed_model_name).
+            _last_active_model_name = _active_model_name
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
+
+    try:
+        embedder_was_loaded = await _unload_engines_and_embedder(
+            loop, _embedder_mod, unloaded_models, skipped_in_use)
+    except asyncio.CancelledError:
+        # The caller stopped waiting: an engine already unloaded above still
+        # gets the pointer reset the normal path does below.
+        if _active_model_name in unloaded_models:
+            _reset_active_pointers()
+        raise
+
+    # Update compatibility pointers - but NOT if the active engine was a pinned
+    # one left loaded above, since clearing it would strand the in-flight
+    # request's active model.
+    if _active_model_name not in skipped_in_use:
+        _reset_active_pointers()
+
+    released_anything = bool(unloaded_models) or embedder_was_loaded
+    if before is not None and released_anything:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+
+    if released_anything:
+        status = "unloaded"
+    elif skipped_in_use:
+        status = "in_use"          # nothing freed: every loaded model is pinned
+    else:
+        status = "already_unloaded"
+    result = {
+        "status": status,
+        "model": unloaded_models[0] if unloaded_models else "none",
+        "unloaded_models": unloaded_models,
+        "embedder_unloaded": embedder_was_loaded,
+    }
+    if skipped_in_use:
+        result["skipped_in_use"] = skipped_in_use
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
+    # Cross-install GPU coordination: reflect the now-empty/changed state for a
+    # sibling's next eviction decision. No-op when not registered. Offloaded:
+    # registry file I/O plus, with a non-zero main_gpu_index, a GPU driver probe.
+    await loop.run_in_executor(None, _gpu_registry_sync)
+    return result
+
+
+async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
+                                       skipped_in_use) -> bool:
+    """The releasing half of ``unload_all_models``: unload every loaded, unpinned
+    chat engine (appending to *unloaded_models* / *skipped_in_use*), then the
+    shared embedder. Returns whether the embedder was released."""
     for name in list(_engines.keys()):
         engine = _engines[name]
         if not engine.loaded:
@@ -1333,10 +1452,11 @@ async def unload_all_models() -> dict:
         engine.unloading = True
         try:
             async with sem:
-                await loop.run_in_executor(None, engine.unload)
-                unloaded_models.append(name)
-                if name in _engines_lru:
-                    _engines_lru.remove(name)
+                def _unloaded(name=name):
+                    unloaded_models.append(name)
+                    if name in _engines_lru:
+                        _engines_lru.remove(name)
+                await _unload_engine_off_loop(loop, engine, _unloaded)
         finally:
             engine.unloading = False
 
@@ -1371,49 +1491,7 @@ async def unload_all_models() -> dict:
             embedder_was_loaded = True
         else:
             skipped_in_use.append("embedding model")
-
-    # Update compatibility pointers - but NOT if the active engine was a pinned
-    # one left loaded above, since clearing it would strand the in-flight
-    # request's active model.
-    if _active_model_name not in skipped_in_use:
-        if _active_model_name:
-            # The Engine stays in _engines above for exactly this: a lazy
-            # reload on the next request. Keep its NAME alive too, or nothing
-            # can resolve an unnamed request back to it (see
-            # _last_active_model_name / _resolve_unnamed_model_name).
-            _last_active_model_name = _active_model_name
-        _active_model_name = None
-        _engine = None
-        _inference_sem = None
-
-    released_anything = bool(unloaded_models) or embedder_was_loaded
-    if before is not None and released_anything:
-        released, after = await loop.run_in_executor(
-            None, lambda: wait_for_vram_release(_free, before_bytes=before))
-    else:
-        released, after = 0, before
-
-    if released_anything:
-        status = "unloaded"
-    elif skipped_in_use:
-        status = "in_use"          # nothing freed: every loaded model is pinned
-    else:
-        status = "already_unloaded"
-    result = {
-        "status": status,
-        "model": unloaded_models[0] if unloaded_models else "none",
-        "unloaded_models": unloaded_models,
-        "embedder_unloaded": embedder_was_loaded,
-    }
-    if skipped_in_use:
-        result["skipped_in_use"] = skipped_in_use
-    _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
-    # Cross-install GPU coordination: reflect the now-empty/changed state for a
-    # sibling's next eviction decision. No-op when not registered. Offloaded:
-    # registry file I/O plus, with a non-zero main_gpu_index, a GPU driver probe.
-    await loop.run_in_executor(None, _gpu_registry_sync)
-    return result
+    return embedder_was_loaded
 
 
 async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:

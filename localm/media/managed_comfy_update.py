@@ -45,10 +45,10 @@ from localm.media.managed_comfy_provision import (
 #  Single-flight: only ONE process may mutate the managed checkout at a time.  #
 # --------------------------------------------------------------------------- #
 # The lock is an atomic mkdir at a sibling path of the checkout, shared with
-# remove_managed_comfy: the GUI route spawns `python -m localm comfy update` as
-# a CHILD PROCESS, so the contenders are separate interpreters. The helpers
-# live in managed_comfy and are imported above; _update_lock_path and
-# _LOCK_OWNER are re-exported from here.
+# remove_managed_comfy and taken by every localm process that mutates the
+# checkout (the GUI spawns `python -m localm comfy update` as a child process).
+# The helpers live in managed_comfy and are imported above; _update_lock_path
+# and _LOCK_OWNER are re-exported from here.
 
 
 def _rev_parse_head(root: Path) -> Optional[str]:

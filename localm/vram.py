@@ -303,7 +303,9 @@ def _cancel_abandoned_eviction(fut, task, loop) -> None:
         return
 
     async def _settle():
-        task.cancel()
+        # fut.cancel() above already requested one cancellation of the task.
+        if not task.done() and not task.cancelling():
+            task.cancel()
         try:
             await task
         except BaseException:
@@ -361,9 +363,10 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
                        "resident chat model - may be tight on VRAM). This call "
                        "should be offloaded to an executor.")
         return "skipped"
-    # INVARIANT: unload_all_models offloads onto the loop's default executor, so
-    # a caller blocking here ON that executor must be concurrency-bounded
-    # (routes/chat.py's _embedder_sem, _inference_sems, runguard.run_slot).
+    # INVARIANT: unload_all_models runs its own steps on the loop's default
+    # executor, so every caller that blocks here ON that executor must be
+    # concurrency-bounded on the loop side (as routes/chat.py's _embedder_sem
+    # bounds the dedicated /v1/embeddings path).
     # See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
     holder: dict = {}
 

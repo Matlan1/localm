@@ -11,15 +11,19 @@ embedding requests on a cold embedder put N workers into that wait; once the
 pool is exhausted nothing can run the unload and every worker sits the full
 timeout, stalling all inference (chat generation shares the pool).
 
-Two properties, one test each:
+Three properties, one test each:
   (1) the route holds one default-pool worker at a time on this path;
-  (2) evict_chat_for_embedder cancels the eviction it gave up waiting for.
+  (2) evict_chat_for_embedder cancels the eviction it gave up waiting for;
+  (3) cancelling an eviction whose engine unload is ALREADY running keeps the
+      engine flagged as unloading until that unload finishes, and still does
+      the unload's bookkeeping afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -144,3 +148,84 @@ def test_abandoned_eviction_is_cancelled_when_its_caller_gives_up(hsclean):
         f"an eviction abandoned by its caller still ran afterwards: {ran}")
     assert status == "error", status
 
+
+class _BlockingEngine:
+    """A loaded engine whose unload blocks until the test releases it."""
+
+    def __init__(self, name, gate):
+        self.display_name = name
+        self._loaded = True
+        self.active_requests = 0
+        self.unloading = False
+        self._gate = gate
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def unload(self):
+        self._gate.wait(10.0)
+        self._loaded = False
+
+
+@pytest.fixture
+def isolated(monkeypatch):
+    monkeypatch.setattr("localm.discover.vram_info",
+                        lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
+    monkeypatch.setattr("localm.vram.wait_for_vram_release",
+                        lambda free_fn, before_bytes=None: (0, before_bytes))
+    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
+    monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: None)
+    for d in (hs._engines, hs._engines_lru, hs._inference_sems, hs._last_activity_per_model):
+        d.clear()
+    hs._active_model_name = None
+    hs._default_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+    hs._server_loop = None
+    yield
+    hs._server_loop = None
+
+
+def test_cancelling_a_running_unload_keeps_its_bookkeeping(isolated, monkeypatch):
+    """The caller gives up while the engine's native unload is already running
+    on a worker. The REAL unload_all_models must keep the engine flagged
+    `unloading` until that unload finishes (get_engine must not hand it out
+    mid-free), and must still drop it from the LRU and reset the active
+    pointers once it has."""
+    import localm.vram as vram_mod
+    monkeypatch.setattr(vram_mod, "_EVICT_CANCEL_SETTLE_S", 1.0)
+    gate = threading.Event()
+    eng = _BlockingEngine("chat-model", gate)
+    hs._engines["chat-model"] = eng
+    hs._engines_lru.append("chat-model")
+    hs._inference_sems["chat-model"] = asyncio.Semaphore(1)
+    hs._active_model_name = "chat-model"
+    hs._engine = eng
+
+    async def _main():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        hs._server_loop = loop
+        status = await loop.run_in_executor(
+            None, lambda: evict_chat_for_embedder(timeout_s=0.5))
+        # The caller has returned; the unload is still blocked on the gate.
+        while_running = (eng.unloading, eng.loaded, "chat-model" in hs._engines_lru)
+        gate.set()
+        deadline = time.monotonic() + 10.0
+        while eng.unloading and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.05)
+        return status, while_running
+
+    status, while_running = asyncio.run(_main())
+    assert while_running[0] is True, (
+        "engine.unloading was cleared while its native unload was still running: "
+        f"(unloading, loaded, in_lru) = {while_running}")
+    assert eng.loaded is False, "the running unload must finish"
+    assert eng.unloading is False
+    assert "chat-model" not in hs._engines_lru, "an unloaded engine stayed in the LRU"
+    assert hs._active_model_name is None and hs._engine is None, (
+        "the active pointers still name an engine that was unloaded")
+    assert hs._last_active_model_name == "chat-model"
+    assert status == "error", status

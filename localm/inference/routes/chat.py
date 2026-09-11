@@ -326,9 +326,8 @@ def register(app: FastAPI, ctx) -> None:
                     400,
                     f"Unsupported encoding_format {req.encoding_format!r}: "
                     "expected 'float' or 'base64'.")
-            # One default-pool worker at a time on this path: embed_texts can
-            # block in vram.evict_chat_for_embedder, whose wait needs that pool.
-            # Waiters queue here on the loop, holding no worker.
+            # One default-pool worker at a time inside embed_texts; further
+            # requests queue here on the loop, holding no worker.
             sem_emb = _hs._get_embedder_sem()
             try:
                 async with sem_emb:
