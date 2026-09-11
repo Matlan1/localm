@@ -49,12 +49,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 # One upstream ref per llama_model_params layout localm binds. The default run
-# checks both.
+# checks all three.
 LLAMA_ABI_REFS = {
     "v1": "b9870",    # pre-reorder: use_mmap/use_direct_io/use_mlock, main_gpu@24
     "v2": "b10360",   # post-reorder: load_mode@24, main_gpu@28, load_mtp
+    "v3": "b10905",   # lazy_mode@28 inserted (b10653; named lazy_mode from b10679)
 }
-LLAMA_ABI_REF = LLAMA_ABI_REFS["v2"]
+LLAMA_ABI_REF = LLAMA_ABI_REFS["v3"]
 _REPO = "ggml-org/llama.cpp"
 
 # Structs passed by value or read field-by-field.
@@ -87,6 +88,14 @@ _ENUM_BINDINGS = (
         c_prefix="LLAMA_LOAD_MODE_",
         members=("AUTO", "NONE", "MMAP", "MLOCK", "MMAP_MLOCK", "DIRECT_IO"),
         gate=("llama_model_params", "load_mode"),
+    ),
+    _EnumBinding(
+        c_enum="llama_lazy_mode",
+        module="localm.inference.backends.llamacpp._structs",
+        prefix="LLAMA_LAZY_MODE_",
+        c_prefix="LLAMA_LAZY_MODE_",
+        members=("OFF", "AUTO", "ON"),
+        gate=("llama_model_params", "lazy_mode"),
     ),
     _EnumBinding(
         c_enum="llama_pooling_type",
@@ -240,11 +249,16 @@ def _layout(fields):
 # --------------------------------------------------------------------------- #
 
 def _header_model_params_layout(header: str) -> str:
-    """Which llama_model_params layout a header carries: 'v1' or 'v2'.
+    """Which llama_model_params layout a header carries: 'v1', 'v2' or 'v3'.
 
-    Keyed on the field that defines the split rather than on a version number,
-    so an arbitrary --ref or --header is classified by what it actually says."""
+    Keyed on the fields that define each split rather than on a version
+    number, so an arbitrary --ref or --header is classified by what it
+    actually says. 'v3' matches the b10679+ spelling ``lazy_mode`` and the
+    b10653..b10678 spelling ``tensor_read_lazy`` alike; the struct check then
+    reports the latter as a missing field, which is a NAME difference."""
     body = _strip_comments(_extract_struct_body(header, "llama_model_params"))
+    if re.search(r"\blazy_mode\b|\btensor_read_lazy\b", body):
+        return "v3"
     return "v2" if re.search(r"\bload_mode\b", body) else "v1"
 
 
@@ -271,8 +285,9 @@ def _localm_layout(struct_name: str, layout: str):
     from localm.inference.backends.llamacpp import _structs as S
 
     cls = {
-        "llama_model_params": (S.LlamaModelParamsV2 if layout == "v2"
-                               else S.LlamaModelParamsV1),
+        "llama_model_params": {"v1": S.LlamaModelParamsV1,
+                               "v2": S.LlamaModelParamsV2,
+                               "v3": S.LlamaModelParamsV3}[layout],
         "llama_context_params": (S.LlamaContextParamsV2 if layout == "v2"
                                  else S.LlamaContextParamsV1),
         "llama_batch": S.LlamaBatch,
@@ -496,10 +511,11 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ref", default=None,
                     help="upstream tag/commit/branch, or 'latest' to resolve the "
-                         "newest release. Default: check BOTH pinned refs, "
-                         f"{LLAMA_ABI_REFS['v1']} (pre-reorder) and "
-                         f"{LLAMA_ABI_REFS['v2']} (post-reorder), since localm "
-                         "binds both llama_model_params layouts.")
+                         "newest release. Default: check ALL pinned refs, "
+                         f"{LLAMA_ABI_REFS['v1']} (pre-reorder), "
+                         f"{LLAMA_ABI_REFS['v2']} (post-reorder) and "
+                         f"{LLAMA_ABI_REFS['v3']} (lazy_mode inserted), since "
+                         "localm binds all three llama_model_params layouts.")
     ap.add_argument("--header", default=None,
                     help="path to a local llama.h instead of fetching")
     args = ap.parse_args()
@@ -534,10 +550,10 @@ def main() -> int:
             total += _check_enum(binding, header, additive)
 
     # Both layout axes must have been exercised.
-    if not args.header and not args.ref and seen_layouts != {"v1", "v2"}:
-        print(f"\nFAIL: expected to check both model_params layouts, only saw "
-              f"{sorted(seen_layouts)} - the pinned refs in LLAMA_ABI_REFS no "
-              "longer straddle the model_params reorder.")
+    if not args.header and not args.ref and seen_layouts != {"v1", "v2", "v3"}:
+        print(f"\nFAIL: expected to check all three model_params layouts, only "
+              f"saw {sorted(seen_layouts)} - the pinned refs in LLAMA_ABI_REFS no "
+              "longer cover the model_params reorder and the lazy_mode insertion.")
         total += 1
     if not args.header and not args.ref and seen_context_layouts != {"v1", "v2"}:
         print(f"\nFAIL: expected to check both context_params layouts, only saw "

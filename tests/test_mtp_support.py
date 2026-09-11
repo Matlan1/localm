@@ -16,6 +16,7 @@ from localm.inference.backends.llamacpp._structs import (
     LLAMA_CONTEXT_TYPE_DEFAULT,
     LLAMA_CONTEXT_TYPE_MTP,
     LlamaModelParamsV2,
+    LlamaModelParamsV3,
 )
 from localm.inference.backends.llamacpp import _api as api
 from localm.inference.engine import Engine
@@ -27,11 +28,12 @@ def test_mtp_constants_and_structs():
     """Verify MTP context type constants and model param struct offsets."""
     assert LLAMA_CONTEXT_TYPE_DEFAULT == 0
     assert LLAMA_CONTEXT_TYPE_MTP == 1
-    assert hasattr(LlamaModelParamsV2, "load_mtp")
-    mp = LlamaModelParamsV2()
-    assert hasattr(mp, "load_mtp")
-    mp.load_mtp = True
-    assert mp.load_mtp is True
+    for cls in (LlamaModelParamsV2, LlamaModelParamsV3):
+        assert hasattr(cls, "load_mtp")
+        mp = cls()
+        assert hasattr(mp, "load_mtp")
+        mp.load_mtp = True
+        assert mp.load_mtp is True
 
 
 def test_mtp_config_and_settings_schema():

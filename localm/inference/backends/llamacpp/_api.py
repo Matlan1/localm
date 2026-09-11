@@ -25,9 +25,10 @@ from ._structs import (
 def _model_params_class():
     """The ``llama_model_params`` ctypes class matching the LOADED runtime.
 
-    upstream reordered that struct in place at an unchanged 72-byte size (see
-    ``_structs``' docstring), so the class cannot be a module constant - it is
-    a property of whichever library got loaded. Resolved once per process by
+    upstream reordered that struct in place at an unchanged 72-byte size and
+    later inserted ``lazy_mode`` mid-struct (see ``_structs``' docstring), so
+    the class cannot be a module constant - it is a property of whichever
+    library got loaded. Resolved once per process by
     ``_abi.model_params_layout``; imported lazily to keep the
     ``_api -> _abi -> _loader`` import order acyclic."""
     from ._abi import model_params_class, model_params_layout
@@ -80,11 +81,13 @@ def llama_backend_free() -> None:
 def llama_model_default_params():
     """Native default model params, as an instance of the LOADED build's layout.
 
-    The concrete class is ``LlamaModelParamsV1`` or ``...V2`` - callers must not
-    assume either. Fields present in both (``n_gpu_layers``, ``split_mode``,
-    ``main_gpu``, ``tensor_split``, ``tensor_buft_overrides``, ...) can be set
-    directly; for mmap use ``_structs.set_use_mmap``, which is the one field
-    with no V2 counterpart."""
+    The concrete class is ``LlamaModelParamsV1``, ``...V2`` or ``...V3`` -
+    callers must not assume any of them. Fields present in all three
+    (``n_gpu_layers``, ``split_mode``, ``main_gpu``, ``tensor_split``,
+    ``tensor_buft_overrides``, ...) can be set directly; for mmap use
+    ``_structs.set_use_mmap``, which is the one field with no V2/V3
+    counterpart. ``lazy_mode`` exists on V3 only and arrives with the build's
+    own default."""
     fn = _bind("llama_model_default_params", _model_params_class())
     return fn()
 
@@ -117,7 +120,7 @@ def llama_load_model_from_file(
 ) -> Optional[ctypes.c_void_p]:
     cls = _model_params_class()
     if not isinstance(params, cls):
-        # Passing the other layout's class by value would marshal main_gpu and
+        # Passing another layout's class by value would marshal main_gpu and
         # the load/mmap flags into the wrong native fields with no error from
         # ctypes and no crash from llama.cpp, so this refuses instead.
         raise TypeError(

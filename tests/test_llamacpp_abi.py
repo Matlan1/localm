@@ -18,11 +18,11 @@ import pytest
 from localm.inference.backends.llamacpp import _abi
 from localm.inference.backends.llamacpp._abi import (
     CONTEXT_PARAMS_V1, CONTEXT_PARAMS_V2, MODEL_PARAMS_V1, MODEL_PARAMS_V2,
-    AbiMismatch, evaluate, verify_abi,
+    MODEL_PARAMS_V3, AbiMismatch, evaluate, verify_abi,
 )
 from localm.inference.backends.llamacpp._structs import (
     LlamaContextParamsV1, LlamaContextParamsV2, LlamaModelParamsV1,
-    LlamaModelParamsV2,
+    LlamaModelParamsV2, LlamaModelParamsV3,
 )
 
 
@@ -31,6 +31,7 @@ from localm.inference.backends.llamacpp._structs import (
 #  src/llama-model.cpp at each side of the reorder.
 #    V1 = 7c158fbb4aec (lemonade b1288, ggml 0.13.1), probed live off the DLL
 #    V2 = 07132750825a (lemonade b1307, ggml 0.18.1)
+#    V3 = ggml-org b10905 (lazy_mode inserted at b10653, renamed at b10679)
 # --------------------------------------------------------------------------- #
 
 def good_model_v1() -> LlamaModelParamsV1:
@@ -49,6 +50,18 @@ def good_model_v2() -> LlamaModelParamsV2:
     mp.n_gpu_layers = -1
     mp.split_mode = 1          # LLAMA_SPLIT_MODE_LAYER
     mp.load_mode = 1           # LLAMA_LOAD_MODE_MMAP
+    mp.main_gpu = 0
+    mp.vocab_only = False
+    mp.use_extra_bufts = True
+    return mp
+
+
+def good_model_v3() -> LlamaModelParamsV3:
+    mp = LlamaModelParamsV3()
+    mp.n_gpu_layers = -1
+    mp.split_mode = 1          # LLAMA_SPLIT_MODE_LAYER
+    mp.load_mode = -1          # LLAMA_LOAD_MODE_AUTO
+    mp.lazy_mode = 1           # LLAMA_LAZY_MODE_AUTO
     mp.main_gpu = 0
     mp.vocab_only = False
     mp.use_extra_bufts = True
@@ -146,9 +159,9 @@ class _ParamsFn:
 class _FakeLib:
     """A fake CDLL exposing what verify_abi and the layout probe actually call.
 
-    The ``llama_load_mode_*`` marker symbols exist only when *mp* is a V2 struct,
-    mirroring a real build - unless *markers* overrides that, which is how the
-    probe-contradiction case is constructed."""
+    The ``llama_load_mode_*`` marker symbols exist only when *mp* is a V2 or V3
+    struct, mirroring a real build - unless *markers* overrides that, which is
+    how the probe-contradiction case is constructed."""
 
     def __init__(self, mp, cp, markers: bool = None,
                  ggml_version: str = None):
@@ -163,7 +176,7 @@ class _FakeLib:
         # has_penalties_sampler() return False via the symbol-missing branch.
         self.llama_sampler_init_penalties = _FakeFn(0)
         if markers is None:
-            markers = isinstance(mp, LlamaModelParamsV2)
+            markers = isinstance(mp, (LlamaModelParamsV2, LlamaModelParamsV3))
         if markers:
             self.llama_load_mode_from_str = _FakeFn(0)
             self.llama_load_mode_name = _FakeFn(0)
@@ -385,6 +398,13 @@ def test_anchor_offsets_match_struct():
     assert LlamaModelParamsV2.main_gpu.offset == 28
     assert LlamaModelParamsV2.check_tensors.offset == 65
     assert ctypes.sizeof(LlamaModelParamsV1) == ctypes.sizeof(LlamaModelParamsV2)
+    # V3 offsets: lazy_mode inserted at 28, everything from main_gpu on +4.
+    assert LlamaModelParamsV3.split_mode.offset == 20
+    assert LlamaModelParamsV3.load_mode.offset == 24
+    assert LlamaModelParamsV3.lazy_mode.offset == 28
+    assert LlamaModelParamsV3.main_gpu.offset == 32
+    assert LlamaModelParamsV3.check_tensors.offset == 73
+    assert ctypes.sizeof(LlamaModelParamsV3) == ctypes.sizeof(LlamaModelParamsV2)
 
 
 # --------------------------------------------------------------------------- #
@@ -458,6 +478,195 @@ def test_v2_detection_survives_a_drifted_default():
     assert v.status == "ok"
     assert v.layout == MODEL_PARAMS_V2
     assert any("use_extra_bufts" in d for d in v.diagnostics)
+
+
+# --------------------------------------------------------------------------- #
+#  llama_model_params V3: the lazy_mode insertion (ggml-org b10653; the field
+#  is named lazy_mode from b10679). No symbol was added with it, so V2 versus
+#  V3 rests on the default-params bytes alone.
+# --------------------------------------------------------------------------- #
+
+def _raw_model(mp) -> bytes:
+    return bytes(bytearray(
+        (ctypes.c_uint8 * ctypes.sizeof(mp)).from_buffer_copy(mp)))
+
+
+def test_v3_layout_matches_upstream_header():
+    """Offsets from include/llama.h at b10905 under natural 64-bit alignment.
+
+    lazy_mode's SIZE is asserted as well as its offset: a 1-byte lazy_mode is
+    padded back to the same offsets by alignment, so offsets alone cannot see
+    a wrong field type."""
+    assert LlamaModelParamsV3.load_mode.offset == 24
+    assert LlamaModelParamsV3.lazy_mode.offset == 28
+    assert LlamaModelParamsV3.lazy_mode.size == 4
+    assert LlamaModelParamsV3.main_gpu.offset == 32
+    assert LlamaModelParamsV3.tensor_split.offset == 40
+    assert LlamaModelParamsV3.progress_callback.offset == 48
+    assert LlamaModelParamsV3.progress_callback_user_data.offset == 56
+    assert LlamaModelParamsV3.kv_overrides.offset == 64
+    for i, name in enumerate(("vocab_only", "check_tensors", "use_extra_bufts",
+                              "no_host", "no_alloc", "load_mtp")):
+        assert getattr(LlamaModelParamsV3, name).offset == 72 + i, name
+    assert ctypes.sizeof(LlamaModelParamsV3) >= 80
+
+
+def test_v3_default_values_pass_with_no_drift_notes():
+    v = evaluate(good_model_v3(), good_ctx())
+    assert v.status == "ok", v.failures
+    assert v.layout == MODEL_PARAMS_V3
+    assert not v.diagnostics
+
+
+@pytest.mark.parametrize("builder,want", [
+    (good_model_v1, MODEL_PARAMS_V1),
+    (good_model_v2, MODEL_PARAMS_V2),
+    (good_model_v3, MODEL_PARAMS_V3),
+])
+def test_each_layout_is_detected_from_its_own_fake_lib(builder, want):
+    """Every layout resolves to ITSELF, corroborated (no 'symbol probe alone'
+    note), with no contradiction and nothing assumed. The V2 and V3 fakes both
+    export the llama_load_mode_* symbols, so the V3 case proves the byte
+    fingerprint decides within that family."""
+    lib = _FakeLib(builder(), good_ctx())
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert (layout, contradiction, assumed) == (want, None, False), notes
+    assert not any("symbol probe alone" in n for n in notes), notes
+
+
+def test_v3_default_bytes_never_resolve_to_v2():
+    """The silent misbind: V3 default bytes carry the llama_load_mode_* symbols
+    and, read as V2, put lazy_mode's AUTO (1) where V2 keeps main_gpu - a
+    value inside evaluate()'s device-index bound. Only the detector can tell,
+    so it has to say V3 through the full probe, symbols included."""
+    lib = _FakeLib(good_model_v3(), good_ctx(), markers=True)
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert layout == MODEL_PARAMS_V3, notes
+    assert layout != MODEL_PARAMS_V2
+    assert (contradiction, assumed) == (None, False)
+    assert _abi._fingerprint_layout(_raw_model(good_model_v3())) == MODEL_PARAMS_V3
+
+    # And the misbind really is invisible downstream: the same bytes through
+    # the V2 class pass evaluate() with main_gpu reading lazy_mode's 1.
+    as_v2 = LlamaModelParamsV2()
+    ctypes.memmove(ctypes.byref(as_v2), ctypes.byref(good_model_v3()), 80)
+    assert as_v2.main_gpu == 1
+    assert evaluate(as_v2, good_ctx()).status == "ok"
+
+
+def test_v2_default_bytes_never_resolve_to_v3():
+    """The other direction: today's pinned V2 build (load_mode AUTO since
+    b10373) must keep binding V2 with the V3 arm present."""
+    mp = good_model_v2()
+    mp.load_mode = -1                  # LLAMA_LOAD_MODE_AUTO, the b10373+ default
+    lib = _FakeLib(mp, good_ctx())
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False), notes
+    assert not any("symbol probe alone" in n for n in notes), notes
+    assert _abi._fingerprint_layout(_raw_model(mp)) == MODEL_PARAMS_V2
+
+
+def test_v3_bytes_without_the_load_mode_symbols_is_a_contradiction():
+    """V3 postdates the llama_load_mode_* symbols, so V3-shaped bytes on a
+    library that exports none of them contradict each other and refuse."""
+    lib = _FakeLib(good_model_v3(), good_ctx(), markers=False)
+    layout, _notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert contradiction is not None and "v3" in contradiction
+    assert (layout, assumed) == (MODEL_PARAMS_V1, False)
+    with pytest.raises(AbiMismatch):
+        verify_abi(lib)
+
+
+@pytest.mark.parametrize("drift", [
+    lambda mp: setattr(mp, "lazy_mode", 0),
+    lambda mp: setattr(mp, "use_extra_bufts", False),
+    lambda mp: setattr(mp, "kv_overrides", 0x0102030405060708),
+])
+def test_v3_detection_survives_a_drift_in_each_fingerprinted_field(drift):
+    """One drifted V3 default leaves V3 at 2 and V2 at most 1, so the build
+    still binds V3 without resting on the symbol probe alone."""
+    mp = good_model_v3()
+    drift(mp)
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(
+        _FakeLib(mp, good_ctx()))
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V3, None, False), notes
+    assert not any("symbol probe alone" in n for n in notes), notes
+
+
+def test_v3_with_two_drifted_defaults_binds_v2_on_symbols_alone():
+    """Pins the LIMIT of the byte-only V2/V3 split: with two of the three
+    fingerprinted defaults drifted the bytes are inconclusive, and the
+    symbols can only say 'V2 or V3', so the family binds V2 and says so."""
+    mp = good_model_v3()
+    mp.lazy_mode = 0
+    mp.use_extra_bufts = False
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(
+        _FakeLib(mp, good_ctx()))
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False)
+    assert any("symbol probe alone" in n and "v3" in n for n in notes), notes
+
+
+def test_v3_dispatch_reaches_every_consumer(monkeypatch):
+    """The class map, the verdict's layout and _api's default-params
+    constructor all follow the detected V3 layout, and the by-value load
+    refuses a V2 instance once the runtime is V3."""
+    from localm.inference.backends.llamacpp import _api, _loader
+
+    assert _abi.model_params_class(MODEL_PARAMS_V3) is LlamaModelParamsV3
+
+    lib = _FakeLib(good_model_v3(), good_ctx())
+    v = verify_abi(lib)
+    assert v.status == "ok", v.failures
+    assert v.layout == MODEL_PARAMS_V3
+
+    monkeypatch.setattr(_loader, "load_lib", lambda: lib)
+    monkeypatch.setattr(_api, "load_lib", lambda: lib)
+    assert _abi.model_params_layout() == MODEL_PARAMS_V3
+    mp = _api.llama_model_default_params()
+    assert isinstance(mp, LlamaModelParamsV3)
+    assert (mp.load_mode, mp.lazy_mode, mp.main_gpu) == (-1, 1, 0)
+    with pytest.raises(TypeError):
+        _api.llama_load_model_from_file("model.gguf", good_model_v2())
+
+
+def test_model_params_class_refuses_an_unknown_layout():
+    with pytest.raises(KeyError):
+        _abi.model_params_class("v4")
+
+
+def test_set_use_mmap_on_v3_writes_load_mode_and_leaves_lazy_mode_alone():
+    from localm.inference.backends.llamacpp._structs import (
+        LLAMA_LOAD_MODE_MMAP, LLAMA_LOAD_MODE_NONE, get_use_mmap, set_use_mmap)
+
+    mp = good_model_v3()
+    before_tail = _raw_model(mp)[64:80]
+    set_use_mmap(mp, False)
+    assert mp.load_mode == LLAMA_LOAD_MODE_NONE
+    assert int.from_bytes(_raw_model(mp)[24:28], "little", signed=True) == 0
+    assert get_use_mmap(mp) is False
+    set_use_mmap(mp, True)
+    assert mp.load_mode == LLAMA_LOAD_MODE_MMAP
+    assert get_use_mmap(mp) is True
+    assert mp.lazy_mode == 1, "lazy_mode is not an mmap flag and must not move"
+    assert _raw_model(mp)[64:80] == before_tail
+
+
+def test_main_gpu_write_on_v3_lands_at_32_not_28():
+    mp = good_model_v3()
+    mp.main_gpu = 3
+    raw = _raw_model(mp)
+    assert int.from_bytes(raw[32:36], "little", signed=True) == 3
+    assert int.from_bytes(raw[28:32], "little", signed=True) == 1, (
+        "offset 28 is lazy_mode on V3; a main_gpu write landing here is the "
+        "V2-class misbind")
+
+
+def test_v3_lazy_mode_drift_is_a_diagnostic_not_a_refusal():
+    mp = good_model_v3()
+    mp.lazy_mode = 2                   # LLAMA_LAZY_MODE_ON
+    v = evaluate(mp, good_ctx())
+    assert v.status == "ok", v.failures
+    assert any("lazy_mode" in d for d in v.diagnostics), v.diagnostics
 
 
 # --------------------------------------------------------------------------- #
@@ -717,6 +926,10 @@ def test_unknown_third_layout_still_fails_safe():
     # call mis-marshals every argument.
     (good_model_v2, "0.18.0", 0),
     (good_model_v2, None,     0),
+    # V3 postdates every one of those changes, so it follows V2's ggml rule.
+    (good_model_v3, "0.18.1", 5),
+    (good_model_v3, "0.19.5", 5),
+    (good_model_v3, None,     0),
 ])
 def test_penalties_arity(mp_builder, ggml, expected):
     lib = _FakeLib(mp_builder(), good_ctx(), ggml_version=ggml)
@@ -880,30 +1093,32 @@ def test_evaluate_cannot_discriminate_the_two_layouts():
     assert evaluate(as_v2, good_ctx()).status == "ok"
 
 
-def test_unknown_third_model_params_layout_is_not_caught():
+def test_unknown_fourth_model_params_layout_is_not_caught():
     """Pins the LIMIT of verify_abi's fail-safe on the model_params axis.
 
     test_unknown_third_layout_still_fails_safe covers the context_params axis,
     where evaluate() re-reads the -1 keystones at wherever the bound class puts
     them. That is a property of that ONE axis; this is its counter-example.
 
-    A hypothetical third model_params layout (one more 4-byte field inserted
-    directly before split_mode) is detected as v2 CONFIDENTLY - both signals
-    agree, so there is no contradiction to refuse on - and then sails through
-    evaluate(), because every model_params check is a RANGE check and every
-    shifted value here is still in range. The struct is bound and crossed over
-    the FFI by value: a silent misbind."""
+    A hypothetical fourth model_params layout (one more 4-byte field inserted
+    directly before split_mode) carries the llama_load_mode_* symbols, so the
+    symbol probe says the V2/V3 family; its bytes score V2 and V3 alike, so the
+    fingerprint is inconclusive and V2 is bound on the symbols with no
+    contradiction to refuse on. It then sails through evaluate(), because every
+    model_params check is a RANGE check and every shifted value here is still
+    in range. The struct is bound and crossed over the FFI by value: a silent
+    misbind."""
     v2 = _raw(good_model_v2())[:72]
-    raw3 = v2[:20] + b"\x00\x00\x00\x00" + v2[20:68]
-    assert len(raw3) == 72, "the receptacle hands back a fixed-size buffer"
+    raw4 = v2[:20] + b"\x00\x00\x00\x00" + v2[20:68]
+    assert len(raw4) == 72, "the receptacle hands back a fixed-size buffer"
 
-    fake_v3 = LlamaModelParamsV2()
-    ctypes.memmove(ctypes.byref(fake_v3), raw3, 72)
-    lib = _FakeLib(fake_v3, good_ctx())
+    fake_v4 = LlamaModelParamsV2()
+    ctypes.memmove(ctypes.byref(fake_v4), raw4, 72)
+    lib = _FakeLib(fake_v4, good_ctx())
 
     layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
     assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False), (
-        f"fixture must exercise the CONFIDENT-misdetection path; got {notes}")
+        f"fixture must exercise the misdetection path; got {notes}")
 
     v = verify_abi(lib)                       # the point: it does NOT raise
     assert v.status == "ok", v.failures
@@ -912,8 +1127,8 @@ def test_unknown_third_model_params_layout_is_not_caught():
     # And it really is a misbind rather than a harmless relabel: the bound
     # class reads split_mode at offset 20, where the inserted field now sits,
     # while this build's actual split_mode has moved to 24.
-    assert fake_v3.split_mode == 0
-    assert int.from_bytes(raw3[24:28], "little", signed=True) == 1, (
+    assert fake_v4.split_mode == 0
+    assert int.from_bytes(raw4[24:28], "little", signed=True) == 1, (
         "the real split_mode must have moved, or this pins nothing")
 
 

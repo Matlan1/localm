@@ -114,6 +114,24 @@ _GOOD_HEADER_V2 = _GOOD_HEADER.replace(
     bool load_mtp;""",
 )
 
+# The header after upstream inserted lazy_mode directly after load_mode
+# (b10653, spelled tensor_read_lazy until b10679) - localm's V3 layout. The
+# native struct grows from 72 to 80 bytes and every field from main_gpu on
+# moves 4 bytes later.
+_GOOD_HEADER_V3 = _GOOD_HEADER_V2.replace(
+    """    enum llama_load_mode load_mode;
+    int32_t main_gpu;""",
+    """    enum llama_load_mode load_mode;
+    enum llama_lazy_mode lazy_mode;
+    int32_t main_gpu;""",
+)
+
+# The same insertion under its b10653..b10678 spelling.
+_GOOD_HEADER_V3_OLD_NAME = _GOOD_HEADER_V3.replace(
+    "    enum llama_lazy_mode lazy_mode;\n",
+    "    enum llama_tensor_read_lazy tensor_read_lazy;\n",
+)
+
 # A mid-struct insertion that shifts every later field.
 _BAD_HEADER = _GOOD_HEADER.replace(
     "    uint32_t n_ctx;\n",
@@ -130,22 +148,26 @@ _GOOD_HEADER_CTX_V2 = _GOOD_HEADER.replace(
 )
 
 
-def test_embedded_headers_are_the_two_real_layouts():
-    """Guards the fixtures themselves: if the V2 edit above stopped producing a
-    genuinely different llama_model_params, every test below would silently
-    check V1 twice and still pass."""
+def test_embedded_headers_are_the_three_real_layouts():
+    """Guards the fixtures themselves: if the V2 or V3 edit above stopped
+    producing a genuinely different llama_model_params, every test below would
+    silently check an earlier layout twice and still pass."""
     assert abichk._header_model_params_layout(_GOOD_HEADER) == "v1"
     assert abichk._header_model_params_layout(_GOOD_HEADER_V2) == "v2"
+    assert abichk._header_model_params_layout(_GOOD_HEADER_V3) == "v3"
+    assert abichk._header_model_params_layout(_GOOD_HEADER_V3_OLD_NAME) == "v3"
+    assert _GOOD_HEADER_V3 != _GOOD_HEADER_V2
+    assert _GOOD_HEADER_V3_OLD_NAME != _GOOD_HEADER_V3
     assert abichk._header_context_params_layout(_GOOD_HEADER) == "v1"
     assert abichk._header_context_params_layout(_GOOD_HEADER_CTX_V2) == "v2"
 
 
 @pytest.mark.parametrize("struct", ["llama_model_params", "llama_context_params", "llama_batch"])
 @pytest.mark.parametrize("header,layout", [
-    (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2")])
+    (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2"), (_GOOD_HEADER_V3, "v3")])
 def test_verifier_passes_on_matching_header(struct, header, layout):
-    # Both fixtures are context_params v1; the model_params axis under test varies
-    # via `layout`, independent of context.
+    # All three fixtures are context_params v1; the model_params axis under
+    # test varies via `layout`, independent of context.
     assert abichk._check(struct, header, layout, "v1") == 0
 
 
@@ -153,8 +175,18 @@ def test_verifier_passes_on_matching_context_params_header():
     assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V2, "v1", "v2") == 0
 
 
+def test_v3_header_under_its_old_field_name_is_a_name_difference(capsys):
+    """b10653..b10678 spell the inserted field tensor_read_lazy. The header is
+    classified v3 (offsets match) and the diff reports exactly that one field
+    as missing by NAME, nothing else."""
+    assert abichk._check("llama_model_params", _GOOD_HEADER_V3_OLD_NAME, "v3", "v1") == 1
+    out = capsys.readouterr().out
+    assert "tensor_read_lazy" in out
+    assert "main_gpu: upstream offset" not in out
+
+
 @pytest.mark.parametrize("header,layout", [
-    (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2")])
+    (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2"), (_GOOD_HEADER_V3, "v3")])
 def test_verifier_fails_on_midstruct_insertion(header, layout):
     # The injected field shifts n_batch onward -> many offset mismatches.
     # model_layout is irrelevant here (_check ignores it for
@@ -171,6 +203,11 @@ def test_verifier_fails_when_the_wrong_model_params_layout_is_selected():
     versa. If either direction passed, the two-layout split would be cosmetic."""
     assert abichk._check("llama_model_params", _GOOD_HEADER_V2, "v1", "v1") > 0
     assert abichk._check("llama_model_params", _GOOD_HEADER, "v2", "v1") > 0
+    # And the newer split: a V3 header against the V2 class is what the
+    # binding did before lazy_mode was taught, and vice versa.
+    assert abichk._check("llama_model_params", _GOOD_HEADER_V3, "v2", "v1") > 0
+    assert abichk._check("llama_model_params", _GOOD_HEADER_V3, "v1", "v1") > 0
+    assert abichk._check("llama_model_params", _GOOD_HEADER_V2, "v3", "v1") > 0
 
 
 def test_verifier_fails_when_the_wrong_context_params_layout_is_selected():
@@ -227,11 +264,25 @@ enum llama_pooling_type {
     LLAMA_POOLING_TYPE_CLS  = 2,
     LLAMA_POOLING_TYPE_LAST = 3,
 };
+enum llama_lazy_mode {
+    LLAMA_LAZY_MODE_OFF  = 0,
+    LLAMA_LAZY_MODE_AUTO = 1,
+    LLAMA_LAZY_MODE_ON   = 2,
+};
 """
 
 # _GOOD_HEADER_V2 carries llama_model_params.load_mode and (via _GOOD_HEADER)
-# llama_context_params.pooling_type, which are the two gate fields.
+# llama_context_params.pooling_type, which are two of the gate fields; it has
+# no lazy_mode, so the llama_lazy_mode binding is skipped against it.
 _ENUM_HEADER = _GOOD_HEADER_V2 + _ENUM_BLOCKS
+
+# _GOOD_HEADER_V3 adds the third gate field, llama_model_params.lazy_mode.
+_ENUM_HEADER_V3 = _GOOD_HEADER_V3 + _ENUM_BLOCKS
+
+# upstream CHANGES the value of a lazy-mode member localm binds. Corrupting.
+_ENUM_LAZY_CHANGED = _ENUM_HEADER_V3.replace(
+    "    LLAMA_LAZY_MODE_AUTO = 1,\n",
+    "    LLAMA_LAZY_MODE_AUTO = 5,\n")
 
 # (a) upstream ADDS a member localm does not bind. Additive.
 _ENUM_ADDED = _ENUM_HEADER.replace(
@@ -250,6 +301,7 @@ _ENUM_NO_AUTO = _ENUM_HEADER.replace(
 
 _LOAD_MODE = next(b for b in abichk._ENUM_BINDINGS if b.c_enum == "llama_load_mode")
 _POOLING = next(b for b in abichk._ENUM_BINDINGS if b.c_enum == "llama_pooling_type")
+_LAZY_MODE = next(b for b in abichk._ENUM_BINDINGS if b.c_enum == "llama_lazy_mode")
 
 
 def _run_enum(binding, header):
@@ -315,6 +367,22 @@ def test_enum_absent_with_its_field_absent_is_skipped():
     """_GOOD_HEADER is pre-reorder: no llama_model_params.load_mode and no
     llama_load_mode. That header predates the feature and is not drift."""
     assert _run_enum(_LOAD_MODE, _GOOD_HEADER) == (0, [])
+
+
+def test_lazy_mode_enum_domain_is_checked_only_where_the_field_exists():
+    """The V3 gate: against a V3 header the three bound members are compared
+    and pass; against a V2 header (no lazy_mode field) the binding is skipped
+    as predating the feature, even though the enum block is present; and a
+    changed value for a bound member is the corrupting class."""
+    assert _ENUM_LAZY_CHANGED != _ENUM_HEADER_V3
+    assert _run_enum(_LAZY_MODE, _ENUM_HEADER_V3) == (0, [])
+    assert _run_enum(_LAZY_MODE, _ENUM_HEADER) == (0, [])
+    problems, notes = _run_enum(_LAZY_MODE, _ENUM_LAZY_CHANGED)
+    assert problems > 0
+    assert notes == []
+    # The b10653..b10678 spelling has no lazy_mode field either: skipped, so
+    # its differently-named enumerators are never compared against ours.
+    assert _run_enum(_LAZY_MODE, _GOOD_HEADER_V3_OLD_NAME + _ENUM_BLOCKS) == (0, [])
 
 
 def test_enum_absent_while_its_field_is_present_fails():

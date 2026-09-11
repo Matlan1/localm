@@ -22,8 +22,8 @@ tag against upstream does not give you a 404, it gives you a plausible WRONG
 ARTIFACT with no signal that anything is off. Every tag below therefore names
 its repository.
 
-TWO llama_model_params LAYOUTS EXIST, BOTH 72 BYTES
----------------------------------------------------
+THREE llama_model_params LAYOUTS EXIST
+--------------------------------------
 ``llama_model_params`` was reordered in place between llama.cpp `7c158fbb4aec`
 (lemonade b1288, ggml 0.13.1) and `07132750825a` (lemonade b1307, ggml 0.18.1).
 The change landed in upstream release **b10105**. Upstream b10103 is the last
@@ -50,21 +50,41 @@ drops the user's GPU selection while changing how the weights are mapped; writin
 ``check_tensors`` at the V1 offset lands in V2's ``no_alloc``, which loads
 metadata and no weights at all. None of it raises.
 
-localm ships BOTH layouts and picks one per loaded library at load time
+Upstream release **b10653** then INSERTED a 4-byte ``lazy_mode`` enum directly
+after ``load_mode`` (spelled ``tensor_read_lazy`` on b10653..b10678, renamed
+``lazy_mode`` from b10679 on; same offset, size and default either way). Every
+field from ``main_gpu`` onward sits 4 bytes later and the native size grows
+from 72 to 80. The LLAMA_API function list did not change with it, so no
+symbol marks V3; ``_abi`` tells V2 from V3 by the default-params bytes alone:
+
+    offset   V2 (upstream b10105..b10649)   V3 (upstream >= b10653)
+    [24]     load_mode                      load_mode
+    [28]     main_gpu                       lazy_mode      <-- INSERTED
+    [32]     tensor_split                   main_gpu       <-- MOVED
+    [40]     progress_callback              tensor_split
+    [48]     progress_callback_user_data    progress_callback
+    [56]     kv_overrides                   progress_callback_user_data
+    [64]     vocab_only ... load_mtp        kv_overrides
+    [72]     (end of struct)                vocab_only ... load_mtp
+
+Writing a V2 ``main_gpu`` into a V3 build lands in ``lazy_mode``, so the GPU
+selection is dropped and the tensor read strategy changes; a V2 ``vocab_only``
+lands in the low byte of V3's ``kv_overrides`` pointer. None of it raises.
+
+localm ships all THREE layouts and picks one per loaded library at load time
 (``_abi.detect_model_params_layout``). There is NO bare ``LlamaModelParams``
 name: a caller must go through ``_abi.model_params_class()`` /
 ``_api.llama_model_default_params()``, so the wrong one cannot be constructed by
 habit.
 
-Fields at offsets that did NOT move (``devices``, ``tensor_buft_overrides``,
-``n_gpu_layers``, ``split_mode``, ``tensor_split``, the callbacks,
-``kv_overrides``, ``vocab_only``) are named identically in both classes, so call
-sites can set them directly. ``main_gpu`` is also named in both, at its own
-correct offset in each, so ``mp.main_gpu = i`` is right once the class is right.
-The ONE field with no V2 counterpart is ``use_mmap``; use :func:`set_use_mmap`.
+Every field is named identically in every class that has it, at that class's
+own correct offset, so ``mp.main_gpu = i`` / ``mp.tensor_split = p`` /
+``mp.load_mtp = True`` are right once the class is right. The ONE field with no
+V2/V3 counterpart is ``use_mmap``; use :func:`set_use_mmap`. ``lazy_mode``
+exists on V3 only and keeps the build's own default (AUTO) unless set.
 
 Verified NATIVE sizes:
-    llama_model_params   = 72 bytes (V1 and V2 alike)
+    llama_model_params   = 72 bytes (V1 and V2 alike); 80 bytes (V3)
     llama_context_params = 152 bytes on lemonade b1288; 160 bytes on
                            upstream b9682+ / lemonade b1307
                            (adds a trailing ``ctx_other`` pointer). Trailing
@@ -112,6 +132,15 @@ _VALID_LOAD_MODES = (
     LLAMA_LOAD_MODE_MMAP_MLOCK,
     LLAMA_LOAD_MODE_DIRECT_IO,
 )
+
+# enum llama_lazy_mode  (V3 builds only, upstream b10679+; b10653..b10678 spell
+# the same enumerators LLAMA_TENSOR_READ_LAZY_*)
+#
+# On-demand reading of the rows of tensors the architecture marks as lazy
+# (requires mmap). llama_model_default_params() returns AUTO.
+LLAMA_LAZY_MODE_OFF  = 0   # always read the whole tensor up front
+LLAMA_LAZY_MODE_AUTO = 1   # lazy only for marked tensors larger than 4 GiB
+LLAMA_LAZY_MODE_ON   = 2   # read the rows of marked tensors on demand
 
 
 # llama_model_params V1  (72 bytes)
@@ -223,13 +252,69 @@ class LlamaModelParamsV2(ctypes.Structure):
     ]
 
 
+# llama_model_params V3  (80 bytes; upstream b10653+, field renamed at b10679)
+#
+# Native defaults from llama_model_default_params():
+#   - [16]    i32  n_gpu_layers    = -1
+#   - [20]    i32  split_mode      = 1 (LLAMA_SPLIT_MODE_LAYER)
+#   - [24]    i32  load_mode       = -1 (LLAMA_LOAD_MODE_AUTO)
+#   - [28]    i32  lazy_mode       = 1 (LLAMA_LAZY_MODE_AUTO)
+#   - [32]    i32  main_gpu        = 0
+#   - [36]    pad
+#   - [40-47] ptr  tensor_split    = NULL
+#   - [48-55] ptr  progress_callback = NULL
+#   - [56-63] ptr  progress_callback_user_data = NULL
+#   - [64-71] ptr  kv_overrides    = NULL
+#   - [72]    bool vocab_only      = False
+#   - [73]    bool check_tensors   = False
+#   - [74]    bool use_extra_bufts = True
+#   - [75]    bool no_host         = False
+#   - [76]    bool no_alloc        = False
+#   - [77]    bool load_mtp        = False
+
+class LlamaModelParamsV3(ctypes.Structure):
+    _fields_ = [
+        ("devices",                     ctypes.c_void_p),    # ggml_backend_dev_t**
+        ("tensor_buft_overrides",       ctypes.c_void_p),
+        ("n_gpu_layers",                ctypes.c_int32),
+        ("split_mode",                  ctypes.c_int32),
+        ("load_mode",                   ctypes.c_int32),     # enum llama_load_mode
+        ("lazy_mode",                   ctypes.c_int32),     # enum llama_lazy_mode
+        ("main_gpu",                    ctypes.c_int32),
+        ("_pad0",                       ctypes.c_int32),
+        ("tensor_split",                ctypes.c_void_p),    # const float*
+        ("progress_callback",           ctypes.c_void_p),
+        ("progress_callback_user_data", ctypes.c_void_p),
+        ("kv_overrides",                ctypes.c_void_p),
+        ("vocab_only",                  ctypes.c_bool),
+        ("check_tensors",               ctypes.c_bool),
+        ("use_extra_bufts",             ctypes.c_bool),
+        ("no_host",                     ctypes.c_bool),
+        ("no_alloc",                    ctypes.c_bool),
+        ("load_mtp",                    ctypes.c_bool),
+        ("_pad1",                       ctypes.c_uint8 * 2),
+        # Forward-compat headroom: 8 bytes shorter than V1/V2's so all three
+        # classes allocate the same 104 bytes.
+        ("_reserved",                   ctypes.c_uint8 * 24),
+    ]
+
+
+# The layouts that carry the load_mode enum instead of V1's mmap/mlock/direct-io
+# booleans. set_use_mmap / get_use_mmap dispatch on this.
+_LOAD_MODE_LAYOUTS = (LlamaModelParamsV2, LlamaModelParamsV3)
+
+
 # Self-consistency guards ONLY (these do NOT validate against the DLL - that is
-# _abi.verify_abi). 72 native bytes + 32 reserved = 104, for BOTH layouts.
+# _abi.verify_abi). 72 native bytes + 32 reserved = 104 for V1 and V2; 80 native
+# bytes + 24 reserved = 104 for V3.
 assert ctypes.sizeof(LlamaModelParamsV1) == 104, (
     f"LlamaModelParamsV1 size mismatch: {ctypes.sizeof(LlamaModelParamsV1)} != 104"
 )
 assert ctypes.sizeof(LlamaModelParamsV2) == 104, (
     f"LlamaModelParamsV2 size mismatch: {ctypes.sizeof(LlamaModelParamsV2)} != 104"
+)
+assert ctypes.sizeof(LlamaModelParamsV3) == 104, (
+    f"LlamaModelParamsV3 size mismatch: {ctypes.sizeof(LlamaModelParamsV3)} != 104"
 )
 # Assert the field offsets each layout is required to have.
 for _cls, _off in (
@@ -241,6 +326,13 @@ for _cls, _off in (
                           "main_gpu": 28, "vocab_only": 64, "check_tensors": 65,
                           "use_extra_bufts": 66, "no_host": 67, "no_alloc": 68,
                           "load_mtp": 69}),
+    (LlamaModelParamsV3, {"n_gpu_layers": 16, "split_mode": 20, "load_mode": 24,
+                          "lazy_mode": 28, "main_gpu": 32, "tensor_split": 40,
+                          "progress_callback": 48,
+                          "progress_callback_user_data": 56, "kv_overrides": 64,
+                          "vocab_only": 72, "check_tensors": 73,
+                          "use_extra_bufts": 74, "no_host": 75, "no_alloc": 76,
+                          "load_mtp": 77}),
 ):
     for _name, _want in _off.items():
         _got = getattr(_cls, _name).offset
@@ -249,18 +341,18 @@ del _cls, _off, _name, _want, _got
 
 
 def set_use_mmap(mp, enabled: bool) -> None:
-    """Express "memory-map the weights (or do not)" on EITHER layout.
+    """Express "memory-map the weights (or do not)" on ANY layout.
 
-    V1 has a ``use_mmap`` bool; V2 folded mmap / mlock / direct-io into the
-    ``load_mode`` enum, so there is no field of that name to assign and a plain
-    ``mp.use_mmap = False`` on a V2 struct would raise (or, if the wrong class
-    were bound, silently write into ``check_tensors``). Call sites use this
-    instead of naming either field.
+    V1 has a ``use_mmap`` bool; V2 and V3 folded mmap / mlock / direct-io into
+    the ``load_mode`` enum, so there is no field of that name to assign and a
+    plain ``mp.use_mmap = False`` on a V2/V3 struct would raise (or, if the
+    wrong class were bound, silently write into ``check_tensors``). Call sites
+    use this instead of naming either field.
 
     Any mlock the caller already asked for is preserved across the flip:
     mapping "no mmap" onto a bare LLAMA_LOAD_MODE_NONE would drop it.
     """
-    if isinstance(mp, LlamaModelParamsV2):
+    if isinstance(mp, _LOAD_MODE_LAYOUTS):
         keep_mlock = mp.load_mode in (LLAMA_LOAD_MODE_MLOCK,
                                       LLAMA_LOAD_MODE_MMAP_MLOCK)
         if enabled:
@@ -274,7 +366,7 @@ def set_use_mmap(mp, enabled: bool) -> None:
 
 
 def get_use_mmap(mp) -> bool:
-    """Read back whether the weights will be memory-mapped, on either layout.
+    """Read back whether the weights will be memory-mapped, on any layout.
 
     DIRECT_IO is NOT mmap: upstream documents it as taking precedence over
     mmap, and V1 carried it as its own separate flag.
@@ -287,7 +379,7 @@ def get_use_mmap(mp) -> bool:
     not reach here in practice; a caller reading unmodified default params on a
     b10373-or-newer build must not read False as "mmap is off".
     """
-    if isinstance(mp, LlamaModelParamsV2):
+    if isinstance(mp, _LOAD_MODE_LAYOUTS):
         return mp.load_mode in (LLAMA_LOAD_MODE_MMAP, LLAMA_LOAD_MODE_MMAP_MLOCK)
     return bool(mp.use_mmap)
 

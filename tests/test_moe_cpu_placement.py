@@ -20,7 +20,8 @@ import struct
 
 from localm.model_manager.gguf import gguf_expert_count
 from localm.inference.backends.llamacpp._structs import (
-    LlamaModelParamsV1, LlamaModelParamsV2, LlamaModelTensorBuftOverride)
+    LlamaModelParamsV1, LlamaModelParamsV2, LlamaModelParamsV3,
+    LlamaModelTensorBuftOverride)
 
 # _apply_cpu_moe only touches `tensor_buft_overrides`, which sits at the same
 # offset in both llama_model_params layouts, so these tests are layout-agnostic
@@ -223,13 +224,16 @@ class TestApplyCpuMoe:
 
 def test_tensor_buft_overrides_offset_is_layout_agnostic():
     """The premise of using one layout's class above: the field MoE placement
-    writes did not move in the lemonade b1288 -> b1307 reorder. If a future reorder moves
-    it, these tests must start covering both layouts instead of silently
-    exercising the wrong offset."""
+    writes did not move in the lemonade b1288 -> b1307 reorder nor in the
+    b10653 lazy_mode insertion. If a future reorder moves it, these tests must
+    start covering every layout instead of silently exercising the wrong
+    offset."""
     assert (LlamaModelParamsV1.tensor_buft_overrides.offset
-            == LlamaModelParamsV2.tensor_buft_overrides.offset == 8)
+            == LlamaModelParamsV2.tensor_buft_overrides.offset
+            == LlamaModelParamsV3.tensor_buft_overrides.offset == 8)
     assert (LlamaModelParamsV1.n_gpu_layers.offset
-            == LlamaModelParamsV2.n_gpu_layers.offset == 16)
+            == LlamaModelParamsV2.n_gpu_layers.offset
+            == LlamaModelParamsV3.n_gpu_layers.offset == 16)
 
 
 # --------------------------------------------------------------------------- #
