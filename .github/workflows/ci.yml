@@ -62,16 +62,20 @@ on:
   workflow_dispatch:
     inputs:
       run_abi:
-        # OFF by default so a plain dispatch runs EXACTLY the job set a push runs.
-        # Before this input, dispatch was the only pre-merge signal (no
-        # pull_request trigger) AND it ran a job push skips, so every pre-merge
-        # check was a strict SUPERSET of the post-merge run it was predicting.
-        # Since abi-check tracks a MOVING upstream target it flips independently
-        # of any branch - measured failing and succeeding on the same commit
-        # hours apart - so it reported run-level "failure" on healthy branches
-        # and every lane carried a "read the job conclusions, not the run
-        # conclusion" workaround. This makes the run-level conclusion mean
-        # something again; pass -f run_abi=true to opt in.
+        # OFF by default so a plain dispatch does not include the flaky
+        # abi-check job. This input gates ONLY abi-check - it has no effect
+        # on test, gui-tests or mutation-test, which always run on
+        # workflow_dispatch regardless (see the top-of-file trigger
+        # comment). Before this input existed, dispatch was the only
+        # pre-merge signal (no pull_request trigger) and it always ran
+        # abi-check alongside the rest of the matrix, even though abi-check
+        # tracks a MOVING upstream target and flips independently of any
+        # branch - measured failing and succeeding on the same commit hours
+        # apart - so it reported run-level "failure" on healthy branches and
+        # every lane carried a "read the job conclusions, not the run
+        # conclusion" workaround. Gating it here makes the run-level
+        # conclusion of the rest of a dispatch mean something again; pass
+        # -f run_abi=true to opt in.
         description: "Also run the native llama.cpp ABI drift check (slow; tracks a MOVING upstream target)"
         type: boolean
         default: false

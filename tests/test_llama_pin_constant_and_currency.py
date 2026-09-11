@@ -439,6 +439,46 @@ def test_the_abi_check_pin_report_survives_a_failure_earlier_in_the_job():
     assert report[0].get("continue-on-error") is True
 
 
+def _norm(expr: str) -> str:
+    return " ".join(expr.split())
+
+
+def test_run_abi_input_gates_only_the_abi_check_job():
+    """`run_abi` (added by PR #856) exists solely to keep the flaky,
+    moving-target abi-check job out of a plain dispatch's run-level
+    conclusion - see the input's own comment in ci.yml. It has never gated
+    anything else: test, gui-tests and mutation-test all run unconditionally
+    on workflow_dispatch regardless of this input, per the top-of-file
+    trigger comment and each job's own `if:`. Pin both halves so a future
+    edit cannot silently tie run_abi to the wider matrix, or drop one of
+    these jobs off workflow_dispatch, without this test catching it."""
+    ci = _load_workflow(_CI)
+    run_abi = ci["on"]["workflow_dispatch"]["inputs"]["run_abi"]
+    assert run_abi["type"] == "boolean"
+    assert run_abi["default"] is False
+
+    assert "inputs.run_abi" in ci["jobs"]["abi-check"]["if"], (
+        "abi-check must still opt in via run_abi")
+
+    for name in ("test", "gui-tests", "mutation-test"):
+        job_if = ci["jobs"][name]["if"]
+        assert "run_abi" not in job_if, (
+            f"{name}: run_abi must not gate this job - a plain dispatch "
+            f"(run_abi=false) still runs it")
+
+    assert _norm(ci["jobs"]["gui-tests"]["if"]) == "github.event_name != 'push'"
+    assert _norm(ci["jobs"]["test"]["if"]) == _norm("""
+        github.event_name != 'push' &&
+        (github.event_name != 'pull_request' ||
+         contains(github.event.pull_request.labels.*.name, 'full-ci'))
+        """)
+    assert _norm(ci["jobs"]["mutation-test"]["if"]) == _norm("""
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' &&
+         contains(github.event.pull_request.labels.*.name, 'mutation-test'))
+        """)
+
+
 def test_confirm_llama_runtime_install_steps_provide_psutil():
     """confirm_llama_runtime.py reads the isolated generation worker's mapped
     modules back through psutil to prove which llama library it loaded (see
