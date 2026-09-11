@@ -247,9 +247,6 @@ def test_the_wrappers_set_the_native_certificate_store_before_opening_the_window
 
 
 def test_setup_bat_still_sets_the_native_certificate_store():
-    """A drift guard: if the console installer ever stops doing this, the
-    graphical installer's own claim of parity becomes false in the other
-    direction."""
     text = (_REPO_ROOT / "setup.bat").read_text(encoding="utf-8")
     assert re.search(r'(?m)^set "UV_SYSTEM_CERTS=1"\s*$', text)
 
@@ -848,8 +845,6 @@ class TestWizard:
         assert "folder" in wizard.status.cget("text")
 
     def test_typing_a_data_folder_selects_the_custom_option(self, wizard):
-        """It used to leave the portable radio selected while a typed folder
-        silently became the install target."""
         wizard.next_page()
         assert wizard.pages[wizard.index][0] == "Where things live"
         wizard.path_var.set("D:/Models")
@@ -858,8 +853,6 @@ class TestWizard:
         assert wizard.current_plan().data_path == "D:/Models"
 
     def test_choosing_portable_after_typing_is_not_overridden(self, wizard):
-        """A deliberate click back to 'Inside this folder' must win even
-        though the typed text is still sitting in the box."""
         wizard.next_page()
         wizard.path_var.set("D:/Models")
         assert wizard.portable_var.get() is False
