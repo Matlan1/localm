@@ -566,18 +566,31 @@ class Agent(
         # MCP: start configured servers and register their tools BEFORE the
         # system prompt is built so the model learns about them. Failures
         # warn and continue - external servers must never break the agent.
+        # A child inherits its parent's servers and bindings rather than
+        # spawning a second set. Every mcp_* name in the registry that this
+        # agent did not register (another project's server) is disabled for it.
         self._mcp_docs: str = ""
+        self._mcp_tool_names: frozenset = frozenset()
         try:
-            from ..mcp import register_mcp_tools
-            mcp_names, mcp_warnings = register_mcp_tools(cwd)
-            for w in mcp_warnings:
-                print_warning(w)
-            if mcp_names:
-                self._mcp_docs = _foreign_tool_docs(
-                    "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
-                    mcp_names, TOOL_REGISTRY)
+            if self.parent is not None:
+                self._mcp_docs = getattr(self.parent, "_mcp_docs", "") or ""
+                mcp_names = list(getattr(self.parent, "_mcp_tool_names", ()))
+            else:
+                from ..mcp import register_mcp_tools
+                mcp_names, mcp_warnings = register_mcp_tools(cwd)
+                for w in mcp_warnings:
+                    print_warning(w)
+                if mcp_names:
+                    self._mcp_docs = _foreign_tool_docs(
+                        "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
+                        mcp_names, TOOL_REGISTRY)
+            self._mcp_tool_names = frozenset(mcp_names)
         except Exception as e:
             print_warning(f"MCP setup failed: {e}")
+        foreign = frozenset(n for n in TOOL_REGISTRY
+                            if n.startswith("mcp_") and n not in self._mcp_tool_names)
+        if foreign:
+            self.disabled_tools = self.disabled_tools | foreign
 
     def _init_plugin_tools(self) -> None:
         print_warning = _agent.print_warning

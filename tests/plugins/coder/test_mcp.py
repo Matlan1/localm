@@ -312,3 +312,114 @@ class TestStopReapsTheChild:
         assert proc.wait.call_count == 2, (
             "stop() killed the child but never waited on it, leaving a zombie "
             "that every os.kill(pid, 0) liveness check reads as alive")
+
+
+
+class TestPooledServers:
+    """One live server per declared spec for the life of the process: a later
+    registration reuses it, and an agent only sees the MCP tools it registered."""
+
+    @staticmethod
+    def _config(tmp_path, fake_server_path, name="fake"):
+        cfg_dir = tmp_path / ".localcoder"
+        cfg_dir.mkdir(exist_ok=True)
+        (cfg_dir / "config.toml").write_text(textwrap.dedent(f"""\
+            [mcp.servers.{name}]
+            command = {json.dumps(sys.executable)}
+            args = [{json.dumps(str(fake_server_path))}]
+        """), encoding="utf-8")
+
+    def test_a_second_registration_reuses_the_live_server(self, tmp_path, fake_server_path):
+        from localm.plugins.coder import mcp as mcp_mod
+        self._config(tmp_path, fake_server_path)
+        mcp_mod.stop_pooled_servers()
+        try:
+            names1, warnings1 = register_mcp_tools(tmp_path)
+            first = TOOL_REGISTRY["mcp_fake_add"].fn._mcp_server
+            names2, warnings2 = register_mcp_tools(tmp_path)
+            assert names1 == names2 == ["mcp_fake_add"]
+            assert warnings1 == warnings2 == []
+            assert TOOL_REGISTRY["mcp_fake_add"].fn._mcp_server is first
+            assert len(mcp_mod._POOL) == 1
+            assert TOOL_REGISTRY["mcp_fake_add"].fn(tmp_path, a=1, b=2).output == "3"
+        finally:
+            TOOL_REGISTRY.pop("mcp_fake_add", None)
+            mcp_mod.stop_pooled_servers()
+        assert not first.alive
+
+    def test_a_dead_pooled_server_is_replaced(self, tmp_path, fake_server_path):
+        from localm.plugins.coder import mcp as mcp_mod
+        self._config(tmp_path, fake_server_path)
+        mcp_mod.stop_pooled_servers()
+        try:
+            register_mcp_tools(tmp_path)
+            first = TOOL_REGISTRY["mcp_fake_add"].fn._mcp_server
+            first.stop()
+            TOOL_REGISTRY.pop("mcp_fake_add", None)
+            names, warnings = register_mcp_tools(tmp_path)
+            assert names == ["mcp_fake_add"] and warnings == []
+            second = TOOL_REGISTRY["mcp_fake_add"].fn._mcp_server
+            assert second is not first and second.alive
+        finally:
+            TOOL_REGISTRY.pop("mcp_fake_add", None)
+            mcp_mod.stop_pooled_servers()
+
+    def test_a_child_agent_inherits_its_parents_servers(self, tmp_path, fake_server_path):
+        from unittest.mock import patch
+        from localm.plugins.coder import mcp as mcp_mod
+        from localm.plugins.coder.agent import Agent
+        from localm.plugins.coder.tools.agents import inherited_child_kwargs
+        self._config(tmp_path, fake_server_path)
+        mcp_mod.stop_pooled_servers()
+        backend = MagicMock()
+        backend.model_id = "m"
+        backend.native_tools = False
+        starts = []
+        real_start = MCPServer.start
+
+        def counting_start(self):
+            starts.append(self.name)
+            return real_start(self)
+
+        try:
+            with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+                 patch("localm.plugins.coder.agent.make_audit_log"), \
+                 patch("localm.plugins.coder.agent.load_memory", return_value=""), \
+                 patch.object(MCPServer, "start", counting_start):
+                MockPM.build.return_value.file_count.return_value = 0
+                MockPM.build.return_value.dirty = False
+                parent = Agent(backend=backend, cwd=tmp_path)
+                child = Agent(**inherited_child_kwargs(
+                    parent, backend=backend, cwd=tmp_path, name="kid",
+                    max_turns=3, confirm_handler=None))
+            assert starts == ["fake"], starts
+            assert parent._mcp_tool_names == child._mcp_tool_names == {"mcp_fake_add"}
+            assert str(child._mcp_docs) == str(parent._mcp_docs)
+            assert "mcp_fake_add" not in child.disabled_tools
+        finally:
+            TOOL_REGISTRY.pop("mcp_fake_add", None)
+            mcp_mod.stop_pooled_servers()
+
+    def test_an_agent_cannot_see_another_projects_mcp_tools(self, tmp_path):
+        from unittest.mock import patch
+        from localm.plugins.coder.agent import Agent
+        from localm.plugins.coder.tool_registration import register_foreign_tool
+        backend = MagicMock()
+        backend.model_id = "m"
+        backend.native_tools = False
+        reg, warn = [], []
+        register_foreign_tool("mcp_other_read", fn=lambda cwd, **a: None,
+                              description="[MCP:other] reads", params={},
+                              destructive=True, source_label="MCP",
+                              registered=reg, warnings=warn)
+        try:
+            with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+                 patch("localm.plugins.coder.agent.make_audit_log"), \
+                 patch("localm.plugins.coder.agent.load_memory", return_value=""):
+                MockPM.build.return_value.file_count.return_value = 0
+                MockPM.build.return_value.dirty = False
+                agent = Agent(backend=backend, cwd=tmp_path)
+            assert "mcp_other_read" in agent.disabled_tools
+            assert "mcp_other_read" not in str(agent._build_messages()[0]["content"])
+        finally:
+            TOOL_REGISTRY.pop("mcp_other_read", None)
