@@ -176,6 +176,19 @@ def test_changed_files_reads_committed_staged_unstaged_and_untracked(repo):
     assert base == _git(root, "rev-parse", "HEAD~1").strip()
 
 
+def test_read_stays_inside_the_repository(repo, tmp_path):
+    mod, root = repo
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        assert mod._read(f"../{outside.name}") == ""
+        assert mod._read(str(outside)) == ""
+        assert mod._read("localm/b.py") == "def func():\n    return 1\n"
+        assert mod._read("localm/missing.py") == ""
+    finally:
+        outside.unlink()
+
+
 def test_changed_files_falls_back_to_head_when_the_base_is_unknown(repo):
     mod, root = repo
     (root / "localm" / "a.py").write_text("# touched\n", encoding="utf-8")

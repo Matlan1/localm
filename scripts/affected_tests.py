@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -203,8 +204,15 @@ class Graph:
 
 
 def _read(rel: str) -> str:
+    """The text of the repository file *rel*; empty for a path outside the
+    repository, an unreadable file, or non-UTF-8 content."""
+    root = os.path.normpath(str(REPO))
+    full = os.path.normpath(os.path.join(root, rel))
+    if not full.startswith(root + os.sep):
+        return ""
     try:
-        return (REPO / rel).read_text(encoding="utf-8")
+        with open(full, encoding="utf-8") as fh:
+            return fh.read()
     except (OSError, UnicodeDecodeError):
         return ""
 
