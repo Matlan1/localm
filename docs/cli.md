@@ -753,6 +753,8 @@ localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor
 localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
+localm setup-browser                     # install the Chromium build the automated browser tool drives
+localm setup-browser --force             # reinstall it
 
 localm make-launcher                     # build the native LocaLM app launcher (see docs/native-app.md)
 localm make-launcher --force             # rebuild it (use after a Python upgrade)
@@ -773,6 +775,8 @@ localm stop --all                        # stop every running localm instance
 `localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
 
 `localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path. Switching to a different model than the one currently configured reports which existing Knowledge collections have embeddings and asks you to confirm before it happens (`-y`/`--yes` skips the confirmation) - see [docs/rag.md](../docs/rag.md#how-retrieval-works-and-why-its-lexical-first).
+
+`localm setup-browser` downloads the Chromium build that the automated browser tool drives (the coder's browser tool, and anything else built on `localm.browser`). The `browser` pip extra installs the playwright driver only; this fetches the separate, version-pinned Chromium binary it needs. Respects the network policy and is refused under `net_mode=off` unless `net_allow_model_downloads` exempts it, same as any other explicit download; does nothing on the network when Chromium is already installed. `--force` reinstalls even if present - note that playwright removes the existing build before redownloading, so a failed `--force` run can leave no Chromium installed at all.
 
 See [docs/gpu-setup.md](../docs/gpu-setup.md) for the full GPU setup guide.
 
