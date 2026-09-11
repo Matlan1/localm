@@ -349,7 +349,7 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     """
     from rich.markup import escape
 
-    from ..media.managed_comfy import (managed_comfy_remove_targets,
+    from ..media.managed_comfy import (ManagedComfyBusy, managed_comfy_remove_targets,
                                        remove_managed_comfy)
 
     targets = managed_comfy_remove_targets(with_models)
@@ -369,7 +369,12 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     # reports any path it could NOT delete instead of claiming success.
     # Each failed entry is "<path> (<OSError>)" - both halves can carry the
     # same LOCALM_HOME-derived path text as `targets` above.
-    _, failed = remove_managed_comfy(with_models)
+    try:
+        _, failed = remove_managed_comfy(with_models)
+    except ManagedComfyBusy as e:
+        console.print(f"[red]Cannot remove the managed ComfyUI right now:[/red] "
+                      f"{escape(e.reason)}")
+        raise SystemExit(1)
     if failed:
         console.print("[red]Could not remove:[/red]\n  "
                       + "\n  ".join(escape(str(f)) for f in failed))

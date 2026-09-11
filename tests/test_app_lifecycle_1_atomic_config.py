@@ -86,6 +86,18 @@ def test_bare_load_save_pair_can_lose_a_concurrent_update(home):
 def test_update_config_never_loses_a_concurrent_write(home):
     cfg.save_config({"n_ctx": 4096})
     barrier = threading.Barrier(2)
+    # A writer thread that dies is a failure of this test, not a printed
+    # traceback: a second in-process writer must QUEUE behind the first, never
+    # be refused as a nested call of the same process.
+    errors = []
+
+    def _guarded(fn):
+        def run():
+            try:
+                fn()
+            except BaseException as e:  # noqa: BLE001 - collected for the assert below
+                errors.append(e)
+        return run
 
     def writer_a():
         barrier.wait()
@@ -99,11 +111,12 @@ def test_update_config_never_loses_a_concurrent_write(home):
         time.sleep(0.02)  # would land inside writer_a's window if unlocked
         cfg.update_config(lambda c: c.__setitem__("main_gpu_index", 1))
 
-    t1 = threading.Thread(target=writer_a)
-    t2 = threading.Thread(target=writer_b)
+    t1 = threading.Thread(target=_guarded(writer_a))
+    t2 = threading.Thread(target=_guarded(writer_b))
     t1.start(); t2.start()
     t1.join(); t2.join()
 
+    assert errors == [], f"a concurrent in-process writer raised: {errors!r}"
     final = cfg.load_config()
     assert final["temperature"] == 0.9
     assert final["main_gpu_index"] == 1, (

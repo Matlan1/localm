@@ -286,6 +286,39 @@ def decide_embedder_swap(embedder_estimate_bytes: Optional[int], *,
     return should_swap_for_media(read_free(), embedder_estimate_bytes, policy=policy)
 
 
+_EVICT_CANCEL_SETTLE_S = 5.0
+
+
+def _cancel_abandoned_eviction(fut, task, loop) -> None:
+    """Cancel the eviction its caller stopped waiting for, and block until the
+    loop has applied the cancellation. A queued executor step of the unload is
+    cancelled before the calling worker thread is freed to run it; a step
+    already running finishes. Never raises.
+    See test_abandoned_eviction_is_cancelled_when_its_caller_gives_up."""
+    import asyncio
+    from localm.debuglog import logger
+
+    fut.cancel()
+    if task is None:
+        return
+
+    async def _settle():
+        # fut.cancel() above already requested one cancellation of the task.
+        if not task.done() and not task.cancelling():
+            task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    try:
+        asyncio.run_coroutine_threadsafe(_settle(), loop).result(
+            timeout=_EVICT_CANCEL_SETTLE_S)
+    except Exception as e:
+        logger.debug("embedder: could not confirm the abandoned eviction was "
+                     "cancelled (%s)", e)
+
+
 def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
     """Free every loaded chat engine so the shared embedder's own load has VRAM
     room, through the SAME guarded path the server's "Unload all" button uses
@@ -330,10 +363,24 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
                        "resident chat model - may be tight on VRAM). This call "
                        "should be offloaded to an executor.")
         return "skipped"
+    # INVARIANT: unload_all_models runs its own steps on the loop's default
+    # executor, so every caller that blocks here ON that executor must be
+    # concurrency-bounded on the loop side (as routes/chat.py's _embedder_sem
+    # bounds the dedicated /v1/embeddings path).
+    # See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
+    holder: dict = {}
+
+    async def _tracked_unload():
+        holder["task"] = asyncio.current_task()
+        return await _hs.unload_all_models()
+
+    fut = None
     try:
-        fut = asyncio.run_coroutine_threadsafe(_hs.unload_all_models(), loop)
+        fut = asyncio.run_coroutine_threadsafe(_tracked_unload(), loop)
         res = fut.result(timeout=timeout_s)
     except Exception as e:
+        if fut is not None:
+            _cancel_abandoned_eviction(fut, holder.get("task"), loop)
         logger.debug("embedder: guarded chat-model eviction did not complete "
                      "(%s); loading the embedder without evicting", e)
         return "error"

@@ -291,3 +291,24 @@ def test_cli_setup_is_honest_on_failure(cli_runner, monkeypatch):
     assert res.exit_code != 0
     assert "failed" in res.output.lower()
     assert not mc.is_managed_comfy_installed()
+
+
+def test_cli_remove_refuses_while_another_process_holds_the_lock(cli_runner):
+    """`localm comfy remove --yes` while an update (a live process) holds the
+    managed-checkout lock: exits non-zero, names the holder, deletes nothing."""
+    import json as _json
+    import os
+    import localm.config as cfg2
+    from localm.cli import main
+
+    paths = _install_managed(cfg2.home_dir())
+    lock = mc._update_lock_path()
+    lock.mkdir(parents=True)
+    (lock / mc._LOCK_OWNER).write_text(
+        _json.dumps({"pid": os.getpid(), "op": "update"}), encoding="utf-8")
+
+    res = cli_runner.invoke(main, ["comfy", "remove", "--yes"])
+    assert paths.root.exists(), "the CLI deleted the tree under a live lock holder"
+    assert res.exit_code != 0, res.output
+    assert str(os.getpid()) in res.output, res.output
+    assert lock.exists(), "a refused remove must not disturb the holder's lock"

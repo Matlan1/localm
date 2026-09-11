@@ -485,3 +485,41 @@ def test_status_not_installed_omits_update_fields(home, app):
         body = client.get("/api/comfy/managed-status").json()
     assert body["installed"] is False
     assert "update_available" not in body
+
+
+# --------------------------------------------------------------------------- #
+#  POST /api/comfy/remove : never under a checkout another job is rewriting    #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("running", ["comfy-update", "comfy-setup"])
+def test_remove_refuses_while_a_checkout_job_is_running(home, app, monkeypatch, running):
+    """Remove clicked while Update (or Setup) is still running: refused with 409
+    BEFORE the shared remove helper is reached, so the tree an in-flight child
+    process is rewriting is never deleted under it."""
+    paths = _install_managed()
+    monkeypatch.setattr(gui_jobs.JobManager, "has_running",
+                        lambda self, kind: kind == running)
+    calls: list = []
+    monkeypatch.setattr(mc, "remove_managed_comfy",
+                        lambda *a, **k: calls.append((a, k)) or ([], []))
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/remove")
+    assert paths.root.exists(), "the managed tree was deleted under a running job"
+    assert calls == [], "remove_managed_comfy must not be reached while a job runs"
+    assert r.status_code == 409, r.text
+
+
+def test_remove_reports_a_lock_held_by_another_process_as_409(home, app, monkeypatch):
+    """A remove refused by the cross-process lock is a 409 naming the holder,
+    never a 500 "Could not remove"."""
+    paths = _install_managed()
+    monkeypatch.setattr(gui_jobs.JobManager, "has_running", lambda self, kind: False)
+
+    def _busy(*a, **k):
+        raise mc.ManagedComfyBusy("Another ComfyUI update is already running (process 4242).")
+    monkeypatch.setattr(mc, "remove_managed_comfy", _busy)
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/remove")
+    assert paths.root.exists()
+    assert r.status_code == 409, r.text
+    assert "4242" in r.json()["detail"]

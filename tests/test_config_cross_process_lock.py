@@ -23,6 +23,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -254,3 +256,131 @@ def test_cross_process_lock_nested_same_process_call_fails_fast(home, monkeypatc
     assert elapsed < 2.0, (
         f"nested call took {elapsed:.1f}s - it must fail immediately, not wait "
         "out the cross-process timeout")
+
+
+# --------------------------------------------------------------------------- #
+#  A writer waiting out the cross-process lock must not hold _io_lock: every  #
+#  reader (auth.require_auth -> load_config on every request) takes it.       #
+# --------------------------------------------------------------------------- #
+
+def test_reader_is_not_blocked_by_a_writer_waiting_on_the_cross_process_lock(home, monkeypatch):
+    """While update_config() sits in the cross-process lock wait (a fresh lock
+    file left by another localm process, e.g. a hard-killed `localm pull`),
+    load_config() from another thread must return at once. _io_lock is taken
+    only around the read-mutate-write itself; the wait holds _rmw_lock, which
+    readers never take."""
+    cfg.save_config({"n_ctx": 4096})
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 1.5)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    lockpath.write_text("12345:foreign", encoding="utf-8")
+
+    # Proves the writer is INSIDE the wait loop (not merely started) before the
+    # reader is timed: the first backoff call can only happen from that loop.
+    in_wait = threading.Event()
+    real_backoff = cfg._cross_lock_backoff
+
+    def backoff(attempt):
+        in_wait.set()
+        real_backoff(attempt)
+
+    monkeypatch.setattr(cfg, "_cross_lock_backoff", backoff)
+    outcome = {}
+
+    def writer():
+        try:
+            cfg.update_config(lambda c: c.__setitem__("temperature", 0.5))
+        except BaseException as e:
+            outcome["exc"] = e
+
+    t = threading.Thread(target=writer)
+    t.start()
+    try:
+        assert in_wait.wait(5.0), "the writer never entered the cross-process wait"
+        start = time.monotonic()
+        result = cfg.load_config()
+        elapsed = time.monotonic() - start
+    finally:
+        t.join(10.0)
+        try:
+            lockpath.unlink()
+        except FileNotFoundError:
+            pass
+    assert result.get("n_ctx") == 4096
+    assert elapsed < 0.5, (
+        f"load_config() blocked {elapsed:.2f}s behind a writer that was only "
+        "WAITING for the cross-process lock - _io_lock was held across the wait")
+    assert isinstance(outcome.get("exc"), TimeoutError), (
+        f"the writer must time out on the foreign lock, got {outcome.get('exc')!r}")
+
+
+# --------------------------------------------------------------------------- #
+#  Release must retry the unlink: a waiter reading the file pins it (Windows) #
+# --------------------------------------------------------------------------- #
+
+def _probe_read_handle_blocks_unlink(tmp_dir):
+    """Assert the fault injection can fire on this box: an open read handle on
+    a file makes os.unlink raise PermissionError."""
+    probe = tmp_dir / "probe.txt"
+    probe.write_text("x", encoding="utf-8")
+    fh = open(probe, "rb")
+    try:
+        with pytest.raises(PermissionError):
+            probe.unlink()
+    finally:
+        fh.close()
+    probe.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="an open handle blocks unlink only on Windows")
+def test_release_retries_unlink_while_a_reader_pins_the_lock_file(home):
+    """A waiter in another process reads the lock file (read_bytes) at the
+    instant the holder releases it. On Windows that handle makes the holder's
+    unlink raise a sharing violation; the release must retry until the handle
+    goes away, never leave an orphaned lock behind."""
+    cfg.ensure_dirs()
+    _probe_read_handle_blocks_unlink(cfg.HOME_DIR)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    fh = None
+    try:
+        with cfg._cross_process_lock(cfg.CONFIG_FILE):
+            fh = open(lockpath, "rb")
+            threading.Timer(0.3, fh.close).start()
+        assert not lockpath.exists(), (
+            "the released lock file survived a 0.3s pinned read handle - the "
+            "release gave up on the first sharing violation and orphaned it")
+    finally:
+        if fh is not None and not fh.closed:
+            fh.close()
+        try:
+            lockpath.unlink()
+        except FileNotFoundError:
+            pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="an open handle blocks unlink only on Windows")
+def test_release_reports_a_lock_file_it_could_not_remove(home, caplog):
+    """A handle held past the whole retry budget leaves the lock file behind;
+    that is reported at WARNING naming the file, never silently."""
+    cfg.ensure_dirs()
+    _probe_read_handle_blocks_unlink(cfg.HOME_DIR)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    fh = None
+    try:
+        with caplog.at_level("WARNING", logger="localm"):
+            with cfg._cross_process_lock(cfg.CONFIG_FILE):
+                fh = open(lockpath, "rb")
+            # The handle is still open here: every retry has failed.
+        assert lockpath.exists(), "the injection did not take: the file was removed"
+        warnings = [r for r in caplog.records
+                    if r.levelname == "WARNING" and lockpath.name in r.getMessage()]
+        assert warnings, (
+            f"no WARNING named {lockpath.name}; records: "
+            f"{[r.getMessage() for r in caplog.records]}")
+    finally:
+        if fh is not None and not fh.closed:
+            fh.close()
+        try:
+            lockpath.unlink()
+        except FileNotFoundError:
+            pass
