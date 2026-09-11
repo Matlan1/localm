@@ -932,8 +932,9 @@ class Agent(
     def cancel(self, reason: str = "cancelled") -> None:
         """Cancel this run and every child of it: no further tool call runs,
         the generation in flight is aborted when the backend can abort one,
-        the loop stops at its next check, and this run's background shell
-        jobs are killed. Irreversible for this agent tree."""
+        and the loop stops at its next check. Cancelling a root agent also
+        kills the session's running background shell jobs. Irreversible for
+        this agent tree."""
         self._cancel_reason = reason or "cancelled"
         self._cancel_event.set()
         self._stop_requested = True
@@ -944,6 +945,8 @@ class Agent(
             except Exception as e:                        # noqa: BLE001
                 from localm.debuglog import logger
                 logger.debug("cancel: backend abort raised: %s", e)
+        if self.parent is not None:
+            return
         try:
             from ..background import get_registry
             registry = get_registry()

@@ -342,8 +342,8 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
                 box["close_error"] = e
             if on_finished is not None:
                 on_finished()
-            if box.get("abandoned"):
-                _report_abandoned(box)
+            if box.get("cancelled"):
+                _report_late_failure(box)
 
     worker = threading.Thread(target=_work, name="coder-task", daemon=True)
     try:
@@ -362,11 +362,11 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
         if "close_error" in box:
             raise box["close_error"]
         return box["result"]
+    box["cancelled"] = True
     agent.cancel(f"timed out after {timeout:g}s")
     worker.join(STOP_GRACE_SECONDS)
     note = f"coder task timed out after {timeout:g}s and was cancelled"
     if worker.is_alive():
-        box["abandoned"] = True
         response = (f"{note}: no further tool call will run; it is being "
                     "wound down")
     else:
@@ -382,12 +382,12 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
                       denied=tuple(agent.denied_unconfirmed))
 
 
-def _report_abandoned(box: dict) -> None:
-    """Log what a run abandoned by its caller did after the caller stopped
-    listening, so a late failure is not silent."""
+def _report_late_failure(box: dict) -> None:
+    """Log a failure raised by a cancelled run while it wound down, so it is
+    never silent even when the caller has already stopped listening."""
     from localm.debuglog import logger
     for key in ("error", "close_error"):
         if key in box:
-            logger.warning("coder task (abandoned after its timeout): %s: %s",
+            logger.warning("coder task (cancelled after its timeout): %s: %s",
                            key, box[key])
-            print_warning(f"abandoned coder task: {key}: {box[key]}")
+            print_warning(f"cancelled coder task: {key}: {box[key]}")
