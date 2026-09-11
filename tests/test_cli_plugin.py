@@ -53,6 +53,86 @@ def test_install_uninstall_roundtrip(cli_env):
     assert "dep1" not in load_config().get("plugins_enabled", [])
 
 
+def _wedged_manager_factory(cli_env, **overrides):
+    """Build a factory for climod._engine_manager that constructs a FRESH
+    PluginManager per call (matching the real one) and applies *overrides* as
+    instance attributes on each one built. cli_env's lambda constructs a new
+    instance every call, so patching an instance obtained from it is silently
+    discarded; the wedge must live in the factory itself."""
+    from localm.plugins.engine import PluginManager
+
+    def factory():
+        m = PluginManager(None, store_root=cli_env.store, installed_root=cli_env.installed)
+        for attr, value in overrides.items():
+            setattr(m, attr, value)
+        return m
+    return factory
+
+
+def test_uninstall_failed_file_removal_is_not_reported_as_not_installed(cli_env, monkeypatch):
+    import localm.cli as climod
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
+    assert r.exit_code == 0 and (cli_env.installed / "dep1").is_dir()
+
+    monkeypatch.setattr(
+        climod, "_engine_manager",
+        _wedged_manager_factory(cli_env, _remove_installed_dir=lambda name: False))
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "uninstall", "dep1"])
+    assert (cli_env.installed / "dep1").is_dir(), (
+        "the injection did not take: removal succeeded")
+    assert "stored data" not in r.output.lower()
+    assert "was not installed" not in r.output.lower()
+    assert r.exit_code != 0
+
+
+def test_uninstall_failed_data_delete_does_not_claim_files_stayed(cli_env, monkeypatch, tmp_path):
+    import localm.cli as climod
+
+    (cli_env.store / "dep1" / "plugin.toml").write_text(
+        '[plugin]\nname = "dep1"\nscope = "dep1"\nregister = "plug"\n'
+        'data_subdir = "dep1_data"\n',
+        encoding="utf-8")
+    data_dir = tmp_path / "dep1_data"
+    data_dir.mkdir()
+    (data_dir / "private.txt").write_text("USER SECRET", encoding="utf-8")
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
+    assert r.exit_code == 0 and (cli_env.installed / "dep1").is_dir()
+
+    monkeypatch.setattr(
+        climod, "_engine_manager",
+        _wedged_manager_factory(cli_env, _delete_plugin_data=lambda spec: False))
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "uninstall", "dep1", "--delete-data"])
+    assert (data_dir / "private.txt").exists()
+    assert (data_dir / "private.txt").read_text(encoding="utf-8") == "USER SECRET"
+    assert not (cli_env.installed / "dep1").exists()
+    assert "files" not in r.output.lower(), (
+        f"the message names files that were in fact removed: {r.output!r}")
+    assert "was not installed" not in r.output.lower()
+    assert r.exit_code != 0
+
+
+def test_uninstall_benign_not_installed_branch_still_reports_cleanly(cli_env):
+    """A directory-name/manifest-name mismatch makes is_installed(<manifest
+    name>) False while the directory itself is untouched - the benign branch
+    plugin_uninstall_engine's fix newly introduces. Not reachable through
+    `plugin install`: a mismatched manifest is refused and rolled back."""
+    foo_dir = cli_env.installed / "foo"
+    foo_dir.mkdir(parents=True)
+    (foo_dir / "plugin.toml").write_text(
+        '[plugin]\nname = "bar"\nscope = "bar"\nregister = "plug"\n', encoding="utf-8")
+    (foo_dir / "plug.py").write_text(
+        "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "uninstall", "bar"])
+    assert foo_dir.is_dir()
+    assert "was not installed" in r.output.lower()
+    assert r.exit_code == 0
+
+
 def test_enable_disable_within_installed(cli_env):
     from localm.config import load_config
     CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
