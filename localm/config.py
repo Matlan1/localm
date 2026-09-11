@@ -1695,7 +1695,6 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     update would matter. (save_registry() itself remains a blind overwrite -
     last-writer-wins by design, not a read-modify-write, so it needs no lock
     beyond the atomic write it already has.)"""
-    ensure_dirs()
     # LOCK ORDER: _rmw_lock -> registry.json.lock -> _io_lock. See
     # test_reader_is_not_blocked_by_a_writer_waiting_on_the_cross_process_lock.
     with _rmw_lock, _cross_process_lock(REGISTRY_FILE), _io_lock:
