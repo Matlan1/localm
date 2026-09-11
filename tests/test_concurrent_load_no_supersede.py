@@ -27,6 +27,7 @@ class FakeEngine:
         self.active_requests = 0
         self._cancel = None
         self._gate = gate  # threading.Event; when set, load may complete
+        self.load_started = threading.Event()   # set the moment load() is entered
 
     @property
     def loaded(self):
@@ -36,6 +37,7 @@ class FakeEngine:
         self._cancel = ev
 
     def load(self):
+        self.load_started.set()
         # Honour cancellation exactly like a real backend load does.
         if self._gate is not None:
             while not self._gate.wait(0.005):
@@ -77,11 +79,19 @@ def test_concurrent_different_model_loads_do_not_supersede(multi, monkeypatch):
     monkeypatch.setattr(hs, "_engine_factory", lambda n: engines[n])
 
     async def scenario():
+        loop = asyncio.get_running_loop()
         ta = asyncio.create_task(hs.get_engine("model-a"))
-        await asyncio.sleep(0.05)          # let A enter its (gated) load
-        tb = asyncio.create_task(hs.get_engine("model-b"))
-        await asyncio.sleep(0.05)          # let B load fully
-        gate_a.set()                       # release A
+        try:
+            # A is inside its gated load() before B is even requested.
+            started = await loop.run_in_executor(
+                None, engines["model-a"].load_started.wait, 2.0)
+            assert started, "model-a's load never started"
+            tb = asyncio.create_task(hs.get_engine("model-b"))
+            # B runs to completion while A is still held in load().
+            done, _ = await asyncio.wait({tb}, timeout=5.0)
+            assert tb in done, "model-b's load did not finish while model-a was mid-load"
+        finally:
+            gate_a.set()                   # release A
         return await asyncio.gather(ta, tb, return_exceptions=True)
 
     results = asyncio.run(scenario())
