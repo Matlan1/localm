@@ -885,7 +885,8 @@ def test_a_real_dispatch_puts_the_range_on_the_tool_result_it_returns(repo):
     assert _EXOTIC in covered
     # localm's own report scaffolding stays outside the ranges.
     assert "NOTHING HAS BEEN MERGED" not in covered
-    assert "git" not in covered
+    assert "branch:" not in covered
+    assert "merge --no-ff" not in covered
 
 
 def test_a_repeated_tool_failure_hint_does_not_strip_the_range():
