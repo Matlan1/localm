@@ -217,7 +217,33 @@ def run_subprocess(
     tools/git.py, and cli/goal.py.
     """
     argv = platform_shell(argv_or_cmd) if shell_wrap else argv_or_cmd
+    if cancel is not None:
+        return _run_cancellable(argv, cwd, timeout=timeout, env=env, cancel=cancel)
 
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(cwd), capture_output=True, text=True,
+            timeout=timeout, encoding="utf-8", errors="replace", env=env,
+        )
+    except subprocess.TimeoutExpired as e:
+        return SubprocessResult(
+            ok=False, timed_out=True, stdout=e.stdout, stderr=e.stderr)
+    except FileNotFoundError as e:
+        return SubprocessResult(ok=False, not_found=True, error=str(e))
+    except Exception as e:
+        return SubprocessResult(ok=False, error=str(e))
+
+    return SubprocessResult(
+        ok=(proc.returncode == 0), returncode=proc.returncode,
+        stdout=proc.stdout or "", stderr=proc.stderr or "",
+    )
+
+
+def _run_cancellable(argv, cwd: Path, *, timeout: float, env: Optional[dict],
+                     cancel: Callable[[], bool]) -> SubprocessResult:
+    """The cancellable form of :func:`run_subprocess`: the process is polled
+    every _CANCEL_POLL_SECONDS against *cancel* and killed the moment it
+    answers True, or at *timeout*, keeping the output captured so far."""
     try:
         proc = subprocess.Popen(
             argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -237,16 +263,14 @@ def run_subprocess(
                 stdout, stderr = proc.communicate()
                 return SubprocessResult(
                     ok=False, timed_out=True, stdout=stdout, stderr=stderr)
-            if cancel is not None and cancel():
+            if cancel():
                 proc.kill()
                 stdout, stderr = proc.communicate()
                 return SubprocessResult(
                     ok=False, cancelled=True, stdout=stdout, stderr=stderr)
-            slice_s = remaining
-            if cancel is not None:
-                slice_s = min(remaining, _CANCEL_POLL_SECONDS)
             try:
-                stdout, stderr = proc.communicate(timeout=slice_s)
+                stdout, stderr = proc.communicate(
+                    timeout=min(remaining, _CANCEL_POLL_SECONDS))
             except subprocess.TimeoutExpired:
                 continue
             break

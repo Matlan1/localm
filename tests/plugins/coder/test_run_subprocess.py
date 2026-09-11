@@ -138,3 +138,39 @@ class TestEnvForwarding:
         with patch(_RUN, side_effect=fake_run):
             run_subprocess(["cmd"], tmp_path, timeout=5, env={"FOO": "bar"})
         assert captured.get("env") == {"FOO": "bar"}
+
+
+class TestCancellable:
+    """With a cancel check the process is killed the moment it answers True."""
+
+    def test_a_cancel_kills_the_process_and_keeps_its_output(self, tmp_path):
+        import sys
+        import threading
+        import time
+        flag = threading.Event()
+        threading.Timer(0.4, flag.set).start()
+        t0 = time.monotonic()
+        result = run_subprocess(
+            [sys.executable, "-c",
+             "import sys, time; print('started', flush=True); time.sleep(8)"],
+            tmp_path, timeout=60, cancel=flag.is_set)
+        elapsed = time.monotonic() - t0
+        assert result.cancelled is True
+        assert result.ok is False and result.timed_out is False
+        assert "started" in (result.stdout or "")
+        assert elapsed < 4.0, f"the process outlived the cancel ({elapsed:.1f}s)"
+
+    def test_without_a_cancel_the_timeout_still_bounds_the_process(self, tmp_path):
+        import sys
+        result = run_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(8)"],
+            tmp_path, timeout=0.5, cancel=lambda: False)
+        assert result.timed_out is True and result.cancelled is False
+
+    def test_a_finished_process_is_reported_as_before(self, tmp_path):
+        import sys
+        result = run_subprocess(
+            [sys.executable, "-c", "print('hi')"], tmp_path, timeout=30,
+            cancel=lambda: False)
+        assert result.ok is True and result.returncode == 0
+        assert result.stdout.strip() == "hi"

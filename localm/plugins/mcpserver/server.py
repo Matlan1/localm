@@ -424,7 +424,8 @@ class EngineCache:
                         f"cannot load {name}: {', '.join(busy)} is still serving "
                         f"a request after {waited:.0f}s and no other resident "
                         f"model can be evicted. Retry once it finishes.")
-                # Nothing evictable (every peer is pinned by configuration).
+                # Nothing evictable and nothing busy: every remaining peer is
+                # pinned by configuration.
                 # Load anyway and SAY the policy was missed, rather than
                 # pretending it held.
                 reasons = []
