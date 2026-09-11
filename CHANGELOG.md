@@ -206,6 +206,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   sub-agent were read without the session's path restriction, so any file in the project could
   reach a sub-agent's context. Every pre-loaded file is now checked against the scope first, and
   an out-of-scope file refuses the whole call, naming the file, before the sub-agent starts.
+- **An MCP server or plugin can no longer use its own tool names and descriptions to forge a
+  model role marker inside the coder's system prompt.** That text was already stripped of literal
+  control-token spellings when the tool was registered; the coder now also marks exactly which
+  characters of its tool list came from the external server or plugin, so the model backend
+  refuses to parse them as anything but plain text. Built-in tools and the rest of the prompt are
+  unchanged.
 
 ## [0.2.0] - 2026-09-04
 
