@@ -212,6 +212,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   characters of its tool list came from the external server or plugin, so the model backend
   refuses to parse them as anything but plain text. Built-in tools and the rest of the prompt are
   unchanged.
+- **On Llama 3, Gemma and EXAONE models, the marking of fetched web pages, search results and
+  external tool output as untrusted text was silently not applied.** Those models' chat templates
+  trim the whitespace around each message, and the step that locates the marked text in the
+  final prompt required an exact match, so it gave up and the whole request fell back to the
+  older text-only protection. It now recognises a trimmed message, so the marking applies on
+  those models as it already did on the others.
 
 ## [0.2.0] - 2026-09-04
 
