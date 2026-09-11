@@ -243,6 +243,12 @@ def _prepare_child(
 
     preload_text = ""
     if files:
+        # Only a list is read; any other container is refused before a read.
+        # See test_a_non_list_files_value_never_reaches_a_child.
+        if not isinstance(files, list):
+            return None, ToolResult.error(
+                f"{tool}: 'files' must be a list of paths, "
+                f"got {type(files).__name__}")
         failed: list[str] = []
         for fp in files:
             r = tool_read_file(cwd, fp)

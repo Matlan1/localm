@@ -527,9 +527,11 @@ _CONTEXT = "the-in-scope-context-7b2e"
 
 def _commit_scope_fixture(repo):
     """One file outside ``src/**`` and one inside, both COMMITTED so a
-    background child's worktree (created from HEAD) carries them too."""
+    background child's worktree (created from HEAD) carries them too. The
+    one-character file ``a`` is what a string iterated by character reads."""
     (repo / "src").mkdir(exist_ok=True)
     (repo / "secrets.txt").write_text(f"{_SECRET}\n", encoding="utf-8")
+    (repo / "a").write_text(f"{_SECRET}\n", encoding="utf-8")
     (repo / "src" / "ctx.txt").write_text(f"{_CONTEXT}\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "scope fixture")
@@ -586,6 +588,43 @@ class TestPreloadRespectsTheParentScope:
         assert not res.ok
         assert "secrets.txt" in res.output
         assert "outside the active scope" in res.output
+
+    @pytest.mark.parametrize("tool", ["spawn_agent", "spawn_agent_background"])
+    @pytest.mark.parametrize("files", [{"secrets.txt": True}, "a"],
+                             ids=["dict-by-key", "str-by-char"])
+    def test_a_non_list_files_value_never_reaches_a_child(
+            self, repo, tool, files):
+        """The gate checks the ENTRIES of a list and sees nothing in any other
+        container, so the reader must refuse every other container before a
+        read: a dict would be read by its keys, a string by its characters."""
+        _commit_scope_fixture(repo)
+        parent = _parent(repo, scope="src/**")
+        with patch(_AGENT_CLASS) as MockAgent:
+            MockAgent.return_value.run_task.return_value = "done"
+            MockAgent.return_value.turns = 1
+            res = parent._execute_tool(
+                _call(tool, task="summarise", files=files), interactive=False)
+        MockAgent.assert_not_called()
+        assert _SECRET not in str(MockAgent.mock_calls)
+        assert child_limit.holders() == []
+        assert not res.ok
+        assert "must be a list" in res.output
+
+    def test_a_non_list_files_value_is_refused_without_a_scope_too(self, repo):
+        """The refusal is the reader's own argument check, not the scope gate,
+        so it holds for an unscoped session as well."""
+        _commit_scope_fixture(repo)
+        parent = _parent(repo)
+        with patch(_AGENT_CLASS) as MockAgent:
+            MockAgent.return_value.run_task.return_value = "done"
+            MockAgent.return_value.turns = 1
+            res = parent._execute_tool(
+                _call("spawn_agent", task="summarise",
+                      files={"secrets.txt": True}),
+                interactive=False)
+        MockAgent.assert_not_called()
+        assert not res.ok
+        assert "must be a list" in res.output
 
     def test_SIBLING_an_in_scope_preload_reaches_the_synchronous_child(
             self, repo):
