@@ -77,6 +77,7 @@ _HEADER_SIZES = {
 _POISON = 0xEE
 _POISON_TEXT = chr(_POISON) * 2
 _AMD_PCI_PREFIX = "PCI\\VEN_1002"
+_AMD_PCI_MARKER = b"VEN_1002&"
 
 
 class TestAdlLayoutsMatchPublishedHeaders:
@@ -127,6 +128,12 @@ def _pnp(info) -> str:
     return _decode(info.strPNPString)
 
 
+def _raw(table) -> bytes:
+    """Every byte of the adapter table as the driver wrote it, independent of
+    the declared field offsets."""
+    return ctypes.string_at(ctypes.addressof(table), ctypes.sizeof(table))
+
+
 @pytest.fixture(scope="module")
 def adl():
     """A live ADL context opened through the production ``_adl_open``, with the
@@ -159,8 +166,7 @@ def adl():
             _poison(arr)
             rc = dll.ADL2_Adapter_AdapterInfo_Get(ctx, ctypes.byref(arr),
                                                   ctypes.sizeof(arr))
-            if rc == gu._ADL_OK and not any(
-                    _pnp(info).startswith(_AMD_PCI_PREFIX) for info in arr):
+            if rc == gu._ADL_OK and _AMD_PCI_MARKER not in _raw(arr):
                 pytest.skip("real_amd_adl: ADL lists no AMD PCI adapter: "
                             + repr([_pnp(info) for info in arr]))
             yield SimpleNamespace(dll=dll, ctx=ctx, state=state, count=n.value,
@@ -188,19 +194,22 @@ def _present_amd(adl) -> list:
 
 
 def _production_adapters(adl) -> list:
-    """``_present_amd`` when it is non-empty. Otherwise skips when no adapter
-    whose PNP string names an AMD PCI device is present, and fails when one is
-    present but the production vendor filter drops it."""
+    """``_present_amd`` when it is non-empty. Otherwise skips when the raw
+    adapter table carries no AMD PCI marker at all, or carries it only in
+    adapters that are not present, and fails when it carries one the production
+    filter cannot see."""
     adapters = _present_amd(adl)
     if adapters:
         return adapters
-    listed = [info for info in adl.adapters
-              if _pnp(info).startswith(_AMD_PCI_PREFIX) and info.iPresent == 1]
-    if not listed:
-        pytest.skip("real_amd_adl: no AMD PCI adapter is present")
-    pytest.fail("a present AMD PCI adapter is dropped by the production vendor "
-                "filter: iVendorID reads "
-                + repr([info.iVendorID for info in listed]))
+    if _AMD_PCI_MARKER not in _raw(adl.adapters):
+        pytest.skip("real_amd_adl: ADL lists no AMD PCI adapter")
+    amd = [info for info in adl.adapters if _pnp(info).startswith(_AMD_PCI_PREFIX)]
+    if amd and all(info.iPresent == 0 for info in amd):
+        pytest.skip("real_amd_adl: the listed AMD PCI adapters are not present")
+    pytest.fail("an AMD PCI adapter is listed but the production filter reads none: "
+                "(iPresent, iVendorID, strPNPString) = "
+                + repr([(info.iPresent, info.iVendorID, _pnp(info))
+                        for info in adl.adapters]))
 
 
 def _windows_pnp_pci_map() -> dict:
