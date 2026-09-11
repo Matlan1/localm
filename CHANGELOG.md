@@ -102,6 +102,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the model cannot take is refused. And a HuggingFace model that fails to load no longer leaves
   its loading process running and holding memory, so retrying after a failed load starts with as
   much free memory as the first attempt had.
+- **Dismissing certain confirmation dialogs with the x or by clicking outside them could leave
+  the page stuck.** Switching the embedding model, re-embedding or repairing a knowledge
+  collection, and adding folders to the knowledge index all left their button disabled and the
+  action silently abandoned if the dialog was closed that way instead of with Cancel. Closing it
+  that way is now treated the same as Cancel.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
@@ -121,6 +126,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   mode, where nothing durable is meant to be written. These are now refused, with a message saying
   which setting turns them back on. Listing suggested corrections no longer rewrites their file
   either. Deleting facts and clearing your memory are unchanged and still work in every mode.
+- **Removing the owner key could report success even when it only partly worked.** If the server
+  could not fully complete the removal, Settings said the server was now open again and reloaded
+  the page, discarding the only explanation of what had actually happened. It now shows exactly
+  what did not clear and tells you that you have been signed out in this browser and need to sign
+  in again with the previous key.
 
 ## [0.2.0] - 2026-09-04
 
