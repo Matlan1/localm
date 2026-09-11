@@ -114,6 +114,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   collection, and adding folders to the knowledge index all left their button disabled and the
   action silently abandoned if the dialog was closed that way instead of with Cancel. Closing it
   that way is now treated the same as Cancel.
+- **The desktop launcher failed to start any mode when installed under a folder path containing a
+  space or an ampersand.** It now launches correctly regardless of where localm is installed.
+- **Uninstalling could leave the Desktop shortcut behind on a machine with a redirected Desktop
+  folder (for example OneDrive's "Back up your folders").** The installer recorded a guessed path
+  instead of the one it actually wrote, so uninstall believed the shortcut was already gone and
+  skipped removing it.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
