@@ -3095,15 +3095,22 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                     console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
                     return chosen, used_tag[0]
                 missing = _name_missing_shared_lib(detail)
-        from localm.bugreport import LocalmError
-        raise LocalmError(
-            f"{chosen} was provisioned but the native library did not load",
-            reason=(f"you picked '{chosen}' and it still failed to load "
-                    f"({missing or detail}) - likely a missing OS dependency or an "
-                    "incompatible binary. Fix the cause and retry with "
-                    f"localm setup-llama --backend {chosen} --force, or provide your "
-                    "own build with --from <build dir>. See docs/gpu-setup.md."),
-            context={"operation": "setup-llama", "backend": chosen})
+        # A plain print + exit, matching the "not provisioned" sibling above
+        # rather than raising LocalmError: this is the one recovery path a
+        # caller like setup.sh already wraps with its own report offer (see
+        # handle_provision_failure), and every OTHER failure exit in this
+        # function is unreportable-by-the-CLI the same way - raising here
+        # would make the CLI's own crash handler offer a report AND the
+        # caller's wrapper offer a second one for the identical failure.
+        console.print(f"[red]'{chosen}' was provisioned but the native library "
+                      f"did not load.[/red]")
+        console.print(f"[yellow]{'Missing OS library' if missing else 'Cause'}:[/yellow] "
+                      f"{missing or detail}")
+        console.print(
+            f"[dim]Fix the cause and retry with: localm setup-llama --backend "
+            f"{chosen} --force  -  or provide your own build with --from "
+            "<build dir>. See docs/gpu-setup.md.[/dim]")
+        sys.exit(1)
 
     # chosen needs a runtime and did not load HERE. Honour the user's pick: never
     # swap it silently. INFORM why, then OFFER the universal build (interactive)

@@ -560,15 +560,20 @@ def test_pinned_sha256_never_falls_back(monkeypatch, tmp_path):
         sl._provision_with_fallback("cuda", tmp_path, "deadbeef", True)
 
 
-def test_selfcontained_provisioned_but_unloadable_is_reportable(monkeypatch, tmp_path):
+def test_selfcontained_provisioned_but_unloadable_is_reportable(monkeypatch, tmp_path, capsys):
     """vulkan/cpu are the universal fallbacks; if one provisions but will not
-    load, that is an unexpected fault - raise (report-worthy), not exit-0."""
+    load, that is an unexpected fault, clearly reported - but a plain
+    sys.exit(1), not a raised LocalmError: this path is always wrapped by a
+    caller (setup.sh's handle_provision_failure) that offers its own report,
+    and raising here would make the CLI's OWN crash handler offer a second
+    one for the identical failure. See tests/test_setup_llama_vulkan_cpu_recovery.py
+    for the full defect-3(d) coverage."""
     _stub_provision(monkeypatch)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: (False, "broken binary"))
-    from localm.bugreport import LocalmError
-    with pytest.raises(LocalmError) as ei:
+    with pytest.raises(SystemExit) as ei:
         sl._provision_with_fallback("vulkan", tmp_path, None, False)
-    assert "did not load" in ei.value.summary
+    assert ei.value.code == 1
+    assert "did not load" in " ".join(capsys.readouterr().out.split())
 
 
 # --------------- inform + offer on load failure (never silent) ------------- #
