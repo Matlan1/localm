@@ -2,10 +2,14 @@
 """Tests for localm.plugins.coder.backends.http - usage capture from responses."""
 
 import json
+import socket
 import unittest
 from unittest.mock import MagicMock, patch
 
-from localm.plugins.coder.backends.http import HTTPBackend
+import requests
+
+from localm.netpolicy import NetworkPolicyError
+from localm.plugins.coder.backends.http import CoderServerError, HTTPBackend
 
 
 def _make_backend():
@@ -120,6 +124,7 @@ class TestHTTPBackendSetModel(unittest.TestCase):
         otherwise the coder keeps budgeting history against the OLD model's
         window."""
         resp_a = MagicMock()
+        resp_a.status_code = 200
         resp_a.ok = True
         resp_a.json.return_value = {"effective_ctx_max": 4096}
         mock_get.return_value = resp_a
@@ -130,6 +135,7 @@ class TestHTTPBackendSetModel(unittest.TestCase):
         self.assertEqual(mock_get.call_count, 1)
 
         resp_b = MagicMock()
+        resp_b.status_code = 200
         resp_b.ok = True
         resp_b.json.return_value = {"effective_ctx_max": 32768}
         mock_get.return_value = resp_b
@@ -310,6 +316,133 @@ class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
         self.assertIn('"name": "read_file"', full)
         self.assertIn('"path": "a.py"', full)
         self.assertNotIn("planning the call", full)
+
+
+class TestHTTPBackendRefusesRedirects(unittest.TestCase):
+    """The coder backend never follows a redirect - see _raise_on_redirect."""
+
+    def test_chat_refuses_a_redirect_and_the_target_is_never_dialed(self):
+        """Unfixed code (allow_redirects left at the requests default of True)
+        would auto-follow into 127.0.0.1: urls would carry a second entry for
+        it. The fix means that address is never dialed at all."""
+        urls = []
+
+        def fake_send(adapter_self, request, **kw):
+            urls.append(request.url)
+            resp = requests.Response()
+            resp.status_code = 302
+            resp.headers["Location"] = "http://127.0.0.1:8642/v1/chat/completions"
+            resp._content = b""
+            resp._content_consumed = True
+            resp.request = request
+            return resp
+
+        backend = HTTPBackend("http://backend.example/v1", "test-model")
+        exc = None
+        with patch("requests.adapters.HTTPAdapter.send", fake_send):
+            try:
+                backend.chat([{"role": "user", "content": "hi"}])
+            except Exception as e:
+                exc = e
+        self.assertEqual(urls, ["http://backend.example/v1/chat/completions"])
+        self.assertIsInstance(exc, CoderServerError)
+        self.assertIn("redirect", str(exc))
+
+    @patch("requests.post")
+    def test_chat_passes_allow_redirects_false(self, mock_post):
+        mock_post.return_value = _mock_non_streaming_response(
+            "hi", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+        backend = _make_backend()
+        backend.chat([{"role": "user", "content": "hi"}])
+        self.assertIs(mock_post.call_args.kwargs["allow_redirects"], False)
+
+    @patch("requests.get")
+    def test_context_capacity_passes_allow_redirects_false(self, mock_get):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        resp.json.return_value = {"effective_ctx_max": 4096}
+        mock_get.return_value = resp
+        backend = _make_backend()
+        backend.context_capacity()
+        self.assertIs(mock_get.call_args.kwargs["allow_redirects"], False)
+
+
+def _fake_pinned_session(calls, ips):
+    """Records every socket.getaddrinfo-derived pin and every session.request()
+    call, and returns a fake session in netpin.pinned_session's shape."""
+    def _make(ip):
+        ips.append(ip)
+        session = MagicMock()
+
+        def _request(method, url, **kw):
+            calls.append((method, url, kw))
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = {
+                "choices": [{"message": {"content": "hi"}}], "usage": {}}
+            return resp
+
+        session.request.side_effect = _request
+        return session
+    return _make
+
+
+def test_pinned_chat_dials_the_validated_ip_not_the_hostname():
+    """The pinned path resolves via netpolicy (which pins netpin's session to
+    the validated IP) instead of a plain requests.post - see HTTPBackend's
+    pinned=True path."""
+    calls, ips = [], []
+    with patch("localm.netpin.pinned_session",
+               side_effect=_fake_pinned_session(calls, ips)), \
+         patch("socket.getaddrinfo",
+              return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]), \
+         patch("requests.post") as mock_post:
+        backend = HTTPBackend("https://backend.example/v1", "test-model",
+                              pinned=True)
+        result = backend.chat([{"role": "user", "content": "hi"}])
+    mock_post.assert_not_called()
+    assert result == "hi"
+    assert ips == ["93.184.216.34"]
+    assert len(calls) == 1
+    method, url, kw = calls[0]
+    assert method == "POST"
+    assert kw["headers"]["Host"] == "backend.example"
+    assert kw["allow_redirects"] is False
+
+
+def test_pinned_chat_fails_closed_when_the_host_is_unresolvable():
+    """A DNS-rebind attacker answers OK at check-time and NXDOMAIN (or a
+    private address) at connect-time; _resolve_pinned refuses rather than
+    falling back to an unvalidated re-resolution."""
+    def _raise(*a, **k):
+        raise socket.gaierror("nope")
+
+    exc = None
+    with patch("socket.getaddrinfo", _raise), \
+         patch("requests.post") as mock_post:
+        backend = HTTPBackend("https://backend.example/v1", "test-model",
+                              pinned=True)
+        try:
+            backend.chat([{"role": "user", "content": "hi"}])
+        except Exception as e:
+            exc = e
+    mock_post.assert_not_called()
+    assert isinstance(exc, NetworkPolicyError)
+
+
+def test_default_backend_is_unpinned():
+    """pinned defaults False: every existing HTTPBackend caller (the local
+    self-connection, Ollama/LM Studio via --url, OpenAI/Anthropic) keeps
+    dialing through plain requests unless it opts in."""
+    with patch("localm.netpin.pinned_session") as mk_session, \
+         patch("requests.post") as mock_post:
+        mock_post.return_value = _mock_non_streaming_response("hi", {})
+        backend = HTTPBackend("http://127.0.0.1:8080/v1", "test-model")
+        backend.chat([{"role": "user", "content": "hi"}])
+    mk_session.assert_not_called()
+    mock_post.assert_called_once()
 
 
 if __name__ == "__main__":

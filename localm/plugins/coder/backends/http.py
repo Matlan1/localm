@@ -119,19 +119,43 @@ def _retry_delay(response, attempt: int) -> float:
     return min(_BACKOFF_BASE_S * (2 ** attempt), 60.0)
 
 
+def _raise_on_redirect(resp: requests.Response, url: str) -> None:
+    """Refuse a 3xx response outright: this backend never follows a redirect."""
+    if 300 <= resp.status_code < 400:
+        loc = resp.headers.get("Location", "?")
+        resp.close()
+        raise CoderServerError(
+            f"HTTP {resp.status_code} redirect from {url} (to {loc!r}) "
+            "refused: the coder backend does not follow redirects")
+
+
 def _post_with_retry(url: str, *, headers: dict, json_body: dict,
                      timeout: int, stream: bool = False,
-                     verify=True, retry_503: bool = True) -> requests.Response:
+                     verify=True, retry_503: bool = True,
+                     pinned: bool = False) -> requests.Response:
     """POST with retry on 429/5xx. Returns the first non-retryable response.
 
     retry_503=False (passed by HTTPBackend for its own local server - see the
     comment above _RETRY_STATUSES for why) makes a 503 immediately
     non-retryable, same as any status outside _RETRY_STATUSES; every other
-    retryable status keeps the full _MAX_RETRIES budget unchanged."""
+    retryable status keeps the full _MAX_RETRIES budget unchanged.
+
+    Never follows a redirect (allow_redirects=False, every 3xx raises via
+    _raise_on_redirect). pinned=True routes the request through
+    netpolicy.pinned_request, which resolves and validates the host's IP
+    itself and pins the socket to it - see HTTPBackend.__init__."""
     last = None
     for attempt in range(_MAX_RETRIES + 1):
-        resp = requests.post(url, headers=headers, json=json_body,
-                             timeout=timeout, stream=stream, verify=verify)
+        if pinned:
+            from localm import netpolicy
+            resp = netpolicy.pinned_request(
+                "POST", url, headers=headers, json=json_body, timeout=timeout,
+                stream=stream, verify=verify, allow_redirects=False)
+        else:
+            resp = requests.post(url, headers=headers, json=json_body,
+                                 timeout=timeout, stream=stream, verify=verify,
+                                 allow_redirects=False)
+        _raise_on_redirect(resp, url)
         if resp.status_code not in _RETRY_STATUSES or attempt == _MAX_RETRIES:
             return resp
         if resp.status_code == 503 and not retry_503:
@@ -175,6 +199,7 @@ class HTTPBackend(BaseLLMBackend):
         anthropic: bool = False,
         localm_server: bool = False,
         verify=None,
+        pinned: bool = False,
         **extra_params,
     ) -> None:
         self._base_url     = base_url.rstrip("/")
@@ -182,6 +207,10 @@ class HTTPBackend(BaseLLMBackend):
         self._api_key      = api_key
         self._timeout      = timeout
         self._extra        = extra_params
+        # Routes every request through netpolicy's IP-pinned transport instead
+        # of a plain request. Requires check_url to have already validated
+        # base_url - see builtin/coder/plug.py's HTTPBackend(..., pinned=...).
+        self._pinned = bool(pinned)
         # This backend's OWN local server, as opposed to a cloud/remote
         # OpenAI-compatible endpoint - gates the 503 retry carve-out (see the
         # comment above _RETRY_STATUSES). Stored directly rather than reusing
@@ -257,9 +286,16 @@ class HTTPBackend(BaseLLMBackend):
             return self._ctx_capacity
         self._ctx_capacity_cached = True
         try:
-            resp = requests.get(f"{self._base_url}/config",
-                                headers=self._headers(), timeout=15,
-                                verify=self._verify)
+            url = f"{self._base_url}/config"
+            if self._pinned:
+                from localm import netpolicy
+                resp = netpolicy.pinned_request(
+                    "GET", url, headers=self._headers(), timeout=15,
+                    verify=self._verify, allow_redirects=False)
+            else:
+                resp = requests.get(url, headers=self._headers(), timeout=15,
+                                    verify=self._verify, allow_redirects=False)
+            _raise_on_redirect(resp, url)
             if resp.ok:
                 v = resp.json().get("effective_ctx_max")
                 if isinstance(v, int) and v > 0:
@@ -509,6 +545,7 @@ class HTTPBackend(BaseLLMBackend):
             timeout=self._timeout,
             verify=self._verify,
             retry_503=not self._is_local_server,
+            pinned=self._pinned,
         )
         _raise_for_status(resp)
         data = resp.json()
@@ -555,6 +592,7 @@ class HTTPBackend(BaseLLMBackend):
             stream=True,
             verify=self._verify,
             retry_503=not self._is_local_server,
+            pinned=self._pinned,
         ) as resp:
             _raise_for_status(resp)
             for line in resp.iter_lines():
@@ -629,6 +667,7 @@ class HTTPBackend(BaseLLMBackend):
             stream=True,
             verify=self._verify,
             retry_503=not self._is_local_server,
+            pinned=self._pinned,
         ) as resp:
             _raise_for_status(resp)
             for line in resp.iter_lines():

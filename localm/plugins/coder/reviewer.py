@@ -194,18 +194,6 @@ class Reviewer:
 #  Wiring: build the right reviewer for an Agent, honoring config + privacy     #
 # --------------------------------------------------------------------------- #
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", ""})
-
-
-def _is_loopback(url: str) -> bool:
-    """True if *url* points at the local machine."""
-    try:
-        from urllib.parse import urlparse
-        return (urlparse(url).hostname or "").lower() in _LOOPBACK_HOSTS
-    except Exception:
-        return False
-
-
 def _is_privacy(mode) -> bool:
     try:
         from localm.audit import SessionMode
@@ -298,7 +286,16 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
             return Reviewer(b, heterogeneous=True)
 
         if low.startswith("http://") or low.startswith("https://"):
-            if privacy and not _is_loopback(target):
+            from localm.netpolicy import NetworkPolicyError, check_url_shape
+            try:
+                host = check_url_shape(target)
+            except NetworkPolicyError as e:
+                print_warning(
+                    f"coder_reviewer URL refused ({e}); reviewing with the "
+                    "local model instead.")
+                return _local_same_model()
+            from localm.bindhost import is_loopback_host
+            if privacy and not is_loopback_host(host):
                 print_warning(
                     "privacy mode: skipping the off-machine reviewer URL and "
                     "reviewing with the local model instead.")
