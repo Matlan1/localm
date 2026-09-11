@@ -19,7 +19,8 @@ function router(routes) {
       if (hit) {
         const res = fn(path, opts);
         return { ok: res.status < 400, status: res.status,
-                 json: async () => res.body || {}, text: async () => res.text || "" };
+                 json: typeof res.json === "function" ? res.json : async () => res.body || {},
+                 text: async () => res.text || "" };
       }
     }
     return { ok: true, status: 200,
@@ -289,4 +290,106 @@ test("owner key: a refused removal is reported, not silently swallowed", async (
 
   assert.ok(t.all().some((x) => x.isErr),
     "a refused removal reported no error at all");
+});
+
+// --------------------------------------------------------------------------- //
+//  cleared:false honesty. /api/auth/key/clear answers 200 with cleared:false   //
+//  when either half of the removal failed - a security step that fails must   //
+//  never report success. That contract must reach the user; a reload here     //
+//  would discard the only copy of the server's warnings.                      //
+// --------------------------------------------------------------------------- //
+
+// jsdom's location.reload is non-writable and non-configurable, so it cannot be
+// stubbed. A real call emits a jsdomError that the default virtual console
+// forwards to console.error; count those to observe a navigation.
+function watchNavigation() {
+  const real = console.error;
+  const hits = [];
+  console.error = (...a) => {
+    const line = a.map(String).join(" ");
+    if (/navigation to another Document/.test(line)) hits.push(line);
+    else real(...a);
+  };
+  return { count: () => hits.length, stop: () => { console.error = real; } };
+}
+
+test("owner key: a completed removal still reloads", async () => {
+  const win = await ownerPanel({
+    "POST /api/auth/key/clear": () => ({ status: 200, body: { cleared: true, warnings: [] } }),
+  });
+  await win.refreshOwnerKeyPanel();
+  autoConfirm(win);
+  const t = toasts(win);
+  const nav = watchNavigation();
+
+  win.document.getElementById("owner-key-clear").onclick();
+  await tick();
+  nav.stop();
+
+  assert.equal(nav.count(), 1,
+    "0 here means watchNavigation cannot see a reload at all: fix the probe, not the fix");
+  assert.ok(t.all().some((x) => /removed/i.test(x.msg) && !x.isErr),
+    "the success path must still report success");
+});
+
+test("owner key: cleared:false is NOT reported as a completed removal", async () => {
+  const win = await ownerPanel({
+    "POST /api/auth/key/clear": () => ({
+      status: 200,
+      body: { cleared: false,
+              warnings: ["the API key file",
+                         "browser sessions (some devices may still be signed in)"] },
+    }),
+  });
+  await win.refreshOwnerKeyPanel();
+  autoConfirm(win);
+  const t = toasts(win);
+  const nav = watchNavigation();
+
+  win.document.getElementById("owner-key-clear").onclick();
+  await tick();
+  nav.stop();
+
+  // THE WORLD FIRST.
+  const card = win.document.getElementById("owner-key-card");
+  assert.match(card.textContent, /the API key file/,
+    "the user must learn WHAT survived; only the server's warning can say");
+  assert.match(card.textContent, /some devices may still be signed in/);
+  assert.match(card.textContent, /sign in again|signed out/i,
+    "the route dropped this browser's session cookie whether or not the removal worked");
+  assert.equal(nav.count(), 0,
+    "a reload here discards the only copy of the warnings that ever existed");
+
+  // THEN THE MESSAGE.
+  const msgs = t.all();
+  assert.ok(msgs.length, "a removal that did not complete must still say something");
+  assert.ok(msgs.every((x) => !(/removed/i.test(x.msg) && !x.isErr)),
+    "'Owner key removed' here is the rule-5 lie: the credential may still grant access");
+  assert.ok(msgs.every((x) => !/open again/i.test(x.msg)),
+    "the server is not open if the key survived");
+  assert.ok(msgs.some((x) => x.isErr), "and it is surfaced as a problem, not a success");
+});
+
+test("owner key: an unparseable clear response is NOT reported as success", async () => {
+  const win = await ownerPanel({
+    "POST /api/auth/key/clear": () => ({
+      status: 200,
+      // json() throws: an unparseable body must be treated as NOT cleared.
+      json: async () => { throw new Error("bad body"); },
+    }),
+  });
+  await win.refreshOwnerKeyPanel();
+  autoConfirm(win);
+  const t = toasts(win);
+  const nav = watchNavigation();
+
+  win.document.getElementById("owner-key-clear").onclick();
+  await tick();
+  nav.stop();
+
+  assert.equal(nav.count(), 0, "an unparseable body must not be treated as a completed removal");
+  const msgs = t.all();
+  assert.ok(msgs.every((x) => !(/removed/i.test(x.msg) && !x.isErr)),
+    "an unparseable body is not evidence of success");
+  assert.ok(msgs.some((x) => x.isErr), "and it is surfaced as a problem");
 });

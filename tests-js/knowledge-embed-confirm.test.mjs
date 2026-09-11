@@ -9,6 +9,12 @@ import { loadAppWithPages, runScript } from "./harness.mjs";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+// node --test applies no per-test timeout, so an await on a never-settling
+// promise hangs the whole suite rather than failing. Bound every wait on a
+// dismissal-confirm promise with this instead of a bare await.
+const settles = (p, ms = 2000) =>
+  Promise.race([p, new Promise((r) => setTimeout(() => r("__PENDING__"), ms))]);
+
 function setup({ dryRun, jobOk = true }) {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
@@ -122,4 +128,84 @@ test("cancelling the modal sends no confirmed POST and no job", async () => {
   assert.equal(confirmBody(calls), null, "cancelling never sends the confirmed POST");
   const log = window.document.getElementById("kb-embed-log");
   assert.match(log.textContent, /Cancelled/);
+});
+
+// --------------------------------------------------------------------------- //
+//  Dismissing via the shared modal chrome (the x, or the backdrop) must be a   //
+//  decline, exactly like Cancel - not a promise that never settles.           //
+// --------------------------------------------------------------------------- //
+
+test("dismissing the modal via the x/backdrop cancels and re-enables Apply", async () => {
+  const { window, calls } = setup({
+    dryRun: {
+      needs_confirm: true, model: "new-model",
+      collections: [{ name: "docs", built_with: "old-model", n_chunks: 42 }],
+      note: "may invalidate",
+    },
+  });
+  const apply = window.document.getElementById("kb-embed-apply");
+  runScript(window, `applyEmbeddingModel("new-model");`);
+  await tick(); await tick();
+
+  assert.notEqual(window.document.getElementById("modal").style.display, "none");
+  assert.equal(apply.disabled, true, "Apply is disabled while the switch is in flight");
+
+  // The shared chrome's own dismiss: it ONLY sets display:none.
+  window.document.getElementById("modal").style.display = "none";
+
+  const deadline = Date.now() + 2000;
+  while (apply.disabled && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+
+  assert.equal(apply.disabled, false,
+    "dismissing the confirm left Apply disabled for the rest of the page session");
+  assert.equal(confirmBody(calls), null, "a dismissal never sends the confirmed POST");
+  const log = window.document.getElementById("kb-embed-log");
+  assert.match(log.textContent, /Cancelled/);
+});
+
+test("kbConfirmAddRoots: an x/backdrop dismissal resolves false", async () => {
+  const { window } = setup({ dryRun: {} });
+  const p = window.kbConfirmAddRoots(["C:/somewhere"]);
+  await tick();
+  assert.notEqual(window.document.getElementById("modal").style.display, "none",
+    "the modal must actually be open, or this test proves nothing");
+  window.document.getElementById("modal").style.display = "none";
+  assert.equal(await settles(p), false,
+    "__PENDING__ means the promise never settled: the caller is stuck forever");
+});
+
+test("kbConfirmReembed: an x/backdrop dismissal resolves false", async () => {
+  const { window } = setup({ dryRun: {} });
+  const p = window.kbConfirmReembed("docs");
+  await tick();
+  assert.notEqual(window.document.getElementById("modal").style.display, "none",
+    "the modal must actually be open, or this test proves nothing");
+  window.document.getElementById("modal").style.display = "none";
+  assert.equal(await settles(p), false,
+    "__PENDING__ means the promise never settled: the caller is stuck forever");
+});
+
+test("kbConfirmRepair: an x/backdrop dismissal resolves false", async () => {
+  const { window } = setup({ dryRun: {} });
+  const p = window.kbConfirmRepair("docs", "needs a full re-embed");
+  await tick();
+  assert.notEqual(window.document.getElementById("modal").style.display, "none",
+    "the modal must actually be open, or this test proves nothing");
+  window.document.getElementById("modal").style.display = "none";
+  assert.equal(await settles(p), false,
+    "__PENDING__ means the promise never settled: the caller is stuck forever");
+});
+
+test("confirmEmbeddingModelSwitch: an x/backdrop dismissal resolves false", async () => {
+  const { window } = setup({ dryRun: {} });
+  const p = window.confirmEmbeddingModelSwitch("new-model",
+    { note: "may invalidate", collections: [] });
+  await tick();
+  assert.notEqual(window.document.getElementById("modal").style.display, "none",
+    "the modal must actually be open, or this test proves nothing");
+  window.document.getElementById("modal").style.display = "none";
+  assert.equal(await settles(p), false,
+    "__PENDING__ means the promise never settled: the caller is stuck forever");
 });
