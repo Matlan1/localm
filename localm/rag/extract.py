@@ -28,10 +28,9 @@ MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
 MAX_ARCHIVE_MEMBERS = 5_000
 _ARCHIVE_TRUNCATED_NOTE = "[archive truncated: content budget reached]"
 
-# Hard caps on PDF extraction, checked between pages (a single page's own
-# extract_text() call is not interruptible): a page count and a wall-clock
-# deadline, so a pathological page-count or content-bomb PDF cannot occupy a
-# plugin-pool worker indefinitely.
+# Hard caps on PDF extraction: a page count and a wall-clock deadline,
+# checked between pages (a single page's own extract_text() call is not
+# interruptible).
 MAX_PDF_PAGES = 5_000
 MAX_PDF_EXTRACT_SECONDS = 30.0
 
@@ -838,9 +837,7 @@ def _extract_pdf(data: bytes, filename: str) -> str:
         total_chars = 0
         deadline = _monotonic() + MAX_PDF_EXTRACT_SECONDS
         note = None
-        # reader.pages is iterated lazily (never len()'d up front, which would
-        # walk the whole page tree) so a page-count cap actually shortens the
-        # walk rather than merely the text kept from it.
+        # reader.pages is iterated lazily here, never len()'d up front.
         for i, page in enumerate(reader.pages):
             if i >= MAX_PDF_PAGES:
                 note = f"[pdf truncated: page cap of {MAX_PDF_PAGES} pages reached]"

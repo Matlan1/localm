@@ -197,11 +197,9 @@ gpu = [
     "rocm-sdk-core; sys_platform == 'win32'",
     "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
 ]
-# The HF transformers/tokenizers/accelerate stack alone, with no GPU backend
-# opinion - platform-neutral so setup.sh / setup.bat / installer/gui.py can
-# provision it on any OS/GPU combination without inheriting [gpu]'s win32
-# ROCm torch pins. Same version pins as [gpu] above (see its comment for why
-# transformers is capped below 5.16); keep the two in sync.
+# The HF transformers/tokenizers/accelerate/psutil stack, platform-neutral
+# (no torch/ROCm pins). Must match [gpu]'s pins for those same four packages -
+# see test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins.
 # Install with:  uv pip install -e ".[hf]"
 hf = [
     "transformers[kernels]~=5.15.1",
