@@ -4,8 +4,13 @@
 restart sequence unloads the model BEFORE relaunching, like the shutdown
 sequence."""
 
+import json
 import os
+import subprocess
 import sys
+import time
+
+import pytest
 
 from localm.inference import http_server
 
@@ -25,6 +30,70 @@ def test_restart_argv_is_canonical_python_m_localm():
     assert argv[0] == sys.executable
     assert argv[1:3] == ["-m", "localm"]
     assert argv[3:] == sys.argv[1:]      # original subcommand + args preserved
+
+
+def test_execv_argv_is_identity_off_windows(monkeypatch):
+    """os.name is patched, not skipif'd, so this branch actually runs on this
+    (Windows) box instead of shipping on reading alone."""
+    monkeypatch.setattr(os, "name", "posix")
+    argv = ["C:/Program Files/localm/python.exe", 'x" --host 0.0.0.0', "-p", "8642"]
+    assert http_server._execv_argv(argv) == argv
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows command-line quoting")
+def test_execv_argv_quotes_every_element_including_argv_zero():
+    argv = ["C:/Program Files/localm/python.exe", "serve", 'x" --host 0.0.0.0', "-p", "8642"]
+    got = http_server._execv_argv(argv)
+    assert got == [subprocess.list2cmdline([a]) for a in argv]
+    assert got[0] == subprocess.list2cmdline([argv[0]])
+    assert " " in argv[0] and got[0] != argv[0]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows command-line quoting")
+def test_restart_command_line_survives_a_path_with_a_space(tmp_path):
+    """The spawned child must not import localm: a script run by path resolves
+    the editable install rather than this worktree, so importing http_server
+    there would test the wrong copy. The quoted argv is computed in THIS
+    process (which does import the worktree copy) and handed to the child as
+    JSON instead."""
+    CHILD = ('import json, sys\n'
+             'with open(sys.argv[1], "w") as f:\n'
+             '    json.dump(sys.argv[1:], f)\n')
+    PARENT = ('import json, os, sys\n'
+              'argv = json.load(open(sys.argv[1]))\n'
+              'os.execv(sys.executable, argv)\n')
+
+    child = tmp_path / "child.py"
+    child.write_text(CHILD, encoding="utf-8")
+    parent = tmp_path / "parent.py"
+    parent.write_text(PARENT, encoding="utf-8")
+    out = tmp_path / "argv.json"
+    argv_file = tmp_path / "argv_in.json"
+
+    logical = [sys.executable, str(child), str(out),
+               "serve", "D:/My Models/foo.gguf",
+               "--device", 'x" --host 0.0.0.0',
+               "-p", "8642"]
+    argv_file.write_text(json.dumps(http_server._execv_argv(logical)),
+                         encoding="utf-8")
+
+    r = subprocess.run([sys.executable, str(parent), str(argv_file)],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, f"parent failed rc={r.returncode}\nstderr:\n{r.stderr}"
+
+    deadline = time.time() + 20
+    got = None
+    while time.time() < deadline:
+        if out.exists():
+            try:
+                got = json.loads(out.read_text(encoding="utf-8"))
+                break
+            except Exception:
+                pass
+        time.sleep(0.2)
+    assert got is not None, (
+        f"replacement process wrote nothing in 20s; parent stderr:\n{r.stderr}")
+    assert got == logical[2:], f"child argv did not round-trip; child got: {got}"
 
 
 def test_do_restart_unloads_before_relaunch(monkeypatch):
@@ -51,7 +120,10 @@ def test_do_restart_unloads_before_relaunch(monkeypatch):
     assert order and order[0] == "unload"
     assert order[-1][0] == "relaunch"
     assert order[-1][1] == sys.executable
-    assert list(order[-1][2]) == http_server._restart_argv()
+    expected = http_server._restart_argv()
+    if os.name == "nt":
+        expected = [subprocess.list2cmdline([a]) for a in expected]
+    assert list(order[-1][2]) == expected
 
 
 def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
