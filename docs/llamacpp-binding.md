@@ -63,31 +63,37 @@ with no ABI or soname bump, so `_structs.py` stays safe two ways:
 The `sizeof` asserts in `_structs.py` are a self-consistency guard on our own
 definitions; they do NOT validate against the loaded DLL.
 
-### `LlamaModelParams` (72 bytes native, over-allocated to 104) - TWO layouts
+### `LlamaModelParams` (72 bytes native on V1/V2, 80 on V3; all over-allocated to 104) - THREE layouts
 
 upstream reordered this struct in place at an unchanged size (`main_gpu`
-moved, `load_mode` inserted, three booleans folded into it), so localm binds
-`LlamaModelParamsV1` (<= lemonade b1288 / upstream b10103) and
-`LlamaModelParamsV2` (>= lemonade b1307 / upstream b10105) and picks one per
-loaded library at load time. There is deliberately no bare `LlamaModelParams`
-name - go through `_abi.model_params_class()` / `_api.llama_model_default_params()`.
+moved, `load_mode` inserted, three booleans folded into it), then inserted a
+4-byte `lazy_mode` enum directly after `load_mode` at b10653 (spelled
+`tensor_read_lazy` until b10679), so localm binds
+`LlamaModelParamsV1` (<= lemonade b1288 / upstream b10103),
+`LlamaModelParamsV2` (>= lemonade b1307 / upstream b10105..b10649) and
+`LlamaModelParamsV3` (upstream >= b10653) and picks one per loaded library at
+load time. There is deliberately no bare `LlamaModelParams` name - go through
+`_abi.model_params_class()` / `_api.llama_model_default_params()`.
 
-| Offset | Type | V1 field | V2 field | Default |
-|--------|------|----------|----------|---------|
-| 0 | ptr | `devices` | `devices` | NULL |
-| 8 | ptr | `tensor_buft_overrides` | `tensor_buft_overrides` | NULL |
-| 16 | i32 | `n_gpu_layers` | `n_gpu_layers` | -1 (all) |
-| 20 | i32 | `split_mode` | `split_mode` | 1 (LAYER) |
-| 24 | i32 | `main_gpu` | `load_mode` | 0 / 1 (MMAP) |
-| 28 | i32 | *(padding)* | `main_gpu` | / 0 |
-| 32 | ptr | `tensor_split` | `tensor_split` | static default |
-| 40 | ptr | `progress_callback` | `progress_callback` | NULL |
-| 48 | ptr | `progress_callback_user_data` | `progress_callback_user_data` | NULL |
-| 56 | ptr | `kv_overrides` | `kv_overrides` | NULL |
-| 64-71 | 8×bool | `vocab_only`, `use_mmap`, `use_direct_io`, `use_mlock`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc` | `vocab_only`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc`, `load_mtp` | |
+| Offset | Type | V1 field | V2 field | V3 field | Default |
+|--------|------|----------|----------|----------|---------|
+| 0 | ptr | `devices` | `devices` | `devices` | NULL |
+| 8 | ptr | `tensor_buft_overrides` | `tensor_buft_overrides` | `tensor_buft_overrides` | NULL |
+| 16 | i32 | `n_gpu_layers` | `n_gpu_layers` | `n_gpu_layers` | -1 (all) |
+| 20 | i32 | `split_mode` | `split_mode` | `split_mode` | 1 (LAYER) |
+| 24 | i32 | `main_gpu` | `load_mode` | `load_mode` | 0 / 1 (MMAP) / -1 (AUTO) |
+| 28 | i32 | *(padding)* | `main_gpu` | `lazy_mode` | / 0 / 1 (AUTO) |
+| 32 | ptr / i32 | `tensor_split` | `tensor_split` | `main_gpu` (+4 pad) | NULL / NULL / 0 |
+| 40 | ptr | `progress_callback` | `progress_callback` | `tensor_split` | NULL |
+| 48 | ptr | `progress_callback_user_data` | `progress_callback_user_data` | `progress_callback` | NULL |
+| 56 | ptr | `kv_overrides` | `kv_overrides` | `progress_callback_user_data` | NULL |
+| 64 | 8×bool / ptr | `vocab_only`, `use_mmap`, `use_direct_io`, `use_mlock`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc` | `vocab_only`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc`, `load_mtp` | `kv_overrides` | |
+| 72-77 | 6×bool | | | `vocab_only`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc`, `load_mtp` | |
 
 Use `_structs.set_use_mmap()` / `get_use_mmap()` rather than naming `use_mmap`
-directly - it has no V2 counterpart.
+directly - it has no V2/V3 counterpart. `lazy_mode` (V3 only,
+`LLAMA_LAZY_MODE_OFF/AUTO/ON` = 0/1/2) keeps the build's own default unless a
+call site sets it.
 
 ### `LlamaContextParams` (152 bytes native on b1288; 160 on b9682+; 160 on
 b10360+ with an inserted field, over-allocated to 224) - TWO layouts
@@ -141,13 +147,19 @@ typedef struct {
 
 `verify_abi(lib)` runs once inside `load_lib()`, right after the native library
 loads and before any by-value struct crosses the FFI boundary. It first decides
-WHICH of the two `LlamaModelParams` and (independently) WHICH of the two
+WHICH of the three `LlamaModelParams` and (independently) WHICH of the two
 `LlamaContextParams` layouts is loaded - `detect_model_params_layout()` uses two
-independent signals (the `llama_load_mode_*` marker symbols, plus a value
-fingerprint as corroboration); `detect_context_params_layout()` has no marker
-symbol for its insertion, so it rests on a value fingerprint alone. Both fall
-back to their historical V1 layout when inconclusive, and callers must not treat
-that fallback as a determination.
+independent signals: the `llama_load_mode_*` marker symbols split V1 from the
+V2/V3 family (their absence with V2- or V3-shaped bytes is a refusal), and the
+default-params value fingerprint splits V2 from V3, since the `lazy_mode`
+insertion added no symbol; `detect_context_params_layout()` has no marker
+symbol for its insertion either, so it rests on a value fingerprint alone. Both
+fall back to their historical V1 layout when inconclusive, and callers must
+not treat that fallback as a determination. Under the `llama_load_mode_*`
+symbols there is no fallback: default bytes that were read but match neither
+V2 nor V3 are refused (every V2 build fingerprints conclusively, so such bytes
+are a layout localm does not bind), while bytes that could not be read at all
+bind V2 with a note.
 
 It then calls `llama_model_default_params()` / `llama_context_default_params()`
 (no model, no GPU needed) using the DETECTED classes and checks a structural
@@ -202,7 +214,7 @@ A header-diff VERIFIER (not a generator). It parses `llama_model_params` /
 field's natural-alignment offset, and diffs them against `_structs.py`:
 
 ```
-python scripts/check_llama_abi.py                 # BOTH pinned refs (LLAMA_ABI_REFS["v1"], ["v2"])
+python scripts/check_llama_abi.py                 # ALL pinned refs (LLAMA_ABI_REFS["v1"], ["v2"], ["v3"])
 python scripts/check_llama_abi.py --ref latest    # newest upstream release
 python scripts/check_llama_abi.py --header path/to/llama.h
 ```
@@ -261,10 +273,12 @@ When you change the prebuilt localm fetches (`DEFAULT_URL` or the pinned tag):
 1. run `python scripts/check_llama_abi.py --ref <the build's tag>` and reconcile
    any reported field drift in `_structs.py`;
 2. if a field was reordered or inserted mid-struct, update `_structs.py` to match
-   (add a V2 layout + detection if a field's OFFSET moved for only some
-   currently-shipped builds, not all - see `LlamaContextParamsV1`/`V2` above for
-   the pattern) and re-probe a real build; update the `_abi` anchors only if a
-   keystone moved;
+   (add a new layout + detection if a field's OFFSET moved for only some
+   currently-shipped builds, not all - see `LlamaModelParamsV1`/`V2`/`V3` and
+   `LlamaContextParamsV1`/`V2` above for the pattern; teach EVERY site that
+   discriminates layouts, including `_abi.model_params_class`, `evaluate`,
+   `_structs.set_use_mmap` and `check_llama_abi.py`'s header classifier) and
+   re-probe a real build; update the `_abi` anchors only if a keystone moved;
 3. if it reports a NEW enum member, bind it (and add it to `_ENUM_BINDINGS`),
    then re-probe a real build's `llama_*_default_params()` - the header cannot
    tell you whether the new member became the default, which is the half that

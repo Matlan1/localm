@@ -26,10 +26,11 @@ alignment is identical on MS-x64 / SysV-x64 / arm64), so a given build matches o
 every OS. (Tag namespaces: b1xxx are lemonade-sdk/llamacpp-rocm, b10xxx are
 ggml-org/llama.cpp, and they collide.)
 
-Upstream reordered ``llama_model_params`` IN PLACE at an unchanged 72-byte size,
-so this module also DECIDES WHICH LAYOUT to bind
-(:func:`detect_model_params_layout`) rather than assuming one. That decision is
-not part of the safety check and is made even when the check is skipped.
+Upstream reordered ``llama_model_params`` IN PLACE at an unchanged 72-byte size
+(V1 -> V2) and later inserted ``lazy_mode`` mid-struct (V2 -> V3), so this
+module also DECIDES WHICH LAYOUT to bind (:func:`detect_model_params_layout`)
+rather than assuming one. That decision is not part of the safety check and is
+made even when the check is skipped.
 """
 
 from __future__ import annotations
@@ -43,22 +44,32 @@ from typing import List, Optional, Tuple
 from localm.bugreport import LocalmError
 
 from ._structs import (
+    _LOAD_MODE_LAYOUTS,
     _VALID_LOAD_MODES,
+    LLAMA_LAZY_MODE_AUTO,
     LLAMA_LOAD_MODE_AUTO,
     LLAMA_LOAD_MODE_MMAP,
     LlamaContextParamsV1,
     LlamaContextParamsV2,
     LlamaModelParamsV1,
     LlamaModelParamsV2,
+    LlamaModelParamsV3,
 )
 
 # Env var that disables the check. Any non-empty value enables the bypass.
 SKIP_ENV = "LOCALM_SKIP_ABI_CHECK"
 
-# The two llama_model_params layouts localm binds. Both are 72 bytes, so the
-# reorder is not visible in sizeof.
+# The three llama_model_params layouts localm binds. V1 and V2 are both 72
+# bytes, so that reorder is not visible in sizeof; V3 is 80.
 MODEL_PARAMS_V1 = "v1"   # use_mmap/use_direct_io/use_mlock, main_gpu@24
 MODEL_PARAMS_V2 = "v2"   # load_mode@24, main_gpu@28, load_mtp
+MODEL_PARAMS_V3 = "v3"   # load_mode@24, lazy_mode@28, main_gpu@32
+
+_MODEL_PARAMS_CLASSES = {
+    MODEL_PARAMS_V1: LlamaModelParamsV1,
+    MODEL_PARAMS_V2: LlamaModelParamsV2,
+    MODEL_PARAMS_V3: LlamaModelParamsV3,
+}
 
 # The two llama_context_params layouts localm binds. Both are 224 bytes, so the
 # reorder is not visible in sizeof. Distinct namespace from MODEL_PARAMS_*; the
@@ -67,9 +78,17 @@ CONTEXT_PARAMS_V1 = "ctx_v1"  # no n_outputs_max_per_seq
 CONTEXT_PARAMS_V2 = "ctx_v2"  # n_outputs_max_per_seq@24 inserted
 
 # Symbols that appear in llama.h in the same change as the V2 reorder: present
-# together on a V2 build, absent together on a V1 build. This is the structural
-# half of the layout decision; the value fingerprint below is the other half.
+# together on a V2 or V3 build, absent together on a V1 build. This is the
+# structural half of the layout decision; the value fingerprint below is the
+# other half. The V3 insertion added no symbol, so within the V2/V3 family the
+# fingerprint alone decides.
 _V2_MARKER_SYMBOLS = ("llama_load_mode_from_str", "llama_load_mode_name")
+
+# The layouts each symbol-probe answer is consistent with.
+_SYMBOL_FAMILY = {
+    MODEL_PARAMS_V1: (MODEL_PARAMS_V1,),
+    MODEL_PARAMS_V2: (MODEL_PARAMS_V2, MODEL_PARAMS_V3),
+}
 
 # Byte offsets/values that llama_model_default_params() produces for each
 # layout, used as a corroborating fingerprint rather than the primary signal.
@@ -77,9 +96,19 @@ _V2_MARKER_SYMBOLS = ("llama_load_mode_from_str", "llama_load_mode_name")
 # symbol probe counts as a mismatch.
 #   V1: main_gpu@24 == 0, use_mmap@65 == 1, use_extra_bufts@69 == 1
 #   V2: load_mode@24 == 1 (MMAP), check_tensors@65 == 0, use_extra_bufts@66 == 1
+#   V3: lazy_mode@28 == 1 (AUTO), kv_overrides low byte@66 == 0,
+#       use_extra_bufts@74 == 1
+# Offsets 28 and 66 hold a different value under the V2 defaults (main_gpu 0,
+# use_extra_bufts 1) and are always misses on a V2 build. Offset 74 lies past
+# the 72 bytes a V1/V2 build writes and reads whatever the return buffer held
+# (stack, never zeroed), so it can add ONE spurious V3 point on such a build and
+# never a second; V3 default bytes score at most 1 against V2. See
+# test_v3_default_bytes_never_resolve_to_v2 and
+# test_v3_fingerprint_is_immune_to_garbage_past_the_v2_struct.
 _FINGERPRINT = {
     MODEL_PARAMS_V1: ((24, "i", 0), (65, "B", 1), (69, "B", 1)),
     MODEL_PARAMS_V2: ((24, "i", 1), (65, "B", 0), (66, "B", 1)),
+    MODEL_PARAMS_V3: ((28, "i", 1), (66, "B", 0), (74, "B", 1)),
 }
 
 # Byte offsets that llama_context_default_params() produces for each
@@ -188,7 +217,7 @@ class AbiVerdict:
     failures: List[str] = field(default_factory=list)      # structural checks that failed
     diagnostics: List[str] = field(default_factory=list)   # value drift notes (not fatal)
     detail: str = ""                                       # human one-liner
-    layout: str = ""                                       # MODEL_PARAMS_V1 / _V2
+    layout: str = ""                                       # MODEL_PARAMS_V1 / _V2 / _V3
     context_layout: str = ""                                # CONTEXT_PARAMS_V1 / _V2
 
     @property
@@ -224,8 +253,12 @@ def _read_raw(lib: ctypes.CDLL, fn_name: str) -> bytes:
 def _fingerprint_layout(raw: bytes) -> Optional[str]:
     """Which layout the default-params BYTES are consistent with, or None.
 
-    SCORED, not all-or-nothing: on real bytes the wrong layout scores 0/3 while
-    the right one scores 3/3, so one drifted default still leaves a 2-0 winner.
+    SCORED, not all-or-nothing: on real bytes the right layout scores 3/3 and
+    every wrong one at most 1/3 from the bytes the build writes, so one
+    drifted default still leaves a clear winner (2 against at most 1). Bytes
+    the build never writes (a V1 alignment pad, the tail past its native size)
+    can add spurious points to V3 alone and never carry it past a layout that
+    scores 3.
 
     Inconclusive (None) is a legitimate answer for a genuine tie or a weak
     winner, and must never be upgraded into a refusal on its own. It is only
@@ -233,14 +266,16 @@ def _fingerprint_layout(raw: bytes) -> Optional[str]:
     """
     scores = {}
     for layout, checks in _FINGERPRINT.items():
-        try:
-            scores[layout] = sum(
-                struct.unpack_from("<" + fmt, raw, off)[0] == want
-                for off, fmt, want in checks)
-        except struct.error:
-            return None
+        hits = 0
+        for off, fmt, want in checks:
+            # An offset past the end of *raw* is a miss for this layout.
+            try:
+                hits += struct.unpack_from("<" + fmt, raw, off)[0] == want
+            except struct.error:
+                pass
+        scores[layout] = hits
     best, runner = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
-    # A majority of this layout's checks, and strictly ahead of the other.
+    # A majority of this layout's checks, and strictly ahead of every other.
     return best[0] if best[1] >= 2 and best[1] > runner[1] else None
 
 
@@ -259,12 +294,20 @@ def detect_model_params_layout(
     Two INDEPENDENT signals:
 
     * structural - the presence of the ``llama_load_mode_*`` helper symbols,
-      which llama.h introduced together with the reorder;
-    * value - the default-params byte fingerprint.
+      which llama.h introduced together with the V1 -> V2 reorder. Present
+      means V2 OR V3 (the V3 insertion added no symbol); absent means V1.
+    * value - the default-params byte fingerprint, which scores all three
+      layouts.
 
-    The structural signal decides. The value signal can agree, be inconclusive
-    (defaults are allowed to drift), or CONTRADICT. A contradiction is returned
-    to the caller, which turns it into a refusal.
+    The structural signal decides V1 versus the V2/V3 family; the value signal
+    decides V2 versus V3 within it. The value signal can agree, be
+    inconclusive, or CONTRADICT. Under the V1 symbols an inconclusive
+    fingerprint binds V1 on the symbols alone; under the load_mode symbols it
+    is itself a contradiction, because every V2 build fingerprints
+    conclusively, so such bytes belong to a layout this module does not bind.
+    Bytes that could not be READ at all (a mechanism failure) never
+    contradict: the family then binds V2 with a note. A contradiction is
+    returned to the caller, which turns it into a refusal.
     """
     notes: List[str] = []
 
@@ -280,17 +323,30 @@ def detect_model_params_layout(
             "the symbol-based layout probe is inconclusive")
 
     by_value: Optional[str] = None
+    bytes_read = False
     try:
         by_value = _fingerprint_layout(_read_raw(lib, "llama_model_default_params"))
+        bytes_read = True
     except Exception as e:  # noqa: BLE001 - probe failure must not condemn the lib
         notes.append(f"model_params fingerprint could not be read ({e})")
 
-    if by_symbol and by_value and by_symbol != by_value:
+    if by_symbol and by_value and by_value not in _SYMBOL_FAMILY[by_symbol]:
         return by_symbol, notes, (
             f"the llama_load_mode symbols say {by_symbol} but "
             f"llama_model_default_params()'s bytes say {by_value}"), False
 
-    layout = by_symbol or by_value
+    # Every V2 build's default bytes fingerprint conclusively as V2 (the V2
+    # set is closed: upstream b10105..b10649 and lemonade b1307), so bytes that
+    # were read and match neither V2 nor V3 under the load_mode symbols belong
+    # to a layout this module does not bind. See
+    # test_load_mode_family_with_inconclusive_bytes_is_refused.
+    if by_symbol == MODEL_PARAMS_V2 and bytes_read and by_value is None:
+        return by_symbol, notes, (
+            "the llama_load_mode symbols are present but "
+            "llama_model_default_params()'s bytes match neither the "
+            f"{MODEL_PARAMS_V2} nor the {MODEL_PARAMS_V3} layout"), False
+
+    layout = by_value or by_symbol
     assumed = layout is None
     if assumed:
         layout = MODEL_PARAMS_V1
@@ -300,13 +356,16 @@ def detect_model_params_layout(
     elif by_value is None:
         notes.append(
             f"model_params layout {layout} rests on the symbol probe alone "
-            "(the default-value fingerprint was inconclusive)")
+            "(the default-value fingerprint "
+            + ("was inconclusive" if bytes_read else "could not be read")
+            + (f"; the symbols cannot tell {MODEL_PARAMS_V2} from "
+               f"{MODEL_PARAMS_V3})" if layout == MODEL_PARAMS_V2 else ")"))
     return layout, notes, None, assumed
 
 
 def model_params_class(layout: str):
-    """The ctypes class for *layout*."""
-    return LlamaModelParamsV2 if layout == MODEL_PARAMS_V2 else LlamaModelParamsV1
+    """The ctypes class for *layout*. Raises KeyError on an unknown layout."""
+    return _MODEL_PARAMS_CLASSES[layout]
 
 
 def detect_context_params_layout(
@@ -372,14 +431,14 @@ def evaluate(mp, cp) -> AbiVerdict:
     non-fatal diagnostics.
 
     The layout of *mp* AND *cp* is taken from their classes (model_params
-    V1/V2, context_params V1/V2 - independent axes), so every check below reads
-    each field at the offset its actual bound layout uses. The checks name
-    fields, never raw offsets:
-    ``getattr(cp, name)`` resolves correctly regardless of which of the two
-    context_params layouts *cp* actually is."""
+    V1/V2/V3, context_params V1/V2 - independent axes), so every check below
+    reads each field at the offset its actual bound layout uses. The checks
+    name fields, never raw offsets: ``getattr(cp, name)`` resolves correctly
+    regardless of which of the two context_params layouts *cp* actually is."""
     failures: List[str] = []
     diags: List[str] = []
-    is_v2 = isinstance(mp, LlamaModelParamsV2)
+    has_load_mode = isinstance(mp, _LOAD_MODE_LAYOUTS)
+    is_v3 = isinstance(mp, LlamaModelParamsV3)
 
     # --- keystone: the long-stable UNSPECIFIED = -1 enums (context_params) ---
     # rope_scaling_type/pooling_type/attention_type read -1 on any aligned
@@ -402,11 +461,11 @@ def evaluate(mp, cp) -> AbiVerdict:
             "(expected a valid LLAMA_SPLIT_MODE: 0, 1, 2 or 3)"
         )
     # These two catch a MISALIGNED read (a pointer, a -1, or garbage landing in
-    # these fields). They cannot discriminate V1 from V2 on plausible defaults;
+    # these fields). They cannot discriminate V1/V2/V3 on plausible defaults;
     # choosing the right class is detect_model_params_layout's job.
     # The valid load-mode set mirrors llama.h and is imported, never spelled out
     # here; the message renders the set rather than restating it.
-    if is_v2 and mp.load_mode not in _VALID_LOAD_MODES:
+    if has_load_mode and mp.load_mode not in _VALID_LOAD_MODES:
         failures.append(
             f"model_params.load_mode = {mp.load_mode} "
             "(expected a valid LLAMA_LOAD_MODE: "
@@ -459,18 +518,22 @@ def evaluate(mp, cp) -> AbiVerdict:
     # The mmap default is expressed differently per layout, so name the field
     # that layout actually has. Two values count as typical, AUTO and MMAP;
     # anything else reports.
-    if is_v2:
+    if has_load_mode:
         checks.append(("model_params.load_mode", mp.load_mode,
                        (LLAMA_LOAD_MODE_AUTO, LLAMA_LOAD_MODE_MMAP)))
     else:
         checks.append(("model_params.use_mmap", bool(mp.use_mmap), True))
+    # lazy_mode is V3-only; any value other than AUTO is reported, never refused.
+    if is_v3:
+        checks.append(("model_params.lazy_mode", mp.lazy_mode, LLAMA_LAZY_MODE_AUTO))
     for label, got, exp in checks:
         expected = exp if isinstance(exp, tuple) else (exp,)
         if got not in expected:
             shown = " or ".join(str(e) for e in expected)
             diags.append(f"{label} = {got} (typical default {shown})")
 
-    layout = MODEL_PARAMS_V2 if is_v2 else MODEL_PARAMS_V1
+    layout = (MODEL_PARAMS_V3 if is_v3
+              else MODEL_PARAMS_V2 if has_load_mode else MODEL_PARAMS_V1)
     context_layout = (CONTEXT_PARAMS_V2 if isinstance(cp, LlamaContextParamsV2)
                        else CONTEXT_PARAMS_V1)
     if failures:
@@ -663,7 +726,7 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     once per process from ``load_lib`` (cached with the lib handle), so it adds
     no per-call overhead.
 
-    BEHAVIOUR FOR A FUTURE THIRD (or Nth) LAYOUT this module does not yet
+    BEHAVIOUR FOR A FUTURE FOURTH (or Nth) LAYOUT this module does not yet
     know about. Detection can be wrong two ways: INCONCLUSIVE (the probes
     report ``assumed=True`` and fall back to V1) or CONFIDENTLY WRONG (an
     unknown layout resembles a known one inside the checked window).
@@ -680,14 +743,21 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
 
     * ``model_params`` - the second layer buys NOTHING. evaluate()'s
       model_params checks are RANGE checks over fields whose plausible
-      values are legal in BOTH layouts (V2's load_mode=1 read as V1's
+      values are legal in EVERY layout (V2's load_mode=1 read as V1's
       main_gpu is a valid device index; V1's main_gpu=0 read as V2's
-      load_mode is a valid LLAMA_LOAD_MODE_NONE), so it returns ok with two
-      soft diagnostics in either direction. An unknown third model_params
-      layout can be detected confidently, pass evaluate(), and be bound and
-      crossed over the FFI by value. What protects model_params is DETECTION
-      being dual-signal (the llama_load_mode_* symbols AND the value
-      fingerprint) with disagreement itself a refusal.
+      load_mode is a valid LLAMA_LOAD_MODE_NONE; V3's lazy_mode=1 read as
+      V2's main_gpu is a valid device index), so it returns ok with soft
+      diagnostics in any direction. An unknown model_params layout can be
+      detected confidently, pass evaluate(), and be bound and crossed over
+      the FFI by value. What protects model_params is DETECTION: the
+      llama_load_mode_* symbols split V1 from the V2/V3 family with
+      disagreement itself a refusal, and the value fingerprint splits V2
+      from V3 on its own (the V3 insertion added no symbol). Under the
+      load_mode symbols an inconclusive fingerprint is ALSO a refusal
+      (every V2 build fingerprints conclusively, so such bytes are a layout
+      this module does not bind); the residual is a future layout whose
+      default bytes still satisfy two of V3's three checks, which binds V3
+      silently.
 
     So a new model_params layout needs its OWN detection signal; nothing
     downstream will catch a wrong choice on that axis."""
