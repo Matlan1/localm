@@ -883,13 +883,21 @@ def _load_keystore_checked() -> tuple:
 
 
 def _load_keystore() -> list:
-    """The keystore records, or [] when the file is absent, empty, or
-    (after retrying) persistently unreadable. For a plain READ - verify(),
-    list_keys(), fs_access_for(), rag_roots_for(), key_hash_live(),
-    scopes_for_key_hash() - failing toward "no match" is the safe direction.
+    """The keystore records, or [] when the file is absent, corrupt, or
+    unreadable. For a plain READ - verify(), list_keys(), fs_access_for(),
+    rag_roots_for(), key_hash_live(), scopes_for_key_hash() - failing toward
+    "no match" is the safe direction, so this never needs ``read_ok`` and
+    deliberately does NOT go through ``_load_keystore_checked()``/
+    ``config._read_json_checked()``: that pre-checks ``Path.is_file()``, and
+    ``verify()`` calls this on every bearer-token check. See
+    test_the_gate_answer_does_not_depend_on_the_filesystem.
     A read-modify-write must use ``_load_keystore_for_write`` instead, which
     refuses rather than silently emptying the store."""
-    return _load_keystore_checked()[0]
+    try:
+        data = json.loads(keystore_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
 
 
 def _load_keystore_for_write() -> list:
