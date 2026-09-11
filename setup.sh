@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export LOCALM_SETUP=1
 
-YES=0; UNINSTALL=0; PURGE=0
+YES=0; UNINSTALL=0; PURGE=0; RUNTIME_OK=1
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) YES=1 ;;
@@ -95,6 +95,29 @@ heartbeat_start() {
 heartbeat_stop() {
   [ -n "$HB_FLAG" ] && : > "$HB_FLAG"
   return 0
+}
+handle_provision_failure() {  # handle_provision_failure "retry-cmd-hint" "detail"
+  # Called only for a genuine setup-llama fault (not a DECLINED provision -
+  # those already return 0 without reaching here). Offers to continue the
+  # rest of setup without a working runtime instead of throwing the whole
+  # install away; returns 0 on continue, exits 1 on abort. --yes mode answers
+  # its own prompt with the default (continue), via ask().
+  local hint="$1" detail="$2" cont
+  RUNTIME_OK=0
+  say ""
+  say "  [!] $detail"
+  say "      No model can load until this is fixed. Retry any time with:"
+  say "        $hint"
+  say ""
+  cont="$(ask "  Continue the rest of setup without a working runtime? [Y/n]: " Y)"
+  case "$cont" in
+    [Nn]*)
+      offer_report "localm setup-llama failed" "$detail"
+      say "  Aborted - re-run bash setup.sh when ready."
+      exit 1
+      ;;
+  esac
+  offer_report "localm setup-llama failed" "$detail (continuing setup without a runtime)"
 }
 offer_report() {  # offer_report "summary" "detail"
   # Offer to file a bug report for a setup failure via the standalone reporter
@@ -556,7 +579,9 @@ if [ "$IS_APPLE_SILICON" = 1 ]; then
   say "    [7] metal    - Apple Silicon, native GPU acceleration$_m7"
   _pick_range="1-7"
 fi
-say "    (your pick is load-tested; a failure offers Vulkan, never a silent swap)"
+say "    (your pick is load-tested; on failure you can retry after fixing the"
+say "     cause, or continue setup and provision a runtime later - never a"
+say "     silent swap to a different backend)"
 bpick="$(ask "  Pick $_pick_range [1]: " 1)"
 case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
@@ -570,25 +595,16 @@ if [ "$LOCALM_BIN_OK" != 1 ]; then
 elif [ "$BACKEND" = own ]; then
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
-    .venv/bin/localm setup-llama --from "$buildpath" || {
-      # Mirror setup.bat: a declined/failed provision stops setup with a non-zero
-      # exit instead of silently continuing into the torch/data-dir steps as if
-      # the runtime were installed (NEW-CUDADECLINE).
-      say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --from <dir>"
-      offer_report "localm setup-llama failed" "Provisioning the native llama.cpp runtime with --from failed during setup."
-      exit 1
-    }
+    .venv/bin/localm setup-llama --from "$buildpath" || handle_provision_failure \
+      ".venv/bin/localm setup-llama --from <dir>" \
+      "Provisioning the native llama.cpp runtime with --from failed during setup."
   else
     say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
   fi
 else
-  .venv/bin/localm setup-llama --backend "$BACKEND" || {
-    # Mirror setup.bat's `if errorlevel 1 (... exit /b 1)`: stop on a declined or
-    # failed runtime provision rather than falling through silently (NEW-CUDADECLINE).
-    say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --backend $BACKEND"
-    offer_report "localm setup-llama failed" "Provisioning the native llama.cpp runtime (--backend $BACKEND) failed during setup."
-    exit 1
-  }
+  .venv/bin/localm setup-llama --backend "$BACKEND" || handle_provision_failure \
+    ".venv/bin/localm setup-llama --backend $BACKEND --force" \
+    "Provisioning the native llama.cpp runtime (--backend $BACKEND) failed during setup."
 fi
 
 # ---- PyTorch + transformers for the HuggingFace backend (FOLLOWS the backend) -
@@ -769,6 +785,12 @@ if [ "$LOCALM_BIN_OK" = 1 ]; then
   say "    ./localm-launcher.sh    graphical launcher (GUI / chat / server / coder)"
   say "    ./localm.sh <args>      the localm CLI, e.g.:  ./localm.sh gui"
   say "    .venv/bin/localm ...    CLI directly"
+  if [ "$RUNTIME_OK" != 1 ]; then
+    say ""
+    say "  [!] No model can load yet - the native llama.cpp runtime did not finish"
+    say "      provisioning. Finish it any time with:"
+    say "        .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
+  fi
 else
   say "  Done, with one open issue: .venv/bin/localm never got installed (see the"
   say "  warning above), so the CLI is not usable yet:"

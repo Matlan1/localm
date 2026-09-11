@@ -35,9 +35,20 @@ If inference fails or hangs on macOS, fall back to CPU:
 Before anything is kept installed, setup **load-tests** the library - and that
 load includes localm's own ABI check: does this exact build's struct layout and
 enum values still match what localm's native bindings expect (an upstream release
-has broken this before without changing the visible API). A build that fails
-either way is never left installed; setup explains why and falls back to a build
-that is confirmed to work.
+has broken this before without changing the visible API). A build that fails is
+never left installed: for a vendor backend (cuda/hip/sycl/amd-rocm) setup
+explains why and offers the universal Vulkan build instead; `vulkan`/`cpu` are
+themselves the universal builds, so a failure there instead names the missing
+piece and offers a retry, then - if you decline or it still fails - lets the
+rest of setup continue so you can provision a runtime later instead.
+
+**On Linux**, every `cpu`/`vulkan` build upstream publishes links against the
+system's OpenMP runtime (`libgomp.so.1`) but does not ship it, so a bare/minimal
+distribution image can be missing it. setup bundles a copy automatically (the
+same way manylinux Python wheels do), so this normally never comes up. If a
+load still fails naming a *different* missing `.so`, that is a genuine system
+dependency - e.g. `libvulkan1` (or your GPU vendor's Vulkan ICD) for the
+`vulkan` build - install the named package and retry.
 
 ## Managing the runtime after install: pin, switch, or roll back
 

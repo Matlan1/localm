@@ -28,6 +28,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **The native llama.cpp runtime now loads on a fresh Linux install that has no
+  system OpenMP library.** Upstream's `cpu`/`vulkan` Linux builds need
+  `libgomp.so.1` but do not ship it; `setup.sh`/`localm setup-llama` now
+  bundles a copy automatically, so a minimal distro image works without
+  installing anything by hand.
+- **`setup.sh` no longer throws away the rest of the install when the native
+  runtime fails to provision.** It now names the missing piece, offers a
+  retry, and - if you decline or it still fails - lets setup finish (PyTorch,
+  data directory, launcher, menu entry) so you can provision a runtime later
+  with `localm setup-llama`, instead of aborting before any of that runs.
 - **The bundled llama.cpp runtime is current again: `localm setup-llama` now
   provisions upstream build b10905 instead of b10375.** The newer build
   carries a month of upstream fixes and model support, and when a model is
