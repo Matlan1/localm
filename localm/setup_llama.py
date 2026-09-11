@@ -2286,23 +2286,16 @@ def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
     return total
 
 
-# Every upstream Linux release tarball (cpu, vulkan, and every other backend
-# sharing libggml-base.so) links OpenMP dynamically and ships no libgomp of
-# its own - true continuously since before localm supported Linux at all (see
-# _informative_error_line's docstring and issue #451). Bundling one copy
-# beside the runtime, the same way manylinux wheels vendor libgomp for pip
-# users, makes the Linux runtime self-contained the way it already claims to
-# be. Sourced from Debian bullseye's libgomp1 (GCC 10): its own GLIBC floor
-# (2.17) sits well under what upstream's ubuntu-22.04 build already requires
-# (2.34), and it exports GOMP_1.0/4.0/4.5 + OMP_1.0, the only versions ggml
-# calls. Pinned to an immutable snapshot.debian.org URL - Debian, not Ubuntu:
-# Ubuntu's pool compresses a .deb's data member with zstd, which this venv's
-# Python cannot read without a third-party module; Debian uses xz, readable
-# with the stdlib alone (see _extract_libgomp_from_deb).
+# Bundles libgomp.so.1: upstream's Linux release tarballs link OpenMP
+# dynamically and ship no copy of their own. Pinned by sha256 to an
+# immutable snapshot.debian.org URL - Debian, not Ubuntu, whose pool
+# compresses a .deb's data member with zstd (unreadable by this venv's
+# Python without a third-party module; Debian uses xz). See
+# _extract_libgomp_from_deb.
 _LIBGOMP_SONAME = "libgomp.so.1"
 _LIBGOMP_DEB_URL = "https://snapshot.debian.org/file/855f73e203af87b85693b43b807f0ba1d6bb410e"
 _LIBGOMP_DEB_SHA256 = "4530c95aefa48e33fd8cf4acbe5c4b559dbe7bdf4c56469986c83a203982cef1"
-_LIBGOMP_DEB_MIN_BYTES = 20_000  # real download is ~98 KB; catches an HTML/error substitute
+_LIBGOMP_DEB_MIN_BYTES = 20_000  # catches an HTML/error substitute for the real file
 _LIBGOMP_LICENSE_NOTICE = """\
 libgomp.so.1 (GCC's OpenMP runtime) is bundled here from Debian's libgomp1
 package, licensed GPL-3.0-or-later WITH the GCC Runtime Library Exception
@@ -2371,17 +2364,12 @@ def _extract_libgomp_from_deb(deb_path: Path, workdir: Path) -> Path:
 def _bundle_missing_native_deps(target: Path) -> None:
     """After a Linux backend is extracted into *target*, provide any native
     dependency the extracted ``.so`` files need but neither the archive nor
-    this runtime dir already supplies. Currently handles ``libgomp.so.1``
-    only - see the comment above _LIBGOMP_SONAME - and is a silent no-op for
-    anything else that might be missing (a vendor Vulkan/ROCm/CUDA runtime
-    library genuinely has to come from the system), leaving the load-test and
-    _name_missing_shared_lib to name that honestly instead.
+    this runtime dir already supplies. Currently handles only
+    ``libgomp.so.1`` (see the comment above _LIBGOMP_SONAME); a silent no-op
+    for every other missing dependency and for Windows/macOS.
 
-    Never raises: a failed fetch here must not abort a provision that would
-    otherwise succeed (this backend's binaries might not need libgomp at
-    all), and if the runtime still cannot load afterwards, the load failure
-    names the real cause either way. A failure IS still surfaced, as a
-    warning - never silently treated as if bundling had succeeded."""
+    Never raises. A failure to bundle is logged as a warning, never silently
+    treated as success."""
     if sys.platform in ("win32", "darwin"):
         return
     try:
