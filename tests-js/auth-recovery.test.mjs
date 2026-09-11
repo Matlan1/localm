@@ -4,7 +4,29 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
 
-const tick = () => new Promise((r) => setTimeout(r, 80));
+// Polls until fn() is true. The timeout is a failure bound, not a delay: every
+// wait below sits on a chain of awaited fetch stubs that resolve at once.
+const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, timeout = 2000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (fn()) return true; await settle(15); }
+  return false;
+}
+// The load-time bootAuthProbe() has reached its verdict: lockUI / unlockUI /
+// onServerUnreachable each set window.__localmLocked, and the open-mode
+// stale-shell path sets the localm.shellReset marker instead.
+async function bootSettled(window) {
+  assert.ok(await waitFor(() => window.__localmLocked !== undefined
+    || window.sessionStorage.getItem("localm.shellReset") === "1"),
+    "the load-time bootAuthProbe() never reached a verdict");
+}
+// The one-shot latch onShellTokenRejected() flips synchronously on entry, so
+// whether the fetch wrapper routed a 403 into the recovery is readable the
+// moment the awaited fetch returns.
+function recoveryStarted(window) {
+  runScript(window, "window.__recoveryStarted = _shellRecoveryStarted;");
+  return window.__recoveryStarted;
+}
 const keyless401 = () => Promise.resolve({
   ok: false, status: 401, json: async () => ({}), text: async () => "",
 });
@@ -34,7 +56,7 @@ function stubSWAndCaches(window) {
 
 test("AUTH-1b: a successful login that still boots 401 self-heals (SW reset + reload, once)", async () => {
   const { window } = loadApp({ fetchImpl: keyless401 });
-  await tick();   // load-time probe: 401, no marker -> gate shown, NO reset
+  await bootSettled(window);   // load-time probe: 401, no marker -> gate shown, NO reset
   stubReload(window);
   const { unregistered, deleted } = stubSWAndCaches(window);
   window.sessionStorage.setItem("localm.loginOk", "1");   // a prior login succeeded
@@ -55,7 +77,7 @@ test("AUTH-1b: a successful login that still boots 401 self-heals (SW reset + re
 
 test("AUTH-1b: a 401 with NO prior login just shows the gate (no SW nuke)", async () => {
   const { window } = loadApp({ fetchImpl: keyless401 });
-  await tick();
+  await bootSettled(window);
   stubReload(window);
   const { unregistered, deleted } = stubSWAndCaches(window);
   // no loginOk marker
@@ -68,7 +90,7 @@ test("AUTH-1b: a 401 with NO prior login just shows the gate (no SW nuke)", asyn
 
 test("AUTH-1b: an UNREACHABLE server shows the reconnect overlay, not the key gate", async () => {
   const { window } = loadApp({ fetchImpl: down });
-  await tick();
+  await bootSettled(window);
   const ov = window.document.getElementById("reconnect-overlay");
   assert.ok(ov, "a reconnect overlay is created");
   assert.notEqual(ov.style.display, "none", "and shown");
@@ -82,11 +104,10 @@ test("AUTH-1b: submitting the gate with a good key marks the login (so the reloa
   const fetchImpl = async (url) => (String(url).includes("/api/session") ? allOk() : keyless401());
   const { window } = loadApp({ fetchImpl });
   stubReload(window);
-  await tick();
+  await bootSettled(window);
   window.document.getElementById("key-gate-input").value = "good-key";
   window.document.getElementById("key-gate-submit").click();
-  await tick();
-  assert.equal(window.sessionStorage.getItem("localm.loginOk"), "1",
+  assert.ok(await waitFor(() => window.sessionStorage.getItem("localm.loginOk") === "1"),
     "a successful login is marked so a still-401 reload self-heals instead of looping");
 });
 
@@ -101,7 +122,7 @@ const forbidden = () => Promise.resolve({
 test("RESTART: an open-mode boot whose shell token is STALE (403) never unlocks " +
      "the shell, and attempts the recovery", async () => {
   const { window } = loadApp({ fetchImpl: forbidden, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   // The load-time probe already ran; assert on what it left behind.
   assert.notEqual(window.__localmLocked, false,
     "a 403 must never reach unlockUI() - that is what presented a dead shell as a live one");
@@ -112,7 +133,7 @@ test("RESTART: an open-mode boot whose shell token is STALE (403) never unlocks 
 test("RESTART: a 403 that SURVIVES the one-shot recovery says so instead of " +
      "reloading again or unlocking", async () => {
   const { window } = loadApp({ fetchImpl: forbidden, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   // The guard is already set; re-arm the in-page latch so the probe runs again.
   runScript(window, "_shellRecoveryStarted = false;");
   const { unregistered } = stubSWAndCaches(window);
@@ -133,14 +154,17 @@ test("RESTART: a shell-token 403 on an ORDINARY call (the real restart case: the
     ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
     : { ok: false, status: 403, json: async () => ({}), text: async () => "" });
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
 
   stubReload(window);
   const { unregistered, deleted } = stubSWAndCaches(window);
   status = 403;                       // the server re-execed; the token is stale
   await window.fetch("/api/stats", { headers: window.authHeaders() });
-  await tick();
+  assert.equal(recoveryStarted(window), true,
+    "the fetch wrapper routed the ordinary-route 403 into the shell recovery");
+  assert.ok(await waitFor(() => deleted.length > 0),
+    "the recovery dropped the SW caches (its last step before the reload)");
 
   assert.equal(unregistered.length, 1,
     "the fetch wrapper recognised a rejected shell token and recovered - without " +
@@ -167,7 +191,7 @@ test("RESTART: a 403 from /api/image-proxy is the route saying the feature is OF
     ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
     : { ok: false, status: 403, json: async () => ({}), text: async () => "" });
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
 
   stubReload(window);
@@ -176,14 +200,24 @@ test("RESTART: a 403 from /api/image-proxy is the route saying the feature is OF
   await window.fetch(
     "/api/image-proxy?url=" + encodeURIComponent("https://example.invalid/a.png"),
     { headers: window.authHeaders() });
-  await tick();
 
+  assert.equal(recoveryStarted(window), false,
+    "the fetch wrapper must not route the image proxy's own 403 into the shell recovery");
   assert.equal(unregistered.length, 0,
     "the service worker must survive: the credential was fine, the feature is off");
   assert.deepEqual(deleted, [], "and its caches with it");
   assert.equal(window.sessionStorage.getItem("localm.shellReset"), null,
-    "the one-shot recovery guard was never armed, so a later REAL stale token " +
-    "still gets its single recovery");
+    "the one-shot recovery guard was never armed");
+
+  // Positive control, same window: a later REAL stale-token 403 on an ordinary
+  // route still gets its single recovery, and the harness observes it.
+  await window.fetch("/api/stats", { headers: window.authHeaders() });
+  assert.equal(recoveryStarted(window), true,
+    "positive control: an ordinary-route 403 in this same window IS routed into the recovery");
+  assert.ok(await waitFor(() => deleted.length > 0),
+    "positive control: the recovery's cache drop is observable from this harness");
+  assert.equal(unregistered.length, 1, "exactly the control's recovery ran, not an earlier one");
+  assert.equal(window.sessionStorage.getItem("localm.shellReset"), "1");
 });
 
 test("RESTART: a 403 from /api/discover/search is the route's own net_mode=off " +
@@ -199,7 +233,7 @@ test("RESTART: a 403 from /api/discover/search is the route's own net_mode=off "
     ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
     : { ok: false, status: 403, json: async () => ({ detail: "Network access is off. Turn it on, or allow downloads only, in Settings → Network." }), text: async () => "" });
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
 
   stubReload(window);
@@ -208,27 +242,40 @@ test("RESTART: a 403 from /api/discover/search is the route's own net_mode=off "
   await window.fetch(
     "/api/discover/search?q=smollm&formats=gguf&types=llm",
     { headers: window.authHeaders() });
-  await tick();
 
+  assert.equal(recoveryStarted(window), false,
+    "the fetch wrapper must not route the search route's own 403 into the shell recovery");
   assert.equal(unregistered.length, 0,
     "the service worker must survive: the credential was fine, net_mode said no");
   assert.deepEqual(deleted, [], "and its caches with it");
   assert.equal(window.sessionStorage.getItem("localm.shellReset"), null,
-    "the one-shot recovery guard was never armed, so a later REAL stale token " +
-    "still gets its single recovery");
+    "the one-shot recovery guard was never armed");
+
+  // Positive control, same window: a later REAL stale-token 403 on an ordinary
+  // route still gets its single recovery, and the harness observes it.
+  await window.fetch("/api/stats", { headers: window.authHeaders() });
+  assert.equal(recoveryStarted(window), true,
+    "positive control: an ordinary-route 403 in this same window IS routed into the recovery");
+  assert.ok(await waitFor(() => deleted.length > 0),
+    "positive control: the recovery's cache drop is observable from this harness");
+  assert.equal(unregistered.length, 1, "exactly the control's recovery ran, not an earlier one");
+  assert.equal(window.sessionStorage.getItem("localm.shellReset"), "1");
 });
 
 test("RESTART: a 403 with NO shell token is NOT swept into the shell recovery", async () => {
   const { window } = loadApp({ fetchImpl: forbidden });   // no shellToken
-  await tick();
-  assert.equal(window.sessionStorage.getItem("localm.shellReset"), null,
+  await bootSettled(window);
+  assert.equal(window.__localmLocked, false,
+    "the probe reached its ordinary verdict on the 403 instead of the recovery branch");
+  assert.equal(recoveryStarted(window), false,
     "no shell token means this is some other 403, not a stale open-mode shell");
+  assert.equal(window.sessionStorage.getItem("localm.shellReset"), null);
 });
 
 test("RESTART: sentShellToken tells the two credential modes apart - it is what " +
      "keeps this recovery off every other kind of 403", async () => {
   const { window } = loadApp({ fetchImpl: allOk, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
 
   window.__LOCALM_CSRF__ = "";                       // open mode
   assert.equal(window.sentShellToken(window.authHeaders()), true,
@@ -262,7 +309,7 @@ test("RESTART: the reconnect poll does not reload until it has seen the server "
     return { ok: true, status: 200, json: async () => ({ models: [] }), text: async () => "" };
   };
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   const p = armPoll(window);
 
   window.onServerUnreachable();          // the restart path: no down observed yet
@@ -284,7 +331,7 @@ test("RESTART: the reconnect poll does not reload until it has seen the server "
 test("RESTART: the wait for a down is BOUNDED - a re-exec faster than one poll " +
      "must not strand the user on the overlay forever", async () => {
   const { window } = loadApp({ fetchImpl: allOk, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   const p = armPoll(window);
   window.onServerUnreachable();
   await p.poll();
@@ -300,7 +347,7 @@ test("RESTART: the wait for a down is BOUNDED - a re-exec faster than one poll "
 test("RESTART: a caller that DID observe the server down still reloads on the " +
      "first answer (no added latency for a plain outage)", async () => {
   const { window } = loadApp({ fetchImpl: allOk, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   const p = armPoll(window);
 
   window.onServerUnreachable({ sawDown: true });   // bootAuthProbe's path
@@ -323,7 +370,7 @@ test("RESTART: with a priorInstanceId, the poll waits for a DIFFERENT " +
     return { ok: true, status: 200, json: async () => ({ models: [] }), text: async () => "" };
   };
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   const p = armPoll(window);
 
   window.onServerUnreachable({ priorInstanceId: "old-proc" });
@@ -350,7 +397,7 @@ test("RESTART: with a priorInstanceId, a /whoami answer with no instance_id " +
     return { ok: true, status: 200, json: async () => ({ models: [] }), text: async () => "" };
   };
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
-  await tick();
+  await bootSettled(window);
   const p = armPoll(window);
 
   window.onServerUnreachable({ priorInstanceId: "old-proc" });
@@ -364,7 +411,7 @@ test("RESTART: with a priorInstanceId, a /whoami answer with no instance_id " +
 
 test("AUTH-1b: a 200 boot clears the recovery markers and reveals the app", async () => {
   const { window } = loadApp({ fetchImpl: allOk });
-  await tick();
+  await bootSettled(window);
   window.sessionStorage.setItem("localm.loginOk", "1");
   window.sessionStorage.setItem("localm.swReset", "1");
   const ok = await window.bootAuthProbe();

@@ -93,8 +93,9 @@ def _flat(text: str) -> str:
 # interpreter took to start, and a delay INSIDE the locked read-modify-write
 # (after _load(), before the save) widens the window a lost update needs.
 #
-# NEUTER=1 replaces the cross-process lock with a no-op IN THE CHILD ONLY: with
-# it, an update must be lost.
+# NEUTER=1 replaces the cross-process lock with a no-op IN THE CHILD ONLY, and
+# adds a second rendezvous after each child's _load(): both children then save
+# from a stale in-memory state, so an update must be lost.
 _WORKER = r"""
 import contextlib, sys, time
 from pathlib import Path
@@ -110,6 +111,12 @@ if neuter:
 
 _orig = store.Collection._add_paths_locked
 def _slow(self, *a, **kw):
+    if neuter:
+        # This child has loaded; wait (bounded) until the sibling has too.
+        (rv / (Path(doc).name + ".loaded")).write_text("1", encoding="utf-8")
+        _loaded_deadline = time.time() + 10
+        while len(list(rv.glob("*.loaded"))) < 2 and time.time() < _loaded_deadline:
+            time.sleep(0.01)
     time.sleep(delay)          # widen the load-modify-save window, inside the lock
     return _orig(self, *a, **kw)
 store.Collection._add_paths_locked = _slow
@@ -126,9 +133,11 @@ coll.create()
 coll.add_paths([doc])
 """
 
-# Long enough to swamp the residual skew the rendezvous leaves (milliseconds),
-# short enough that four real interpreters are not held on the box any longer
-# than the race needs.
+# The locked arm's window: long enough to swamp the residual skew the ready
+# rendezvous leaves (milliseconds), short enough that four real interpreters are
+# not held on the box any longer than the race needs. The neutered arm does not
+# depend on it: its children rendezvous again on "*.loaded" after each has read
+# the collection, so both save from a stale state however they are scheduled.
 _RACE_DELAY = 0.5
 
 
@@ -171,8 +180,9 @@ def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path,
                                                           base, docs):
     """FIRES-CONTROL for the test above.
 
-    Same two processes, same timing, with the cross-process lock neutralised in
-    the children: one update MUST be lost."""
+    Same two processes, with the cross-process lock neutralised in the children
+    and each child held until BOTH have read the collection: one update MUST be
+    lost."""
     survived = _race_two_writers(tmp_path, base, docs, "kb", neuter=True)
     assert survived != {"alpha.txt", "beta.txt"}, (
         "with the cross-process lock removed, two overlapping indexing runs "

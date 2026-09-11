@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 
 import pytest
 
@@ -198,23 +197,25 @@ def test_atomic_write_unique_tmp_path_survives_concurrent_saves(tmp_path):
 
 
 def test_concurrent_consolidation_and_add_no_data_loss(tmp_path, monkeypatch):
-    """run_consolidation() snapshots store.all(), then for each candidate that
-    near-but-not-exactly matches an existing record calls the SLOW per-candidate
-    _decide() LLM step, before finally overwriting the whole namespace via
-    replace(). A concurrent add() landing during THAT decide call must block on
-    the namespace lock and survive, not be silently discarded by the stale
-    snapshot's overwrite.
+    """run_consolidation() snapshots store.all() under a brief lock, runs the
+    SLOW per-candidate _decide() LLM step for each near-but-not-exactly matching
+    candidate with NO lock held, then reloads under the lock and merges the
+    decided deltas onto that fresh state before replace(). An add() that commits
+    inside the lock-free decide window lands between the snapshot and the
+    replace() and must survive the merge, not be discarded by a stale-snapshot
+    overwrite.
 
-    The delay is placed inside _decide() (identified by the "EXISTING:" marker
-    unique to _DECIDE_PROMPT), not extract(): a version of this test that only
-    blocks during extract() (before store.all() is even read) stays green even
-    with consolidate.py's outer store.lock() removed, because replace()'s own
-    lock+reload already covers that narrower window - it would not catch a
-    regression that re-acquires the lock only around the final replace() rather
-    than across the whole decide loop. The seeded record's text is a difflib
+    The delay sits inside _decide() (the "EXISTING:" marker unique to
+    _DECIDE_PROMPT), after store.all() has been read: an add() committed before
+    the snapshot is read is covered by the reload alone, so the window under
+    test is the one after the snapshot. The seeded record's text is a difflib
     near-duplicate of the extracted candidate (ratio in (MATCH_THRESHOLD,
     NEAR_DUP_RATIO)), so _nearest() routes it to _decide() instead of a
-    deterministic ADD/NO_OP shortcut that would skip the LLM call."""
+    deterministic ADD/NO_OP shortcut that would skip the LLM call.
+
+    The add thread is joined and its record checked on disk BEFORE the decide
+    gate is released, so the add is committed inside the window on every run.
+    _decide_changeset holds no lock, so that join cannot deadlock."""
     monkeypatch.setenv("LOCALM_MODE", "log")
     from localm.memory import run_consolidation
     store = MemoryStore("owner", "chat", root=tmp_path)
@@ -223,11 +224,13 @@ def test_concurrent_consolidation_and_add_no_data_loss(tmp_path, monkeypatch):
 
     decide_started = threading.Event()
     release = threading.Event()
+    add_join_timeout = 5
+    decide_gate_timeout = 2 * add_join_timeout
 
     def slow_complete(prompt: str) -> str:
         if "EXISTING:" in prompt:                 # _decide(), not extract()
             decide_started.set()
-            release.wait(timeout=5)
+            release.wait(timeout=decide_gate_timeout)
             return json.dumps({"decision": "ADD", "confidence": 0.9})
         return json.dumps({"facts": [
             {"fact": "User prefers dark mode in the terminal", "confidence": 0.9}]})
@@ -256,10 +259,16 @@ def test_concurrent_consolidation_and_add_no_data_loss(tmp_path, monkeypatch):
 
     t2 = threading.Thread(target=add_worker)
     t2.start()
-    time.sleep(0.2)          # let add_worker actually reach and block on the lock
+    t2.join(timeout=add_join_timeout)
+    assert not t2.is_alive(), (
+        "the concurrent add() did not complete inside the decide window")
+    assert not errors, errors
+    on_disk = {r.id for r in MemoryStore("owner", "chat", root=tmp_path).all()}
+    assert concurrent["rec"].id in on_disk, (
+        "the concurrent add() was not committed before the decide gate was released")
     release.set()
     t1.join(timeout=5)
-    t2.join(timeout=5)
+    assert not t1.is_alive(), "consolidation did not finish after its decide gate opened"
 
     assert not errors, errors
     final_ids = {r.id for r in MemoryStore("owner", "chat", root=tmp_path).all()}
