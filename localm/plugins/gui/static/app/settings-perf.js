@@ -531,6 +531,15 @@ export function confirmWebRequest(call) {
   // R27: a remembered choice short-circuits the modal for the rest of the session.
   if (webAskSession !== null) return Promise.resolve(webAskSession);
   return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
     const args = (call && call.args) || {};
     const target = args.query || args.url || "";
     const verb = call && call.name === "fetch_url" ? "fetch a web page" : "search the web";
@@ -549,19 +558,20 @@ export function confirmWebRequest(call) {
       const deny = el("button", "btn-secondary", "Deny");
       deny.onclick = () => {
         if (cb.checked) webAskSession = false;
-        $("modal").style.display = "none";
-        resolve(false);
+        finish(false);
       };
       const allow = el("button", "btn-primary", "Allow");
       allow.onclick = () => {
         if (cb.checked) webAskSession = true;
-        $("modal").style.display = "none";
-        resolve(true);
+        finish(true);
       };
       row.appendChild(deny);
       row.appendChild(allow);
       body.appendChild(row);
     });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
   });
 }
 window.confirmWebRequest = confirmWebRequest;
