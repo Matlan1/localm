@@ -142,14 +142,16 @@ def _detect(arch, extra):
 def test_metadata_key_alone_does_not_engage_mtp():
     """An architecture that ships nextn metadata but builds no MTP graph is refused.
 
-    glm4moe (GLM-4.5 / 4.5-Air / 4.6) is the real case: published GGUFs carry
-    glm4moe.nextn_predict_layers=1 and the NextN tensors, while upstream's
-    build_arch_graph ignores the MTP graph type, so an MTP context there is a
-    second full decoder rather than a draft head.
+    llama.cpp reads nextn_predict_layers for every architecture, so the key can
+    appear on one whose build_arch_graph ignores the MTP graph type; an MTP
+    context there is a second full decoder rather than a draft head. glm4
+    (dense GLM-4) is outside MTP_GRAPH_ARCHITECTURES at the pinned build.
+    (glm4moe was the real published case until upstream gave it an MTP graph;
+    it is now in the allowlist, which is why the example moved.)
     """
-    supported, reason = _detect("glm4moe", {"glm4moe.nextn_predict_layers": "1"})
+    supported, reason = _detect("glm4", {"glm4.nextn_predict_layers": "1"})
     assert supported is False
-    assert reason == "no-mtp-graph:glm4moe"
+    assert reason == "no-mtp-graph:glm4"
 
 
 def test_mtp_engages_on_an_architecture_with_a_draft_graph():
@@ -943,13 +945,13 @@ def test_mtp_draft_vram_is_zero_when_mtp_is_disabled():
 
 
 def test_mtp_draft_vram_is_zero_when_the_architecture_has_no_real_mtp_graph():
-    # glm4moe declares the nextn metadata key but build_arch_graph ignores
-    # gtype for it - the SAME false-positive _api.py's MTP_GRAPH_ARCHITECTURES
-    # gate already refuses at load time. Sizing must agree, or it charges VRAM
-    # for a context that will never actually be created.
+    # An architecture outside MTP_GRAPH_ARCHITECTURES declaring the nextn
+    # metadata key - the SAME false-positive _api.py's gate already refuses at
+    # load time. Sizing must agree, or it charges VRAM for a context that will
+    # never actually be created.
     b = _mtp_sizing_backend()
     with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
-               return_value=("glm4moe", 1)):
+               return_value=("glm4", 1)):
         assert b._mtp_draft_context_vram_bytes() == 0
 
 
