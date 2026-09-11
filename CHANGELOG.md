@@ -114,6 +114,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   collection, and adding folders to the knowledge index all left their button disabled and the
   action silently abandoned if the dialog was closed that way instead of with Cancel. Closing it
   that way is now treated the same as Cancel.
+- **The desktop launcher failed to start any mode when installed under a folder path containing a
+  space or an ampersand.** It now launches correctly regardless of where localm is installed.
+- **Uninstalling could leave the Desktop shortcut behind on a machine with a redirected Desktop
+  folder (for example OneDrive's "Back up your folders").** The installer recorded a guessed path
+  instead of the one it actually wrote, so uninstall believed the shortcut was already gone and
+  skipped removing it.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
@@ -138,6 +144,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the page, discarding the only explanation of what had actually happened. It now shows exactly
   what did not clear and tells you that you have been signed out in this browser and need to sign
   in again with the previous key.
+- **The desktop launcher no longer builds a command line from a value containing a literal quote
+  character.** A HuggingFace spec or URL typed into the Import-from-URL dialog, or a saved coder
+  project folder, could contain a quote positioned so Windows ran a second, unintended command
+  alongside the one you launched. Such a value is now refused with an error instead of being used.
 
 ## [0.2.0] - 2026-09-04
 

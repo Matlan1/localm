@@ -510,29 +510,31 @@ call :flush
 set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
 if not defined SCPICK set "SCPICK=1"
 set "SCPATH="
-if "%SCPICK%"=="1" set "SCPATH=%USERPROFILE%\Desktop\LocaLM.lnk"
-if "%SCPICK%"=="2" set "SCPATH=%USERPROFILE%\Desktop\LocaLM.lnk"
 if "%SCPICK%"=="1" (
-    powershell -NoProfile -Command ^
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk');" ^
+    for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command ^
+        "$ErrorActionPreference = 'Stop';" ^
+        "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);" ^
         "$s.TargetPath = '%CD%\localm-launcher.bat';" ^
         "$s.WorkingDirectory = '%CD%';" ^
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'LocaLM - open the launcher';" ^
-        "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the launcher^)
-    if not errorlevel 1 set "SCMADE=1"
+        "$s.Save();Write-Output $p"`) do set "SCPATH=%%p"
+    if defined SCPATH echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the launcher^)
+    if defined SCPATH set "SCMADE=1"
 )
 if "%SCPICK%"=="2" (
-    powershell -NoProfile -Command ^
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk');" ^
+    for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command ^
+        "$ErrorActionPreference = 'Stop';" ^
+        "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);" ^
         "$exe = '%CD%\.venv\localm-app\LocaLM.exe'; if (Test-Path $exe) { $s.TargetPath = $exe; $s.Arguments = '-m localm gui' } else { $s.TargetPath = '%CD%\.venv\Scripts\localm.exe'; $s.Arguments = 'gui' };" ^
         "$s.WorkingDirectory = '%CD%';" ^
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'LocaLM - open the web GUI';" ^
-        "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the GUI as LocaLM.exe^)
-    if not errorlevel 1 set "SCMADE=1"
+        "$s.Save();Write-Output $p"`) do set "SCPATH=%%p"
+    if defined SCPATH echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the GUI as LocaLM.exe^)
+    if defined SCPATH set "SCMADE=1"
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
 rem  Asked for one but it did not get made: record NOTHING, so uninstall never

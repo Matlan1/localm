@@ -15,6 +15,9 @@ the desktop-shortcut screen:
 
 These run against the REAL setup.bat, so they fail if the wording regresses.
 """
+import os
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,10 +25,22 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BAT = ROOT / "setup.bat"
 
+# The whole PowerShell -Command payload of a shortcut block, from the literal
+# start of the invocation through the closing quote of its last fragment.
+_POWERSHELL_BODY_RE = re.compile(r'powershell -NoProfile -Command \^.*?Write-Output \$p"', re.DOTALL)
+
 
 @pytest.fixture(scope="module")
 def bat():
     return BAT.read_text(encoding="utf-8", errors="replace")
+
+
+def _shortcut_blocks(bat_text):
+    """The two `if "%SCPICK%"=="N" ( ... )` shortcut blocks, sliced out of the
+    real setup.bat text by their own boundaries."""
+    b1 = bat_text[bat_text.index('if "%SCPICK%"=="1" ('):bat_text.index('if "%SCPICK%"=="2" (')]
+    b2 = bat_text[bat_text.index('if "%SCPICK%"=="2" ('):bat_text.index('if "%SCPICK%"=="3"')]
+    return b1, b2
 
 
 def test_window_mode_is_captured_where_it_is_chosen(bat):
@@ -77,8 +92,104 @@ def test_manifest_records_no_shortcut_when_none_was_created(bat):
     assert 'if not defined SCMADE set "SCPATH="' in bat
     assert bat.index('if not defined SCMADE set "SCPATH="') < bat.index("--shortcut"), \
         "SCPATH must be cleared BEFORE the manifest records it"
-    assert bat.count('if not errorlevel 1 set "SCMADE=1"') == 2, \
-        "both shortcut branches must record whether they actually succeeded"
+    assert bat.count('if defined SCPATH set "SCMADE=1"') == 2, \
+        "both shortcut branches must derive SCMADE from the path PowerShell " \
+        "actually wrote back, never from errorlevel"
+
+
+def test_shortcut_path_is_not_a_second_guess(bat):
+    """SCPATH must come from what PowerShell actually wrote, not a hardcoded
+    %USERPROFILE%\\Desktop literal that can diverge from a redirected Desktop
+    (OneDrive Known Folder Move, Folder Redirection, a moved Desktop)."""
+    assert "SCPATH=%USERPROFILE%\\Desktop" not in bat
+
+
+def test_shortcut_powershell_writes_the_path_back(bat):
+    """Both shortcut blocks must read back the real path, the same way
+    installer/gui.py already does, instead of assuming one."""
+    for block in _shortcut_blocks(bat):
+        assert "Write-Output $p" in block
+
+
+def test_shortcut_powershell_stops_on_the_first_error(bat):
+    """A thrown .Save() must not still reach Write-Output and claim success."""
+    for block in _shortcut_blocks(bat):
+        assert "$ErrorActionPreference = 'Stop'" in block
+        assert block.index("$ErrorActionPreference = 'Stop'") < block.index(".Save()")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestShortcutBlockDerivesScmadeFromThePath:
+    """Drives the real %SCPICK%==1 block, with its PowerShell body replaced by
+    a harmless placeholder and `powershell` shadowed by a stub, so SCMADE's
+    derivation is proven under a real cmd.exe instead of merely read as text.
+    Nothing here invokes real PowerShell, writes a .lnk, or touches the
+    registry, the Desktop, %USERPROFILE%, or any real LocaLM install."""
+
+    def _stubbed_block(self, bat):
+        block, _ = _shortcut_blocks(bat)
+        substituted, n = _POWERSHELL_BODY_RE.subn(
+            'powershell -NoProfile -Command "x"', block, count=1)
+        assert n == 1, "the placeholder regex no longer matches the shipped block"
+        assert "WScript.Shell" not in substituted
+        assert ".Save()" not in substituted
+        assert '-Command "x"' in substituted
+        return substituted
+
+    def _write_probe(self, tmp_path, block, seed):
+        bat_path = tmp_path / "probe.bat"
+        bat_path.write_text(
+            "@echo off\r\nsetlocal\r\n"
+            'set "SCPICK=1"\r\nset "SCPATH="\r\nset "SCMADE="\r\n'
+            "call :seterr {seed}\r\n"
+            "{block}\r\n"
+            'if not defined SCMADE set "SCPATH="\r\n'
+            'echo RESULT SCPATH=[%SCPATH%] SCMADE=[%SCMADE%]\r\n'
+            "exit /b 0\r\n:seterr\r\nexit /b %1\r\n".format(seed=seed, block=block),
+            encoding="utf-8")
+        return bat_path
+
+    def _write_stub_powershell(self, directory, succeed):
+        directory.mkdir(parents=True, exist_ok=True)
+        stub = directory / "powershell.bat"
+        if succeed:
+            stub.write_text(
+                "@echo off\r\necho C:\\Redirected\\OneDrive\\Desktop\\LocaLM.lnk\r\nexit /b 0\r\n",
+                encoding="utf-8")
+        else:
+            stub.write_text("@echo off\r\nexit /b 1\r\n", encoding="utf-8")
+        return directory
+
+    def _run(self, probe_bat, stub_dir):
+        env = dict(os.environ)
+        env["PATH"] = str(stub_dir) + ";" + env.get("PATH", "")
+        return subprocess.run(["cmd", "/c", str(probe_bat)], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL, timeout=15, env=env)
+
+    def _result(self, stdout):
+        m = re.search(r"RESULT SCPATH=\[(.*?)\] SCMADE=\[(.*?)\]", stdout)
+        assert m, "RESULT line not found: {!r}".format(stdout)
+        return m.group(1), m.group(2)
+
+    def test_a_succeeding_write_is_captured_at_the_default_menu_answer(self, bat, tmp_path):
+        """set /p leaves errorlevel 1 on the common default-Enter path, which
+        a naive `for /f` + `if not errorlevel 1` capture reads as failure."""
+        block = self._stubbed_block(bat)
+        stub_dir = self._write_stub_powershell(tmp_path / "ok", succeed=True)
+        probe = self._write_probe(tmp_path, block, seed=1)
+        out = self._run(probe, stub_dir)
+        scpath, scmade = self._result(out.stdout)
+        assert scpath == "C:\\Redirected\\OneDrive\\Desktop\\LocaLM.lnk", (out.stdout, out.stderr)
+        assert scmade == "1", (out.stdout, out.stderr)
+
+    def test_a_failing_write_records_nothing(self, bat, tmp_path):
+        block = self._stubbed_block(bat)
+        stub_dir = self._write_stub_powershell(tmp_path / "fail", succeed=False)
+        probe = self._write_probe(tmp_path, block, seed=0)
+        out = self._run(probe, stub_dir)
+        scpath, scmade = self._result(out.stdout)
+        assert scpath == "", (out.stdout, out.stderr)
+        assert scmade == "", (out.stdout, out.stderr)
 
 
 def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
