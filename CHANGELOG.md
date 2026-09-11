@@ -144,6 +144,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the page, discarding the only explanation of what had actually happened. It now shows exactly
   what did not clear and tells you that you have been signed out in this browser and need to sign
   in again with the previous key.
+- **The desktop launcher no longer builds a command line from a value containing a literal quote
+  character.** A HuggingFace spec or URL typed into the Import-from-URL dialog, or a saved coder
+  project folder, could contain a quote positioned so Windows ran a second, unintended command
+  alongside the one you launched. Such a value is now refused with an error instead of being used.
 
 ## [0.2.0] - 2026-09-04
 
