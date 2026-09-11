@@ -154,6 +154,19 @@ class TestWindowsCommandLineBuilder:
         line = _win_cmdline(["prog"], {})
         assert line.startswith('cmd.exe /c "')
 
+    def test_an_embedded_quote_is_refused_not_corrupted(self):
+        """A literal quote toggles cmd.exe's own quote-tracking regardless of
+        the backslash escaping applied for the child's argv parser, so an
+        embedded quote next to a metacharacter (e.g. `x"&calc&"y`) cannot be
+        represented safely through both layers at once. Refusing to build
+        the command line is the safe response."""
+        with pytest.raises(ValueError):
+            _win_cmdline(["prog", "--cwd", 'x"&calc&"y'], {})
+
+    def test_a_plain_trailing_backslash_survives(self):
+        line = _win_cmdline(["prog", "D:\\"], {})
+        assert '"D:\\\\"' in line
+
 
 @pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
 class TestWindowsCommandLineExecution:

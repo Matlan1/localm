@@ -119,29 +119,24 @@ def _console_hold(cmd: list, env: dict | None) -> str:
 
 
 def _quote_arg_for_cmd(arg: str) -> str:
-    """One argument, always wrapped in double quotes: the same backslash/quote
-    escaping ``subprocess.list2cmdline`` applies per MS C runtime rules, but
-    applied unconditionally rather than only when the argument holds whitespace.
-    Every cmd.exe metacharacter in the argument (``& | < > ^ ( )``) ends up
-    inside that quoted region, never caret-escaped. See
-    test_cmd_line_survives_a_space_and_an_ampersand."""
-    result = ['"']
-    bs_count = 0
-    for c in arg:
-        if c == "\\":
-            bs_count += 1
-        elif c == '"':
-            result.append("\\" * (bs_count * 2 + 1))
-            result.append('"')
-            bs_count = 0
-        else:
-            if bs_count:
-                result.append("\\" * bs_count)
-                bs_count = 0
-            result.append(c)
-    result.append("\\" * (bs_count * 2))
-    result.append('"')
-    return "".join(result)
+    """One argument, always wrapped in double quotes, with any trailing
+    backslashes doubled per the MS C runtime rule so they cannot escape the
+    closing quote. Every cmd.exe metacharacter in the argument
+    (``& | < > ^ ( )``) ends up inside that quoted region, never
+    caret-escaped. See test_cmd_line_survives_a_space_and_an_ampersand.
+
+    Raises ValueError if *arg* contains a literal double quote: cmd.exe
+    toggles its own quoting state on every quote character regardless of any
+    backslash escaping applied for the child process's argv parser, so an
+    embedded quote cannot be represented safely through both parsers at
+    once. See test_an_embedded_quote_is_refused_not_corrupted. A legitimate
+    Windows path can never contain one, since it is a reserved character."""
+    if '"' in arg:
+        raise ValueError(
+            "cannot safely quote an argument containing a literal quote "
+            "character for cmd.exe: {!r}".format(arg))
+    trailing_backslashes = len(arg) - len(arg.rstrip("\\"))
+    return '"' + arg + ("\\" * trailing_backslashes) + '"'
 
 
 def _windows_command_line(cmd: list, env: dict | None) -> str:
