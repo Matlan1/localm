@@ -8,13 +8,18 @@ Any other construction leaves the shape OPEN and unjudged.
 
 These tests pin what makes the check worth having. It FIRES on a key the route
 dropped, however the test spells the read (a bound name, an inline chain, a
-positive membership test, an f-string path, an awaited client). It does NOT
-fire when the shape is open, when the key is produced by a tracked mutation or
-a same-module helper, on a negative membership test, on `.get()`, inside a
-`pytest.raises` block, on the error keys, on a path the test file serves itself,
-or on an ambiguous path. The last section binds the check to the real tree:
-the route whose dropped field motivated it is judged, and dropping that field
-again is caught.
+positive membership test, an f-string path, an awaited client, a rebinding
+through `.json()`, a binding inside a `try*` block). It does NOT fire when the
+shape is open (including every handler mutation the walk does not model), when
+the key is produced by a tracked mutation or a same-module helper, on a write
+into the body, on a negative membership test, on `.get()`, inside a
+`pytest.raises` block, on the error keys, on a path the test file serves itself
+(by template or router prefix), on a path behind a non-literal base, on a path
+variable that differs between branches, on an ambiguous path, on a name shadowed
+by a comprehension or lambda, or in a function that mentions a helper the
+route's keys came from. The last section binds the check to the real tree: the
+route whose dropped field motivated it is judged, and dropping that field again
+is caught.
 """
 
 import importlib.util
@@ -142,10 +147,35 @@ async def test_async(ac):
     assert len(problems) == 1 and "'gone'" in problems[0], problems
 
 
-def test_query_string_and_base_url_are_stripped(tmp_path, monkeypatch):
+def test_query_string_and_literal_host_are_stripped(tmp_path, monkeypatch):
+    test = '''
+def test_url(client):
+    body = client.get("/api/thing/status?verbose=1").json()
+    assert body["gone"]
+    data = client.get("http://testserver/api/thing/status").json()
+    assert data["also_gone"]
+'''
+    problems = _run(tmp_path, monkeypatch, test=test)
+    assert len(problems) == 2, problems
+    assert all("GET /api/thing/status" in p for p in problems)
+
+
+def test_a_path_behind_a_non_literal_base_is_not_resolved(tmp_path, monkeypatch):
     test = '''
 def test_url(client, base):
-    body = client.get(f"{base}/api/thing/status?verbose=1").json()
+    body = client.get(f"{base}/api/thing/status").json()
+    assert body["gone"]
+    other = client.get(base + "/api/thing/status").json()
+    assert other["gone"]
+'''
+    assert _run(tmp_path, monkeypatch, test=test) == []
+
+
+def test_a_literal_bound_in_the_function_is_substituted_into_an_fstring(tmp_path, monkeypatch):
+    test = '''
+def test_url(client):
+    base = "/api/thing"
+    body = client.get(f"{base}/status").json()
     assert body["gone"]
 '''
     problems = _run(tmp_path, monkeypatch, test=test)
@@ -419,6 +449,216 @@ def test_missing_trees_are_a_no_op(tmp_path, monkeypatch):
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     assert ch._response_key_violations([]) == []
+
+
+def test_a_write_into_the_body_is_not_a_read(tmp_path, monkeypatch):
+    test = '''
+def test_write(client):
+    body = client.get("/api/thing/status").json()
+    body["extra"] = 1
+    del body["state"]
+    client.post("/api/other", json=body)
+'''
+    assert _run(tmp_path, monkeypatch, test=test) == []
+
+
+def test_unmodelled_handler_mutations_open_the_shape(tmp_path, monkeypatch):
+    route = '''
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+def _fill(d):
+    d["filled"] = 1
+
+
+@app.get("/api/open/call-arg")
+async def call_arg():
+    body = {"a": 1}
+    _fill(body)
+    return body
+
+
+@app.get("/api/open/nested-setdefault")
+async def nested_setdefault():
+    out = {"a": 1}
+    out.setdefault("warnings", []).append("x")
+    return out
+
+
+@app.get("/api/open/augassign")
+async def augassign():
+    body = {"a": 1}
+    body |= {"b": 2}
+    return body
+
+
+@app.get("/api/open/alias")
+async def alias():
+    body = {"a": 1}
+    out = body
+    out["b"] = 2
+    return body
+
+
+@app.get("/api/open/closure")
+async def closure():
+    body = {"a": 1}
+
+    def add(k):
+        body[k] = 1
+
+    add("b")
+    return body
+
+
+@app.get("/api/open/read-in-value")
+async def read_in_value():
+    body = {"a": 1}
+    body["b"] = body["a"] + 1
+    return body
+'''
+    test = '''
+def test_open(client):
+    assert client.get("/api/open/call-arg").json()["filled"]
+    assert client.get("/api/open/nested-setdefault").json()["warnings"]
+    assert client.get("/api/open/augassign").json()["b"]
+    assert client.get("/api/open/alias").json()["b"]
+    assert client.get("/api/open/closure").json()["b"]
+    assert client.get("/api/open/read-in-value").json()["b"]
+'''
+    assert _run(tmp_path, monkeypatch, route=route, test=test) == []
+
+
+def test_a_path_variable_differing_between_branches_is_dropped(tmp_path, monkeypatch):
+    route = '''
+@app.get("/api/other")
+async def other():
+    return {"other": 1}
+'''
+    test = '''
+def test_branches(client, flag):
+    if flag:
+        url = "/api/thing/status"
+    else:
+        url = "/api/other"
+    body = client.get(url).json()
+    assert body["state"] or body["other"]
+'''
+    assert _run(tmp_path, monkeypatch, route=_ROUTE + route, test=test) == []
+
+
+def test_own_routes_match_by_template_and_router_prefix(tmp_path, monkeypatch):
+    route = '''
+@app.get("/api/things/{name}")
+async def one_thing(name: str):
+    return {"name": name}
+
+
+@app.get("/api/x/status")
+async def x_status():
+    return {"x": 1}
+'''
+    test = '''
+from fastapi import APIRouter, FastAPI
+
+fake = FastAPI()
+fake_router = APIRouter(prefix="/api/x")
+
+
+@fake.get("/api/things/{name}")
+def fake_thing(name):
+    return {"gone": 1}
+
+
+@fake_router.get("/status")
+def fake_status():
+    return {"gone": 1}
+
+
+def test_fake(client):
+    assert client.get("/api/things/abc").json()["gone"]
+    assert client.get("/api/x/status").json()["gone"]
+'''
+    assert _run(tmp_path, monkeypatch, route=_ROUTE + route, test=test) == []
+
+
+def test_a_literal_and_a_parameterised_template_both_matching_is_ambiguous(tmp_path, monkeypatch):
+    route = '''
+@app.get("/api/things/{name}")
+async def one_thing(name: str):
+    return {"name": name}
+
+
+@app.get("/api/things/abc")
+async def the_abc_thing():
+    return {"abc": 1}
+'''
+    test = '''
+def test_ambiguous(client):
+    assert client.get("/api/things/abc").json()["name"]
+'''
+    assert _run(tmp_path, monkeypatch, route=_ROUTE + route, test=test) == []
+
+
+def test_a_function_mentioning_the_routes_helper_is_not_judged(tmp_path, monkeypatch):
+    route = '''
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+def _build():
+    return {"built": 1}
+
+
+@app.get("/api/thing/status")
+async def thing_status():
+    return _build()
+'''
+    test = '''
+def test_patched(client, monkeypatch):
+    monkeypatch.setattr("localm.routes._build", lambda: {"patched": 1})
+    assert client.get("/api/thing/status").json()["patched"]
+
+
+def test_unpatched(client):
+    assert client.get("/api/thing/status").json()["gone"]
+'''
+    problems = _run(tmp_path, monkeypatch, route=route, test=test)
+    assert len(problems) == 1 and "test_unpatched" in problems[0], problems
+
+
+def test_a_name_shadowed_by_a_comprehension_or_lambda_is_not_judged(tmp_path, monkeypatch):
+    test = '''
+def test_shadow(client, others):
+    body = client.get("/api/thing/status").json()
+    assert all("gone" in body for body in others)
+    assert any((lambda body: body["gone"])(o) for o in others)
+    assert body["state"]
+'''
+    assert _run(tmp_path, monkeypatch, test=test) == []
+
+
+def test_a_rebinding_through_json_and_a_try_star_block_are_followed(tmp_path, monkeypatch):
+    test = '''
+def test_rebind(client):
+    r = client.get("/api/thing/status")
+    r = r.json()
+    assert r["gone"]
+
+
+def test_try_star(client):
+    try:
+        body = client.get("/api/thing/status").json()
+    except* ValueError:
+        raise
+    assert body["also_gone"]
+'''
+    problems = _run(tmp_path, monkeypatch, test=test)
+    assert len(problems) == 2, problems
+    assert "'gone'" in problems[0] and "'also_gone'" in problems[1]
 
 
 # --------------------------------------------------------------------------- #

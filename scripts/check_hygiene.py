@@ -1474,22 +1474,28 @@ def _import_direction_violations(tracked: "list[Path] | None" = None) -> list[st
 # route's response must name a key the handler can return. A handler whose
 # response is built any other way (a value returned from another module, a
 # pydantic model, a file or stream, a dict merged from a non-literal) has an
-# OPEN shape and is not judged. "detail" and "errors" are always allowed: the
-# error handlers produce them for any route.
+# OPEN shape and is not judged. "detail" and "errors" are allowed for every
+# route.
 #
 # On the test side a response is recognised through a straight-line chain in
 # one function: a name bound to `<anything>.get|post|put|delete|patch(<path>)`,
 # a name bound to `.json()` of such a value, or the chain written inline. The
-# path may be a literal, an f-string, or a concatenation; formatted parts match
-# one path segment. Only a first-level string subscript (`body["k"]`) and a
-# positive `"k" in body` test are read; `.get("k")`, `"k" not in body`, and a
-# `with pytest.raises(...)` body are not. A path the test file registers on an
-# app of its own is skipped for that file, and a line carrying the
+# path may be a literal, an f-string, or a concatenation; a formatted part
+# bound to a literal in the same function is substituted, any other formatted
+# part matches one path segment, and a path whose first part is not a literal
+# is not resolved. Only a first-level string subscript read (`body["k"]`) and a
+# positive `"k" in body` test are judged; `.get("k")`, `"k" not in body`, a
+# write (`body["k"] = v`), a name shadowed by a comprehension or lambda, and a
+# `with pytest.raises(...)` body are not. A path matching a route or a router
+# prefix the test file registers itself is skipped for that file, a route
+# matched by two templates is skipped, a read is skipped when the function
+# mentions a helper the route's keys came from, and a line carrying the
 # `hygiene-ok` marker is skipped like check 3.
 
 _JSON_ROUTE_METHODS = {"get", "post", "put", "delete", "patch"}
 _JSON_ROUTE_ALWAYS_KEYS = {"detail", "errors"}
 _JSON_ROUTE_SEGMENT = "\x00"
+_JSON_ROUTE_DECORATOR = re.compile(r"@\w+\.(get|post|put|delete|patch)\(")
 
 
 class _OpenShape(Exception):
@@ -1529,62 +1535,90 @@ def _json_response_content(call: ast.Call) -> ast.AST:
     raise _OpenShape
 
 
-def _same_module_helper_keys(call: ast.AST, index: dict, seen: frozenset) -> set[str]:
+def _same_module_helper_keys(call: ast.AST, index: dict, seen: frozenset,
+                             helpers: set) -> set[str]:
     """Keys returned by a helper called as a plain name and defined exactly once
-    in the same module; _OpenShape otherwise or on a recursive call."""
+    in the same module; _OpenShape otherwise or on a recursive call. The
+    helper's name is added to *helpers*."""
     if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
         raise _OpenShape
     defs = index.get(call.func.id) or []
     if len(defs) != 1 or call.func.id in seen:
         raise _OpenShape
-    keys = _route_json_keys(defs[0], index, seen | {call.func.id})
+    keys = _route_json_keys(defs[0], index, seen | {call.func.id}, helpers)
     if keys is None:
         raise _OpenShape
+    helpers.add(call.func.id)
     return keys
 
 
-def _route_json_keys(fn, index: dict, seen: frozenset = frozenset()) -> "set[str] | None":
+def _route_json_keys(fn, index: dict, seen: frozenset = frozenset(),
+                     helpers: "set | None" = None) -> "set[str] | None":
     """The union of top-level keys over every return of *fn*, or None when the
     shape is open.
 
     A local name assigned a dict literal (or a JSONResponse of one) is tracked
     through `name["k"] = v`, `name.update({...})`, `name.update(k=v)`,
     `name.update(helper())` for a same-module helper, and `name.setdefault("k",
-    ...)`. Any other mutation of the name, a non-literal assignment, a return of
+    ...)`, each as a statement of its own. Every other use of the name (a read
+    inside an expression, an argument to a call, an alias, `|=`, `del`, a
+    method not listed, a mention inside a nested function, lambda or class)
+    makes the shape open, as does a non-literal assignment and a return of
     anything but a tracked name, a dict literal, a JSONResponse of either, or a
-    same-module helper call, makes the shape open. Nested function and class
-    bodies are not walked."""
+    same-module helper call. Same-module helpers whose keys were folded in are
+    added to *helpers*."""
+    helpers = set() if helpers is None else helpers
     tracked: dict = {}
     returns: list[ast.Return] = []
+    closure_names: set[str] = set()
+    for nested in ast.walk(fn):
+        if nested is not fn and isinstance(
+                nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            closure_names.update(n.id for n in ast.walk(nested) if isinstance(n, ast.Name))
 
-    def note_assign(target: ast.AST, value: ast.AST) -> None:
+    def open_uses(st: ast.AST, allowed: "set[int]") -> None:
+        for node in ast.walk(st):
+            if (isinstance(node, ast.Name) and tracked.get(node.id) is not None
+                    and id(node) not in allowed):
+                tracked[node.id] = None
+
+    def note_assign(st: ast.AST, target: ast.AST, value: ast.AST) -> None:
         if isinstance(target, ast.Name):
+            open_uses(value, set())
             try:
                 if _is_json_response_call(value):
                     value = _json_response_content(value)
                 tracked[target.id] = _dict_literal_keys(value)
             except _OpenShape:
                 tracked[target.id] = None
+            if target.id in closure_names:
+                tracked[target.id] = None
         elif (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
-              and tracked.get(target.value.id) is not None):
-            s = target.slice
-            if isinstance(s, ast.Constant) and isinstance(s.value, str):
-                tracked[target.value.id].add(s.value)
-            else:
-                tracked[target.value.id] = None
+              and tracked.get(target.value.id) is not None
+              and isinstance(target.slice, ast.Constant)
+              and isinstance(target.slice.value, str)):
+            open_uses(st, {id(target.value)})
+            if tracked.get(target.value.id) is not None:
+                tracked[target.value.id].add(target.slice.value)
+        else:
+            open_uses(st, set())
 
-    def note_method_call(c: ast.Call) -> None:
+    def note_method_call(st: ast.AST, c: ast.Call) -> None:
         f = c.func
         if not (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
                 and tracked.get(f.value.id) is not None):
+            open_uses(st, set())
             return
         name = f.value.id
+        open_uses(st, {id(f.value)})
+        if tracked.get(name) is None:
+            return
         if f.attr == "update" and len(c.args) == 1 and not c.keywords:
             try:
                 tracked[name] |= _dict_literal_keys(c.args[0])
             except _OpenShape:
                 try:
-                    tracked[name] |= _same_module_helper_keys(c.args[0], index, seen)
+                    tracked[name] |= _same_module_helper_keys(c.args[0], index, seen, helpers)
                 except _OpenShape:
                     tracked[name] = None
         elif f.attr == "update" and not c.args and all(kw.arg for kw in c.keywords):
@@ -1592,7 +1626,7 @@ def _route_json_keys(fn, index: dict, seen: frozenset = frozenset()) -> "set[str
         elif (f.attr == "setdefault" and c.args and isinstance(c.args[0], ast.Constant)
               and isinstance(c.args[0].value, str)):
             tracked[name].add(c.args[0].value)
-        elif f.attr not in ("pop", "popitem", "clear"):
+        else:
             tracked[name] = None
 
     def walk(stmts) -> None:
@@ -1601,12 +1635,18 @@ def _route_json_keys(fn, index: dict, seen: frozenset = frozenset()) -> "set[str
                 continue
             if isinstance(st, ast.Return):
                 returns.append(st)
+                v = st.value
+                if _is_json_response_call(v):
+                    v = _json_response_content_or_none(v)
+                open_uses(st, {id(v)} if isinstance(v, ast.Name) else set())
             elif isinstance(st, ast.Assign) and len(st.targets) == 1:
-                note_assign(st.targets[0], st.value)
+                note_assign(st, st.targets[0], st.value)
             elif isinstance(st, ast.AnnAssign) and st.value is not None:
-                note_assign(st.target, st.value)
+                note_assign(st, st.target, st.value)
             elif isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
-                note_method_call(st.value)
+                note_method_call(st, st.value)
+            else:
+                open_uses(_statement_head(st), set())
             for field in ("body", "orelse", "finalbody"):
                 sub = getattr(st, field, None)
                 if isinstance(sub, list):
@@ -1635,10 +1675,17 @@ def _route_json_keys(fn, index: dict, seen: frozenset = frozenset()) -> "set[str
             elif isinstance(v, ast.Dict):
                 keys |= _dict_literal_keys(v)
             else:
-                keys |= _same_module_helper_keys(v, index, seen)
+                keys |= _same_module_helper_keys(v, index, seen, helpers)
     except _OpenShape:
         return None
     return keys
+
+
+def _json_response_content_or_none(call: ast.Call) -> "ast.AST | None":
+    try:
+        return _json_response_content(call)
+    except _OpenShape:
+        return None
 
 
 def _route_template_regex(template: str) -> "re.Pattern[str]":
@@ -1669,12 +1716,16 @@ def _decorated_route(dec: ast.AST) -> "tuple[str, str, bool] | None":
 
 
 def _collect_json_routes(files: list[Path]) -> dict:
-    """{(METHOD, template): [(relative path, lineno, handler name, keys)]} over
-    every decorated handler in *files*; keys is None for an open shape."""
+    """{(METHOD, template): [(relative path, lineno, handler name, keys,
+    helpers)]} over every decorated handler in *files*; keys is None for an
+    open shape, helpers the same-module helper names its keys came from."""
     routes: dict = {}
     for py in files:
         try:
-            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            source = py.read_text(encoding="utf-8")
+            if not _JSON_ROUTE_DECORATOR.search(source):
+                continue
+            tree = ast.parse(source, filename=str(py))
         except (SyntaxError, UnicodeDecodeError, OSError):
             continue
         index: dict = {}
@@ -1690,9 +1741,10 @@ def _collect_json_routes(files: list[Path]) -> dict:
                 if found is None:
                     continue
                 method, template, opened = found
-                keys = None if opened else _route_json_keys(node, index)
+                helpers: set = set()
+                keys = None if opened else _route_json_keys(node, index, helpers=helpers)
                 routes.setdefault((method, template), []).append(
-                    (rel, node.lineno, node.name, keys))
+                    (rel, node.lineno, node.name, keys, helpers))
     return routes
 
 
@@ -1751,15 +1803,13 @@ def _path_text(node: ast.AST, strings: dict) -> "str | None":
 
 
 def _request_path(text: str) -> "str | None":
-    """The request path of *text*: the query string dropped, a scheme and host
-    or a leading placeholder (a base URL variable) stripped; None unless the
-    remainder starts with '/'."""
+    """The request path of *text*: the query string dropped and a scheme and
+    host stripped; None unless the remainder starts with '/'. A text starting
+    with a placeholder (a base URL that is not a literal) is None."""
     text = text.split("?", 1)[0]
     if "://" in text:
         text = text.split("://", 1)[1]
         text = text[text.find("/"):] if "/" in text else ""
-    elif text.startswith(_JSON_ROUTE_SEGMENT) and "/" in text:
-        text = text[text.find("/"):]
     return text if text.startswith("/") else None
 
 
@@ -1784,18 +1834,53 @@ def _is_raises_block(st: ast.AST) -> bool:
         and it.context_expr.func.attr == "raises" for it in st.items)
 
 
+def _shadowed_names(node: ast.AST) -> set[str]:
+    """Names bound by a comprehension target or a lambda parameter anywhere
+    inside *node*."""
+    names: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.comprehension):
+            names.update(n.id for n in ast.walk(sub.target) if isinstance(n, ast.Name))
+        elif isinstance(sub, ast.Lambda):
+            args = sub.args
+            names.update(a.arg for a in args.args + args.posonlyargs + args.kwonlyargs)
+            if args.vararg:
+                names.add(args.vararg.arg)
+            if args.kwarg:
+                names.add(args.kwarg.arg)
+    return names
+
+
+def _mentioned_names(node: ast.AST) -> set[str]:
+    """Every string constant and attribute name inside *node*, plus the last
+    dotted segment of each string constant."""
+    names: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            names.add(sub.value)
+            names.add(sub.value.rsplit(".", 1)[-1])
+        elif isinstance(sub, ast.Attribute):
+            names.add(sub.attr)
+    return names
+
+
 class _JsonKeyReads:
     """Walks one test function in source order and reports every top-level
     key read from a response whose route is known.
 
-    *resolve(method, path)* returns (template, closed key set) for the matching
-    route, or None when the route is unknown, ambiguous or open. *report(lineno,
-    key, shapes)* receives each read of a key absent from every candidate
-    shape, *shapes* being a list of (method, path, template, keys)."""
+    *resolve(method, path)* returns (template, closed key set, helper names)
+    for the matching route, or None when the route is unknown, ambiguous or
+    open. *is_own(path)* says whether the test file serves the path itself.
+    *mentioned* holds the string constants and attribute names of the function;
+    a read is skipped when one of them names a helper the route's keys came
+    from. *report(lineno, key, shapes)* receives each read of a key absent from
+    every candidate shape, *shapes* being a list of (method, path, template,
+    keys)."""
 
-    def __init__(self, resolve, own_paths: set[str], report) -> None:
+    def __init__(self, resolve, is_own, mentioned: set[str], report) -> None:
         self.resolve = resolve
-        self.own_paths = own_paths
+        self.is_own = is_own
+        self.mentioned = mentioned
         self.report = report
         self.responses: dict = {}     # name -> set of (METHOD, path)
         self.bodies: dict = {}        # name -> set of (METHOD, path)
@@ -1820,26 +1905,35 @@ class _JsonKeyReads:
             return
         shapes = []
         for method, path in routes:
-            if path in self.own_paths:
+            if self.is_own(path):
                 return
             found = self.resolve(method, path)
-            if found is None:
+            if found is None or found[2] & self.mentioned:
                 return
             shapes.append((method, path, found[0], found[1]))
         if shapes and not any(key in keys for _, _, _, keys in shapes):
             self.report(lineno, key, shapes)
 
     def _reads(self, node: ast.AST) -> None:
+        shadowed = _shadowed_names(node)
+
+        def bound(expr: ast.AST) -> "set | None":
+            base = _unwrap_await(expr)
+            if isinstance(base, ast.Name) and base.id in shadowed:
+                return None
+            return self._routes_of_body(expr)
+
         for sub in ast.walk(node):
-            if (isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant)
+            if (isinstance(sub, ast.Subscript) and isinstance(sub.ctx, ast.Load)
+                    and isinstance(sub.slice, ast.Constant)
                     and isinstance(sub.slice.value, str)):
-                routes = self._routes_of_body(sub.value)
+                routes = bound(sub.value)
                 if routes:
                     self._check(sub.slice.value, routes, sub.lineno)
             elif (isinstance(sub, ast.Compare) and len(sub.ops) == 1
                   and isinstance(sub.ops[0], ast.In)
                   and isinstance(sub.left, ast.Constant) and isinstance(sub.left.value, str)):
-                routes = self._routes_of_body(sub.comparators[0])
+                routes = bound(sub.comparators[0])
                 if routes:
                     self._check(sub.left.value, routes, sub.lineno)
 
@@ -1847,29 +1941,37 @@ class _JsonKeyReads:
         if not isinstance(target, ast.Name):
             return
         name = target.id
-        for env in (self.responses, self.bodies, self.strings):
-            env.pop(name, None)
         value = _unwrap_await(value)
+        text = response = body = None
         if isinstance(value, (ast.Constant, ast.JoinedStr, ast.BinOp)):
             text = _path_text(value, self.strings)
-            if text is not None:
-                self.strings[name] = text
         elif isinstance(value, ast.Call):
-            found = _request_call(value, self.strings)
-            if found:
-                self.responses[name] = {found}
-                return
-            routes = self._routes_of_body(value)
-            if routes:
-                self.bodies[name] = routes
+            response = _request_call(value, self.strings)
+            if response is None:
+                body = self._routes_of_body(value)
+        for env in (self.responses, self.bodies, self.strings):
+            env.pop(name, None)
+        if text is not None:
+            self.strings[name] = text
+        elif response is not None:
+            self.responses[name] = {response}
+        elif body:
+            self.bodies[name] = body
 
     def _snapshot(self) -> tuple:
-        return dict(self.responses), dict(self.bodies)
+        return dict(self.responses), dict(self.bodies), dict(self.strings)
+
+    def _restore(self, saved: tuple) -> None:
+        self.responses, self.bodies, self.strings = (dict(saved[0]), dict(saved[1]),
+                                                     dict(saved[2]))
 
     def _merge(self, other: tuple) -> None:
         for env, saved in ((self.responses, other[0]), (self.bodies, other[1])):
             for name, routes in saved.items():
                 env[name] = env.get(name, set()) | routes
+        for name in set(self.strings) | set(other[2]):
+            if self.strings.get(name) != other[2].get(name):
+                self.strings.pop(name, None)
 
     def walk(self, stmts) -> None:
         for st in stmts:
@@ -1885,7 +1987,7 @@ class _JsonKeyReads:
                 before = self._snapshot()
                 self.walk(st.body)
                 taken = self._snapshot()
-                self.responses, self.bodies = dict(before[0]), dict(before[1])
+                self._restore(before)
                 self.walk(st.orelse)
                 self._merge(taken)
             elif isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
@@ -1895,7 +1997,7 @@ class _JsonKeyReads:
                 self._merge(before)
             elif isinstance(st, (ast.With, ast.AsyncWith)):
                 self.walk(st.body)
-            elif isinstance(st, ast.Try):
+            elif isinstance(st, (ast.Try, ast.TryStar)):
                 before = self._snapshot()
                 self.walk(st.body)
                 for h in st.handlers:
@@ -1922,9 +2024,30 @@ def _statement_head(st: ast.AST) -> ast.AST:
         return ast.Module(body=[ast.Expr(it.context_expr) for it in st.items], type_ignores=[])
     if isinstance(st, ast.Match):
         return st.subject
-    if isinstance(st, ast.Try):
+    if isinstance(st, (ast.Try, ast.TryStar)):
         return ast.Module(body=[], type_ignores=[])
     return st
+
+
+def _own_route_matcher(tree: ast.AST):
+    """A predicate over request paths for the routes a test file serves
+    itself: the templates of `_own_route_paths` and every prefix given to an
+    `APIRouter(prefix=...)` call."""
+    templates = [_route_template_regex(t) for t in _own_route_paths(tree)]
+    prefixes: list[str] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "APIRouter"):
+            for kw in node.keywords:
+                if (kw.arg == "prefix" and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, str) and kw.value.value):
+                    prefixes.append(kw.value.value)
+
+    def is_own(path: str) -> bool:
+        return any(rx.match(path) for rx in templates) or \
+            any(path.startswith(p) for p in prefixes)
+
+    return is_own
 
 
 def _response_key_violations(tracked: list[Path]) -> list[str]:
@@ -1940,20 +2063,19 @@ def _response_key_violations(tracked: list[Path]) -> list[str]:
     compiled = [(method, template, _route_template_regex(template), handlers)
                 for (method, template), handlers in routes.items()]
 
-    def resolve(method: str, path: str) -> "tuple[str, set[str]] | None":
+    def resolve(method: str, path: str) -> "tuple[str, set[str], set[str]] | None":
         matches = [(t, hs) for m, t, rx, hs in compiled if m == method and rx.match(path)]
-        exact = [m for m in matches if m[0] == path]
-        if exact:
-            matches = exact
         if len(matches) != 1:
             return None
         template, handlers = matches[0]
         keys: set[str] = set()
-        for _, _, _, handler_keys in handlers:
+        helpers: set[str] = set()
+        for _, _, _, handler_keys, handler_helpers in handlers:
             if handler_keys is None:
                 return None
             keys |= handler_keys
-        return template, keys
+            helpers |= handler_helpers
+        return template, keys, helpers
 
     problems: list[str] = []
     for py in sorted(under(tests_root)):
@@ -1966,7 +2088,7 @@ def _response_key_violations(tracked: list[Path]) -> list[str]:
             continue
         lines = source.splitlines()
         rel = py.relative_to(REPO).as_posix()
-        own = _own_route_paths(tree)
+        is_own = _own_route_matcher(tree)
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -1981,11 +2103,11 @@ def _response_key_violations(tracked: list[Path]) -> list[str]:
                 problems.append(
                     f"{rel}:{lineno} ({fn}) reads key {key!r} from the JSON of "
                     f"{method} {path}, which never produces it\n      "
-                    + "; ".join(f"{r}:{ln} {name}" for r, ln, name, _ in handlers)
+                    + "; ".join(f"{r}:{ln} {name}" for r, ln, name, _, _ in handlers)
                     + f" can return only: {', '.join(keys) if keys else '(no keys)'}."
                     " Update the assertion, or the route.")
 
-            _JsonKeyReads(resolve, own, report).walk(node.body)
+            _JsonKeyReads(resolve, is_own, _mentioned_names(node), report).walk(node.body)
     return problems
 
 

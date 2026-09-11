@@ -27,12 +27,15 @@ an explicit list instead.
     pytest $(python scripts/affected_tests.py) -m "not integration"
 
 The selection is printed one path per line so it can be substituted into a
-pytest command line; the summary goes to stderr. When nothing is affected the
-one line printed is tests/NO_TEST_FILE_IS_AFFECTED, a path that does not
-exist, so pytest refuses it instead of collecting the whole suite from an
-empty substitution. Exit status 0, or 3 when the selection is wider than
---max-share of all test files: the change touches a module most tests import,
-and a run that wide is not a targeted run any more. The list is still printed.
+pytest command line; the summary goes to stderr. Stdout never leaves pytest
+with an empty or a whole-suite argument list: when nothing is affected the one
+line printed is tests/NO_TEST_FILE_IS_AFFECTED; when the selection is wider
+than --max-share of all test files (the change touches a module most tests
+import, so a run that wide is not a targeted run) the one line printed is
+tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR and the exit status is
+3, with --list-wide printing the selection instead; when the script itself
+fails the one line printed is tests/AFFECTED_TESTS_FAILED_SEE_STDERR and the
+exit status is 1. None of those paths exists, so pytest refuses each one.
 
 Stdlib only.
 """
@@ -44,6 +47,7 @@ import ast
 import re
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -54,6 +58,8 @@ _TESTS_ROOT = "tests"
 _TEST_FILE = re.compile(r"(^|/)test_[^/]*\.py$")
 _WIDE_EXIT = 3
 _NOTHING_AFFECTED = "tests/NO_TEST_FILE_IS_AFFECTED"
+_TOO_WIDE = "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR"
+_FAILED = "tests/AFFECTED_TESTS_FAILED_SEE_STDERR"
 
 
 def _git(*args: str) -> str:
@@ -62,9 +68,13 @@ def _git(*args: str) -> str:
 
 
 def _tracked(prefix: str) -> list[str]:
-    out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", "--", prefix],
-                         capture_output=True, check=True).stdout
-    return [p for p in out.decode("utf-8").split("\0") if p]
+    """Tracked plus untracked, not ignored, files under *prefix*."""
+    files: list[str] = []
+    for extra in ((), ("--others", "--exclude-standard")):
+        out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", *extra, "--", prefix],
+                             capture_output=True, check=True).stdout
+        files.extend(p for p in out.decode("utf-8").split("\0") if p)
+    return files
 
 
 def module_name(rel: str) -> str:
@@ -286,11 +296,21 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--why", action="store_true", help="print the reason next to each file")
     ap.add_argument("--max-share", type=float, default=0.25,
                     help="exit 3 when the selection exceeds this share of all test files")
+    ap.add_argument("--list-wide", action="store_true",
+                    help="print a selection wider than --max-share instead of the sentinel")
     args = ap.parse_args(argv)
 
-    # One path per line, LF-terminated on every platform, so a shell's $(...)
-    # substitution yields clean paths.
+    # Every line is LF-terminated on every platform.
     sys.stdout.reconfigure(newline="\n")
+    try:
+        return _run(args)
+    except Exception:
+        print(_FAILED)
+        traceback.print_exc()
+        return 1
+
+
+def _run(args) -> int:
     graph = Graph()
     if args.files is not None:
         changed, base_ref = sorted(f.replace("\\", "/") for f in args.files), "HEAD"
@@ -301,16 +321,22 @@ def main(argv: list[str]) -> int:
     total = len(graph.test_files)
     share = len(selected) / total if total else 0.0
 
-    for t in selected:
-        print(f"{t}  # {'; '.join(reasons[t])}" if args.why else t)
-    if not selected:
+    wide = share > args.max_share
+    if wide and not args.list_wide:
+        print(_TOO_WIDE)
+    elif selected:
+        for t in selected:
+            print(f"{t}  # {'; '.join(reasons[t])}" if args.why else t)
+    else:
         print(_NOTHING_AFFECTED)
     print(f"{len(selected)} of {total} test files affected by {len(changed)} changed file(s)",
           file=sys.stderr)
-    if share > args.max_share:
+    if wide:
         print(f"WIDE: {share:.0%} of the suite exceeds --max-share {args.max_share:.0%}; "
               "the change touches a module most tests import, so a targeted run "
-              "cannot stand in for the suite", file=sys.stderr)
+              "cannot stand in for the suite" + ("" if args.list_wide else
+                                                  "; --list-wide prints the selection"),
+              file=sys.stderr)
         return _WIDE_EXIT
     return 0
 

@@ -231,12 +231,32 @@ def test_cli_output_is_lf_terminated_and_never_empty(repo):
     assert "0 of 10 test files affected" in nothing.stderr
 
 
-def test_cli_exits_3_on_a_wide_selection_but_still_prints_it(repo):
+def test_cli_prints_a_refusing_sentinel_and_exits_3_on_a_wide_selection(repo):
     _, root = repo
     out = _run_cli(root, "--files", "tests/conftest.py")
     assert out.returncode == 3, out.stderr
-    assert len(out.stdout.splitlines()) == 10
+    assert out.stdout == "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n"
     assert "WIDE: 100% of the suite exceeds --max-share 25%" in out.stderr
+    assert "--list-wide prints the selection" in out.stderr
+    listed = _run_cli(root, "--files", "tests/conftest.py", "--list-wide")
+    assert listed.returncode == 3
+    assert len(listed.stdout.splitlines()) == 10
+    assert "tests/NO_TEST_FILE_IS_AFFECTED" not in listed.stdout
+
+
+def test_cli_prints_a_refusing_sentinel_and_exits_1_when_it_cannot_run(tmp_path):
+    out = _run_cli(tmp_path / "not-a-checkout", "--files", "x.py")
+    assert out.returncode == 1
+    assert out.stdout == "tests/AFFECTED_TESTS_FAILED_SEE_STDERR\n"
+    assert "Traceback" in out.stderr
+
+
+def test_an_untracked_new_test_file_selects_itself(repo):
+    mod, root = repo
+    (root / "tests" / "test_new.py").write_text("def test_new():\n    pass\n", encoding="utf-8")
+    changed, _ = mod.changed_files("no/such/ref")
+    assert "tests/test_new.py" in changed
+    assert _select(mod, changed)["tests/test_new.py"] == ["changed"]
 
 
 # --------------------------------------------------------------------------- #
