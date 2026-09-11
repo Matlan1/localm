@@ -237,9 +237,8 @@ _SENTINEL_OPEN = "\ue000"
 _SENTINEL_CLOSE = "\ue001"
 
 
-# The whitespace a chat template's trim removes from both ends of a message:
-# C isspace() for llama.cpp's built-in formatters, Jinja's |trim for an HF
-# template. ASCII only, so a non-ASCII space is never mistaken for trimming.
+# The whitespace a chat template's trim strips from both ends of a message
+# (C isspace() in llama.cpp's built-in formatters, Jinja's |trim). ASCII only.
 _TRIM_CHARS = " \t\n\r\v\f"
 
 
