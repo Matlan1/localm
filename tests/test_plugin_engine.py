@@ -1405,3 +1405,101 @@ def test_parse_spec_reads_tool_exports(tmp_path):
     bad = _make_legacy_plugin(tmp_path / "b", "badexp", exports='"not-a-list"')
     with pytest.raises(ValueError, match="must be a list of strings"):
         parse_spec(bad)
+
+
+def test_provision_replaces_a_manifestless_directory_instead_of_raising(env, caplog):
+    """A directory left behind by an interrupted install (an OSError mid-copy,
+    a killed process, a hand-made folder) has no plugin.toml, so it is not
+    'already installed' - but shutil.copytree used to raise FileExistsError
+    on every retry, making the plugin permanently uninstallable and
+    unremovable. install() must replace it instead."""
+    import logging
+
+    from localm.plugins.engine import PluginManager
+
+    store = env / "store"
+    inst = env / "installed"
+    _make_plugin(store, "p1", _ping("p1"))
+    (inst / "p1").mkdir(parents=True)
+    (inst / "p1" / "partial.py").write_text("# half-copied\n", encoding="utf-8")
+
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        mgr.install("p1")
+
+    assert (inst / "p1" / "plugin.toml").is_file()
+    assert not (inst / "p1" / "partial.py").exists(), (
+        "dirs_exist_ok would merge the store copy over the stray file "
+        "instead of replacing the directory")
+    assert mgr.is_installed("p1")
+    assert any("p1" in rec.message for rec in caplog.records), (
+        f"expected a WARNING naming the plugin; got: "
+        f"{[rec.message for rec in caplog.records]}")
+
+
+def test_uninstall_and_set_installed_state_remove_a_manifestless_directory(env):
+    """uninstall() and set_installed_state(on=False) must be able to remove a
+    directory that exists on disk but has no manifest - the recovery path for
+    the same interrupted-install state _provision_from_store now self-heals
+    on install. Both used to raise KeyError ('no such plugin'), leaving the
+    directory permanently stuck."""
+    from localm.plugins.engine import PluginManager
+
+    inst = env / "installed"
+    (inst / "p1").mkdir(parents=True)
+    (inst / "p1" / "stray.py").write_text("# no manifest\n", encoding="utf-8")
+
+    mgr = PluginManager(FastAPI(), store_root=env / "store", installed_root=inst)
+    assert mgr.uninstall("p1") is True
+    assert not (inst / "p1").exists()
+
+    (inst / "p1").mkdir(parents=True)
+    (inst / "p1" / "stray.py").write_text("# no manifest\n", encoding="utf-8")
+    mgr.set_installed_state("p1", False)   # must not raise KeyError
+    assert not (inst / "p1").exists()
+
+
+def test_manifestless_chat_self_heals_through_discover(env):
+    """A directory left over from an interrupted preinstall (chat is plugin
+    #0, always preinstalled) must not permanently disable
+    _ensure_preinstalled's self-heal: it used to record
+    _discover_errors['chat'] = 'preinstall: <FileExistsError>' forever,
+    contradicting _ensure_preinstalled's own docstring, which promises it
+    self-heals if the directory is removed."""
+    from localm.plugins.engine import PluginManager
+
+    store = env / "store"
+    inst = env / "installed"
+    _make_plugin(store, "chat", _ping("chat"))
+    (inst / "chat").mkdir(parents=True)
+    (inst / "chat" / "stale.py").write_text("# stale\n", encoding="utf-8")
+
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    mgr.discover()
+
+    assert (inst / "chat" / "plugin.toml").is_file()
+    assert not (inst / "chat" / "stale.py").exists()
+    assert "chat" not in mgr._discover_errors, (
+        f"chat failed to self-heal: {mgr._discover_errors.get('chat')!r}")
+
+
+def test_provision_from_store_rmtree_failure_stays_honest(env, monkeypatch):
+    """When the stale directory cannot be removed (a locked file, an AV
+    hold), _provision_from_store must raise rather than merge the store copy
+    over it or silently report success, and must leave the stray file
+    untouched - nothing half-copied over a removal it could not complete."""
+    from localm.plugins.engine import PluginManager
+
+    store = env / "store"
+    inst = env / "installed"
+    _make_plugin(store, "p1", _ping("p1"))
+    (inst / "p1").mkdir(parents=True)
+    (inst / "p1" / "partial.py").write_text("# half-copied\n", encoding="utf-8")
+
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    monkeypatch.setattr(mgr, "_remove_installed_dir", lambda name: False)
+
+    with pytest.raises(ValueError, match="p1"):
+        mgr.install("p1")
+    assert (inst / "p1" / "partial.py").exists()
+    assert not (inst / "p1" / "plugin.toml").exists()
