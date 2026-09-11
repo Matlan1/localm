@@ -528,6 +528,18 @@ def _uv_missing_contained_block(bat_text):
     return bat_text[start:end]
 
 
+def _uv_missing_full_sequence(bat_text):
+    """The CONTAINED-mode block through the `where uv` / `goto uv_ready`
+    check that follows the (stubbed-out, by the caller) Astral installer
+    call - covers the UVDIRS/PATH rebuild that consumes UV_INSTALL_DIR a few
+    lines after it is set."""
+    marker = bat_text.index("rem  Portable was picked: confine uv's OWN binary")
+    start = bat_text.rindex('if "%CONTAINED%"=="1" (', 0, marker)
+    end = bat_text.index('if not errorlevel 1 goto uv_ready', start)
+    end = bat_text.index('\n', end)
+    return bat_text[start:end]
+
+
 def _datadir_lines(bat_text):
     """The DATADIR/DATACREATED default-plus-DATAPICK==1 span."""
     start = bat_text.index('rem DATADIR + DATACREATED feed the install manifest')
@@ -715,6 +727,51 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         assert "UID_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
         assert "UVDIR_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
 
+    def test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install(
+            self, bat, tmp_path):
+        """UV_INSTALL_DIR surviving its OWN `set` (the test above) is not
+        enough: a few lines later setup.bat rebuilds PATH from it so `where
+        uv` can find the freshly-installed binary. Reading UV_INSTALL_DIR
+        back there via an ordinary %-substitution corrupts it AGAIN, the
+        same way a bare %CD% would - confirmed directly: the first draft of
+        this fix read `%UV_INSTALL_DIR%` at that point and `where uv` failed
+        to find a real, just-created uv.exe at the correct (bang-preserving)
+        location. The PATH entry is prepended fresh from %CD:!=^!% instead.
+        A minimal PATH (just enough to resolve `where`/`powershell`) rules
+        out a real, pre-existing system `uv` masking the check."""
+        block = _uv_missing_full_sequence(bat)
+        install_target = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
+        assert install_target in block, "the Astral install invocation text moved; update this test"
+        stub_install = (
+            'powershell -NoProfile -Command '
+            '"New-Item -ItemType Directory -Force $env:UV_INSTALL_DIR | Out-Null; '
+            'New-Item -ItemType File -Force (Join-Path $env:UV_INSTALL_DIR \'uv.exe\') | Out-Null"'
+        )
+        block = block.replace(install_target, stub_install, 1)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        system_root = Path(r"C:\Windows\System32")
+        minimal_path = "{};{}".format(
+            system_root, system_root / "WindowsPowerShell" / "v1.0")
+        probe = bangdir / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            'set "CONTAINED=1"\r\n'
+            'set "PATH={minimal_path}"\r\n'
+            "{block}\r\n"
+            'echo NOT_REACHED_IF_GOTO_FAILED\r\n'
+            ":uv_ready\r\n"
+            'where uv\r\n'
+            "exit /b 0\r\n".format(block=block, minimal_path=minimal_path),
+            encoding="utf-8")
+        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
+        assert "NOT_REACHED_IF_GOTO_FAILED" not in out.stdout, out.stdout
+        expected_uv = str(bangdir / ".uv" / "uv.exe")
+        assert expected_uv in out.stdout.splitlines(), (
+            "where uv did not find the just-installed binary at the real "
+            "bang-preserving location: {}".format(out.stdout), out.stderr)
+
     def test_datadir_default_survives_a_bang_in_the_install_path(self, bat, tmp_path):
         block = _datadir_lines(bat)
         bangdir = tmp_path / "bang!dir"
@@ -832,7 +889,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
             + _pydir_cachedir_block(bat) + "\r\n"
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\n'
             'set "CRD=--data-created"\r\nset "RCFLAG=--runtime-contained"\r\n'
-            'set "UVDIR="\r\nset "PATHMOD=--path-modified"\r\n'
+            'set "UVDIR=%CD:!=^!%\\.uv"\r\nset "PATHMOD=--path-modified"\r\n'
             + echoed + "\r\n"
             "exit /b 0\r\n")
         probe = bangdir / "probe.bat"
@@ -846,6 +903,8 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
                 ("--python-dir", "\\.python"),
                 ("--cache-dir", "\\.cache"),
                 ("--path-dir", "\\bin"),
+                ("--command-shim", "\\bin\\localm.cmd"),
+                ("--uv-dir", "\\.uv"),
         ]:
             expected = '{} "{}{}"'.format(flag, bang, suffix)
             assert expected in out.stdout, (expected, out.stdout, out.stderr)

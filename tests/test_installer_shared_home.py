@@ -13,10 +13,8 @@ def test_setup_bat_never_uses_localm_as_data_dir():
     text = (ROOT / "setup.bat").read_text(encoding="utf-8")
     # No data-dir assignment to the per-user ~/.localm.
     assert "%USERPROFILE%\\.localm" not in text
-    # The default data dir is the contained ./home. %CD:!=^!% (not a bare
-    # %CD%) escapes a literal ! in the install path before cmd's delayed-
-    # expansion scanner can drop it - see test_installer_shortcut_prompt.py's
-    # TestCdDerivedVarsSurviveBangInInstallPath for the executing proof.
+    # The default data dir is the contained ./home. See
+    # TestCdDerivedVarsSurviveBangInInstallPath.
     assert 'set "DATADIR=%CD:!=^!%\\home"' in text
 
 

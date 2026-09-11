@@ -40,9 +40,7 @@ def test_sh_asks_portable_vs_shared_before_installing_uv():
 
 def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
     text = _bat()
-    # %CD:!=^!% (not a bare %CD%) escapes a literal ! in the install path
-    # before cmd's delayed-expansion scanner can drop it - see
-    # test_installer_shortcut_prompt.py's TestCdDerivedVarsSurviveBangInInstallPath.
+    # See TestCdDerivedVarsSurviveBangInInstallPath.
     contained_set_idx = text.index('set "UV_INSTALL_DIR=%CD:!=^!%\\.uv"')
     # Match the real invocation, not the install-it-yourself messages that echo
     # the identical URL as plain text: the `-NoProfile ... -Command` prefix is

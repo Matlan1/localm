@@ -132,14 +132,15 @@ rem  persistent PATH the installer set.
 rem  Harmless caveat (AGENTS.md rule 5): under this file's EnableDelayedExpansion a
 rem  `!` inside the user's INHERITED PATH is dropped when PATH is re-assigned here.
 rem  Proven harmless: this runs only in the uv-missing branch, the change is
-rem  process-local (never the persistent PATH), and every tool the rest of setup runs
-rem  resolves via an explicit path (.venv\Scripts, System32) or the uv dirs prepended
-rem  above, none of which live in a `!`-named directory. A dir literally named with
-rem  `!` is exotic, and a bulletproof-preserving assignment needs fragile batch not
-rem  worth it here (an endlocal-transport re-enables expansion and strips it anyway).
+rem  process-local (never the persistent PATH), and every OTHER tool the rest of
+rem  setup runs resolves via an explicit path (.venv\Scripts, System32). A dir
+rem  literally named with `!` in the inherited PATH is exotic, and a bulletproof-
+rem  preserving assignment needs fragile batch not worth it here.
 set "UVDIRS=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin"
-if defined UV_INSTALL_DIR set "UVDIRS=%UV_INSTALL_DIR%;%UVDIRS%"
 set "PATH=%UVDIRS%;%PATH%"
+rem  UV_INSTALL_DIR itself is prepended fresh from %CD:!=^!% here rather than
+rem  read back - see test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install.
+if defined UV_INSTALL_DIR set "PATH=%CD:!=^!%\.uv;%PATH%"
 where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
 

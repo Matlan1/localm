@@ -156,8 +156,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   issue the bootstrap and desktop-shortcut steps were.
 - **A `!` in the install path could also leave several settings silently recorded with the wrong
   (or no) location instead of the real one: the data directory, the Python/download cache
-  directories, and the optional `localm` command's PATH entry.** Each of those is now insulated the
-  same way the earlier `!`-in-path fixes were.
+  directories, uv's own binary directory, and the optional `localm` command's PATH entry.** Each of
+  those is now insulated the same way the earlier `!`-in-path fixes were, including the follow-on
+  step that could otherwise fail to find a freshly-installed, correctly-placed `uv`.
 - **Uninstalling could leave the Desktop shortcut behind on a machine with a redirected Desktop
   folder (for example OneDrive's "Back up your folders").** The installer recorded a guessed path
   instead of the one it actually wrote, so uninstall believed the shortcut was already gone and
