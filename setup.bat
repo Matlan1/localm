@@ -13,9 +13,9 @@ rem  NVIDIA, Intel, AMD, or CPU-only machine all get a working install. Vulkan
 rem  is the universal default (any GPU, no vendor toolkit); CUDA/ROCm are
 rem  offered for peak performance; CPU for machines with no GPU.
 rem ===========================================================================
+cd /d "%~dp0"
 setlocal EnableDelayedExpansion
 set LOCALM_SETUP=1
-cd /d "%~dp0"
 title LocaLM setup
 set "HBSEQ=0"
 
@@ -511,6 +511,8 @@ set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
 if not defined SCPICK set "SCPICK=1"
 set "SCPATH="
 if "%SCPICK%"=="1" (
+    setlocal DisableDelayedExpansion
+    set "SC_STILL_OPEN=1"
     for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command ^
         "$ErrorActionPreference = 'Stop';" ^
         "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
@@ -519,11 +521,16 @@ if "%SCPICK%"=="1" (
         "$s.WorkingDirectory = '%CD%';" ^
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'LocaLM - open the launcher';" ^
-        "$s.Save();Write-Output $p"`) do set "SCPATH=%%p"
+        "$s.Save();Write-Output $p"`) do (
+        endlocal & set "SCPATH=%%p"
+    )
+    if defined SC_STILL_OPEN endlocal
     if defined SCPATH echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the launcher^)
     if defined SCPATH set "SCMADE=1"
 )
 if "%SCPICK%"=="2" (
+    setlocal DisableDelayedExpansion
+    set "SC_STILL_OPEN=1"
     for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command ^
         "$ErrorActionPreference = 'Stop';" ^
         "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
@@ -532,7 +539,10 @@ if "%SCPICK%"=="2" (
         "$s.WorkingDirectory = '%CD%';" ^
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'LocaLM - open the web GUI';" ^
-        "$s.Save();Write-Output $p"`) do set "SCPATH=%%p"
+        "$s.Save();Write-Output $p"`) do (
+        endlocal & set "SCPATH=%%p"
+    )
+    if defined SC_STILL_OPEN endlocal
     if defined SCPATH echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the GUI as LocaLM.exe^)
     if defined SCPATH set "SCMADE=1"
 )

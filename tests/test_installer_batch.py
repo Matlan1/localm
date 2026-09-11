@@ -12,8 +12,11 @@ time.`` for the same shape with a trailing ``:``, and the installer dies.
 So an unquoted paren in any command *inside* a block MUST be escaped as
 ``^(`` / ``^)``. Parens at the top level (depth 0), e.g. the backend menu, are
 harmless and are not flagged; neither is a paren inside a double-quoted string
-(cmd.exe's block parser does not count those) or the FOR /F ``in ("...")``
-idiom, which wraps a quoted literal in cmd.exe's own grammar.
+(cmd.exe's block parser does not count those) or the FOR /F ``in ("...")`` /
+``in (`...`)`` idiom, which wraps a quoted literal or ``usebackq`` command
+substitution in cmd.exe's own grammar. The backtick form may span several
+physical lines via caret continuation, so its open/close state is tracked
+across lines the same way block ``depth`` is.
 
 This is a cheap static lint, not a full cmd parser.
 """
@@ -29,6 +32,28 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BAT_FILES = sorted(REPO_ROOT.glob("*.bat"))
 
 
+def _strip_backtick_command_parens(unquoted: str, in_backtick: bool) -> tuple[str, bool]:
+    """Remove a ``usebackq`` FOR /F command-substitution span (`` `...` ``)
+    from `unquoted`, carrying the open/close state across the caret-continued
+    lines such a span usually spans. The ``(`` immediately before an OPENING
+    backtick and the ``)`` immediately after a CLOSING backtick are the FOR
+    clause's own required grammar (the backtick counterpart of the existing
+    ``("literal")`` idiom), not a stray paren for the enclosing block.
+    """
+    parts = unquoted.split("`")
+    kept: list[str] = []
+    for i, part in enumerate(parts):
+        if not in_backtick:
+            if i > 0 and part.startswith(")"):
+                part = part[1:]
+            kept.append(part)
+        if i < len(parts) - 1:
+            in_backtick = not in_backtick
+            if in_backtick and kept and kept[-1].endswith("("):
+                kept[-1] = kept[-1][:-1]
+    return "".join(kept), in_backtick
+
+
 def find_unescaped_block_parens(text: str) -> list[tuple[int, str]]:
     """Return (line_number, line) for any non-comment, non-label line inside a
     block that contains an unescaped, unquoted ``(`` or ``)``.
@@ -37,10 +62,12 @@ def find_unescaped_block_parens(text: str) -> list[tuple[int, str]]:
     ``(`` (``if ... (`` / ``else (`` / ``for ... (``) and closes when a line
     STARTS with ``)``. That structural opener/closer is excluded from the
     hazard scan, as is a paren inside a double-quoted segment (no nested
-    quoting in cmd) and the FOR /F ``in ("...")`` parenthesised-literal idiom.
+    quoting in cmd), the FOR /F ``in ("...")`` parenthesised-literal idiom,
+    and the FOR /F ``in (`...`)`` command-substitution idiom.
     """
     offenders: list[tuple[int, str]] = []
     depth = 0
+    in_backtick = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
         low = stripped.lower()
@@ -60,6 +87,7 @@ def find_unescaped_block_parens(text: str) -> list[tuple[int, str]]:
             # Anything else quoted is likewise outside the block parser's
             # count (no nested quoting in a .bat file).
             unquoted = "".join(seg for i, seg in enumerate(body.split('"')) if i % 2 == 0)
+            unquoted, in_backtick = _strip_backtick_command_parens(unquoted, in_backtick)
             if "(" in unquoted or ")" in unquoted:
                 offenders.append((lineno, raw))
 
@@ -145,3 +173,47 @@ def test_checker_ignores_quoted_and_for_f_parens() -> None:
         ')\r\n'
     )
     assert find_unescaped_block_parens(ok) == []
+
+
+def test_checker_ignores_single_line_backtick_command_substitution() -> None:
+    """FOR /F `usebackq` over a backtick-quoted command, entirely on one
+    line, is the same cmd.exe grammar as the `("literal")` form."""
+    ok = (
+        'if x (\r\n'
+        '    for /f "usebackq delims=" %%i in (`echo hi`) do (\r\n'
+        '        set "V=%%i"\r\n'
+        '    )\r\n'
+        ')\r\n'
+    )
+    assert find_unescaped_block_parens(ok) == []
+
+
+def test_checker_ignores_multiline_backtick_command_substitution() -> None:
+    """The real shape used by setup.bat's shortcut blocks: the backtick span
+    opens and closes on DIFFERENT physical lines via caret continuation, and
+    the FOR clause's own closing `)` shares a line with a new `do (` block
+    opener - both must be recognised as grammar, not stray parens."""
+    ok = (
+        'if x (\r\n'
+        '    for /f "usebackq delims=" %%p in (`powershell -Command ^\r\n'
+        '        "$a = 1;" ^\r\n'
+        '        "Write-Output $a"`) do (\r\n'
+        '        set "V=%%p"\r\n'
+        '    )\r\n'
+        ')\r\n'
+    )
+    assert find_unescaped_block_parens(ok) == []
+
+
+def test_checker_still_flags_a_stray_paren_after_a_backtick_span() -> None:
+    """The backtick-span tracking must not leak past its own close: a
+    genuinely stray paren later in the same block is still a hazard."""
+    bad = (
+        'if x (\r\n'
+        '    for /f "usebackq delims=" %%i in (`echo hi`) do set "V=%%i"\r\n'
+        '    echo done (oops)\r\n'
+        ')\r\n'
+    )
+    offenders = find_unescaped_block_parens(bad)
+    assert offenders, "a stray paren after a backtick span must still be flagged"
+    assert offenders[0][0] == 3
