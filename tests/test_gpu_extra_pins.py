@@ -75,8 +75,9 @@ def test_pyproject_transformers_spec_excludes_the_fsdp_breaking_line(extra):
 
 def test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins():
     """[hf] and [gpu] must never drift apart on the pins they share
-    (transformers, tokenizers, accelerate) - [hf] exists so a non-ROCm
-    install gets the identical HF stack [gpu] gives a ROCm/Windows one."""
+    (transformers, tokenizers, accelerate, psutil) - [hf] exists so a
+    non-ROCm install gets the identical HF stack [gpu] gives a ROCm/Windows
+    one."""
     packaging_requirements = pytest.importorskip("packaging.requirements")
 
     def _specifiers(extra):
@@ -85,7 +86,7 @@ def test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins():
 
     gpu_specs = _specifiers("gpu")
     hf_specs = _specifiers("hf")
-    for name in ("transformers", "tokenizers", "accelerate"):
+    for name in ("transformers", "tokenizers", "accelerate", "psutil"):
         assert name in hf_specs, f"[hf] is missing {name}"
         assert hf_specs[name] == gpu_specs[name], (
             f"[hf] pins {name} as '{hf_specs[name]}' but [gpu] pins it as "

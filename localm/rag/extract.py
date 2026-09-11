@@ -837,7 +837,11 @@ def _extract_pdf(data: bytes, filename: str) -> str:
         total_chars = 0
         deadline = _monotonic() + MAX_PDF_EXTRACT_SECONDS
         note = None
-        # reader.pages is iterated lazily here, never len()'d up front.
+        # enumerate() calls len(reader.pages) once, up front, which walks
+        # pypdf's whole page tree (capped by its own page_tree_maximum_entries,
+        # raising past it - caught below). deadline is taken before this call
+        # so that walk counts against it rather than adding to it. See
+        # test_a_pathological_page_tree_is_caught_not_crashed.
         for i, page in enumerate(reader.pages):
             if i >= MAX_PDF_PAGES:
                 note = f"[pdf truncated: page cap of {MAX_PDF_PAGES} pages reached]"

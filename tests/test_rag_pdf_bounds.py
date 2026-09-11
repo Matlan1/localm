@@ -117,3 +117,18 @@ def test_text_budget_stops_the_walk(monkeypatch):
     assert 0 < len(page_markers) < 50, (
         f"expected the text budget to stop the walk before all 50 pages, got {text!r}")
     assert "truncated" in text
+
+
+def test_a_pathological_page_tree_is_caught_not_crashed():
+    """enumerate(reader.pages) resolves reader.get_num_pages() before this
+    function's own MAX_PDF_PAGES/deadline/budget checks ever run, which walks
+    pypdf's whole page tree and is bounded only by pypdf's own
+    page_tree_maximum_entries. A PDF whose page tree exceeds that pypdf-level
+    cap must still surface as ExtractError, not pypdf's own LimitReachedError
+    or an unbounded walk."""
+    pypdf = pytest.importorskip("pypdf")
+    if not hasattr(pypdf, "apply_configuration"):
+        pytest.skip("this pypdf version has no configurable page_tree_maximum_entries")
+    with pypdf.apply_configuration(page_tree_maximum_entries=50):
+        with pytest.raises(extract.ExtractError):
+            extract._extract_pdf(_multi_page_pdf(100), "huge-tree.pdf")
