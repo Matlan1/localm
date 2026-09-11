@@ -124,6 +124,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   folder (for example OneDrive's "Back up your folders").** The installer recorded a guessed path
   instead of the one it actually wrote, so uninstall believed the shortcut was already gone and
   skipped removing it.
+- **Relocating a model to a new path now rejects a network (UNC) or device path before touching
+  the filesystem, and the relocation itself no longer blocks the server while it runs.** The path
+  is validated as text first, so a malformed or unreachable network location is refused instead
+  of the server dialing it and stalling every other request for as long as that dial takes.
+- **The chat REPL's `/generate-image`, `/generate-music` and `/generate-video` commands now use
+  each plugin's own configured ComfyUI address, the same one the Models page and the command line
+  already use.** They previously always used the shared address, so a ComfyUI configured
+  specifically for one of the three could be bypassed from inside a chat session.
+- **A plugin whose installation was interrupted partway through can be installed, reinstalled, or
+  removed again.** It previously stayed stuck in a broken, half-installed state that nothing in
+  the app could clear, including plugins that install themselves automatically.
+- **A ComfyUI address written in an unusual numeric form (hexadecimal, octal, or a single decimal
+  number) is now refused when it points at a link-local or cloud-metadata address, the same as
+  the ordinary dotted form already was.** Only that numeric form was previously overlooked.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role

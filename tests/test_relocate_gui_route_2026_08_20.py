@@ -8,6 +8,9 @@ pull spec, which may be a remote HuggingFace repo id), so relocate is gated on
 host filesystem access exactly like /api/models/scan - see
 test_scan_workdir_route.py, whose fixture shape this file mirrors."""
 
+import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm import scopes as S
+from tests.test_admin_fs_routes import (DEVICE, UNC, UNC_FWD, _NO_DIAL_SECONDS,  # noqa: F401
+                                        _unc_calls, fs_spy)
 
 
 def _gguf(p: Path) -> Path:
@@ -213,3 +218,78 @@ class TestRelocateValidation:
             after = c.get("/api/models", headers=_hdr(key)).json()
             row = next(m for m in after["models"] if m["name"] == "m")
             assert "missing" not in row
+
+
+class TestRelocatePathRejectedLexically:
+    """new_path is a UNC/device string rejected BEFORE any filesystem call, and
+    the response comes back fast - see test_admin_fs_routes.py for why this
+    must be proven by recording every filesystem call rather than by status
+    code alone (the route wraps its body in a broad exception handler
+    upstream, so a raised AssertionError could otherwise be swallowed into a
+    tolerated 500)."""
+
+    @pytest.mark.parametrize("bad_path", [UNC, DEVICE])
+    def test_a_unc_or_device_path_never_reaches_the_filesystem(
+            self, relocate_app, fs_spy, bad_path):  # noqa: F811
+        import localm.model_manager as mm
+        app, tmp = relocate_app
+        old = _gguf(tmp / "ext" / "m.gguf")
+        mm.save_registry({"m": {"path": str(old), "source": "local"}})
+        start = time.monotonic()
+        with TestClient(app) as c:
+            r = c.post("/api/models/relocate", headers=_hdr(_host_writer_key()),
+                       json={"model": "m", "new_path": bad_path})
+        elapsed = time.monotonic() - start
+        assert _unc_calls(fs_spy) == [], (
+            f"a filesystem call reached the UNC/device string: {_unc_calls(fs_spy)!r}")
+        assert Path(mm.load_registry()["m"]["path"]) == old
+        assert elapsed < _NO_DIAL_SECONDS
+        assert r.status_code == 400, r.text
+
+    def test_forward_slash_unc_platform_split(self, relocate_app, fs_spy):  # noqa: F811
+        import localm.model_manager as mm
+        app, tmp = relocate_app
+        old = _gguf(tmp / "ext" / "m.gguf")
+        mm.save_registry({"m": {"path": str(old), "source": "local"}})
+        with TestClient(app) as c:
+            r = c.post("/api/models/relocate", headers=_hdr(_host_writer_key()),
+                       json={"model": "m", "new_path": UNC_FWD})
+        if os.name == "nt":
+            assert _unc_calls(fs_spy) == [], (
+                f"a filesystem call reached the UNC string: {_unc_calls(fs_spy)!r}")
+            assert r.status_code == 400, r.text
+        else:
+            assert r.status_code == 400, r.text
+            assert "does not exist" in r.json()["detail"]
+        assert Path(mm.load_registry()["m"]["path"]) == old
+
+
+class TestRelocateFilesystemWorkRunsOffTheLoop:
+    def test_relocate_target_runs_in_the_plugin_executor(self, relocate_app, monkeypatch):
+        """relocate_target's own filesystem checks (exists/is_dir/stat, and the
+        open() inside _has_gguf_magic) must never run on the event loop -
+        proven by recording the name of the thread that calls it, since the
+        plugin executor's workers are the only threads named "localm-plugin*"
+        (localm/executor.py's thread_name_prefix)."""
+        import localm.model_manager as mm
+        from localm.model_manager import registry as _registry
+        app, tmp = relocate_app
+        old = _gguf(tmp / "ext" / "m.gguf")
+        mm.save_registry({"m": {"path": str(old), "source": "local"}})
+        new = _gguf(tmp / "moved" / "m.gguf")
+
+        real = _registry.relocate_target
+        thread_names = []
+
+        def wrapper(new_path):
+            thread_names.append(threading.current_thread().name)
+            return real(new_path)
+
+        monkeypatch.setattr(_registry, "relocate_target", wrapper)
+        with TestClient(app) as c:
+            r = c.post("/api/models/relocate", headers=_hdr(_host_writer_key()),
+                       json={"model": "m", "new_path": str(new)})
+        assert r.status_code == 200, r.text
+        assert thread_names, "relocate_target was never called"
+        assert all(n.startswith("localm-plugin") for n in thread_names), (
+            f"relocate_target ran outside the plugin executor: {thread_names!r}")

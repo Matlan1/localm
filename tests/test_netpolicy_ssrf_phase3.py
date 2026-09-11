@@ -104,3 +104,52 @@ def test_public_numeric_ip_passes(monkeypatch):
     # 93.184.216.34 in dotless decimal.
     dotless = str(int.from_bytes(socket.inet_aton("93.184.216.34"), "big"))
     check_url(f"https://{dotless}/")   # no raise
+
+
+# --------------------------------------------------------------------------- #
+# is_link_local_host: the SAME numeric-literal-bypass discipline as above,
+# for a caller (comfy_client's ComfyUI-address guard) that must allow
+# loopback/private/public and refuse ONLY link-local/cloud-metadata - unlike
+# check_url, which refuses every non-public class at once.
+# --------------------------------------------------------------------------- #
+
+from localm.netpolicy import is_link_local_host  # noqa: E402
+
+# Each of these is a different obfuscation of 169.254.169.254 (cloud metadata).
+_LINK_LOCAL_FORMS = [
+    "0xa9fea9fe",              # dotless hex
+    "2852039166",              # dotless decimal
+    "0251.0376.0251.0376",     # octal, every octet
+    "169.254.169.254",         # dotted (control: the un-obfuscated form)
+]
+
+
+@pytest.mark.parametrize("host", _LINK_LOCAL_FORMS)
+def test_is_link_local_host_catches_every_numeric_spelling(monkeypatch, host):
+    """ipaddress.ip_address() refuses these dotless/hex/octal forms outright,
+    so without the _literal_ipv4 fast path is_link_local_host would classify
+    them via getaddrinfo - which _no_dns makes unavailable, so a pass here
+    proves the LITERAL normalization caught it, not a real DNS lookup."""
+    _no_dns(monkeypatch)
+    assert is_link_local_host(host) is True
+
+
+def test_is_link_local_host_does_not_flag_the_numeric_loopback_literal(monkeypatch):
+    """2130706433 is loopback (127.0.0.1), not link-local - is_link_local_host
+    must stay narrow and not widen into flagging every non-public address."""
+    _no_dns(monkeypatch)
+    assert is_link_local_host("2130706433") is False
+
+
+def test_is_link_local_host_unresolvable_host_passes(monkeypatch):
+    _no_dns(monkeypatch)
+    assert is_link_local_host("nonexistent.invalid") is False
+
+
+def test_is_link_local_host_via_dns_resolution(monkeypatch):
+    """A HOSTNAME (not a literal) that resolves to a link-local address must
+    also be caught by the getaddrinfo loop, not only the literal fast path."""
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda host, port, *a, **k: [(2, 1, 6, "", ("169.254.1.1", 0))])
+    assert is_link_local_host("metadata.internal") is True

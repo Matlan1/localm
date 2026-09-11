@@ -338,6 +338,37 @@ def _check_public_address(host: str) -> None:
                 "(set net_allow_private true to permit them).")
 
 
+def is_link_local_host(host: str) -> bool:
+    """True if *host* is (or resolves to) a link-local address
+    (169.254.0.0/16, fe80::/10) - including every numeric/short-form IPv4
+    spelling of one (see _literal_ipv4), which ipaddress.ip_address() and
+    socket.getaddrinfo alike can fail to classify directly. Unresolvable or
+    unparseable hosts return False, the same contract _check_public_address
+    uses for a host it cannot resolve.
+
+    This is narrower than _check_public_address: it flags ONLY link-local,
+    never loopback/private/public, for a caller (an owner-configured local
+    service endpoint) that must allow loopback and LAN but still refuse
+    cloud-metadata addresses."""
+    lit = _literal_ipv4(host)
+    if lit is not None:
+        return lit.is_link_local
+    try:
+        return ipaddress.ip_address(host).is_link_local
+    except ValueError:
+        pass
+    try:
+        for info in socket.getaddrinfo(host, None):
+            try:
+                if ipaddress.ip_address(info[4][0]).is_link_local:
+                    return True
+            except ValueError:
+                continue
+    except (socket.gaierror, OSError):
+        return False
+    return False
+
+
 def _resolve_pinned(host: str) -> Optional[str]:
     """Resolve *host* to ONE IP to pin the connection to, closing the
     check-and-connect DNS-rebinding TOCTOU. ``check_url`` resolves

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from localm import netpolicy
 from localm.http_ssl import verified_urlopen
 from localm.pathsafe import confined_under, is_unc_or_device_path
 
@@ -802,30 +803,6 @@ def _comfy_urlopen(req_or_url, *, timeout=None):
 _COMFY_LOOPBACK_DEFAULT = "http://127.0.0.1:8188"
 
 
-def _host_is_link_local(host: str) -> bool:
-    """True if *host* is (or resolves to) a link-local / cloud-metadata address
-    (169.254.0.0/16, fe80::/10). A ComfyUI never lives there; loopback / LAN /
-    public do, and are allowed."""
-    import ipaddress
-    import socket
-    if not host:
-        return False
-    try:
-        return ipaddress.ip_address(host).is_link_local
-    except ValueError:
-        pass
-    try:
-        for info in socket.getaddrinfo(host, None):
-            try:
-                if ipaddress.ip_address(info[4][0]).is_link_local:
-                    return True
-            except ValueError:
-                continue
-    except (socket.gaierror, OSError):
-        return False
-    return False
-
-
 def sanitize_comfy_url(url: str) -> str:
     """Return *url* unless its host is link-local / cloud-metadata (or the guard
     itself cannot validate it), in which case warn and fall back to the loopback
@@ -843,7 +820,8 @@ def sanitize_comfy_url_checked(url: str) -> tuple:
     guard replacing an admin-set URL reaches the user instead of only the debug
     log."""
     try:
-        if _host_is_link_local(urllib.parse.urlparse(url).hostname or ""):
+        host = netpolicy.check_url_shape(url)
+        if netpolicy.is_link_local_host(host):
             from localm.debuglog import logger
             logger.warning(
                 "comfy_api_url %r targets a link-local/metadata address; ignoring "

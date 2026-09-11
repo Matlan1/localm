@@ -907,22 +907,37 @@ def register(app: FastAPI, ctx) -> None:
         (fs_access="none") could use the specific validation error below (does
         not exist / not a GGUF / not a HF dir) as an existence-and-validity
         oracle over the server's filesystem.
+
+        new_path is rejected lexically (pathsafe.reject_unsafe_path_string)
+        before anything touches the filesystem, and every filesystem call runs
+        in the plugin executor, never on the event loop.
         """
         require_fs_host(request)
         _require_registered(req.model)
+        from localm.plugins.gui.routes.admin import _network_drives_allowed
+        try:
+            pathsafe.reject_unsafe_path_string(
+                req.new_path, reject_network_drives=not _network_drives_allowed())
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid path: {e}")
         from localm.model_manager.registry import relocate_model, relocate_target
-        p, reason = relocate_target(req.new_path)
-        if p is None:
-            raise HTTPException(400, reason)
+
+        def _do():
+            p, reason = relocate_target(req.new_path)
+            if p is None:
+                return {"reason": reason}
+            if not relocate_model(req.model, req.new_path):
+                return {"reason": None}
+            # .resolve() to match what relocate_model actually wrote (it resolves
+            # its own, separately-computed `p` before saving), not the
+            # pre-resolution path relocate_target returned above.
+            return {"path": str(p.resolve())}
+
         loop = asyncio.get_running_loop()
-        ok = await loop.run_in_executor(
-            get_plugin_executor(), relocate_model, req.model, req.new_path)
-        if not ok:
-            raise HTTPException(400, f"Could not relocate {req.model}")
-        # .resolve() to match what relocate_model actually wrote (it resolves its
-        # own, separately-computed `p` before saving), not the pre-resolution path
-        # relocate_target returned above.
-        return {"status": "relocated", "model": req.model, "path": str(p.resolve())}
+        result = await loop.run_in_executor(get_plugin_executor(), _do)
+        if "path" not in result:
+            raise HTTPException(400, result["reason"] or f"Could not relocate {req.model}")
+        return {"status": "relocated", "model": req.model, "path": result["path"]}
 
     # ------------------------ model discovery --------------------- #
     # Search HuggingFace or CivitAI and show per-quant/per-file "fits your VRAM"

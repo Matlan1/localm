@@ -997,10 +997,44 @@ class PluginManager:
         # Raises ValueError on a bad id.
         return Path(self._installed_root) / _check_plugin_name(name)
 
+    def _installed_dir_on_disk(self, name: str) -> bool:
+        """True when the installed-plugins root DIRECTLY contains a directory
+        literally named *name*, manifest or not - the same raw-name tolerance
+        _installed_set() uses (a directory need not equal any manifest name),
+        without requiring plugin.toml to be present.
+
+        LEXICAL first, before any syscall: *name* must be exactly one path
+        component (``name == Path(name).name``, the same rule
+        _is_valid_plugin_name applies, without ITS added identifier-shape
+        requirement - an odd but legitimate basename like 'coolplugin-1.0'
+        must still pass). Without this, a UNC-shaped name (``\\\\host\\share``)
+        joined with ``/`` onto root does not stay confined - an ABSOLUTE
+        right-hand operand makes pathlib's ``/`` discard the left side
+        entirely - and the is_dir()/resolve() below would dial that host on
+        Windows before the resolved-parent check below ever runs.
+
+        Confined AGAIN by RESOLVED PARENT after that, exactly like
+        _remove_installed_dir: a traversing name that is lexically one
+        component but resolves outside root (e.g. a symlink) is still
+        refused."""
+        root = self._installed_root
+        if not root or not name or name != Path(name).name:
+            return False
+        d = Path(root) / name
+        try:
+            return d.is_dir() and d.resolve().parent == Path(root).resolve()
+        except OSError:
+            return False
+
     def _provision_from_store(self, name: str) -> bool:
         """Copy the plugin from the bundled store into the installed folder (or,
         if missing from the store, fetch it from its GitHub repo). No-op if it is
         already installed. Raises KeyError when no source exists.
+
+        A directory already present at the destination with no manifest (an
+        interrupted or partial previous install) is replaced rather than
+        left in place: it is removed first, and ValueError propagates if that
+        removal fails, before anything is copied.
 
         Returns True only if THIS call created the directory. The caller must
         pass that through to _provision_and_verify's rollback: rolling back a
@@ -1009,6 +1043,14 @@ class PluginManager:
         dest = self._installed_dir(name)
         if (dest / "plugin.toml").is_file():
             return False                             # already installed on disk
+        if dest.exists():
+            _log.warning(
+                "plugin %s: the installed directory exists with no manifest "
+                "(an interrupted or partial install); replacing it", name)
+            if not self._remove_installed_dir(name):
+                raise ValueError(
+                    f"plugin {name!r}: a stale installed directory could not "
+                    f"be removed; see the log")
         src = self._store_dir(name)
         if src is not None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1505,7 +1547,7 @@ class PluginManager:
                 self._set_enabled(name, True)
         else:
             self.discover()
-            if name not in self._installed_set():
+            if name not in self._installed_set() and not self._installed_dir_on_disk(name):
                 raise KeyError(f"no such plugin: {name}")
             if self._is_protected(name):
                 raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
@@ -1538,11 +1580,18 @@ class PluginManager:
         is still disabled and unloaded, but some of its files remain on disk; see
         the WARNING logged by _remove_installed_dir / _delete_plugin_data for the
         concrete cause. A caller must never report bare success without checking
-        this return value. KeyError if wholly unknown."""
+        this return value.
+
+        Also removable when the installed directory exists with no manifest
+        (an interrupted or corrupted previous install): that directory is
+        deleted the same as a fully installed plugin's, and doing so still
+        counts as complete. KeyError only when nothing - manifest or
+        directory - exists under this name."""
         self.discover()
         spec = self._specs.get(name)
         was_installed = name in self._installed_set()
-        if spec is None and not was_installed:
+        on_disk = self._installed_dir_on_disk(name)
+        if spec is None and not was_installed and not on_disk:
             raise KeyError(f"no such plugin: {name}")
         if self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
@@ -1576,7 +1625,8 @@ class PluginManager:
         if delete_data and spec and spec.data_subdir:
             data_deleted = self._delete_plugin_data(spec)
         removed = self._remove_installed_dir(name)    # delete from the installed folder
-        if was_installed and not removed:
+        existed = was_installed or on_disk
+        if existed and not removed:
             _log.warning(
                 "plugin %s: uninstall disabled and unloaded it, but its "
                 "installed directory could not be removed; reporting a "
@@ -1586,7 +1636,7 @@ class PluginManager:
                 "plugin %s: uninstall disabled and unloaded it, but its data "
                 "could not be fully deleted; reporting a degraded result "
                 "rather than a bare success", name)
-        return was_installed and removed and data_deleted
+        return existed and removed and data_deleted
 
     def _delete_plugin_data(self, spec: PluginSpec) -> bool:
         """Delete the plugin's data_subdir. Returns True iff it is confirmed gone
