@@ -66,6 +66,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Scheduled coding jobs no longer fail on a server whose API key was set from the terminal.**
   A job could only authenticate with a key supplied through the environment, so a key stored on
   disk was ignored and every scheduled run was rejected as unauthorized.
+- **Closing the web-access prompt without choosing now cancels the request properly instead of
+  leaving the reply unfinished.** Dismissing the "Allow web access?" dialog with the x or by
+  clicking outside it used to leave the chat waiting forever with no error and no response.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
