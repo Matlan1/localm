@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 from localm.debuglog import logger
 
@@ -466,6 +466,80 @@ class _CancelCriteria:
                           device=input_ids.device)
 
 
+# Shown when audio is attached to a model whose processor has no audio
+# capability. Kept local to this module rather than in base.py: there is no
+# parent-side audio refusal to share it with, since hf.py refuses only
+# images.
+_AUDIO_UNSUPPORTED_MESSAGE = (
+    "This model cannot accept audio input, so the attached clip would be "
+    "ignored. Load a HuggingFace-format model whose processor exposes a "
+    "feature_extractor or audio_processor."
+)
+
+
+def _messages_contain_audio(messages: List[dict]) -> bool:
+    """True if any message carries an ``input_audio`` content part."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "input_audio":
+                    return True
+    return False
+
+
+def _audio_processor_sampling_rate(processor) -> Optional[int]:
+    """The sample rate *processor* expects its audio input at, read from
+    either attribute shape a transformers audio processor exposes it under
+    (``feature_extractor`` or ``audio_processor``), or None when neither
+    exposes one."""
+    for attr in ("feature_extractor", "audio_processor"):
+        extractor = getattr(processor, attr, None)
+        rate = getattr(extractor, "sampling_rate", None)
+        if isinstance(rate, int) and rate > 0:
+            return rate
+    return None
+
+
+def _build_audio_process_kwargs(processor, audios: List[tuple]) -> Tuple[dict, bool]:
+    """``(kwargs, rate_verified)`` for passing *audios* (a list of
+    ``(waveform, sample_rate)`` pairs) to *processor*'s ``__call__``.
+
+    ``kwargs`` carries ``audio=`` (a single waveform, or a list of waveforms
+    for several clips) and ``sampling_rate=`` - never the tuple shape
+    :func:`localm.inference.media.decode_audio` returns. ``rate_verified`` is
+    True only when the model's own expected rate was read and matched the
+    clips.
+
+    Raises :class:`UnsupportedInputError`
+    (``localm.inference.backends.base``) when several clips carry different
+    sample rates, or when the model's expected rate is known and does not
+    match theirs.
+    """
+    from .base import UnsupportedInputError
+    rates = {sr for _audio, sr in audios}
+    if len(rates) > 1:
+        raise UnsupportedInputError(
+            "Several audio clips were attached at different sample rates "
+            f"({sorted(rates)} Hz); localm cannot mix sample rates in one "
+            "request. Resend the clips at a single, matching sample rate.")
+    clip_rate = next(iter(rates))
+    expected_rate = _audio_processor_sampling_rate(processor)
+    if expected_rate is not None and expected_rate != clip_rate:
+        raise UnsupportedInputError(
+            f"The attached audio is {clip_rate} Hz, but this model expects "
+            f"{expected_rate} Hz. localm does not resample audio; resend the "
+            "clip at the model's sample rate.")
+    if expected_rate is None:
+        logger.debug(
+            "hf worker: could not read this model's expected audio sample "
+            "rate from its processor; passing the clip's own rate (%s Hz) "
+            "through unverified", clip_rate)
+    waveforms = [audio for audio, _sr in audios]
+    audio_value = waveforms[0] if len(waveforms) == 1 else waveforms
+    return {"audio": audio_value, "sampling_rate": clip_rate}, expected_rate is not None
+
+
 # transformers' naming convention for a GENERATIVE task head. A checkpoint whose
 # declared architecture ends in one of these generates text; anything else (the
 # bare ``*Model`` encoders: BertModel, XLMRobertaModel, NomicBertModel,
@@ -487,10 +561,11 @@ class HFWorker:
     Loads any HuggingFace-format model directory. Runs only inside the
     isolated child process - see this module's docstring.
 
-    Multimodal detection is automatic: if the model directory ships a processor
-    that handles images/audio, multimodal content in messages is handled.
-    If the model only has a tokenizer, image/audio parts are silently dropped
-    and only text is passed to the model.
+    Multimodal detection is automatic and per-capability: if the loaded
+    processor exposes an ``image_processor``, images are handled; if it
+    exposes a ``feature_extractor`` or ``audio_processor``, audio is handled.
+    A message part whose media type the loaded model does not support raises
+    ``UnsupportedInputError`` instead of being dropped.
     """
 
     # An HF checkpoint may ship an image processor; whether this instance can
@@ -504,6 +579,8 @@ class HFWorker:
         self._processor = None     # AutoProcessor (multimodal)
         self._tokenizer = None     # AutoTokenizer fallback
         self._is_multimodal = False
+        self._supports_image = False
+        self._supports_audio = False
         self._loaded = False
         # The RESOLVED device ("cuda"/"xpu"/"cpu"), set once load() picks
         # one - None beforehand ("auto" was requested and not decided yet).
@@ -519,8 +596,9 @@ class HFWorker:
 
     @property
     def supports_images(self) -> bool:
-        """True once a multimodal processor has been detected at load time."""
-        return self._is_multimodal
+        """True once a processor with image support has been detected at
+        load time."""
+        return self._supports_image
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
@@ -587,6 +665,8 @@ class HFWorker:
                 self._processor, "audio_processor"
             )
             self._is_multimodal = has_image or has_audio
+            self._supports_image = has_image
+            self._supports_audio = has_audio
             self._tokenizer = getattr(self._processor, "tokenizer", self._processor)
         except Exception as e:
             # Fall back to plain tokenizer. Expected for text-only models (no
@@ -752,9 +832,9 @@ class HFWorker:
                             ptype = part.get("type", "text")
                             if ptype == "text":
                                 parts.append({"type": "text", "text": part.get("text", "")})
-                            elif ptype == "image_url" and self._is_multimodal:
+                            elif ptype == "image_url" and self._supports_image:
                                 parts.append({"type": "image"})
-                            elif ptype == "input_audio" and self._is_multimodal:
+                            elif ptype == "input_audio" and self._supports_audio:
                                 parts.append({"type": "audio"})
                         template_messages.append({"role": msg.get("role", "user"), "content": parts})
                     else:
@@ -939,18 +1019,20 @@ class HFWorker:
         if grammar and grammar_lazy:
             from .base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
             raise GrammarUnsupportedError(GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
-        # Refuse images on a text-only checkpoint instead of silently dropping
-        # them (a processor-less model would otherwise ignore the picture and
-        # answer from the text alone). Checked before importing transformers so
-        # it fails fast and clearly.
-        if not self._is_multimodal:
-            from .base import (
-                IMAGE_UNSUPPORTED_MESSAGE,
-                UnsupportedInputError,
-                messages_contain_image,
-            )
-            if messages_contain_image(messages):
-                raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+        # Refuse a media type this checkpoint's processor does not support
+        # instead of silently dropping it (a processor without that
+        # capability would otherwise ignore the media and answer from the
+        # text alone). Checked before importing transformers so it fails
+        # fast and clearly.
+        from .base import (
+            IMAGE_UNSUPPORTED_MESSAGE,
+            UnsupportedInputError,
+            messages_contain_image,
+        )
+        if messages_contain_image(messages) and not self._supports_image:
+            raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+        if _messages_contain_audio(messages) and not self._supports_audio:
+            raise UnsupportedInputError(_AUDIO_UNSUPPORTED_MESSAGE)
 
         from transformers import (
             StoppingCriteriaList,
@@ -972,12 +1054,12 @@ class HFWorker:
                     ptype = part.get("type", "text")
                     if ptype == "text":
                         parts.append({"type": "text", "text": part["text"]})
-                    elif ptype == "image_url" and self._is_multimodal:
+                    elif ptype == "image_url" and self._supports_image:
                         from localm.inference.media import decode_image_url
                         img = decode_image_url(part["image_url"]["url"])
                         images.append(img)
                         parts.append({"type": "image"})
-                    elif ptype == "input_audio" and self._is_multimodal:
+                    elif ptype == "input_audio" and self._supports_audio:
                         from localm.inference.media import decode_audio
                         audio, sr = decode_audio(
                             part["input_audio"]["data"],
@@ -1004,9 +1086,21 @@ class HFWorker:
                               "add_special_tokens": False}
             if images:
                 process_kwargs["images"] = images
+            audio_rate_verified = True
             if audios:
-                process_kwargs["audios"] = audios
-            inputs = self._processor(**process_kwargs).to(model.device)
+                audio_kwargs, audio_rate_verified = _build_audio_process_kwargs(
+                    self._processor, audios)
+                process_kwargs.update(audio_kwargs)
+            try:
+                inputs = self._processor(**process_kwargs).to(model.device)
+            except ValueError as e:
+                if audios and not audio_rate_verified:
+                    from .base import UnsupportedInputError
+                    raise UnsupportedInputError(
+                        f"The attached audio was refused by the model's own "
+                        f"processor ({e}). Its expected sample rate could not "
+                        "be read in advance to check it.") from e
+                raise
         else:
             # Text-only path (even if processor exists, no media was provided)
             text = tokenizer.apply_chat_template(

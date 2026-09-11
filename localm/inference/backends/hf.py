@@ -122,10 +122,11 @@ class HFBackend(BaseBackend):
     Parent-side handle to a HuggingFace-format model loaded in an isolated
     child process.
 
-    Multimodal detection is automatic: if the model directory ships a processor
-    that handles images/audio, multimodal content in messages is handled.
-    If the model only has a tokenizer, image/audio parts are silently dropped
-    and only text is passed to the model.
+    Multimodal detection is automatic and per-capability: if the loaded
+    processor exposes an ``image_processor``, images are handled; if it
+    exposes a ``feature_extractor`` or ``audio_processor``, audio is handled.
+    A message part whose media type the loaded model does not support is
+    refused with a clear error instead of being dropped.
     """
 
     # An HF checkpoint may ship an image processor; whether this instance can
