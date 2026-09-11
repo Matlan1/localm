@@ -109,8 +109,10 @@ def test_the_torch_and_base_installs_print_their_own_progress():
     for path, installs in (
         (BAT, ['uv pip install -p .venv -e ".[%EXTRAS%]"',
                'uv pip install -p .venv -e ".[gpu,audio]"',
+               'uv pip install -p .venv -e ".[hf,audio]"',
                "uv pip install -p .venv %TORCHSPEC%"]),
         (SH, ['uv pip install -p .venv -e ".[${EXTRAS}]"',
+              'uv pip install -p .venv -e ".[hf,audio]"',
               "uv pip install -p .venv $TORCHSPEC"]),
     ):
         text = path.read_text(encoding="utf-8", errors="replace")

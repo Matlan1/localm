@@ -10,11 +10,11 @@ resolution-markers = [
 [options]
 
 [options.exclude-newer-package]
-torchvision = false
-rocm-sdk-libraries-gfx103x-all = false
-rocm-sdk-core = false
-torch = false
 rocm = false
+rocm-sdk-core = false
+rocm-sdk-libraries-gfx103x-all = false
+torch = false
+torchvision = false
 transformers = false
 
 [manifest]
@@ -675,6 +675,12 @@ grammar = [
     { name = "triton-windows", marker = "sys_platform == 'win32'" },
     { name = "xgrammar" },
 ]
+hf = [
+    { name = "accelerate" },
+    { name = "psutil" },
+    { name = "tokenizers" },
+    { name = "transformers", extra = ["kernels"] },
+]
 monitor = [
     { name = "psutil" },
 ]
@@ -688,6 +694,7 @@ voice = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'gpu'", specifier = ">=1.14.0" },
+    { name = "accelerate", marker = "extra == 'hf'", specifier = ">=1.14.0" },
     { name = "certifi", specifier = ">=2026.7.22" },
     { name = "click", specifier = ">=8.5.0" },
     { name = "cryptography", specifier = ">=50.0.1" },
@@ -698,6 +705,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.61,<1.62" },
     { name = "psutil", marker = "extra == 'dev'", specifier = ">=7.2.2" },
     { name = "psutil", marker = "extra == 'gpu'", specifier = ">=7.2.2" },
+    { name = "psutil", marker = "extra == 'hf'", specifier = ">=7.2.2" },
     { name = "psutil", marker = "extra == 'monitor'", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pypdf", marker = "extra == 'dev'", specifier = ">=6.16.1" },
@@ -720,18 +728,20 @@ requires-dist = [
     { name = "soundfile", marker = "extra == 'audio'", specifier = ">=0.14.0" },
     { name = "starlette", specifier = ">=1.6.0" },
     { name = "tokenizers", marker = "extra == 'gpu'", specifier = "==0.22.2" },
+    { name = "tokenizers", marker = "extra == 'hf'", specifier = "==0.22.2" },
     { name = "torch", marker = "python_full_version == '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" },
     { name = "torch", marker = "python_full_version != '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", specifier = "==2.11.0+rocm7.13.0" },
     { name = "torchvision", marker = "python_full_version == '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchvision-0.26.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" },
     { name = "torchvision", marker = "python_full_version != '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", specifier = "==0.26.0+rocm7.13.0" },
     { name = "transformers", extras = ["kernels"], marker = "extra == 'gpu'", specifier = "~=5.15.1" },
+    { name = "transformers", extras = ["kernels"], marker = "extra == 'hf'", specifier = "~=5.15.1" },
     { name = "triton-windows", marker = "sys_platform == 'win32' and extra == 'grammar'", specifier = ">=3.7" },
     { name = "uvicorn", specifier = ">=0.52.4" },
     { name = "xgrammar", marker = "extra == 'grammar'", specifier = ">=0.2.2" },
     { name = "zeroconf", specifier = ">=0.150.0" },
     { name = "zizmor", marker = "extra == 'dev'", specifier = ">=1.30.0" },
 ]
-provides-extras = ["coder", "desktop", "browser", "gpu", "audio", "rag", "voice", "monitor", "grammar", "cpu", "dev"]
+provides-extras = ["coder", "desktop", "browser", "gpu", "hf", "audio", "rag", "voice", "monitor", "grammar", "cpu", "dev"]
 
 [[package]]
 name = "markdown-it-py"

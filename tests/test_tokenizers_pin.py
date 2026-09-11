@@ -18,12 +18,14 @@ def test_pyproject_pins_tokenizers():
     assert len(_versions("pyproject.toml")) == 1
 
 
-def test_inline_transformers_installs_also_pin_tokenizers():
-    for name in ("setup.sh", "setup.bat"):
+def test_installers_carry_no_inline_transformers_pin():
+    """setup.sh, setup.bat and installer/gui.py must resolve the HF stack
+    from pyproject's [hf] extra, never from an inline "transformers["
+    specifier of their own."""
+    for name in ("setup.sh", "setup.bat", "installer/gui.py"):
         text = (ROOT / name).read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if "transformers[kernels]" in line and "uv pip install" in line:
-                assert "tokenizers==" in line, f"{name}: {line.strip()}"
+        hits = [line.strip() for line in text.splitlines() if "transformers[" in line]
+        assert not hits, f"{name} carries its own transformers[ specifier: {hits}"
 
 
 def test_single_tokenizers_version_across_files():

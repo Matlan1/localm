@@ -421,7 +421,7 @@ if not defined TORCHSPEC (
 ) else (
     echo  Installing PyTorch + transformers ...
     uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    uv pip install -p .venv -e ".[hf,audio]" || echo  [!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------

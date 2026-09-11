@@ -315,9 +315,7 @@ def build_steps(plan: Plan) -> List[Step]:
             codes = [
                 _run(uv_argv("pip", "install", "-p", ".venv", *spec.split()),
                      emit, plan, allow_fail=True),
-                _run(uv_argv("pip", "install", "-p", ".venv",
-                             "transformers[kernels]~=5.12", "tokenizers==0.22.2",
-                             "accelerate>=1.0", "pillow>=10.0", "soundfile>=0.12"),
+                _run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[hf,audio]"),
                      emit, plan, allow_fail=True),
             ]
         if any(codes):

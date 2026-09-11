@@ -515,6 +515,19 @@ class TestInstallParity:
         assert "--python-dir" not in rec
         assert "--cache-dir" not in rec
 
+    def test_the_hf_stack_comes_from_the_hf_extra_not_an_inline_pin(
+            self, gui, monkeypatch):
+        """A non-gfx103x backend's torch install must resolve the HF stack
+        from pyproject's [hf] extra, matching setup.sh/setup.bat, never from
+        its own inline transformers[ specifier."""
+        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="cuda"),
+                             spec="torch torchvision --index-url https://x")
+        hf_install = [c for c in cmds if any(".[hf" in part for part in c)]
+        assert len(hf_install) == 1, f"expected one [hf] install, found {hf_install}"
+        assert ".[hf,audio]" in hf_install[0]
+        assert not any(part.startswith("transformers[") for part in hf_install[0]), (
+            f"an inline transformers[ specifier is back: {hf_install[0]}")
+
 
 class TestGlobalCommandExitCodes:
     """globalcmd exit 20 means the command WAS created and its directory was

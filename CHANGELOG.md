@@ -144,6 +144,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A ComfyUI address written in an unusual numeric form (hexadecimal, octal, or a single decimal
   number) is now refused when it points at a link-local or cloud-metadata address, the same as
   the ordinary dotted form already was.** Only that numeric form was previously overlooked.
+- **A warning localm needed you to see, such as an admin key being revoked or a network setting
+  being forced off, no longer only reaches the bug report.** The always-on activity log that
+  feeds bug reports was quietly stopping such warnings from also reaching the console, on every
+  ordinary run. They print to the console again.
+- **Extracting text from a knowledge-collection PDF is now bounded, instead of being able to run
+  for minutes on a document with an extreme number of pages.** Extraction now stops after a page
+  count or time limit and leaves a note explaining what was cut, rather than working through the
+  whole document unbounded.
+- **Setup and the graphical installer now install the same HuggingFace/transformers version
+  pyproject specifies, instead of an older version of their own that could go out of sync with it.**
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
