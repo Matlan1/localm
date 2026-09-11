@@ -5,8 +5,9 @@ Run large language models on your own machine. Offline, private, and yours.
 LocaLM downloads and runs LLMs locally: GGUF models through llama.cpp and
 HuggingFace models through transformers, on AMD, NVIDIA, Intel, Apple Silicon
 or CPU. It ships a chat GUI, an OpenAI-compatible API, a coding agent, RAG
-over your own documents, and an MCP server, with everything off by default and
-nothing leaving your machine.
+over your own documents, and an MCP server, with every online feature off by
+default. The only thing it does online without being asked is a periodic
+update check (see Network below), which you can turn off too.
 
 ## Install
 
@@ -42,6 +43,14 @@ Set `LOCALM_HOME` to choose where models, chats and settings are stored. Left
 unset, it defaults to a directory inside the Python environment you installed
 into (not a per-user directory); `localm info` prints the path actually in
 use.
+
+## Network
+
+Online features (web access for the coder, cloud model providers) are
+opt-in. The one request LocaLM makes on its own is a periodic check for a
+new release, which sends no version number or chat content - turn it off
+with `localm config net_mode off`, or clear the update endpoint. Details:
+<https://github.com/Matlan1/localm/blob/master/docs/privacy.md#4-update-checks-network-policy-not-a-persistence-mode>
 
 ## The self-contained installer
 

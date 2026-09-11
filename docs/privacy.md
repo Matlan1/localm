@@ -36,7 +36,7 @@ per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
 
 | Mode | What it saves automatically |
 | --- | --- |
-| **privacy** (default) | **Nothing.** No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). This is the "no traces" mode. |
+| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). This is the "no traces" mode. |
 | **log** | A JSONL audit trail of chat traffic under `<data dir>/sessions/` (one record per exchange). No markdown transcript. |
 | **full** | Everything `log` does, PLUS a human-readable markdown transcript of each session. |
 
@@ -50,6 +50,32 @@ Notes:
   suppress Python's own `readline` history, so what you type is not left
   behind in `~/.python_history` either. This is separate from and in addition
   to not writing a session transcript.
+
+### What privacy mode does not cover
+
+The two dials above are about automatic SESSION traces (a transcript, an
+audit log). They are not the whole of what localm writes to disk. A few
+kinds of data are explicit, deliberate assets - like a file you save
+yourself - and are written in every session mode, privacy included:
+
+- **Scheduled job results.** Every run of a chat or coder job writes its
+  prompt, the full reply, status, and timing to
+  `<data dir>/jobs/results/<job_id>/<timestamp>.json`, on its own schedule,
+  whether or not anyone is watching. You asked the job to run and keep its
+  output, so this is not gated on session mode.
+- **Knowledge (RAG) collections.** Indexing a document into a collection
+  writes to `<data dir>/rag/`, the same way saving a generated image does.
+  The one RAG operation that stays in memory only is one-off attachment
+  extraction (`/api/rag/extract`), which never touches disk.
+- **The prompt library.** A persona you save (a system prompt plus sampling
+  defaults) is written to `prompts.json`.
+- **GUI uploads.** A file you upload for a model or tool to read is written
+  to `<home>/uploads/`.
+
+None of this is silent: each is something you explicitly asked localm to
+keep, not a trace of a conversation. But if you are relying on privacy mode
+alone to leave nothing behind, know that a job you scheduled, a document you
+indexed, a persona you saved, or a file you uploaded still lands on disk.
 
 ---
 
@@ -180,13 +206,16 @@ policy](network.md) instead.
   to the latest release happens locally, on your machine. What it does expose to
   the update server is your IP address, the time you checked, and the fact that
   a localm install checked in.
-- **It obeys `net_mode`.** Like every other outbound request, the update check
-  goes through the network policy (`localm/netpolicy.py`) - setting network
-  access to `off` blocks it too, and it fails honestly (never a false "you are
-  up to date") when blocked. Turn on "Check for updates even when network
-  access is off" in **Settings > Updates** to exempt just this one channel;
-  it is off by default, so `net_mode=off` is a real kill switch unless you
-  opt back in.
+- **It obeys `net_mode`.** The update check reads the network mode you set
+  (`localm/netpolicy.py`) and is blocked when it is `off`, failing honestly
+  (never a false "you are up to date") rather than silently skipping. It does
+  not go through the same per-request domain-list/SSRF checks a chat or coder
+  web fetch does, since the update endpoint is fixed by localm itself rather
+  than a URL you or a fetched page supplied - see
+  [network.md](network.md#what-the-policy-does-not-govern). Turn on "Check
+  for updates even when network access is off" in **Settings > Updates** to
+  exempt just this one channel; it is off by default, so `net_mode=off` is a
+  real kill switch unless you opt back in.
 - **Turning the channel off entirely.** Clear the update endpoint
   (`update_url` and `bugreport_upload_url` both blank) to disable update
   checks regardless of network policy.

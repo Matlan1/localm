@@ -15,7 +15,7 @@ Both sides use stdio transport (JSON-RPC 2.0, newline-delimited). No network por
 ## Exposed tools
 
 localm exposes local-model operations and localm management as MCP tools. Most are
-always present; three are conditional (marked below).
+always present; several are conditional (marked below).
 
 | Tool | What it does | Annotation |
 |---|---|---|
@@ -37,6 +37,8 @@ always present; three are conditional (marked below).
 | `embed` | Embedding vectors from the local model (only when the backend can embed) | |
 | `run_coder_task` | Delegate a whole coding task to the local coder agent (only when the coder plugin is active and not `--no-coder`) | |
 | `generate_image` | Local FLUX via ComfyUI (omit with `--no-images`; needs a reachable ComfyUI) | |
+| `memory_recall` | Read the owner's durable chat memory (only when the memory plugin is active and not `--no-memory`) | read-only |
+| `memory_append` | Offer one fact for that memory (memory plugin active, and only with `--memory-write`) | |
 
 ### Tool annotations
 
@@ -47,10 +49,18 @@ a destructive call. The annotations are advisory metadata the server advertises;
 the server itself does not prompt. Coverage is deliberately narrow: only those two
 carry `destructiveHint`. Other state-changing tools (for example `pull_model`,
 `setup_embeddings`, the plugin install/enable/disable tools, and the conditional
-`run_coder_task` and `generate_image`, which run code and write files) carry no
-annotation, so an annotation-only client cannot tell they mutate. localm's own
-coder client (below) does not read these hints from remote servers; it gates on the
+`run_coder_task`, `generate_image`, and `memory_append`, which run code, write
+files, or write to your durable memory) carry no annotation, so an
+annotation-only client cannot tell they mutate. localm's own coder client
+(below) does not read these hints from remote servers; it gates on the
 `trusted` config flag instead.
+
+If you have the [memory plugin](memory.md) on, an MCP client can read your
+durable chat memory through `memory_recall` (pass `--no-memory` to hide it),
+and write to it through `memory_append` if you additionally pass
+`--memory-write` (off by default - enabling the memory plugin is not consent
+for an external client to write into it). Both memory tools are refused when
+the relevant session is in privacy mode.
 
 Options for the server:
 
@@ -58,6 +68,8 @@ Options for the server:
 localm mcp --model NAME      # default model (else LOCALM_MODEL env, else the first chat-eligible registered model)
 localm mcp --no-images       # do not expose generate_image
 localm mcp --no-coder        # do not expose run_coder_task
+localm mcp --no-memory       # do not expose memory_recall even if the memory plugin is active
+localm mcp --memory-write    # also expose memory_append (needs --no-memory to be absent)
 ```
 
 The model loads on the first tool call, so client startup stays instant. All logging goes to stderr; stdout carries only protocol frames.

@@ -40,6 +40,24 @@ class TestRuntimePackageShips:
         assert "pip install localm" in body
         assert "localm setup-llama" in body
 
+    def test_pypi_readme_does_not_overclaim_nothing_leaves_your_machine(self):
+        """The unqualified claim was false: an update check leaves the machine
+        by default (config.DEFAULT_CONFIG["bugreport_upload_url"] - the
+        updater's fallback endpoint - is non-empty out of the box), so any
+        surviving "nothing leaving your machine" phrasing must be qualified,
+        and the page must say so."""
+        from localm.config import DEFAULT_CONFIG
+
+        cfg = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+        readme = cfg["project"]["readme"]
+        body = (REPO / readme).read_text(encoding="utf-8")
+        assert "nothing leaving your machine" not in body
+        assert bool(DEFAULT_CONFIG.get("bugreport_upload_url")), (
+            "this test's premise (an update endpoint is configured by default) "
+            "no longer holds - re-check whether the page still needs the "
+            "update-check caveat at all")
+        assert "update check" in body.lower()
+
 
 class TestKillPidWithoutPsutil:
     def test_kill_pid_without_psutil_does_not_raise(self, monkeypatch):

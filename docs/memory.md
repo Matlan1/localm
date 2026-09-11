@@ -252,6 +252,12 @@ Because the default is privacy, memory does nothing out of the box until you
 switch to `log` or `full`. This is deliberate (offline-first, no traces by
 default), not a bug.
 
+If you run the [MCP server](mcp.md), an external client can read your memory
+through the `memory_recall` tool (and write to it through `memory_append` if
+you separately opted in with `--memory-write`). Both tools are refused
+whenever the relevant session is in privacy mode, the same guarantee above;
+pass `--no-memory` to hide `memory_recall` entirely.
+
 ## The coder's own memory
 
 The coder agent keeps a separate store of past-session lessons (what worked, what
@@ -266,5 +272,6 @@ distinct from chat memory described here. See [cli.md](cli.md) for the coder.
 - [jobs.md](jobs.md) - scheduling a memory-synthesis job.
 - [server-api.md](server-api.md) - the `/api/memory*` routes and the
   `X-Localm-Memory` header.
+- [mcp.md](mcp.md) - `memory_recall` / `memory_append` as MCP tools.
 - [rag.md](rag.md) - Knowledge collections, the other way to ground replies in
   your own content.

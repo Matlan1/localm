@@ -145,12 +145,36 @@ coding agent's shell access, so you can grant one without the other.
   shell-command approval (and `always_confirm` for `run_shell`), not the
   network policy.
 - **Model downloads** (`localm pull`) and **online coder providers**
-  (OpenAI/Anthropic opt-ins) - explicit user actions.
+  (OpenAI/Anthropic opt-ins) - explicit user actions. Note that model
+  downloads DO go through this same policy's domain lists and SSRF guard
+  (`check_url`); `off` is bypassed only via the separate
+  `net_allow_model_downloads` setting.
+- **Bug-report upload.** A deliberate, one-off action you trigger yourself
+  (see [privacy.md](privacy.md)); it does not call `check_url` and is not
+  subject to the domain lists.
+- **Requests to your ComfyUI instance.** ComfyUI has its own, narrower
+  guards instead: a configured `comfy_api_url` that targets a link-local or
+  cloud-metadata address is refused, and the connection itself refuses any
+  HTTP redirect outright. Loopback and LAN are both normal, unchecked ComfyUI
+  deployments.
+- **Embedding-model and Whisper downloads.** These respect `net_mode`
+  (including `off`) but fetch from a fixed, hardcoded repository named by
+  localm's own code rather than a caller-supplied URL, so they never call
+  `check_url` and are not subject to the domain lists, the SSRF guard, or the
+  DNS-rebinding pin - none of which a fixed destination needs.
+- **The periodic update check.** It respects `net_mode` (blocked when `off`,
+  unless explicitly exempted) but, like the embedding/Whisper downloads
+  above, targets a fixed endpoint rather than a caller-supplied URL, so it
+  does not call `check_url` either. See [privacy.md](privacy.md#4-update-checks-network-policy-not-a-persistence-mode).
 - **Privacy mode is orthogonal.** Privacy controls what localm writes to
   *disk*; it cannot make network requests untraceable. Any request leaves DNS
   lookups and traffic visible to your network and the remote server. If a
   conversation must stay fully local, keep web access off - that is why the
   chat toggle is per-conversation and off by default.
+
+Treat this policy as governing the paths named in the sections above it (chat
+and coder web access, HuggingFace search and pulls, the browser plugin), not
+as a blanket statement about every socket localm opens.
 
 ## Trust note: web content is untrusted input
 

@@ -736,9 +736,10 @@ class ModelRunner:
             # deadline; it still bounds the whole load.
             if result is None and time.monotonic() > deadline:
                 self.shutdown(grace=0)
+                from localm.debuglog import native_fault_hint
                 raise RuntimeError(
                     f"Model load timed out after {timeout:.0f}s - the "
-                    "worker process may be hung (see the debug log). The "
+                    f"worker process may be hung ({native_fault_hint()}). The "
                     "server stayed up and the load was aborted; retry, or "
                     "raise gguf_load_timeout_s if this model genuinely "
                     "needs longer to load."
