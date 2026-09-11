@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 # Multiplier from on-disk model size to the VRAM a model is expected to occupy
 # once loaded.
@@ -146,17 +146,56 @@ def pin_engine(engine) -> None:
             engine.active_requests += 1
 
 
-def unpin_engine(engine) -> None:
-    """Release one pin taken by ``pin_engine``; never goes below zero."""
+def try_pin_engine(engine, *, check: Optional[Callable[[], bool]] = None) -> bool:
+    """Pin *engine* only if it is not mid-unload and *check* (when given)
+    answers True, evaluated under the same lock ``begin_unload`` takes, so the
+    check and the pin are one operation against an eviction. Returns whether
+    the pin was taken. An engine without an integer ``active_requests`` is
+    pinned by the check alone."""
     with _PIN_LOCK:
+        if getattr(engine, "unloading", False) is True:
+            return False
+        if check is not None and not check():
+            return False
         if isinstance(getattr(engine, "active_requests", None), int):
-            engine.active_requests = max(0, engine.active_requests - 1)
+            engine.active_requests += 1
+        return True
+
+
+def unpin_engine(engine) -> None:
+    """Release one pin taken by ``pin_engine``; never goes below zero. A
+    release with no pin outstanding is logged at WARNING and ignored."""
+    with _PIN_LOCK:
+        if not isinstance(getattr(engine, "active_requests", None), int):
+            return
+        if engine.active_requests <= 0:
+            _warn("unbalanced unpin on %s: no pin was outstanding",
+                  getattr(engine, "display_name", engine))
+            engine.active_requests = 0
+            return
+        engine.active_requests -= 1
+
+
+def begin_unload(engine) -> bool:
+    """Mark *engine* as mid-unload (``unloading = True``) unless a request is
+    pinned on it. Decided under the pin lock, so a pin that lands first keeps
+    the engine and a mark that lands first refuses every later
+    ``try_pin_engine``. Returns whether the mark was set."""
+    with _PIN_LOCK:
+        if is_serving(engine):
+            return False
+        try:
+            engine.unloading = True
+        except Exception:
+            return False
+        return True
 
 
 def is_serving(engine) -> bool:
-    """True while at least one request is pinned on *engine*."""
-    active = getattr(engine, "active_requests", 0)
-    return isinstance(active, int) and active > 0
+    """True while at least one request is pinned on *engine*. A non-integer
+    ``active_requests`` counts as serving, the same reading
+    ``pick_eviction_victim`` gives it."""
+    return getattr(engine, "active_requests", 0) != 0
 
 
 def pick_eviction_victim(
@@ -189,7 +228,7 @@ def pick_eviction_victim(
         engine = engines.get(candidate)
         if engine is None:
             continue
-        if getattr(engine, "active_requests", 0) != 0:
+        if is_serving(engine):
             continue
         if getattr(engine, "unloading", False) is True:
             continue

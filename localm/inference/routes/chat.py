@@ -394,8 +394,7 @@ def register(app: FastAPI, ctx) -> None:
 
         sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
         loop = asyncio.get_running_loop()
-        if isinstance(getattr(engine, "active_requests", None), int):
-            engine.active_requests += 1
+        _hs._pin(engine)
         try:
             async with sem:
                 vecs = await loop.run_in_executor(None, lambda: engine.embed(texts))
@@ -404,8 +403,7 @@ def register(app: FastAPI, ctx) -> None:
         except EmbedBatchTooLargeError as e:
             raise HTTPException(413, str(e))
         finally:
-            if isinstance(getattr(engine, "active_requests", None), int):
-                engine.active_requests = max(0, engine.active_requests - 1)
+            _hs._unpin(engine)
 
         def _encode(vec):
             if fmt == "base64":
