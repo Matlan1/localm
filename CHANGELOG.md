@@ -120,6 +120,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   that way is now treated the same as Cancel.
 - **The desktop launcher failed to start any mode when installed under a folder path containing a
   space or an ampersand.** It now launches correctly regardless of where localm is installed.
+- **The console setup script (`setup.bat`) failed at its very first step, with no explanation, when
+  run from a folder path containing a literal `!` character.** If that step were skipped, the
+  desktop-shortcut option later in the same script could also fail to create a working shortcut,
+  or create none at all. Both are fixed; a `!` anywhere in the install path no longer affects setup.
 - **Uninstalling could leave the Desktop shortcut behind on a machine with a redirected Desktop
   folder (for example OneDrive's "Back up your folders").** The installer recorded a guessed path
   instead of the one it actually wrote, so uninstall believed the shortcut was already gone and
