@@ -570,7 +570,8 @@ class TestPreloadRespectsTheParentScope:
     @pytest.mark.parametrize("tool", ["spawn_agent", "spawn_agent_background"])
     def test_one_out_of_scope_entry_refuses_the_whole_preload(self, repo, tool):
         """A list mixing an in-scope and an out-of-scope path is refused as a
-        whole, naming the offending entry; nothing is read for the child."""
+        whole, naming the offending entry; not even the in-scope file reaches
+        a child."""
         _commit_scope_fixture(repo)
         parent = _parent(repo, scope="src/**")
         with patch(_AGENT_CLASS) as MockAgent:
@@ -578,11 +579,12 @@ class TestPreloadRespectsTheParentScope:
             MockAgent.return_value.turns = 1
             res = parent._execute_tool(
                 _call(tool, task="summarise",
-                      files=["src/ctx.txt", "../escape.txt", "secrets.txt"]),
+                      files=["src/ctx.txt", "secrets.txt"]),
                 interactive=False)
         MockAgent.assert_not_called()
+        assert _CONTEXT not in str(MockAgent.mock_calls)
         assert not res.ok
-        assert "../escape.txt" in res.output
+        assert "secrets.txt" in res.output
         assert "outside the active scope" in res.output
 
     def test_SIBLING_an_in_scope_preload_reaches_the_synchronous_child(

@@ -383,6 +383,27 @@ class TestScopeEnforcementNeverStatsTheValue:
             "the scope gate reached out and touched the path it was refusing: "
             + "; ".join(touches))
 
+    @pytest.mark.parametrize("tool", ["spawn_agent", "spawn_agent_background"])
+    def test_refusing_a_spawn_preload_outside_cwd_touches_nothing(
+            self, tmp_path, tmp_path_factory, tool):
+        """The spawners' ``files`` list goes through the same gate, with the
+        same property: every entry is decided lexically, and an entry the
+        child would have been fed is refused without a single stat."""
+        outside = tmp_path_factory.mktemp("outside-cwd")
+        target = outside / "disposable-target.txt"
+        target.write_text("disposable\n", encoding="utf-8")
+        agent = _make_agent(tmp_path, scope="src/**")
+
+        with _records_touches_outside(tmp_path, value=target) as touches:
+            offending = agent._scope_violation(
+                _make_tool_call(tool, task="t",
+                                files=["src/ok.py", str(target)]))
+
+        assert offending == str(target), "the call must still be refused"
+        assert touches == [], (
+            "the scope gate reached out and touched the path it was refusing: "
+            + "; ".join(touches))
+
     def test_the_recorder_still_catches_a_stat_of_the_value(
             self, tmp_path, tmp_path_factory):
         """Drives a real stat through :func:`_records_touches_outside` and
