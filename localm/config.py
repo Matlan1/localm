@@ -981,10 +981,22 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
         return False
 
 
-def atomic_write_private(path: Path, text: str) -> bool:
+def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bool:
     """Write *text* to *path* atomically, owner-restricted from the moment the
     bytes first exist on disk. Returns whether the PRE-RENAME restriction
     succeeded (see below).
+
+    *retrying* selects the final replace: False (default) is a bare
+    ``os.replace`` (preserves the original behaviour for every caller that
+    predates this parameter - auth.key, the owner-KDF file, sessions.json, the
+    instance and GPU registry entries - some of which run on the asyncio event
+    loop and must not block on a multi-attempt retry); True uses
+    ``_replace_atomic``'s bounded backoff over a transient Windows sharing
+    violation instead. Pass True only when the caller already serializes every
+    writer of *path* across processes (a cross-process lock held for the whole
+    read-modify-write), so the retry is bounded, rare, and never faces another
+    writer racing the same temp file - only a concurrent READER's open handle,
+    which is exactly what the retry rides out.
 
     TWO steps are needed and NEITHER covers both platforms alone:
 
@@ -1042,7 +1054,10 @@ def atomic_write_private(path: Path, text: str) -> bool:
     finally:
         os.close(fd)
     ok = restrict_file_perms(tmp)
-    os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
+    if retrying:
+        _replace_atomic(tmp, path)
+    else:
+        os.replace(tmp, path)      # atomic on Windows + POSIX (same dir)
     if not ok:
         restrict_file_perms(path)
     return ok
@@ -1174,9 +1189,11 @@ def _atomic_write_json(path: Path, data) -> None:
 
 
 class ConfigUnreadable(RuntimeError):
-    """A config/registry file EXISTS but could not be read, so a
-    read-modify-write must not proceed (it would persist defaults over the
-    user's real settings). Raised by update_config / update_registry only."""
+    """A JSON store file EXISTS but could not be read, so a read-modify-write
+    must not proceed (it would persist defaults over the caller's real data).
+    Raised by update_config / update_registry, and by auth.py's keystore
+    (create_key/revoke_key) and model_source_credentials.set_credentials,
+    which share this same refuse-on-unreadable contract."""
 
 
 def _read_json(path: Path, default):
