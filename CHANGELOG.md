@@ -78,6 +78,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   streams.** A rare failure while closing a disconnected stream skipped the
   step that releases the model, so it was never eligible for automatic
   eviction or idle unload until the server restarted.
+- **The graphical installer now verifies downloads against your system's certificate store,
+  like the console installer.** It previously used only its own bundled certificate list, which
+  fails on networks that inspect and re-sign TLS traffic with their own certificate.
+- **Typing a folder into the graphical installer's data-location field now selects that
+  option.** A typed path used to be silently ignored unless you used the Browse button, and the
+  install went to the default location instead.
+- **The application menu entry the graphical installer creates on Linux now includes the
+  LocaLM icon.** It previously had none.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
