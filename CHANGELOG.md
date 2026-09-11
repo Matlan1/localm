@@ -69,6 +69,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Closing the web-access prompt without choosing now cancels the request properly instead of
   leaving the reply unfinished.** Dismissing the "Allow web access?" dialog with the x or by
   clicking outside it used to leave the chat waiting forever with no error and no response.
+- **Restarting on Windows works again when a path in the launch command contains
+  a space.** The command line was rebuilt without quotes, so an install folder
+  or a model path containing a space was split into pieces and the server did
+  not come back. That also broke the restart which finishes an update, so a
+  healthy update was rolled back.
+- **A model could stay pinned in VRAM forever after certain interrupted chat
+  streams.** A rare failure while closing a disconnected stream skipped the
+  step that releases the model, so it was never eligible for automatic
+  eviction or idle unload until the server restarted.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
