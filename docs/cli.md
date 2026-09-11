@@ -15,6 +15,7 @@ localm mcp [opts]                # MCP stdio server (mcp plugin)
 localm doctor                    # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                      # paths + current config
 localm setup-llama [opts]        # provision native llama.cpp binaries
+localm setup-browser [opts]      # download Chromium for the automated browser
 ```
 
 `--debug` on `gui`, `serve`, and `run` writes a log to `<data dir>/logs/` with request timing and the native llama.cpp stderr stream (including crash abort reasons), and shows raw model output without marker scrubbing.
@@ -753,6 +754,8 @@ localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor
 localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
+localm setup-browser                     # download Chromium for the automated browser (coder tool)
+localm setup-browser --force             # reinstall even if already present
 
 localm make-launcher                     # build the native LocaLM app launcher (see docs/native-app.md)
 localm make-launcher --force             # rebuild it (use after a Python upgrade)

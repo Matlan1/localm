@@ -153,9 +153,23 @@ def test_input_image_cannot_name_the_credential_store(
     app, home = _media_app(tmp_path, monkeypatch, plugin)
     _dead_backend(monkeypatch)
     uploaded = _no_upload(monkeypatch)
+    if secret_name == "auth.json":
+        # This file IS the scoped-key store _key() would write to and every
+        # request's own auth check would then read from. Corrupting it and
+        # still authenticating through it is unsatisfiable - a keystore that
+        # fails to parse fails CLOSED (auth.py's own contract), which also
+        # locks out the key this test just created. Authenticate as owner
+        # instead: LOCALM_API_KEY is checked first and is a plain env-var
+        # compare (auth.py: "1. LOCALM_API_KEY environment variable"), so it
+        # never touches the file this test is about to corrupt. Route-level
+        # confinement (what this test checks) runs the same regardless of
+        # how the caller authenticated.
+        monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+        key = "ownersecret"
+    else:
+        key = _key([plugin])                    # media scope only, fs_access=none
     secret = home / secret_name
     secret.write_bytes(b"\x89PNG\r\n\x1a\nowner-key-material")  # readable AND image-shaped
-    key = _key([plugin])                       # media scope only, fs_access=none
 
     with TestClient(app) as c:
         before = _job_count(app)

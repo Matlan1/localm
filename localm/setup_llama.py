@@ -92,7 +92,7 @@ from typing import Optional
 import click
 from rich.console import Console
 
-from localm import config
+from localm import config, elf_deps
 from localm.debuglog import logger
 from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
 
@@ -2286,6 +2286,128 @@ def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
     return total
 
 
+# Bundles libgomp.so.1: upstream's Linux release tarballs link OpenMP
+# dynamically and ship no copy of their own. Pinned by sha256 to an
+# immutable snapshot.debian.org URL - Debian, not Ubuntu, whose pool
+# compresses a .deb's data member with zstd (unreadable by this venv's
+# Python without a third-party module; Debian uses xz). See
+# _extract_libgomp_from_deb.
+_LIBGOMP_SONAME = "libgomp.so.1"
+_LIBGOMP_DEB_URL = "https://snapshot.debian.org/file/855f73e203af87b85693b43b807f0ba1d6bb410e"
+_LIBGOMP_DEB_SHA256 = "4530c95aefa48e33fd8cf4acbe5c4b559dbe7bdf4c56469986c83a203982cef1"
+_LIBGOMP_DEB_MIN_BYTES = 20_000  # catches an HTML/error substitute for the real file
+_LIBGOMP_LICENSE_NOTICE = """\
+libgomp.so.1 (GCC's OpenMP runtime) is bundled here from Debian's libgomp1
+package, licensed GPL-3.0-or-later WITH the GCC Runtime Library Exception
+3.1 <https://www.gnu.org/licenses/gcc-exception-3.1.html>. That exception's
+Grant of Additional Permission (section 1) permits combining the Runtime
+Library with Independent Modules such as the llama.cpp/ggml binaries it
+ships alongside here, under terms of your choice.
+
+Source package: https://snapshot.debian.org/package/gcc-10/10.2.1-6/
+Full GPLv3 text: https://www.gnu.org/licenses/gpl-3.0.txt
+"""
+
+
+def _read_ar_archive(path: Path) -> dict:
+    """``{member_name: bytes}`` for every member of a plain ``ar`` archive -
+    the container format a Debian ``.deb`` uses (``!<arch>\\n`` then one
+    60-byte header per member, each content block padded to an even byte
+    count). No decompression at this layer; a ``.deb``'s members
+    (``debian-binary``, ``control.tar.*``, ``data.tar.*``) are themselves
+    separately-compressed tarballs. Raises ArtifactError if *path* is not an
+    ``ar`` archive at all."""
+    data = path.read_bytes()
+    if data[:8] != b"!<arch>\n":
+        raise ArtifactError(f"{path.name} is not an ar archive")
+    members: dict = {}
+    pos = 8
+    while pos + 60 <= len(data):
+        header = data[pos:pos + 60]
+        name = header[0:16].decode("ascii", "replace").strip().rstrip("/")
+        size = int(header[48:58].decode("ascii", "replace").strip())
+        pos += 60
+        members[name] = data[pos:pos + size]
+        pos += size + (size & 1)   # members are 2-byte aligned
+    return members
+
+
+def _extract_libgomp_from_deb(deb_path: Path, workdir: Path) -> Path:
+    """Pull the real ``libgomp.so.1*`` file out of a Debian ``.deb`` at
+    *deb_path* using only the stdlib (``ar`` reader + :mod:`tarfile`'s xz
+    support), writing it into *workdir* and returning its path. Picks the
+    REGULAR FILE member (Debian ships ``libgomp.so.1 -> libgomp.so.1.0.0`` as
+    a symlink to it), so the destination filename this returns is never the
+    ``libgomp.so.1`` the caller will rename it to - callers must not assume
+    otherwise."""
+    members = _read_ar_archive(deb_path)
+    data_name = next((n for n in members if n.startswith("data.tar")), None)
+    if data_name is None:
+        raise ArtifactError(f"{deb_path.name} has no data.tar member")
+    data_tar_path = workdir / data_name
+    data_tar_path.write_bytes(members[data_name])
+    with tarfile.open(data_tar_path) as tf:
+        member = next((m for m in tf.getmembers()
+                       if m.isfile() and Path(m.name).name.startswith("libgomp.so.1")),
+                      None)
+        if member is None:
+            raise ArtifactError(f"{deb_path.name} contains no libgomp.so.1 file")
+        extracted = workdir / "extracted-libgomp"
+        src = tf.extractfile(member)
+        if src is None:
+            raise ArtifactError(f"{deb_path.name}: could not read {member.name}")
+        with src, open(extracted, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    return extracted
+
+
+def _bundle_missing_native_deps(target: Path) -> None:
+    """After a Linux backend is extracted into *target*, provide any native
+    dependency the extracted ``.so`` files need but neither the archive nor
+    this runtime dir already supplies. Currently handles only
+    ``libgomp.so.1`` (see the comment above _LIBGOMP_SONAME); a silent no-op
+    for every other missing dependency and for Windows/macOS.
+
+    Never raises. A failure to bundle is logged as a warning, never silently
+    treated as success."""
+    if sys.platform in ("win32", "darwin"):
+        return
+    try:
+        so_files = [f for f in target.iterdir()
+                   if f.is_file() and not f.is_symlink() and ".so" in f.name]
+        provided = {f.name for f in so_files}
+        needed: set = set()
+        for f in so_files:
+            needed.update(elf_deps.needed_libraries(f))
+    except OSError as e:
+        logger.warning("could not scan %s for native dependencies: %s", target, e)
+        return
+    if _LIBGOMP_SONAME not in needed or _LIBGOMP_SONAME in provided:
+        return
+    console.print(f"[dim]Bundling {_LIBGOMP_SONAME} (OpenMP runtime; upstream's Linux "
+                  "builds link it dynamically and ship no copy of their own)[/dim]")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            deb = Path(tmp) / "libgomp1.deb"
+            _download(_LIBGOMP_DEB_URL, deb)
+            size = deb.stat().st_size
+            if size < _LIBGOMP_DEB_MIN_BYTES:
+                raise ArtifactError(f"libgomp1 download too small ({size} bytes)")
+            got = _sha256_file(deb)
+            if got != _LIBGOMP_DEB_SHA256:
+                raise ArtifactError(
+                    f"libgomp1 download sha256 mismatch (expected "
+                    f"{_LIBGOMP_DEB_SHA256}, got {got}) - refusing to bundle a "
+                    "possibly tampered or wrong file")
+            so_path = _extract_libgomp_from_deb(deb, Path(tmp))
+            shutil.copy2(so_path, target / _LIBGOMP_SONAME)
+            (target / "LICENSE.libgomp").write_text(_LIBGOMP_LICENSE_NOTICE, encoding="utf-8")
+    except Exception as e:
+        logger.warning("could not bundle %s into %s (%s) - if the runtime still "
+                       "does not load, the reported cause will name what is "
+                       "missing", _LIBGOMP_SONAME, target, e)
+
+
 def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
                        with_cudart: bool, cuda_line: str = _CUDA_LINE,
                        tag: Optional[str] = None) -> Optional[str]:
@@ -2424,6 +2546,38 @@ def _informative_error_line(text: str) -> str:
         if _EXC_HEADER_RE.match(ln.lstrip()):
             return ln.strip()
     return lines[-1].strip()
+
+
+# Sonames known to reach the dlopen error a load failure can carry, mapped to
+# the Debian/Ubuntu package that provides them - used only to phrase an
+# actionable message. libgomp.so.1 is bundled automatically on Linux (see
+# _bundle_missing_native_deps), so this fires for it only when that bundling
+# did not run or did not help; a vendor library like libvulkan genuinely has
+# to come from the system either way.
+_KNOWN_SHARED_LIB_PACKAGES = {
+    "libgomp.so.1": "libgomp1",
+    "libvulkan.so.1": "libvulkan1 (or your GPU vendor's Vulkan ICD/driver package)",
+}
+_MISSING_SO_RE = re.compile(r"([\w.+-]+\.so(?:\.[\w.]+)?): cannot open shared object file")
+
+
+def _name_missing_shared_lib(detail: str) -> Optional[str]:
+    """A plain-words description of the OS shared library a dlopen failure in
+    *detail* named, or None when *detail* is not that shape.
+
+    *detail* is already the trimmed exception-header line
+    _informative_error_line produces (e.g. ``RuntimeError: Failed to load
+    libllama.so from ...: libgomp.so.1: cannot open shared object file: No
+    such file or directory``); this pulls the soname back out of it rather
+    than re-running the load probe."""
+    m = _MISSING_SO_RE.search(detail or "")
+    if not m:
+        return None
+    soname = m.group(1)
+    package = _KNOWN_SHARED_LIB_PACKAGES.get(soname)
+    if package:
+        return f"{soname} - on Debian/Ubuntu: sudo apt install {package}"
+    return f"{soname} - install the OS package that provides it, then retry"
 
 
 # Exit codes the load probe uses to tell its outcomes apart STRUCTURALLY rather
@@ -2806,6 +2960,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
             cudart, cuda_line, tag=tag)
         if not (target / lib_name).exists():
             raise ArtifactError(f"the archive did not contain {lib_name}")
+        _bundle_missing_native_deps(target)
         _install_runtime_wheel(_runtime_pkg_dir())
 
     notes = {
@@ -2899,16 +3054,51 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                 f"mirror your network allows. Retry the same command once the "
                 f"cause is fixed: localm setup-llama --backend {chosen}[/dim]")
             sys.exit(1)
-        # Provisioned but would not load: vulkan/cpu are the universal fallbacks,
-        # so this is an unexpected environment fault worth a report - not an exit-0
-        # "success" on a broken runtime.
-        from localm.bugreport import LocalmError
-        raise LocalmError(
-            f"{chosen} was provisioned but the native library did not load",
-            reason=(f"{chosen} is the self-contained fallback and still failed to load "
-                    f"({detail}) - likely a broken/incompatible binary or a missing OS "
-                    "dependency. See docs/gpu-setup.md."),
-            context={"operation": "setup-llama", "backend": chosen})
+        # Provisioned but would not load: an environment fault, not a bad pick -
+        # vulkan and cpu ARE the universal builds, so there is no different
+        # backend to fall back to. Name the missing piece, offer a retry once
+        # the user has had a chance to fix it, and only then give up.
+        missing = _name_missing_shared_lib(detail)
+        interactive = (not assume_yes) and sys.stdin.isatty()
+        if interactive:
+            while True:
+                console.print(f"[red]You picked '{chosen}' and it was provisioned, "
+                              "but the native library did not load.[/red]")
+                if missing:
+                    console.print(f"[yellow]Missing OS library:[/yellow] {missing}")
+                else:
+                    console.print(f"[yellow]Cause:[/yellow] {detail}")
+                _flush_stdin()
+                if not click.confirm(
+                        f"  Retry the same '{chosen}' build now (after fixing the "
+                        "cause above)?", default=bool(missing)):
+                    break
+                try:
+                    _try(chosen, with_cudart)
+                except Exception as e:
+                    console.print(f"[red]Provisioning {chosen} failed:[/red] {e}")
+                    break
+                loaded, detail = _native_loads_ok()
+                if loaded:
+                    console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
+                    return chosen, used_tag[0]
+                missing = _name_missing_shared_lib(detail)
+        # A plain print + exit, matching the "not provisioned" sibling above
+        # rather than raising LocalmError: this is the one recovery path a
+        # caller like setup.sh already wraps with its own report offer (see
+        # handle_provision_failure), and every OTHER failure exit in this
+        # function is unreportable-by-the-CLI the same way - raising here
+        # would make the CLI's own crash handler offer a report AND the
+        # caller's wrapper offer a second one for the identical failure.
+        console.print(f"[red]'{chosen}' was provisioned but the native library "
+                      f"did not load.[/red]")
+        console.print(f"[yellow]{'Missing OS library' if missing else 'Cause'}:[/yellow] "
+                      f"{missing or detail}")
+        console.print(
+            f"[dim]Fix the cause and retry with: localm setup-llama --backend "
+            f"{chosen} --force  -  or provide your own build with --from "
+            "<build dir>. See docs/gpu-setup.md.[/dim]")
+        sys.exit(1)
 
     # chosen needs a runtime and did not load HERE. Honour the user's pick: never
     # swap it silently. INFORM why, then OFFER the universal build (interactive)
@@ -3121,10 +3311,14 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     The chosen backend is load-tested after provisioning. If it cannot load on
-    this machine (e.g. CUDA without a new-enough driver) your pick is NOT changed
-    silently: setup explains why and (interactively) offers the universal Vulkan
-    build instead, or - in a non-interactive install - falls back with a loud
+    this machine, your pick is NOT changed silently: for a vendor backend
+    (cuda/hip/sycl/amd-rocm, e.g. CUDA without a new-enough driver) setup
+    explains why and (interactively) offers the universal Vulkan build
+    instead, or - in a non-interactive install - falls back with a loud
     warning and tells you how to retry your backend once the cause is fixed.
+    vulkan and cpu are themselves the universal builds, so a failure there
+    instead names the missing piece and offers a retry, then reports the
+    cause and stops rather than silently degrading.
 
     By default the newest upstream llama.cpp release is used, which means an
     upstream build that is broken on your hardware arrives on your next install.

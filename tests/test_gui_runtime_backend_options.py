@@ -52,7 +52,10 @@ def test_every_offered_backend_is_labelled_not_bare():
     without a terminal in front of them."""
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     m = re.search(r'<select id="runtime-backend".*?</select>', html, re.S)
-    pairs = re.findall(r'<option value="([^"]*)">([^<]*)</option>', m.group(0))
+    # `[^>]*` between the value and the closing `>`, not a bare `>`: each
+    # <option> also carries a data-i18n="..." attribute for the translation
+    # catalog, so the value is never the only thing before the tag closes.
+    pairs = re.findall(r'<option value="([^"]*)"[^>]*>([^<]*)</option>', m.group(0))
     assert len(pairs) == len(sl.BACKENDS) + 1, pairs
     for value, label in pairs:
         if value == _KEEP_INSTALLED:

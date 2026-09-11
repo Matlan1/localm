@@ -207,6 +207,16 @@ def _provision_block() -> str:
     return src[start : end + len("\nfi")]
 
 
+def _handle_failure_function() -> str:
+    # The provision block calls handle_provision_failure(), defined earlier in
+    # the real script (right before offer_report()). Extract it the same way
+    # _heartbeat_functions() does, so the synthetic script below has it.
+    src = SETUP_SH.read_text(encoding="utf-8")
+    start = src.index("handle_provision_failure() {")
+    end = src.index("\n}\n", start) + len("\n}\n")
+    return src[start:end]
+
+
 def _make_localm_setup_llama_stub(bin_dir: Path, *, rc: int) -> None:
     # Records each invocation's args (one per line) into a counter file
     # relative to cwd, exactly like _make_uv_stub, so a test can assert the
@@ -221,21 +231,31 @@ def _make_localm_setup_llama_stub(bin_dir: Path, *, rc: int) -> None:
 
 
 def _run_provision_block(tmp_path: Path, *, localm_bin_ok: bool, backend: str,
-                          stub_rc: int = 0) -> subprocess.CompletedProcess[str]:
+                          stub_rc: int = 0, ask_answer: str | None = None
+                          ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     venv_bin = tmp_path / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
     _make_localm_setup_llama_stub(venv_bin, rc=stub_rc)
+    # ask_answer=None: always answer the prompt's own default ($2) - covers
+    # both --yes (which short-circuits to the default before ever reaching
+    # this stub in the real script) and an interactive user just pressing
+    # Enter. A non-None value pins a specific answer regardless of $2, so a
+    # test can drive the "declined" branch of a Y-defaulted prompt.
+    ask_body = (f'printf "%s" "{ask_answer}"' if ask_answer is not None
+               else 'printf "%s" "$2"')
     script = (
         "set -euo pipefail\n"
         'say() { printf "%s\\n" "$*"; }\n'
-        'ask() { printf "%s" "$2"; }\n'  # always answers the prompt's default
-        'offer_report() { printf "OFFERED_REPORT\\n"; }\n'
+        f'ask() {{ {ask_body}; }}\n'
+        'offer_report() { printf "OFFERED_REPORT detail=%s\\n" "$2"; }\n'
+        'RUNTIME_OK=1\n'
         f'LOCALM_BIN_OK={1 if localm_bin_ok else 0}\n'
         f'BACKEND="{backend}"\n'
+        + _handle_failure_function()
         + _provision_block()
-        + '\nprintf "COMPLETED\\n"\n'
+        + '\nprintf "COMPLETED RUNTIME_OK=%s\\n" "$RUNTIME_OK"\n'
     )
     env = dict(os.environ)
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
@@ -275,15 +295,39 @@ def test_provision_runs_normally_when_bin_present(tmp_path):
     assert calls == "setup-llama --backend vulkan"
 
 
-def test_provision_still_hard_fails_on_a_real_setup_llama_failure(tmp_path):
+def test_provision_failure_defaults_to_continuing_the_rest_of_setup(tmp_path):
     # A genuine setup-llama failure (binary present, provisioning itself
-    # fails) must still abort setup loudly - only the missing-BINARY case is
-    # soft. Distinguishes "skip" from the hard-fail path.
+    # fails) no longer throws the whole install away: the recovery prompt's
+    # own default is "continue" (Y), which is also what --yes answers, so
+    # setup reaches COMPLETED with RUNTIME_OK now 0 rather than exiting.
     result = _run_provision_block(tmp_path, localm_bin_ok=True, backend="vulkan", stub_rc=3)
-    assert result.returncode == 1
-    assert "setup-llama failed" in result.stdout
+    assert result.returncode == 0, result.stderr
+    assert "No model can load until this is fixed" in result.stdout
     assert "OFFERED_REPORT" in result.stdout
+    assert "continuing setup without a runtime" in result.stdout
+    assert "COMPLETED RUNTIME_OK=0" in result.stdout
+
+
+def test_provision_failure_aborts_when_the_user_declines_to_continue(tmp_path):
+    # The other half of the same prompt: an explicit decline still aborts
+    # setup loudly, exactly as the old unconditional exit did.
+    result = _run_provision_block(tmp_path, localm_bin_ok=True, backend="vulkan",
+                                  stub_rc=3, ask_answer="n")
+    assert result.returncode == 1
+    assert "Aborted" in result.stdout
+    assert "OFFERED_REPORT" in result.stdout
+    assert "continuing setup without a runtime" not in result.stdout
     assert "COMPLETED" not in result.stdout
+
+
+def test_provision_success_never_touches_runtime_ok(tmp_path):
+    # The happy path must not print the failure prompt at all, and RUNTIME_OK
+    # stays at its initial 1 - handle_provision_failure is never called.
+    result = _run_provision_block(tmp_path, localm_bin_ok=True, backend="vulkan", stub_rc=0)
+    assert result.returncode == 0, result.stderr
+    assert "No model can load until this is fixed" not in result.stdout
+    assert "OFFERED_REPORT" not in result.stdout
+    assert "COMPLETED RUNTIME_OK=1" in result.stdout
 
 
 # ---------------------------------------------------------------------------

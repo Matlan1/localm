@@ -139,6 +139,7 @@ class TestHFCapabilitySplit:
 
     def test_audio_only_processor_does_not_report_supports_images(
             self, tmp_path, monkeypatch):
+        pytest.importorskip("torch")
         from localm.inference.backends import _hf_worker
 
         monkeypatch.setattr(
@@ -155,6 +156,7 @@ class TestHFCapabilitySplit:
 
     def test_image_only_processor_does_not_report_supports_audio(
             self, tmp_path, monkeypatch):
+        pytest.importorskip("torch")
         from localm.inference.backends import _hf_worker
 
         monkeypatch.setattr(

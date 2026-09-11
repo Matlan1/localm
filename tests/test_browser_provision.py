@@ -12,8 +12,19 @@ previous build.
 from __future__ import annotations
 
 import sys
+import types
 
 from localm.browser import provision as bprovision
+
+
+def _stub_playwright_importable(monkeypatch):
+    """install_chromium()'s first line is `import playwright`, which fails
+    outright in this suite's own CI environment (the [browser] extra is not
+    part of .[dev,rag]). Every test below mocks is_chromium_installed/
+    _stream_install to drive logic PAST that check, so it needs `import
+    playwright` to merely succeed, not to be a real, usable package - a bare
+    stub module does that without installing anything."""
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
 
 
 # --------------------------------------------------------------------------- #
@@ -37,6 +48,7 @@ def test_playwright_missing_returns_pip_install_message(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_already_installed_skips_download_and_policy(monkeypatch):
+    _stub_playwright_importable(monkeypatch)
     monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: True)
     monkeypatch.setattr(bprovision, "chromium_executable_path",
                         lambda: "/fake/chrome")
@@ -57,6 +69,7 @@ def test_already_installed_skips_download_and_policy(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_net_mode_off_refuses_before_any_subprocess(cli_runner, monkeypatch):
+    _stub_playwright_importable(monkeypatch)
     monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: False)
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
 
@@ -72,6 +85,7 @@ def test_net_mode_off_refuses_before_any_subprocess(cli_runner, monkeypatch):
 
 
 def test_net_mode_off_exempted_by_config_proceeds(cli_runner, monkeypatch):
+    _stub_playwright_importable(monkeypatch)
     from localm.config import update_config
     update_config(lambda c: c.update({"net_allow_model_downloads": True}))
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
@@ -88,6 +102,7 @@ def test_net_mode_off_exempted_by_config_proceeds(cli_runner, monkeypatch):
 
 
 def test_force_reinstalls_even_when_already_present(cli_runner, monkeypatch):
+    _stub_playwright_importable(monkeypatch)
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
     monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: True)
     monkeypatch.setattr(bprovision, "chromium_executable_path",
@@ -110,6 +125,7 @@ def test_force_reinstalls_even_when_already_present(cli_runner, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_subprocess_failure_is_reported_honestly(cli_runner, monkeypatch):
+    _stub_playwright_importable(monkeypatch)
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
     monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: False)
     monkeypatch.setattr(bprovision, "_stream_install",
@@ -127,6 +143,7 @@ def test_subprocess_success_with_missing_binary_is_not_reported_as_success(
     # The installer's own exit code says 0, but the executable is still not on
     # disk afterward - this must NOT be reported as success (rule 5: never
     # trust the exit code alone).
+    _stub_playwright_importable(monkeypatch)
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
     monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: False)
     monkeypatch.setattr(bprovision, "_stream_install",
@@ -141,6 +158,7 @@ def test_subprocess_success_with_missing_binary_is_not_reported_as_success(
 
 def test_subprocess_success_with_binary_present_reports_success(
         cli_runner, monkeypatch):
+    _stub_playwright_importable(monkeypatch)
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
     calls = iter([False, True])   # not installed before, installed after
     monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: next(calls))
@@ -159,6 +177,7 @@ def test_force_failure_warns_browser_now_uninstalled(cli_runner, monkeypatch):
     # was_installed=True (the pre-check), then False afterward: playwright's
     # --force removed the old build before the reinstall failed, so the
     # machine now has NO Chromium at all - the message must say so.
+    _stub_playwright_importable(monkeypatch)
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
     calls = iter([True, False])
     monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: next(calls))

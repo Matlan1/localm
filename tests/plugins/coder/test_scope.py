@@ -241,6 +241,7 @@ class TestScopeEnforcement:
         dynamically in production; here a stub reaches the scope gate.)"""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
+        agent._mcp_tool_names = frozenset({"mcp_fs_read_file"})
         call = _make_tool_call("mcp_fs_read_file", path=_outside_scope(tmp_path))
         with patch.dict(_agent.TOOL_REGISTRY,
                         {"mcp_fs_read_file": MagicMock(destructive=False)}, clear=False):
@@ -251,6 +252,7 @@ class TestScopeEnforcement:
         """A path under an uncommon MCP arg name (source_path) is still scoped."""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
+        agent._mcp_tool_names = frozenset({"mcp_fs_copy"})
         call = _make_tool_call("mcp_fs_copy", source_path=_outside_scope(tmp_path))
         with patch.dict(_agent.TOOL_REGISTRY,
                         {"mcp_fs_copy": MagicMock(destructive=False)}, clear=False):

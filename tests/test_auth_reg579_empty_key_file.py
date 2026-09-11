@@ -244,6 +244,19 @@ def test_non_utf8_owner_key_still_fails_closed(auth):
     assert auth.any_key_configured() is True
 
 
+def test_non_utf8_keystore_still_fails_closed(auth):
+    """The SAME property, one layer over: _keystore_configured() (the scoped-
+    key store, auth.json) must fail closed on undecodable bytes exactly like
+    the owner key file does above. path.read_text(encoding="utf-8") raises
+    UnicodeDecodeError, which is a ValueError subclass, not an OSError - a
+    guard written as `except OSError` alone does not catch it, and the
+    request path holding it crashes instead of returning 401."""
+    p = auth.keystore_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\x89PNG\r\n\x1a\nnot utf-8 json")
+    assert auth.any_key_configured() is True
+
+
 def test_real_owner_key_still_puts_auth_in_effect(auth):
     """NEGATIVE CASE: the ordinary keyed install must be untouched."""
     _write_key_file(auth, "s3cret-key-value\n")

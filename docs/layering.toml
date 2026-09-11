@@ -78,9 +78,9 @@ units = [
 
 [[tier]]
 name = "foundation"
-role = "Primitives that import nothing from localm at module level: configuration, the debug log, the shared console, JSONL and store mechanics, path and text helpers, the bounded thread pool, the bind-host and listening-socket helpers, scopes, readline privacy, the version, the venv guard, the spawn fix."
+role = "Primitives that import nothing from localm at module level: configuration, the debug log, the shared console, JSONL and store mechanics, path and text helpers, ELF dependency inspection, the bounded thread pool, the bind-host and listening-socket helpers, scopes, readline privacy, the version, the venv guard, the spawn fix."
 units = [
     "config", "debuglog", "console", "jsonl", "storekit", "pathsafe", "pathscrub",
-    "textguard", "textnorm", "executor", "bindhost", "netlisten", "scopes",
+    "textguard", "textnorm", "elf_deps", "executor", "bindhost", "netlisten", "scopes",
     "readline_privacy", "_version", "_venvguard", "_mp_spawn",
 ]

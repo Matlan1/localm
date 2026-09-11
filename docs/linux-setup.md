@@ -93,6 +93,14 @@ backend (or let auto-detect choose) and it downloads the matching Linux build
 .venv/bin/localm setup-llama --backend cpu       # no GPU
 ```
 
+Upstream's `cpu`/`vulkan` Linux builds link against the system's OpenMP
+runtime (`libgomp.so.1`) but do not ship it; setup bundles a copy into the
+runtime dir automatically (the same way manylinux Python wheels vendor it),
+so a bare/minimal distro image works without installing anything yourself. A
+load failure naming a *different* missing `.so` is a genuine system
+dependency (e.g. `libvulkan1` for the `vulkan` build) - install the named
+package and retry with `--force`.
+
 If you would rather build llama.cpp yourself (e.g. a specific gfx target), build
 it once and point localm at the output with `--from`:
 

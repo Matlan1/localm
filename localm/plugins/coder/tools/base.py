@@ -303,9 +303,11 @@ def _run_cancellable(argv, cwd: Path, *, timeout: float, env: Optional[dict],
             break
     except Exception as e:
         _kill_tree(proc)
+        proc.communicate()
         return SubprocessResult(ok=False, error=str(e))
     except BaseException:
         _kill_tree(proc)
+        proc.communicate()
         raise
 
     return SubprocessResult(

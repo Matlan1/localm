@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """settings()/default_api_url()/comfy_models_dest_dir() reach
 sanitize_comfy_url's blocking getaddrinfo
-(comfy_client._host_is_link_local), on 11 ``async def`` routes across the
+(netpolicy.is_link_local_host), on 11 ``async def`` routes across the
 image/music/video plugins and the GUI models routes. Not reachable with the
 DEFAULT comfy_api_url (an IP literal, which ``ipaddress.ip_address`` parses
 without touching DNS) - only a HOSTNAME value reaches it, so every test here
@@ -10,13 +10,13 @@ configures one.
 Oracle: ``asyncio.get_running_loop()`` succeeds only on the event-loop thread
 and raises RuntimeError anywhere else (a threadpool worker, or plain
 synchronous code with no loop at all) - a structural, non-timing oracle for
-this defect class. ``_host_is_link_local`` is patched once, at its single canonical
-module, rather than per-plugin: unlike a media backend (which a
-PluginManager-installed plugin loads under a synthetic module name, see
-``_installed_backend`` below), it is never re-imported into a plugin's own
-namespace - every caller looks it up in ``comfy_client``'s own globals at call
-time, so one patch there is reached from image, music, video and the GUI
-routes alike.
+this defect class. ``is_link_local_host`` is patched once, at its single
+canonical module (``netpolicy``), rather than per-plugin: unlike a media
+backend (which a PluginManager-installed plugin loads under a synthetic
+module name, see ``_installed_backend`` below), it is never re-imported into
+a plugin's own namespace - every caller looks it up in ``netpolicy``'s own
+globals at call time, so one patch there is reached from image, music, video
+and the GUI routes alike.
 
 Every test asserts the probe fired BEFORE asserting where, so a test that
 never reached the sink cannot pass vacuously.
@@ -36,7 +36,7 @@ from fastapi.testclient import TestClient
 
 
 def _sink_probe(monkeypatch):
-    """Patch comfy_client._host_is_link_local to record, per call, whether it
+    """Patch netpolicy.is_link_local_host to record, per call, whether it
     ran on a running asyncio event loop. Returns the calls list. Always
     answers "not link-local" so the caller's URL passes through unchanged.
 
@@ -48,7 +48,7 @@ def _sink_probe(monkeypatch):
     runs, so callers assert every recorded call is off-loop, never an exact
     count.
     """
-    from localm.media import comfy_client as cc
+    from localm import netpolicy
 
     calls: list[bool] = []
 
@@ -60,7 +60,7 @@ def _sink_probe(monkeypatch):
             calls.append(False)
         return False
 
-    monkeypatch.setattr(cc, "_host_is_link_local", _probe)
+    monkeypatch.setattr(netpolicy, "is_link_local_host", _probe)
     return calls
 
 
