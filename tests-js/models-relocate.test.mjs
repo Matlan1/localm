@@ -68,7 +68,7 @@ test("models-relocate: the prompt is pre-filled with the last known path", async
   await window.refreshModelsPage();
   await new Promise((r) => setTimeout(r, 0));
 
-  let seenDefault = null;
+  let seenDefault;
   runScript(window, `promptText = async (msg, dflt) => { window.__seenDefault = dflt; return null; };`);
   const btn = rowButtons(window, "moved-model").find((b) => b.textContent === "relocate");
   await btn.onclick();

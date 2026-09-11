@@ -107,7 +107,7 @@ test("the cert step surfaces a Firefox-specific note ONLY on Firefox", async () 
   assert.ok(ff, "#key-gate-cert-ff exists in the shell");
 
   const setUA = (ua) => { try { Object.defineProperty(window.navigator, "userAgent",
-    { value: ua, configurable: true }); } catch (e) { /* jsdom */ } };
+    { value: ua, configurable: true }); } catch { /* jsdom */ } };
 
   setUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
   window.updateKeyGateCertStep();
@@ -162,7 +162,7 @@ test("P2b/S2: scanning a localm-key QR logs in via /api/session (prefix stripped
 
 test("P2b: a non-localm QR is ignored (no login attempt)", async () => {
   const calls = [];
-  const fetchImpl = async (url, opts = {}) => { calls.push({ url: String(url) }); return keyless401(); };
+  const fetchImpl = async (url, _opts = {}) => { calls.push({ url: String(url) }); return keyless401(); };
   const { window } = loadApp({ fetchImpl });
   await tick();
   assert.equal(window.handleScannedKey("https://example.com"), false);

@@ -337,7 +337,7 @@ test("Runtime: a failed provision shows the job's own reason and keeps the retry
 test("Runtime: a 400 from the route is reported, and no job is streamed", async () => {
   // The route validates backend and tag against setup_llama's own definitions,
   // so a refusal arrives BEFORE a job exists. Nothing may claim otherwise.
-  let streamed = 0;
+  let streamed;
   const { window } = loadAppWithPages({ fetchImpl: async (url, opts = {}) => {
     if (String(url).includes("/api/runtime/update")) {
       return { ok: false, status: 400, statusText: "Bad Request",

@@ -45,7 +45,7 @@ after(async () => {
     for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 50));
   }
   for (const win of _openWindows) {
-    try { win.close(); } catch (e) { /* already torn down */ }
+    try { win.close(); } catch { /* already torn down */ }
   }
   _openWindows.clear();
 });

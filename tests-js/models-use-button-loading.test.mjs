@@ -58,7 +58,7 @@ test("use button: shows 'loading…' and stays disabled WHILE the switch is in f
 });
 
 test("use button: label restores on a FAILED load, not stuck at 'loading…'", async () => {
-  const fetchImpl = async (url, opts = {}) => {
+  const fetchImpl = async (url, _opts = {}) => {
     const u = String(url);
     if (u === "/api/models" || u.startsWith("/api/models?")) {
       return { ok: true, status: 200, json: async () => MODELS_PAYLOAD, text: async () => "" };

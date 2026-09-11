@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
 function makeFetch(posts, consolidateResp, memText) {
-  return async (url, opts = {}) => {
+  return async (url, _opts = {}) => {
     const u = String(url);
     if (u === "/api/memory/consolidate") {
       posts.push(u);

@@ -352,7 +352,7 @@ test("the model box is refreshed when the language changes", async () => {
 
 test("the persona and knowledge dropdowns rebuild their (none) option in German",
   async () => {
-    const fetchImpl = async (url, opts = {}) => {
+    const fetchImpl = async (url, _opts = {}) => {
       const u = String(url);
       if (u.includes("/i18n/de.json")) return { ok: true, status: 200, json: async () => DE };
       if (u.includes("/api/models")) return { ok: false, status: 401, json: async () => ({}) };

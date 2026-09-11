@@ -32,7 +32,7 @@ function loadRealPipeline({ withSanitizer = true } = {}) {
 // Payload classes: raw-HTML passthrough, URL schemes markdown can carry, the
 // rawtext-element family, mXSS/namespace confusion, and document-scope hijacks.
 const PAYLOADS = {
-  "raw script element":      "<script>window.__xss=1<\/script>",
+  "raw script element":      "<script>window.__xss=1</script>",
   "img onerror":             '<img src=x onerror="window.__xss=1">',
   "svg onload":              '<svg onload="window.__xss=1"></svg>',
   "body onload":             '<body onload="window.__xss=1">',

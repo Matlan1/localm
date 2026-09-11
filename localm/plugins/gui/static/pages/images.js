@@ -128,7 +128,7 @@ export async function refreshLoraPicker() {
   try {
     const r = await fetch("/api/imagine/comfy-models", { headers: authHeaders() });
     data = await r.json();
-  } catch (e) { return; }
+  } catch { return; }
   sel.replaceChildren();
   const none = document.createElement("option");
   none.value = "";

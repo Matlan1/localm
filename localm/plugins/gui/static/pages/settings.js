@@ -524,7 +524,7 @@ export async function refreshPairingQR() {
     // Sanitize even though it is our own endpoint (defense in depth, SVG profile).
     box.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
     wrap.style.display = "block";
-  } catch (e) {
+  } catch {
     wrap.style.display = "none";
   }
 }
@@ -575,7 +575,7 @@ export async function refreshCompanion() {
   try {
     const r = await fetch("/api/companion", { headers: authHeaders() });
     if (r.ok) info = await r.json();
-  } catch (e) { /* offline / no endpoint - show the generic hint */ }
+  } catch { /* offline / no endpoint - show the generic hint */ }
   const view = companionView(info, window.location);
   list.replaceChildren();
   for (const u of view.urls) {
@@ -731,7 +731,7 @@ export async function renderKeyQR(box, key) {
     holder.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
     wrap.appendChild(holder);
     box.appendChild(wrap);
-  } catch (e) { /* QR is best-effort; the copyable secret is the fallback */ }
+  } catch { /* QR is best-effort; the copyable secret is the fallback */ }
 }
 
 export function keyExpiryLabel(expires) {
@@ -788,7 +788,7 @@ export async function refreshKeysPanel() {
     card.classList.toggle("sec-hidden", hidden);
     if (typeof buildSettingsNav === "function") buildSettingsNav();
   };
-  let keys = [], isOwner = false, presets = [];
+  let keys, isOwner, presets;
   try {
     const r = await fetch("/v1/keys", { headers: authHeaders() });
     if (!r.ok) { setHidden(true); return; }   // 401/403 -> not a key minter
@@ -797,7 +797,7 @@ export async function refreshKeysPanel() {
     keys = data.keys || [];
     isOwner = !!data.is_owner;
     presets = data.presets || [];
-  } catch (e) { setHidden(true); return; }
+  } catch { setHidden(true); return; }
   applyOwnerGate(isOwner);           // hide owner-only scopes from a keys:admin device
   buildKeyPresets(presets, isOwner);
 
@@ -845,7 +845,7 @@ export async function refreshKeysPanel() {
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch (e) { toast("Create failed"); return; }
+    } catch { toast("Create failed"); return; }
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
       toast(e.detail || "Create failed"); return;
@@ -909,7 +909,7 @@ export async function refreshOwnerKeyPanel() {
     // warning must still reach them, unlike the rotate controls below.
     setWarnHidden(!data.owner_key_warning, data.owner_key_warning);
     if (!data.is_owner) { setHidden(true); return; }
-  } catch (e) { setHidden(true); setWarnHidden(true); return; }
+  } catch { setHidden(true); setWarnHidden(true); return; }
   setHidden(false);
 
   const rotate = async (body, verb) => {
@@ -920,7 +920,7 @@ export async function refreshOwnerKeyPanel() {
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch (e) { toast(`${verb} failed`, true); return; }
+    } catch { toast(`${verb} failed`, true); return; }
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
       toast(e.detail || `${verb} failed`, true);
@@ -977,7 +977,7 @@ export async function refreshOwnerKeyPanel() {
         try {
           r = await fetch("/api/auth/key/clear",
                           { method: "POST", headers: authHeaders() });
-        } catch (e) { toast("Could not remove the owner key", true); return; }
+        } catch { toast("Could not remove the owner key", true); return; }
         if (!r.ok) {
           const e = await r.json().catch(() => ({}));
           toast(e.detail || "Could not remove the owner key", true);
@@ -1346,7 +1346,7 @@ export async function refreshSettingsPage() {
     try {
       const cr = await fetch("/v1/config", { headers: authHeaders() });
       if (cr.ok) portField.live_port = (await cr.json()).instance_port ?? null;
-    } catch (e) { /* live_port stays unset */ }
+    } catch { /* live_port stays unset */ }
   }
   if (myToken !== _settingsRenderToken) return;
 
@@ -1830,7 +1830,7 @@ export async function buildAvatarsSection(form, fields) {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
     current = await r.json();
-  } catch (e) {
+  } catch {
     return;   // best-effort: skip this refresh rather than show a broken panel
   }
 
@@ -1844,7 +1844,7 @@ export async function buildAvatarsSection(form, fields) {
       const md = await mr.json();
       installedModels = Array.isArray(md.models) ? md.models.map((m) => m.name) : [];
     }
-  } catch (e) { /* ignored - rows fall back to their own current value */ }
+  } catch { /* ignored - rows fall back to their own current value */ }
 
   const panel = el("section", "card settings-section");
   panel.id = "settings-sec-avatars";
@@ -2475,7 +2475,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
                                 { method: "POST", headers: authHeaders() });
           const d = await r.json().catch(() => ({}));
           toast(r.ok ? "Removed localm's ComfyUI" : (d.detail || "Remove failed"), !r.ok);
-        } catch (e) {
+        } catch {
           toast("Remove failed", true);
         }
         renderManagedComfyPanel(host, toggleFields);
@@ -2561,7 +2561,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
           return;
         }
         jobId = d.job_id;
-      } catch (e) {
+      } catch {
         toast("Update failed", true);
         indicator.stop();
         resetUpdate();
@@ -2647,7 +2647,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
             return;
           }
           jobId = d.job_id;
-        } catch (e) {
+        } catch {
           toast("Repair failed", true);
           indicator.stop();
           repair.disabled = false;
@@ -2698,7 +2698,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
           .find((o) => o.kind === "comfy-setup" && o.status === "running");
         if (op) jobId = op.id;
       }
-    } catch (e) { /* fall through to the not-found message below */ }
+    } catch { /* fall through to the not-found message below */ }
     if (!jobId) {
       // Not found is not necessarily stale: /api/activity is owner-filtered
       // (KEY-SCOPE-2), so on a keyed server with distinct principals this is
@@ -2769,7 +2769,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         return;
       }
       jobId = d.job_id;
-    } catch (e) {
+    } catch {
       toast("Setup failed", true);
       indicator.stop();
       reset();
@@ -3095,7 +3095,7 @@ export async function refreshDiagnosticsCard() {
     const body = await r.json();
     renderDoctorReport(body);
     if (body.running) pollDiagnostics();
-  } catch (e) { /* a card that cannot reach the server just stays as it was */ }
+  } catch { /* a card that cannot reach the server just stays as it was */ }
 }
 
 /** Poll until the run finishes, then paint the result. */
@@ -3111,7 +3111,7 @@ export async function pollDiagnostics() {
       renderDoctorReport(body);
       if (!body.running) return;
     }
-  } catch (e) {
+  } catch {
     // Say so rather than leaving the card frozen mid-run: a stalled poll and a
     // still-running check look identical from the outside.
     const status = $("doctor-status");

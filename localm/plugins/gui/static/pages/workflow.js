@@ -274,7 +274,7 @@ export async function uploadWorkflow(media, fileInput) {
   let wf;
   try {
     wf = JSON.parse(await f.text());
-  } catch (e) {
+  } catch {
     toast(t("workflow.invalidJson"), true);
     return;
   }
@@ -306,7 +306,7 @@ $("gui-key-save").onclick = async () => {
   if (key) {
     const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
     if (!ok) { toast("Key was not accepted", true); return; }
-    try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ }
+    try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
     toast("Key saved - reloading");
     setTimeout(() => location.reload(), 600);
     return;
@@ -316,7 +316,7 @@ $("gui-key-save").onclick = async () => {
   try {
     const r = await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
     signedOut = r.ok;
-  } catch (e) { /* fetch failed */ }
+  } catch { /* fetch failed */ }
   if (!signedOut) { toast("Could not sign out", true); return; }
   toast("Signed out - reloading");
   setTimeout(() => location.reload(), 600);

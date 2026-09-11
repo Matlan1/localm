@@ -383,7 +383,7 @@ export function videoPreview(item, ctx) {
     // Assigning a non-finite currentTime throws, so only seek on a finite,
     // non-zero duration.
     if (Number.isFinite(v.duration) && v.duration > 0) {
-      try { v.currentTime = Math.min(0.1, v.duration / 2); } catch (e) { /* keep frame 0 */ }
+      try { v.currentTime = Math.min(0.1, v.duration / 2); } catch { /* keep frame 0 */ }
     }
   });
   v.addEventListener("error", () => previewFailed(wrap, t("mediaGallery.previewUnavailable")));
@@ -532,5 +532,5 @@ export async function refreshReloadToggle(plugin, checkboxId) {
     const entry = (data.plugins || []).find((p) => p.plugin === plugin);
     const field = (entry?.fields || []).find((f) => f.key === "reload_after");
     if (field && typeof field.value === "boolean") box.checked = field.value;
-  } catch (e) { /* ignored - keep the current state */ }
+  } catch { /* ignored - keep the current state */ }
 }

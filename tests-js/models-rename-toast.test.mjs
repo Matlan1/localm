@@ -87,7 +87,7 @@ test("models-rename: a response with no notes (or an older server) toasts cleanl
 test("models-rename: a failed rename surfaces the server's error, not a silent no-op", async () => {
   const toasts = [];
   const { window } = loadAppWithPages({
-    fetchImpl: async (url, opts = {}) => {
+    fetchImpl: async (url, _opts = {}) => {
       const u = String(url);
       if (u.startsWith("/api/models/rename")) {
         return { ok: false, status: 409, json: async () => ({ detail: "Name already taken: taken" }) };

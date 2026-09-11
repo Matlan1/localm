@@ -36,7 +36,7 @@ const _ROUTE_OWNED_403 = ["/api/image-proxy", "/api/discover/search", "/api/disc
 
 function _routeOwns403(url) {
   let path = url;
-  try { path = new URL(url, location.origin).pathname; } catch (e) { /* use the raw value */ }
+  try { path = new URL(url, location.origin).pathname; } catch { /* use the raw value */ }
   return _ROUTE_OWNED_403.some((p) => path === p || path.startsWith(p + "/"));
 }
 
@@ -71,7 +71,7 @@ window.fetch = async function (input, init) {
         onShellTokenRejected();
       }
     }
-  } catch (e) { /* fall through with the original response */ }
+  } catch { /* fall through with the original response */ }
   return res;
 };
 
@@ -138,13 +138,13 @@ export async function resetServiceWorkerAndCaches() {
       const regs = await navigator.serviceWorker.getRegistrations();
       await Promise.all(regs.map((r) => r.unregister()));
     }
-  } catch (e) { /* best-effort; the reload still fetches a fresh shell */ }
+  } catch { /* best-effort; the reload still fetches a fresh shell */ }
   try {
     if (window.caches) {
       const keys = await caches.keys();
       await Promise.all(keys.map((k) => caches.delete(k)));
     }
-  } catch (e) { /* best-effort */ }
+  } catch { /* best-effort */ }
 }
 window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
 
@@ -159,10 +159,10 @@ export async function resetClientState() {
       const n = c.split("=")[0].trim();
       if (n) document.cookie = n + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
     });
-  } catch (e) { /* ignore */ }
-  try { localStorage.clear(); } catch (e) { /* ignore */ }
-  try { sessionStorage.clear(); } catch (e) { /* ignore */ }
-  try { await resetServiceWorkerAndCaches(); } catch (e) { /* ignore */ }
+  } catch { /* ignore */ }
+  try { localStorage.clear(); } catch { /* ignore */ }
+  try { sessionStorage.clear(); } catch { /* ignore */ }
+  try { await resetServiceWorkerAndCaches(); } catch { /* ignore */ }
   location.reload();
 }
 window.resetClientState = resetClientState;
@@ -225,14 +225,14 @@ export async function onShellTokenRejected() {
   _shellRecoveryStarted = true;
   let alreadyTried = false;
   try { alreadyTried = sessionStorage.getItem("localm.shellReset") === "1"; }
-  catch (e) { /* sessionStorage unavailable in some private modes */ }
+  catch { /* sessionStorage unavailable in some private modes */ }
   if (alreadyTried) { showShellStaleOverlay(); return; }
   // A 403 proves the server ANSWERED, but during a restart the process that
   // answered may be on its way out. Confirm it is still reachable before
   // reloading, so a reload aimed into the re-exec gap lands on our own
   // reconnect overlay (which retries) instead of the browser's error page.
   if (!(await serverReachable())) { onServerUnreachable({ sawDown: true }); return; }
-  try { sessionStorage.setItem("localm.shellReset", "1"); } catch (e) { /* ignore */ }
+  try { sessionStorage.setItem("localm.shellReset", "1"); } catch { /* ignore */ }
   await resetServiceWorkerAndCaches();
   location.reload();
 }
@@ -303,7 +303,7 @@ export async function serverReachable() {
   try {
     await fetch("/api/models", { cache: "no-store" });
     return true;
-  } catch (e) {
+  } catch {
     return false;
   }
 }
@@ -316,7 +316,7 @@ export async function fetchWhoami() {
     const r = await fetch("/whoami", { cache: "no-store" });
     if (!r.ok) return null;
     return await r.json();
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -382,7 +382,7 @@ export async function bootAuthProbe() {
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
     status = r.status;
-  } catch (e) {
+  } catch {
     // The authed request could not complete. Before declaring the server
     // unreachable (a dead-end overlay), confirm with a header-free probe: if the
     // server answers at all it is UP and the failure was client-side, so treat it
@@ -428,7 +428,7 @@ export async function bootAuthProbe() {
     // would make the second restart of a session skip straight to the "reload
     // by hand" overlay having never retried.
     sessionStorage.removeItem("localm.shellReset");
-  } catch (e) { /* sessionStorage may be unavailable in some private modes */ }
+  } catch { /* sessionStorage may be unavailable in some private modes */ }
   unlockUI();
   return true;
 }
@@ -608,7 +608,7 @@ window.bootAuthProbe = bootAuthProbe;
               body: JSON.stringify({ spec: pullSpec, token: pullToken }),
             });
             authorized = r.ok;
-          } catch (e) { authorized = false; }
+          } catch { authorized = false; }
         }
         if (authorized || confirm(
           `Download model "${pullSpec}"?\n\n` +

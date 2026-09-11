@@ -130,7 +130,7 @@ export async function pollHwStats() {
     const r = await fetch("/api/stats", { headers: authHeaders() });
     if (!r.ok) return;
     renderHwStats(await r.json());
-  } catch (e) { /* transient - keep the last reading */ }
+  } catch { /* transient - keep the last reading */ }
 }
 
 export let _hwStatsTimer = null;
@@ -342,7 +342,7 @@ async function _readActivity() {
     renderActivityPill(ops);
     _refreshActivityModalIfOpen();
     return ops;
-  } catch (e) {
+  } catch {
     return _activityReadFailed();
   }
 }
@@ -410,7 +410,7 @@ export async function reattachActivity() {
     toast(running.length === 1
       ? `Reattached to a running ${activityLabel(running[0])}`
       : `Reattached to ${running.length} running operations`);
-  } catch (e) { /* server unreachable at boot - same as reattachSessions() */ }
+  } catch { /* server unreachable at boot - same as reattachSessions() */ }
 }
 
 // In-page API-key gate. Shown when an authed boot returns 401 and this browser
@@ -475,10 +475,10 @@ export async function loginWithKey(key) {
       body: JSON.stringify({ key }),
     });
     if (r.ok) {
-      try { window.__LOCALM_CSRF__ = (await r.json()).csrf || ""; } catch (e) { /* body optional */ }
+      try { window.__LOCALM_CSRF__ = (await r.json()).csrf || ""; } catch { /* body optional */ }
     }
     return r.ok;
-  } catch (e) { return false; }
+  } catch { return false; }
 }
 
 // Submit the gate: log in with the entered key (trimmed) then reload. An empty
@@ -491,7 +491,7 @@ export function submitKeyGate() {
       // Mark a SUCCESSFUL login so a still-401 boot after the reload self-heals a
       // stale shell instead of looping the gate (AUTH-1b). A failed login (wrong
       // key / server down) sets nothing, so the gate just shows again.
-      if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
+      if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ } }
       location.reload();
     });
   } else {
@@ -554,7 +554,7 @@ export function handleScannedKey(text) {
   const key = text.slice(prefix.length).trim();
   if (!key) return false;
   loginWithKey(key).then((ok) => {
-    if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
+    if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ } }
     location.reload();
   });
   return true;
@@ -579,23 +579,23 @@ export async function startQrScan() {
   let detector = null;
   if ("BarcodeDetector" in window) {
     try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); }
-    catch (e) { detector = null; }
+    catch { detector = null; }
   }
   let jsqr = null;
   if (!detector) {
     try { jsqr = await loadJsQR(); }
-    catch (e) { if (status) status.textContent = "QR scanning is not available here."; return; }
+    catch { if (status) status.textContent = "QR scanning is not available here."; return; }
   }
 
   try {
     _qrStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment" }, audio: false });
-  } catch (e) {
+  } catch {
     if (status) status.textContent = "Could not open the camera (permission denied?).";
     return;
   }
   video.srcObject = _qrStream;
-  try { await video.play(); } catch (e) { /* autoplay guard */ }
+  try { await video.play(); } catch { /* autoplay guard */ }
   if (status) status.textContent = "Point at the QR in the computer's Settings.";
 
   // Decode one video frame -> the QR text, or null. BarcodeDetector reads the
@@ -623,7 +623,7 @@ export async function startQrScan() {
     try {
       const value = await decodeFrame();
       if (value && handleScannedKey(value)) { stopQrScan(); return; }
-    } catch (e) { /* transient detect error - keep scanning */ }
+    } catch { /* transient detect error - keep scanning */ }
     finally { busy = false; }
   }, detector ? 300 : 200);
 }
@@ -640,7 +640,7 @@ export function pwaDisplayMode() {
     if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) {
       return "standalone";
     }
-  } catch (e) { /* matchMedia absent (older/headless) */ }
+  } catch { /* matchMedia absent (older/headless) */ }
   // iOS records an installed PWA on navigator.standalone, not display-mode.
   if (window.navigator && window.navigator.standalone === true) return "standalone";
   return "browser";
@@ -704,7 +704,7 @@ export function shouldShowInstallGate() {
     // connected backend, else a fresh install reusing a prior instance's origin
     // would skip its own onboarding because a DIFFERENT install dismissed it here.
     if (instanceCacheTrusted() && localStorage.getItem("localm.onboarded") === "1") return false;
-  } catch (e) { /* storage blocked - treat as not onboarded */ }
+  } catch { /* storage blocked - treat as not onboarded */ }
   // Phones/tablets only: a touch device with a coarse pointer. A desktop
   // `localm gui` (fine pointer) opens straight into the app.
   return (navigator.maxTouchPoints || 0) > 0
@@ -879,7 +879,7 @@ export async function refreshModels() {
       refreshPerfEstimate();
     }
     _modelsEverRefreshed = true;
-  } catch (e) {
+  } catch {
     setStatus("err", t("sidebar.status.serverUnreachable"));
   }
 }
@@ -966,7 +966,7 @@ async function _maybeRoutePeer(model) {
                           { headers: authHeaders() });
     if (!r.ok) return null;
     offer = await r.json();
-  } catch (e) {
+  } catch {
     return null;
   }
   if (!offer || !offer.available || !offer.peer) return null;

@@ -166,7 +166,7 @@ export async function compactConversation(conv) {
       const data = await r.json();
       summary = (data.choices?.[0]?.message?.content || "").trim();
     }
-  } catch (e) { /* summarisation unavailable - fall back to a note below */ }
+  } catch { /* summarisation unavailable - fall back to a note below */ }
   // R44: sanitise the summary so leaked <think>/markers never re-enter context.
   summary = stripThink(scrubMarkers(summary)).trim();
 
@@ -386,7 +386,7 @@ export function lsSetScoped(key, value) {
       "instance-mismatch wipe covers it too.");
   }
   try { localStorage.setItem(key, value); }
-  catch (e) { /* storage full/blocked - callers already tolerate a miss */ }
+  catch { /* storage full/blocked - callers already tolerate a miss */ }
 }
 
 // R34: the per-chat Web-access and Speak-aloud toggles used to reset to OFF on
@@ -397,7 +397,7 @@ export function lsSetScoped(key, value) {
 export function hydrateChatToggles(cfg) {
   const webEl = $("p-web"), speakEl = $("p-speak");
   if (!webEl || !speakEl) return;
-  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
   const savedSpeak = chat.privacy ? null : lsGet("localm.speakAloud");
   if (savedSpeak !== null) speakEl.checked = savedSpeak === "1";
   const savedWeb = chat.privacy ? null : lsGet("localm.webAccess");
@@ -419,7 +419,7 @@ export function saveConversations(changed) {
   try {
     localStorage.setItem("localm.conversations",
       JSON.stringify(cacheable.slice(0, 50)));
-  } catch (e) {
+  } catch {
     // Quota: drop image-heavy older conversations and retry once
     const slim = cacheable.slice(0, 10);
     try { localStorage.setItem("localm.conversations", JSON.stringify(slim)); } catch {}
@@ -463,7 +463,7 @@ export function pushConversation(conv) {
       } else if (r.ok) {
         _convPushWarned = false;
       }
-    } catch (e) { /* offline - localStorage still has the copy; a reachable
+    } catch { /* offline - localStorage still has the copy; a reachable
                      server that ANSWERS with an error is the r.ok branch
                      above, not this one */ }
   }, 600));
@@ -503,7 +503,7 @@ export async function hydrateConversation(conv) {
     delete conv._meta;
     saveConversations();   // cache the now-full conversation locally
     return true;
-  } catch (e) {
+  } catch {
     return false;   // offline - keep the placeholder; renderChat shows the hint
   }
 }
@@ -582,7 +582,7 @@ export async function initServerConversations() {
       hint.title = t("chat.persistHint.title");
       h.after(hint);
     }
-  } catch (e) { /* store unavailable - localStorage keeps working */ }
+  } catch { /* store unavailable - localStorage keeps working */ }
 }
 
 export function currentConv() {
@@ -813,7 +813,7 @@ export function imageFilename(url) {
     }
     const base = new URL(url, location.origin).pathname.split("/").pop();
     return base && base.includes(".") ? base : "localm-image.png";
-  } catch (e) { return "localm-image.png"; }
+  } catch { return "localm-image.png"; }
 }
 
 // Copy an image (by its resolved src) to the clipboard. Returns true on success.
@@ -826,7 +826,7 @@ export async function copyImageSrc(src) {
     const blob = await (await fetch(src)).blob();
     await navigator.clipboard.write([new window.ClipboardItem({ [blob.type]: blob })]);
     return true;
-  } catch (e) { return false; }
+  } catch { return false; }
 }
 window.copyImageSrc = copyImageSrc;
 
@@ -1082,7 +1082,7 @@ export function addMessageRow(container, role, text, opts = {}) {
       await navigator.clipboard.writeText(plain);
       copy.textContent = t("chat.copied");
       setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
-    } catch (e) {
+    } catch {
       // Matches the image branch above: a real failure (permission denied,
       // insecure context) must never be reported as "copied" - that is
       // claiming a step happened that did not (AGENTS.md rule 5).
@@ -1541,7 +1541,7 @@ export async function ingestSharedFiles() {
     const r = await fetch("/api/share/pending", { headers: authHeaders() });
     if (!r.ok) return;
     items = (await r.json()).items || [];
-  } catch (e) { return; }
+  } catch { return; }
   if (!items.length) return;
   const ids = [];
   let imgs = 0;
@@ -1555,7 +1555,7 @@ export async function ingestSharedFiles() {
         const txt = decodeURIComponent(escape(atob(it.data_uri.split(",", 2)[1] || "")));
         const ta = $("chat-input");
         if (ta) { ta.value = (ta.value ? ta.value + "\n" : "") + txt; autoGrow(ta); }
-      } catch (e) { /* not decodable text */ }
+      } catch { /* not decodable text */ }
     }
   }
   renderAttachChips();
@@ -1580,7 +1580,7 @@ export async function ingestSharedFiles() {
     // A server that does not report the field yields 0 and changes nothing.
     let failed = 0;
     try { failed = Number((await r.json()).failed) || 0; }
-    catch (e) { /* no/!JSON body: nothing more to report than the 200 above */ }
+    catch { /* no/!JSON body: nothing more to report than the 200 above */ }
     if (failed > 0) {
       console.error("share-inbox clear: " + failed + " item(s) could not be " +
                     "deleted server-side - retried on the next share ingest");

@@ -234,7 +234,7 @@ export async function refreshEmbeddingPanel() {
       if ((st.internal || []).includes(m.name)) continue;   // already listed
       opts.push([m.name, t("knowledge.embed.optionFromModels", { name: m.name })]);
     }
-  } catch (e) { /* model list is optional for the picker */ }
+  } catch { /* model list is optional for the picker */ }
   // A current custom path/name not otherwise listed still shows (and stays selected).
   if (st.model && !opts.some(([v]) => v === st.model)) {
     opts.unshift([st.model, t("knowledge.embed.optionCurrent", { model: st.model })]);
@@ -547,7 +547,7 @@ async function repairWillEmbed() {
     const r = await fetch("/api/rag/embedding", { headers: authHeaders() });
     const st = await r.json().catch(() => ({}));
     return !(r.ok && st.status === "not_installed");
-  } catch (e) {
+  } catch {
     return true;
   }
 }

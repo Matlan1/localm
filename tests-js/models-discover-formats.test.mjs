@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
 function makeFetch(payload, calls) {
-  return async (url, opts = {}) => {
+  return async (url, _opts = {}) => {
     const u = String(url);
     if (u.includes("/api/discover/search")) {
       calls.push(u);

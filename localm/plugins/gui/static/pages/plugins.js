@@ -233,7 +233,7 @@ export async function installPluginDeps(name, opts = {}) {
         if (ev.type === "end") end = ev;
       });
     }
-  } catch (e) { /* stream ended or dropped; fall through to a re-render */ }
+  } catch { /* stream ended or dropped; fall through to a re-render */ }
   panel.remove();
   if (end && end.ok) {
     toast(`${name}: dependencies installed`);
@@ -259,7 +259,7 @@ export async function _maybeAutoInstallDeps(name) {
     if (p && Array.isArray(p.missing_deps) && p.missing_deps.length) {
       await installPluginDeps(name, { silent: true });
     }
-  } catch (e) { /* best-effort */ }
+  } catch { /* best-effort */ }
 }
 
 export function pluginCatalogAction(action, name) {

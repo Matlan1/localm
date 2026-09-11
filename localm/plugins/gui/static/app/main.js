@@ -39,6 +39,6 @@ for (const mod of [m0, m1, mI18nEn, mI18n, mIcons, mPk, m2, m3, m4, m5, m6, m7, 
   for (const name of Object.keys(mod)) {
     try {
       Object.defineProperty(window, name, { get: () => mod[name], configurable: true, enumerable: true });
-    } catch (_) { /* read-only global; skip */ }
+    } catch { /* read-only global; skip */ }
   }
 }

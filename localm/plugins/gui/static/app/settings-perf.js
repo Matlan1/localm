@@ -41,7 +41,7 @@ export async function refreshPerfEstimate() {
       out.appendChild(document.createTextNode(text + " · free VRAM unknown"));
     }
     out.classList.toggle("perf-warn", d.fits === false);
-  } catch (e) {
+  } catch {
     out.textContent = "estimate unavailable";
   }
 }
@@ -137,9 +137,9 @@ export async function refreshBackendInfo() {
     row.hidden = false;
     let dismissed = false;
     try { dismissed = localStorage.getItem(BACKEND_HINT_DISMISSED_KEY) === "1"; }
-    catch (e) { /* storage blocked - treat as not dismissed */ }
+    catch { /* storage blocked - treat as not dismissed */ }
     hint.hidden = !shouldShowBackendHint(data, dismissed);
-  } catch (e) {   // server unreachable - stay hidden, not broken
+  } catch {   // server unreachable - stay hidden, not broken
     row.hidden = true; hint.hidden = true;
     if (warnEl) warnEl.hidden = true;
   }
@@ -224,7 +224,7 @@ export async function refreshMainGpuSelector() {
     sel.value = String(current);
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
-  } catch (e) {
+  } catch {
     row.hidden = true; syncIndexSpaceHint();        // server unreachable - hidden, not broken
   }
 }
@@ -357,7 +357,7 @@ export async function refreshGpuSplitCheckboxes() {
     renderGpuSplitRatioRow(gpus, indices, data.gpu_split_ratios);
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
-  } catch (e) {
+  } catch {
     row.hidden = true; syncIndexSpaceHint();        // server unreachable - hidden, not broken
   }
 }
@@ -518,7 +518,7 @@ export async function webModeIsAsk() {
       const cfg = await r.json();
       return !!(cfg && cfg.net_mode === "ask");
     }
-  } catch (e) { /* server unreachable - fall through to "do not block" */ }
+  } catch { /* server unreachable - fall through to "do not block" */ }
   return false;
 }
 window.webModeIsAsk = webModeIsAsk;
@@ -719,7 +719,7 @@ export function _lenientJSON(body) {
     try {
       const obj = JSON.parse(fix(body));
       if (obj && typeof obj === "object") return obj;
-    } catch (e) { /* try the next recovery layer */ }
+    } catch { /* try the next recovery layer */ }
   }
   return null;
 }
@@ -949,7 +949,7 @@ export async function refreshVoiceStatus() {
       : (data.reason || "") + (voice.canDownload
           ? " Click the mic to download it now (one-time; changes no settings)."
           : "");
-  } catch (e) { /* server unreachable - status refreshes on next load */ }
+  } catch { /* server unreachable - status refreshes on next load */ }
 }
 
 export function blobToB64(blob) {
@@ -1103,7 +1103,7 @@ export function selectedBrowserVoice() {
  *  never when this call only stopped a prior one. Returns whether a new
  *  utterance actually started. */
 export function speak(text, opts = {}) {
-  const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ").trim();
+  const clean = stripThink(text).replace(/[*_`#>[\]()]/g, " ").trim();
   if (ttsProvider) {
     if (ttsProvider.speaking()) {
       ttsProvider.stop();
@@ -1146,7 +1146,7 @@ export const TTS_VOICE_KEY = "localm.ttsVoice";
 /** The raw stored value, whether or not it is still usable ("" if unreadable). */
 function storedVoice() {
   try { return localStorage.getItem(TTS_VOICE_KEY) || ""; }
-  catch (e) { return ""; }        // storage blocked: no override is readable
+  catch { return ""; }        // storage blocked: no override is readable
 }
 
 /** This browser's own voice override, or "" when it follows the server default.
@@ -1251,10 +1251,10 @@ export function onVoicePick() {
   if (ttsProvider) {
     ttsProvider.setVoice(id);
     try { localStorage.setItem(TTS_VOICE_KEY, id); }
-    catch (e) { toast("This browser blocked storage, so the voice resets on reload", true); }
+    catch { toast("This browser blocked storage, so the voice resets on reload", true); }
   } else {
     try { localStorage.setItem("localm.ttsVoiceBrowser", id); }
-    catch (e) { toast("This browser blocked storage, so the voice resets on reload", true); }
+    catch { toast("This browser blocked storage, so the voice resets on reload", true); }
   }
 }
 
@@ -1321,7 +1321,7 @@ export const capsReady = new Promise((resolve) => { _markCapsReady = resolve; })
 // storage event wired near the focus listener.
 export function bumpPluginsRev() {
   try { localStorage.setItem("localm.pluginsRev", String(Date.now())); }
-  catch (e) { /* storage blocked / full - cross-tab sync degrades to focus only */ }
+  catch { /* storage blocked / full - cross-tab sync degrades to focus only */ }
 }
 window.bumpPluginsRev = bumpPluginsRev;
 
@@ -1382,7 +1382,7 @@ export function maybeAutoUpdateCheck() {
     const last = +(localStorage.getItem("localm.updateCheckAt") || 0);
     if (Date.now() - last < 6 * 3600 * 1000) return;
     localStorage.setItem("localm.updateCheckAt", String(Date.now()));
-  } catch (e) { /* storage blocked: just check */ }
+  } catch { /* storage blocked: just check */ }
   if (typeof window.__localmUpdateCheck === "function") window.__localmUpdateCheck();
 }
 
@@ -1590,7 +1590,7 @@ export async function refreshMemory() {
     // embedding model, and this caller could fetch it in one click.
     memory.canDownloadEmbedder = !!data.can_download_embedder;
     memory.embedderModel = data.embedder_model || null;
-  } catch (e) { /* server unreachable */ }
+  } catch { /* server unreachable */ }
 }
 
 function _relAge(tsSeconds) {
@@ -1863,7 +1863,7 @@ export async function refreshPersonas() {
       sel.appendChild(opt);
     }
     if ([...sel.options].some((o) => o.value === current)) sel.value = current;
-  } catch (e) { /* server unreachable */ }
+  } catch { /* server unreachable */ }
 }
 
 export function applyPersona(name) {
@@ -1947,7 +1947,7 @@ export function parseMemoryHeader(resp) {
       degrade: data.degrade ?? null,
       items: Array.isArray(data.items) ? data.items : [],
     };
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 
 export async function runCompletion(conv, webDepth = 0, web = null) {
@@ -2194,7 +2194,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     renderMarkdown(liveBody,
       (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +
       (full || reasoning ? "\n\n" : "") + "*[stopped]*");
-    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* no TTS */ }
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch { /* no TTS */ }
     if (full.trim() || reasoning.trim()) {
       const reply = {
         role: "assistant",
@@ -2412,7 +2412,7 @@ export async function refreshKbSelect() {
       sel.appendChild(opt);
     }
     if ([...sel.options].some((o) => o.value === current)) sel.value = current;
-  } catch (e) { /* server unreachable - selector stays as-is */ }
+  } catch { /* server unreachable - selector stays as-is */ }
 }
 
 export async function sendChat() {

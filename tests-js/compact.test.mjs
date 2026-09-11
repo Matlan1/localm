@@ -6,8 +6,8 @@ import { loadApp, runScript } from "./harness.mjs";
 function summFetch(summary) {
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
-    try { body = opts.body ? JSON.parse(opts.body) : null; } catch (e) { body = null; }
+    let body;
+    try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/chat/completions") {
       return { ok: true, status: 200, text: async () => "",

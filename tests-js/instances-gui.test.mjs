@@ -110,7 +110,7 @@ test("instances-gui: Stop asks confirmDanger naming the instance, and declining 
   await window.refreshInstancesCard();
   await new Promise((r) => setTimeout(r, 0));
 
-  let seenTitle = null, seenMessage = null;
+  let seenMessage;
   runScript(window, `
     confirmDanger = (title, message, label, onConfirm) => {
       window.__seenTitle = title;
@@ -126,7 +126,6 @@ test("instances-gui: Stop asks confirmDanger naming the instance, and declining 
   stopBtn.onclick();
   await new Promise((r) => setTimeout(r, 0));
 
-  seenTitle = window.__seenTitle;
   seenMessage = window.__seenMessage;
   assert.match(seenMessage, /\/proj\/other/, "the confirmation names the target directory");
   assert.deepEqual(calls, [], "declining the confirmation must not call the stop route");

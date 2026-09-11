@@ -44,7 +44,7 @@ export async function setLogoStyle(id) {
       method: "PATCH", headers: authHeaders(),
       body: JSON.stringify({ logo_style: applied }),
     });
-  } catch (e) { /* ignored */ }
+  } catch { /* ignored */ }
 }
 
 // Apply the wordmark style recorded in the server config.
@@ -54,7 +54,7 @@ export async function syncLogoStyleFromConfig() {
     if (!r.ok) return;
     const cfg = await r.json();
     if (cfg && typeof cfg.logo_style === "string") applyLogoStyle(cfg.logo_style);
-  } catch (e) { /* ignored */ }
+  } catch { /* ignored */ }
 }
 
 // Render the preview tiles into the Settings -> GUI card. Clicking a tile

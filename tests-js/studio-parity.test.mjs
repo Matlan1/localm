@@ -76,7 +76,7 @@ function setup({ tracks = [], videos = [], images = [] } = {}) {
   const { window } = loadAppWithPages({ fetchImpl });
   win0 = window;
   if (!window.URL.createObjectURL) {
-    window.URL.createObjectURL = (b) => "blob:mock/" + Math.random().toString(36).slice(2);
+    window.URL.createObjectURL = (_b) => "blob:mock/" + Math.random().toString(36).slice(2);
     window.URL.revokeObjectURL = () => {};
   }
   return { window, calls, startRecording: () => { recording = true; } };
