@@ -33,6 +33,7 @@ from .constants import (
     _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_GUARDED_TOOLS, _SKILL_STATE_TOOLS,
+    _CANCELLABLE_SUBPROCESS_TOOLS,
     _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
@@ -331,6 +332,17 @@ class _ExecutionMixin:
 
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
+        # A cancelled run executes nothing, whatever the model emits.
+        if self.cancelled:
+            result = ToolResult.error(
+                f"{call.name} was not run: this run was cancelled "
+                f"({self.cancel_reason}).")
+            if interactive:
+                print_tool_error(call.name, result.output)
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary="not run: the run was cancelled")
+            return result
+
         # Hard gate: a tool disabled for this session (e.g. run_shell for a
         # restricted, shareable coder key) can never execute, whatever the model
         # emits. This is the security boundary; the prompt/parse exclusions below
@@ -629,6 +641,10 @@ class _ExecutionMixin:
         # _parent_agent and reads job_owner off it.
         if call.name == "run_shell_background":
             args["_owner"] = self.job_owner
+        # The run's cancel token, so a cancelled run kills the tool's child
+        # process rather than waiting out its timeout.
+        if call.name in _CANCELLABLE_SUBPROCESS_TOOLS:
+            args["_cancel"] = self._cancel_check
 
         # Timed around the invocation ONLY, not the bookkeeping below, so this is
         # how long the tool took - the number the GUI shows next to the card.
@@ -663,6 +679,9 @@ class _ExecutionMixin:
         self._post_tool_success(call, result, snapshots)
 
         return result
+
+    def _cancel_check(self) -> bool:
+        return self.cancelled
 
     def _track_tool_failure(self, call: ToolCall, result: ToolResult) -> ToolResult:
         """Update the per-tool + global failure streaks and arm the circuit

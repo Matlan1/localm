@@ -25,7 +25,9 @@ from .project_config import load_project_config
 
 DEFAULT_MAX_TURNS = 40
 
-# Grace after a stop request before a timed-out run is reported as abandoned.
+# Grace after a timed-out run is cancelled before it is reported as abandoned
+# (still winding down: the tool call in flight is killed or refused, the loop
+# stops at its next check, then the agent closes).
 STOP_GRACE_SECONDS = 30.0
 
 
@@ -290,11 +292,15 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
     """Run one task on a worker thread, then close the agent there.
 
     ``on_finished`` runs on the worker thread once the agent is closed, whether
-    or not the caller is still waiting. When ``timeout`` elapses the agent is
-    asked to stop; if it has not stopped within STOP_GRACE_SECONDS the run is
-    reported as timed out and left to finish its current step and close on
-    its own."""
+    or not the caller is still waiting. When ``timeout`` elapses the run is
+    CANCELLED (``Agent.cancel``): no further tool call runs, the tool call in
+    flight is killed or refused, the generation in flight is aborted, and every
+    child of the run is cancelled with it. If the worker has not closed within
+    STOP_GRACE_SECONDS the run is reported as timed out and left to wind down
+    and close on its own; an error it raises after that is logged. The host is
+    long-lived, so the close-time reflection runs on its own thread."""
     box: dict = {}
+    agent.reflect_in_background = True
 
     def _work():
         try:
@@ -308,6 +314,8 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
                 box["close_error"] = e
             if on_finished is not None:
                 on_finished()
+            if box.get("abandoned"):
+                _report_abandoned(box)
 
     worker = threading.Thread(target=_work, name="coder-task", daemon=True)
     try:
@@ -321,13 +329,15 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
         raise
     worker.join(timeout)
     if worker.is_alive():
-        agent.request_stop()
+        agent.cancel(f"timed out after {timeout:g}s")
         worker.join(STOP_GRACE_SECONDS)
     if worker.is_alive():
+        box["abandoned"] = True
         return TaskResult(
             success=False,
-            response=(f"coder task timed out after {timeout:g}s; it was asked "
-                      "to stop and is finishing its current step"),
+            response=(f"coder task timed out after {timeout:g}s and was "
+                      "cancelled: no further tool call will run; it is being "
+                      "wound down"),
             turns=agent.turns, total_tokens=agent.total_tokens, timed_out=True,
             denied=tuple(agent.denied_unconfirmed))
     if "error" in box:
@@ -335,3 +345,14 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
     if "close_error" in box:
         raise box["close_error"]
     return box["result"]
+
+
+def _report_abandoned(box: dict) -> None:
+    """Log what a run abandoned by its caller did after the caller stopped
+    listening, so a late failure is not silent."""
+    from localm.debuglog import logger
+    for key in ("error", "close_error"):
+        if key in box:
+            logger.warning("coder task (abandoned after its timeout): %s: %s",
+                           key, box[key])
+            print_warning(f"abandoned coder task: {key}: {box[key]}")

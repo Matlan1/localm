@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from localm import pathsafe
 
@@ -156,6 +157,7 @@ class SubprocessResult:
     timed_out: bool = False
     not_found: bool = False
     error: Optional[str] = None
+    cancelled: bool = False
 
 
 def platform_shell(command: str) -> Union[list, str]:
@@ -183,6 +185,10 @@ def platform_shell(command: str) -> Union[list, str]:
     return ["/bin/sh", "-c", command]
 
 
+# How often a running subprocess is checked against its cancel token.
+_CANCEL_POLL_SECONDS = 0.25
+
+
 def run_subprocess(
     argv_or_cmd: Union[list, str],
     cwd: Path,
@@ -190,6 +196,7 @@ def run_subprocess(
     timeout: float,
     shell_wrap: bool = False,
     env: Optional[dict] = None,
+    cancel: Optional[Callable[[], bool]] = None,
 ) -> SubprocessResult:
     """
     Run a subprocess, capturing stdout+stderr as text with a timeout.
@@ -203,25 +210,54 @@ def run_subprocess(
 
     On a timeout, the process's captured stdout/stderr up to the kill is
     preserved on the result, not dropped - format it for display with
-    :func:`_partial_on_timeout`. This is the canonical subprocess-execution
-    primitive for the coder's tools/shell.py, tools/git.py, and cli/goal.py.
+    :func:`_partial_on_timeout`. *cancel*, when given, is polled while the
+    process runs; once it answers True the process is killed and the result
+    carries ``cancelled=True`` plus the output captured so far. This is the
+    canonical subprocess-execution primitive for the coder's tools/shell.py,
+    tools/git.py, and cli/goal.py.
     """
     argv = platform_shell(argv_or_cmd) if shell_wrap else argv_or_cmd
 
     try:
-        proc = subprocess.run(
-            argv, cwd=str(cwd), capture_output=True, text=True,
-            timeout=timeout, encoding="utf-8", errors="replace", env=env,
+        proc = subprocess.Popen(
+            argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", env=env,
         )
-    except subprocess.TimeoutExpired as e:
-        return SubprocessResult(
-            ok=False, timed_out=True, stdout=e.stdout, stderr=e.stderr)
     except FileNotFoundError as e:
         return SubprocessResult(ok=False, not_found=True, error=str(e))
     except Exception as e:
         return SubprocessResult(ok=False, error=str(e))
 
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                return SubprocessResult(
+                    ok=False, timed_out=True, stdout=stdout, stderr=stderr)
+            if cancel is not None and cancel():
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                return SubprocessResult(
+                    ok=False, cancelled=True, stdout=stdout, stderr=stderr)
+            slice_s = remaining
+            if cancel is not None:
+                slice_s = min(remaining, _CANCEL_POLL_SECONDS)
+            try:
+                stdout, stderr = proc.communicate(timeout=slice_s)
+            except subprocess.TimeoutExpired:
+                continue
+            break
+    except Exception as e:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return SubprocessResult(ok=False, error=str(e))
+
     return SubprocessResult(
         ok=(proc.returncode == 0), returncode=proc.returncode,
-        stdout=proc.stdout or "", stderr=proc.stderr or "",
+        stdout=stdout or "", stderr=stderr or "",
     )

@@ -209,6 +209,15 @@ class Agent(
         # both interactive and non-interactive runs.
         self.confirm_handler = confirm_handler
         self._stop_requested = False
+        # Sticky run cancellation: set once by cancel(), never cleared, and
+        # read through the parent chain (see the cancelled property), so a
+        # cancelled root cancels every child it spawned.
+        self._cancel_event = threading.Event()
+        self._cancel_reason: str = ""
+        # Where the close-time episode reflection runs: True on a thread (a
+        # long-lived host), False synchronously with a deadline (a process
+        # about to exit), None to decide by whether an event sink is wired.
+        self.reflect_in_background: Optional[bool] = None
         self.gen_kwargs     = gen_kwargs
 
         # Stable identity for THIS conversation's resume checkpoint: generated
@@ -886,6 +895,53 @@ class Agent(
     def request_stop(self) -> None:
         """Ask the loop to stop at the next safe point (turn or token boundary)."""
         self._stop_requested = True
+
+    @property
+    def cancelled(self) -> bool:
+        """True once this agent, or any ancestor, has been cancelled."""
+        agent = self
+        while agent is not None:
+            if agent._cancel_event.is_set():
+                return True
+            agent = getattr(agent, "parent", None)
+        return False
+
+    @property
+    def cancel_reason(self) -> str:
+        """Why this agent tree was cancelled; empty while it is not."""
+        agent = self
+        while agent is not None:
+            if agent._cancel_event.is_set():
+                return agent._cancel_reason
+            agent = getattr(agent, "parent", None)
+        return ""
+
+    def cancel(self, reason: str = "cancelled") -> None:
+        """Cancel this run and every child of it: no further tool call runs,
+        the generation in flight is aborted when the backend can abort one,
+        the loop stops at its next check, and this run's background shell
+        jobs are killed. Irreversible for this agent tree."""
+        self._cancel_reason = reason or "cancelled"
+        self._cancel_event.set()
+        self._stop_requested = True
+        abort = getattr(self.backend, "cancel", None)
+        if callable(abort):
+            try:
+                abort(self._cancel_reason)
+            except Exception as e:                        # noqa: BLE001
+                from localm.debuglog import logger
+                logger.debug("cancel: backend abort raised: %s", e)
+        try:
+            from ..background import get_registry
+            registry = get_registry()
+            for st in registry.list_status(kind="shell", owner=self.job_owner):
+                if st.get("state") == "running":
+                    job = registry.get(st["id"])
+                    if job is not None:
+                        job.kill()
+        except Exception as e:                            # noqa: BLE001
+            from localm.debuglog import logger
+            logger.debug("cancel: background shell jobs not killed: %s", e)
 
     def queue_message(self, text: str) -> None:
         """
