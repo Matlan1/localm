@@ -91,6 +91,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   because something is holding them, `localm plugin uninstall` now says the plugin was not
   fully uninstalled and exits with an error, instead of reporting that there was nothing to
   uninstall.
+- **The plugin management HTTP API and MCP tool had their own versions of that same bug.**
+  Uninstalling a plugin that was never installed under the given name over the `/api/plugins/
+  {name}/uninstall` HTTP endpoint used to answer with an unrelated 500 error claiming its files
+  could not be removed; it now reports that the plugin was not found. And the MCP `uninstall_plugin`
+  tool's degraded-removal message used to name the plugin's installed files specifically even when
+  only its `delete_data` cleanup had failed and the files were in fact gone; the message no longer
+  claims a specific cause it cannot confirm.
 - **HuggingFace models: an attached audio clip is no longer silently ignored, and a model that
   can only hear no longer claims it can see.** Audio sent to a HuggingFace audio model was handed
   to it under a name the library does not recognise, so the clip was dropped without a word while
