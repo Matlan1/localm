@@ -150,6 +150,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   marker.** Web content was already stripped of literal control-token text before reaching the
   model; the chat now also marks exactly which characters of a search result or page came from
   the remote source, so the model backend refuses to parse them as anything but plain text.
+- **A parallel coder child's code changes are now handed back to the parent model as untrusted
+  text.** Each child's committed diff is included in the report the parent reads, so a control
+  token or a fake tool-result marker written into a changed file (by the child, or by a page it
+  fetched) reached the parent as if the parent had written it. The diff in that report is now
+  defanged and marked so the model backend reads it as plain text only. The `/diff` and
+  `/changes` footer still shows each child's diff byte for byte.
 - Rotated the release signing key. The previous key stays pinned alongside the new one for this
   release so existing installations can still verify and apply the update; it is removed in the
   release after.
