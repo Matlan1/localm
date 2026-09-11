@@ -193,6 +193,30 @@ def test_privacy_still_allows_a_loopback_url():
     assert any("Grammar-constrained" in n for n in notes)
 
 
+def test_default_local_backend_is_not_pinned():
+    """pinned is opt-in - the default self-connection never routes through
+    netpolicy's pinned transport."""
+    backend, info, notes = _resolve(_req())
+    assert backend._pinned is False
+
+
+def test_loopback_url_backend_is_not_pinned():
+    backend, info, notes = _resolve(
+        _req(backend="url", backend_url="http://127.0.0.1:11434/v1"),
+        session_mode="privacy")
+    assert backend._pinned is False
+
+
+def test_offmachine_url_backend_is_pinned(monkeypatch):
+    """Pinned exactly when check_url just validated the address - see
+    HTTPBackend.__init__ and _resolve_backend's HTTPBackend(...) call."""
+    _no_netpolicy(monkeypatch)
+    backend, info, notes = _resolve(
+        _req(backend="url", backend_url="https://api.example.com/v1"),
+        session_mode="log")
+    assert backend._pinned is True
+
+
 def test_a_scoped_key_cannot_point_the_coder_anywhere():
     """An exfil channel for the project's source and a billing channel for
     someone else's account. Matches coder_reviewer's admin_only=True."""

@@ -301,15 +301,13 @@ _PROVIDER_ENV = {
 def _url_leaves_machine(url: str) -> bool:
     """True when *url* points somewhere other than this machine.
 
-    Uses ``bindhost.is_loopback_host``, the canonical classifier, rather than a
-    private set of literals. It differs from ``reviewer.py``'s
-    ``_LOOPBACK_HOSTS`` in two places, both in the SAFE direction here:
-    ``127.0.0.2`` (the whole 127.0.0.0/8 block) is correctly local, and
-    ``0.0.0.0`` / an empty host are NOT treated as local. A wildcard bind
-    address is not a destination and a missing host is malformed, so calling
-    either "on this machine" would grant the quiet path to a string nobody
-    validated. Unparseable input answers True, because the only safe answer to
-    "might this leave the machine" is yes.
+    Uses ``bindhost.is_loopback_host``, the canonical classifier: the whole
+    127.0.0.0/8 block (e.g. ``127.0.0.2``) is correctly local, and ``0.0.0.0``
+    / an empty host are NOT treated as local. A wildcard bind address is not a
+    destination and a missing host is malformed, so calling either "on this
+    machine" would grant the quiet path to a string nobody validated.
+    Unparseable input answers True, because the only safe answer to "might
+    this leave the machine" is yes.
     """
     from urllib.parse import urlparse
     try:
@@ -491,6 +489,9 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
         # backend already documents: an unknown third-party server can 400 on
         # grammar kwargs it does not understand.
         native_tools=req.native_tools,
+        # Pinned exactly when check_url validated this address above -
+        # pinned_request requires that to have already passed.
+        pinned=leaves,
     )
     if leaves:
         notes.append(

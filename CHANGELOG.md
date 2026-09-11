@@ -156,6 +156,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   silently wipe out every other key or credential you had if that happened to race the server's own
   use of the same file.** Both stores now refuse to save rather than losing what was already there,
   and no longer report success when that happens.
+- **The coder's reviewer model can no longer be tricked into sending your diff off-machine in
+  privacy mode.** A malformed reviewer URL is now refused outright, and a genuinely local one is
+  classified the same way the rest of localm classifies "on this machine" everywhere else.
+- **The coder's URL backend no longer follows a redirect, and an off-machine one now dials the
+  address it validated rather than re-resolving the hostname at connect time.**
 
 ## [0.2.0] - 2026-09-04
 

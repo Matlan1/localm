@@ -205,6 +205,56 @@ def test_factory_loopback_url_allowed_in_privacy(monkeypatch):
     mk.assert_called_once()
 
 
+def test_factory_backslash_url_refused_before_privacy_classifies_it(monkeypatch):
+    """A raw backslash in the authority parses HERE as host '127.0.0.1' (so it
+    reads as loopback, gate skipped) while requests terminates the userinfo at
+    the backslash and dials 'evil.example'. The shape guard must run and refuse
+    it BEFORE any loopback classification, in every mode."""
+    _cfg(monkeypatch, coder_reviewer="http://evil.example\\@127.0.0.1/v1")
+    backend = _backend_returning("")
+    with patch("localm.plugins.coder.backends.http.HTTPBackend") as mk, \
+         patch("localm.plugins.coder.display.print_warning") as warn:
+        rv = reviewer_for_agent(backend, SessionMode.PRIVACY, False)
+    mk.assert_not_called()
+    assert rv.backend is backend and rv.heterogeneous is False
+    assert warn.called
+    assert "backslash" in str(warn.call_args[0][0]).lower()
+
+
+def test_factory_backslash_url_refused_regardless_of_privacy_mode(monkeypatch):
+    """The shape guard is unconditional - it must refuse even outside privacy
+    mode, where the old loopback-only gate would have let it through."""
+    _cfg(monkeypatch, coder_reviewer="http://evil.example\\@127.0.0.1/v1")
+    with patch("localm.plugins.coder.backends.http.HTTPBackend") as mk, \
+         patch("localm.plugins.coder.display.print_warning"):
+        reviewer_for_agent(_backend_returning(""), SessionMode.FULL, False)
+    mk.assert_not_called()
+
+
+def test_factory_wildcard_bind_address_not_treated_as_loopback(monkeypatch):
+    """0.0.0.0 is a bind address, not a destination - bindhost.is_loopback_host
+    (unlike the old private set) correctly answers False for it."""
+    _cfg(monkeypatch, coder_reviewer="http://0.0.0.0:1234/v1")
+    with patch("localm.plugins.coder.backends.http.HTTPBackend") as mk, \
+         patch("localm.plugins.coder.display.print_warning") as warn:
+        reviewer_for_agent(_backend_returning(""), SessionMode.PRIVACY, False)
+    mk.assert_not_called()
+    assert warn.called
+
+
+def test_factory_127_0_0_2_is_loopback_under_the_new_classifier(monkeypatch):
+    """CONTROL: the whole 127.0.0.0/8 block is loopback under bindhost, unlike
+    the old literal {"127.0.0.1", ...} set - a privacy-mode session must still
+    use it directly rather than falling back."""
+    _cfg(monkeypatch, coder_reviewer="http://127.0.0.2:8643/v1")
+    fake = MagicMock()
+    with patch("localm.plugins.coder.backends.http.HTTPBackend",
+               return_value=fake) as mk:
+        rv = reviewer_for_agent(_backend_returning(""), SessionMode.PRIVACY, False)
+    mk.assert_called_once()
+    assert rv.heterogeneous is True and rv.backend is fake
+
+
 # --------------------------------------------------------------------------- #
 #  Agent done-gate integration                                                 #
 # --------------------------------------------------------------------------- #
