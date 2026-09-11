@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 import shutil
 from pathlib import Path
 
@@ -884,6 +885,77 @@ def _no_giant_tmp_files(tmp_path, request):
             "  why-comment.")
 
 
+_HEAVY_SLOT_STALE_AFTER = 240.0
+
+
+def _acquire_heavy_slot(slot: Path, stale_after: float = _HEAVY_SLOT_STALE_AFTER) -> str | None:
+    """Take ``slot`` by creating it with O_EXCL and writing an owner token into it.
+
+    Returns the token when the slot is OWNED by this call. A slot file whose
+    mtime is older than ``stale_after`` seconds is reclaimed: it is unlinked and
+    the create retried, so a crashed holder's leftover, or a holder still
+    running past ``stale_after``, hands the slot over. A slot that vanishes
+    between the failed create and the stat is retried immediately; one whose
+    stat fails otherwise is waited on as if young.
+
+    Returns None when the slot could not be owned within ``stale_after`` seconds
+    of waiting (the reclaim's unlink keeps being refused, or fresh holders keep
+    winning the create); the caller then proceeds without the slot and must not
+    release it. Never raises on a refused unlink; a create failure other than
+    FileExistsError propagates."""
+    token = f"{os.getpid()}:{uuid.uuid4().hex}"
+    give_up_at = time.monotonic() + stale_after
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    while True:
+        try:
+            fd = os.open(str(slot), flags)
+        except FileExistsError:
+            pass
+        else:
+            try:
+                os.write(fd, token.encode("utf-8"))
+            finally:
+                os.close(fd)
+            return token
+        try:
+            age = time.time() - slot.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        except OSError:
+            age = 0.0
+        if age > stale_after:
+            try:
+                slot.unlink()
+            except OSError:
+                pass          # left for the give-up bound. See test_un_owned_timeout_leaves_the_slot_alone.
+            else:
+                continue
+        if time.monotonic() > give_up_at:
+            return None
+        time.sleep(0.05)
+
+
+def _release_heavy_slot(slot: Path, token: str | None) -> None:
+    """Unlink ``slot`` only when it still holds exactly ``token``.
+
+    Leaves the file alone when ``token`` is None (the caller never owned it),
+    when the file cannot be read, and when it holds a different token (another
+    caller reclaimed it). A refused unlink is silent; the file is then reclaimed
+    by a later caller once it is older than ``stale_after``."""
+    if token is None:
+        return
+    try:
+        current = slot.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if current != token:
+        return
+    try:
+        slot.unlink()
+    except OSError:
+        pass                  # left for reclaim. See test_stale_leftover_is_taken_over.
+
+
 @pytest.fixture
 def heavy_slot():
     """Let only ONE subprocess-heavy test run at a time, across every test file
@@ -894,25 +966,17 @@ def heavy_slot():
 
     A plain O_EXCL file, so it works across PROCESSES (xdist workers are
     separate interpreters, so a threading lock would not be seen) and under a
-    bare `-n auto` with no --dist loadgroup. The slot is force-taken after the
-    deadline if a crashed test leaves it behind, so it can never wedge a run."""
+    bare `-n auto` with no --dist loadgroup. A slot older than 240 s is taken
+    over (a crashed test's leftover, or a test still running past 240 s, whose
+    own release then leaves the new owner's slot in place), and a test that
+    cannot own the slot within 240 s runs without it and releases nothing, so
+    the slot can never wedge a run."""
     slot = Path(tempfile.gettempdir()) / "localm-subprocess-heavy.slot"
-    deadline = time.time() + 240
-    while True:
-        try:
-            os.close(os.open(str(slot), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-            break
-        except FileExistsError:
-            if time.time() > deadline:
-                break             # a leftover slot must never block the suite
-            time.sleep(0.05)
+    token = _acquire_heavy_slot(slot)
     try:
         yield
     finally:
-        try:
-            slot.unlink()
-        except OSError:
-            pass
+        _release_heavy_slot(slot, token)
 
 
 @pytest.fixture
