@@ -400,19 +400,26 @@ def _restrict_perms(path: Path) -> bool:
     return restrict_file_perms(path)
 
 
-def _atomic_write_private(path: Path, text: str) -> None:
+def _atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> None:
     """Write *text* to *path* atomically, owner-restricted from the moment the
     bytes first exist on disk. Delegates to ``config.atomic_write_private``,
     which is the one implementation shared by sessions.json, the instance
     registry entry, the GPU coordination entry and this module's three
     credential files.
 
+    *retrying* is passed straight through - see ``config.atomic_write_private``.
+    Only the keystore writer (``_save_keystore``) passes True: it is the one
+    caller in this module whose writers are all serialized by a cross-process
+    lock across their whole read-modify-write (see ``create_key``/
+    ``revoke_key``/``_mark_record_alg``/``_touch_last_used``), so the bounded
+    retry there only ever rides out a concurrent reader, never another writer.
+
     Kept as a name here because it is referenced throughout this module. The bool
     the shared writer returns is dropped: no caller in this module logs a
     subsystem-named warning of its own, and reporting the failed tightening is
     already ``restrict_file_perms``'s job."""
     from localm.config import atomic_write_private
-    atomic_write_private(path, text)
+    atomic_write_private(path, text, retrying=retrying)
 
 
 # --------------------------------------------------------------------------- #
@@ -847,8 +854,10 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
     if not key_id:
         return
     try:
-        with _KEYSTORE_LOCK:
-            records = _load_keystore()
+        from localm.config import _cross_process_lock, ensure_dirs
+        ensure_dirs()
+        with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+            records = _load_keystore_for_write()
             for r in records:
                 if r.get("id") == key_id and not r.get("alg"):
                     r["alg"] = alg
@@ -860,12 +869,49 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
                      key_id, e)
 
 
+def _load_keystore_checked() -> tuple:
+    """``(records, read_ok)``. ``read_ok`` is False ONLY when auth.json is
+    PRESENT and could not be read (even after ``config._read_json_checked``'s
+    own bounded retry over a transient Windows sharing violation) - the one
+    state in which an empty list is indistinguishable from a genuinely empty
+    keystore. Mirrors ``config.load_config_checked`` exactly; see
+    ``_load_keystore_for_write`` for the read-modify-write callers that must
+    act on ``read_ok``."""
+    from localm.config import _read_json_checked
+    data, read_ok = _read_json_checked(keystore_file(), [])
+    return (data if isinstance(data, list) else []), read_ok
+
+
 def _load_keystore() -> list:
-    try:
-        data = json.loads(keystore_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    return data if isinstance(data, list) else []
+    """The keystore records, or [] when the file is absent, empty, or
+    (after retrying) persistently unreadable. For a plain READ - verify(),
+    list_keys(), fs_access_for(), rag_roots_for(), key_hash_live(),
+    scopes_for_key_hash() - failing toward "no match" is the safe direction.
+    A read-modify-write must use ``_load_keystore_for_write`` instead, which
+    refuses rather than silently emptying the store."""
+    return _load_keystore_checked()[0]
+
+
+def _load_keystore_for_write() -> list:
+    """The keystore records for a read-modify-write, RAISING ``ConfigUnreadable``
+    instead of returning [] when auth.json exists but cannot be read - the
+    same refusal ``config.update_config``/``update_registry`` apply to
+    config.json/registry.json, extended to this store. Silently returning []
+    here is exactly the bug: the caller then appends/mutates and persists a
+    near-empty list over every other key.
+
+    Callers must hold both ``_KEYSTORE_LOCK`` and a cross-process lock on
+    ``keystore_file()`` for their whole read-modify-write before calling this,
+    so two writers (in this process or another) can never race the read."""
+    from localm.config import ConfigUnreadable
+    records, read_ok = _load_keystore_checked()
+    if not read_ok:
+        name = keystore_file().name
+        raise ConfigUnreadable(
+            f"{name} exists but could not be read, so saving would replace "
+            f"every key in it with just this change; refused. Fix or remove "
+            f"{name} (deleting it resets to no scoped keys).")
+    return records
 
 
 def _save_keystore(records: list) -> None:
@@ -873,7 +919,9 @@ def _save_keystore(records: list) -> None:
     ensure_dirs()
     path = keystore_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_private(path, json.dumps(records, indent=2))
+    # Writers of this file are already serialized cross-process. See
+    # test_keystore_two_process_create_key_no_lost_writes.
+    _atomic_write_private(path, json.dumps(records, indent=2), retrying=True)
 
 
 # Filesystem-access level a credential may reach on the SERVER HOST. A single
@@ -1026,8 +1074,10 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         "fs_access": norm_fs_access(fs_access),
         "rag_roots": norm_rag_roots(rag_roots),
     }
-    with _KEYSTORE_LOCK:
-        records = _load_keystore()
+    from localm.config import _cross_process_lock, ensure_dirs
+    ensure_dirs()
+    with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+        records = _load_keystore_for_write()
         records.append(record)
         _save_keystore(records)
     return {"id": record["id"], "name": record["name"],
@@ -1044,8 +1094,10 @@ def revoke_key(key_id: str) -> bool:
     until expiry. (The cookie auth path also re-validates a scoped session's key on
     every request via key_hash_live, so this is belt-and-suspenders cleanup that
     keeps the session store tidy rather than the sole enforcement.)"""
-    with _KEYSTORE_LOCK:
-        records = _load_keystore()
+    from localm.config import _cross_process_lock, ensure_dirs
+    ensure_dirs()
+    with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+        records = _load_keystore_for_write()
         target = next((r for r in records if r.get("id") == key_id), None)
         remaining = [r for r in records if r.get("id") != key_id]
         if len(remaining) == len(records):
@@ -1266,8 +1318,10 @@ def _touch_last_used(key_hash: str) -> None:
             return
         _last_used_writes[key_hash] = now
     try:
-        with _KEYSTORE_LOCK:
-            records = _load_keystore()
+        from localm.config import _cross_process_lock, ensure_dirs
+        ensure_dirs()
+        with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+            records = _load_keystore_for_write()
             for r in records:
                 # Plain == is fine here (not constant-time): the key is ALREADY
                 # verified; this only locates its row to stamp, not authenticating.

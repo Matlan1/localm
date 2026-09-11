@@ -148,6 +148,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   character.** A HuggingFace spec or URL typed into the Import-from-URL dialog, or a saved coder
   project folder, could contain a quote positioned so Windows ran a second, unintended command
   alongside the one you launched. Such a value is now refused with an error instead of being used.
+- **Creating or revoking an API key, or saving a stored Hugging Face / CivitAI credential, could
+  silently wipe out every other key or credential you had if that happened to race the server's own
+  use of the same file.** Both stores now refuse to save rather than losing what was already there,
+  and no longer report success when that happens.
 
 ## [0.2.0] - 2026-09-04
 

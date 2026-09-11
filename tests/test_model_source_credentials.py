@@ -211,6 +211,68 @@ def test_a_raised_validation_error_writes_nothing(isolated_home):
     assert not credentials_path().is_file()
 
 
+def _fail_next_read_once(monkeypatch, target_name: str) -> None:
+    """Make the NEXT read-mode open() of a file named *target_name* raise a
+    plain (non-Permission) OSError exactly once, then behave normally
+    afterward. Mirrors test_auth_keystore_fail_closed.py's helper - see its
+    docstring for why both builtins.open and io.open are patched, and why a
+    plain OSError (not PermissionError) is used."""
+    import builtins
+    import io as io_mod
+    real_open = builtins.open
+    state = {"armed": True}
+
+    def flaky(file, mode="r", *args, **kwargs):
+        name = getattr(file, "name", None)
+        if name is None:
+            name = str(file).replace("\\", "/").rsplit("/", 1)[-1]
+        if (state["armed"] and name == target_name
+                and "r" in mode and "w" not in mode and "a" not in mode):
+            state["armed"] = False
+            raise OSError(f"simulated persistent read failure for {target_name}")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", flaky)
+    monkeypatch.setattr(io_mod, "open", flaky)
+
+
+def test_set_credentials_refuses_rather_than_wipes_on_unreadable_store(isolated_home, monkeypatch):
+    """_read_all() used to fail OPEN (return {}) on any read error, and
+    set_credentials() read-modify-wrote on that result - so a single
+    reported-unreadable read while setting civitai_api_key would silently
+    drop an already-stored hf_token. Pins the fix: refuse instead."""
+    from localm.model_source_credentials import (credentials_path, get_civitai_api_key,
+                                                  get_hf_token, set_credentials)
+    set_credentials({"hf_token": "hf_should_survive"})
+    assert get_hf_token() == "hf_should_survive"
+
+    import localm.config as cfg
+    _fail_next_read_once(monkeypatch, credentials_path().name)
+
+    exc = None
+    try:
+        set_credentials({"civitai_api_key": "civ_should_not_wipe_hf"})
+    except Exception as e:  # noqa: BLE001
+        exc = e
+
+    # DATA FIRST: hf_token must survive a reported-unreadable read, whether
+    # set_credentials raised or - on the unfixed code - silently "succeeded"
+    # by replacing the store with just the new key.
+    assert get_hf_token() == "hf_should_survive", (
+        "a reported-unreadable read destroyed the existing hf_token instead "
+        "of refusing the write")
+
+    # And the failure must be LOUD, never a silent partial overwrite.
+    assert isinstance(exc, cfg.ConfigUnreadable), (
+        f"set_credentials() must raise ConfigUnreadable on an unreadable "
+        f"store read rather than silently succeed; got {exc!r}")
+
+    # One-shot: a normal call right after succeeds, and both values persist.
+    set_credentials({"civitai_api_key": "civ_1"})
+    assert get_hf_token() == "hf_should_survive"
+    assert get_civitai_api_key() == "civ_1"
+
+
 # --------------------------------------------------------------------------- #
 #  the field never reaches config.json, over the real PATCH /v1/config route  #
 # --------------------------------------------------------------------------- #
