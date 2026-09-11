@@ -28,6 +28,6 @@ def test_inline_transformers_installs_also_pin_tokenizers():
 
 def test_single_tokenizers_version_across_files():
     vs = set()
-    for name in ("pyproject.toml", "setup.sh", "setup.bat"):
+    for name in ("pyproject.toml", "setup.sh", "setup.bat", "installer/gui.py"):
         vs |= _versions(name)
     assert len(vs) == 1, f"expected one tokenizers version, found {vs}"

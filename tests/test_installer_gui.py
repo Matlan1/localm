@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
 import pytest
 
 _GUI_PATH = Path(__file__).resolve().parents[1] / "installer" / "gui.py"
+_REPO_ROOT = _GUI_PATH.parents[1]
 _MOD_NAME = "localm_installer_gui"
 
 
@@ -220,6 +222,33 @@ def test_portable_store_contains_uv_inside_the_install(gui, tmp_path):
     plain = gui._env_for(gui.Plan(portable_store=False))
     assert plain.get("UV_PYTHON_INSTALL_DIR") != str(tmp_path / ".python")
     assert plain.get("UV_CACHE_DIR") != str(tmp_path / ".cache")
+
+
+# --------------------------------------------------------------------------- #
+#  The native certificate store                                                #
+# --------------------------------------------------------------------------- #
+
+def test_the_native_certificate_store_is_used_like_the_console_installers(
+        gui, monkeypatch):
+    monkeypatch.delenv("UV_SYSTEM_CERTS", raising=False)
+    env = gui._env_for(gui.Plan())
+    assert env.get("UV_SYSTEM_CERTS") == "1"
+
+
+def test_the_wrappers_set_the_native_certificate_store_before_opening_the_window():
+    bat = (_REPO_ROOT / "setup-gui.bat").read_text(encoding="utf-8")
+    sh = (_REPO_ROOT / "setup-gui.sh").read_text(encoding="utf-8")
+    bat_run = bat.index('"%UVEXE%" run')
+    bat_set = bat.index('set "UV_SYSTEM_CERTS=1"')
+    assert bat_set < bat_run, "setup-gui.bat opens the window before the store is set"
+    sh_run = sh.index('"$UVEXE" run')
+    sh_set = sh.index("export UV_SYSTEM_CERTS=1")
+    assert sh_set < sh_run, "setup-gui.sh opens the window before the store is set"
+
+
+def test_setup_bat_still_sets_the_native_certificate_store():
+    text = (_REPO_ROOT / "setup.bat").read_text(encoding="utf-8")
+    assert re.search(r'(?m)^set "UV_SYSTEM_CERTS=1"\s*$', text)
 
 
 # --------------------------------------------------------------------------- #
@@ -687,6 +716,72 @@ class TestPosixShortcut:
         # second file written here could never be removed on uninstall.
         assert not (home / "Desktop" / "LocaLM.desktop").exists()
 
+    def test_categories_matches_the_console_installer(
+            self, gui, tmp_path, monkeypatch):
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        text = entry.read_text(encoding="utf-8")
+        assert "Categories=Utility;Development;Science;\n" in text
+
+    def test_icon_prefers_the_svg_when_both_assets_exist(
+            self, gui, tmp_path, monkeypatch):
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "localm.svg").write_bytes(b"")
+        (assets / "localm.ico").write_bytes(b"")
+        gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        text = entry.read_text(encoding="utf-8")
+        assert f"Icon={assets / 'localm.svg'}\n" in text
+
+    def test_icon_falls_back_to_the_ico_when_only_that_exists(
+            self, gui, tmp_path, monkeypatch):
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "localm.ico").write_bytes(b"")
+        gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        text = entry.read_text(encoding="utf-8")
+        assert f"Icon={assets / 'localm.ico'}\n" in text
+
+    def test_no_icon_line_when_neither_asset_exists(
+            self, gui, tmp_path, monkeypatch):
+        if gui.IS_WINDOWS:
+            monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        home = tmp_path / "h"
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+        gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
+        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        text = entry.read_text(encoding="utf-8")
+        assert "Icon=" not in text
+
+
+# --------------------------------------------------------------------------- #
+#  The data-folder text box                                                    #
+# --------------------------------------------------------------------------- #
+
+class TestCustomFolderText:
+    """The typing-side predicate the path_var write-trace consults."""
+
+    def test_nonempty_text_means_the_custom_option(self, gui):
+        assert gui._is_custom_folder_text("D:/Models") is True
+
+    def test_empty_text_leaves_the_choice_alone(self, gui):
+        assert gui._is_custom_folder_text("") is False
+        assert gui._is_custom_folder_text("   ") is False
+
 
 # --------------------------------------------------------------------------- #
 #  The dialogue                                                                #
@@ -748,6 +843,21 @@ class TestWizard:
         wizard.next_page()
         assert wizard.index == 1, "advanced with no data folder chosen"
         assert "folder" in wizard.status.cget("text")
+
+    def test_typing_a_data_folder_selects_the_custom_option(self, wizard):
+        wizard.next_page()
+        assert wizard.pages[wizard.index][0] == "Where things live"
+        wizard.path_var.set("D:/Models")
+        assert wizard.portable_var.get() is False
+        assert wizard.current_plan().portable_data is False
+        assert wizard.current_plan().data_path == "D:/Models"
+
+    def test_choosing_portable_after_typing_is_not_overridden(self, wizard):
+        wizard.next_page()
+        wizard.path_var.set("D:/Models")
+        assert wizard.portable_var.get() is False
+        wizard.portable_var.set(True)
+        assert wizard.current_plan().portable_data is True
 
     def test_an_answer_survives_leaving_its_page(self, wizard):
         wizard.backend_var.set("cpu")

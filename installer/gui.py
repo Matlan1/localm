@@ -211,6 +211,7 @@ def _env_for(plan: Plan) -> dict:
     same containment setup.bat's Portable option gives."""
     env = dict(os.environ)
     env["LOCALM_SETUP"] = "1"
+    env["UV_SYSTEM_CERTS"] = "1"
     # Put the uv being used on PATH for everything the steps run. localm's own
     # plugin dependency installer shells out to a bare uv, and a portable copy
     # inside the folder is not on PATH; its fallback cannot help either,
@@ -472,14 +473,18 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
     else:
         exec_line = str(ROOT / "localm-launcher.sh")
         comment = "LocaLM launcher: GUI, chat, server or coder"
+    svg = ROOT / "assets" / "localm.svg"
+    ico = ROOT / "assets" / "localm.ico"
+    icon = svg if svg.exists() else (ico if ico.exists() else None)
     text = ("[Desktop Entry]\n"
             "Type=Application\n"
             f"Name={APP_NAME}\n"
             f"Comment={comment}\n"
             f"Exec={exec_line}\n"
-            f"Path={ROOT}\n"
+            + (f"Icon={icon}\n" if icon else "")
+            + f"Path={ROOT}\n"
             "Terminal=false\n"
-            "Categories=Utility;Development;\n")
+            "Categories=Utility;Development;Science;\n")
     d = Path.home() / ".local/share/applications"
     try:
         d.mkdir(parents=True, exist_ok=True)
@@ -495,6 +500,11 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
 # --------------------------------------------------------------------------- #
 #  The window                                                                  #
 # --------------------------------------------------------------------------- #
+
+def _is_custom_folder_text(text: str) -> bool:
+    """Whether text typed into the data-folder box means the custom option."""
+    return bool(text.strip())
+
 
 class Wizard:
     """The setup dialogue: one page per group of questions, then the install.
@@ -526,6 +536,7 @@ class Wizard:
         self.backend_var = tk.StringVar(value=self.recommended)
         self.portable_var = tk.BooleanVar(value=True)
         self.path_var = tk.StringVar(value=str(ROOT / "home"))
+        self.path_var.trace_add("write", self._on_path_typed)
         self.store_var = tk.BooleanVar(value=True)
         self.appwin_var = tk.BooleanVar(value=False)
         self.path_cmd_var = tk.BooleanVar(value=False)
@@ -721,6 +732,10 @@ class Wizard:
         chosen = self.filedialog.askdirectory(title="Choose a data folder")
         if chosen:
             self.path_var.set(chosen)
+            self.portable_var.set(False)
+
+    def _on_path_typed(self, *_args) -> None:
+        if _is_custom_folder_text(self.path_var.get()):
             self.portable_var.set(False)
 
     # -- running the install ------------------------------------------------

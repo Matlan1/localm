@@ -71,6 +71,7 @@ rem  Keep the interpreter this window runs on inside the folder, so a portable
 rem  install reuses it rather than downloading a second copy.
 set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
 set "UV_CACHE_DIR=%CD%\.cache"
+set "UV_SYSTEM_CERTS=1"
 "%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
 set "RC=!errorlevel!"
 

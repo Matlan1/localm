@@ -80,6 +80,7 @@ echo "  Opening the setup window ..."
 # install reuses it rather than downloading a second copy.
 export UV_PYTHON_INSTALL_DIR="$PWD/.python"
 export UV_CACHE_DIR="$PWD/.cache"
+export UV_SYSTEM_CERTS=1
 if ! "$UVEXE" run --no-project --python 3.12 python installer/gui.py; then
     echo
     echo "  [!] The setup window could not run."
