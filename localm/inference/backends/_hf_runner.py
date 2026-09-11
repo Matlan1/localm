@@ -675,6 +675,10 @@ class HFRunner:
         kind = result[0]
         if kind == "ok":
             return result[1]
+        # No branch below produced a usable model, so this worker holds nothing
+        # worth keeping. Reaped here rather than left orphaned for the caller's
+        # next load attempt to pile another one alongside it.
+        self.shutdown(grace=0)
         if kind == "error":
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the HF model-loading process: {result!r}")

@@ -112,20 +112,60 @@ class TestLoadCrashContainment:
         """The HFWorker(**payload) constructor call sits INSIDE the "load"
         branch's try/except (see _hf_runner.py), so a malformed payload - a
         parent/child protocol bug, not a native fault - is a normal, clean
-        error, not an uncaught crash that kills the process for no native
-        reason at all."""
+        error rather than an uncaught crash: the RuntimeError carries the real
+        message ("unexpected keyword argument"), never the "crashed (exit code
+        ...)" text the sibling crash-containment tests above assert on.
+
+        The worker process is still reaped by spawn_and_load before this
+        raises, same as every other non-"ok" load outcome (an unexpected
+        envelope) - a failed load never produces a usable model, so nothing is
+        left running. See TestLoadFailureReapsWorker below for the count-based
+        oracle this is a special case of."""
         r = HFRunner()
         bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
         try:
             with pytest.raises(RuntimeError) as ei:
                 r.spawn_and_load(bad_params, timeout=30.0)
             assert "unexpected keyword argument" in str(ei.value).lower()
-            assert r.is_alive(), (
-                "a bad payload is a protocol error, not a native fault - the "
-                "worker process itself must not have been killed by it"
+            assert not r.is_alive(), (
+                "a failed load produced no usable model - the worker must "
+                "be reaped, not left orphaned for the next retry to pile "
+                "another one alongside"
             )
         finally:
             r.shutdown(grace=0)
+
+
+class TestLoadFailureReapsWorker:
+    """engine.py's chat_stream retries HFBackend.load() on EVERY request
+    while the model is not loaded (see engine.py's auto-reload), and
+    HFBackend.load() spawns a BRAND NEW HFRunner every attempt (see hf.py's
+    HFBackend.load). So an unloadable model that keeps failing must not leave
+    a trail of live worker processes behind it: each failed spawn_and_load
+    reaps its own worker before it returns to the caller.
+
+    Counts real, spawned multiprocessing.Process objects via is_alive(), never
+    a mock: a mock's is_alive()/terminate() say nothing about the real
+    subprocess boundary this property lives on."""
+
+    def test_repeated_load_errors_never_leave_a_surviving_worker(self):
+        bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
+        runners = []
+        try:
+            for _ in range(3):
+                r = HFRunner()
+                runners.append(r)
+                with pytest.raises(RuntimeError, match="unexpected keyword argument"):
+                    r.spawn_and_load(bad_params, timeout=30.0)
+            survivors = sum(1 for r in runners if r.is_alive())
+            assert survivors == 0, (
+                f"{survivors} of {len(runners)} workers from a failed "
+                "(ERROR) load are still alive - each failed load must reap "
+                "its own worker"
+            )
+        finally:
+            for r in runners:
+                r.shutdown(grace=0)
 
 
 class TestRunnerLifecycle:

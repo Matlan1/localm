@@ -91,6 +91,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   because something is holding them, `localm plugin uninstall` now says the plugin was not
   fully uninstalled and exits with an error, instead of reporting that there was nothing to
   uninstall.
+- **HuggingFace models: an attached audio clip is no longer silently ignored, and a model that
+  can only hear no longer claims it can see.** Audio sent to a HuggingFace audio model was handed
+  to it under a name the library does not recognise, so the clip was dropped without a word while
+  the prompt still said one was attached. It is now passed correctly together with its sample
+  rate, and a clip recorded at a rate the model was not trained on is refused with a message
+  naming both rates instead of being ignored, since localm does not resample. Separately, a
+  checkpoint that handles only audio used to report that it could accept pictures, so an attached
+  image was dropped in silence; image and audio support are tracked separately now, and whichever
+  the model cannot take is refused. And a HuggingFace model that fails to load no longer leaves
+  its loading process running and holding memory, so retrying after a failed load starts with as
+  much free memory as the first attempt had.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role

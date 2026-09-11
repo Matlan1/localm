@@ -95,6 +95,90 @@ class TestHFRejectsImagesWhenTextOnly:
             next(backend.chat_stream(_IMAGE_MSG))
 
 
+class _FakeModelConfig:
+    def __init__(self):
+        self.max_position_embeddings = 128
+
+
+class _FakeAutoModel:
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        model = MagicMock()
+        model.config = _FakeModelConfig()
+        return model
+
+
+class _AudioOnlyFakeProcessor:
+    def __init__(self):
+        self.feature_extractor = object()
+        self.tokenizer = object()
+
+
+class _ImageOnlyFakeProcessor:
+    def __init__(self):
+        self.image_processor = object()
+        self.tokenizer = object()
+
+
+def _fake_transformers_namespace(processor_cls):
+    class _FakeAutoProcessor:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return processor_cls()
+
+    class _Namespace:
+        AutoProcessor = _FakeAutoProcessor
+        AutoModelForImageTextToText = _FakeAutoModel
+
+    return _Namespace
+
+
+class TestHFCapabilitySplit:
+    """A processor's image and audio capabilities are tracked and refused
+    independently: one is not allowed to stand in for the other."""
+
+    def test_audio_only_processor_does_not_report_supports_images(
+            self, tmp_path, monkeypatch):
+        from localm.inference.backends import _hf_worker
+
+        monkeypatch.setattr(
+            _hf_worker, "_require_transformers",
+            lambda: _fake_transformers_namespace(_AudioOnlyFakeProcessor))
+
+        worker = _hf_worker.HFWorker(str(tmp_path), device="cpu")
+        worker.load()
+
+        assert worker._is_multimodal is True
+        assert worker.supports_images is False
+        with pytest.raises(UnsupportedInputError):
+            next(worker.chat_stream(_IMAGE_MSG))
+
+    def test_image_only_processor_does_not_report_supports_audio(
+            self, tmp_path, monkeypatch):
+        from localm.inference.backends import _hf_worker
+
+        monkeypatch.setattr(
+            _hf_worker, "_require_transformers",
+            lambda: _fake_transformers_namespace(_ImageOnlyFakeProcessor))
+
+        worker = _hf_worker.HFWorker(str(tmp_path), device="cpu")
+        worker.load()
+
+        assert worker._is_multimodal is True
+        assert worker.supports_images is True
+        assert worker._supports_audio is False
+        audio_msg = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "input_audio",
+                 "input_audio": {"data": "AAAA", "format": "wav"}},
+            ],
+        }]
+        with pytest.raises(UnsupportedInputError):
+            next(worker.chat_stream(audio_msg))
+
+
 # --------------------------------------------------------------------------- #
 #  HTTP route returns a clean 400                                              #
 # --------------------------------------------------------------------------- #
