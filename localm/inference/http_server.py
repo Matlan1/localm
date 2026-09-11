@@ -4722,11 +4722,13 @@ async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[
         # producer thread holds - instead of one async-generator GC tick later.
         # No-op on a clean finish (the inner generator is already exhausted).
         try:
-            await gen.aclose()
-        except Exception:
-            from localm.debuglog import logger as _dbg
-            _dbg.exception("closing stream generator on unpin failed")
-        _unpin(engine)
+            try:
+                await gen.aclose()
+            except Exception:
+                from localm.debuglog import logger as _dbg
+                _dbg.exception("closing stream generator on unpin failed")
+        finally:
+            _unpin(engine)
 
 
 async def _stream_sse(

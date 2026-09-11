@@ -4,6 +4,7 @@
 restart sequence unloads the model BEFORE relaunching, like the shutdown
 sequence."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -615,3 +616,61 @@ def test_do_restart_probes_free_vram_when_only_embedder_present(monkeypatch):
     except SystemExit:
         pass
     assert calls, "vram_capacity must still be probed when the embedder is loaded"
+
+
+# ------------------------- _pin_engine cancellation ------------------------
+#
+# _pin_engine wraps a streaming generator and releases the engine's pin in its
+# own finally. Unrelated to restart, but placed here because it shares
+# _do_restart's engine-pin machinery and this is the test file this unit is
+# scoped to edit.
+
+class _StopImmediately:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+class _CancelOnClose(_StopImmediately):
+    async def aclose(self):
+        raise asyncio.CancelledError()
+
+
+class _RaiseOnClose(_StopImmediately):
+    async def aclose(self):
+        raise RuntimeError("boom")
+
+
+def test_pin_engine_unpins_even_when_inner_aclose_raises_cancelled():
+    class _FakeEngine:
+        active_requests = 0
+
+    async def scenario():
+        engine = _FakeEngine()
+        http_server._pin(engine)
+        assert engine.active_requests == 1
+        wrapped = http_server._pin_engine(engine, _CancelOnClose())
+        with pytest.raises(asyncio.CancelledError):
+            async for _ in wrapped:
+                pass
+        assert engine.active_requests == 0
+
+    asyncio.run(scenario())
+
+
+def test_pin_engine_unpins_when_inner_aclose_raises_a_plain_exception():
+    class _FakeEngine:
+        active_requests = 0
+
+    async def scenario():
+        engine = _FakeEngine()
+        http_server._pin(engine)
+        assert engine.active_requests == 1
+        wrapped = http_server._pin_engine(engine, _RaiseOnClose())
+        async for _ in wrapped:
+            pass
+        assert engine.active_requests == 0
+
+    asyncio.run(scenario())
