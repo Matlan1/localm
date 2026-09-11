@@ -1759,9 +1759,31 @@ class TestNewToolCalls:
                         {"name": "uninstall_plugin", "arguments": {"plugin": "coder"}})
         assert resp["result"]["isError"] is True
         text = resp["result"]["content"][0]["text"]
-        assert "could not be fully removed" in text
+        assert "not fully uninstalled" in text
         assert "successfully uninstalled" not in text
+        # uninstall()'s bool folds installed-dir removal AND data deletion into
+        # one result, so the message must not claim a specific artefact - the
+        # arm that failed might be either one.
+        assert "files" not in text.lower(), (
+            f"the message names files, which may not be what actually failed: {text!r}")
         mock_uninstall.assert_called_once_with("coder", delete_data=False)
+
+    def test_uninstall_plugin_degraded_message_warns_about_data_when_requested(self):
+        # With delete_data=True, a degraded result cannot tell the caller
+        # whether the installed dir or the data dir (or both) failed to be
+        # removed - the message must caution about stored data rather than
+        # staying silent about it or falsely claiming it is gone.
+        server, _ = _server()
+        with patch("localm.plugins.engine.PluginManager.is_installed", return_value=True), \
+             patch("localm.plugins.engine.PluginManager.uninstall", return_value=False) as mock_uninstall:
+            resp = _req(server, "tools/call",
+                        {"name": "uninstall_plugin",
+                         "arguments": {"plugin": "coder", "delete_data": True}})
+        assert resp["result"]["isError"] is True
+        text = resp["result"]["content"][0]["text"].lower()
+        assert "not fully uninstalled" in text
+        assert "delete_data" in text
+        mock_uninstall.assert_called_once_with("coder", delete_data=True)
 
 
 # --------------------------------------------------------------------------- #
