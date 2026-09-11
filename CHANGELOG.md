@@ -135,6 +135,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A plugin whose installation was interrupted partway through can be installed, reinstalled, or
   removed again.** It previously stayed stuck in a broken, half-installed state that nothing in
   the app could clear, including plugins that install themselves automatically.
+- **Removing such a plugin, when the removal itself fails, is no longer reported as a success, or
+  over the HTTP API as the plugin never having existed.** `localm plugin uninstall`, the plugin
+  management HTTP API, and the MCP `uninstall_plugin` tool can all remove a plugin directory left
+  behind by an interrupted install; if a locked file, antivirus, or a permission denial stops that
+  removal from completing, all three now report the failure instead of claiming success or that
+  there was nothing to remove.
 - **A ComfyUI address written in an unusual numeric form (hexadecimal, octal, or a single decimal
   number) is now refused when it points at a link-local or cloud-metadata address, the same as
   the ordinary dotted form already was.** Only that numeric form was previously overlooked.
