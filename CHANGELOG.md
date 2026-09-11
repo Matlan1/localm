@@ -86,6 +86,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   install went to the default location instead.
 - **The application menu entry the graphical installer creates on Linux now includes the
   LocaLM icon.** It previously had none.
+- **Uninstalling a plugin no longer says it was never installed when the uninstall did not
+  complete.** If a plugin's files, or with `--delete-data` its stored data, stay on disk
+  because something is holding them, `localm plugin uninstall` now says the plugin was not
+  fully uninstalled and exits with an error, instead of reporting that there was nothing to
+  uninstall.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
