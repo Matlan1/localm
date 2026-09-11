@@ -43,6 +43,49 @@ other key is rejected. A new module goes in the lowest tier whose role fits
 and that sits above everything the module imports at module level; moving an
 existing unit between tiers is a design change and the pull request says why.
 
+## Removing or renaming a config key or a response field
+
+A test can depend on a name that never contains the one being removed.
+Dropping the config key `managed_comfy_enabled` also dropped the `enabled`
+field from `/api/comfy/managed-status`, and a test asserting
+`body["enabled"]` kept failing while a search for the key found nothing.
+Two tools cover that gap.
+
+`scripts/check_hygiene.py` (check 10) reads every route whose handler
+builds its JSON response from dict literals, and every test that reads a
+top-level key from that route's response, and fails when the key is one the
+handler cannot produce. It runs on every commit through the pre-commit hook
+and in CI's hygiene gate, before any test runs. It does not see a handler
+whose response comes from another module, a model class, a file or stream,
+or a non-literal merge (that shape is open and not judged); a nested key; a
+key read through a helper or a fixture rather than a `.json()` call in the
+test function itself; or a GUI script reading the response.
+
+`scripts/affected_tests.py` prints the test files a change affects: the
+changed tests, every test importing a changed module, every test naming a
+route path a changed module registers, and every test naming a changed
+module or file. It reads the change from git (the branch's diff from
+`origin/master` plus uncommitted work) and prints one path per line, so the
+selection substitutes straight into a pytest command:
+
+    pytest $(python scripts/affected_tests.py) -m "not integration"
+
+`--why` prints the reason next to each file, `--files` takes an explicit
+list instead of git, and `--depth 1` also follows the modules that import a
+changed one. The substitution above can never hand pytest an empty or a
+whole-suite argument list: when nothing is affected the script prints
+`tests/NO_TEST_FILE_IS_AFFECTED`; when the selection exceeds a quarter of
+the suite it prints `tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR`
+and exits 3 (the change touches a module most tests import, and no targeted
+run stands in for the suite there; `--list-wide` prints the selection
+anyway); when the script itself fails it prints
+`tests/AFFECTED_TESTS_FAILED_SEE_STDERR` and exits 1. None of those paths
+exists, so pytest stops with "file or directory not found".
+
+So before removing or renaming a config key, a route, or a response field:
+search for the old name and for every field name the route derives from
+it, run the hygiene check, and run the affected selection.
+
 ## Engine
 
 `Engine` auto-detects the backend from the model path (`.gguf` file or
