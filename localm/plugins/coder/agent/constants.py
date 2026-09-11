@@ -56,15 +56,30 @@ _NESTED_PATH_TOOLS: dict[str, tuple[str, str]] = {
     "edit_files": ("edits", "path"),
 }
 
+# Tools whose target paths are the STRINGS of a list arg. Maps tool name ->
+# list arg. The spawn tools read every entry of `files` into the child's
+# first message before the child starts.
+_LIST_PATH_TOOLS: dict[str, str] = {
+    "spawn_agent": "files",
+    "spawn_agent_background": "files",
+}
+
 
 def _call_target_paths(tool_name: str, args: dict) -> list[str]:
     """Every filesystem path a tool call targets, in call order.
 
     One `path` arg for most tools; for a tool in _NESTED_PATH_TOOLS, each
-    item's path inside its collection arg. Malformed items are skipped here
-    (the tool itself reports them); duplicates are preserved so a caller can
-    count edits, and callers that need unique files de-duplicate.
+    item's path inside its collection arg; for a tool in _LIST_PATH_TOOLS,
+    each entry of its list arg. Malformed items are skipped here (the tool
+    itself reports them); duplicates are preserved so a caller can count
+    edits, and callers that need unique files de-duplicate.
     """
+    list_arg = _LIST_PATH_TOOLS.get(tool_name)
+    if list_arg is not None:
+        items = args.get(list_arg)
+        if not isinstance(items, list):
+            return []
+        return [str(item) for item in items if item]
     nested = _NESTED_PATH_TOOLS.get(tool_name)
     if nested is None:
         value = args.get("path", "")
@@ -83,13 +98,17 @@ def _call_target_paths(tool_name: str, args: dict) -> list[str]:
 
 # File-access tools whose target path must match the active scope glob. Keys on
 # the `path` arg; a tool whose real target is a `glob`/`output_path` arg has that
-# checked too (see _SCOPE_PATH_ARGS). run_shell is unscoped (see _INTENTIONALLY_UNSCOPED).
+# checked too (see _SCOPE_PATH_ARGS), and the spawn tools have every entry of
+# their `files` list checked (see _LIST_PATH_TOOLS). run_shell is unscoped (see
+# _INTENTIONALLY_UNSCOPED).
 _SCOPED_TOOLS: frozenset[str] = frozenset({
     "read_file", "write_file", "edit_file", "edit_files", "patch_file",
     "list_dir", "tree",
     # The rest of the file-reading/writing tools.
     "grep", "search_files", "search_replace", "read_env",
     "edit_notebook_cell", "generate_image", "browser_screenshot",
+    # The sub-agent spawners: their `files` pre-load reads each listed path.
+    "spawn_agent", "spawn_agent_background",
 })
 
 # Tools NOT confined by the scope glob: git_diff / git_log take a git

@@ -181,6 +181,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   classified the same way the rest of localm classifies "on this machine" everywhere else.
 - **The coder's URL backend no longer follows a redirect, and an off-machine one now dials the
   address it validated rather than re-resolving the hostname at connect time.**
+- **A coder session started with `--scope` can no longer hand a sub-agent a file from outside
+  that scope.** The files a `spawn_agent` or `spawn_agent_background` call pre-loads into the
+  sub-agent were read without the session's path restriction, so any file in the project could
+  reach a sub-agent's context. Every pre-loaded file is now checked against the scope first, and
+  an out-of-scope file refuses the whole call, naming the file, before the sub-agent starts.
 
 ## [0.2.0] - 2026-09-04
 
