@@ -938,6 +938,70 @@ def test_uninstall_http_reports_failure_when_removal_incomplete(env, monkeypatch
         "the route reported success while the installed directory could not be removed"
     # The removal genuinely did not complete: prove it, don't assume it.
     assert installed_dir.is_dir()
+    detail = r.json()["detail"].lower()
+    assert "not fully uninstalled" in detail
+    assert "not installed" not in detail
+
+
+def test_uninstall_http_degraded_message_does_not_claim_files_when_only_data_fails(
+        env, monkeypatch):
+    """uninstall() folds installed-dir removal AND data deletion into one bool.
+    When only data deletion fails, the installed directory IS gone - a message
+    naming "files" would be false, the same shape as the CLI fix this mirrors."""
+    from pathlib import Path
+
+    from localm.plugins.engine import attach_engine
+
+    src = _make_plugin(env / "src", "withdata", _ping("withdata"),
+                       toml_extra='data_subdir = "withdata_data"\n')
+    data_dir = env / "withdata_data"
+    data_dir.mkdir()
+    (data_dir / "private.txt").write_text("USER SECRET", encoding="utf-8")
+
+    app = FastAPI()
+    manager = attach_engine(app)
+    with TestClient(app) as c:
+        r = c.post("/api/plugins/install-external", json={"source": str(src)})
+        assert r.status_code == 200, r.text
+
+    monkeypatch.setattr(manager, "_delete_plugin_data", lambda spec: False)
+
+    with TestClient(app) as c:
+        r = c.post("/api/plugins/withdata/uninstall?delete_data=true")
+    assert r.status_code == 500, r.text
+    assert not (Path(manager._installed_root) / "withdata").exists(), \
+        "the installed directory should have been removed in this arm"
+    assert (data_dir / "private.txt").exists(), \
+        "the injection did not take: data deletion succeeded"
+    detail = r.json()["detail"].lower()
+    assert "files" not in detail, (
+        f"the message names files that were in fact removed: {detail!r}")
+    assert "not fully uninstalled" in detail
+    assert "delete_data" in detail
+
+
+def test_uninstall_http_benign_not_installed_mismatch_is_not_a_failed_removal(env):
+    """A directory-name/manifest-name mismatch makes is_installed(<manifest
+    name>) False while the directory on disk is untouched - the route must not
+    report this as a files-could-not-be-removed 500; nothing needed removing."""
+    from pathlib import Path
+
+    from localm.plugins.engine import attach_engine
+
+    app = FastAPI()
+    manager = attach_engine(app)
+    foo_dir = Path(manager._installed_root) / "foo"
+    foo_dir.mkdir(parents=True)
+    (foo_dir / "plugin.toml").write_text(
+        '[plugin]\nname = "bar"\nscope = "bar"\nregister = "plug"\n', encoding="utf-8")
+    (foo_dir / "plug.py").write_text(
+        "def register(host):\n    pass\n\ndef unregister():\n    pass\n",
+        encoding="utf-8")
+
+    with TestClient(app) as c:
+        r = c.post("/api/plugins/bar/uninstall")
+    assert r.status_code == 404, r.text
+    assert foo_dir.is_dir()
 
 
 def _make_legacy_plugin(root, name, *, exports='["tool_hello"]'):

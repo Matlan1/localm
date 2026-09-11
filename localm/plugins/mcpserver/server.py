@@ -1442,10 +1442,15 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             except ValueError as e:
                 return _text_result(str(e), is_error=True)
         if was_installed and not removed:
-            return _text_result(
-                f"Plugin '{plugin}' was disabled and unloaded, but its installed "
-                "files could not be fully removed (a locked file, an AV hold, or "
-                "a permission denial); it is not fully uninstalled.", is_error=True)
+            detail = (
+                f"Plugin '{plugin}' was disabled and unloaded, but it was not "
+                f"fully uninstalled: something it owns could not be removed "
+                f"from disk.")
+            if delete_data:
+                detail += (
+                    " delete_data was requested and this uninstall did not "
+                    "complete, so do not assume its stored data is gone.")
+            return _text_result(detail, is_error=True)
         return _text_result(f"Plugin '{plugin}' successfully uninstalled.")
 
     _model_param = {"type": "string",

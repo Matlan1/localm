@@ -1756,6 +1756,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def uninstall_plugin_engine(name: str, delete_data: bool = False):
         _valid_name_or_404(name)
+        was_installed = manager.is_installed(name)
         try:
             complete = manager.uninstall(name, delete_data=delete_data)
         except KeyError:
@@ -1764,17 +1765,19 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
             raise HTTPException(409, str(e))
         except Exception as e:
             raise HTTPException(400, f"Uninstall failed: {e}")
-        if not complete:
-            # uninstall() disabled and unloaded the plugin; what did not
-            # complete is deleting its files from disk (a locked file, an AV
-            # hold, a permission denial, or - with delete_data - its data
-            # directory).
-            raise HTTPException(
-                500,
-                f"Plugin {name!r} was disabled and unloaded, but its files "
-                f"could not be fully removed from disk; see the server log "
-                f"for the cause.")
-        return {"status": "uninstalled", "name": name}
+        if complete:
+            return {"status": "uninstalled", "name": name}
+        if not was_installed:
+            raise HTTPException(404, f"No such plugin: {name}")
+        detail = (
+            f"Plugin {name!r} was disabled and unloaded, but it was not "
+            f"fully uninstalled: something it owns could not be removed "
+            f"from disk; see the server log for the cause.")
+        if delete_data:
+            detail += (
+                " delete_data was requested and this uninstall did not "
+                "complete, so do not assume its stored data is gone.")
+        raise HTTPException(500, detail)
 
     @app.post("/api/plugins/refresh",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
