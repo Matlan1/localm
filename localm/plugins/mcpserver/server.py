@@ -65,6 +65,10 @@ SERVER_VERSION = "0.2.0"
 BUSY_WAIT_SECONDS = 30.0
 BUSY_POLL_SECONDS = 1.0
 
+# Longest run_coder_task budget a client may ask for; the budget covers the
+# model load and the agent's construction as well as the run.
+MAX_CODER_TIMEOUT_SECONDS = 3600.0
+
 
 class ModelBusyError(RuntimeError):
     """A load was refused because every evictable resident is still serving a
@@ -1223,7 +1227,14 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 or timeout <= 0):
             return _text_result("'timeout_seconds' must be a positive number",
                                 is_error=True)
+        if timeout > MAX_CODER_TIMEOUT_SECONDS:
+            return _text_result(
+                f"'timeout_seconds' must be at most {MAX_CODER_TIMEOUT_SECONDS:g}",
+                is_error=True)
         timeout = float(timeout)
+        # One deadline for the whole call: the model load and the agent's
+        # construction below spend from the same budget as the run.
+        started = time.monotonic()
 
         # A model name from the client or the project config is registry-gated
         # by resolve_model; the operator's own --model default is the only path
@@ -1258,10 +1269,21 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         except Exception as e:
             engines.unpin(engine)
             return _text_result(f"coder task failed to start: {e}", is_error=True)
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            try:
+                with _quiet_stdout():
+                    coder_runner.finish_agent(agent)
+            finally:
+                engines.unpin(engine)
+            return _text_result(
+                f"coder task timed out after {timeout:g}s before it could start: "
+                "loading the model and preparing the agent used the whole budget",
+                is_error=True)
         try:
             with _quiet_stdout():
                 result = coder_runner.run_task_with_timeout(
-                    agent, task, timeout,
+                    agent, task, remaining,
                     on_finished=lambda: engines.unpin(engine))
         except Exception as e:
             return _text_result(f"coder task failed to run: {e}", is_error=True)
@@ -1637,7 +1659,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                                              "without this since there is no TTY to confirm "
                                              "them)")},
                     "timeout_seconds": {"type": "integer",
-                                        "description": "Give up after this long (default 900)"},
+                                        "description": ("Give up after this long (default 900, "
+                                                        "at most 3600). Covers loading the "
+                                                        "model and preparing the agent as "
+                                                        "well as the run; on expiry the run is "
+                                                        "cancelled")},
                 },
                 "required": ["task", "cwd"],
             },

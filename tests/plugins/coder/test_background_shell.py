@@ -1569,3 +1569,41 @@ def test_the_one_shot_report_names_only_its_own_run(monkeypatch, capsys, make_re
         assert [j["label"] for j in reg.drain_finished(kind="agent", owner="task-a")] == ["a-done"]
     finally:
         a_running.finish_now("done")
+
+
+def test_a_turn_boundary_drain_takes_only_the_jobs_this_agent_spawned(
+        monkeypatch, make_registry):
+    """A background child shares its parent's owner id; its own turn-boundary
+    drain must leave its siblings' completions for the parent."""
+    from types import SimpleNamespace
+    from localm.plugins.coder.agent.persistence import _PersistenceMixin
+
+    class _Spawned(_OwnedAgentJob):
+        def __init__(self, label, owner, parent):
+            super().__init__(label, owner=owner)
+            self.child = SimpleNamespace(parent=parent, _error_trace=[],
+                                         last_run_ok=True)
+
+    parent = _PersistenceMixin.__new__(_PersistenceMixin)
+    parent._error_trace = []
+    parent.job_owner = "sess"
+    sibling = _PersistenceMixin.__new__(_PersistenceMixin)
+    sibling._error_trace = []
+    sibling.job_owner = "sess"
+    parent._absorb_child_denials = lambda child, label="": None
+    sibling._absorb_child_denials = lambda child, label="": None
+
+    reg = make_registry(kind_caps={"agent": 50}, keep_finished=10)
+    monkeypatch.setattr(bg, "_registry", reg)
+    mine = reg.submit(lambda: _Spawned("mine", "sess", parent), kind="agent")
+    theirs = reg.submit(lambda: _Spawned("theirs", "sess", sibling), kind="agent")
+    mine.finish_now("r-mine")
+    theirs.finish_now("r-theirs")
+    assert _wait_for(lambda: mine.state == "done" and theirs.state == "done")
+
+    notes = _PersistenceMixin._drain_background_agents(parent)
+    assert any("mine" in n for n in notes), notes
+    assert not any("theirs" in n for n in notes), notes
+    # The sibling's completion is still there for the agent that spawned it.
+    later = _PersistenceMixin._drain_background_agents(sibling)
+    assert any("theirs" in n for n in later), later

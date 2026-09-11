@@ -16,7 +16,9 @@ caller, which for the reviewer is fail-open (a broken reviewer never blocks).
 
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Callable, Iterator, Optional
+
+from localm.textnorm import ThinkSplitter, split_think
 
 from .base import BaseLLMBackend
 
@@ -43,6 +45,7 @@ class LocalEngineBackend(BaseLLMBackend):
                               n_gpu_layers=n_gpu_layers, display_name=display_name)
         self._model_id = display_name or model_display_name(model_path)
         self._loaded = False
+        self._last_reasoning = ""
         # supports_grammar (BaseLLMBackend) gates whether callers (context.py's
         # tool-call forcing and JSON-summary compaction) trust this backend to
         # enforce a GBNF grammar it is handed rather than generating
@@ -62,13 +65,50 @@ class LocalEngineBackend(BaseLLMBackend):
         return {k: v for k, v in kwargs.items()
                 if k in _ENGINE_GEN_KWARGS and v is not None}
 
-    def chat(self, messages: list[dict], **kwargs) -> str:
-        self._ensure_loaded()
-        return "".join(self._engine.chat_stream(messages, **self._gen(kwargs)))
+    @property
+    def last_reasoning(self) -> str:
+        """The most recent call's reasoning text, with the think tags removed;
+        empty when the model produced none."""
+        return self._last_reasoning
 
-    def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        """The answer alone: a thinking model's ``<think>`` scratchpad is
+        split off and latched as ``last_reasoning``."""
         self._ensure_loaded()
-        yield from self._engine.chat_stream(messages, **self._gen(kwargs))
+        self._last_reasoning = ""
+        text = "".join(self._engine.chat_stream(messages, **self._gen(kwargs)))
+        answer, reasoning = split_think(text)
+        self._last_reasoning = reasoning
+        return answer
+
+    def chat_stream(self, messages: list[dict],
+                    on_reasoning: Optional[Callable[[str], None]] = None,
+                    **kwargs) -> Iterator[str]:
+        """The answer's pieces; reasoning pieces go to ``on_reasoning`` and are
+        never yielded."""
+        self._ensure_loaded()
+        self._last_reasoning = ""
+        splitter = ThinkSplitter()
+        reasoning_parts: list[str] = []
+
+        def _route(reasoning: str) -> None:
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                if on_reasoning is not None:
+                    on_reasoning(reasoning)
+
+        try:
+            for piece in self._engine.chat_stream(messages, **self._gen(kwargs)):
+                content, reasoning = splitter.feed(piece)
+                _route(reasoning)
+                if content:
+                    yield content
+            content, reasoning = splitter.flush()
+            _route(reasoning)
+            if content:
+                yield content
+        finally:
+            self._last_reasoning = "".join(reasoning_parts)
 
     @property
     def model_id(self) -> str:
