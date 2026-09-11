@@ -117,3 +117,69 @@ def test_repl_media_no_arg_shows_usage_no_unload(tmp_path, monkeypatch,
         cli._handle_command(command, [], {}, engine=engine)
     gen.assert_not_called()
     engine.unload.assert_not_called()
+
+
+@pytest.mark.parametrize("command,target,plugin", [
+    ("/generate-image a cat", "localm.image_gen.comfy.generate_image", "image"),
+    ("/generate-music happy lo-fi", "localm.music_gen.comfy.generate_music", "music"),
+    ("/generate-video a cat surfing", "localm.video_gen.comfy.generate_video", "video"),
+])
+def test_repl_media_honours_the_per_plugin_comfy_url(
+        tmp_path, monkeypatch, command, target, plugin):
+    """Each /generate-* REPL command must resolve ITS OWN plugin's configured
+    ComfyUI address, not the shared comfy_api_url - the same defect already
+    fixed for `localm image/music/video` on the command line, see
+    test_media_cli_uses_plugin_settings.py.
+
+    Deliberately does NOT patch default_api_url (unlike _run_repl_media
+    above): a real per-plugin config is written so the fix's own resolution
+    path (cli.media._plugin_api_url) runs end to end rather than being
+    mocked around it."""
+    import localm.config as _cfg
+    from localm import cli
+    from localm.audit import SessionMode
+    from localm.config import load_config, save_config
+
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    _cfg.ensure_dirs()
+    monkeypatch.setattr(cli, "HOME_DIR", tmp_path)
+
+    cfg = load_config()
+    cfg.setdefault("plugins", {}).setdefault(plugin, {})["comfy"] = {
+        "api_url": "http://127.0.0.1:9999",
+    }
+    cfg["comfy_api_url"] = "http://127.0.0.1:8188"   # a DIFFERENT shared default
+    save_config(cfg)
+
+    calls = {}
+
+    def fake_gen(prompt, out, **kwargs):
+        calls["prompt"] = prompt
+        calls["out"] = out
+        calls.update(kwargs)
+        return (True, "ok")
+
+    ensure_calls = []
+
+    def fake_ensure_comfy(api, **kwargs):
+        ensure_calls.append(api)
+        return (True, "ok")
+
+    engine = MagicMock()
+    with patch(target, fake_gen), \
+         patch("localm.image_gen.comfy.ensure_comfy", fake_ensure_comfy), \
+         patch("localm.image_gen.comfy.free_comfy_vram"), \
+         patch("localm.audit.effective_mode", return_value=SessionMode.LOG):
+        cli._handle_command(command, [], {}, engine=engine)
+
+    assert calls.get("api_url", "").rstrip("/") == "http://127.0.0.1:9999", (
+        f"the {plugin} REPL command used {calls.get('api_url')!r} instead of "
+        "its own configured ComfyUI url")
+    assert ensure_calls and ensure_calls[0].rstrip("/") == "http://127.0.0.1:9999", (
+        f"ensure_comfy was reached with {ensure_calls!r}, not the per-plugin url "
+        "- the pre-unload reachability check would have dialled the wrong instance")

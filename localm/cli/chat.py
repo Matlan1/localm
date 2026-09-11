@@ -671,15 +671,15 @@ from ..media import paths as _media_paths  # noqa: E402
 _MEDIA_REPL = {
     "generate-image": {
         "subdir": _media_paths.IMAGE_DIR_NAME, "ext": ".png", "arg": "prompt",
-        "get_generate": _media_generate_image,
+        "get_generate": _media_generate_image, "plugin": "image",
     },
     "generate-music": {
         "subdir": _media_paths.MUSIC_DIR_NAME, "ext": ".flac", "arg": "tags",
-        "get_generate": _media_generate_music,
+        "get_generate": _media_generate_music, "plugin": "music",
     },
     "generate-video": {
         "subdir": _media_paths.VIDEO_DIR_NAME, "ext": ".mp4", "arg": "prompt",
-        "get_generate": _media_generate_video,
+        "get_generate": _media_generate_video, "plugin": "video",
     },
 }
 
@@ -698,8 +698,9 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     if not arg:
         console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
-    from ..image_gen.comfy import default_api_url, ensure_comfy, free_comfy_vram
-    api = default_api_url()
+    from ..image_gen.comfy import ensure_comfy, free_comfy_vram
+    from .media import _plugin_api_url
+    api = _plugin_api_url(spec["plugin"])
     # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir.
     # Only unload the chat model once ComfyUI is actually available. escape(t):
     # progress text embeds the user's own comfy_launch_cmd/comfy_workdir config
