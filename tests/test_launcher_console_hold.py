@@ -93,6 +93,115 @@ class TestConsoleHold:
 
 
 # --------------------------------------------------------------------------- #
+#  The Windows command line _spawn_detached hands to cmd.exe                   #
+# --------------------------------------------------------------------------- #
+
+CMDLINE_MARKER = "LAUNCHER-CMDLINE-PROBE-RAN"
+SECOND_STUB_MARKER = "LAUNCHER-CMDLINE-SECOND-STUB-RAN"
+
+
+def _win_cmdline(cmd, env=None):
+    mod = _load_launcher_pyw("localm_launcher_pyw")
+    return mod._windows_command_line(cmd, env)
+
+
+def _write_marker_stub(directory, marker=CMDLINE_MARKER, exit_code=0):
+    """A .bat that prints a fixed marker and exits *exit_code*.
+
+    It never echoes its own arguments: batch re-expands ``%*`` into the
+    ``echo`` line, so an argument carrying a metacharacter would be split by
+    the batch parser and the stub would appear to fail for a reason that has
+    nothing to do with the command line under test.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    bat = directory / "probe.bat"
+    bat.write_text(
+        "@echo off\r\necho {}\r\nexit /b {}\r\n".format(marker, exit_code),
+        encoding="utf-8")
+    return bat
+
+
+def _run_cmdline(line):
+    """Run a cmd.exe /c command line for real, with the two traps this file's
+    own docstring warns about: pause blocks on stdin without DEVNULL, and a
+    hung child needs a bounded timeout."""
+    return subprocess.run(line, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=15)
+
+
+class TestWindowsCommandLineBuilder:
+    """Structural checks on the string _windows_command_line returns. None of
+    these execute cmd.exe, so they run on every platform."""
+
+    def test_the_hold_is_not_escaped(self):
+        line = _win_cmdline(["localm", "gui"], {})
+        assert line.endswith(' || pause'), line
+        assert "^|" not in line, line
+        assert "^&" not in line, line
+
+    def test_the_debug_hold_is_not_escaped(self):
+        line = _win_cmdline(["localm", "gui", "--debug"], {})
+        assert line.endswith(' & pause'), line
+        assert "^&" not in line, line
+
+    def test_every_argument_is_quoted(self):
+        line = _win_cmdline(["prog", "a", "b c"], {})
+        assert '"prog"' in line
+        assert '"a"' in line
+        assert '"b c"' in line
+
+    def test_the_whole_line_starts_with_cmd_and_one_outer_quote(self):
+        line = _win_cmdline(["prog"], {})
+        assert line.startswith('cmd.exe /c "')
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestWindowsCommandLineExecution:
+    """Drives the real string through a real cmd.exe, in tmp_path, against
+    hostile directory names. A source-level assertion cannot tell a working
+    fix from one that merely looks right: the mandatory hold test passes for
+    a shape that does not run at all, so this has to execute."""
+
+    def test_a_space_in_the_path_runs(self, tmp_path):
+        stub = _write_marker_stub(tmp_path / "My Repo")
+        line = _win_cmdline([str(stub)], {})
+        out = _run_cmdline(line)
+        assert CMDLINE_MARKER in out.stdout, (line, out.stdout, out.stderr)
+
+    def test_an_ampersand_in_the_path_runs(self, tmp_path):
+        stub = _write_marker_stub(tmp_path / "R&D")
+        line = _win_cmdline([str(stub)], {})
+        out = _run_cmdline(line)
+        assert CMDLINE_MARKER in out.stdout, (line, out.stdout, out.stderr)
+
+    def test_a_space_and_an_ampersand_together_run(self, tmp_path):
+        """The case that separates a half-fix from a fix: blind caret-escaping
+        passes the ampersand-only case above and fails this one, because it
+        also escapes the ampersand that sits inside this path's own quotes."""
+        stub = _write_marker_stub(tmp_path / "My R&D Dir")
+        line = _win_cmdline([str(stub)], {})
+        out = _run_cmdline(line)
+        assert CMDLINE_MARKER in out.stdout, (line, out.stdout, out.stderr)
+
+    def test_no_injection_from_an_argument_value(self, tmp_path):
+        main_stub = _write_marker_stub(tmp_path / "main")
+        second_stub = _write_marker_stub(tmp_path / "second", marker=SECOND_STUB_MARKER)
+        payload = "X&{}".format(second_stub)
+        assert " " not in payload
+        cmd = [str(main_stub), "--cwd", payload]
+        line = _win_cmdline(cmd, {})
+        out = _run_cmdline(line)
+        assert CMDLINE_MARKER in out.stdout, (line, out.stdout, out.stderr)
+        assert SECOND_STUB_MARKER not in out.stdout, (line, out.stdout, out.stderr)
+
+    def test_the_hold_still_pauses_on_a_failing_child_with_a_space_in_the_path(self, tmp_path):
+        stub = _write_marker_stub(tmp_path / "My Repo", exit_code=1)
+        line = _win_cmdline([str(stub)], {})
+        out = _run_cmdline(line)
+        assert "press any key" in out.stdout.lower(), (line, out.stdout, out.stderr)
+
+
+# --------------------------------------------------------------------------- #
 #  The shipped localm.bat                                                      #
 # --------------------------------------------------------------------------- #
 

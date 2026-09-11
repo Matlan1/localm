@@ -118,6 +118,44 @@ def _console_hold(cmd: list, env: dict | None) -> str:
     return " || pause"
 
 
+def _quote_arg_for_cmd(arg: str) -> str:
+    """One argument, always wrapped in double quotes: the same backslash/quote
+    escaping ``subprocess.list2cmdline`` applies per MS C runtime rules, but
+    applied unconditionally rather than only when the argument holds whitespace.
+    Every cmd.exe metacharacter in the argument (``& | < > ^ ( )``) ends up
+    inside that quoted region, never caret-escaped. See
+    test_cmd_line_survives_a_space_and_an_ampersand."""
+    result = ['"']
+    bs_count = 0
+    for c in arg:
+        if c == "\\":
+            bs_count += 1
+        elif c == '"':
+            result.append("\\" * (bs_count * 2 + 1))
+            result.append('"')
+            bs_count = 0
+        else:
+            if bs_count:
+                result.append("\\" * bs_count)
+                bs_count = 0
+            result.append(c)
+    result.append("\\" * (bs_count * 2))
+    result.append('"')
+    return "".join(result)
+
+
+def _windows_command_line(cmd: list, env: dict | None) -> str:
+    """The full ``cmd.exe /c`` command line for *cmd*: every argument quoted
+    with ``_quote_arg_for_cmd``, joined with a single space and wrapped in one
+    outer double-quote pair for cmd.exe's own ``/c`` unquoting, with the
+    console hold from ``_console_hold`` appended after that pair closes. See
+    test_cmd_line_survives_a_space_and_an_ampersand and
+    test_the_hold_is_not_escaped."""
+    inner = " ".join(_quote_arg_for_cmd(a) for a in cmd)
+    # The hold is appended after the outer quote, unescaped. See test_the_hold_is_not_escaped.
+    return 'cmd.exe /c "{}"{}'.format(inner, _console_hold(cmd, env))
+
+
 def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     """Start a child mode process detached from the launcher, cross-platform.
 
@@ -144,12 +182,16 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     In debug mode the window is held unconditionally: the log is the reason
     the console is open, and a clean exit would otherwise take it away.
     Outside debug mode a clean exit still closes normally.
+
+    The command line comes from ``_windows_command_line``, a raw string that
+    ``Popen`` passes straight to ``CreateProcess`` without reprocessing it
+    through ``list2cmdline`` a second time.
     """
     kwargs: dict = {"cwd": cwd}
     if env is not None:
         kwargs["env"] = env
     if sys.platform == "win32":
-        cmd = ["cmd.exe", "/c", subprocess.list2cmdline(cmd) + _console_hold(cmd, env)]
+        cmd = _windows_command_line(cmd, env)
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
     else:
         kwargs["start_new_session"] = True
