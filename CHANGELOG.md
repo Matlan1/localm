@@ -28,6 +28,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **The bundled llama.cpp runtime is current again: `localm setup-llama` now
+  provisions upstream build b10905 instead of b10375.** The newer build
+  carries a month of upstream fixes and model support, and when a model is
+  memory-mapped it can read the rows of tensors larger than 4 GiB from disk on
+  demand instead of keeping them resident. An existing install picks it up
+  with `localm setup-llama --force`.
 - **A model whose tokenizer cannot handle ordinary sentences is now refused
   when you try to load it, with an explanation, instead of loading and then
   rejecting most of what you type.** Models declaring the `exaone-moe`
