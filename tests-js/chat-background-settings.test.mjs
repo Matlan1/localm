@@ -33,6 +33,14 @@ function makeFetch(config, patches) {
   };
 }
 
+// Polls until fn() is true. The timeout is a failure bound, not a delay.
+const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, timeout = 2000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (fn()) return true; await settle(15); }
+  return false;
+}
+
 async function render(win) {
   await new Promise((r) => setTimeout(r, 0));
   runScript(win, "refreshSettingsPage();");
@@ -86,14 +94,23 @@ test("a failed save rolls the live wallpaper and the preview back to the last co
   const { window: win } = loadAppWithPages({ fetchImpl });
   await render(win);
 
-  win.document.getElementById("chat-bg-clear").click();
-  await new Promise((r) => setTimeout(r, 200));
-
   const preview = win.document.getElementById("chat-bg-preview");
-  const cssVar = win.document.documentElement.style.getPropertyValue("--chat-bg-image").trim();
+  const cssVar = () =>
+    win.document.documentElement.style.getPropertyValue("--chat-bg-image").trim();
   assert.equal(preview.classList.contains("empty"), false,
+    "precondition: the preview shows the persisted image before the click");
+
+  win.document.getElementById("chat-bg-clear").click();
+  // The clear is applied optimistically and synchronously; the rollback lands
+  // only after the PATCH has been rejected.
+  assert.equal(preview.classList.contains("empty"), true,
+    "precondition: the click cleared the preview before the server answered");
+  assert.equal(cssVar(), "none",
+    "precondition: the click cleared the live wallpaper before the server answered");
+
+  assert.ok(await waitFor(() => !preview.classList.contains("empty")),
     "the preview must roll back to the still-persisted image, not stay on the rejected clear");
-  assert.equal(cssVar, `url("${goodUri}")`,
+  assert.equal(cssVar(), `url("${goodUri}")`,
     "the live wallpaper must roll back to the last confirmed value, not the attempted (rejected) one");
 });
 

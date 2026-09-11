@@ -7,7 +7,21 @@ import { loadAppWithPages, runScript } from "./harness.mjs";
 // keys, list them, revoke them - backed by the owner-gated /v1/keys API. Owner-only:
 // the card hides when /v1/keys is forbidden.
 
-const tick = () => new Promise((r) => setTimeout(r, 50));
+// Polls until fn() is true. The timeout is a failure bound, not a delay: the
+// panel's own handlers are awaited directly; only fire-and-forget saves
+// (saveKeyPresets) need a wait, and it sits on their PATCH.
+const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, timeout = 2000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (fn()) return true; await settle(15); }
+  return false;
+}
+// The load-time bootAuthProbe() unlocked the shell (unlockUI sets the flag), so
+// the pages' auth-gated refreshes may run.
+async function bootSettled(window) {
+  assert.ok(await waitFor(() => window.__localmLocked === false),
+    "the load-time bootAuthProbe() never unlocked the shell");
+}
 
 function router(routes) {
   return async (url, opts = {}) => {
@@ -34,7 +48,7 @@ test("keys panel: hides the card for a non-owner (/v1/keys 403)", async () => {
   const { window } = loadAppWithPages({
     fetchImpl: router({ "GET /v1/keys": () => ({ status: 403 }) }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
   // The card is hidden via the sec-hidden class, not an inline display style.
   assert.ok(window.document.getElementById("keys-card").classList.contains("sec-hidden"));
@@ -47,7 +61,7 @@ test("keys panel: renders the scope checkboxes and lists existing keys", async (
         body: { keys: [{ id: "abc", name: "phone", scopes: ["coder", "models:read"] }] } }),
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
   assert.ok(!window.document.getElementById("keys-card").classList.contains("sec-hidden"));
   assert.ok(window.document.querySelectorAll(".key-scope-cb").length >= 5);
@@ -68,14 +82,13 @@ test("keys panel: create posts {name, scopes} and shows the secret once", async 
       },
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
   window.document.getElementById("key-name").value = "phone";
   const cb = [...window.document.querySelectorAll(".key-scope-cb")]
     .find((c) => c.value === "coder");
   cb.checked = true;
   await window.document.getElementById("key-create").onclick();
-  await tick();
   assert.deepEqual(posted, { name: "phone", scopes: ["coder"] });
   const box = window.document.getElementById("key-secret");
   assert.notEqual(box.style.display, "none");
@@ -91,12 +104,16 @@ test("keys panel: create with no scope checked does not POST", async () => {
       "POST /v1/keys": () => { posts++; return { status: 200, body: {} }; },
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
   window.document.getElementById("key-name").value = "phone";   // name but no scope
   await window.document.getElementById("key-create").onclick();
-  await tick();
-  assert.equal(posts, 0);
+  assert.equal(posts, 0, "no scope checked (and no confirmation): nothing is minted");
+  // Positive control, same window: with a scope checked the same click POSTs.
+  [...window.document.querySelectorAll(".key-scope-cb")]
+    .find((c) => c.value === "chat").checked = true;
+  await window.document.getElementById("key-create").onclick();
+  assert.equal(posts, 1, "positive control: a scoped create reaches the stub as a POST");
 });
 
 test("keys panel: presets (from /v1/keys) populate checkboxes; coder vs coder:full distinct", async () => {
@@ -106,9 +123,8 @@ test("keys panel: presets (from /v1/keys) populate checkboxes; coder vs coder:fu
         presets: [{ name: "Companion", scopes: ["chat", "image"] }] } }),
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
-  await tick();
   const cbs = [...window.document.querySelectorAll(".key-scope-cb")].map((c) => c.value);
   assert.ok(cbs.includes("coder") && cbs.includes("coder:full"),
             "coder and coder:full are separate checkboxes");
@@ -127,9 +143,8 @@ test("keys panel: all five privileged scopes are disabled for a non-owner", asyn
       "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: false, presets: [] } }),
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
-  await tick();
   const byVal = {};
   for (const c of window.document.querySelectorAll(".key-scope-cb")) byVal[c.value] = c;
   for (const priv of ["admin", "coder:full", "keys:admin", "plugins:admin", "config:write"]) {
@@ -154,9 +169,8 @@ test("keys panel: the owner CAN check the three newly-offered privileged scopes"
       },
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
-  await tick();
   window.document.getElementById("key-name").value = "admin-device";
   for (const priv of ["keys:admin", "plugins:admin", "config:write"]) {
     const cb = [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === priv);
@@ -164,7 +178,6 @@ test("keys panel: the owner CAN check the three newly-offered privileged scopes"
     cb.checked = true;
   }
   await window.document.getElementById("key-create").onclick();
-  await tick();
   assert.deepEqual(posted.scopes.sort(),
     ["config:write", "keys:admin", "plugins:admin"]);
 });
@@ -178,25 +191,23 @@ test("keys panel: owner can save and delete a preset (PATCH /v1/config)", async 
       "PATCH /v1/config": (_p, opts) => { patched = JSON.parse(opts.body); return { status: 200, body: {} }; },
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
-  await tick();
   const del = window.document.querySelector(".key-preset-del");
   assert.ok(del, "owner sees a delete affordance");
   del.onclick({ stopPropagation() {} });
-  await tick();
   // Deletion confirms via the in-page confirmDanger modal; click its danger
   // button.
   const ok = window.document.querySelector("#modal-body .btn-danger");
   assert.ok(ok, "delete-preset confirm modal shown");
   ok.click();
-  await tick();
+  assert.ok(await waitFor(() => patched !== null), "the delete PATCHed /v1/config");
   assert.equal(patched.key_presets.length, 0);      // "Old" removed
   patched = null;
   runScript(window, 'promptText = async () => "Phone";');
   [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === "chat").checked = true;
   window.document.querySelector(".key-preset-save").onclick();
-  await tick();
+  assert.ok(await waitFor(() => patched !== null), "the save PATCHed /v1/config");
   assert.ok(patched.key_presets.some((p) => p.name === "Phone" && p.scopes.includes("chat")));
 });
 
@@ -216,14 +227,13 @@ test("keys panel: create threads expires and requests a pairing QR for the new k
       },
     }),
   });
-  await tick();
+  await bootSettled(window);
   await window.refreshKeysPanel();
   window.document.getElementById("key-name").value = "phone";
   [...window.document.querySelectorAll(".key-scope-cb")]
     .find((c) => c.value === "chat").checked = true;
   window.document.getElementById("key-expiry").value = "86400";   // in 24 hours
   await window.document.getElementById("key-create").onclick();
-  await tick();
   assert.equal(posted.name, "phone");
   assert.deepEqual(posted.scopes, ["chat"]);
   assert.equal(posted.expires_in, 86400);          // relative TTL threaded (server-clock)

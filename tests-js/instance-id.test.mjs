@@ -13,11 +13,28 @@ const drain = async (n = 12) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
 };
 
+// Polls until fn() is true. The timeout is a failure bound, not a delay: the
+// waits below sit on the pushConversation debounce (600 ms) and on boot chains.
 const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
-async function waitFor(fn, timeout = 800) {
+async function waitFor(fn, timeout = 2000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (fn()) return true; await settle(15); }
   return false;
+}
+
+// A conversation that exists only to prove the harness observes a debounced
+// PUT: pushing it after the boot has settled arms a timer BEHIND any timer the
+// boot could have armed, so its PUT arriving proves an earlier boot push would
+// have arrived too.
+const CONTROL_CONV = JSON.stringify({
+  id: "control-push", title: "control", updated_at: 1, pinned: false,
+  folder: null, branches: [], messages: [{ role: "user", content: "ping" }],
+});
+async function pushControlConversation(window, putCalls) {
+  runScript(window, `pushConversation(${CONTROL_CONV});`);
+  assert.ok(await waitFor(() => putCalls.some((u) => u.endsWith("/control-push"))),
+    "positive control: a pushConversation() armed after boot must reach the " +
+    "fetch stub as a PUT, or this window cannot observe uploads at all");
 }
 
 // A cached conversation with a real title and message content.
@@ -128,9 +145,8 @@ test("AUD-INSTANCEID: a CONFIRMED same-instance restart still renders and " +
   const listText = window.document.getElementById("conv-list").textContent;
   assert.ok(listText.includes("Not yet synced"));
 
-  // pushConversation debounces 600ms - ride it out with margin.
-  await new Promise((r) => setTimeout(r, 900));
-  assert.ok(putCalls.some((u) => u.includes("local-only-1")),
+  // pushConversation debounces 600 ms: wait for the PUT, not the clock.
+  assert.ok(await waitFor(() => putCalls.some((u) => u.includes("local-only-1"))),
     "a confirmed same-instance restart still syncs the not-yet-uploaded chat " +
     "back to ITS OWN server (the legitimate use case must survive the fix)");
 });
@@ -376,13 +392,24 @@ test("AUD-INSTANCEID: the startup overlay stays up until refreshCtxLimit's " +
   });
 
   const ov = window.document.getElementById("startup-overlay");
-  // Let bootAuthProbe, refreshCsrf and refreshModels run to completion while
-  // /v1/config is still gated.
-  await waitFor(() => window.document.getElementById("conv-list").textContent
-    .includes("Someone else's private chat"));
+  const convList = window.document.getElementById("conv-list");
+  // init.js paints the trusted cache into the sidebar synchronously at script
+  // load, so the stale title is already in the DOM when loadApp() returns.
+  assert.ok(convList.textContent.includes("Someone else's private chat"),
+    "precondition: the foreign cached list was painted synchronously at boot");
+  // refreshModels() writes the disabled "No model loaded" placeholder into the
+  // empty #model-select when it settles, so that option is the signal that the
+  // models chain has resolved while /v1/config is still gated.
+  const modelSelect = window.document.getElementById("model-select");
+  assert.equal(modelSelect.options.length, 0,
+    "precondition: #model-select is empty until refreshModels() settles");
+  assert.ok(await waitFor(() => modelSelect.options.length > 0),
+    "precondition: refreshModels() settled (its placeholder option was written)");
   assert.equal(ov.style.display, "flex",
     "the overlay must still be covering the shell: refreshCtxLimit has not " +
     "resolved yet, so the mismatch has not been detected/corrected");
+  assert.ok(convList.textContent.includes("Someone else's private chat"),
+    "the stale paint is still in the DOM at this point, hidden behind the overlay");
 
   resolveConfig();   // let /v1/config (and the instance-id reconciliation) proceed
   assert.ok(await waitFor(() => ov.style.display === "none"),
@@ -472,8 +499,12 @@ test("AUD-INSTANCEID residual 2: an UNKNOWN instance state (old server, no " +
   const listText = window.document.getElementById("conv-list").textContent;
   assert.ok(listText.includes("Not yet synced (old server)"));
 
-  await new Promise((r) => setTimeout(r, 900));   // ride out pushConversation's 600ms debounce
-  assert.equal(putCalls.length, 0,
+  runScript(window, "window.__pushTimers = _convPushTimers;");
+  assert.equal(window.__pushTimers.size, 0,
+    "an UNCONFIRMED (unknown) instance state must never even schedule an upload " +
+    "of a local-only conversation - only a CONFIRMED match may");
+  await pushControlConversation(window, putCalls);
+  assert.deepEqual(putCalls, ["/api/conversations/control-push"],
     "an UNCONFIRMED (unknown) instance state must never upload a local-only " +
     "conversation to the backend's own store - only a CONFIRMED match may");
 });
@@ -502,12 +533,14 @@ test("AUD-INSTANCEID residual 2: a NON-OK /v1/config (HTTP 500) leaves the " +
     fetchImpl: makeFetch({ instanceId: "backend-a", putCalls, configStatus: 500 }),
     seedLocalStorage: { ...CACHED_SEED },
   });
-  runScript(window, "window.chatState = chat;");
+  runScript(window, "window.chatState = chat; window.__pushTimers = _convPushTimers;");
   await drain();
-  // Ride out pushConversation's 600ms debounce before reading putCalls.
-  await new Promise((r) => setTimeout(r, 900));
 
-  assert.equal(putCalls.length, 0,
+  assert.equal(window.__pushTimers.size, 0,
+    "a failed /v1/config round trip cannot even schedule an upload of a cached " +
+    "conversation into the store of a backend whose identity was never confirmed");
+  await pushControlConversation(window, putCalls);
+  assert.deepEqual(putCalls, ["/api/conversations/control-push"],
     "a failed /v1/config round trip cannot authorise writing a cached " +
     "conversation into the store of a backend whose identity was never confirmed");
   assert.equal(window.chatState.instanceState, "unknown",
@@ -532,11 +565,14 @@ test("AUD-INSTANCEID residual 2: a THROWN /v1/config fetch (server down, the " +
     fetchImpl: makeFetch({ instanceId: "backend-a", putCalls, configThrows: true }),
     seedLocalStorage: { ...CACHED_SEED },
   });
-  runScript(window, "window.chatState = chat;");
+  runScript(window, "window.chatState = chat; window.__pushTimers = _convPushTimers;");
   await drain();
-  await new Promise((r) => setTimeout(r, 900));   // pushConversation's debounce
 
-  assert.equal(putCalls.length, 0,
+  assert.equal(window.__pushTimers.size, 0,
+    "a rejected /v1/config cannot even schedule an upload - the reject path " +
+    "must reach the same unconfirmed state as a non-ok answer");
+  await pushControlConversation(window, putCalls);
+  assert.deepEqual(putCalls, ["/api/conversations/control-push"],
     "a rejected /v1/config cannot authorise an upload either - the catch used " +
     "to swallow it and leave the boot defaults standing as though confirmed");
   assert.equal(window.chatState.instanceState, "unknown");
