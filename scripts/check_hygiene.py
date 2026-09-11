@@ -38,6 +38,11 @@ Scans tracked files and fails on:
      unit under localm/ must be placed in exactly one tier; a unit missing from
      the map, a stale entry and a duplicate placement fail too. Function-local
      imports are not counted, as in check 7.
+ 10. A test that reads a top-level JSON key from a route's response when the
+     route's handler builds that response from dict literals and none of them
+     carries the key. A removed or renamed response field is caught at the
+     assertion that still names it, without running the test. A handler whose
+     response shape cannot be read statically is not judged.
 
 It also runs the release-file manifest gate (scripts/check_manifest.py): every
 tracked file must be classified release-include or release-exclude, nothing
@@ -1462,6 +1467,528 @@ def _import_direction_violations(tracked: "list[Path] | None" = None) -> list[st
     return problems
 
 
+# ---- check 10: a test never reads a JSON key a route cannot produce ---------
+#
+# For every route whose handler builds its JSON response from dict literals
+# (a CLOSED shape), each test assertion that reads a top-level key from that
+# route's response must name a key the handler can return. A handler whose
+# response is built any other way (a value returned from another module, a
+# pydantic model, a file or stream, a dict merged from a non-literal) has an
+# OPEN shape and is not judged. "detail" and "errors" are always allowed: the
+# error handlers produce them for any route.
+#
+# On the test side a response is recognised through a straight-line chain in
+# one function: a name bound to `<anything>.get|post|put|delete|patch(<path>)`,
+# a name bound to `.json()` of such a value, or the chain written inline. The
+# path may be a literal, an f-string, or a concatenation; formatted parts match
+# one path segment. Only a first-level string subscript (`body["k"]`) and a
+# positive `"k" in body` test are read; `.get("k")`, `"k" not in body`, and a
+# `with pytest.raises(...)` body are not. A path the test file registers on an
+# app of its own is skipped for that file, and a line carrying the
+# `hygiene-ok` marker is skipped like check 3.
+
+_JSON_ROUTE_METHODS = {"get", "post", "put", "delete", "patch"}
+_JSON_ROUTE_ALWAYS_KEYS = {"detail", "errors"}
+_JSON_ROUTE_SEGMENT = "\x00"
+
+
+class _OpenShape(Exception):
+    """Raised inside the handler walk when a response shape cannot be read."""
+
+
+def _dict_literal_keys(node: ast.AST) -> set[str]:
+    """Top-level string keys of a dict literal; _OpenShape for any other node,
+    a non-string key, or a ** spread."""
+    if not isinstance(node, ast.Dict):
+        raise _OpenShape
+    keys: set[str] = set()
+    for k in node.keys:
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            raise _OpenShape
+        keys.add(k.value)
+    return keys
+
+
+def _is_json_response_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    return (isinstance(f, ast.Name) and f.id == "JSONResponse") or \
+        (isinstance(f, ast.Attribute) and f.attr == "JSONResponse")
+
+
+def _json_response_content(call: ast.Call) -> ast.AST:
+    """The content argument of a JSONResponse(...) call."""
+    for kw in call.keywords:
+        if kw.arg == "content":
+            return kw.value
+        if kw.arg is None:
+            raise _OpenShape
+    if call.args:
+        return call.args[0]
+    raise _OpenShape
+
+
+def _same_module_helper_keys(call: ast.AST, index: dict, seen: frozenset) -> set[str]:
+    """Keys returned by a helper called as a plain name and defined exactly once
+    in the same module; _OpenShape otherwise or on a recursive call."""
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+        raise _OpenShape
+    defs = index.get(call.func.id) or []
+    if len(defs) != 1 or call.func.id in seen:
+        raise _OpenShape
+    keys = _route_json_keys(defs[0], index, seen | {call.func.id})
+    if keys is None:
+        raise _OpenShape
+    return keys
+
+
+def _route_json_keys(fn, index: dict, seen: frozenset = frozenset()) -> "set[str] | None":
+    """The union of top-level keys over every return of *fn*, or None when the
+    shape is open.
+
+    A local name assigned a dict literal (or a JSONResponse of one) is tracked
+    through `name["k"] = v`, `name.update({...})`, `name.update(k=v)`,
+    `name.update(helper())` for a same-module helper, and `name.setdefault("k",
+    ...)`. Any other mutation of the name, a non-literal assignment, a return of
+    anything but a tracked name, a dict literal, a JSONResponse of either, or a
+    same-module helper call, makes the shape open. Nested function and class
+    bodies are not walked."""
+    tracked: dict = {}
+    returns: list[ast.Return] = []
+
+    def note_assign(target: ast.AST, value: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            try:
+                if _is_json_response_call(value):
+                    value = _json_response_content(value)
+                tracked[target.id] = _dict_literal_keys(value)
+            except _OpenShape:
+                tracked[target.id] = None
+        elif (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+              and tracked.get(target.value.id) is not None):
+            s = target.slice
+            if isinstance(s, ast.Constant) and isinstance(s.value, str):
+                tracked[target.value.id].add(s.value)
+            else:
+                tracked[target.value.id] = None
+
+    def note_method_call(c: ast.Call) -> None:
+        f = c.func
+        if not (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                and tracked.get(f.value.id) is not None):
+            return
+        name = f.value.id
+        if f.attr == "update" and len(c.args) == 1 and not c.keywords:
+            try:
+                tracked[name] |= _dict_literal_keys(c.args[0])
+            except _OpenShape:
+                try:
+                    tracked[name] |= _same_module_helper_keys(c.args[0], index, seen)
+                except _OpenShape:
+                    tracked[name] = None
+        elif f.attr == "update" and not c.args and all(kw.arg for kw in c.keywords):
+            tracked[name] |= {kw.arg for kw in c.keywords}
+        elif (f.attr == "setdefault" and c.args and isinstance(c.args[0], ast.Constant)
+              and isinstance(c.args[0].value, str)):
+            tracked[name].add(c.args[0].value)
+        elif f.attr not in ("pop", "popitem", "clear"):
+            tracked[name] = None
+
+    def walk(stmts) -> None:
+        for st in stmts:
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(st, ast.Return):
+                returns.append(st)
+            elif isinstance(st, ast.Assign) and len(st.targets) == 1:
+                note_assign(st.targets[0], st.value)
+            elif isinstance(st, ast.AnnAssign) and st.value is not None:
+                note_assign(st.target, st.value)
+            elif isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
+                note_method_call(st.value)
+            for field in ("body", "orelse", "finalbody"):
+                sub = getattr(st, field, None)
+                if isinstance(sub, list):
+                    walk(sub)
+            for h in getattr(st, "handlers", ()):
+                walk(h.body)
+            for case in getattr(st, "cases", ()):
+                walk(case.body)
+
+    walk(fn.body)
+    if not returns:
+        return None
+    keys: set[str] = set()
+    try:
+        for r in returns:
+            v = r.value
+            if v is None:
+                raise _OpenShape
+            if _is_json_response_call(v):
+                v = _json_response_content(v)
+            if isinstance(v, ast.Name):
+                got = tracked.get(v.id)
+                if got is None:
+                    raise _OpenShape
+                keys |= got
+            elif isinstance(v, ast.Dict):
+                keys |= _dict_literal_keys(v)
+            else:
+                keys |= _same_module_helper_keys(v, index, seen)
+    except _OpenShape:
+        return None
+    return keys
+
+
+def _route_template_regex(template: str) -> "re.Pattern[str]":
+    """A regex matching a concrete path for a FastAPI path template: `{name}`
+    matches one segment, `{name:path}` the rest of the path."""
+    out = "^"
+    for part in re.split(r"(\{[^}]*\})", template):
+        if part.startswith("{"):
+            out += ".+" if part.endswith(":path}") else "[^/]+"
+        else:
+            out += re.escape(part)
+    return re.compile(out + "$")
+
+
+def _decorated_route(dec: ast.AST) -> "tuple[str, str, bool] | None":
+    """(METHOD, path template, opened) for an `@x.get("/path", ...)`-shaped
+    decorator with a literal path, else None. *opened* is True when the
+    decorator carries response_model or response_class."""
+    if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+            and dec.func.attr in _JSON_ROUTE_METHODS and dec.args):
+        return None
+    p = dec.args[0]
+    if not (isinstance(p, ast.Constant) and isinstance(p.value, str)
+            and p.value.startswith("/")):
+        return None
+    opened = any(kw.arg in ("response_model", "response_class") for kw in dec.keywords)
+    return dec.func.attr.upper(), p.value, opened
+
+
+def _collect_json_routes(files: list[Path]) -> dict:
+    """{(METHOD, template): [(relative path, lineno, handler name, keys)]} over
+    every decorated handler in *files*; keys is None for an open shape."""
+    routes: dict = {}
+    for py in files:
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        index: dict = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                index.setdefault(node.name, []).append(node)
+        rel = py.relative_to(REPO).as_posix()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                found = _decorated_route(dec)
+                if found is None:
+                    continue
+                method, template, opened = found
+                keys = None if opened else _route_json_keys(node, index)
+                routes.setdefault((method, template), []).append(
+                    (rel, node.lineno, node.name, keys))
+    return routes
+
+
+def _own_route_paths(tree: ast.AST) -> set[str]:
+    """Literal paths a test file registers on an app of its own: a route
+    decorator, an `add_api_route("/p", ...)` call, or `app.get("/p")(fn)`."""
+    paths: set[str] = set()
+
+    def literal(call: ast.Call) -> "str | None":
+        if (isinstance(call.func, ast.Attribute) and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+                and call.args[0].value.startswith("/")):
+            return call.args[0].value
+        return None
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for dec in node.decorator_list:
+                if isinstance(dec, ast.Call) and (p := literal(dec)):
+                    paths.add(p)
+        elif isinstance(node, ast.Call):
+            if (isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("add_api_route", "add_route", "api_route")
+                    and (p := literal(node))):
+                paths.add(p)
+            elif isinstance(node.func, ast.Call) and (p := literal(node.func)):
+                paths.add(p)
+    return paths
+
+
+def _path_text(node: ast.AST, strings: dict) -> "str | None":
+    """A path expression as text: a literal, an f-string, or a concatenation,
+    with a name bound in *strings* substituted and every other non-literal part
+    replaced by one placeholder segment; None when the node is not
+    string-shaped."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for v in node.values:
+            if isinstance(v, ast.Constant):
+                parts.append(str(v.value))
+            elif isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name):
+                parts.append(strings.get(v.value.id, _JSON_ROUTE_SEGMENT))
+            else:
+                parts.append(_JSON_ROUTE_SEGMENT)
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _path_text(node.left, strings)
+        right = _path_text(node.right, strings)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.Name):
+        return strings.get(node.id, _JSON_ROUTE_SEGMENT)
+    return _JSON_ROUTE_SEGMENT
+
+
+def _request_path(text: str) -> "str | None":
+    """The request path of *text*: the query string dropped, a scheme and host
+    or a leading placeholder (a base URL variable) stripped; None unless the
+    remainder starts with '/'."""
+    text = text.split("?", 1)[0]
+    if "://" in text:
+        text = text.split("://", 1)[1]
+        text = text[text.find("/"):] if "/" in text else ""
+    elif text.startswith(_JSON_ROUTE_SEGMENT) and "/" in text:
+        text = text[text.find("/"):]
+    return text if text.startswith("/") else None
+
+
+def _request_call(call: ast.Call, strings: dict) -> "tuple[str, str] | None":
+    """(METHOD, path) for `<x>.get|post|...(<path>, ...)`, else None."""
+    if not (isinstance(call.func, ast.Attribute) and call.func.attr in _JSON_ROUTE_METHODS
+            and call.args):
+        return None
+    text = _path_text(call.args[0], strings)
+    path = _request_path(text) if text is not None else None
+    return None if path is None else (call.func.attr.upper(), path)
+
+
+def _unwrap_await(node: ast.AST) -> ast.AST:
+    return node.value if isinstance(node, ast.Await) else node
+
+
+def _is_raises_block(st: ast.AST) -> bool:
+    return isinstance(st, (ast.With, ast.AsyncWith)) and any(
+        isinstance(it.context_expr, ast.Call)
+        and isinstance(it.context_expr.func, ast.Attribute)
+        and it.context_expr.func.attr == "raises" for it in st.items)
+
+
+class _JsonKeyReads:
+    """Walks one test function in source order and reports every top-level
+    key read from a response whose route is known.
+
+    *resolve(method, path)* returns (template, closed key set) for the matching
+    route, or None when the route is unknown, ambiguous or open. *report(lineno,
+    key, shapes)* receives each read of a key absent from every candidate
+    shape, *shapes* being a list of (method, path, template, keys)."""
+
+    def __init__(self, resolve, own_paths: set[str], report) -> None:
+        self.resolve = resolve
+        self.own_paths = own_paths
+        self.report = report
+        self.responses: dict = {}     # name -> set of (METHOD, path)
+        self.bodies: dict = {}        # name -> set of (METHOD, path)
+        self.strings: dict = {}       # name -> path text
+
+    def _routes_of_body(self, node: ast.AST) -> "set | None":
+        node = _unwrap_await(node)
+        if isinstance(node, ast.Name):
+            return self.bodies.get(node.id)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "json" and not node.args):
+            recv = _unwrap_await(node.func.value)
+            if isinstance(recv, ast.Name):
+                return self.responses.get(recv.id)
+            if isinstance(recv, ast.Call):
+                found = _request_call(recv, self.strings)
+                return {found} if found else None
+        return None
+
+    def _check(self, key: str, routes: set, lineno: int) -> None:
+        if key in _JSON_ROUTE_ALWAYS_KEYS:
+            return
+        shapes = []
+        for method, path in routes:
+            if path in self.own_paths:
+                return
+            found = self.resolve(method, path)
+            if found is None:
+                return
+            shapes.append((method, path, found[0], found[1]))
+        if shapes and not any(key in keys for _, _, _, keys in shapes):
+            self.report(lineno, key, shapes)
+
+    def _reads(self, node: ast.AST) -> None:
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant)
+                    and isinstance(sub.slice.value, str)):
+                routes = self._routes_of_body(sub.value)
+                if routes:
+                    self._check(sub.slice.value, routes, sub.lineno)
+            elif (isinstance(sub, ast.Compare) and len(sub.ops) == 1
+                  and isinstance(sub.ops[0], ast.In)
+                  and isinstance(sub.left, ast.Constant) and isinstance(sub.left.value, str)):
+                routes = self._routes_of_body(sub.comparators[0])
+                if routes:
+                    self._check(sub.left.value, routes, sub.lineno)
+
+    def _bind(self, target: ast.AST, value: ast.AST) -> None:
+        if not isinstance(target, ast.Name):
+            return
+        name = target.id
+        for env in (self.responses, self.bodies, self.strings):
+            env.pop(name, None)
+        value = _unwrap_await(value)
+        if isinstance(value, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+            text = _path_text(value, self.strings)
+            if text is not None:
+                self.strings[name] = text
+        elif isinstance(value, ast.Call):
+            found = _request_call(value, self.strings)
+            if found:
+                self.responses[name] = {found}
+                return
+            routes = self._routes_of_body(value)
+            if routes:
+                self.bodies[name] = routes
+
+    def _snapshot(self) -> tuple:
+        return dict(self.responses), dict(self.bodies)
+
+    def _merge(self, other: tuple) -> None:
+        for env, saved in ((self.responses, other[0]), (self.bodies, other[1])):
+            for name, routes in saved.items():
+                env[name] = env.get(name, set()) | routes
+
+    def walk(self, stmts) -> None:
+        for st in stmts:
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    or _is_raises_block(st):
+                continue
+            self._reads(_statement_head(st))
+            if isinstance(st, ast.Assign) and len(st.targets) == 1:
+                self._bind(st.targets[0], st.value)
+            elif isinstance(st, ast.AnnAssign) and st.value is not None:
+                self._bind(st.target, st.value)
+            if isinstance(st, ast.If):
+                before = self._snapshot()
+                self.walk(st.body)
+                taken = self._snapshot()
+                self.responses, self.bodies = dict(before[0]), dict(before[1])
+                self.walk(st.orelse)
+                self._merge(taken)
+            elif isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+                before = self._snapshot()
+                self.walk(st.body)
+                self.walk(st.orelse)
+                self._merge(before)
+            elif isinstance(st, (ast.With, ast.AsyncWith)):
+                self.walk(st.body)
+            elif isinstance(st, ast.Try):
+                before = self._snapshot()
+                self.walk(st.body)
+                for h in st.handlers:
+                    self.walk(h.body)
+                self.walk(st.orelse)
+                self.walk(st.finalbody)
+                self._merge(before)
+            elif isinstance(st, ast.Match):
+                before = self._snapshot()
+                for case in st.cases:
+                    self.walk(case.body)
+                self._merge(before)
+
+
+def _statement_head(st: ast.AST) -> ast.AST:
+    """The part of a statement evaluated before any nested body: the whole
+    statement for a simple one, the test / iterable / subject / context
+    expressions for a compound one."""
+    if isinstance(st, (ast.If, ast.While)):
+        return st.test
+    if isinstance(st, (ast.For, ast.AsyncFor)):
+        return st.iter
+    if isinstance(st, (ast.With, ast.AsyncWith)):
+        return ast.Module(body=[ast.Expr(it.context_expr) for it in st.items], type_ignores=[])
+    if isinstance(st, ast.Match):
+        return st.subject
+    if isinstance(st, ast.Try):
+        return ast.Module(body=[], type_ignores=[])
+    return st
+
+
+def _response_key_violations(tracked: list[Path]) -> list[str]:
+    """Reads, in tracked test files, of a top-level JSON key that the matching
+    route's closed response shape never produces."""
+    pkg_root = REPO / "localm"
+    tests_root = REPO / "tests"
+    if not pkg_root.is_dir() or not tests_root.is_dir():
+        return []
+    def under(root: Path) -> list[Path]:
+        return [p for p in tracked if p.suffix == ".py" and root in p.parents]
+    routes = _collect_json_routes(under(pkg_root))
+    compiled = [(method, template, _route_template_regex(template), handlers)
+                for (method, template), handlers in routes.items()]
+
+    def resolve(method: str, path: str) -> "tuple[str, set[str]] | None":
+        matches = [(t, hs) for m, t, rx, hs in compiled if m == method and rx.match(path)]
+        exact = [m for m in matches if m[0] == path]
+        if exact:
+            matches = exact
+        if len(matches) != 1:
+            return None
+        template, handlers = matches[0]
+        keys: set[str] = set()
+        for _, _, _, handler_keys in handlers:
+            if handler_keys is None:
+                return None
+            keys |= handler_keys
+        return template, keys
+
+    problems: list[str] = []
+    for py in sorted(under(tests_root)):
+        try:
+            source = py.read_text(encoding="utf-8")
+            if ".json(" not in source:
+                continue
+            tree = ast.parse(source, filename=str(py))
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        lines = source.splitlines()
+        rel = py.relative_to(REPO).as_posix()
+        own = _own_route_paths(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+
+            def report(lineno: int, key: str, shapes, fn=node.name) -> None:
+                if lineno - 1 < len(lines) and "hygiene-ok" in lines[lineno - 1]:
+                    return
+                method, path, _, _ = shapes[0]
+                path = path.replace(_JSON_ROUTE_SEGMENT, "{...}")
+                handlers = [h for m, _, t, _ in shapes for h in routes[(m, t)]]
+                keys = sorted(set().union(*(k for _, _, _, k in shapes)))
+                problems.append(
+                    f"{rel}:{lineno} ({fn}) reads key {key!r} from the JSON of "
+                    f"{method} {path}, which never produces it\n      "
+                    + "; ".join(f"{r}:{ln} {name}" for r, ln, name, _ in handlers)
+                    + f" can return only: {', '.join(keys) if keys else '(no keys)'}."
+                    " Update the assertion, or the route.")
+
+            _JsonKeyReads(resolve, own, report).walk(node.body)
+    return problems
+
+
 def _strict_env() -> bool:
     """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but a
     recognized OFF value behaves like passing --strict (an env knob because a CI
@@ -1574,6 +2101,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_import_cycle_violations())
     problems.extend(_import_direction_violations())
     problems.extend(_child_process_console_print_violations())
+    problems.extend(_response_key_violations(tracked))
     manifest_failures, manifest_warnings = _release_manifest_gate()
     problems.extend(manifest_failures)
     # Check 4b is warn-only by default; --strict / LOCALM_HYGIENE_STRICT=1 folds the
