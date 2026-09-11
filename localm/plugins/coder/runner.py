@@ -200,20 +200,22 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
 
 
 def warn_unfinished_background(agent) -> None:
-    """Report background sub-agents this one-shot run is about to abandon.
+    """Report background sub-agents this one-shot run is leaving behind.
 
     The turn-boundary drain only fires at the START of a turn, so a child that is
-    still running (or that finished after the final turn) is never folded in, and
-    a one-shot process then exits and takes its daemon threads with it. Exiting
-    silently would drop work the user explicitly asked for. What survives is
-    stated exactly: a committed branch does, a running child does not.
+    still running (or that finished after the final turn) is never folded in.
+    Ending silently would drop work the user explicitly asked for. What survives
+    is stated exactly: a committed branch does, a running child does not. Only
+    this run's own jobs are reported and drained: the registry is process-wide
+    and another run's completions belong to that run.
     """
     try:
         from .background import get_registry
         registry = get_registry()
-        running = [j for j in registry.list_status(kind="agent")
+        owner = getattr(agent, "job_owner", None)
+        running = [j for j in registry.list_status(kind="agent", owner=owner)
                    if j["state"] == "running"]
-        pending = registry.drain_finished(kind="agent")
+        pending = registry.drain_finished(kind="agent", owner=owner)
     except Exception:
         return
 
@@ -221,7 +223,7 @@ def warn_unfinished_background(agent) -> None:
     # drain_finished CONSUMES, so a failure folded into the same try would discard
     # completions already handed over.
     try:
-        lost = registry.take_dropped_undrained("agent")
+        lost = registry.take_dropped_undrained("agent", owner=owner)
     except Exception:
         lost = 0
 
@@ -240,9 +242,32 @@ def warn_unfinished_background(agent) -> None:
     for st in running:
         print_warning(
             f"background sub-agent '{st.get('label')}' ({st.get('id')}) is STILL "
-            "RUNNING and will be killed when this one-shot run exits. Use an "
-            "interactive session for background delegation, or spawn_agent "
-            "(synchronous) for a one-shot.")
+            "RUNNING: this one-shot run has ended, so it is being stopped and "
+            "its result will not be folded in. Use an interactive session for "
+            "background delegation, or spawn_agent (synchronous) for a one-shot.")
+
+
+def stop_unfinished_background(agent, reason: str = "the run that started it ended") -> int:
+    """Cancel this run's background sub-agents that are still running, so a
+    child never keeps writing after the run that asked for it has reported.
+    Returns how many were cancelled. Best-effort, never raises."""
+    stopped = 0
+    try:
+        from .background import get_registry
+        registry = get_registry()
+        owner = getattr(agent, "job_owner", None)
+        for st in registry.list_status(kind="agent", owner=owner):
+            if st.get("state") != "running":
+                continue
+            job = registry.get(st["id"])
+            child = getattr(job, "child", None)
+            cancel = getattr(child, "cancel", None)
+            if callable(cancel):
+                cancel(reason)
+                stopped += 1
+    except Exception:                                       # noqa: BLE001
+        return stopped
+    return stopped
 
 
 def warn_sensitive_changes(agent) -> None:
@@ -271,11 +296,14 @@ def browser_enabled() -> bool:
 
 def run_single_task(agent: Agent, task: str) -> TaskResult:
     """Run one task to completion and report the outcome. A run in which a
-    tool call was denied for want of a confirmation is not a success."""
+    tool call was denied for want of a confirmation is not a success. A
+    background sub-agent the run leaves behind is reported and then
+    cancelled."""
     response = agent.run_task(task)
     denied = tuple(agent.denied_unconfirmed)
     success = agent.last_run_ok and not denied
     warn_unfinished_background(agent)
+    stop_unfinished_background(agent)
     return TaskResult(success=success, response=response, turns=agent.turns,
                       total_tokens=agent.total_tokens, denied=denied)
 

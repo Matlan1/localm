@@ -839,7 +839,9 @@ class JobRegistry:
         self.dropped_undrained_by_kind: dict[str, int] = {}
         # The same losses awaiting a report, consumed by take_dropped_undrained
         # so each loss is reported once.
-        self._unreported_drops: dict[str, int] = {}
+        # Keyed by (owner, kind), so a drain-based consumer can take exactly
+        # its own losses.
+        self._unreported_drops: dict[tuple, int] = {}
         # The same cumulative losses, split by owner as well as kind.
         self._dropped_by_owner: dict[tuple, int] = {}
         self._jobs: dict[str, BackgroundJob] = {}
@@ -950,17 +952,20 @@ class JobRegistry:
                     out[kind] = out.get(kind, 0) + n
             return out
 
-    def drain_finished(self, kind: Optional[str] = None) -> list:
+    def drain_finished(self, kind: Optional[str] = None, owner=_ANY_OWNER) -> list:
         """Status of every job that finished since the last drain, then mark them.
 
         For a caller that absorbs completions at a turn boundary instead of
         polling a known id. Each finished job is returned by exactly one drain.
         Draining does NOT remove the job, so a later poll-by-id still works.
+        *owner* narrows the drain to one session's jobs, the way ``list_status``
+        does; the default drains every owner's.
         """
         with self._lock:
             jobs = [j for j in self._jobs.values()
                     if j.state != "running" and not j.drained
-                    and (kind is None or j.kind == kind)]
+                    and (kind is None or j.kind == kind)
+                    and (owner is _ANY_OWNER or j.owner == owner)]
             for job in jobs:
                 job.drained = True
         # status() takes each job's own lock - do it outside the registry lock.
@@ -994,13 +999,14 @@ class JobRegistry:
                     # count it and queue it for report.
                     self.dropped_undrained_by_kind[kind] = (
                         self.dropped_undrained_by_kind.get(kind, 0) + 1)
-                    self._unreported_drops[kind] = (
-                        self._unreported_drops.get(kind, 0) + 1)
                     key = (job.owner, kind)
+                    self._unreported_drops[key] = (
+                        self._unreported_drops.get(key, 0) + 1)
                     self._dropped_by_owner[key] = (
                         self._dropped_by_owner.get(key, 0) + 1)
 
-    def take_dropped_undrained(self, kind: Optional[str] = None) -> int:
+    def take_dropped_undrained(self, kind: Optional[str] = None,
+                               owner=_ANY_OWNER) -> int:
         """Uncollected completions lost since the last call, and RESET the count.
 
         The reporting half of ``dropped_undrained``. A drain-based consumer calls
@@ -1008,15 +1014,16 @@ class JobRegistry:
         because from the consumer's side a discarded completion is
         indistinguishable from "nothing finished". Consumed exactly once, like
         the drain itself, so a turn-boundary caller warns per loss instead of
-        every turn forever. The cumulative ``dropped_undrained`` total is NOT
-        reset here and stays readable all session (``/bg`` shows it).
+        every turn forever. *owner* narrows the count to one session's losses,
+        like ``drain_finished``. The cumulative ``dropped_undrained`` total is
+        NOT reset here and stays readable all session (``/bg`` shows it).
         """
         with self._lock:
-            if kind is None:
-                total = sum(self._unreported_drops.values())
-                self._unreported_drops.clear()
-                return total
-            return self._unreported_drops.pop(kind, 0)
+            keys = [k for k in self._unreported_drops
+                    if (kind is None or k[1] == kind)
+                    and (owner is _ANY_OWNER or k[0] == owner)]
+            total = sum(self._unreported_drops.pop(k) for k in keys)
+            return total
 
     def shutdown_all(self) -> int:
         """Kill every running job. Returns how many were killed. Never raises.

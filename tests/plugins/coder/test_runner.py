@@ -480,3 +480,46 @@ class TestReflectionHost:
         runner.run_single_task(agent, "t")
         runner.finish_agent(agent)
         assert seen and seen[0] is not None, "the CLI branch reflects with a deadline"
+
+
+class TestBackgroundChildrenOfAOneShot:
+    def test_a_background_child_still_running_at_the_end_is_cancelled(
+            self, home, project, monkeypatch, capsys):
+        """A one-shot run that ends with a background sub-agent still going
+        reports it, then cancels it: in a long-lived host nothing else would
+        ever stop it, and its planned write must not land after the run has
+        reported."""
+        from localm.plugins.coder import background as bg
+        from localm.plugins.coder.agent import Agent
+        from localm.plugins.coder.background import AgentJob, JobRegistry
+        from localm.plugins.coder.tools.agents import inherited_child_kwargs
+        reg = JobRegistry(kind_caps={"agent": 4})
+        monkeypatch.setattr(bg, "_registry", reg)
+        late = project / "late.txt"
+        parent = _build(_Scripted(["parent done"]), project, "t", auto_approve=True)
+        child_backend = _Scripted([_tc("run_shell", command=_SLEEP_CMD, timeout=60),
+                                   _tc("write_file", path="late.txt", content="x"),
+                                   "child done"])
+        pm, audit, mem = _agent_patches()
+        with pm as MockPM, audit, mem:
+            MockPM.build.return_value.file_count.return_value = 0
+            child = Agent(**inherited_child_kwargs(
+                parent, backend=child_backend, cwd=project, name="kid",
+                max_turns=5, confirm_handler=None))
+        t0 = time.monotonic()
+        job = reg.submit(lambda: AgentJob(child, "slow", label="kid",
+                                          owner=parent.job_owner), kind="agent")
+        assert _wait_until(lambda: child_backend.calls >= 1), "the child never started"
+        try:
+            result = runner.run_single_task(parent, "t")
+            assert result.success is True
+            assert child.cancelled is True
+            assert _wait_until(lambda: job.state != "running"), "the child never stopped"
+            elapsed = time.monotonic() - t0
+            assert not late.exists(), "the child wrote after the run had reported"
+            assert elapsed < 6.0, f"the child's command was not killed ({elapsed:.1f}s)"
+            captured = capsys.readouterr()
+            text = captured.out + captured.err
+        finally:
+            reg.shutdown_all()
+        assert "STILL RUNNING" in text or "kid" in text
