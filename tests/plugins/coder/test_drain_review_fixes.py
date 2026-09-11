@@ -342,7 +342,7 @@ def test_a_failed_background_child_is_not_absorbed_as_ok(tmp_path):
     }]
 
     class _Registry:
-        def drain_finished(self, kind=None, owner=None):
+        def drain_finished(self, kind=None, owner=None, select=None):
             return finished
 
         def get(self, job_id):

@@ -2268,3 +2268,63 @@ class TestRunCoderTaskInProcess:
         assert "[denied] 1 tool call was denied and did not run" in text
         assert "write_file: the call was not written in the <tool_call> format" in text
         assert "success=False" in text and "denied=1" in text
+
+    def test_the_budget_covers_the_model_load_and_the_agent_build(
+            self, coder_env, tmp_path, monkeypatch):
+        """timeout_seconds is one deadline for the whole call: a slow load that
+        uses it up ends the call as timed out, and the agent never generates."""
+        import time
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        engine = engines._engines["stub-model"]
+        real_get = EngineCache.get
+
+        def slow_get(self, requested):
+            time.sleep(0.5)
+            return real_get(self, requested)
+
+        monkeypatch.setattr(EngineCache, "get", slow_get)
+        resp = _run_task(server, _project(tmp_path), timeout_seconds=0.3)
+        assert resp["result"]["isError"] is True
+        text = resp["result"]["content"][0]["text"]
+        assert "timed out" in text and "before it could start" in text
+        assert engine.calls == [], "the agent generated after the budget was spent"
+        assert _wait_until(lambda: engine.active_requests == 0)
+
+    def test_the_run_gets_only_the_remaining_budget(
+            self, coder_env, tmp_path, monkeypatch):
+        import time
+        from localm.plugins.coder import runner as coder_runner
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        real_get = EngineCache.get
+
+        def slow_get(self, requested):
+            time.sleep(0.4)
+            return real_get(self, requested)
+
+        monkeypatch.setattr(EngineCache, "get", slow_get)
+        seen = {}
+        real_run = coder_runner.run_task_with_timeout
+
+        def recording(agent, task, timeout, **kw):
+            seen["timeout"] = timeout
+            return real_run(agent, task, timeout, **kw)
+
+        monkeypatch.setattr(coder_runner, "run_task_with_timeout", recording)
+        resp = _run_task(server, _project(tmp_path), timeout_seconds=5)
+        assert resp["result"]["isError"] is False, resp
+        assert 3.0 < seen["timeout"] < 4.7, seen
+
+    def test_a_timeout_above_the_cap_is_refused_before_anything_is_pinned(
+            self, coder_env, tmp_path):
+        import localm.plugins.mcpserver.server as srv
+        factory = _scripted_engine_factory(["done"])
+        server, engines = _coder_server(factory)
+        engine = engines._engines["stub-model"]
+        resp = _run_task(server, _project(tmp_path),
+                         timeout_seconds=srv.MAX_CODER_TIMEOUT_SECONDS + 1)
+        assert resp["result"]["isError"] is True
+        assert "at most" in resp["result"]["content"][0]["text"]
+        assert engine.active_requests == 0
+        assert engine.calls == []

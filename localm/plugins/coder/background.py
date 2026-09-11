@@ -952,20 +952,24 @@ class JobRegistry:
                     out[kind] = out.get(kind, 0) + n
             return out
 
-    def drain_finished(self, kind: Optional[str] = None, owner=_ANY_OWNER) -> list:
+    def drain_finished(self, kind: Optional[str] = None, owner=_ANY_OWNER,
+                       select: Optional[Callable[["BackgroundJob"], bool]] = None) -> list:
         """Status of every job that finished since the last drain, then mark them.
 
         For a caller that absorbs completions at a turn boundary instead of
         polling a known id. Each finished job is returned by exactly one drain.
         Draining does NOT remove the job, so a later poll-by-id still works.
         *owner* narrows the drain to one session's jobs, the way ``list_status``
-        does; the default drains every owner's.
+        does; the default drains every owner's. *select*, when given, must
+        answer True for a job to be drained; a job it rejects is left for a
+        later drain.
         """
         with self._lock:
             jobs = [j for j in self._jobs.values()
                     if j.state != "running" and not j.drained
                     and (kind is None or j.kind == kind)
-                    and (owner is _ANY_OWNER or j.owner == owner)]
+                    and (owner is _ANY_OWNER or j.owner == owner)
+                    and (select is None or select(j))]
             for job in jobs:
                 job.drained = True
         # status() takes each job's own lock - do it outside the registry lock.

@@ -149,3 +149,43 @@ def test_local_reviewer_no_model_name_falls_back(monkeypatch):
 def test_local_reviewer_still_gated_off_for_restricted(monkeypatch):
     _cfg(monkeypatch)
     assert reviewer_for_agent(_agent_backend(), SessionMode.FULL, True) is None
+
+
+# --------------------------------------------------------------------------- #
+#  A thinking reviewer model's scratchpad never reaches the review parser      #
+# --------------------------------------------------------------------------- #
+
+def test_local_backend_chat_splits_the_think_scratchpad_off(monkeypatch):
+    from localm.plugins.coder.backends.local_engine import LocalEngineBackend
+    _patched_engine(monkeypatch, [
+        "<think>\nthe diff deletes tests, blocking: ", '{"approved": false, "blocking": ["x"]}',
+        "\n</think>\n", '{"approved": true, "blocking": []}'])
+    b = LocalEngineBackend("/models/mini.gguf")
+    text = b.chat([{"role": "user", "content": "review"}])
+    assert "<think>" not in text and "deletes tests" not in text
+    assert text.strip() == '{"approved": true, "blocking": []}'
+    assert "deletes tests" in b.last_reasoning
+
+
+def test_local_backend_stream_routes_reasoning_to_the_callback(monkeypatch):
+    from localm.plugins.coder.backends.local_engine import LocalEngineBackend
+    _patched_engine(monkeypatch, ["<thi", "nk>plan</th", "ink>ans", "wer"])
+    b = LocalEngineBackend("/models/mini.gguf")
+    reasoning = []
+    visible = "".join(b.chat_stream([{"role": "user", "content": "q"}],
+                                    on_reasoning=reasoning.append))
+    assert visible == "answer"
+    assert "".join(reasoning) == "plan"
+    assert b.last_reasoning == "plan"
+
+
+def test_the_reviewer_verdict_comes_from_the_answer_not_the_scratchpad(monkeypatch):
+    from localm.plugins.coder.backends.local_engine import LocalEngineBackend
+    from localm.plugins.coder.reviewer import Reviewer
+    _patched_engine(monkeypatch, [
+        '<think>maybe {"approved": false, "blocking": ["it deleted the tests"]}</think>',
+        '{"approved": true, "blocking": []}'])
+    result = Reviewer(LocalEngineBackend("/models/mini.gguf")).review("diff", "task")
+    assert result.ok is True
+    assert result.approved is True
+    assert result.blocking == []

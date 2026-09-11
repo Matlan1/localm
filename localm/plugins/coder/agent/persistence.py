@@ -26,6 +26,15 @@ from .checkpoint import (
 )
 
 
+def _spawned_by(agent, job) -> bool:
+    """True for a background job whose child agent *agent* spawned; a job with
+    no child agent counts as anyone's."""
+    child = getattr(job, "child", None)
+    if child is None:
+        return True
+    return getattr(child, "parent", None) is agent
+
+
 class _PersistenceMixin:
     def changed_files(self) -> list[dict]:
         """
@@ -170,7 +179,10 @@ class _PersistenceMixin:
             from ..background import get_registry
             registry = get_registry()
             owner = getattr(self, "job_owner", None)
-            finished = registry.drain_finished(kind="agent", owner=owner)
+            # Only the jobs THIS agent spawned: a background child shares its
+            # parent's owner id and must not consume its siblings' completions.
+            finished = registry.drain_finished(
+                kind="agent", owner=owner, select=lambda job: _spawned_by(self, job))
         except Exception:
             return []
 
