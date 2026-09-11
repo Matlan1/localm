@@ -389,12 +389,22 @@ def plugin_uninstall_engine(name, delete_data):
 
     from localm import cli as _cli
     mgr = _cli._engine_manager()
-    was = run_or_die(mgr.uninstall, name, delete_data=delete_data,
-                     missing_msg=f"No such plugin: {name}")
-    if was:
+    was_installed = mgr.is_installed(name)
+    complete = run_or_die(mgr.uninstall, name, delete_data=delete_data,
+                          missing_msg=f"No such plugin: {name}")
+    if complete:
         console.print(f"[yellow]Uninstalled[/yellow] plugin [bold]{escape(name)}[/bold]")
-    else:
+        return
+    if not was_installed:
         console.print(f"[dim]Plugin {escape(repr(name))} was not installed.[/dim]")
+        return
+    console.print(f"[red]Plugin {escape(repr(name))} was disabled and unloaded, but it was "
+                  f"NOT fully uninstalled: something it owns could not be removed from "
+                  f"disk.[/red]")
+    if delete_data:
+        console.print("[red]--delete-data was requested and this uninstall did not complete, "
+                      "so do not assume its stored data is gone.[/red]")
+    sys.exit(1)
 
 
 
