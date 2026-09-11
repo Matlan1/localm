@@ -326,8 +326,13 @@ def register(app: FastAPI, ctx) -> None:
                     400,
                     f"Unsupported encoding_format {req.encoding_format!r}: "
                     "expected 'float' or 'base64'.")
+            # One default-pool worker at a time on this path: embed_texts can
+            # block in vram.evict_chat_for_embedder, whose wait needs that pool.
+            # Waiters queue here on the loop, holding no worker.
+            sem_emb = _hs._get_embedder_sem()
             try:
-                vecs_emb = await loop.run_in_executor(None, lambda: embed_texts(texts_emb))
+                async with sem_emb:
+                    vecs_emb = await loop.run_in_executor(None, lambda: embed_texts(texts_emb))
             except PretokenizerUnsafeInputError as e:
                 # A permanent property of this text against this model, not a
                 # transient worker condition, so 400 rather than the 503 below:

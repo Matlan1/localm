@@ -97,6 +97,20 @@ _audit = None
 # Inference serialisation - per-model semaphores mapping display name -> Semaphore
 _inference_sems: dict[str, asyncio.Semaphore] = {}
 
+# Bounds the dedicated-embedder /v1/embeddings path to ONE default-pool worker
+# at a time. Kept apart from _inference_sems, whose entries follow the chat
+# engines' lifecycle (popped on evict, renamed on rename); cleared with it in
+# create_app. See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
+_embedder_sem: asyncio.Semaphore | None = None
+
+
+def _get_embedder_sem() -> asyncio.Semaphore:
+    """The dedicated-embedder semaphore, created on first use on the serving loop."""
+    global _embedder_sem
+    if _embedder_sem is None:
+        _embedder_sem = asyncio.Semaphore(1)
+    return _embedder_sem
+
 # Backward compatibility references
 _engine: Engine | None = None
 _inference_sem: asyncio.Semaphore | None = None
@@ -3468,11 +3482,12 @@ def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = N
 
 
 def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAPI:
-    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _last_active_model_name, _inference_sems, _last_activity_per_model, _audit
+    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _last_active_model_name, _inference_sems, _last_activity_per_model, _audit, _embedder_sem
 
     _engines.clear()
     _engines_lru.clear()
     _inference_sems.clear()
+    _embedder_sem = None
     _last_activity_per_model.clear()
     # A fresh app boot must never carry over a name remembered from a
     # previous create_app() call in the same process (test reuse, a restart) -
