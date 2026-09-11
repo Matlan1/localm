@@ -21,6 +21,7 @@ import datetime as dt
 import importlib.util
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -436,6 +437,42 @@ def test_the_abi_check_pin_report_survives_a_failure_earlier_in_the_job():
     assert len(report) == 1
     assert report[0].get("if") == "always()"
     assert report[0].get("continue-on-error") is True
+
+
+def test_confirm_llama_runtime_install_steps_provide_psutil():
+    """confirm_llama_runtime.py reads the isolated generation worker's mapped
+    modules back through psutil to prove which llama library it loaded (see
+    its own module docstring); without psutil that check is INCONCLUSIVE, and
+    INCONCLUSIVE is warned rather than failed, so the job goes green having
+    proven nothing. Both jobs that call the script must install an extra that
+    provides psutil."""
+    packaging_requirements = pytest.importorskip("packaging.requirements")
+
+    optional_deps = tomllib.loads(
+        (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["optional-dependencies"]
+
+    for path, job_name in ((_CI, "abi-check"), (_WORKFLOW, "candidate-preflight")):
+        steps = _load_workflow(path)["jobs"][job_name]["steps"]
+        run_all = "\n".join(s.get("run", "") for s in steps)
+        assert "confirm_llama_runtime.py" in run_all, (
+            f"{job_name} no longer calls confirm_llama_runtime.py; "
+            f"this test's premise is gone")
+
+        install = [s for s in steps if s.get("name") == "Install"]
+        assert len(install) == 1, f"{job_name}: expected exactly one Install step"
+        extras = re.findall(r'pip install -e "\.\[([^\]"]+)\]"', install[0]["run"])
+        assert extras, f"{job_name}: Install step must install an extra, not the bare package"
+
+        names = {n.strip() for group in extras for n in group.split(",")}
+        provides_psutil = any(
+            packaging_requirements.Requirement(dep).name == "psutil"
+            for name in names
+            for dep in optional_deps.get(name, [])
+        )
+        assert provides_psutil, (
+            f"{job_name}: none of {sorted(names)} provides psutil, so the "
+            f"worker-inspection step can never report PASS")
 
 
 def _boom(*a, **k):
