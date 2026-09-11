@@ -183,9 +183,10 @@ class _ExecutionMixin:
         if call.name.startswith(("mcp_", "plugin_")):
             arg_names = _MCP_SCOPE_PATH_ARGS
         else:
-            # A nested-path tool (edit_files) has NO top-level `path` arg, so
-            # checking arg names alone would find nothing and let the call
-            # through. Check its real targets first.
+            # A nested-path tool (edit_files) or a list-path tool (spawn_agent)
+            # has NO top-level `path` arg, so checking arg names alone would
+            # find nothing and let the call through. Check its real targets
+            # first.
             for value in _call_target_paths(call.name, call.args):
                 if not self._scope_allows(value):
                     return value

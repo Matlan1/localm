@@ -517,6 +517,133 @@ class TestScopeInheritance:
 
 
 # --------------------------------------------------------------------------- #
+#  9b. The `files` pre-load is confined by the PARENT's scope                  #
+# --------------------------------------------------------------------------- #
+
+_AGENT_CLASS = "localm.plugins.coder.agent.Agent"
+_SECRET = "the-out-of-scope-secret-4f9c"
+_CONTEXT = "the-in-scope-context-7b2e"
+
+
+def _commit_scope_fixture(repo):
+    """One file outside ``src/**`` and one inside, both COMMITTED so a
+    background child's worktree (created from HEAD) carries them too."""
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "secrets.txt").write_text(f"{_SECRET}\n", encoding="utf-8")
+    (repo / "src" / "ctx.txt").write_text(f"{_CONTEXT}\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "scope fixture")
+
+
+class TestPreloadRespectsTheParentScope:
+    """Both spawners read every ``files`` entry into the child's first message,
+    BEFORE the child exists and outside the child's own scope enforcement. A
+    scoped parent must therefore have those reads gated by ITS scope, through
+    the dispatcher, exactly like a read_file call.
+
+    Driven through ``_execute_tool`` (the dispatcher), never the bare tool
+    function: the gate lives in the dispatcher, so a direct call would bypass
+    the thing under test.
+    """
+
+    @pytest.mark.parametrize("tool", ["spawn_agent", "spawn_agent_background"])
+    def test_a_scoped_parent_cannot_preload_a_file_outside_its_scope(
+            self, repo, tool):
+        _commit_scope_fixture(repo)
+        parent = _parent(repo, scope="src/**")
+        with patch(_AGENT_CLASS) as MockAgent:
+            MockAgent.return_value.run_task.return_value = "done"
+            MockAgent.return_value.turns = 1
+            res = parent._execute_tool(
+                _call(tool, task="summarise", files=["secrets.txt"]),
+                interactive=False)
+        # The world first: no child was built, so the out-of-scope content
+        # reached nobody, and nothing was taken from the shared child budget.
+        MockAgent.assert_not_called()
+        assert _SECRET not in str(MockAgent.mock_calls)
+        assert child_limit.holders() == []
+        assert not res.ok
+        assert "secrets.txt" in res.output
+        assert "outside the active scope" in res.output
+        assert _SECRET not in res.output
+
+    @pytest.mark.parametrize("tool", ["spawn_agent", "spawn_agent_background"])
+    def test_one_out_of_scope_entry_refuses_the_whole_preload(self, repo, tool):
+        """A list mixing an in-scope and an out-of-scope path is refused as a
+        whole, naming the offending entry; nothing is read for the child."""
+        _commit_scope_fixture(repo)
+        parent = _parent(repo, scope="src/**")
+        with patch(_AGENT_CLASS) as MockAgent:
+            MockAgent.return_value.run_task.return_value = "done"
+            MockAgent.return_value.turns = 1
+            res = parent._execute_tool(
+                _call(tool, task="summarise",
+                      files=["src/ctx.txt", "../escape.txt", "secrets.txt"]),
+                interactive=False)
+        MockAgent.assert_not_called()
+        assert not res.ok
+        assert "../escape.txt" in res.output
+        assert "outside the active scope" in res.output
+
+    def test_SIBLING_an_in_scope_preload_reaches_the_synchronous_child(
+            self, repo):
+        """The gate must CONFINE the pre-load, not disable it: the same parent,
+        the same dispatcher, an in-scope file, and the content lands in the
+        child's task."""
+        _commit_scope_fixture(repo)
+        parent = _parent(repo, scope="src/**")
+        with patch(_AGENT_CLASS) as MockAgent:
+            MockAgent.return_value.run_task.return_value = "done"
+            MockAgent.return_value.turns = 1
+            res = parent._execute_tool(
+                _call("spawn_agent", task="summarise", files=["src/ctx.txt"]),
+                interactive=False)
+        MockAgent.assert_called_once()
+        task_sent = MockAgent.return_value.run_task.call_args[0][0]
+        assert _CONTEXT in task_sent
+        assert "Task:\nsummarise" in task_sent
+        assert res.ok, res.output
+
+    def test_SIBLING_an_in_scope_preload_reaches_the_background_child(
+            self, repo):
+        """Same property on the background path, with a REAL child so the
+        worktree isolation the pre-load reads through is exercised too."""
+        _commit_scope_fixture(repo)
+        captured = {}
+
+        def _capture(self, task):
+            captured["task"] = task
+            return "ok"
+
+        parent = _parent(repo, scope="src/**")
+        with patch.object(Agent, "run_task", _capture):
+            res = parent._execute_tool(
+                ToolCall(name="spawn_agent_background",
+                         args={"task": "summarise", "name": "pl",
+                               "files": ["src/ctx.txt"]},
+                         raw="", start=0, end=0),
+                interactive=False)
+            assert res.ok, res.output
+            _drain_all()
+        assert _CONTEXT in captured["task"]
+        assert "Task:\nsummarise" in captured["task"]
+
+    def test_an_unscoped_parent_still_preloads_any_file_under_cwd(self, repo):
+        """No scope, no gate: the pre-load keeps its cwd-only confinement."""
+        _commit_scope_fixture(repo)
+        parent = _parent(repo)
+        with patch(_AGENT_CLASS) as MockAgent:
+            MockAgent.return_value.run_task.return_value = "done"
+            MockAgent.return_value.turns = 1
+            res = parent._execute_tool(
+                _call("spawn_agent", task="summarise", files=["secrets.txt"]),
+                interactive=False)
+        MockAgent.assert_called_once()
+        assert _SECRET in MockAgent.return_value.run_task.call_args[0][0]
+        assert res.ok, res.output
+
+
+# --------------------------------------------------------------------------- #
 #  verify_cmd on the isolated background construction path                    #
 # --------------------------------------------------------------------------- #
 
@@ -739,11 +866,24 @@ def test_agent_kind_has_its_own_cap_and_does_not_fall_back():
     assert _DEFAULT_CAP != 2, "this test would pass by accident if they matched"
 
 
-def test_background_agent_tools_are_registered_and_unscoped():
-    from localm.plugins.coder.agent.constants import _INTENTIONALLY_UNSCOPED
+def test_background_agent_tools_are_registered_with_a_scope_decision():
+    """The agent tools are confined, never exempt: a child inherits the parent's
+    scope, and the two spawners' ``files`` pre-load is gated by the parent's
+    scope before the child exists. ``_INTENTIONALLY_UNSCOPED`` is for tools a
+    path check cannot confine (the shell family), so none of the three belong
+    there. check_agent_job takes no path and sits in neither set."""
+    from localm.plugins.coder.agent.constants import (
+        _INTENTIONALLY_UNSCOPED, _LIST_PATH_TOOLS, _SCOPED_TOOLS,
+    )
     assert TOOL_REGISTRY["spawn_agent_background"].destructive is True
     assert TOOL_REGISTRY["check_agent_job"].destructive is False
-    assert "spawn_agent" in _INTENTIONALLY_UNSCOPED or True   # spawn is scoped via child
+    for name in ("spawn_agent", "spawn_agent_background", "check_agent_job"):
+        assert name not in _INTENTIONALLY_UNSCOPED, name
+    for name in ("spawn_agent", "spawn_agent_background"):
+        assert name in _SCOPED_TOOLS, name
+        assert _LIST_PATH_TOOLS[name] == "files"
+        assert "files" in TOOL_REGISTRY[name].params
+    assert "check_agent_job" not in _SCOPED_TOOLS
 
 
 # --------------------------------------------------------------------------- #
