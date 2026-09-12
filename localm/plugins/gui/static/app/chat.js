@@ -37,7 +37,12 @@ export const chat = {
   // by refreshCtxLimit's 30s poll) - a config refresh must not resurrect a
   // grammar THIS backend has already demonstrated it cannot honour.
   toolGrammarUnsupported: false,
-  privacy: false,    // server in privacy mode → conversations not persisted
+  privacy: false,    // server in privacy mode: conversations not persisted
+  // True once /v1/config has answered and `privacy` reflects the server's real
+  // mode. The two localStorage write funnels (lsSetScoped, saveConversations)
+  // stay closed while this is false - the boot default above is not an answer.
+  // Never reset by a later failed poll: the last confirmed answer stands.
+  modeKnown: false,
   persist: false,    // non-privacy: conversations sync to the server store
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
   // AUD-INSTANCEID residual 2: true ONLY once reconcileInstanceId returns
@@ -303,6 +308,7 @@ export async function refreshCtxLimit() {
       // previous non-privacy session left behind (in-memory AND on disk) and
       // show the hint.
       chat.privacy = cfg.effective_mode === "privacy";
+      chat.modeKnown = true;
       if (chat.privacy) {
         for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
         // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
@@ -374,7 +380,7 @@ export async function refreshCtxLimit() {
 // instance-scoped write now goes through this one function instead, so the
 // write-gate decision lives in exactly one place.
 export function lsSetScoped(key, value) {
-  if (chat.privacy) return;
+  if (chat.privacy || !chat.modeKnown) return;
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
     // Loud, not silent (AGENTS.md rule 5): a key reaching here that is not in
     // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw
@@ -411,7 +417,8 @@ export function hydrateChatToggles(cfg) {
 window.hydrateChatToggles = hydrateChatToggles;
 
 export function saveConversations(changed) {
-  if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
+  // Privacy mode, or the mode not yet confirmed: no traces, not even localStorage.
+  if (chat.privacy || !chat.modeKnown) return;
   // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
   // caching them would shadow a real local copy and show empty conversations
   // offline. Only full conversations are cached locally.

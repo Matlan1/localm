@@ -617,3 +617,93 @@ test("AUD-INSTANCEID residual 2: the unconfirmed WARNING is one per breakage, " 
   assert.equal(window.__warns.length, 1,
     "...while the console still carries exactly one line for this outage");
 });
+
+// --------------------------------------------------------------------------- //
+//  The PRIVACY half of the same failed round trip: until /v1/config has said   //
+//  which mode the server runs in, neither localStorage write funnel may write. //
+//  A privacy-mode transcript must not reach disk during a 503 / dropped        //
+//  connection at boot, and chat.privacy's boot default (false) is not an       //
+//  answer.                                                                     //
+// --------------------------------------------------------------------------- //
+
+// Both write funnels, driven with content that occurs nowhere else in the app.
+const WRITE_BOTH_FUNNELS = `
+  lsSetScoped("localm.activeView", "settings");
+  chat.conversations.unshift({ id: "c1", title: "t", updated_at: 1, pinned: false,
+    folder: null, branches: [], messages: [{ role: "user", content: "secret-prompt-7Q4M" }] });
+  saveConversations(chat.conversations[0]);
+`;
+
+for (const [label, fetchOpts] of [
+  ["a THROWN /v1/config fetch", { configThrows: true }],
+  ["a 503 from /v1/config", { configStatus: 503 }],
+]) {
+  test(`privacy: ${label} at boot leaves the mode UNKNOWN, and neither ` +
+       "localStorage write funnel writes until it is confirmed", async () => {
+    const { window } = loadApp({
+      fetchImpl: makeFetch({ instanceId: "backend-a", ...fetchOpts }),
+    });
+    runScript(window, "window.chatState = chat;");
+    await drain();
+
+    assert.equal(window.chatState.modeKnown, false,
+      "a failed round trip is no answer about the server's session mode");
+    runScript(window, WRITE_BOTH_FUNNELS);
+
+    assert.equal(window.localStorage.getItem("localm.activeView"), null,
+      "lsSetScoped must not write while the session mode is unconfirmed");
+    assert.equal(window.localStorage.getItem("localm.conversations"), null,
+      "saveConversations must not write a transcript while the session mode is " +
+      "unconfirmed - the server may be in privacy mode");
+    for (const key of Object.keys(window.localStorage)) {
+      assert.ok(!String(window.localStorage.getItem(key)).includes("secret-prompt-7Q4M"),
+        `the prompt reached localStorage under ${key}`);
+    }
+  });
+}
+
+test("privacy: a confirmed non-privacy mode opens both write funnels (the control " +
+     "for the unconfirmed-mode gate)", async () => {
+  const { window } = loadApp({
+    fetchImpl: makeFetch({ instanceId: "backend-a" }),   // answers effective_mode "log"
+  });
+  runScript(window, "window.chatState = chat;");
+  await drain();
+
+  assert.equal(window.chatState.modeKnown, true);
+  assert.equal(window.chatState.privacy, false);
+  runScript(window, WRITE_BOTH_FUNNELS);
+
+  assert.equal(window.localStorage.getItem("localm.activeView"), "settings",
+    "positive control: lsSetScoped writes once a non-privacy mode is confirmed");
+  assert.ok(String(window.localStorage.getItem("localm.conversations"))
+    .includes("secret-prompt-7Q4M"),
+    "positive control: saveConversations caches the transcript in log mode");
+});
+
+test("privacy: a later failed poll does not reopen the gate, and does not " +
+     "forget a confirmed answer either", async () => {
+  const { window } = loadApp({
+    fetchImpl: makeFetch({ instanceId: "backend-a" }),
+  });
+  runScript(window, "window.chatState = chat;");
+  await drain();
+  assert.equal(window.chatState.modeKnown, true);
+
+  // The server goes away: the poll fails from now on.
+  runScript(window, `
+    window.fetch = async (url) => {
+      if (String(url) === "/v1/config") throw new TypeError("Failed to fetch");
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+    };
+    refreshCtxLimit();
+  `);
+  await drain();
+
+  assert.equal(window.chatState.modeKnown, true,
+    "the last confirmed answer stands across a failed poll");
+  runScript(window, WRITE_BOTH_FUNNELS);
+  assert.equal(window.localStorage.getItem("localm.activeView"), "settings",
+    "a confirmed log mode keeps writing through an outage");
+});
