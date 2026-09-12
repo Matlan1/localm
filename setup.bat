@@ -104,7 +104,7 @@ if exist ".uv\uv.exe" (
 )
 
 :uv_missing
-echo  [!] uv (the Python package manager localm builds on) is not installed.
+echo  [^^!] uv (the Python package manager localm builds on) is not installed.
 set "GETUV="
 call :flush
 set /p "GETUV=  Install it now with Astral's official installer? [Y/n]: "
@@ -145,7 +145,7 @@ where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
 
 echo.
-echo  [!] uv still is not callable after the install attempt.
+echo  [^^!] uv still is not callable after the install attempt.
 echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat again,
 echo      or install uv manually first, then re-run setup.bat:
 call :uv_manual_hint
@@ -248,7 +248,7 @@ goto venv_retry
 type "%TEMP%\localm_uv_err.txt" 2>nul
 del "%TEMP%\localm_uv_err.txt" 2>nul
 echo.
-echo  [!] Could not create the environment.
+echo  [^^!] Could not create the environment.
 echo      If you see "Access is denied" or "os error 5", a localm process is still running.
 echo      Please close any open LocaLM launchers, chat windows, or server consoles.
 echo.
@@ -313,7 +313,7 @@ rem  uv's output is CAPTURED and the console would otherwise be silent - the ONE
 rem  such site is :venv_retry above. Do not copy it back here.
 uv pip install -p .venv -e ".[%EXTRAS%]"
 if not errorlevel 1 goto install_ok
-echo  [!] Install failed - see the error above.
+echo  [^^!] Install failed - see the error above.
 call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
 pause
 exit /b 1
@@ -420,11 +420,11 @@ if not defined TORCHSPEC (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
     echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers ...
-    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    uv pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 ) else (
     echo  Installing PyTorch + transformers ...
-    uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
-    uv pip install -p .venv -e ".[hf,audio]" || echo  [!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------
@@ -440,7 +440,7 @@ if /i "%BACKEND%"=="own" (
     if not "!LLAMABUILD!"=="" (
         .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
         if errorlevel 1 (
-            echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+            echo  [^^!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
             echo      ^(Double-click report-issue.bat to send a report about this.^)
             pause
             exit /b 1
@@ -451,7 +451,7 @@ if /i "%BACKEND%"=="own" (
 ) else (
     .venv\Scripts\localm setup-llama --backend %BACKEND%
     if errorlevel 1 (
-        echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
+        echo  [^^!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
         echo      ^(Double-click report-issue.bat to send a report about this.^)
         pause
         exit /b 1
@@ -499,7 +499,7 @@ rem  works if this step fails; it never blocks the install.
 echo.
 echo  Branding the app executable ^(so it shows as LocaLM, not python^) ...
 .venv\Scripts\python -m localm make-launcher --force --quiet
-if errorlevel 1 echo  [!] Could not build LocaLM.exe - `localm gui` still works ^(shows python.exe^).
+if errorlevel 1 echo  [^^!] Could not build LocaLM.exe - `localm gui` still works ^(shows python.exe^).
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
@@ -602,7 +602,7 @@ if "%CONTAINED%"=="1" (
 setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 endlocal
-if errorlevel 1 echo  [!] Could not record the install manifest (uninstall will be conservative).
+if errorlevel 1 echo  [^^!] Could not record the install manifest (uninstall will be conservative).
 
 rem ---- done ------------------------------------------------------------------
 echo.
@@ -639,7 +639,7 @@ if exist "%PYBIN%" (
     echo  Planned removals ^(from the install manifest .localm-install.json^):
     "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG% --dry-run
 ) else (
-    echo  [!] No venv Python found - only the marked .venv will be removed.
+    echo  [^^!] No venv Python found - only the marked .venv will be removed.
 )
 echo.
 call :flush
@@ -765,7 +765,7 @@ set "DATACREATED=1"
 echo  Data directory: !CUSTOMHOME!  ^(recorded in localm-home.cfg^)
 exit /b 0
 :custom_home_blank
-echo  [!] No path given - using the portable .\home instead.
+echo  [^^!] No path given - using the portable .\home instead.
 if exist "localm-home.cfg" del "localm-home.cfg"
 if not exist "home" mkdir "home"
 set "DATADIR=%CD:!=^!%\home"

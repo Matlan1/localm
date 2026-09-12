@@ -249,6 +249,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   destroy the install.** Remove now refuses while an update or setup is in progress, and the
   `localm comfy remove` command refuses while another localm process is updating the same
   install, naming the process to wait for.
+- **Several `setup.bat` warning and error messages on Windows (e.g. "uv is not installed",
+  "Install failed") always printed with their `[!]` marker silently missing, on every install.**
+  They now show it correctly.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
