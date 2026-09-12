@@ -11,12 +11,14 @@ embedding requests on a cold embedder put N workers into that wait; once the
 pool is exhausted nothing can run the unload and every worker sits the full
 timeout, stalling all inference (chat generation shares the pool).
 
-Three properties, one test each:
+Four properties, one test each:
   (1) the route holds one default-pool worker at a time on this path;
   (2) evict_chat_for_embedder cancels the eviction it gave up waiting for;
   (3) cancelling an eviction whose engine unload is ALREADY running keeps the
       engine flagged as unloading until that unload finishes, and still does
-      the unload's bookkeeping afterwards.
+      the unload's bookkeeping afterwards;
+  (4) the memory plugin's off-loop callers (the chat inlet hook, /api/memory/*)
+      share the same one-worker bound.
 """
 
 from __future__ import annotations
@@ -110,6 +112,72 @@ def test_dedicated_embed_path_holds_one_pool_worker_at_a_time(app_client, monkey
     for i, r in enumerate(results):
         assert r is not None and r.status_code == 200, (i, getattr(r, "text", r))
         assert r.json()["data"][0]["embedding"] == [0.0]
+
+
+def test_memory_off_loop_holds_one_embedder_slot_at_a_time(app_client, monkeypatch):
+    """Four concurrent POST /api/memory/append: at most ONE is inside
+    get_embedder() (on a default-pool worker) at any instant, and all four
+    still succeed. The memory plugin's _off_loop wraps every embedder-resolving
+    call in the same _get_embedder_sem() the dedicated /v1/embeddings path
+    uses above, so a burst of chat turns (which hit this same helper via the
+    registered inlet hook) cannot park more than one worker waiting inside
+    evict_chat_for_embedder either."""
+    from localm.plugins.builtin.memory import plug
+    app_client.app.include_router(plug._router)
+    monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
+    monkeypatch.setattr(plug, "_migrate_legacy", lambda store: None)
+    # Open-mode management routes (POST /api/memory/*) require the per-process
+    # shell token as a bearer; the GUI shell injects it.
+    shell = getattr(app_client.app.state, "shell_token", None)
+    hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
+
+    n_requests = 4
+    issued = threading.Semaphore(0)     # one release per request that reached get_embedder
+    release = threading.Event()         # set only once the first has been issued
+    state = {"inflight": 0, "peak": 0}
+    guard = threading.Lock()
+
+    class _FakeEmb:
+        def embed(self, texts):
+            return [[0.0] * 8 for _ in texts]
+
+    def fake_get_embedder():
+        with guard:
+            state["inflight"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+        issued.release()
+        try:
+            assert release.wait(10.0), "the test never released get_embedder"
+            return _FakeEmb()
+        finally:
+            with guard:
+                state["inflight"] -= 1
+
+    monkeypatch.setattr("localm.inference.embedder.get_embedder", fake_get_embedder)
+
+    results = [None] * n_requests
+
+    def _post(i):
+        results[i] = app_client.post(
+            "/api/memory/append", headers=hdr, json={"text": f"fact {i}"})
+
+    threads = [threading.Thread(target=_post, args=(i,)) for i in range(n_requests)]
+    for t in threads:
+        t.start()
+    # Wait until the FIRST request is inside get_embedder, then give the other
+    # three time to arrive (and queue on the semaphore); only then release.
+    assert issued.acquire(timeout=10.0), "no request reached get_embedder"
+    time.sleep(0.5)
+    release.set()
+    for t in threads:
+        t.join(20.0)
+    assert not any(t.is_alive() for t in threads), "a request never returned"
+
+    assert state["peak"] == 1, (
+        f"{state['peak']} default-pool workers were inside get_embedder at once; "
+        "memory-plugin _off_loop callers that resolve the embedder must be bounded to one")
+    for i, r in enumerate(results):
+        assert r is not None and r.status_code == 200, (i, getattr(r, "text", r))
 
 
 @pytest.fixture

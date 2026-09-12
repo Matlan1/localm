@@ -228,7 +228,7 @@ def _embedder_download_status(request: Request | None) -> dict:
     return {"can_download_embedder": False, "embedder_model": None}
 
 
-async def _off_loop(fn):
+async def _off_loop(fn, *, embedder_bound: bool = True):
     """Run a blocking store operation OFF the server event loop, mapping a
     contended namespace to 409.
 
@@ -242,10 +242,25 @@ async def _off_loop(fn):
     NOT run on the event-loop thread: it blocks on a coroutine the loop itself has
     to execute. Offloading to the default executor keeps the loop free and lets the
     eviction complete while the store write / embedder load runs.
+
+    When *embedder_bound* (default True), the call holds
+    http_server._get_embedder_sem() for its whole duration, the same bound the
+    dedicated /v1/embeddings route uses: with N concurrent callers otherwise, N
+    default-pool workers can end up parked inside evict_chat_for_embedder at
+    once, leaving none free to run unload_all_models()'s own executor-bound
+    steps, so the unload never completes and every caller sits the full
+    timeout. Pass embedder_bound=False only for a call that never resolves the
+    embedder (e.g. memory_delete), so it never queues behind an unrelated
+    embedder load. See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
     """
     from localm.rag.collection_lock import CollectionLockedError
+    loop = asyncio.get_running_loop()
     try:
-        return await asyncio.get_running_loop().run_in_executor(None, fn)
+        if embedder_bound:
+            from localm.inference import http_server as _hs
+            async with _hs._get_embedder_sem():
+                return await loop.run_in_executor(None, fn)
+        return await loop.run_in_executor(None, fn)
     except CollectionLockedError as e:
         raise HTTPException(409, str(e))
 
@@ -508,7 +523,9 @@ async def memory_delete(mem_id: str, request: Request = None):
 
     # Off the loop like every other mutating route here: the write waits on a
     # cross-process lock, which must not be awaited on the event-loop thread.
-    deleted = await _off_loop(lambda: store.delete(mem_id))
+    # store.delete never resolves the embedder, so it is not embedder_bound -
+    # it must not queue behind an unrelated embedder load.
+    deleted = await _off_loop(lambda: store.delete(mem_id), embedder_bound=False)
     return {"status": "deleted" if deleted else "absent", "id": mem_id}
 
 
