@@ -28,6 +28,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **Several chat turns arriving together with memory recall on and the embedding
+  model not yet loaded, on a card too small for both models, could stall all
+  inference for five minutes.** The chat memory inlet and the `/api/memory/*`
+  routes now queue behind the embedding model one at a time, the same way the
+  dedicated embeddings endpoint already does.
 - **The native llama.cpp runtime now loads on a fresh Linux install that has no
   system OpenMP library.** Upstream's `cpu`/`vulkan` Linux builds need
   `libgomp.so.1` but do not ship it; `setup.sh`/`localm setup-llama` now
