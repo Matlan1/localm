@@ -49,7 +49,7 @@ def _manifest_record_block(bat_text):
     boundaries."""
     start = bat_text.index(
         'setlocal DisableDelayedExpansion\n.venv\\Scripts\\python -m localm.install_manifest record')
-    end = bat_text.index('\nif errorlevel 1 echo  [!] Could not record the install manifest', start)
+    end = bat_text.index('\nif errorlevel 1 echo  [^^!] Could not record the install manifest', start)
     return bat_text[start:end]
 
 
@@ -373,7 +373,7 @@ def test_manifest_record_line_isolates_the_bang_hazard(bat):
     assert lines[0] == "setlocal DisableDelayedExpansion"
     assert lines[-1] == "endlocal"
     assert lines[1].startswith(".venv\\Scripts\\python -m localm.install_manifest record")
-    assert bat.index(block) < bat.index("if errorlevel 1 echo  [!] Could not record the install manifest")
+    assert bat.index(block) < bat.index("if errorlevel 1 echo  [^^!] Could not record the install manifest")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
