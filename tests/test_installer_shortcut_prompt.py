@@ -578,6 +578,31 @@ def _custom_home_blank_lines(bat_text):
     return bat_text[start:end]
 
 
+def _do_custom_home_block(bat_text):
+    """The `:do_custom_home` label body, from the label itself up to but
+    excluding its own `exit /b 0` - the caller feeds a bang-bearing path via
+    stdin (its own two `set /p` prompts capture it) and appends whatever
+    readback it needs, then its own exit. Anchored on the label LINE via
+    regex, not a bare substring search: `call :do_custom_home` (the caller)
+    and a `rem` line documenting this function both contain the literal text
+    `:do_custom_home` earlier in the file and would satisfy a naive
+    `.index(':do_custom_home')`."""
+    m = re.search(r"(?m)^:do_custom_home\s*$", bat_text)
+    assert m, "the :do_custom_home label moved or was renamed"
+    end = bat_text.index('exit /b 0', m.start())
+    return bat_text[m.start():end]
+
+
+def _flush_block(bat_text):
+    """The real `:flush` subroutine, verbatim. `:do_custom_home` calls it
+    twice, so any probe driving that block whole needs a real target for
+    `call :flush` to jump to."""
+    m = re.search(r"(?m)^:flush\s*$", bat_text)
+    assert m, "the :flush label moved or was renamed"
+    end = bat_text.index('goto :eof', m.start()) + len('goto :eof')
+    return bat_text[m.start():end]
+
+
 def _uninstall_header_block(bat_text):
     """The `:uninstall` label's clone-path banner."""
     literal = 'setlocal DisableDelayedExpansion\necho    %CD%\nendlocal'
@@ -908,6 +933,98 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         ]:
             expected = '{} "{}{}"'.format(flag, bang, suffix)
             assert expected in out.stdout, (expected, out.stdout, out.stderr)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestDoCustomHomeSurvivesBangInInstallPath:
+    """`:do_custom_home` reads its path from a `set /p` PROMPT, not from a
+    %-substituted pseudo-variable like %CD%. `set /p` writes the typed text
+    straight into the variable at runtime; it never re-enters cmd's command-
+    line parser, so it is never subject to the %-then-delayed-expansion pass
+    that drops a lone `!` from parsed source text (the mechanism %CD:!=^!%
+    above exists to work around). A later `!CUSTOMHOME!` read of that value
+    is also safe here: none of the 5 sites below has any OTHER `!`-bearing
+    construct on its own logical line for cmd's scanner to (mis)pair it
+    with. Driven below with the REAL, unmodified `:do_custom_home` (plus the
+    real `:flush` it calls twice) through a real cmd.exe, feeding a
+    genuinely typed bang-bearing path and confirming it, across several bang
+    shapes, checking all 5 read sites directly.
+
+    This is a LOCK-IN test, not a fix for a reproduced defect: a prior
+    investigation (see dev-notes/installer-b1-b2-fix-2026-09-11.md) concluded
+    these 5 sites drop the bang, reasoning from a repro that staged
+    CUSTOMHOME with a literal `set "CUSTOMHOME=...!..."` instead of `set
+    /p`. That literal-assignment staging has its own, real, but DIFFERENT
+    defect (the exact one %CD:!=^!% exists to fix) that drops the bang at
+    the moment the value is SET, before any `!CUSTOMHOME!` read runs at all
+    - conflating "the read corrupts it" with "the value was already
+    corrupted before the read ever saw it". Confirmed directly: staging via
+    a literal `set` and reading back through a KNOWN-safe technique
+    (`setlocal DisableDelayedExpansion` + `%VAR%`) already shows the bang
+    missing, immediately after the `set` line and before any `!VAR!` read.
+    `set /p` does not share that defect.
+
+    Deliberately does not drive the "N" (reject, re-prompt) branch, and
+    cannot currently exercise a genuinely-CAPTURED confirm answer at all:
+    `:flush` spawns a real `powershell.exe` that inherits this process's
+    stdin pipe, and reproducibly (every run, confirmed repeatedly, not a
+    rare race) the SECOND OR LATER `call :flush` in one script run silently
+    consumes the pipe's next pending line before the `set /p` that follows
+    it gets to read it - only the run's FIRST `call :flush` is clean.
+    Confirmed directly: feeding "Y", "N", or a blank line for the confirm
+    answer all produce byte-identical output (always the accept branch,
+    never a re-prompt) - the fed value never reaches OKHOME at all, so this
+    harness can only exercise the path via `if not defined OKHOME set
+    "OKHOME=Y"`. That is unaffected here: CUSTOMHOME's own capture is always
+    the run's FIRST `set /p`, so it never meets this interference, and the
+    5 sites under test all key off CUSTOMHOME, never OKHOME."""
+
+    def _run(self, bat, directory, customhome_value, confirm_answer="Y"):
+        probe = directory / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            + _do_custom_home_block(bat) +
+            "echo POST_DATADIR_DISABLED=\r\n"
+            "setlocal DisableDelayedExpansion\r\n"
+            "echo [%DATADIR%]\r\n"
+            "endlocal\r\n"
+            'echo POST_DATADIR_BANG=[!DATADIR!]\r\n'
+            'echo POST_DATACREATED=[%DATACREATED%]\r\n'
+            "exit /b 0\r\n"
+            + _flush_block(bat) + "\r\n",
+            encoding="utf-8")
+        stdin_text = "{}\r\n{}\r\n".format(customhome_value, confirm_answer)
+        return subprocess.run(
+            ["cmd", "/c", str(probe)], input=stdin_text, capture_output=True, text=True,
+            timeout=15, cwd=str(directory))
+
+    @pytest.mark.parametrize("dirname", [
+        "bang!dir", "ba!ng!dir", "!bangfirst", "banglast!", "a!b!c!d!e",
+    ])
+    def test_all_five_reads_survive_a_bang_in_the_typed_path(self, bat, tmp_path, dirname):
+        target = tmp_path / dirname / "sub"
+        out = self._run(bat, tmp_path, str(target))
+        assert out.returncode == 0, (out.stdout, out.stderr)
+
+        # site 1: the confirm prompt names the real, bang-bearing path back.
+        assert "Use '{}'? [Y/n]:".format(target) in out.stdout, out.stdout
+
+        # site 2: localm-home.cfg is written with the literal, unescaped path.
+        cfg = tmp_path / "localm-home.cfg"
+        assert cfg.read_text(encoding="utf-8").strip() == str(target), out.stdout
+
+        # site 3: mkdir actually created the bang-bearing directory.
+        assert target.is_dir(), (out.stdout, out.stderr)
+
+        # site 4: DATADIR holds the real path, read back two independent ways.
+        assert "POST_DATADIR_DISABLED=" in out.stdout, out.stdout
+        assert "[{}]".format(target) in out.stdout, out.stdout
+        assert "POST_DATADIR_BANG=[{}]".format(target) in out.stdout, out.stdout
+        assert "POST_DATACREATED=[1]" in out.stdout, out.stdout
+
+        # site 5: the closing confirmation echo names the real path.
+        assert "Data directory: {}  (recorded in localm-home.cfg)".format(target) in out.stdout, \
+            out.stdout
 
 
 def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
