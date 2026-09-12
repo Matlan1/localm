@@ -28,6 +28,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **Privacy mode no longer leaves a crash-trace file behind after every server
+  run, and a hard crash in privacy mode no longer files a bug report on the
+  next start.** Crash auto-recovery still works in every mode; the native
+  trace and the report are written only outside privacy mode, or with "keep
+  diagnostics" on.
+- **A privacy-mode chat prompt could reach the browser's local storage when
+  the server was still starting up (or briefly unreachable) at page load.** The
+  web UI now writes nothing to local storage until the server has confirmed
+  which mode it runs in.
+- **Sharing a photo or text into localm from a phone in privacy mode no longer
+  stages the shared content on disk.** It is held in memory until the app
+  ingests it. Outside privacy mode, a share the app never picked up is now
+  removed after 15 minutes instead of staying on disk indefinitely.
+- **Knowledge-base indexing no longer records the names and paths of every
+  indexed document in the activity log that a bug report carries.** The
+  document names still show live in the indexing progress; only the
+  embedding-degrade warnings reach the log.
 - **Several chat turns arriving together with memory recall on and the embedding
   model not yet loaded, on a card too small for both models, could stall all
   inference for five minutes.** The chat memory inlet and the `/api/memory/*`
