@@ -7,6 +7,12 @@ import { loadApp, runScript } from "./harness.mjs";
 // gate (Install on Android, Add-to-Home-Screen steps on iOS) and Continue enters
 // the app. Desktop, installed and returning visits skip it.
 
+// Lets the boot's /v1/config round trip land, so the session mode is
+// confirmed and localStorage writes are no longer held back.
+const drain = async (n = 12) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+};
+
 const allOk = () => Promise.resolve({
   ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "",
 });
@@ -77,8 +83,9 @@ test("shouldShowInstallGate: AUD-INSTANCEID - an onboarded flag with no confirme
     "an unverified onboarded flag must not silently skip onboarding for a new pairing");
 });
 
-test("show/dismiss: gate covers the app, Continue reveals it and remembers", () => {
+test("show/dismiss: gate covers the app, Continue reveals it and remembers", async () => {
   const { window } = loadApp({ fetchImpl: allOk });
+  await drain();
   const app = window.document.getElementById("app");
   window.showInstallGate();
   assert.equal(app.style.display, "none", "app hidden behind the landing");

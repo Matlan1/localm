@@ -707,3 +707,65 @@ test("privacy: a later failed poll does not reopen the gate, and does not " +
   assert.equal(window.localStorage.getItem("localm.activeView"), "settings",
     "a confirmed log mode keeps writing through an outage");
 });
+
+// A write attempted BEFORE /v1/config answers is neither dropped nor leaked: it
+// waits, then lands once a non-privacy mode is confirmed and is discarded once
+// privacy mode is.
+function makeModeFetch(mode) {
+  return async (url) => {
+    const u = String(url);
+    if (u === "/v1/config") {
+      return { ok: true, status: 200, text: async () => "", json: async () => (
+        { effective_mode: mode, n_ctx_max: 16384, instance_id: "backend-a" }) };
+    }
+    return { ok: true, status: 200, text: async () => "", json: async () => (
+      { models: [], active: "", conversations: [], plugins: [] }) };
+  };
+}
+
+test("privacy: a write made before /v1/config answers is replayed once a " +
+     "non-privacy mode is confirmed", async () => {
+  const { window } = loadApp({
+    fetchImpl: makeModeFetch("log"),
+    seedLocalStorage: { "localm.instanceId": "backend-a" },
+  });
+  runScript(window, "window.chatState = chat;");
+  // No drain: the round trip has not landed, and the writes are attempted now.
+  assert.equal(window.chatState.modeKnown, false);
+  runScript(window, WRITE_BOTH_FUNNELS);
+  assert.equal(window.localStorage.getItem("localm.activeView"), null,
+    "nothing lands before the mode is known");
+  assert.equal(window.localStorage.getItem("localm.conversations"), null);
+
+  await drain();
+
+  assert.equal(window.chatState.modeKnown, true);
+  assert.equal(window.localStorage.getItem("localm.activeView"), "settings",
+    "the queued lsSetScoped write lands once log mode is confirmed");
+  assert.ok(String(window.localStorage.getItem("localm.conversations"))
+    .includes("secret-prompt-7Q4M"),
+    "the queued conversation cache write lands once log mode is confirmed");
+});
+
+test("privacy: a write made before /v1/config answers is discarded once " +
+     "privacy mode is confirmed", async () => {
+  const { window } = loadApp({ fetchImpl: makeModeFetch("privacy") });
+  runScript(window, "window.chatState = chat;");
+  assert.equal(window.chatState.modeKnown, false);
+  runScript(window, WRITE_BOTH_FUNNELS);
+
+  await drain();
+
+  assert.equal(window.chatState.modeKnown, true);
+  assert.equal(window.chatState.privacy, true);
+  for (const key of Object.keys(window.localStorage)) {
+    assert.ok(!String(window.localStorage.getItem(key)).includes("secret-prompt-7Q4M"),
+      `the prompt reached localStorage under ${key}`);
+  }
+  assert.equal(window.localStorage.getItem("localm.activeView"), null);
+  assert.equal(window.localStorage.getItem("localm.conversations"), null);
+  // And the queue is gone: a later confirmation cannot resurrect it.
+  runScript(window, "chat.privacy = false; settlePendingScopedWrites();");
+  assert.equal(window.localStorage.getItem("localm.activeView"), null,
+    "a discarded queue must not be replayed later");
+});

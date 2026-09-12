@@ -40,8 +40,10 @@ export const chat = {
   privacy: false,    // server in privacy mode: conversations not persisted
   // True once /v1/config has answered and `privacy` reflects the server's real
   // mode. The two localStorage write funnels (lsSetScoped, saveConversations)
-  // stay closed while this is false - the boot default above is not an answer.
-  // Never reset by a later failed poll: the last confirmed answer stands.
+  // queue their writes while this is false - the boot default above is not an
+  // answer - and settlePendingScopedWrites() replays or discards the queue
+  // once it is. Never reset by a later failed poll: the last confirmed answer
+  // stands.
   modeKnown: false,
   persist: false,    // non-privacy: conversations sync to the server store
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
@@ -309,6 +311,7 @@ export async function refreshCtxLimit() {
       // show the hint.
       chat.privacy = cfg.effective_mode === "privacy";
       chat.modeKnown = true;
+      settlePendingScopedWrites();
       if (chat.privacy) {
         for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
         // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
@@ -379,8 +382,31 @@ export async function refreshCtxLimit() {
 // agreed, and two keys had drifted (write-gated but never wiped). Every
 // instance-scoped write now goes through this one function instead, so the
 // write-gate decision lives in exactly one place.
+
+// Writes attempted before /v1/config has answered (chat.modeKnown false).
+// settlePendingScopedWrites() replays them once a non-privacy mode is
+// confirmed and discards them when privacy mode is. Last write per key wins.
+const _pendingScopedWrites = new Map();
+let _pendingConversationSave = false;
+
+export function settlePendingScopedWrites() {
+  if (!chat.modeKnown) return;
+  const writes = [..._pendingScopedWrites];
+  const saveConv = _pendingConversationSave;
+  _pendingScopedWrites.clear();
+  _pendingConversationSave = false;
+  if (chat.privacy) return;
+  for (const [key, value] of writes) _writeScoped(key, value);
+  if (saveConv) saveConversations();
+}
+
 export function lsSetScoped(key, value) {
-  if (chat.privacy || !chat.modeKnown) return;
+  if (chat.privacy) return;
+  if (!chat.modeKnown) { _pendingScopedWrites.set(key, value); return; }
+  _writeScoped(key, value);
+}
+
+function _writeScoped(key, value) {
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
     // Loud, not silent (AGENTS.md rule 5): a key reaching here that is not in
     // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw
@@ -417,8 +443,14 @@ export function hydrateChatToggles(cfg) {
 window.hydrateChatToggles = hydrateChatToggles;
 
 export function saveConversations(changed) {
-  // Privacy mode, or the mode not yet confirmed: no traces, not even localStorage.
-  if (chat.privacy || !chat.modeKnown) return;
+  if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
+  if (!chat.modeKnown) {
+    // The mode is not confirmed yet: the localStorage write waits for
+    // settlePendingScopedWrites(); the server push gates itself on chat.persist.
+    _pendingConversationSave = true;
+    if (changed) pushConversation(changed);
+    return;
+  }
   // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
   // caching them would shadow a real local copy and show empty conversations
   // offline. Only full conversations are cached locally.
