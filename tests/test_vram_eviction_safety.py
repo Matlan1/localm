@@ -138,6 +138,9 @@ def _install_fakes(monkeypatch, *, free, status=None, fails_to_fit=False):
     hs._default_model_name = None
     hs._engine = None
     hs._inference_sem = None
+    # No restart authority on a fresh server; the fake-alarm tests install
+    # theirs after this call.
+    hs._hang_alarm_instance = None
 
 
 def _chat(client, model):
