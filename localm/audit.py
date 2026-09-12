@@ -176,6 +176,26 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
     return SessionMode.PRIVACY
 
 
+def diagnostics_allowed() -> bool:
+    """Whether localm may write an AUTOMATIC diagnostic trace right now.
+
+    True in the log and full session modes, and in privacy mode only when the
+    user opted into keeping diagnostics (config ``keep_diagnostics`` or the
+    ``LOCALM_KEEP_DIAGNOSTICS`` env). False when the mode or the config cannot
+    be resolved. Never raises.
+    """
+    try:
+        from localm.config import keep_diagnostics_enabled
+        if keep_diagnostics_enabled():
+            return True
+    except Exception:
+        pass
+    try:
+        return effective_mode("server") != SessionMode.PRIVACY
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 #  NullAuditLog  (privacy mode - no-op)
 # ---------------------------------------------------------------------------
