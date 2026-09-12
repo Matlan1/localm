@@ -152,6 +152,17 @@ def test_launch_cmd_still_targets_the_managed_venv_and_port(home, monkeypatch):
     assert f"--port {mc.MANAGED_COMFY_PORT}" in cmd
 
 
+@pytest.mark.parametrize("config", [{}, {"gpu_split_indices": [0, 1]}])
+def test_launch_cmd_always_disables_comfy_metadata_embedding(home, monkeypatch, config):
+    """With or without a device choice, the managed instance is launched with
+    --disable-metadata, so its save nodes never embed the prompt/workflow into
+    the images, audio and video they write."""
+    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
+    cfg.save_config(config)
+
+    assert "--disable-metadata" in mc.managed_comfy_launch_cmd().split()
+
+
 # --------------------------------------------------------------------------- #
 #  A user's OWN ComfyUI: the child env must ORDER, not MASK.                   #
 # --------------------------------------------------------------------------- #

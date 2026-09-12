@@ -312,6 +312,12 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     user's own launch command is expected to be (see ensure_comfy's shlex/cmd
     handling).
 
+    Always passes ``--disable-metadata``, so the managed instance's save nodes
+    embed no workflow/prompt metadata into the images, audio and video they
+    write. A user-provided ComfyUI is launched with the user's own command and
+    may embed it; the media generators strip it from the fetched copy either
+    way.
+
     Names a PREFERRED GPU via ``--default-device`` when the user configured a
     split or a main GPU, so the swap gate (which reads COMBINED free VRAM across
     the split) and the actual loader agree on which card the work lands on.
@@ -336,7 +342,7 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     """
     paths = managed_comfy_paths()
     cmd = (f'"{paths.venv_python}" "{paths.main_py}" '
-           f'--listen 127.0.0.1 --port {MANAGED_COMFY_PORT}')
+           f'--listen 127.0.0.1 --port {MANAGED_COMFY_PORT} --disable-metadata')
     from localm.discover import resolve_preferred_device
     device = resolve_preferred_device(config)
     if device is not None:

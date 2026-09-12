@@ -18,6 +18,10 @@ Covered:
     clears history and returns a loud WARNING instead of leaking silently.
   * generate_image / generate_music end-to-end with delete_outputs=True contain;
     by default they keep ComfyUI's copy.
+  * generate_music / generate_video strip the workflow (prompt, lyrics) that
+    ComfyUI's SaveAudio / SaveVideo embed as container metadata from the copy
+    localm saves, and warn loudly when the fetched file is a container the
+    strip does not handle.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import pytest
 from localm.image_gen import comfy
 from localm.media.comfy_client import _comfy_output_root
 from localm.music_gen import comfy as music_comfy
+from localm.video_gen import comfy as video_comfy
 
 # A non-routable RFC5737 (TEST-NET-1) address, so nothing here can dial a real
 # host from this machine or CI.
@@ -63,6 +68,23 @@ def _minimal_png() -> bytes:
             + chunk(b"IDAT", idat) + chunk(b"IEND", b""))
 
 
+_MEDIA_FIXTURES = Path(__file__).parent / "fixtures" / "media"
+_EMBEDDED_PROMPT_MARKER = b"SECRET-LYRICS-MARKER-7Q4M"
+
+
+def _stub_media_bytes(output_kind: str) -> bytes:
+    """What the stub's save node writes for an output kind: a real PNG, or the
+    committed FLAC / MP4 fixture carrying an embedded workflow (with
+    _EMBEDDED_PROMPT_MARKER in its lyrics) the way ComfyUI embeds it."""
+    if output_kind == "images":
+        return _minimal_png()
+    if output_kind == "audio":
+        return (_MEDIA_FIXTURES / "prompt.flac").read_bytes()
+    if output_kind in ("videos", "gifs"):
+        return (_MEDIA_FIXTURES / "prompt.mp4").read_bytes()
+    return b"FAKEMEDIADATA"
+
+
 class _ComfyStub(HTTPServer):
     """Minimal stand-in for the ComfyUI HTTP API used by the generators."""
 
@@ -75,6 +97,7 @@ class _ComfyStub(HTTPServer):
         self.fail_history_clear = False  # force POST /history to fail
         self.output_kind = "images"    # "images" | "audio" | gifs ...
         self.file_ext = ".png"
+        self.media_bytes = None        # override what the save node writes
         self._counter = 0
 
     @property
@@ -133,10 +156,12 @@ class _Handler(BaseHTTPRequestHandler):
             pid = f"pid-{s._counter}"
             fn = f"ComfyUI_{s._counter:05d}_{s.file_ext}"
             s.output_dir.mkdir(parents=True, exist_ok=True)
-            # Images get real PNG bytes so the strip path runs as in production;
-            # audio (music tests) is not PNG-stripped, so placeholder bytes are fine.
-            media = _minimal_png() if s.output_kind == "images" else b"FAKEMEDIADATA"
-            (s.output_dir / fn).write_bytes(media)
+            # Real container bytes for every kind, so each generator's metadata
+            # strip runs as in production: a PNG for images, and the PyAV-written
+            # FLAC / MP4 fixtures (embedded prompt included) for audio / videos.
+            (s.output_dir / fn).write_bytes(
+                s.media_bytes if s.media_bytes is not None
+                else _stub_media_bytes(s.output_kind))
             s.history[pid] = {"9": {s.output_kind: [
                 {"filename": fn, "subfolder": "", "type": "output"}]}}
             return self._json(200, {"prompt_id": pid})
@@ -629,3 +654,76 @@ def test_generate_music_contains_via_env_dir(stub, tmp_path, monkeypatch):
     assert list(stub.output_dir.glob("ComfyUI_*")) == []   # ComfyUI copy gone
     assert stub.history_deleted                            # history cleared
     assert "WARNING" not in msg
+
+
+# --------------------------------------------------------------------------- #
+#  The saved track / clip carries none of the prompt ComfyUI embedded in it    #
+# --------------------------------------------------------------------------- #
+
+def test_generate_music_strips_the_embedded_lyrics_from_the_saved_track(
+        stub, tmp_path, monkeypatch):
+    monkeypatch.setattr(music_comfy, "workflow_path",
+                        lambda: music_comfy._WORKFLOW_PATH)
+    stub.output_kind = "audio"
+    stub.file_ext = ".flac"
+    out = tmp_path / "saved" / "track.flac"
+
+    ok, msg = music_comfy.generate_music(
+        "lofi, chill", out, api_url=stub.base_url, lyrics="[verse] la la",
+        duration_seconds=5.0, write_sidecar=False,
+    )
+
+    assert ok, msg
+    comfy_copy = next(stub.output_dir.glob("ComfyUI_*"))
+    assert _EMBEDDED_PROMPT_MARKER in comfy_copy.read_bytes()   # what was fetched
+    saved = out.read_bytes()
+    assert saved[:4] == b"fLaC"
+    assert len(saved) == comfy_copy.stat().st_size
+    assert _EMBEDDED_PROMPT_MARKER not in saved
+    assert b"prompt" not in saved
+    assert "WARNING" not in msg
+    assert not out.with_suffix(".flac.json").exists()           # no sidecar either
+
+
+def test_generate_video_strips_the_embedded_prompt_from_the_saved_clip(
+        stub, tmp_path, monkeypatch):
+    monkeypatch.setattr(video_comfy, "workflow_path",
+                        lambda: video_comfy._WORKFLOW_PATH)
+    stub.output_kind = "videos"
+    stub.file_ext = ".mp4"
+    out = tmp_path / "saved" / "clip.mp4"
+
+    ok, msg = video_comfy.generate_video(
+        "a fox in the snow", out, api_url=stub.base_url,
+        seconds=1.0, write_sidecar=False,
+    )
+
+    assert ok, msg
+    comfy_copy = next(stub.output_dir.glob("ComfyUI_*"))
+    assert _EMBEDDED_PROMPT_MARKER in comfy_copy.read_bytes()   # what was fetched
+    saved = out.read_bytes()
+    assert saved[4:8] == b"ftyp"
+    assert len(saved) == comfy_copy.stat().st_size
+    assert _EMBEDDED_PROMPT_MARKER not in saved
+    assert b"prompt" not in saved
+    assert "WARNING" not in msg
+    assert not out.with_suffix(".mp4.json").exists()            # no sidecar either
+
+
+def test_generate_music_warns_when_the_track_is_not_a_container_it_can_strip(
+        stub, tmp_path, monkeypatch):
+    monkeypatch.setattr(music_comfy, "workflow_path",
+                        lambda: music_comfy._WORKFLOW_PATH)
+    stub.output_kind = "audio"
+    stub.file_ext = ".flac"
+    stub.media_bytes = b"FAKEMEDIADATA"
+    out = tmp_path / "saved" / "track.flac"
+
+    ok, msg = music_comfy.generate_music(
+        "lofi, chill", out, api_url=stub.base_url,
+        duration_seconds=5.0, write_sidecar=False,
+    )
+
+    assert ok, msg
+    assert out.read_bytes() == b"FAKEMEDIADATA"                 # bytes untouched
+    assert "WARNING: generated file is not FLAC or MP3" in msg   # loud, not silent

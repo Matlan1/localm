@@ -55,6 +55,7 @@ from localm.media.comfy_client import (
     SUBMIT_NO_ID,
     SUBMIT_URL_ERROR,
 )
+from localm.media.output_metadata import strip_audio_metadata
 
 # ace_workflow.json is the committed generic template (public ACE-Step
 # checkpoint).  An ace_workflow_local.json next to it (gitignored) overrides it
@@ -418,6 +419,10 @@ def generate_music(
     except Exception as e:
         return False, f"Failed to download generated track from ComfyUI: {e}"
 
+    # Strip the container metadata ComfyUI's SaveAudio embeds (the submitted
+    # workflow: tags AND lyrics); a strip that did not run returns a warning.
+    strip_warning = strip_audio_metadata(output_path)
+
     # Output containment (opt-in): clear ComfyUI's history entry and delete its
     # own copy of the track ONLY when delete_outputs is set (user opted in, or
     # privacy mode forces no-trace). ACE-Step's SaveAudio node writes into
@@ -432,14 +437,16 @@ def generate_music(
     )
 
     # Sidecar JSON - everything needed to reproduce or tweak the track.
-    # Skipped entirely in privacy mode (write_sidecar=False), so the prompt and
-    # lyrics never touch disk. The console warning is still reported in the
-    # message either way; only the sidecar's record of it is suppressed.
+    # Skipped entirely in privacy mode (write_sidecar=False): with the container
+    # metadata stripped above, the sidecar is the only file that records the
+    # tags and lyrics. The console warning is still reported in the message
+    # either way; only the sidecar's record of it is suppressed.
+    output_warning = "\n".join(w for w in (strip_warning, contain_warning) if w)
     if not write_sidecar:
         return True, _with_warning(
             _with_warning(
                 f"Track saved to {output_path} "
-                f"(seed {seed} - reuse it to reproduce)", contain_warning),
+                f"(seed {seed} - reuse it to reproduce)", output_warning),
             comfy_console_msg)
     try:
         sidecar = {
@@ -463,12 +470,12 @@ def generate_music(
     except OSError as e:
         # Note the sidecar miss in the message instead of failing; the track
         # itself is already saved.
-        contain_warning = _with_warning(
+        output_warning = _with_warning(
             "the reproducibility sidecar could not be saved "
-            f"({e}); the track itself was saved.", contain_warning)
+            f"({e}); the track itself was saved.", output_warning)
 
     return True, _with_warning(
         _with_warning(
             f"Track saved to {output_path} "
-            f"(seed {seed} - reuse it to reproduce)", contain_warning),
+            f"(seed {seed} - reuse it to reproduce)", output_warning),
         comfy_console_msg)
