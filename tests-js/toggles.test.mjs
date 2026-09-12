@@ -8,6 +8,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
 
+// Lets the boot's /v1/config round trip land, so the session mode is
+// confirmed and localStorage writes are no longer held back.
+const drain = async (n = 12) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+};
+
 function appWithChat() {
   const { window } = loadApp();
   runScript(window, "window.chatState = chat;");
@@ -43,8 +49,10 @@ test("R34: speak-aloud is restored from the saved choice", () => {
   assert.equal(w.document.getElementById("p-speak").checked, true);
 });
 
-test("R34: toggling persists the choice across loads", () => {
+test("R34: toggling persists the choice across loads", async () => {
   const w = appWithChat();
+  await drain();
+  assert.equal(w.chatState.modeKnown, true, "the boot's /v1/config answer landed");
   const web = w.document.getElementById("p-web");
   web.checked = true;
   web.dispatchEvent(new w.Event("change"));

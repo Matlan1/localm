@@ -2301,25 +2301,12 @@ def _hang_restart_action(app) -> None:
 
 
 def _diagnostics_allowed() -> bool:
-    """Whether localm may write an AUTOMATIC diagnostic trace right now. True in
-    the log/full session modes; in privacy mode ONLY when the user opted into
-    keeping diagnostics (config ``keep_diagnostics``). Fail-safe to privacy (no
-    trace) when the mode/config cannot be resolved, matching audit.py's default.
-
-    Gates the hang watchdog and the crash-restart breadcrumbs so privacy mode's
-    "nothing written automatically" promise holds, while the toggle lets a tester
-    keep the diagnostics a bug report needs."""
-    try:
-        from localm.config import keep_diagnostics_enabled
-        if keep_diagnostics_enabled():
-            return True
-    except Exception:
-        pass
-    try:
-        from localm.audit import SessionMode, effective_mode
-        return effective_mode("server") != SessionMode.PRIVACY
-    except Exception:
-        return False   # fail toward privacy: write no automatic trace
+    """Whether localm may write an AUTOMATIC diagnostic trace right now: the
+    log/full session modes, or privacy mode with ``keep_diagnostics`` on.
+    Alias of :func:`localm.audit.diagnostics_allowed`, which also gates the
+    crash guard's trace file and crash report (bugreport.py)."""
+    from localm.audit import diagnostics_allowed
+    return diagnostics_allowed()
 
 
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.

@@ -232,6 +232,7 @@ class TestEndToEndClassificationInReport:
     report."""
 
     def test_mid_native_op_cutoff_reaches_the_filed_report(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
         home = tmp_path
         run = home / "run"
@@ -251,6 +252,7 @@ class TestEndToEndClassificationInReport:
         assert "llama_co" in captured["reason"]
 
     def test_clean_looking_tail_with_no_evidence_stays_honest(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
         home = tmp_path
         run = home / "run"
