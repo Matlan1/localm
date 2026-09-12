@@ -13,8 +13,10 @@ from fastapi.testclient import TestClient
 from localm.plugins.gui.web import attach_gui
 
 
-@pytest.fixture
-def share_client(tmp_path, monkeypatch):
+def _make_client(tmp_path, monkeypatch, mode):
+    """A GUI app in a hermetic home, in session mode *mode*. Every disk-inbox
+    test pins "log": the default test mode is privacy, which stages in memory."""
+    monkeypatch.setenv("LOCALM_MODE", mode)
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -32,6 +34,16 @@ def share_client(tmp_path, monkeypatch):
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=switch_model, active_model=lambda: "m")
     return TestClient(app)
+
+
+@pytest.fixture
+def share_client(tmp_path, monkeypatch):
+    return _make_client(tmp_path, monkeypatch, "log")
+
+
+@pytest.fixture
+def privacy_client(tmp_path, monkeypatch):
+    return _make_client(tmp_path, monkeypatch, "privacy")
 
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
@@ -194,23 +206,7 @@ def _mk_keys(*scope_lists):
 
 @pytest.fixture
 def share_app(tmp_path, monkeypatch):
-    home = tmp_path / ".localm"
-    monkeypatch.setenv("LOCALM_HOME", str(home))
-    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-    import localm.config as _cfg
-    monkeypatch.setattr(_cfg, "HOME_DIR", home)
-    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
-    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
-    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
-    app = FastAPI()
-
-    async def switch_model(name):
-        pass
-
-    attach_gui(app, self_url="http://127.0.0.1:9/v1",
-               switch_model=switch_model, active_model=lambda: "m")
-    return TestClient(app)
+    return _make_client(tmp_path, monkeypatch, "log")
 
 
 class TestShareInboxOwnership:
@@ -325,3 +321,148 @@ def test_share_clear_logs_the_path_of_a_failed_delete(share_client, monkeypatch,
         share_client.post("/api/share/clear", json={})
     assert any("noisy" in r.getMessage() for r in caplog.records), \
         f"the failed path was not logged: {[r.getMessage() for r in caplog.records]}"
+
+
+# --------------------------------------------------------------------------- #
+#  Privacy mode: the share is staged in memory, never on disk.                 #
+# --------------------------------------------------------------------------- #
+
+def _disk_entries(tmp_path):
+    inbox = tmp_path / ".localm" / "share_inbox"
+    return sorted(p.name for p in inbox.glob("*__*")) if inbox.exists() else []
+
+
+def test_privacy_share_never_touches_the_disk_inbox(privacy_client, tmp_path):
+    r = privacy_client.post(
+        "/share-target",
+        files={"files": ("photo.png", _PNG, "image/png")},
+        data={"text": "a note from the phone"},
+        follow_redirects=False)
+    # Assert on the data first: nothing staged on disk.
+    assert _disk_entries(tmp_path) == [], "privacy mode wrote the share to disk"
+    assert not (tmp_path / ".localm" / "share_inbox").exists(), \
+        "privacy mode must not even create the inbox directory"
+    assert r.status_code == 303
+    assert r.headers["location"] == "/?shared=2"
+
+    items = privacy_client.get("/api/share/pending").json()["items"]
+    assert sorted(i["name"] for i in items) == ["photo.png", "shared.txt"]
+    png = next(i for i in items if i["name"] == "photo.png")
+    assert png["data_uri"].startswith("data:image/png;base64,")
+    assert _disk_entries(tmp_path) == []
+
+    body = privacy_client.post("/api/share/clear", json={"ids": [i["id"] for i in items]}).json()
+    assert body == {"removed": 2, "failed": 0}
+    assert privacy_client.get("/api/share/pending").json()["items"] == []
+
+
+def test_privacy_share_clear_all_without_ids(privacy_client, tmp_path):
+    for nm in ("a.png", "b.png"):
+        privacy_client.post("/share-target", files={"files": (nm, _PNG, "image/png")})
+    assert len(privacy_client.get("/api/share/pending").json()["items"]) == 2
+    assert privacy_client.post("/api/share/clear", json={}).json()["removed"] == 2
+    assert privacy_client.get("/api/share/pending").json()["items"] == []
+    assert _disk_entries(tmp_path) == []
+
+
+def test_privacy_share_refuses_a_bad_name_before_staging_anything(privacy_client, tmp_path):
+    r = _post_raw(privacy_client, "ok.png", "photo:stream.png")
+    assert r.status_code == 400
+    assert privacy_client.get("/api/share/pending").json()["items"] == []
+    assert _disk_entries(tmp_path) == []
+
+
+def test_log_mode_share_still_stages_on_disk(share_client, tmp_path):
+    """The control for the mode split: outside privacy mode the inbox is the
+    disk directory, exactly as before."""
+    share_client.post("/share-target", files={"files": ("photo.png", _PNG, "image/png")})
+    entries = _disk_entries(tmp_path)
+    assert len(entries) == 1 and entries[0].endswith("__photo.png")
+
+
+class TestPrivacyShareInboxOwnership:
+    def test_a_key_cannot_read_or_clear_b_keys_share_in_memory(self, privacy_client, tmp_path):
+        a, b = _mk_keys(["chat"], ["chat"])
+        r = privacy_client.post("/share-target", headers=_h(a),
+                                files={"files": ("photo.png", _PNG, "image/png")},
+                                follow_redirects=False)
+        assert r.status_code == 303
+        assert _disk_entries(tmp_path) == []
+
+        assert privacy_client.get("/api/share/pending", headers=_h(b)).json()["items"] == []
+        assert privacy_client.post("/api/share/clear", headers=_h(b),
+                                   json={}).json()["removed"] == 0
+        a_items = privacy_client.get("/api/share/pending", headers=_h(a)).json()["items"]
+        assert len(a_items) == 1 and a_items[0]["name"] == "photo.png"
+
+        fid = a_items[0]["id"]
+        assert privacy_client.post("/api/share/clear", headers=_h(b),
+                                   json={"ids": [fid]}).json()["removed"] == 0
+        assert len(privacy_client.get("/api/share/pending", headers=_h(a)).json()["items"]) == 1
+
+        assert privacy_client.post("/api/share/clear", headers=_h(a),
+                                   json={"ids": [fid]}).json()["removed"] == 1
+        assert privacy_client.get("/api/share/pending", headers=_h(a)).json()["items"] == []
+
+
+# --------------------------------------------------------------------------- #
+#  Expiry: an entry the app never ingested does not live forever.              #
+# --------------------------------------------------------------------------- #
+
+def _age(path, minutes):
+    import os, time
+    t = time.time() - minutes * 60
+    os.utime(path, (t, t))
+
+
+def test_disk_entry_older_than_the_ttl_is_swept_on_access(share_client, tmp_path):
+    for nm in ("old.png", "fresh.png"):
+        share_client.post("/share-target", files={"files": (nm, _PNG, "image/png")})
+    inbox = tmp_path / ".localm" / "share_inbox"
+    old = next(p for p in inbox.glob("*__old.png"))
+    fresh = next(p for p in inbox.glob("*__fresh.png"))
+    _age(old, 16)
+    _age(fresh, 14)
+
+    items = share_client.get("/api/share/pending").json()["items"]
+
+    assert not old.exists(), "a 16 minute old entry must be removed on access"
+    assert fresh.exists(), "a 14 minute old entry is still within the TTL"
+    assert [i["name"] for i in items] == ["fresh.png"]
+
+
+def test_stale_disk_entries_are_swept_at_startup(tmp_path, monkeypatch, caplog):
+    import logging
+    inbox = tmp_path / ".localm" / "share_inbox"
+    inbox.mkdir(parents=True)
+    stale = inbox / "deadbeef__-__old.png"
+    stale.write_bytes(_PNG)
+    _age(stale, 16)
+    recent = inbox / "cafef00d__-__recent.png"
+    recent.write_bytes(_PNG)
+
+    with caplog.at_level(logging.INFO, logger="localm"):
+        client = _make_client(tmp_path, monkeypatch, "log")   # register() runs the sweep
+
+    assert not stale.exists(), "a stale entry from an earlier run must be swept at startup"
+    assert recent.exists()
+    assert any("deadbeef" in r.getMessage() for r in caplog.records)
+    assert not any("old.png" in r.getMessage() for r in caplog.records), \
+        "the sweep log names the entry id, never the shared file name"
+    assert [i["name"] for i in client.get("/api/share/pending").json()["items"]] == ["recent.png"]
+
+
+def test_memory_entry_older_than_the_ttl_is_dropped_on_access(privacy_client):
+    import time
+    privacy_client.post("/share-target", files={"files": ("old.png", _PNG, "image/png")})
+    privacy_client.post("/share-target", files={"files": ("fresh.png", _PNG, "image/png")})
+    store = privacy_client.app.state.share_memory_inbox
+    assert len(store) == 2
+    old = next(k for k in store if k.endswith("__old.png"))
+    data, _exp = store[old]
+    store[old] = (data, time.time() - 1)
+
+    items = privacy_client.get("/api/share/pending").json()["items"]
+
+    assert [i["name"] for i in items] == ["fresh.png"]
+    assert old not in store

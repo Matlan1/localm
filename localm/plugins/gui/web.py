@@ -495,13 +495,17 @@ class FsRenameRequest(BaseModel):
 _SHARE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 
 
-def _share_inbox() -> Path:
-    """Transient inbox for files shared INTO localm from a phone (PWA share
-    target). Lives under the data dir; entries are deleted once the app ingests
-    them, so it never accumulates."""
+def _share_inbox(create: bool = True) -> Path:
+    """The on-disk inbox for files shared INTO localm from a phone (PWA share
+    target), under the data dir. Written only outside privacy mode (privacy
+    mode stages shares in memory, see routes/share.py). An entry is deleted
+    once the app ingests it, and any entry older than the share TTL (15
+    minutes) is removed at startup and whenever the inbox is next touched.
+    *create* False returns the path without creating the directory."""
     from localm.config import home_dir
     d = home_dir() / "share_inbox"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
