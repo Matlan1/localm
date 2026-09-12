@@ -144,8 +144,9 @@ _switch_cancel: Optional["threading.Event"] = None
 _gpu_coord: Optional[dict] = None
 
 # The running server's HangAlarm instance (see localm.inference._hang_alarm),
-# None until lifespan startup constructs one and None whenever recovery is
-# disabled (LOCALM_HANG_RECOVERY=off) or the process is under pytest. Read by
+# None until lifespan startup constructs one, None again once that lifespan
+# shuts down, and None whenever recovery is disabled
+# (LOCALM_HANG_RECOVERY=off) or the process is under pytest. Read by
 # switch_engine to trigger the same seamless self-restart the loop-freeze and
 # transport-death detectors use, for a GPU probe still wedged after its own
 # in-request retries.
@@ -3610,6 +3611,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _inference_sem, _inference_sems, _active_model_name, _server_loop
+        global _hang_dump_loop, _hang_alarm_instance
         # Publish the running loop so off-loop worker threads (the jobs runner) can
         # route a shared-engine unload back onto it via run_coroutine_threadsafe -
         # see unload_one_model and the _server_loop comment above.
@@ -3761,7 +3763,6 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
                 _mode_now = _ha.recovery_mode()
                 if _mode_now != "off":
-                    global _hang_dump_loop, _hang_alarm_instance
                     _hang_dump_loop = asyncio.get_running_loop()
                     hang_alarm = _ha.HangAlarm(
                         heartbeat_gap=lambda: (
@@ -3857,6 +3858,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                     sat_thread.join(timeout=2)
             if hang_alarm is not None:
                 hang_alarm.stop()
+                # Retire this lifespan's alarm as the process's restart authority.
+                # See test_lifespan_shutdown_clears_the_hang_alarm_instance.
+                if _hang_alarm_instance is hang_alarm:
+                    _hang_alarm_instance = None
+                    _hang_dump_loop = None
             if gpu_task is not None:
                 gpu_task.cancel()
                 try:

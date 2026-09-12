@@ -309,6 +309,39 @@ def test_heartbeat_starts_in_privacy_mode_on_default_config(tmp_path, monkeypatc
         "explicit keep_diagnostics opt-in - it writes an automatic disk trace")
 
 
+def test_lifespan_shutdown_clears_the_hang_alarm_instance(tmp_path, monkeypatch):
+    """The lifespan that installs a real HangAlarm must retire it on shutdown:
+    http_server._hang_alarm_instance (and _hang_dump_loop) must be None again
+    once the TestClient context exits. A stopped alarm left in that global
+    still honours trigger_restart(), which re-execs the whole process the next
+    time switch_engine exhausts its inconclusive-probe retries."""
+    from localm.inference import http_server as hs
+    from localm.inference._hang_alarm import HangAlarm
+
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_HANG_RECOVERY", raising=False)
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(hs, "_hang_alarm_instance", None)
+    monkeypatch.setattr(hs, "_hang_dump_loop", None)
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+
+    with TestClient(create_app(None)):
+        installed = hs._hang_alarm_instance
+    assert isinstance(installed, HangAlarm), (
+        "the lifespan did not install a real HangAlarm, so this test could not "
+        f"exercise the shutdown path at all: {installed!r}")
+    assert hs._hang_alarm_instance is None, (
+        "lifespan shutdown left the stopped HangAlarm published as the process "
+        f"restart authority: {hs._hang_alarm_instance!r}")
+    assert hs._hang_dump_loop is None, (
+        f"lifespan shutdown left the closed loop published: {hs._hang_dump_loop!r}")
+
+
 # --------------------------------------------------------------------------- #
 # _loop_lag_seconds() reports a scheduling-delay figure, not the raw time since
 # the last heartbeat tick (which saws 0..1s on a healthy loop depending on where
