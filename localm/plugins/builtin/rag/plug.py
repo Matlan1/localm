@@ -444,19 +444,38 @@ def _self_services(request: Request):
             _make_self_describe_image(self_url, active_model))
 
 
-def _log_progress(text: str) -> None:
-    """Route an indexing progress line to the debug logger.
+# The two embedding-degrade lines store.py emits (add_paths/add_uploads).
+_DEGRADE_UNAVAILABLE = "embeddings unavailable"
+_DEGRADE_NON_FINITE = "embeddings had non-finite"
 
-    The line that matters is the "embeddings unavailable ... indexing
-    lexical-only" degrade warning (store.py add_paths/add_uploads): a doc that
-    fell back to lexical-only otherwise looks like an ordinary success. The
-    logger surfaces it - printed when ``--debug`` is on, and always captured in
-    the always-on in-memory activity ring buffer (see debuglog.py) so it shows
-    up in a bug report even without --debug.
+
+def _log_progress(text: str) -> None:
+    """Route an indexing progress line to the logger.
+
+    The two embedding-degrade lines ("embeddings unavailable ..." and
+    "embeddings had non-finite ...") are logged at WARNING under the
+    ``rag index degrade:`` prefix, so they reach the always-on activity ring
+    and a bug report; the non-finite form is logged without the document's
+    name. Every other line names a document or path, so it is logged at
+    DEBUG only: verbatim under the ``rag index:`` prefix when
+    ``debuglog.debug_content_enabled()`` allows content in the debug log
+    (the run-log digest withholds that prefix), otherwise as a fixed line
+    with the identity withheld. DEBUG never enters the activity ring.
 
     Paired with the job stream push rather than replaced by it - see
     ``_job_progress``."""
-    logger.warning("rag index: %s", text)
+    if text.startswith(_DEGRADE_UNAVAILABLE):
+        logger.warning("rag index degrade: %s", text)
+        return
+    if text.startswith(_DEGRADE_NON_FINITE):
+        logger.warning("rag index degrade: embeddings had non-finite (NaN/inf) "
+                       "values for a document - indexing it lexical-only")
+        return
+    from localm.debuglog import debug_content_enabled
+    if debug_content_enabled():
+        logger.debug("rag index: %s", text)
+    else:
+        logger.debug("rag index progress (document identity withheld)")
 
 
 def _job_progress(job):
@@ -464,8 +483,9 @@ def _job_progress(job):
     stream AND to the log, and any call that also carries done/total (reembed's
     batch loop) additionally reports it through ``Job.progress``.
 
-    Both, not either. The stream is what a watching client sees live, but it is
-    ephemeral, per-job and bounded; the log is what a bug report carries.
+    Both, not either. The stream is what a watching client sees live, with the
+    document names, but it is ephemeral, per-job and bounded; the log carries
+    the embedding-degrade warnings a bug report needs (see ``_log_progress``).
 
     The structured branch reuses the SAME ``done``/``total``/``unit`` the text was
     already formatted from - store.py builds both from one set of numbers in a

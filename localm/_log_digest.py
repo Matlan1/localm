@@ -94,6 +94,11 @@ _CONTENT_MARKER_RES = (
     # message(s)):\n%s" - the count is on the header line, the messages ride
     # in as continuation lines below it.
     re.compile(r"assembled chat prompt \(\d+ message\(s\)\):\s*$"),
+    # rag/plug.py's _log_progress(): the content-bearing branch logs
+    # "rag index: <line>" with the indexed document's name or path; the
+    # WARNING degrade lines use the prefix "rag index degrade: ", which this
+    # does not match.
+    re.compile(r"\brag index: "),
 )
 
 
