@@ -172,7 +172,8 @@ async def video(req: VideoRequest, request: Request):
             s, req.prompt, out_path,
             self_url=self_url,
             instance_token=instance_token,
-            # privacy mode: the prompt never touches disk
+            # privacy mode: no sidecar (the clip's own metadata is stripped
+            # in every mode)
             write_sidecar=not is_privacy,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             input_image=input_image,

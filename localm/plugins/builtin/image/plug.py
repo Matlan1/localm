@@ -180,7 +180,8 @@ async def imagine(req: ImagineRequest, request: Request):
             s, req.prompt, out_path,
             self_url=self_url,
             instance_token=instance_token,
-            # privacy mode: the prompt never touches disk
+            # privacy mode: no sidecar (the image's own metadata is stripped
+            # in every mode)
             write_sidecar=not is_privacy,
             guidance=req.guidance,
             cfg=req.cfg,

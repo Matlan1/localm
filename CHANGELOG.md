@@ -41,6 +41,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   inference for five minutes.** The chat memory inlet and the `/api/memory/*`
   routes now queue behind the embedding model one at a time, the same way the
   dedicated embeddings endpoint already does.
+- **Generated music and video no longer carry your prompt inside the file.**
+  ComfyUI embeds the whole workflow it ran, prompt included (for music, the
+  lyrics too), as metadata in the FLAC and MP4 it writes, so sharing a track or
+  clip shared the prompt with it, in privacy mode as well. Images were already
+  cleaned; audio and video now are too, and localm's own ComfyUI is started
+  with metadata embedding turned off. If a custom workflow produces a file
+  localm cannot clean (an Opus or WebM, for example), the result says so.
 - **The native llama.cpp runtime now loads on a fresh Linux install that has no
   system OpenMP library.** Upstream's `cpu`/`vulkan` Linux builds need
   `libgomp.so.1` but do not ship it; `setup.sh`/`localm setup-llama` now

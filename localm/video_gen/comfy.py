@@ -68,6 +68,7 @@ from localm.media.comfy_client import (
     SUBMIT_NO_ID,
     SUBMIT_URL_ERROR,
 )
+from localm.media.output_metadata import strip_video_metadata
 
 # wan_workflow.json is the committed generic template (public Wan 2.2 5B
 # stack).  Drop a wan_workflow_local.json next to it (gitignored) to use
@@ -344,8 +345,9 @@ def generate_video(
         Optional ``Callable[[str], None]`` for status lines.
     write_sidecar
         Write a ``<output>.json`` sidecar with the prompt and settings so
-        the clip can be reproduced.  Pass False in privacy mode - the
-        prompt then never touches disk.
+        the clip can be reproduced.  Pass False in privacy mode. The clip's
+        own container metadata is stripped either way, so the sidecar is the
+        only file on disk that records the prompt.
 
     Returns
     -------
@@ -520,6 +522,10 @@ def generate_video(
     except Exception as e:
         return False, f"Failed to download generated clip from ComfyUI: {e}"
 
+    # Strip the container metadata ComfyUI's SaveVideo embeds (the submitted
+    # workflow, prompt included); a strip that did not run returns a warning.
+    strip_warning = strip_video_metadata(output_path)
+
     # Enforce output containment: clear ComfyUI's history entry (the
     # Queue/History + gallery view) and delete ComfyUI's own on-disk copy of
     # the clip plus any uploaded img2video source. Returns a warning when the
@@ -538,15 +544,17 @@ def generate_video(
     )
 
     # Sidecar JSON - everything needed to reproduce or tweak the clip.
-    # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
-    # never touches disk. The console warning (a real quality issue with THIS
-    # clip) is still reported in the message either way - only the sidecar's
-    # record of it is what privacy mode suppresses.
+    # Skipped entirely in privacy mode (write_sidecar=False): with the container
+    # metadata stripped above, the sidecar is the only file that records the
+    # prompt. The console warning (a real quality issue with THIS clip) is still
+    # reported in the message either way - only the sidecar's record of it is
+    # what privacy mode suppresses.
+    output_warning = "\n".join(w for w in (strip_warning, contain_warning) if w)
     if not write_sidecar:
         return True, _with_warning(
             _with_warning(
                 f"Clip saved to {output_path} "
-                f"(seed {seed} - reuse it to reproduce)", contain_warning),
+                f"(seed {seed} - reuse it to reproduce)", output_warning),
             comfy_console_msg)
 
     sidecar_warning = _write_video_sidecar(
@@ -570,6 +578,6 @@ def generate_video(
         _with_warning(
             _with_warning(
                 f"Clip saved to {output_path} "
-                f"(seed {seed} - reuse it to reproduce)", contain_warning),
+                f"(seed {seed} - reuse it to reproduce)", output_warning),
             comfy_console_msg),
         sidecar_warning)
