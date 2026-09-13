@@ -526,6 +526,20 @@ def _archive_log():
     return _dbg
 
 
+def _archive_identity_debug(msg: str, *args) -> None:
+    """Log an archive-member or document identity detail at DEBUG.
+
+    Verbatim, under the ``rag extract identity:`` prefix, when
+    ``debuglog.debug_content_enabled()`` allows content in the debug log;
+    otherwise a fixed line with the identity withheld. DEBUG records never
+    enter the always-on activity ring (INFO and above only)."""
+    from localm.debuglog import debug_content_enabled
+    if debug_content_enabled():
+        _archive_log().debug("rag extract identity: " + msg, *args)
+    else:
+        _archive_log().debug("rag extract identity withheld")
+
+
 def _archive_budget() -> int:
     """How many chars an archive extractor may accumulate before stopping. Leaves
     room for the truncation note so it survives the outer MAX_TEXT_CHARS cap."""
@@ -575,13 +589,20 @@ def _extract_zip(data: bytes, filename: str,
                     if inflated >= MAX_ARCHIVE_INFLATED_BYTES:
                         truncated = True
                         _archive_log().warning(
-                            "rag: %s exceeded the whole-archive decompressed-size "
-                            "budget (%d MB); stopped early and truncated the text",
-                            filename, MAX_ARCHIVE_INFLATED_BYTES // 1_000_000)
+                            "rag: an archive exceeded the whole-archive "
+                            "decompressed-size budget (%d MB); stopped early "
+                            "and truncated the text",
+                            MAX_ARCHIVE_INFLATED_BYTES // 1_000_000)
+                        _archive_identity_debug(
+                            "%s exceeded the whole-archive decompressed-size budget",
+                            filename)
                         break
                     if len(member_data) > limit:
-                        _archive_log().warning("rag: archive member %s in %s exceeds the "
-                                               "decompressed-size limit; skipped", member, filename)
+                        _archive_log().warning("rag: an archive member exceeded the "
+                                               "decompressed-size limit; skipped")
+                        _archive_identity_debug(
+                            "archive member %s in %s exceeds the decompressed-size limit",
+                            member, filename)
                         continue
                     inferred = sniff_format(member_data, member)
                     # Skip nested archives (zip / tar-family) to avoid loops.
@@ -670,13 +691,20 @@ def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 
                 if inflated >= MAX_ARCHIVE_INFLATED_BYTES:
                     truncated = True
                     _archive_log().warning(
-                        "rag: %s exceeded the whole-archive decompressed-size "
-                        "budget (%d MB); stopped early and truncated the text",
-                        filename, MAX_ARCHIVE_INFLATED_BYTES // 1_000_000)
+                        "rag: an archive exceeded the whole-archive "
+                        "decompressed-size budget (%d MB); stopped early "
+                        "and truncated the text",
+                        MAX_ARCHIVE_INFLATED_BYTES // 1_000_000)
+                    _archive_identity_debug(
+                        "%s exceeded the whole-archive decompressed-size budget",
+                        filename)
                     break
                 if len(member_data) > limit:
-                    _archive_log().warning("rag: archive member %s in %s exceeds the "
-                                           "decompressed-size limit; skipped", member.name, filename)
+                    _archive_log().warning("rag: an archive member exceeded the "
+                                           "decompressed-size limit; skipped")
+                    _archive_identity_debug(
+                        "archive member %s in %s exceeds the decompressed-size limit",
+                        member.name, filename)
                     continue
                 inferred = sniff_format(member_data, member.name)
                 if inferred and inferred != ".zip" and inferred not in _TAR_LIKE_SUFFIXES:
@@ -859,8 +887,8 @@ def _extract_pdf(data: bytes, filename: str) -> str:
                 pages.append(entry)
                 total_chars += len(entry) + 2   # + the "\n\n" join separator
         if note:
-            _archive_log().warning(
-                "rag: %s PDF extraction stopped early (%s)", filename, note)
+            _archive_log().warning("rag: PDF extraction stopped early (%s)", note)
+            _archive_identity_debug("%s PDF extraction stopped early (%s)", filename, note)
         return _join_pdf(pages, note)
     except Exception as e:
         raise ExtractError(f"Cannot extract text from {filename}: {e}")

@@ -99,6 +99,10 @@ _CONTENT_MARKER_RES = (
     # WARNING degrade lines use the prefix "rag index degrade: ", which this
     # does not match.
     re.compile(r"\brag index: "),
+    # rag/extract.py's _archive_identity_debug(): the content-bearing branch
+    # logs "rag extract identity: <document or archive member detail>"; the
+    # WARNING sibling for the same event never uses this prefix.
+    re.compile(r"\brag extract identity: "),
 )
 
 
