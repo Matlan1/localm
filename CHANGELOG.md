@@ -46,6 +46,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   indexed document in the activity log that a bug report carries.** The
   document names still show live in the indexing progress; only the
   embedding-degrade warnings reach the log.
+- **Extracting an oversized archive member, an oversized zip/tar bundle, or a
+  PDF that was cut short during knowledge-base indexing no longer records the
+  document's or archive member's name in the activity log that a bug report
+  carries.** The warning that a safety limit was hit still shows; only the
+  name is withheld.
 - **Loading a model on some AMD GPUs could repeatedly report the VRAM check as
   inconclusive, trigger an automatic server restart, and occasionally fail to
   come back up on the same port.** Once the GPU runtime is loaded, torch can no
