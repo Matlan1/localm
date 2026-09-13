@@ -100,7 +100,9 @@ test("LM-DA-047: the old hand-written `if (!chat.privacy) localStorage.setItem` 
 
 test("LM-DA-047: _writeScoped (the one localStorage setter for scoped keys) is " +
      "called only from lsSetScoped and settlePendingScopedWrites", () => {
-  const chat = read("app/chat.js").replace(/\/\/[^\n]*/g, "");
+  // Line endings normalised: a checkout may hold CRLF, and the function-body
+  // slice below keys on a bare "\n}\n".
+  const chat = read("app/chat.js").replace(/\r\n/g, "\n").replace(/\/\/[^\n]*/g, "");
   const calls = [...chat.matchAll(/(?<!function )_writeScoped\(/g)].length;
   const allowed = ["export function lsSetScoped(", "export function settlePendingScopedWrites("]
     .map((sig) => {
