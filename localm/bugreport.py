@@ -1670,11 +1670,22 @@ def install_global_handlers(force: bool = False) -> bool:
 #  console window) cannot be caught in-process at all. (1) is closed with an   #
 #  asyncio exception handler and (2) with a crash marker: the server arms a    #
 #  marker on start and disarms it on a clean shutdown, so a marker still       #
-#  present on the NEXT start means the previous run died hard, and the report  #
-#  is filed then, with the native traceback faulthandler captured.             #
+#  present on the NEXT start means the previous run died hard. The report is   #
+#  filed then, with the native traceback faulthandler captured, when           #
+#  audit.diagnostics_allowed() holds (log/full mode, or keep_diagnostics on);  #
+#  in privacy mode the trace is never written and the crash is only logged.    #
 # --------------------------------------------------------------------------- #
 
 _crash_trace_fh = None   # kept alive so faulthandler can write to it
+
+
+def _diagnostics_allowed() -> bool:
+    """audit.diagnostics_allowed(), False if it cannot be resolved. Never raises."""
+    try:
+        from localm.audit import diagnostics_allowed
+        return bool(diagnostics_allowed())
+    except Exception:
+        return False
 
 
 def install_asyncio_handler(loop) -> bool:
@@ -1769,14 +1780,18 @@ def _all_crash_markers(d):
 
 def arm_crash_guard(context: Optional[dict] = None, home=None,
                     instance_id: Optional[str] = None) -> bool:
-    """Mark that a server run is in progress and enable faulthandler so a native
-    fault leaves a trace. If the process dies hard the marker survives;
-    check_and_report_prior_crash() reports it on the next start. *instance_id*
-    (``app.state.instance_id``, set by instances.advertise() before this is
-    called) scopes the marker to THIS running instance so a sibling instance
-    sharing the same LOCALM_HOME is never mistaken for a crash - see the module
-    note above. Returns True if armed. Fully guarded - never raises into the
-    caller."""
+    """Mark that a server run is in progress, and when diagnostics are allowed
+    (``audit.diagnostics_allowed()``: the log/full modes, or privacy mode with
+    ``keep_diagnostics`` on) also open the native-fault trace file and enable
+    faulthandler on it. The marker is written in EVERY mode: it is the
+    liveness record the crash-recovery watchdog reads. If the process dies
+    hard the marker survives; check_and_report_prior_crash() reports it on the
+    next start. *instance_id* (``app.state.instance_id``, set by
+    instances.advertise() before this is called) scopes the marker to THIS
+    running instance so a sibling instance sharing the same LOCALM_HOME is
+    never mistaken for a crash - see the module note above. The marker records
+    ``"diagnostics"``, whether a trace was armed for this run. Returns True if
+    armed. Fully guarded - never raises into the caller."""
     global _crash_trace_fh
     import faulthandler
     import json
@@ -1785,29 +1800,33 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
     from localm.debuglog import logger
     try:
         d = _crash_dir(home)
-        _crash_trace_fh = open(_crash_trace_path(d, instance_id), "w", encoding="utf-8")
-        try:
-            faulthandler.enable(file=_crash_trace_fh, all_threads=True)
-            if not faulthandler.is_enabled():
-                # enable() can return without raising yet still not actually be
-                # armed on some platforms/file-object shapes - is_enabled() is
-                # the one call that tells the truth, not "no exception was
-                # raised", so an unarmed faulthandler is warned about rather
-                # than left silent.
+        diagnostics = _diagnostics_allowed()
+        if diagnostics:
+            _crash_trace_fh = open(_crash_trace_path(d, instance_id), "w",
+                                   encoding="utf-8")
+            try:
+                faulthandler.enable(file=_crash_trace_fh, all_threads=True)
+                if not faulthandler.is_enabled():
+                    # enable() can return without raising yet still not actually
+                    # be armed on some platforms/file-object shapes - is_enabled()
+                    # is the one call that tells the truth, not "no exception was
+                    # raised", so an unarmed faulthandler is warned about rather
+                    # than left silent.
+                    logger.warning(
+                        "bugreport: faulthandler.enable() returned without raising "
+                        "but is_enabled() is False - a native crash will produce no "
+                        "trace this run")
+            except Exception as e:
+                # Arming must not fail over this: the crash marker below is still
+                # written, so a hard death is still reported next start, just
+                # without the native traceback. The failure is logged rather than
+                # swallowed, so a later empty trace file is diagnosable.
                 logger.warning(
-                    "bugreport: faulthandler.enable() returned without raising "
-                    "but is_enabled() is False - a native crash will produce no "
-                    "trace this run")
-        except Exception as e:
-            # Arming must not fail over this: the crash marker below is still
-            # written, so a hard death is still reported next start, just
-            # without the native traceback. The failure is logged rather than
-            # swallowed, so a later empty trace file is diagnosable.
-            logger.warning(
-                "bugreport: faulthandler could not attach (%s: %s) - a native "
-                "crash this run will produce no trace", type(e).__name__, e)
+                    "bugreport: faulthandler could not attach (%s: %s) - a native "
+                    "crash this run will produce no trace", type(e).__name__, e)
         _crash_marker_path(d, instance_id).write_text(
-            json.dumps({"pid": os.getpid(), "context": context or {}}),
+            json.dumps({"pid": os.getpid(), "context": context or {},
+                        "diagnostics": diagnostics}),
             encoding="utf-8")
         return True
     except Exception:
@@ -1815,13 +1834,16 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
 
 
 def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
-    """Clean shutdown: drop THIS instance's own marker (never a sibling's) so
-    the next start does not report a crash. *instance_id* must be the SAME id
-    passed to the matching arm_crash_guard() call - see the module note above
-    for why an unscoped delete is unsafe when more than one instance shares a
-    LOCALM_HOME."""
+    """Clean shutdown: drop THIS instance's own marker and its native-fault
+    trace file (never a sibling's) so the next start does not report a crash
+    and no trace is left behind. *instance_id* must be the SAME id passed to
+    the matching arm_crash_guard() call - see the module note above for why an
+    unscoped delete is unsafe when more than one instance shares a LOCALM_HOME.
+    The trace handle is closed before the file is unlinked (an open handle
+    blocks the unlink on Windows)."""
     global _crash_trace_fh
     import faulthandler
+    d = None
     try:
         d = _crash_dir(home)
         _crash_marker_path(d, instance_id).unlink(missing_ok=True)
@@ -1838,6 +1860,13 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
     except Exception:
         # Best-effort: releasing the faulthandler file on shutdown. A failure
         # leaks a file handle until process exit (imminent anyway); never raise.
+        pass
+    try:
+        if d is not None:
+            _crash_trace_path(d, instance_id).unlink(missing_ok=True)
+    except Exception:
+        # Best-effort: a trace file that cannot be removed is reported and
+        # deleted by the next start's check_and_report_prior_crash().
         pass
 
 
@@ -1985,9 +2014,15 @@ def _classify_prior_death(*, native_trace: str, hang_trace: str,
 
 def _report_one_crash_marker(d, marker, home, interactive: bool):
     """Report *marker* as a crash IF its recorded pid is no longer alive, then
-    clear it. Returns the report path, or None if this marker was skipped (a
-    live sibling instance) or nothing could be filed. Never raises."""
+    clear it (the marker and its trace file). The report is filed only when
+    diagnostics are allowed now (``audit.diagnostics_allowed()``) and the
+    marker does not record ``"diagnostics": false`` (a run armed in privacy
+    mode); a marker without the key is reported like any other. A dead-pid
+    marker that is not reported is still cleared, and logged at INFO. Returns
+    the report path, or None if this marker was skipped (a live sibling
+    instance, or not reported) or nothing could be filed. Never raises."""
     import json
+    from localm.debuglog import logger
     from localm.instances import pid_alive
     try:
         if not marker.exists():
@@ -2014,10 +2049,11 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
             # No/unparseable pid recorded: cannot confirm liveness, so treat it
             # like the corrupt-marker case above - report rather than drop it.
             pass
+        report = _diagnostics_allowed() and info.get("diagnostics") is not False
         trace = ""
         tp = _trace_path_for_marker(d, marker)
         try:
-            if tp.exists():
+            if report and tp.exists():
                 trace = tp.read_text(encoding="utf-8").strip()
         except Exception:
             # Best-effort: the native traceback file is optional extra context.
@@ -2032,15 +2068,17 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
             # report we are about to file over a failed unlink.
             pass
         # Delete the trace WITH its marker, now that its content (if any) has
-        # been folded into ctx below. Nothing else ever removes a
-        # server-crash-trace.<instance_id>.txt, so without this run/ accumulates
-        # one per instance that has EVER armed, permanently. Best-effort, same
-        # as the marker unlink above - a failure here must not block or
-        # duplicate the report.
+        # been folded into ctx below. Best-effort, same as the marker unlink
+        # above - a failure here must not block or duplicate the report.
         try:
             tp.unlink(missing_ok=True)
         except Exception:
             pass
+        if not report:
+            logger.info(
+                "bugreport: prior hard crash detected (%s); not reported: "
+                "privacy mode", marker.name)
+            return None
         ctx = {"prior_run": info}
         if trace:
             ctx["native_trace"] = trace[:4000]

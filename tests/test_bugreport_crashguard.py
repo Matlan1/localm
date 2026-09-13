@@ -11,6 +11,7 @@ from localm import bugreport, instances
 
 
 def test_crash_marker_arm_check_disarm(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "log")
     calls = []
     monkeypatch.setattr(bugreport, "report_failure",
                         lambda **k: calls.append(k) or str(tmp_path / "r.md"))
@@ -55,6 +56,7 @@ def test_faulthandler_enable_exception_is_logged_not_silent(tmp_path, monkeypatc
         raise OSError("fd is not a real file on this platform")
 
     monkeypatch.setattr(faulthandler, "enable", _boom)
+    monkeypatch.setenv("LOCALM_MODE", "log")
     home = str(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger="localm"):
@@ -75,6 +77,7 @@ def test_faulthandler_silently_not_enabled_is_also_logged(tmp_path, monkeypatch,
 
     monkeypatch.setattr(faulthandler, "enable", lambda *a, **k: None)
     monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+    monkeypatch.setenv("LOCALM_MODE", "log")
     home = str(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger="localm"):
@@ -84,10 +87,11 @@ def test_faulthandler_silently_not_enabled_is_also_logged(tmp_path, monkeypatch,
     assert any("faulthandler" in r.getMessage() for r in warnings)
 
 
-def test_faulthandler_successful_attach_logs_no_warning(tmp_path, caplog):
+def test_faulthandler_successful_attach_logs_no_warning(tmp_path, monkeypatch, caplog):
     """The negative case: a genuinely successful attach on this real box (no
     mocking of faulthandler itself) must NOT spam a warning - only a real
     attach failure should."""
+    monkeypatch.setenv("LOCALM_MODE", "log")
     home = str(tmp_path)
     with caplog.at_level(logging.WARNING, logger="localm"):
         assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
@@ -170,6 +174,7 @@ def test_disarm_only_clears_its_own_marker_never_a_siblings(tmp_path):
 
 def test_genuine_crash_still_detected_while_a_sibling_stays_alive(
         tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "log")
     home = str(tmp_path)
     run = tmp_path / "run"
     alive_pid, dead_pid = 11111, 22222
@@ -196,6 +201,7 @@ def test_genuine_crash_still_detected_while_a_sibling_stays_alive(
 # --------------------------------------------------------------------------- #
 
 def test_report_one_crash_marker_deletes_the_trace_file_too(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "log")
     monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
     home = str(tmp_path)
     run = tmp_path / "run"
@@ -219,6 +225,7 @@ def test_report_one_crash_marker_deletes_the_trace_file_too(tmp_path, monkeypatc
 def test_report_one_crash_marker_survives_a_missing_trace_file(tmp_path, monkeypatch):
     """No trace at all (window-close/OS-kill leave none) must not be treated
     as a cleanup failure - the report still files normally."""
+    monkeypatch.setenv("LOCALM_MODE", "log")
     monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
     home = str(tmp_path)
     run = tmp_path / "run"
@@ -257,6 +264,143 @@ def test_a_live_siblings_trace_file_is_left_untouched(tmp_path, monkeypatch):
     assert calls == []
     assert (run / "server-crash.inst-z.marker").exists()
     assert trace.exists(), "a live sibling's trace file must not be deleted"
+
+
+# --------------------------------------------------------------------------- #
+#  Privacy mode: the marker (watchdog liveness) is always written, the trace   #
+#  file and the crash report only when diagnostics are allowed.                #
+# --------------------------------------------------------------------------- #
+
+def _pin_mode(monkeypatch, mode, keep=False):
+    """Resolve the session mode from config (never the LOCALM_MODE env), the
+    same shape tests/test_hang_watchdog.py uses for _diagnostics_allowed."""
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"mode": mode, "keep_diagnostics": keep})
+
+
+def _crash_files(run, instance_id):
+    return (run / f"server-crash.{instance_id}.marker",
+            run / f"server-crash-trace.{instance_id}.txt")
+
+
+def test_privacy_arm_writes_the_marker_but_no_trace_file(tmp_path, monkeypatch):
+    _pin_mode(monkeypatch, "privacy")
+    run = tmp_path / "run"
+    marker, trace = _crash_files(run, "inst-p")
+
+    assert bugreport.arm_crash_guard(context={"port": 1}, home=str(tmp_path),
+                                     instance_id="inst-p") is True
+    try:
+        assert marker.exists(), "the marker is the watchdog's liveness record"
+        assert not trace.exists(), "privacy mode must not write a native-fault trace"
+        assert sorted(p.name for p in run.glob("server-crash-trace.*")) == []
+        info = json.loads(marker.read_text(encoding="utf-8"))
+        assert info["diagnostics"] is False
+        assert info["pid"]
+    finally:
+        bugreport.disarm_crash_guard(home=str(tmp_path), instance_id="inst-p")
+    assert not marker.exists()
+
+
+def test_privacy_prior_crash_is_cleared_but_not_reported(tmp_path, monkeypatch, caplog):
+    _pin_mode(monkeypatch, "privacy")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-q", 4242)
+    marker, trace = _crash_files(run, "inst-q")
+    trace.write_text("Windows fatal exception: access violation\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
+
+    with caplog.at_level(logging.INFO, logger="localm"):
+        result = bugreport.check_and_report_prior_crash(home=str(tmp_path))
+
+    assert calls == [], "privacy mode must not file a crash report"
+    assert result is None
+    assert not marker.exists()
+    assert not trace.exists()
+    assert list((tmp_path / "bug-reports").glob("bug-*.md")) == []
+    assert any("prior hard crash detected" in r.getMessage()
+               and "not reported" in r.getMessage() for r in caplog.records)
+
+
+def test_privacy_prior_crash_files_no_report_through_the_real_reporter(
+        tmp_path, monkeypatch):
+    """No recorder on report_failure: the real save path must leave
+    <home>/bug-reports empty."""
+    _pin_mode(monkeypatch, "privacy")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-r", 4242)
+
+    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+    assert list((tmp_path / "bug-reports").glob("bug-*.md")) == []
+    assert not (run / "server-crash.inst-r.marker").exists()
+
+
+def test_log_mode_prior_crash_is_reported_once(tmp_path, monkeypatch):
+    """The control for the gate: the same marker IS reported outside privacy."""
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-q", 4242)
+    calls = []
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
+
+    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is not None
+    assert len(calls) == 1
+    assert not (run / "server-crash.inst-q.marker").exists()
+
+
+def test_keep_diagnostics_toggle_reports_in_privacy_mode(tmp_path, monkeypatch):
+    _pin_mode(monkeypatch, "privacy", keep=True)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-k", 4242)
+    calls = []
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
+
+    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is not None
+    assert len(calls) == 1
+
+
+def test_a_marker_armed_in_privacy_mode_is_not_reported_later_in_log_mode(
+        tmp_path, monkeypatch):
+    """The run that died was a privacy run (its marker says diagnostics were
+    off), so switching to log mode before the next start files nothing."""
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    run = tmp_path / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    marker = run / "server-crash.inst-v.marker"
+    marker.write_text(json.dumps({"pid": 4242, "context": {}, "diagnostics": False}),
+                      encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
+
+    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+    assert calls == []
+    assert not marker.exists()
+
+
+def test_disarm_removes_this_instances_trace_file(tmp_path, monkeypatch):
+    _pin_mode(monkeypatch, "log")
+    run = tmp_path / "run"
+    marker, trace = _crash_files(run, "inst-d")
+
+    assert bugreport.arm_crash_guard(home=str(tmp_path), instance_id="inst-d") is True
+    assert marker.exists() and trace.exists()
+    bugreport.disarm_crash_guard(home=str(tmp_path), instance_id="inst-d")
+
+    assert not marker.exists()
+    assert not trace.exists(), "a clean exit must not leave the trace file behind"
+    assert sorted(p.name for p in run.glob("server-crash*")) == []
 
 
 def test_asyncio_handler_reports_task_exception(monkeypatch):

@@ -209,6 +209,7 @@ class TestCheckAndReportAttachesContent:
         # trace. pid_alive is mocked so the pid-liveness check treats this
         # marker as a genuine crash.
         from localm import instances
+        monkeypatch.setenv("LOCALM_MODE", "log")
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
         run = tmp_path / "run"
         run.mkdir(parents=True, exist_ok=True)
