@@ -28,6 +28,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **Loading a model on some AMD GPUs could repeatedly report the VRAM check as
+  inconclusive, trigger an automatic server restart, and occasionally fail to
+  come back up on the same port.** Once the GPU runtime is loaded, torch can no
+  longer be asked directly for VRAM info; the pre-load VRAM check now also
+  trusts the same GPU usage reading the fit badges already rely on for a single
+  adapter, so it succeeds instead of exhausting its retries. A restart resuming
+  on its own port also now tolerates the brief moment the previous process
+  takes to release it, instead of failing immediately.
 - **Several chat turns arriving together with memory recall on and the embedding
   model not yet loaded, on a card too small for both models, could stall all
   inference for five minutes.** The chat memory inlet and the `/api/memory/*`

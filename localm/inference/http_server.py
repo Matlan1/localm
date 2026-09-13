@@ -2261,8 +2261,9 @@ def _hang_restart_action(app) -> None:
     gets a hard window, after which the re-exec happens anyway with only the
     steps that cannot block: the lock-free embedder-worker release (an
     orphaned worker survives execv holding VRAM), the crash-marker disarm (so
-    the next boot does not misreport this recovery as a crash), and a log
-    flush."""
+    the next boot does not misreport this recovery as a crash), a log flush,
+    and the same fd non-inheritance marking (_mark_fds_noninheritable) the
+    graceful path uses before its own os.execv."""
     port = getattr(app.state, "instance_port", None)
     instance_id = getattr(app.state, "instance_id", None)
 
@@ -2296,6 +2297,7 @@ def _hang_restart_action(app) -> None:
         flush_log_handlers()
     except Exception:
         pass
+    _mark_fds_noninheritable()
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
     os.execv(sys.executable, _execv_argv(_restart_argv(port)))
 
@@ -3283,6 +3285,33 @@ def _execv_argv(argv: list) -> list:
     return [subprocess.list2cmdline([a]) for a in argv]
 
 
+def _mark_fds_noninheritable() -> None:
+    """Mark every open fd >= 3 non-inheritable. Call this immediately before
+    ANY os.execv() in this module - os.execv does NOT close fds on its own,
+    so an inherited listening socket or log FileHandler survives into the
+    re-exec'd image otherwise (POSIX O_CLOEXEC / Windows handle inheritance
+    is what actually drops them at exec). Best-effort per fd; stdin/stdout/
+    stderr (0-2) are left inheritable so the new process keeps the console.
+    Shared by _do_restart's graceful path and _hang_restart_action's forced
+    fallback - see test_hang_restart_forced_fallback_marks_fds_non_inheritable."""
+    try:
+        max_fd = 4096
+        try:
+            import resource
+            soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            if isinstance(soft, int) and 0 < soft < max_fd:
+                max_fd = soft
+        except Exception:
+            pass  # no resource module (Windows) - the 4096 default is plenty
+        for fd in range(3, max_fd):
+            try:
+                os.set_inheritable(fd, False)
+            except OSError:
+                pass  # not an open fd
+    except Exception:
+        pass  # never let fd hygiene block the restart
+
+
 def _do_restart(*, update_watchdog: Optional[dict] = None,
                 port: Optional[int] = None,
                 instance_id: Optional[str] = None) -> None:
@@ -3485,28 +3514,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     import os
     import sys
 
-    # No inheritable fd (the debug-log FileHandler, the uvicorn listening
-    # socket) must survive into the re-exec'd image, where the freshly loaded
-    # ggml/llama runtime warns "Failed to close child file descriptors at 3/4".
-    # os.execv does NOT close fds; marking them non-inheritable drops them at exec
-    # (POSIX O_CLOEXEC / Windows handle inheritance). Best-effort per fd; stdin/
-    # stdout/stderr (0-2) are left inheritable so the new process keeps the console.
-    try:
-        max_fd = 4096
-        try:
-            import resource
-            soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
-            if isinstance(soft, int) and 0 < soft < max_fd:
-                max_fd = soft
-        except Exception:
-            pass  # no resource module (Windows) - the 4096 default is plenty
-        for fd in range(3, max_fd):
-            try:
-                os.set_inheritable(fd, False)
-            except OSError:
-                pass  # not an open fd
-    except Exception:
-        pass  # never let fd hygiene block the restart
+    _mark_fds_noninheritable()
 
     if update_watchdog:
         # Spawned as the LAST step before execv: the watchdog's own timeout

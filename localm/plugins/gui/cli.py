@@ -113,6 +113,26 @@ def _engine_load_failed_hint(api_mode: bool) -> str:
             "the Models page.[/yellow]")
 
 
+# How long a self-restart resume (LOCALM_RESTART_IN_PROGRESS) waits for its
+# own just-held port to free before giving up - see
+# _restart_port_grace_window() below and config.pick_port's
+# restart_grace_window.
+_RESTART_PORT_GRACE_WINDOW_S = 4.0
+
+
+def _restart_port_grace_window() -> float:
+    """The restart_grace_window to pass to config.pick_port(): 0.0 (no
+    grace) for an ordinary launch, _RESTART_PORT_GRACE_WINDOW_S when this
+    process was re-exec'd by a server restart (LOCALM_RESTART_IN_PROGRESS).
+
+    Reads the flag non-destructively (os.environ.get, never .pop):
+    _should_auto_open_browser below is the flag's consumer and must still
+    see it once the server has actually started."""
+    import os
+    return (_RESTART_PORT_GRACE_WINDOW_S
+           if os.environ.get("LOCALM_RESTART_IN_PROGRESS") else 0.0)
+
+
 def _should_auto_open_browser(no_browser: bool) -> bool:
     """Whether THIS process's own startup should auto-open a browser tab.
 
@@ -791,7 +811,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     try:
         # A wildcard is not itself connectable, so probe the loopback it covers
         # (self_connect_host maps 0.0.0.0 -> 127.0.0.1 and :: -> ::1).
-        chosen_port, was_busy = pick_port(port, host=self_connect_host(host))
+        chosen_port, was_busy = pick_port(
+            port, host=self_connect_host(host),
+            restart_grace_window=_restart_port_grace_window())
     except PortInUseError as exc:
         # An explicit --port is honored or refused, never silently relocated onto
         # another (often the shared default) port. Only the default auto-bumps.
