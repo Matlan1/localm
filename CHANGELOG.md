@@ -40,7 +40,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Sharing a photo or text into localm from a phone in privacy mode no longer
   stages the shared content on disk.** It is held in memory until the app
   ingests it. Outside privacy mode, a share the app never picked up is now
-  removed after 15 minutes instead of staying on disk indefinitely.
+  removed after 15 minutes instead of staying on disk indefinitely. A single
+  share larger than the upload limit is refused.
 - **Knowledge-base indexing no longer records the names and paths of every
   indexed document in the activity log that a bug report carries.** The
   document names still show live in the indexing progress; only the
