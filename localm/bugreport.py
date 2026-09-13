@@ -1677,6 +1677,7 @@ def install_global_handlers(force: bool = False) -> bool:
 # --------------------------------------------------------------------------- #
 
 _crash_trace_fh = None   # kept alive so faulthandler can write to it
+_crash_trace_instance_id = None   # which instance_id currently owns _crash_trace_fh
 
 
 def _diagnostics_allowed() -> bool:
@@ -1792,7 +1793,7 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
     never mistaken for a crash - see the module note above. The marker records
     ``"diagnostics"``, whether a trace was armed for this run. Returns True if
     armed. Fully guarded - never raises into the caller."""
-    global _crash_trace_fh
+    global _crash_trace_fh, _crash_trace_instance_id
     import faulthandler
     import json
     import os
@@ -1804,6 +1805,7 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
         if diagnostics:
             _crash_trace_fh = open(_crash_trace_path(d, instance_id), "w",
                                    encoding="utf-8")
+            _crash_trace_instance_id = instance_id
             try:
                 faulthandler.enable(file=_crash_trace_fh, all_threads=True)
                 if not faulthandler.is_enabled():
@@ -1840,8 +1842,11 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
     the matching arm_crash_guard() call - see the module note above for why an
     unscoped delete is unsafe when more than one instance shares a LOCALM_HOME.
     The trace handle is closed before the file is unlinked (an open handle
-    blocks the unlink on Windows)."""
-    global _crash_trace_fh
+    blocks the unlink on Windows). The module-level faulthandler/trace handle
+    is only released when *instance_id* matches the instance that armed it in
+    THIS process; a sibling's own marker and trace file are still removed
+    regardless, but this process's own live trace stays open and attached."""
+    global _crash_trace_fh, _crash_trace_instance_id
     import faulthandler
     d = None
     try:
@@ -1853,10 +1858,11 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
         # not unsafe. disarm must not raise during shutdown.
         pass
     try:
-        if _crash_trace_fh is not None:
+        if _crash_trace_fh is not None and _crash_trace_instance_id == instance_id:
             faulthandler.disable()
             _crash_trace_fh.close()
             _crash_trace_fh = None
+            _crash_trace_instance_id = None
     except Exception:
         # Best-effort: releasing the faulthandler file on shutdown. A failure
         # leaks a file handle until process exit (imminent anyway); never raise.
