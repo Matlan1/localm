@@ -403,6 +403,43 @@ def test_disarm_removes_this_instances_trace_file(tmp_path, monkeypatch):
     assert sorted(p.name for p in run.glob("server-crash*")) == []
 
 
+def test_disarm_of_a_sibling_does_not_release_this_instances_faulthandler(
+        tmp_path, monkeypatch):
+    """Stopping a SIBLING instance (disarm_crash_guard called for a different
+    instance_id than the one armed in this process) must remove only the
+    sibling's own marker - never this process's own faulthandler attachment
+    or its still-live trace file."""
+    import faulthandler
+
+    _pin_mode(monkeypatch, "log")
+    home = str(tmp_path)
+    run = tmp_path / "run"
+    my_trace = run / "server-crash-trace.me.txt"
+
+    assert bugreport.arm_crash_guard(home=home, instance_id="me") is True
+    assert faulthandler.is_enabled()
+    assert bugreport._crash_trace_fh is not None
+    assert my_trace.exists()
+
+    _write_marker(run, "sibling", 99999)
+    sibling_marker = run / "server-crash.sibling.marker"
+    assert sibling_marker.exists()
+
+    bugreport.disarm_crash_guard(home=home, instance_id="sibling")
+
+    assert not sibling_marker.exists(), "the sibling's own marker is removed"
+    assert faulthandler.is_enabled(), (
+        "disarming a sibling must not release this instance's own faulthandler")
+    assert bugreport._crash_trace_fh is not None
+    assert my_trace.exists(), "this instance's own trace file must survive"
+
+    # This instance's own clean shutdown still releases everything.
+    bugreport.disarm_crash_guard(home=home, instance_id="me")
+    assert not faulthandler.is_enabled()
+    assert bugreport._crash_trace_fh is None
+    assert not my_trace.exists()
+
+
 def test_asyncio_handler_reports_task_exception(monkeypatch):
     calls = []
     monkeypatch.setattr(bugreport, "report_failure", lambda **k: calls.append(k))

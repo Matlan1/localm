@@ -28,6 +28,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **Stopping another running localm instance (Settings > other running
+  instances, or `localm stop`) no longer disables this server's own
+  native-crash reporting.** Only the stopped instance's own crash marker and
+  trace file are cleared; a later hard crash of the still-running server is
+  now captured normally instead of producing no trace.
 - **Privacy mode no longer leaves a crash-trace file behind after every server
   run, and a hard crash in privacy mode no longer files a bug report on the
   next start.** Crash auto-recovery still works in every mode; the native
