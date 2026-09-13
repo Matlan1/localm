@@ -38,6 +38,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next start.** Crash auto-recovery still works in every mode; the native
   trace and the report are written only outside privacy mode, or with "keep
   diagnostics" on.
+- **Loading a chat, embedding, or vision model in privacy mode still wrote a
+  native crash-trace file for that model's isolated worker process on every
+  load.** It is now written only outside privacy mode, or with "keep
+  diagnostics" on, matching the server's own crash guard above.
 - **A privacy-mode chat prompt could reach the browser's local storage when
   the server was still starting up (or briefly unreachable) at page load.** The
   web UI now writes nothing to local storage until the server has confirmed

@@ -355,13 +355,17 @@ class EmbedderRunner:
         # trace nothing consumed); drop it before the new child claims the name,
         # so a stale trace can never be reported against the new process.
         self._discard_native_crash_trace()
-        from localm.debuglog import child_crash_trace_path, logger
-        try:
-            self._crash_trace_path = child_crash_trace_path("embedder-worker")
-        except OSError as e:
-            # An unwritable logs dir costs the trace, not the worker.
-            logger.warning("could not allocate a native-fault trace file (%s); "
-                           "a native fault in this worker will not be traced", e)
+        from localm.audit import diagnostics_allowed
+        if diagnostics_allowed():
+            from localm.debuglog import child_crash_trace_path, logger
+            try:
+                self._crash_trace_path = child_crash_trace_path("embedder-worker")
+            except OSError as e:
+                # An unwritable logs dir costs the trace, not the worker.
+                logger.warning("could not allocate a native-fault trace file (%s); "
+                               "a native fault in this worker will not be traced", e)
+                self._crash_trace_path = None
+        else:
             self._crash_trace_path = None
         self._proc = ctx.Process(
             target=_runner_main,
