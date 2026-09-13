@@ -144,8 +144,9 @@ Features handled for you:
   starts ComfyUI itself and waits for it to come up.
 - **Reproducibility**: the seed is applied to every sampler node and
   reported back; a JSON sidecar with prompt, seed, guidance, and encoder
-  settings is written next to each output image (skipped in privacy mode,
-  so the prompt never touches disk).
+  settings is written next to each output image (skipped in privacy mode;
+  the image's own PNG metadata is stripped in every mode, so the sidecar is
+  the only file that records the prompt).
 - **img2img**: pass an input image and a denoise strength; output
   dimensions match the input.
 - Optional negative prompts, LoRA injection, and encoder overrides are

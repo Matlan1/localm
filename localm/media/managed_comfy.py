@@ -312,11 +312,12 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     user's own launch command is expected to be (see ensure_comfy's shlex/cmd
     handling).
 
-    Always passes ``--disable-metadata``, so the managed instance's save nodes
-    embed no workflow/prompt metadata into the images, audio and video they
-    write. A user-provided ComfyUI is launched with the user's own command and
-    may embed it; the media generators strip it from the fetched copy either
-    way.
+    Always passes ``--disable-metadata``, so the managed instance's SaveImage,
+    SaveAudio and SaveVideo nodes embed no workflow/prompt metadata into the
+    files they write (SaveWEBM ignores the flag and always embeds it). A
+    user-provided ComfyUI is launched with the user's own command and may embed
+    it; the media generators strip it from the fetched copy either way, and
+    say so when the container is one they cannot strip.
 
     Names a PREFERRED GPU via ``--default-device`` when the user configured a
     split or a main GPU, so the swap gate (which reads COMBINED free VRAM across

@@ -5,10 +5,11 @@ In-place metadata removal for generated audio and video files.
 ComfyUI's save nodes embed the full submitted workflow (the prompt, and for
 ACE-Step the lyrics) as container metadata unless it was launched with
 ``--disable-metadata``: a FLAC VORBIS_COMMENT block, an MP3 ID3v2 tag, or an
-MP4 ``udta``/``meta`` box. ``strip_audio_metadata`` and ``strip_video_metadata``
-overwrite those regions with same-size padding structures. The file length and
-the position of every other byte are unchanged: MP4 ``stco``/``co64`` chunk
-offsets and FLAC seek points are absolute and must stay valid.
+MP4 ``udta``/``meta`` box under ``moov``/``trak``. ``strip_audio_metadata`` and
+``strip_video_metadata`` overwrite those regions with same-size padding
+structures. The file length and the position of every other byte are
+unchanged: MP4 ``stco``/``co64`` chunk offsets and FLAC seek points are
+absolute and must stay valid.
 
 Pure Python, no dependencies. Both entry points return "" on a clean strip and
 a WARNING string when the container is not one they recognise or the rewrite
@@ -32,6 +33,13 @@ _FLAC_STRIP_TYPES = frozenset({_FLAC_APPLICATION, _FLAC_VORBIS_COMMENT, _FLAC_PI
 # 8.11) and the containers they are nested in.
 _MP4_STRIP_BOXES = frozenset({b"udta", b"meta"})
 _MP4_CONTAINER_BOXES = frozenset({b"moov", b"trak"})
+_MP4_MAX_DEPTH = 8
+# HEIF-family major brands (ISO/IEC 23008-12): still images whose file-level
+# ``meta`` box is the item table, not user metadata.
+_HEIF_BRANDS = frozenset({
+    b"avif", b"avis", b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx",
+    b"hevm", b"hevs", b"mif1", b"msf1", b"miaf",
+})
 
 _ID3V2_FOOTER_FLAG = 0x10
 _ID3V1_TAG_SIZE = 128
@@ -97,10 +105,14 @@ def _neutralise_mp3(f: BinaryIO, size: int) -> None:
             _zero(f, _ID3V1_TAG_SIZE - 3)
 
 
-def _neutralise_mp4_boxes(f: BinaryIO, start: int, end: int) -> None:
-    """Walk the boxes in [start, end), turning every ``udta``/``meta`` box into
-    a zeroed ``free`` box of the same size and descending into ``moov`` and
-    ``trak``. Raises ValueError on a box that overruns its parent."""
+def _neutralise_mp4_boxes(f: BinaryIO, start: int, end: int, depth: int) -> None:
+    """Walk the boxes in [start, end), turning every ``udta``/``meta`` box nested
+    inside ``moov``/``trak`` (``depth`` >= 1) into a zeroed ``free`` box of the
+    same size. File-level boxes (``depth`` 0) are only descended into, never
+    rewritten. Raises ValueError on a box that overruns its parent or on nesting
+    deeper than ``_MP4_MAX_DEPTH``."""
+    if depth > _MP4_MAX_DEPTH:
+        raise ValueError(f"MP4 boxes nested deeper than {_MP4_MAX_DEPTH} levels")
     pos = start
     while pos + 8 <= end:
         f.seek(pos)
@@ -120,18 +132,18 @@ def _neutralise_mp4_boxes(f: BinaryIO, start: int, end: int) -> None:
             box_size = end - pos
         if box_size < header_len or pos + box_size > end:
             raise ValueError(f"malformed MP4 box size for {box_type!r}")
-        if box_type in _MP4_STRIP_BOXES:
+        if depth > 0 and box_type in _MP4_STRIP_BOXES:
             f.seek(pos + 4)
             f.write(b"free")
             f.seek(pos + header_len)
             _zero(f, box_size - header_len)
         elif box_type in _MP4_CONTAINER_BOXES:
-            _neutralise_mp4_boxes(f, pos + header_len, pos + box_size)
+            _neutralise_mp4_boxes(f, pos + header_len, pos + box_size, depth + 1)
         pos += box_size
 
 
 def _neutralise_mp4(f: BinaryIO, size: int) -> None:
-    _neutralise_mp4_boxes(f, 0, size)
+    _neutralise_mp4_boxes(f, 0, size, 0)
 
 
 def _is_flac(head: bytes) -> bool:
@@ -144,7 +156,7 @@ def _is_mp3(head: bytes) -> bool:
 
 
 def _is_mp4(head: bytes) -> bool:
-    return head[4:8] == b"ftyp"
+    return head[4:8] == b"ftyp" and head[8:12] not in _HEIF_BRANDS
 
 
 _Neutraliser = Callable[[BinaryIO, int], None]

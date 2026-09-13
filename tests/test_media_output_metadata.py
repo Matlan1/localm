@@ -77,7 +77,7 @@ def _box(typ: bytes, payload: bytes, large: bool = False) -> bytes:
 
 
 def _synthetic_mp4(*, top_meta: bool = True, trak_udta: bool = True,
-                   large_udta: bool = False) -> bytes:
+                   large_udta: bool = False, brand: bytes = b"isom") -> bytes:
     """ftyp + moov(mvhd, trak(tkhd, udta?), udta) + meta? + mdat, every
     metadata box carrying MARKER."""
     udta = _box(b"udta", _box(b"meta", b"\x00\x00\x00\x00" + MARKER), large=large_udta)
@@ -85,7 +85,7 @@ def _synthetic_mp4(*, top_meta: bool = True, trak_udta: bool = True,
                 + (_box(b"udta", _box(b"name", MARKER)) if trak_udta else b""))
     moov = _box(b"moov", _box(b"mvhd", b"M" * 24) + trak + udta)
     top = _box(b"meta", b"\x00\x00\x00\x00" + _box(b"ilst", MARKER)) if top_meta else b""
-    return (_box(b"ftyp", b"isom\x00\x00\x02\x00isomiso2mp41") + moov + top
+    return (_box(b"ftyp", brand + b"\x00\x00\x02\x00isomiso2mp41") + moov + top
             + _box(b"mdat", b"D" * 40))
 
 
@@ -246,7 +246,7 @@ def test_mp4_udta_becomes_free_and_every_offset_survives(tmp_path):
             assert after[off:off + size] == before[off:off + size], name
 
 
-def test_mp4_track_udta_and_file_level_meta_are_neutralised(tmp_path):
+def test_mp4_track_udta_is_neutralised_and_file_level_meta_is_left_alone(tmp_path):
     data = _synthetic_mp4()
     assert data.count(MARKER) == 3
     path = tmp_path / "clip.mp4"
@@ -255,13 +255,47 @@ def test_mp4_track_udta_and_file_level_meta_are_neutralised(tmp_path):
     assert strip_video_metadata(path) == ""
 
     after = path.read_bytes()
-    assert MARKER not in after
     assert len(after) == len(data)
+    boxes_before = _mp4_boxes(data)
     names = [n for n, _, _ in _mp4_boxes(after)]
     assert names == ["/ftyp", "/moov", "/moov/mvhd", "/moov/trak", "/moov/trak/tkhd",
-                     "/moov/trak/free", "/moov/free", "/free", "/mdat"]
-    mdat_off = next(o for n, o, _ in _mp4_boxes(data) if n == "/mdat")
+                     "/moov/trak/free", "/moov/free", "/meta", "/mdat"]
+    # Both nested metadata boxes are gone; the file-level meta box (the item
+    # table of a HEIF-family file) is byte-identical.
+    meta_off, meta_size = next((o, sz) for n, o, sz in boxes_before if n == "/meta")
+    assert after[meta_off:meta_off + meta_size] == data[meta_off:meta_off + meta_size]
+    assert after.count(MARKER) == 1
+    assert after.find(MARKER) > meta_off
+    mdat_off = next(o for n, o, _ in boxes_before if n == "/mdat")
     assert after[mdat_off:] == data[mdat_off:]
+
+
+def test_mp4_heif_family_brand_is_not_treated_as_video(tmp_path):
+    data = _synthetic_mp4(brand=b"avif")
+    path = tmp_path / "picture.mp4"
+    path.write_bytes(data)
+
+    warning = strip_video_metadata(path)
+
+    assert warning == ("WARNING: generated file is not MP4; video metadata could not "
+                       "be stripped and may still contain the prompt.")
+    assert path.read_bytes() == data
+
+
+def test_mp4_nesting_deeper_than_the_guard_warns_and_writes_nothing(tmp_path):
+    inner = _box(b"udta", MARKER)
+    for _ in range(12):
+        inner = _box(b"trak", inner)
+    data = (_box(b"ftyp", b"isom\x00\x00\x02\x00isom") + _box(b"moov", inner)
+            + _box(b"mdat", b"D" * 8))
+    path = tmp_path / "deep.mp4"
+    path.write_bytes(data)
+
+    warning = strip_video_metadata(path)
+
+    assert warning.startswith("WARNING: could not strip video metadata")
+    assert "nested deeper" in warning
+    assert path.read_bytes() == data
 
 
 def test_mp4_64bit_size_udta_keeps_its_large_header(tmp_path):

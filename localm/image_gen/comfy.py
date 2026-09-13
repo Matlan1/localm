@@ -587,8 +587,9 @@ def generate_image(
         Timeout waiting for ComfyUI to finish (default 10 minutes).
     write_sidecar
         Write a ``<output>.json`` sidecar with the prompt and settings so
-        the image can be reproduced.  Pass False in privacy mode - the
-        prompt then never touches disk.
+        the image can be reproduced.  Pass False in privacy mode. The image's
+        own PNG metadata is stripped either way, so the sidecar is the only
+        file on disk that records the prompt.
 
     Returns
     -------
