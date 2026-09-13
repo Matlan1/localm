@@ -407,6 +407,7 @@ export function lsSetScoped(key, value) {
 }
 
 function _writeScoped(key, value) {
+  if (chat.privacy) return;
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
     // Loud, not silent (AGENTS.md rule 5): a key reaching here that is not in
     // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw

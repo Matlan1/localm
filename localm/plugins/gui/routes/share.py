@@ -31,6 +31,10 @@ from localm.plugins.gui.web import ShareClearRequest
 
 # How long a shared entry waits for the app to ingest it.
 _SHARE_TTL_SECONDS = 15 * 60
+# Ceiling on the bytes one share may stage, and on what the privacy-mode memory
+# inbox holds at once across every owner.
+_SHARE_MAX_BYTES = _web._MAX_UPLOAD_BYTES
+_SHARE_MEMORY_MAX_BYTES = _web._MAX_UPLOAD_BYTES
 
 
 def _memory_inbox(app) -> dict:
@@ -46,6 +50,10 @@ def _memory_inbox(app) -> dict:
 def _privacy_mode() -> bool:
     from localm.audit import SessionMode, effective_mode
     return effective_mode("server") == SessionMode.PRIVACY
+
+
+def _memory_inbox_bytes(store: dict) -> int:
+    return sum(len(data) for data, _exp in store.values())
 
 
 def _sweep_expired(app, inbox: Path, *, startup: bool = False) -> None:
@@ -85,6 +93,9 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/share-target", dependencies=[Depends(_require_auth)],
               include_in_schema=False)
     async def share_target(request: Request):
+        """Stage a share-sheet payload and redirect to the app. 413 when one
+        share exceeds ``_SHARE_MAX_BYTES`` or, in privacy mode, when the memory
+        inbox would exceed ``_SHARE_MEMORY_MAX_BYTES`` with it."""
         import uuid as _uuid
         boundary = _web._multipart_boundary(request.headers.get("content-type", ""))
         if boundary is None:
@@ -116,9 +127,16 @@ def register(app: FastAPI, ctx) -> None:
         shared_text = (fields.get("text") or fields.get("url") or "").strip()
         if shared_text:
             accepted.append(("shared.txt", shared_text[:20000].encode("utf-8")))
+        total = sum(len(data) for _safe, data in accepted)
+        if total > _SHARE_MAX_BYTES:
+            raise HTTPException(413, "Shared content is too large.")
         # Privacy mode stages in memory; the log/full modes stage on disk.
         in_memory = _privacy_mode()
         store = _memory_inbox(app) if in_memory else None
+        if in_memory and _memory_inbox_bytes(store) + total > _SHARE_MEMORY_MAX_BYTES:
+            raise HTTPException(
+                413, "Too much shared content is waiting to be picked up; "
+                     "open the app to ingest it, then share again.")
         inbox = None if in_memory else _web._share_inbox()
         expires_at = time.time() + _SHARE_TTL_SECONDS
         n = 0

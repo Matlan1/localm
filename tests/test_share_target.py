@@ -467,3 +467,54 @@ def test_memory_entry_older_than_the_ttl_is_dropped_on_access(privacy_client):
 
     assert [i["name"] for i in items] == ["fresh.png"]
     assert old not in store
+
+
+# --------------------------------------------------------------------------- #
+#  Size caps: one share is bounded in every mode, and the privacy-mode memory  #
+#  inbox is bounded across every owner.                                        #
+# --------------------------------------------------------------------------- #
+
+def _share_module():
+    import localm.plugins.gui.routes.share as share
+    return share
+
+
+def test_an_oversized_share_is_refused_in_privacy_mode(privacy_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(_share_module(), "_SHARE_MAX_BYTES", len(_PNG) - 1)
+    r = privacy_client.post("/share-target", files={"files": ("big.png", _PNG, "image/png")},
+                            follow_redirects=False)
+    assert privacy_client.get("/api/share/pending").json()["items"] == []
+    assert privacy_client.app.state.share_memory_inbox == {}
+    assert _disk_entries(tmp_path) == []
+    assert r.status_code == 413
+
+
+def test_an_oversized_share_is_refused_in_log_mode(share_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(_share_module(), "_SHARE_MAX_BYTES", len(_PNG) - 1)
+    r = share_client.post("/share-target", files={"files": ("big.png", _PNG, "image/png")},
+                          follow_redirects=False)
+    assert _disk_entries(tmp_path) == []
+    assert r.status_code == 413
+
+
+def test_the_memory_inbox_is_bounded_across_shares(privacy_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(_share_module(), "_SHARE_MEMORY_MAX_BYTES", 2 * len(_PNG))
+    for nm in ("a.png", "b.png"):
+        r = privacy_client.post("/share-target", files={"files": (nm, _PNG, "image/png")},
+                                follow_redirects=False)
+        assert r.status_code == 303
+    r = privacy_client.post("/share-target", files={"files": ("c.png", _PNG, "image/png")},
+                            follow_redirects=False)
+    # The store never exceeds the cap: the third share is refused, the first
+    # two stay staged and are still ingestible.
+    store = privacy_client.app.state.share_memory_inbox
+    assert sum(len(d) for d, _ in store.values()) == 2 * len(_PNG)
+    assert r.status_code == 413
+    items = privacy_client.get("/api/share/pending").json()["items"]
+    assert sorted(i["name"] for i in items) == ["a.png", "b.png"]
+    assert _disk_entries(tmp_path) == []
+    # Ingesting frees the room.
+    assert privacy_client.post("/api/share/clear", json={}).json()["removed"] == 2
+    r = privacy_client.post("/share-target", files={"files": ("c.png", _PNG, "image/png")},
+                            follow_redirects=False)
+    assert r.status_code == 303

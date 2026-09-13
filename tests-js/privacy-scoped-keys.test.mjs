@@ -97,3 +97,26 @@ test("LM-DA-047: the old hand-written `if (!chat.privacy) localStorage.setItem` 
   assert.deepEqual(offenders, [],
     "found the pre-LM-DA-047 inline guard pattern reintroduced in: " + offenders.join(", "));
 });
+
+test("LM-DA-047: _writeScoped (the one localStorage setter for scoped keys) is " +
+     "called only from lsSetScoped and settlePendingScopedWrites", () => {
+  const chat = read("app/chat.js").replace(/\/\/[^\n]*/g, "");
+  const calls = [...chat.matchAll(/(?<!function )_writeScoped\(/g)].length;
+  const allowed = ["export function lsSetScoped(", "export function settlePendingScopedWrites("]
+    .map((sig) => {
+      const start = chat.indexOf(sig);
+      assert.ok(start >= 0, `${sig} not found in app/chat.js`);
+      const body = chat.slice(start, chat.indexOf("\n}\n", start));
+      return [...body.matchAll(/_writeScoped\(/g)].length;
+    })
+    .reduce((a, b) => a + b, 0);
+  assert.equal(allowed, 2, "each of the two gated callers calls _writeScoped exactly once");
+  assert.equal(calls, allowed,
+    "a _writeScoped(...) call outside lsSetScoped/settlePendingScopedWrites bypasses the " +
+    "mode gate - route the write through lsSetScoped instead");
+  for (const file of SCANNED_FILES) {
+    if (file === "app/chat.js") continue;
+    assert.ok(!/_writeScoped\(/.test(read(file).replace(/\/\/[^\n]*/g, "")),
+      `${file} calls _writeScoped directly - use lsSetScoped`);
+  }
+});
