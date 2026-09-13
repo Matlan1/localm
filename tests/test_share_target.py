@@ -410,7 +410,8 @@ class TestPrivacyShareInboxOwnership:
 # --------------------------------------------------------------------------- #
 
 def _age(path, minutes):
-    import os, time
+    import os
+    import time
     t = time.time() - minutes * 60
     os.utime(path, (t, t))
 
