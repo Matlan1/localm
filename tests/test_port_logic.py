@@ -2,6 +2,8 @@
 """Tests for port selection: default range, busy detection, auto-fallback."""
 
 import socket
+import threading
+import time
 
 import pytest
 
@@ -99,3 +101,66 @@ class TestPickPort:
         # but the chosen port must be usable either way
         port, _ = pick_port(None)
         assert not port_in_use(port)
+
+
+class TestPickPortRestartGraceWindow:
+    """restart_grace_window - the self-restart resume path added to tolerate
+    the prior process's listening socket taking a brief moment to release.
+    Must never change the immediate-refusal behaviour when the window is 0
+    (the default, and every TestPickPort case above)."""
+
+    def test_port_freed_partway_through_the_window_succeeds(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+        def _release_soon():
+            time.sleep(0.3)
+            s.close()
+        threading.Thread(target=_release_soon, daemon=True).start()
+
+        chosen, was_busy = pick_port(port, restart_grace_window=2.0)
+
+        assert chosen == port
+        assert was_busy is False
+
+    def test_still_busy_after_the_window_still_refuses(self):
+        # An explicit port is never silently relocated, even inside the grace
+        # window - it is only ever a bounded delay on the same refusal. Uses
+        # its own actively-accepting listener rather than the shared
+        # occupied_port fixture: the grace window polls port_in_use()
+        # repeatedly, and a listener that never drains its accept queue
+        # would otherwise read as free again once the first poll fills it.
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(5)
+        port = s.getsockname()[1]
+        stop = threading.Event()
+
+        def _keep_accepting():
+            s.settimeout(0.05)
+            while not stop.is_set():
+                try:
+                    conn, _ = s.accept()
+                    conn.close()
+                except OSError:
+                    continue
+        t = threading.Thread(target=_keep_accepting, daemon=True)
+        t.start()
+        try:
+            with pytest.raises(PortInUseError) as exc:
+                pick_port(port, restart_grace_window=0.3)
+            assert exc.value.port == port
+        finally:
+            stop.set()
+            t.join(timeout=1.0)
+            s.close()
+
+    def test_zero_window_refuses_immediately(self, occupied_port):
+        # The default (0) must be the same immediate refusal as omitting the
+        # kwarg entirely - no new delay for an ordinary launch.
+        t0 = time.monotonic()
+        with pytest.raises(PortInUseError):
+            pick_port(occupied_port, restart_grace_window=0.0)
+        assert time.monotonic() - t0 < 0.5
