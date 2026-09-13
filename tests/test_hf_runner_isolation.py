@@ -392,8 +392,10 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
         The fault env var is set BEFORE ``_spawn()``: the child reads it from
         its OWN ``os.environ``, a snapshot taken at spawn time, so setting it
-        afterwards never reaches a running child."""
+        afterwards never reaches a running child. LOCALM_MODE=log so the parent
+        arms the crash-trace file this class is about."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        monkeypatch.setenv("LOCALM_MODE", "log")
 
         r = HFRunner()
         r._spawn()
@@ -437,6 +439,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         """The load path builds its own crash message, separately from
         chat_stream's, so it carries its own captured trace."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = HFRunner()
         try:
             with pytest.raises(RuntimeError) as ei:
@@ -503,7 +506,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         assert not trace_path.exists(), (
             f"the worker crash-trace file was left behind at {trace_path}")
 
-    def test_healthy_worker_arms_a_trace_then_reaps_it(self):
+    def test_healthy_worker_arms_a_trace_then_reaps_it(self, monkeypatch):
         """The capture costs one empty file per model load, and a clean shutdown
         reaps it.
 
@@ -512,7 +515,9 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
         The existence check is POLLED, not immediate: ``_spawn()`` returns as
         soon as ``Process.start()`` does, and a spawn-context child then boots a
-        fresh interpreter and runs its imports before it arms anything."""
+        fresh interpreter and runs its imports before it arms anything.
+        LOCALM_MODE=log so the parent arms the trace in the first place."""
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = HFRunner()
         r._spawn()
         trace_path = r._crash_trace_path

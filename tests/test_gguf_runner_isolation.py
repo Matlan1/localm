@@ -358,8 +358,10 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         The fault env var is set BEFORE ``_spawn()``: the child reads
         it from its OWN ``os.environ``, which is a snapshot taken at spawn time, so
         setting it afterwards could never reach the running child (the same trap
-        documented on test_count_tokens_crash_is_contained above)."""
+        documented on test_count_tokens_crash_is_contained above). LOCALM_MODE=log
+        so the parent arms the crash-trace file this class is about."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        monkeypatch.setenv("LOCALM_MODE", "log")
 
         r = ModelRunner()
         r._spawn()
@@ -437,7 +439,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         assert not trace_path.exists(), (
             f"the worker crash-trace file was left behind at {trace_path}")
 
-    def test_healthy_worker_arms_a_trace_then_reaps_it(self):
+    def test_healthy_worker_arms_a_trace_then_reaps_it(self, monkeypatch):
         """The capture costs one empty file per model load, so a clean shutdown
         has to reap it or a long-running server slowly fills its own logs dir.
 
@@ -449,7 +451,9 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         The existence check is POLLED, not immediate. ``_spawn()`` returns as
         soon as ``Process.start()`` does, and a spawn-context child then has to
         boot a fresh interpreter and run its imports before it arms anything, so
-        the poll waits for the file to appear while the worker stays alive."""
+        the poll waits for the file to appear while the worker stays alive.
+        LOCALM_MODE=log so the parent arms the trace in the first place."""
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = ModelRunner()
         r._spawn()
         trace_path = r._crash_trace_path
@@ -482,6 +486,7 @@ class TestSimpleRequestNativeSignalCrashDiagnosticsReachDebugLog:
     def test_native_abort_during_count_tokens_is_reported_with_its_trace(
             self, monkeypatch, caplog):
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = ModelRunner()
         r._spawn()
         try:

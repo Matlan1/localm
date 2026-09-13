@@ -682,8 +682,10 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
         The fault env var is set BEFORE ``_spawn()``: the child reads it from
         its OWN ``os.environ``, a snapshot taken at spawn time, so setting it
-        afterwards could never reach the running child."""
+        afterwards could never reach the running child. LOCALM_MODE=log so the
+        parent arms the crash-trace file this class is about."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = EmbedderRunner()
         r._spawn()   # embed() assumes a prior spawn_and_load(); spawn directly
                       # so "embed" is the first command the child dispatches.
@@ -727,6 +729,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         the one a user hits first and it reaches ``_wait`` by a different route
         (spawn_and_load), so it gets its own proof."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = EmbedderRunner()
         try:
             with pytest.raises(RuntimeError) as ei:
@@ -772,7 +775,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         assert not trace_path.exists(), (
             f"the worker crash-trace file was left behind at {trace_path}")
 
-    def test_healthy_worker_arms_a_trace_then_reaps_it(self):
+    def test_healthy_worker_arms_a_trace_then_reaps_it(self, monkeypatch):
         """The capture costs one empty file per model load, and a clean
         shutdown reaps it.
 
@@ -784,7 +787,8 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         soon as ``Process.start()`` does, and a spawn-context child then has to
         boot a fresh interpreter and run its imports before it arms anything - so
         an immediate check races the child and fails on a perfectly healthy
-        worker."""
+        worker. LOCALM_MODE=log so the parent arms the trace in the first place."""
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = EmbedderRunner()
         r._spawn()
         trace_path = r._crash_trace_path

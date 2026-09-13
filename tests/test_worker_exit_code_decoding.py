@@ -229,8 +229,10 @@ class TestRunnerReportsTheDecodedCode:
         handler, so os.abort() takes the ordinary CRT path and exits 3 instead of
         __fastfail's NTSTATUS. On Windows this fault mode therefore yields no
         decodable code at all, and what characterises the fault is the captured
-        trace instead."""
+        trace instead. LOCALM_MODE=log so the parent arms the crash trace the
+        docstring above describes."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        monkeypatch.setenv("LOCALM_MODE", "log")
         r = ModelRunner()
         r._spawn()
         try:
