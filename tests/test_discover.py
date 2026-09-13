@@ -1142,6 +1142,12 @@ class TestListGpus:
         shared single-flight GPU-probe lock (_gpu_probe_inflight) permanently.
         The drain here must be bounded, not left open-ended."""
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: True)
+        # The AMD/Windows single-adapter ADL fallback (see
+        # TestListGpusAmdSingleAdapterFallback) declines here too - this test
+        # is about the drain timeout, not that fallback, and must not depend
+        # on whether the machine running it happens to have a single adapter.
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: None)
         import subprocess
         fake_popen = MagicMock()
         fake_popen.return_value.communicate.side_effect = [
@@ -1520,11 +1526,16 @@ class TestListGpusInconclusiveStatus:
     def test_latch_engaged_and_nvidia_smi_blind_reports_inconclusive(self, monkeypatch):
         """The scenario the gap named: torch wedges THIS round (engaging the
         latch as a side effect) and nvidia-smi (NVIDIA-only) cannot see the
-        AMD/Intel card either."""
+        AMD/Intel card either. The AMD/Windows single-adapter ADL fallback
+        (TestListGpusAmdSingleAdapterFallback) also declines here, modelling
+        no other measurement source working either - see that class for the
+        case where it does."""
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
         monkeypatch.setattr(discover, "_torch_gpus_isolated",
                             MagicMock(side_effect=discover._IsolatedTorchWedged))
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: None)
         self._blind_nvidia_smi(monkeypatch)
 
         gpus, status = list_gpus(return_status=True)
@@ -1577,6 +1588,103 @@ class TestListGpusInconclusiveStatus:
 
         assert status == discover.GPU_PROBE_OK
         assert gpus and gpus[0]["name"] == "RTX 4090"
+
+
+class TestListGpusAmdSingleAdapterFallback:
+    """When torch cannot be trusted this round (known-doomed, or the
+    isolated-torch latch is engaged) and nvidia-smi cannot see a non-NVIDIA
+    card, list_gpus() must not default to INCONCLUSIVE if the Windows
+    display-adapter registry names exactly one adapter that ADL/PDH can pair
+    unambiguously without a torch pci_bus_id - the same torch-independent
+    rule vram_info()'s registry tier already trusts (see
+    gpu_usage.device_global_used_bytes' docstring, the "ADL, torch-less"
+    rule). Reuses TestVramInfoRegistryTierDeviceGlobalFree's _FakeWinreg."""
+
+    _TOTAL = 17_163_091_968
+    _USED = 3_500_000_000
+
+    def _blind_nvidia_smi(self, monkeypatch):
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen",
+                            MagicMock(side_effect=FileNotFoundError("no nvidia-smi")))
+
+    def _arm_single_adapter_registry(self, monkeypatch,
+                                     name="AMD Radeon RX 6900 XT"):
+        monkeypatch.setattr(sys, "platform", "win32")
+        adapters = {"0000": {"HardwareInformation.qwMemorySize": self._TOTAL,
+                             "DriverDesc": name}}
+        monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(adapters))
+
+    def test_torch_known_doomed_single_adapter_is_conclusive(self, monkeypatch):
+        """The incident this fallback fixes: llama.cpp's bundled HIP runtime
+        is resident so torch is skipped outright (known-doomed), and
+        nvidia-smi (NVIDIA-only) cannot see the AMD card - but the registry
+        names exactly one adapter and ADL pairs it without torch."""
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: True)
+        self._blind_nvidia_smi(monkeypatch)
+        self._arm_single_adapter_registry(monkeypatch)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: self._USED})
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert status == discover.GPU_PROBE_OK, (
+            "an unambiguous single-adapter ADL pairing is conclusive on its "
+            "own terms, even though torch was never asked")
+        assert gpus == [{"index": 0, "name": "AMD Radeon RX 6900 XT",
+                         "total": self._TOTAL,
+                         "free": self._TOTAL - self._USED,
+                         "free_scope": discover.FREE_SCOPE_DEVICE}]
+
+    def test_isolated_torch_latch_single_adapter_is_conclusive(self, monkeypatch):
+        """Same fallback, reached via the other trigger: torch was asked
+        earlier and is latched unavailable (a genuine prior wedge/timeout),
+        not the known-doomed skip."""
+        monkeypatch.setattr(discover, "_isolated_torch_unavailable", True)
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_isolated",
+            lambda: pytest.fail("latch was engaged; must not respawn the child"))
+        self._blind_nvidia_smi(monkeypatch)
+        self._arm_single_adapter_registry(monkeypatch)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: self._USED})
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert status == discover.GPU_PROBE_OK
+        assert gpus and gpus[0]["free"] == self._TOTAL - self._USED
+
+    def test_fires_control_declined_pairing_stays_inconclusive(self, monkeypatch):
+        """FIRES-CONTROL: the same known-doomed + blind-nvidia-smi setup, but
+        the usage source cannot map the adapter (ambiguous / multi-adapter /
+        non-AMD) - must stay INCONCLUSIVE, proving the new path is not a
+        blanket trust of the registry total alone."""
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: True)
+        self._blind_nvidia_smi(monkeypatch)
+        self._arm_single_adapter_registry(monkeypatch, name="NVIDIA GeForce RTX 4090")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {})   # declines: ambiguous / non-AMD
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert gpus == []
+        assert status == discover.GPU_PROBE_INCONCLUSIVE
+
+    def test_fires_control_no_registry_adapter_stays_inconclusive(self, monkeypatch):
+        """FIRES-CONTROL: known-doomed + blind nvidia-smi + no adapter in the
+        registry either (e.g. off Windows) - must stay INCONCLUSIVE, not
+        raise or fabricate an entry."""
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: True)
+        self._blind_nvidia_smi(monkeypatch)
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: None)
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert gpus == []
+        assert status == discover.GPU_PROBE_INCONCLUSIVE
 
 
 class TestTorchGpusResidentBounded:

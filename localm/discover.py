@@ -972,20 +972,21 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
         except Exception as e:   # the probe swallows its own errors; belt-and-braces
             logger.debug("list_gpus: probe raised unexpectedly: %s", e)
         with _gpu_probe_lock:
-            # CONCLUSIVENESS (GPU_PROBE_INCONCLUSIVE): propagates the distinction
-            # _isolated_torch_unavailable already makes rather than inventing a new
-            # one - that latch is set ONLY when the isolated torch enumeration
-            # proved it could not answer this round (never for an honest "torch
-            # answered, zero devices" - see test_a_real_empty_answer_does_NOT_latch),
-            # so reading it here is exact, not a heuristic. Gated on an EMPTY value:
-            # a non-empty reading came from a source that DID answer (nvidia-smi
-            # found real hardware, or torch answered before the latch engaged) and
-            # is conclusive regardless of the latch - the actual sm_120 case this
-            # isolation exists for is NVIDIA, where nvidia-smi still answers while
-            # torch is latched-unavailable. Read under this same lock (not a
+            # CONCLUSIVENESS (GPU_PROBE_INCONCLUSIVE): an EMPTY value is
+            # conclusive unless torch could not be TRUSTED this round -
+            # either _isolated_torch_unavailable (the isolated probe itself
+            # proved it cannot answer; never set for an honest "torch
+            # answered, zero devices" - see
+            # test_a_real_empty_answer_does_NOT_latch) or
+            # _torch_gpu_probe_known_doomed() (torch was never even asked,
+            # see TestListGpusAmdSingleAdapterFallback). A non-empty reading
+            # is conclusive regardless of either - the sm_120 case this
+            # isolation exists for is NVIDIA, where nvidia-smi still answers
+            # while torch sits out. Read under this same lock (not a
             # separate one) because it is the same global _torch_gpus_isolated_once
             # mutates, and this probe thread is the only writer while it runs.
-            conclusive = not (not value and _isolated_torch_unavailable)
+            conclusive = not (not value and (_isolated_torch_unavailable
+                                             or _torch_gpu_probe_known_doomed()))
             if _gpu_probe_epoch != my_epoch:
                 # A reset retired this probe while it ran: its reading describes a
                 # state the owner has explicitly dropped, and the in-flight slot is
@@ -1661,7 +1662,11 @@ def _torch_gpus_resident_bounded(timeout: float = _TORCH_RESIDENT_READ_TIMEOUT) 
 def _list_gpus_probe() -> list:
     """The actual (blocking) GPU driver probe. Call :func:`list_gpus`, not this -
     this one has no timeout and can wedge on a busy/broken driver."""
-    if not _torch_gpu_probe_known_doomed():
+    # Whether torch was actually asked this round, as opposed to being
+    # skipped outright because it is known-doomed. Read by the AMD/Windows
+    # fallback at the end of this function.
+    torch_asked = not _torch_gpu_probe_known_doomed()
+    if torch_asked:
         try:
             out = _torch_gpus_resident_bounded() if _torch_is_resident() \
                 else _torch_gpus_isolated_once()
@@ -1712,6 +1717,21 @@ def _list_gpus_probe() -> list:
                 return out
     except Exception:
         pass
+
+    # AMD/Windows single-adapter fallback: pair the one registry-reported
+    # adapter via ADL/PDH, same source and rule as vram_info()'s registry
+    # tier. Runs ONLY when torch itself could not be trusted this round
+    # (never asked, or the isolated-torch latch is engaged) - never when
+    # torch was asked and answered honestly empty. See
+    # test_amd_single_adapter_fallback_is_conclusive and
+    # test_fires_control_genuine_no_gpu_box_stays_ok.
+    if not torch_asked or _isolated_torch_unavailable:
+        entry = _windows_largest_adapter_registry_entry()
+        if entry is not None:
+            _apply_device_global_free([entry])
+            if "free" in entry:
+                return [entry]
+
     return []
 
 
@@ -1733,6 +1753,61 @@ _CORRECTION_COLD_BUDGET_S = 1.5
 # on a cold source. Safe as a module global precisely because _gpu_probe_inflight
 # serialises probes: only ever one in flight to describe.
 _probe_deadline_at = None
+
+
+def _windows_largest_adapter_registry_entry() -> "dict | None":
+    """``{"index": 0, "name": <DriverDesc>, "total": <bytes>}`` for the
+    LARGEST adapter (skips an iGPU) in the Windows display-adapter class
+    registry key, or ``None`` off Windows / when nothing readable.
+
+    Shared by two torch-less tiers: :func:`vram_info`'s registry fallback
+    (the only "total" source on a GGUF-only / non-NVIDIA install) and
+    :func:`_list_gpus_probe`'s AMD single-adapter ADL fallback. The synthetic
+    index 0 never feeds GPU SELECTION - both callers are single-adapter tiers
+    by construction - it only carries the name so
+    :func:`gpu_usage._gpu_is_amd` can authorise the ADL pairing."""
+    import sys
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+        best = 0
+        best_desc = ""
+        base = (r"SYSTEM\CurrentControlSet\Control\Class"
+                r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as root:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(root, i)
+                except OSError:
+                    break
+                i += 1
+                if not sub.isdigit():
+                    continue
+                try:
+                    with winreg.OpenKey(root, sub) as key:
+                        val, _typ = winreg.QueryValueEx(
+                            key, "HardwareInformation.qwMemorySize")
+                        if isinstance(val, int) and val > best:
+                            best = val   # largest adapter wins (skip iGPU)
+                            try:
+                                desc, _dt = winreg.QueryValueEx(key, "DriverDesc")
+                                best_desc = str(desc or "")
+                            except OSError:
+                                best_desc = ""
+                except OSError as e:
+                    # Unexpected (vs the EnumKey end-of-list break above):
+                    # access denied or a removed key. Surface under --debug
+                    # so incomplete VRAM detection is diagnosable; the silent
+                    # fallback is deliberate (a note beats crashing fit badges).
+                    logger.debug("vram registry: subkey %s unreadable: %s", sub, e)
+                    continue
+        if not best:
+            return None
+        return {"index": 0, "name": best_desc, "total": int(best)}
+    except Exception:
+        return None
 
 
 def _apply_device_global_free(gpus: list) -> None:
@@ -2518,94 +2593,57 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
                 out["free_scope"] = g["free_scope"]
         return _ret(out)
 
-    import sys
-    if sys.platform == "win32":
-        try:
-            import winreg
-            best = 0
-            best_desc = ""
-            base = (r"SYSTEM\CurrentControlSet\Control\Class"
-                    r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as root:
-                i = 0
-                while True:
-                    try:
-                        sub = winreg.EnumKey(root, i)
-                    except OSError:
-                        break
-                    i += 1
-                    if not sub.isdigit():
-                        continue
-                    try:
-                        with winreg.OpenKey(root, sub) as key:
-                            val, _typ = winreg.QueryValueEx(
-                                key, "HardwareInformation.qwMemorySize")
-                            if isinstance(val, int) and val > best:
-                                best = val   # largest adapter wins (skip iGPU)
-                                # The adapter's human name lives in the SAME key; it
-                                # is what lets the device-global lookup below authorise
-                                # an AMD single-adapter pairing by vendor (see
-                                # gpu_usage._gpu_is_amd). Absent on odd drivers -> "".
-                                try:
-                                    desc, _dt = winreg.QueryValueEx(key, "DriverDesc")
-                                    best_desc = str(desc or "")
-                                except OSError:
-                                    best_desc = ""
-                    except OSError as e:
-                        # Unexpected (vs the EnumKey end-of-list break above):
-                        # access denied or a removed key. Surface under --debug
-                        # so incomplete VRAM detection is diagnosable; the silent
-                        # fallback is deliberate (a note beats crashing fit badges).
-                        logger.debug("vram_info: registry subkey %s unreadable: %s",
-                                     sub, e)
-                        continue
-            if best:
-                out = {"total": int(best)}
-                # The registry gives total but NO free. Torch-less builds land here
-                # for EVERY VRAM query (list_gpus() is empty - no torch to enumerate,
-                # and nvidia-smi is NVIDIA-only), so without this the meter and every
-                # fit/admission gate see total-only forever on a GGUF-only install.
-                # Recover a DEVICE-GLOBAL free from the ADL/PDH usage source, which
-                # works torch-less and in-process (ADL for AMD, PDH's WDDM counter as
-                # the vendor-neutral fallback - the same source _apply_device_global_free
-                # uses). It maps ONLY when unambiguous (exactly one AMD adapter for an
-                # AMD-named GPU, or exactly one WDDM instance); a non-AMD or multi-
-                # adapter box declines and we keep total-only rather than guess a
-                # pairing. The synthetic index 0 never feeds GPU SELECTION (this tier
-                # is single-adapter by design, see the docstring) - it only carries the
-                # name so the AMD pairing can be authorised.
-                #
-                # ONLY when the probe COMPLETED empty (torch-less: it returns [] fast,
-                # status OK) - never when it TIMED OUT, was BUSY, or was INCONCLUSIVE.
-                # A timeout means the driver is wedged/cold and the box is
-                # unmeasurable; the pre-load gate treats that as "skip the VRAM
-                # check", and surfacing an independent ADL number there
-                # would silently turn a skipped gate into an enforcing one (and could
-                # act on a reading taken while the driver is in a bad state).
-                # INCONCLUSIVE (the isolated torch probe could not be asked and
-                # nvidia-smi also found nothing) gets the same conservative treatment:
-                # gpu_usage.device_global_used_bytes' ADL/PDH mapping itself partially
-                # depends on torch's pci_bus_id as one of its strategies, so it is not
-                # proven independent of the same trouble - the honest degrade is
-                # total-only, exactly as for TIMEOUT/BUSY, not a fresh claim of
-                # certainty this call has not earned. status is None only when the
-                # caller did not ask for it (return_status=False fit-badges), which
-                # never gates on any of these.
-                if status not in (GPU_PROBE_TIMEOUT, GPU_PROBE_BUSY, GPU_PROBE_INCONCLUSIVE):
-                    try:
-                        from localm import gpu_usage
-                        entry = {"index": 0, "name": best_desc, "total": int(best)}
-                        u = gpu_usage.device_global_used_bytes([entry]).get(0)
-                        if u is not None:
-                            out["free"] = max(0, min(int(best), int(best) - int(u)))
-                            out["free_scope"] = FREE_SCOPE_DEVICE
-                    except Exception as e:
-                        # Best-effort enrichment: total-only is the honest fallback, so
-                        # a failed lookup degrades to it rather than losing the total.
-                        logger.debug("vram_info: device-global free lookup failed: %s", e)
-                return _ret(out)
-        except Exception:
-            pass
+    entry = _windows_largest_adapter_registry_entry()
+    if entry is not None:
+        best = entry["total"]
+        out = {"total": int(best)}
+        # The registry gives total but NO free. Torch-less builds land here
+        # for EVERY VRAM query (list_gpus() is empty - no torch to enumerate,
+        # and nvidia-smi is NVIDIA-only), so without this the meter and every
+        # fit/admission gate see total-only forever on a GGUF-only install.
+        # Recover a DEVICE-GLOBAL free from the ADL/PDH usage source, which
+        # works torch-less and in-process (ADL for AMD, PDH's WDDM counter as
+        # the vendor-neutral fallback - the same source _apply_device_global_free
+        # uses). It maps ONLY when unambiguous (exactly one AMD adapter for an
+        # AMD-named GPU, or exactly one WDDM instance); a non-AMD or multi-
+        # adapter box declines and we keep total-only rather than guess a
+        # pairing. The synthetic index 0 never feeds GPU SELECTION (this tier
+        # is single-adapter by design, see the docstring) - it only carries the
+        # name so the AMD pairing can be authorised.
+        #
+        # ONLY when the probe COMPLETED empty (torch-less: it returns [] fast,
+        # status OK) - never when it TIMED OUT, was BUSY, or was INCONCLUSIVE.
+        # A timeout means the driver is wedged/cold and the box is
+        # unmeasurable; the pre-load gate treats that as "skip the VRAM
+        # check", and surfacing an independent ADL number there
+        # would silently turn a skipped gate into an enforcing one (and could
+        # act on a reading taken while the driver is in a bad state).
+        # INCONCLUSIVE (the isolated torch probe could not be asked and
+        # nvidia-smi also found nothing) gets the same conservative treatment:
+        # gpu_usage.device_global_used_bytes' ADL/PDH mapping itself partially
+        # depends on torch's pci_bus_id as one of its strategies, so it is not
+        # proven independent of the same trouble - the honest degrade is
+        # total-only, exactly as for TIMEOUT/BUSY, not a fresh claim of
+        # certainty this call has not earned. status is None only when the
+        # caller did not ask for it (return_status=False fit-badges), which
+        # never gates on any of these. (list_gpus()'s own AMD single-adapter
+        # ADL fallback - _list_gpus_probe - already upgrades the genuinely
+        # unambiguous single-adapter case to GPU_PROBE_OK before it ever
+        # reaches here, via the "if gpus:" branch above; what is left
+        # INCONCLUSIVE by the time this tier is reached is the remainder this
+        # comment's reasoning still applies to.)
+        if status not in (GPU_PROBE_TIMEOUT, GPU_PROBE_BUSY, GPU_PROBE_INCONCLUSIVE):
+            try:
+                from localm import gpu_usage
+                u = gpu_usage.device_global_used_bytes([entry]).get(entry["index"])
+                if u is not None:
+                    out["free"] = max(0, min(int(best), int(best) - int(u)))
+                    out["free_scope"] = FREE_SCOPE_DEVICE
+            except Exception as e:
+                # Best-effort enrichment: total-only is the honest fallback, so
+                # a failed lookup degrades to it rather than losing the total.
+                logger.debug("vram_info: device-global free lookup failed: %s", e)
+        return _ret(out)
     return _ret({})
 
 

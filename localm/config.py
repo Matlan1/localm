@@ -799,6 +799,9 @@ DEFAULT_CONFIG: dict = {
 # Ollama (11434), and the 8000/8080/8888 dev-server crowd.
 PORT_RANGE = (8642, 8741)
 
+# pick_port's restart_grace_window poll interval.
+_RESTART_PORT_POLL_S = 0.15
+
 
 def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     """True when something is already listening on host:port.
@@ -848,7 +851,8 @@ class PortInUseError(RuntimeError):
         super().__init__(f"Port {port} is already in use.")
 
 
-def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
+def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1", *,
+              restart_grace_window: float = 0.0):
     """
     Resolve the port to serve on. Returns ``(port, default_port_was_busy)``.
 
@@ -856,15 +860,30 @@ def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
     :class:`PortInUseError` is raised. It is never silently relocated to a
     different port (see that class for why).
 
+    ``restart_grace_window`` (seconds, default 0 - no grace): when the
+    explicit port is busy, poll for up to this long before raising, instead
+    of failing on the first check. For a self-restart resuming on the port it
+    just held, the prior process's listening socket can take a brief moment
+    to release. ``PortInUseError`` is still raised, unchanged, once the
+    window elapses with the port still busy - this delays the same refusal
+    by a bounded amount, it never relocates an explicit port.
+
     With no explicit port, uses the configured default (``config['port']``, 8642)
     and, if that is busy, walks localm's range (8642-8741) for the next free port,
     falling back to an OS-assigned port. The returned flag is True only in that
     auto-bump case; an explicit request never returns True (it raises instead).
     """
     if requested is not None:
-        if port_in_use(requested, host):
-            raise PortInUseError(requested)
-        return requested, False
+        if not port_in_use(requested, host):
+            return requested, False
+        if restart_grace_window > 0:
+            import time
+            deadline = time.monotonic() + restart_grace_window
+            while time.monotonic() < deadline:
+                time.sleep(min(_RESTART_PORT_POLL_S, max(0.0, deadline - time.monotonic())))
+                if not port_in_use(requested, host):
+                    return requested, False
+        raise PortInUseError(requested)
     start = load_config().get("port", PORT_RANGE[0])
     if not port_in_use(start, host):
         return start, False
