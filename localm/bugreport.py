@@ -1678,6 +1678,7 @@ def install_global_handlers(force: bool = False) -> bool:
 
 _crash_trace_fh = None   # kept alive so faulthandler can write to it
 _crash_trace_instance_id = None   # which instance_id currently owns _crash_trace_fh
+_armed_instance_id = None   # instance_id of the last arm_crash_guard() in THIS process
 
 
 def _diagnostics_allowed() -> bool:
@@ -1793,7 +1794,7 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
     never mistaken for a crash - see the module note above. The marker records
     ``"diagnostics"``, whether a trace was armed for this run. Returns True if
     armed. Fully guarded - never raises into the caller."""
-    global _crash_trace_fh, _crash_trace_instance_id
+    global _crash_trace_fh, _crash_trace_instance_id, _armed_instance_id
     import faulthandler
     import json
     import os
@@ -1830,9 +1831,18 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
             json.dumps({"pid": os.getpid(), "context": context or {},
                         "diagnostics": diagnostics}),
             encoding="utf-8")
+        _armed_instance_id = instance_id
         return True
     except Exception:
         return False
+
+
+def armed_instance_id() -> Optional[str]:
+    """The instance_id of the last arm_crash_guard() call in this process, or
+    None if none has armed yet. For a caller with no other way to learn it -
+    a console-close handler registered before app.state.instance_id exists,
+    see gui/cli.py's _console_close_cleanup."""
+    return _armed_instance_id
 
 
 def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
@@ -1846,7 +1856,7 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
     is only released when *instance_id* matches the instance that armed it in
     THIS process; a sibling's own marker and trace file are still removed
     regardless, but this process's own live trace stays open and attached."""
-    global _crash_trace_fh, _crash_trace_instance_id
+    global _crash_trace_fh, _crash_trace_instance_id, _armed_instance_id
     import faulthandler
     d = None
     try:
@@ -1857,6 +1867,8 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
         # and the next start files one spurious "prior crash" report - annoying,
         # not unsafe. disarm must not raise during shutdown.
         pass
+    if _armed_instance_id == instance_id:
+        _armed_instance_id = None
     try:
         if _crash_trace_fh is not None and _crash_trace_instance_id == instance_id:
             faulthandler.disable()

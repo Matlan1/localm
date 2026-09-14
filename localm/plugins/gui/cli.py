@@ -191,7 +191,12 @@ _CONSOLE_CLOSE_CLEANUP_BUDGET_S = 3.0
 
 def _console_close_cleanup() -> None:
     """Kill any running coder background OS subprocess (see
-    localm.plugins.coder.background.JobRegistry.shutdown_all).
+    localm.plugins.coder.background.JobRegistry.shutdown_all), and disarm
+    this instance's own crash guard so CTRL_CLOSE_EVENT/logoff/shutdown - a
+    deliberate close of the console window - is treated the same as any
+    other clean stop (Ctrl+C, the GUI Stop button) rather than as a crash.
+    Without this, the crash-recovery watchdog cannot tell "the user closed
+    the window" from "the process died", and relaunches every time.
 
     Runs the kill on a separate daemon thread and returns after at most
     _CONSOLE_CLOSE_CLEANUP_BUDGET_S seconds regardless of that thread's
@@ -215,6 +220,11 @@ def _console_close_cleanup() -> None:
     threading.Thread(target=_work, daemon=True,
                      name="localm-console-close-cleanup").start()
     done.wait(_CONSOLE_CLOSE_CLEANUP_BUDGET_S)
+    try:
+        from localm import bugreport
+        bugreport.disarm_crash_guard(instance_id=bugreport.armed_instance_id())
+    except Exception:
+        pass
 
 
 def _gui_bind_warning(host: str):
