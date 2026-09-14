@@ -20,6 +20,7 @@ import threading
 import pytest
 
 from localm.inference import http_server as hs
+from localm.inference.http_server import create_app
 
 
 class _ThreadProbe:
@@ -151,6 +152,61 @@ def test_unload_embedder_if_matches_syncs_registry_off_the_loop(probe, monkeypat
 
     loop_thread = asyncio.run(scenario())
     _assert_off_loop(probe, loop_thread, "_unload_embedder_if_matches")
+
+
+def test_lifespan_startup_syncs_gpu_registry_off_the_loop(tmp_path, monkeypatch):
+    """The ONE-SHOT startup call to _gpu_registry_sync (lifespan(), distinct
+    from the recurring heartbeat covered by the tests above) must also run
+    off the event loop.
+
+    Live incident this pins: at server startup, this call sat bare (no
+    run_in_executor) while its heartbeat twin was already correctly
+    offloaded - the exact "we fixed it in one place and never backported
+    it to the other call site" gap this whole file exists to catch, except
+    this call site had no test here at all. Symptom on a real box: /api/gpus,
+    /api/doctor, /api/stats and /api/instances all blocked for the full
+    ~15s GPU-probe deadline on ordinary GUI page load, with the hang alarm
+    firing CRITICAL "event loop frozen" repeatedly.
+    """
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+
+    threads = []
+    real_sync = hs._gpu_registry_sync
+
+    def _spy():
+        threads.append(threading.get_ident())
+        return real_sync()
+
+    monkeypatch.setattr(hs, "_gpu_registry_sync", _spy)
+
+    app = create_app(None)
+    # Only a real, non-isolated advertise()'d instance reaches this branch
+    # (see the comment at its call site) - a bare create_app() never sets
+    # these, so the test arms them itself to exercise the guarded path.
+    app.state.instance_id = "test-startup-offload-instance"
+    app.state.instance_port = 0
+    app.state.instance_scheme = "http"
+    app.state.bind_host = "127.0.0.1"
+
+    async def scenario():
+        async with app.router.lifespan_context(app):
+            pass
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(scenario())
+    assert threads, (
+        "_gpu_registry_sync never ran during lifespan startup - this test "
+        "did not exercise the guarded instance_id branch at all")
+    assert all(t != loop_thread for t in threads), (
+        "lifespan's one-shot startup call ran _gpu_registry_sync (registry "
+        "file I/O + a GPU driver probe) ON the event loop thread, stalling "
+        "every concurrent request during startup")
 
 
 # --------------------------------------------------------------------------- #

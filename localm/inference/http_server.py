@@ -3798,7 +3798,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 from localm import gpu_registry
                 gpu_registry.reap_stale(gpu_registry.registry_dir(),
                                         self_id=_instance_id)
-                _gpu_registry_sync()
+                # Offloaded for the same reason as the heartbeat's own call
+                # below: a non-zero main_gpu_index makes this probe the GPU
+                # driver, which can take seconds on this box.
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _gpu_registry_sync)
                 gpu_task = asyncio.create_task(_gpu_registry_heartbeat_loop())
             except Exception as e:
                 from localm.debuglog import logger as _dbg
