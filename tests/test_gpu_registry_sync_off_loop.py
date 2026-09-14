@@ -14,7 +14,9 @@ than the event-loop thread - rather than trying to measure a stall.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import threading
 
 import pytest
@@ -152,6 +154,88 @@ def test_unload_embedder_if_matches_syncs_registry_off_the_loop(probe, monkeypat
 
     loop_thread = asyncio.run(scenario())
     _assert_off_loop(probe, loop_thread, "_unload_embedder_if_matches")
+
+
+def test_idle_unload_once_syncs_registry_off_the_loop(probe):
+    """The 5th real call site, found only by building the AST sentinel below
+    - this test file's own docstring never mentioned _idle_unload_once at
+    all until this test was added. It was already correctly offloaded (not
+    a live bug), but had zero coverage here, the same shape as the startup
+    call site that was NOT already correct."""
+    import time
+    async def scenario():
+        _install_loaded("A")
+        hs._last_activity_per_model["A"] = time.monotonic() - 1000
+        unloaded = await hs._idle_unload_once(ttl=1)
+        assert unloaded is True, "the idle check never actually unloaded anything"
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(scenario())
+    _assert_off_loop(probe, loop_thread, "_idle_unload_once")
+
+
+def test_every_gpu_registry_sync_reference_has_a_dedicated_test():
+    """Sentinel: enumerate every function in http_server.py that references
+    _gpu_registry_sync at all (a direct call, or passed by name to
+    run_in_executor - which is how every real call site here actually
+    invokes it), and require each one to be named in THIS file.
+
+    This is the mechanical guardrail for the exact class of bug this file
+    was written to catch (item 6, 2026-09-14 regression triage): the
+    off-loop invariant was correctly enforced for four call sites, then a
+    FIFTH (lifespan's one-shot startup call) was added later with no test
+    added here, and nothing caught the gap until a live server froze on
+    startup. A lesson recorded only in a docstring or a dev-notes file
+    goes stale the moment a new caller is added and nobody remembers to
+    come back here - this makes staleness a test failure instead of a
+    silent gap: add a new caller, this test breaks until you also cover it.
+
+    Matched by NAME in the source of every test function in this module,
+    not by an editable allowlist here, so approving a new caller means
+    writing a test that actually exercises it - not just typing its name
+    into a list.
+    """
+    import localm.inference.http_server as hs_mod
+
+    source = inspect.getsource(hs_mod)
+    tree = ast.parse(source)
+
+    referencing_functions: set[str] = set()
+
+    class _Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.stack: list[str] = []
+
+        def _visit_fn(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _visit_fn
+        visit_AsyncFunctionDef = _visit_fn
+
+        def visit_Name(self, node):
+            if node.id == "_gpu_registry_sync" and self.stack:
+                referencing_functions.add(self.stack[-1])
+            self.generic_visit(node)
+
+    _Visitor().visit(tree)
+
+    assert referencing_functions, (
+        "the AST walk found no references to _gpu_registry_sync at all - "
+        "this sentinel is broken, not proof there is nothing to cover")
+
+    this_file_source = open(__file__, encoding="utf-8").read()
+
+    uncovered = [name for name in sorted(referencing_functions)
+                if name not in this_file_source]
+    assert not uncovered, (
+        f"these http_server.py functions reference _gpu_registry_sync but "
+        f"are never named in this test file: {uncovered} - add a test here "
+        f"(see the existing off-loop tests for the pattern) before this "
+        f"sentinel will pass. This is exactly the gap that let the "
+        f"startup-hang regression through: a 5th/6th caller with no "
+        f"coverage here.")
 
 
 def test_lifespan_startup_syncs_gpu_registry_off_the_loop(tmp_path, monkeypatch):
