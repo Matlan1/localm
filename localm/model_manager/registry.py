@@ -28,6 +28,7 @@ from .gguf import _SPLIT_GGUF_RE
 from .gguf import _gguf_first_parts
 from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
+from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
@@ -502,7 +503,28 @@ def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Opti
         return None
     by_name = {f.name: f for f in cands}
     picked = _pick_mmproj_candidate(p.stem, list(by_name.keys()))
-    return by_name[picked] if picked else None
+    if not picked:
+        return None
+    candidate_path = by_name[picked]
+    # A LONE candidate (the common case _pick_mmproj_candidate never has to
+    # disambiguate) is otherwise returned unconditionally regardless of fit -
+    # confirmed n_embd/projection_dim mismatch here is what
+    # mtmd_init_from_file's own native check catches ANYWAY, just after the
+    # load attempt instead of before it, and after already logging a
+    # confusing native error. gguf_n_embd() returns None on any read failure
+    # (a genuinely unreadable file, a future GGUF layout, ...) - that is
+    # "unknown", not "mismatch", so it still passes through here unchanged
+    # rather than losing a mmproj this exact same code accepted before.
+    model_n_embd = gguf_n_embd(p)
+    mmproj_n_embd = gguf_n_embd(candidate_path)
+    if model_n_embd and mmproj_n_embd and model_n_embd != mmproj_n_embd:
+        logger.debug(
+            "find_sibling_mmproj: %r looks like the projector for %r by "
+            "filename, but its embedding width (%d) does not match the "
+            "model's (%d) - not auto-attaching it",
+            candidate_path.name, p.name, mmproj_n_embd, model_n_embd)
+        return None
+    return candidate_path
 
 
 
