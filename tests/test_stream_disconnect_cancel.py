@@ -67,6 +67,30 @@ class _LockingEngine:
                 time.sleep(self._delay)
 
 
+class _LockingCompactEngine(_LockingEngine):
+    """Like _LockingEngine, but context_capacity() returns a REAL value so
+    _stream_sse's compaction branch actually engages - the exact branch
+    every other engine stand-in in this file routes around (see
+    _LockingEngine.context_capacity's own "skip the compaction branch"
+    comment). This is the fixture gap that let a real bug through: the
+    compaction call ran engine.chat_stream() to completion via a blind
+    "".join(gen) with no cancellation check at all, so a disconnect DURING
+    compaction unpinned the request but left the producer thread (and the
+    per-model inference lock) running regardless."""
+
+    def context_capacity(self):
+        return 100   # tiny: capacity - prompt_tokens is always < the 2048 buffer
+
+    def count_messages_tokens(self, messages):
+        return 10
+
+
+# 8 plain messages: more than compact.KEEP_RECENT (4), so _split's "older"
+# half is non-empty and compact_messages actually calls generate() instead
+# of returning early.
+_MSG_MANY = [{"role": "user", "content": f"message {i}"} for i in range(8)]
+
+
 async def _wait(cond, want=True, timeout: float = 3.0) -> bool:
     """Poll *cond* on the event loop until it equals *want* or *timeout* elapses.
     The condition flips from another (worker) thread, so we cannot just read it
@@ -112,6 +136,69 @@ def test_chat_stream_disconnect_releases_inference_lock():
         assert "t0" in tok
         await agen2.aclose()
         assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0)
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_during_compaction_releases_inference_lock():
+    """The regression this file was missing: a client disconnect while
+    _stream_sse is compacting the conversation (before real generation ever
+    starts) must stop the compaction's own summarization call, not just
+    unpin around it. Without the fix this hangs (the never-ending
+    _LockingCompactEngine holds inference_lock forever), which is exactly
+    the "test times out" signature the module docstring already promises
+    for a broken cancel path - the same instrument, aimed at a call site
+    every other test here explicitly avoids."""
+    async def scenario():
+        eng = _LockingCompactEngine()   # never-ending "summarization"
+        sem = asyncio.Semaphore(1)
+
+        agen = _stream_sse(eng, _MSG_MANY, "lock-model", sem)
+        # _stream_sse awaits the compaction executor call BEFORE yielding the
+        # role chunk, so __anext__() cannot be awaited to completion first
+        # (unlike the other tests here) - it is suspended INSIDE compaction,
+        # never at a yield. Run it as a task so its pending await can be
+        # cancelled, mirroring how a real disconnect cancels the request
+        # task that is awaiting the generator, which Starlette then
+        # aclose()s only once that cancellation has actually unwound it.
+        task = asyncio.ensure_future(agen.__anext__())
+        assert await _wait(lambda: eng.entered.is_set(), True, 3.0), \
+            "compaction never started a generation - fixture did not " \
+            "reach the branch under test"
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0), \
+            "producer should hold the inference lock during compaction"
+
+        # Simulate the client disconnecting while compaction is still running.
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "inference lock still held after a disconnect DURING compaction " \
+            "- the summarization thread was orphaned, not cancelled"
+        await agen.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_compaction_runs_to_completion_without_a_disconnect():
+    """Companion to the cancellation test: an UNDISTURBED compaction call
+    must still run its generation to completion and produce a real summary,
+    proving the new per-token cancel check does not accidentally cut a
+    normal (non-disconnected) compaction short."""
+    async def scenario():
+        eng = _LockingCompactEngine(ntokens=20, per_token_delay=0.0)
+        sem = asyncio.Semaphore(1)
+
+        agen = _stream_sse(eng, _MSG_MANY, "lock-model", sem)
+        role = await agen.__anext__()
+        assert "assistant" in role
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "compaction's own generation never released the lock on a " \
+            "normal (undisturbed) run"
+        await agen.aclose()
 
     asyncio.run(scenario())
 
