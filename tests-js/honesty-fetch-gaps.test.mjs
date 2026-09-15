@@ -7,6 +7,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 
+/** A working, in-memory localStorage stand-in, for swapping a broken one out
+ *  mid-test once a scenario needs a save to actually succeed. */
+function workingStorage() {
+  const data = {};
+  return {
+    getItem: (k) => (Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null),
+    setItem: (k, v) => { data[k] = String(v); },
+    removeItem: (k) => { delete data[k]; },
+    clear: () => { for (const k of Object.keys(data)) delete data[k]; },
+    key: () => null,
+    get length() { return Object.keys(data).length; },
+  };
+}
+
 const drain = async (n = 12) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
 };
@@ -62,6 +76,72 @@ test("a resolved-but-failed conversation save is logged once, not per save", asy
   assert.equal(puts, 2, "both saves reached the server");
   const lines = (window.__localmClientLog || []).filter((l) => l.includes("conversation save failed"));
   assert.equal(lines.length, 1, "the breakage is logged once, not per debounce tick");
+});
+
+test("a network exception on the conversation save is surfaced, not silently swallowed", async () => {
+  const { window } = loadApp({ fetchImpl: async (url, opts) => {
+    if (opts && opts.method === "PUT") throw new Error("network unreachable");
+    return OK;
+  } });
+  runScript(window, `
+    chat.persist = true;
+    window.__conv = { id: "cy", title: "T", pinned: false, folder: null,
+                      branches: [], messages: [{ role: "user", content: "hi" }] };
+    pushConversation(window.__conv);
+  `);
+  await new Promise((r) => setTimeout(r, 1000));
+  const lines = window.__localmClientLog || [];
+  assert.ok(lines.some((l) => l.includes("could not reach the server")),
+    "a thrown fetch must be logged, not silently ignored");
+});
+
+test("both local and remote save failing shows a visible warning, never a false " +
+     "'local copy is intact' claim, and clears only once a write is confirmed", async () => {
+  let putCalls = 0;
+  const { window } = loadApp({
+    breakStorage: true,   // localStorage.setItem throws on every attempt, full and reduced alike
+    fetchImpl: async (url, opts) => {
+      if (opts && opts.method === "PUT") {
+        putCalls++;
+        if (putCalls === 1) return { ok: false, status: 500, json: async () => ({}), text: async () => "" };
+        if (putCalls === 2) throw new Error("network unreachable");
+        return OK;
+      }
+      return OK;
+    },
+  });
+  runScript(window, `
+    chat.persist = true;
+    chat.modeKnown = true;
+    window.__conv = { id: "cz", title: "T", pinned: false, folder: null,
+                      branches: [], messages: [{ role: "user", content: "hi" }] };
+    chat.conversations = [window.__conv];
+    saveConversations(window.__conv);
+  `);
+  await new Promise((r) => setTimeout(r, 1000));   // ride out the debounce - PUT #1 (500)
+
+  let lines = window.__localmClientLog || [];
+  assert.ok(!lines.some((l) => /local copy is intact/i.test(l)),
+    "must never claim the local copy is intact when it could not be saved either");
+  assert.ok(lines.some((l) => /conversation save failed/.test(l)), "the HTTP failure is surfaced");
+  let banner = window.document.getElementById("conv-unsaved-warning");
+  assert.ok(banner, "a persistent 'not saved' warning must show once neither path has landed");
+  assert.equal(banner.textContent, "not saved - history is only in this tab");
+
+  runScript(window, "saveConversations(window.__conv);");
+  await new Promise((r) => setTimeout(r, 1000));   // PUT #2 (network exception)
+  lines = window.__localmClientLog || [];
+  assert.ok(!lines.some((l) => /local copy is intact/i.test(l)),
+    "still no false claim after the network-exception attempt");
+  banner = window.document.getElementById("conv-unsaved-warning");
+  assert.ok(banner, "the warning must stay visible - nothing has actually been saved yet");
+
+  // Recovery: both paths work now - the warning must clear.
+  Object.defineProperty(window, "localStorage", { value: workingStorage(), configurable: true });
+  runScript(window, "saveConversations(window.__conv);");
+  await new Promise((r) => setTimeout(r, 1000));   // PUT #3 (ok)
+  assert.equal(window.document.getElementById("conv-unsaved-warning"), null,
+    "the warning must clear once a save actually lands both locally and remotely");
 });
 
 test("a plain-text 500 on model detail still shows the error toast", async () => {

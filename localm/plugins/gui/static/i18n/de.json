@@ -22,6 +22,8 @@
   "chat.conv.empty": "Noch keine Unterhaltungen",
   "chat.conv.empty.hint": "Starten Sie eine mit dem + darüber.",
   "chat.conv.noMatches": "keine passenden Chats",
+  "chat.conv.unsaved": "nicht gespeichert - Verlauf nur in diesem Tab",
+  "chat.conv.unsaved.title": "Weder der Speicher dieses Browsers noch der Server konnten Ihre Unterhaltungen speichern. Sie bestehen derzeit nur in diesem Tab; beim Schließen könnten sie verloren gehen.",
   "chat.copied": "kopiert",
   "chat.copy": "kopieren",
   "chat.copyBlocked": "Kopieren nicht möglich - Ihr Browser hat den Zugriff auf die Zwischenablage blockiert",

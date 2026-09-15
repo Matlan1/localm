@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, sentShellToken } from "./helpers.js";
+import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentShellToken } from "./helpers.js";
 import { syncLanguageFromConfig } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
@@ -83,7 +83,7 @@ window.fetch = async function (input, init) {
 // everything once their round trip lands.
 const _instanceTrusted = instanceCacheTrusted();
 
-$("setup-cwd").value = _instanceTrusted ? (localStorage.getItem("localm.coderCwd") || "") : "";
+$("setup-cwd").value = _instanceTrusted ? (safeStorageGet("localm.coderCwd") || "") : "";
 // API-key gate wiring (shown by showKeyGate on a 401 boot, e.g. a network bind).
 if ($("key-gate-submit")) $("key-gate-submit").onclick = submitKeyGate;
 if ($("key-gate-scan")) $("key-gate-scan").onclick = startQrScan;
@@ -640,7 +640,7 @@ window.bootAuthProbe = bootAuthProbe;
     // last-open page back on screen - reintroducing the exact leftover that
     // branch exists to clear. A `?view=` deep link carries no such residue: it
     // is an explicit request in THIS url, not cached state from another backend.
-    const savedView = _instanceTrusted ? localStorage.getItem("localm.activeView") : null;
+    const savedView = _instanceTrusted ? safeStorageGet("localm.activeView") : null;
     if (savedView && savedView !== "chat") showView(savedView);
   }
 })();

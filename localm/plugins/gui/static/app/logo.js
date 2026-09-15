@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { $, authHeaders } from "./helpers.js";
+import { $, authHeaders, safeStorageGet, safeStorageSet } from "./helpers.js";
 import { t } from "./i18n.js";
 
 // The three sidebar wordmark styles. The choice is stored in server config
@@ -29,7 +29,7 @@ export function drawWordmark(el, style) {
 export function applyLogoStyle(id) {
   const style = LOGO_STYLES.find((s) => s.id === id) || LOGO_STYLES[0];
   drawWordmark($("logo"), style);
-  localStorage.setItem("localm.logoStyle", style.id);
+  safeStorageSet("localm.logoStyle", style.id);
   for (const tile of document.querySelectorAll("#logo-style-picker .logo-tile")) {
     tile.classList.toggle("active", tile.dataset.style === style.id);
   }
@@ -63,7 +63,7 @@ export function renderLogoPicker() {
   const wrap = $("logo-style-picker");
   if (!wrap) return;
   wrap.textContent = "";
-  const current = localStorage.getItem("localm.logoStyle") || LOGO_DEFAULT;
+  const current = safeStorageGet("localm.logoStyle") || LOGO_DEFAULT;
   for (const style of LOGO_STYLES) {
     const tile = document.createElement("button");
     tile.type = "button";
@@ -76,6 +76,6 @@ export function renderLogoPicker() {
   }
 }
 
-applyLogoStyle(localStorage.getItem("localm.logoStyle") || LOGO_DEFAULT);
+applyLogoStyle(safeStorageGet("localm.logoStyle") || LOGO_DEFAULT);
 renderLogoPicker();
 

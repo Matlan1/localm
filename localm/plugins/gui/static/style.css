@@ -2668,6 +2668,17 @@ div:has(> .data-table) { overflow-x: auto; }
   color: var(--text-dim);
 }
 
+/* "not saved anywhere" warning in the conversations sidebar */
+.unsaved-warning {
+  margin: 2px 12px 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+  font-size: 11px;
+  color: var(--text);
+}
+
 /* ---------------- responsive: phone / narrow screens ---------------- */
 /* Desktop keeps the always-visible sidebar; the top bar + drawer backdrop are
    inert. On a narrow screen the 230px fixed sidebar would eat most of the width

@@ -114,6 +114,9 @@ export const I18N_EN = {
   "chat.conv.empty.hint": "Start one with the + above.",
   "chat.conv.deleteFailed": "Could not delete the conversation on the server - it may reappear",
   "chat.conv.noMatches": "no matching chats",
+  "chat.conv.unsaved": "not saved - history is only in this tab",
+  "chat.conv.unsaved.title":
+    "Neither this browser's storage nor the server could save your conversations. They exist only in this tab right now; closing it may lose them.",
   "chat.copied": "copied",
   "chat.copy": "copy",
   "chat.copyBlocked": "Could not copy - your browser blocked clipboard access",
