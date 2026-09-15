@@ -30,6 +30,21 @@ export function readStoredJSON(key, fallback) {
   }
 }
 
+/** Read a raw localStorage value, without letting a blocked or disabled
+ *  store abort the caller. Returns *fallback* (default null) on any
+ *  failure. */
+export function safeStorageGet(key, fallback = null) {
+  try { return localStorage.getItem(key); }
+  catch (e) { console.warn(`localm: localStorage unavailable for "${key}":`, e); return fallback; }
+}
+
+/** Write a raw value to localStorage, without letting a blocked or disabled
+ *  store abort the caller. Returns true on success, false otherwise. */
+export function safeStorageSet(key, value) {
+  try { localStorage.setItem(key, value); return true; }
+  catch (e) { console.warn(`localm: could not save "${key}" to localStorage:`, e); return false; }
+}
+
 // AUD-INSTANCEID (canonical: see reconcileInstanceId below). localStorage is
 // scoped by browser ORIGIN only, never by which backend DATA DIRECTORY runs
 // behind it, and localm reuses the default port, so a fresh install can inherit

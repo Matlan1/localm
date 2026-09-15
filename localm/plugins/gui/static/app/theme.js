@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { $ } from "./helpers.js";
+import { $, safeStorageGet, safeStorageSet } from "./helpers.js";
 
 /* ================================================================ */
 /*  Theme                                                            */
@@ -11,9 +11,9 @@ import { $ } from "./helpers.js";
 
 export function applyTheme(name) {
   document.documentElement.dataset.theme = name;
-  localStorage.setItem("localm.theme", name);
+  safeStorageSet("localm.theme", name);
 }
-applyTheme(localStorage.getItem("localm.theme") || "dark");
+applyTheme(safeStorageGet("localm.theme") || "dark");
 $("theme-toggle").onclick = () =>
   applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 

@@ -331,6 +331,9 @@ export async function refreshCtxLimit() {
           chat.conversations = [];
           chat.activeId = null;
           convUI.collapsed = new Set();
+          _localSaveOk = true;
+          _remoteSaveOk = true;
+          _updateUnsavedIndicator();
           setWebAskSession(null);                        // R27: forget the session choice
           renderConvList();
           renderChat();
@@ -443,6 +446,36 @@ export function hydrateChatToggles(cfg) {
 }
 window.hydrateChatToggles = hydrateChatToggles;
 
+// Whether the last attempt to persist chat.conversations actually landed
+// anywhere: the localStorage blob (one shared key covers every conversation)
+// and the debounced per-conversation server PUT are tracked separately, so a
+// message about one path must never assume the other one succeeded.
+let _localSaveOk = true;
+let _remoteSaveOk = true;
+
+/** Shows or clears the conversations-sidebar "not saved" banner. Visible
+ *  only while both the local cache write and the server push are failing;
+ *  clears the moment either one confirms a real write. */
+function _updateUnsavedIndicator() {
+  const atRisk = !_localSaveOk && !_remoteSaveOk;
+  const existing = document.getElementById("conv-unsaved-warning");
+  if (!atRisk) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) return;
+  const h = document.querySelector("#conversations h3");
+  if (!h) return;
+  const warn = document.createElement("div");
+  warn.id = "conv-unsaved-warning";
+  warn.className = "unsaved-warning";
+  warn.dataset.i18n = "chat.conv.unsaved";
+  warn.dataset.i18nTitle = "chat.conv.unsaved.title";
+  warn.textContent = t("chat.conv.unsaved");
+  warn.title = t("chat.conv.unsaved.title");
+  h.after(warn);
+}
+
 export function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
   if (!chat.modeKnown) {
@@ -456,14 +489,22 @@ export function saveConversations(changed) {
   // caching them would shadow a real local copy and show empty conversations
   // offline. Only full conversations are cached locally.
   const cacheable = chat.conversations.filter((c) => !c._meta);
+  let localOk = true;
   try {
     localStorage.setItem("localm.conversations",
       JSON.stringify(cacheable.slice(0, 50)));
   } catch {
     // Quota: drop image-heavy older conversations and retry once
     const slim = cacheable.slice(0, 10);
-    try { localStorage.setItem("localm.conversations", JSON.stringify(slim)); } catch {}
+    try {
+      localStorage.setItem("localm.conversations", JSON.stringify(slim));
+    } catch (e2) {
+      localOk = false;
+      console.error("localm: could not save conversations to localStorage:", e2);
+    }
   }
+  _localSaveOk = localOk;
+  _updateUnsavedIndicator();
   if (changed) pushConversation(changed);
 }
 
@@ -492,20 +533,30 @@ export function pushConversation(conv) {
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
-      // A resolved-but-failed save (500, 413 on a huge conversation) means
-      // server-side persistence quietly stopped; localStorage still holds the
-      // copy, so surface it ONCE per breakage (this runs on every debounce
-      // tick), re-arming after the next successful save.
-      if (!r.ok && !_convPushWarned) {
-        _convPushWarned = true;
-        console.error("conversation save failed (HTTP " + r.status +
-                      ") - server-side persistence may be stale; the local copy is intact");
-      } else if (r.ok) {
+      if (!r.ok) {
+        _remoteSaveOk = false;
+        if (!_convPushWarned) {
+          _convPushWarned = true;
+          console.error("conversation save failed (HTTP " + r.status + ") - " +
+            (_localSaveOk
+              ? "server-side persistence may be stale; the local copy is intact"
+              : "server-side persistence may be stale, and the local copy " +
+                "could not be saved either"));
+        }
+      } else {
         _convPushWarned = false;
+        _remoteSaveOk = true;
       }
-    } catch { /* offline - localStorage still has the copy; a reachable
-                     server that ANSWERS with an error is the r.ok branch
-                     above, not this one */ }
+    } catch (e) {
+      _remoteSaveOk = false;
+      if (!_convPushWarned) {
+        _convPushWarned = true;
+        console.error("conversation save: could not reach the server" +
+          (_localSaveOk ? " - the local copy is intact"
+                        : " - and the local copy could not be saved either") + ":", e);
+      }
+    }
+    _updateUnsavedIndicator();
   }, 600));
 }
 

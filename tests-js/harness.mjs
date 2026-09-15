@@ -89,10 +89,51 @@ const APP_SCRIPTS = [
 ];
 
 /**
+ * A localStorage stand-in that throws (mirroring a real SecurityError - a
+ * blocked/disabled store) for the given keys, and behaves as a normal
+ * in-memory store - seeded from *seed* - for every other key. jsdom's own
+ * Storage cannot be partially overridden (its methods are Proxy-trapped;
+ * assigning e.g. `localStorage.getItem = fn` silently stores a value under
+ * the key "getItem" instead of replacing the method), so a full replacement
+ * object is used instead.
+ */
+class GuardedStorage {
+  constructor(win, seed, blockedKeys) {
+    this._win = win;
+    this._data = { ...(seed || {}) };
+    this._blocked = blockedKeys === true ? null : new Set(blockedKeys || []);
+  }
+  _blockedFor(key) { return this._blocked === null || this._blocked.has(key); }
+  _throw() { throw new this._win.DOMException("Storage is blocked", "SecurityError"); }
+  getItem(key) {
+    if (this._blockedFor(key)) this._throw();
+    return Object.prototype.hasOwnProperty.call(this._data, key) ? this._data[key] : null;
+  }
+  setItem(key, value) {
+    if (this._blockedFor(key)) this._throw();
+    this._data[key] = String(value);
+  }
+  removeItem(key) {
+    if (this._blockedFor(key)) this._throw();
+    delete this._data[key];
+  }
+  clear() { this._data = {}; }
+  key(i) { return Object.keys(this._data)[i] ?? null; }
+  get length() { return Object.keys(this._data).length; }
+}
+
+/**
  * Builds a jsdom window with the app scripts loaded and the DOMContentLoaded
  * init not run. Returns { dom, window }. Pass fetchImpl to control network.
+ *
+ * breakStorage: true blocks every localStorage key with a thrown
+ * SecurityError; an array of key names blocks only those keys (everything
+ * else - including anything in seedLocalStorage - reads/writes normally).
+ * Use the array form to simulate storage that works in general but fails for
+ * one specific read (a corrupted entry, a call mid-eviction), as opposed to
+ * a store that is blocked outright.
  */
-export function loadApp({ fetchImpl, url, shellToken, seedLocalStorage } = {}) {
+export function loadApp({ fetchImpl, url, shellToken, seedLocalStorage, breakStorage } = {}) {
   const html = read("index.html");
   const dom = new JSDOM(html, {
     // Pass url: "https://..." to exercise the HTTPS-only paths.
@@ -106,9 +147,13 @@ export function loadApp({ fetchImpl, url, shellToken, seedLocalStorage } = {}) {
   // Seeded before the app scripts run: helpers.js reads
   // window.__LOCALM_SHELL_TOKEN__ into a const at load.
   if (shellToken) win.__LOCALM_SHELL_TOKEN__ = shellToken;
-  // Also seeded before the app scripts run: some module-level state reads
-  // localStorage at eval time.
-  if (seedLocalStorage) {
+  if (breakStorage) {
+    Object.defineProperty(win, "localStorage", {
+      value: new GuardedStorage(win, seedLocalStorage, breakStorage), configurable: true,
+    });
+  } else if (seedLocalStorage) {
+    // Also seeded before the app scripts run: some module-level state reads
+    // localStorage at eval time.
     for (const [k, v] of Object.entries(seedLocalStorage)) win.localStorage.setItem(k, v);
   }
 

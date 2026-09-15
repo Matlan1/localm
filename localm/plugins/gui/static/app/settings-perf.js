@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -1144,7 +1144,7 @@ export function registerTTS(provider) {
 /** The browser SpeechSynthesisVoice the user picked for the fallback, if any. */
 export function selectedBrowserVoice() {
   if (!window.speechSynthesis) return null;
-  const want = localStorage.getItem("localm.ttsVoiceBrowser");
+  const want = safeStorageGet("localm.ttsVoiceBrowser");
   if (!want) return null;
   return speechSynthesis.getVoices().find((v) => v.name === want) || null;
 }
@@ -1278,7 +1278,7 @@ export function populateVoicePicker() {
       .getVoices()
       .filter((v) => v.localService)
       .map((v) => ({ id: v.name, label: `${v.name} (${v.lang})` }));
-    current = localStorage.getItem("localm.ttsVoiceBrowser") || "";
+    current = safeStorageGet("localm.ttsVoiceBrowser") || "";
   }
   sel.replaceChildren();
   if (!opts.length) {
@@ -1559,7 +1559,7 @@ export function renderNavGroup(slot, groupKey, members) {
     .id.replace("view-", "");
   const hasActiveKid = kids.some((p) => p.tab === activeView);
   const open = hasActiveKid ||
-    (chat.privacy ? true : localStorage.getItem(group.key) !== "0");
+    (chat.privacy ? true : safeStorageGet(group.key) !== "0");
 
   const wrap = el("div", "nav-group");
   const parent = el("button", "nav-group-parent" + (open ? " open" : ""));
