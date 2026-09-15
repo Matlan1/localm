@@ -30,11 +30,11 @@ function sseResponse(events) {
   };
 }
 
-function makeFetch({ missing, pulls }) {
+function makeFetch({ missing, pulls, status = "verified" }) {
   return async (url, opts = {}) => {
     const method = opts.method || "GET";
     if (url === "/api/media/image/preflight" && method === "POST") {
-      return { ok: true, status: 200, json: async () => ({ missing }) };
+      return { ok: true, status: 200, json: async () => ({ status, missing, warning: "" }) };
     }
     if (url === "/api/models/pull-comfy-source" && method === "POST") {
       pulls.push(JSON.parse(opts.body));
@@ -56,6 +56,26 @@ test("nothing missing: resolves true, no modal, no pull POST", async () => {
   assert.equal(proceed, true);
   assert.notEqual(win.document.querySelector("#modal").style.display, "flex");
   assert.deepEqual(pulls, []);
+});
+
+test("preflight unavailable: non-blocking warning shown, still resolves true, no modal, no pull POST", async () => {
+  const pulls = [];
+  const { window: win } = loadApp({
+    fetchImpl: makeFetch({ missing: [], pulls, status: "unavailable" }),
+  });
+  await tick();
+  const log = win.document.createElement("div");
+  const proceed = await win.checkModelsBeforeGenerate("image", log);
+  assert.equal(proceed, true, "unavailable never blocks generation");
+  assert.notEqual(win.document.querySelector("#modal").style.display, "flex");
+  assert.deepEqual(pulls, []);
+
+  const toastEl = win.document.getElementById("toast");
+  assert.ok(toastEl.textContent.toLowerCase().includes("could not check"),
+    "toast says the pre-check itself could not run, not that nothing is missing");
+  assert.equal(toastEl.className, "show error", "surfaced with error-level visual weight");
+  assert.ok(log.textContent.toLowerCase().includes("could not check"),
+    "the persistent log also gets the line");
 });
 
 test("missing WITHOUT a curated source: no modal, but an honest toast+log message", async () => {

@@ -54,13 +54,40 @@ class TestPreflightRoute:
     def test_no_comfy_running_reports_nothing_missing(self, scoped_app):
         # Best-effort, matching preflight_models: an unreachable ComfyUI never
         # surfaces a false "missing" list. Mocks comfy_object_info directly rather
-        # than relying on nothing answering the real ComfyUI default port.
+        # than relying on nothing answering the real ComfyUI default port. The
+        # workflow itself still built fine here, so this is the genuine
+        # verified-empty state, distinct from status="unavailable" below.
         from localm.media import comfy_client as cc
         with patch.object(cc, "comfy_object_info", return_value=None):
             with TestClient(scoped_app) as c:
                 r = c.post("/api/media/image/preflight", json={})
         assert r.status_code == 200
-        assert r.json() == {"missing": []}
+        assert r.json() == {"status": "verified", "missing": [], "warning": ""}
+
+    @pytest.mark.parametrize("kind,module_path", [
+        ("image", "localm.image_gen.comfy"),
+        ("video", "localm.video_gen.comfy"),
+        ("music", "localm.music_gen.comfy"),
+    ])
+    def test_workflow_build_failure_reports_unavailable(
+            self, scoped_app, tmp_path, kind, module_path):
+        """When _build_check_workflow() itself raises (here: its workflow
+        template does not exist), the route must report status="unavailable"
+        rather than collapse into the same {"missing": []} shape the genuine
+        verified-empty case above uses - those two are otherwise
+        indistinguishable to a caller. Covers all three media kinds since
+        each imports its own workflow_path()."""
+        import importlib
+        mod = importlib.import_module(module_path)
+        missing_wf = tmp_path / "does-not-exist.json"
+        with patch.object(mod, "workflow_path", return_value=missing_wf):
+            with TestClient(scoped_app) as c:
+                r = c.post(f"/api/media/{kind}/preflight", json={})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "unavailable", body
+        assert body["missing"] == []
+        assert body["warning"], "an unavailable check must say so, not report an empty warning"
 
     def test_reports_missing_curated_file_with_source_and_dest(self, scoped_app, tmp_path):
         import localm.config as _cfg
