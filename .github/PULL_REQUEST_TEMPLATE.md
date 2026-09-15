@@ -5,17 +5,17 @@
 ## Checklist
 
 - [ ] `python scripts/check_hygiene.py` passes (no em/en dashes, no personal
-      disclosure, no machine-absolute paths in code) - see AGENTS.md
-- [ ] Its `[Unreleased]` WARNINGS, if any, are understood before merging (AGENTS.md):
+      disclosure, no machine-absolute paths in code)
+- [ ] Its `[Unreleased]` WARNINGS, if any, are understood before merging:
       a DROPPED line must be one you meant to remove or reword, not a sibling PR's
       bullet lost around a rebase; a DUPLICATED bullet is usually one restored that
       was never actually lost, so delete the extra copy, not every copy
 - [ ] `pytest -m "not integration"` passes
 - [ ] `ruff check .` reviewed (no new lint regressions)
 - [ ] Defaults are project-relative or user-config; no absolute or
-      machine-specific paths (AGENTS.md rule 1)
+      machine-specific paths
 - [ ] No personal disclosure in tracked files: usernames, email, hostnames,
-      secrets, private paths (AGENTS.md rule 2)
+      secrets, private paths
 - [ ] Docs updated if behaviour, CLI, or the plugin contract changed
 
 ## Feature correctness
