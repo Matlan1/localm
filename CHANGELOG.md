@@ -299,6 +299,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Several `setup.bat` warning and error messages on Windows (e.g. "uv is not installed",
   "Install failed") always printed with their `[!]` marker silently missing, on every install.**
   They now show it correctly.
+- **A web search/fetch result, knowledge-base excerpt, or attached-document note in chat was
+  shown as a right-aligned bubble as if you had typed it yourself, and its "Web" / "Sources" /
+  "Doc" label never appeared.** It now renders as a plain, labeled note instead.
+- **Fetching a web page that declared a non-UTF-8 encoding (common on older or non-English
+  sites) could show garbled text instead of the page's actual content.** The page's declared
+  encoding is now used to decode it, falling back to UTF-8 only when none is declared.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
