@@ -21,11 +21,25 @@ import asyncio
 import threading
 import time
 
+import pytest
+
+from localm.inference import residency
 from localm.inference.http_server import (
     _pin_engine,
     _stream_sse,
     _stream_sse_completion,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_cancel_registry():
+    """Every test in this file uses the same display_name ("lock-model" /
+    "raise-model") across many engine instances - a leaked registration from
+    one test (a bug, or an interrupted run) must never be mistaken for a
+    real signal by a later one."""
+    residency._cancel_events.clear()
+    yield
+    residency._cancel_events.clear()
 
 
 class _LockingEngine:
@@ -724,3 +738,85 @@ def test_completions_stream_eager_engine_error_releases_sem_and_surfaces_error()
         assert not sem.locked()
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+#  residency.cancel_all(model_name) must reach every one of the three real    #
+#  generation paths above - the eviction/unload side of the same mechanism.  #
+#  Each path registers its own cancel_event with residency on entry and      #
+#  unregisters it on exit; these tests call cancel_all() as an EXTERNAL      #
+#  caller would (an unload endpoint), never via disconnect/aclose.           #
+# --------------------------------------------------------------------------- #
+
+def test_cancel_all_stops_stream_sse_without_a_disconnect():
+    async def scenario():
+        eng = _LockingEngine()   # never-ending generation
+        sem = asyncio.Semaphore(1)
+
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()          # role chunk
+        await agen.__anext__()          # first real token -> worker running
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        signaled = residency.cancel_all("lock-model")
+        assert signaled == 1, "cancel_all did not find the registered event"
+
+        # No disconnect, no aclose() - the generator's own producer thread must
+        # notice the broadcast cancel and release the lock on its own.
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "inference lock still held after residency.cancel_all() - the " \
+            "generation was not actually reachable from the eviction side"
+        await agen.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_cancel_all_stops_stream_sse_completion_without_a_disconnect():
+    async def scenario():
+        eng = _LockingEngine()
+        sem = asyncio.Semaphore(1)
+
+        agen = _stream_sse_completion(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        assert residency.cancel_all("lock-model") == 1
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "inference lock still held after residency.cancel_all() (completions path)"
+        await agen.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_cancel_all_stops_generate_full_without_a_disconnect():
+    from localm.inference.http_server import _generate_full
+
+    async def scenario():
+        eng = _LockingEngine()
+        # request=None: no disconnect signal at all: proves the stop came from
+        # cancel_all, not from the poll loop this path also has.
+        task = asyncio.ensure_future(_generate_full(eng, _MSG, None, max_tokens=0))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        assert residency.cancel_all("lock-model") == 1
+        text = await asyncio.wait_for(task, timeout=3.0)
+        assert isinstance(text, str)
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "inference lock still held after residency.cancel_all() (non-streaming path)"
+
+    asyncio.run(scenario())
+
+
+def test_registration_is_removed_once_the_generation_ends():
+    """No leaked registry entries: once a generation finishes (normally, not
+    via cancel), cancel_all() for that model must find nothing."""
+    async def scenario():
+        eng = _LockingEngine(ntokens=3, per_token_delay=0.0)
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        async for _ in agen:
+            pass
+        return residency.cancel_all("lock-model")
+
+    signaled = asyncio.run(scenario())
+    assert signaled == 0, "a finished generation left its cancel_event registered"

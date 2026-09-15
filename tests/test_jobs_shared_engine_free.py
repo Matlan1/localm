@@ -183,8 +183,21 @@ def _drive_evict(live, monkeypatch, *, wait_started=False):
 
 
 def test_vram_gate_honors_pin_does_not_free_busy_engine(hsclean, monkeypatch):
-    """A chat is generating on the shared engine (active_requests > 0), so the
-    gate does NOT free it."""
+    """A chat is generating on the shared engine (active_requests > 0). The
+    gate calls unload_one_model with no force (a background media job must
+    never force-kill an active chat), so a pin that does not clear within
+    the grace period is left resident, reported as confirm_required rather
+    than a raw "in_use" refusal - this caller (jobs/runner.py) discards the
+    status string either way and falls through to loading its own engine
+    alongside the still-resident one, so the change is invisible to it."""
+    # This pin never clears - shorten the grace period so the test does not
+    # spend 2 real seconds proving a negative (see test_unload_honors_pin.py
+    # for the same pattern on unload_one_model directly). Captured BEFORE
+    # patching: referencing hs._wait_for_pin_clear from inside the
+    # replacement would call the replacement itself once installed.
+    _real_wait = hs._wait_for_pin_clear
+    monkeypatch.setattr(hs, "_wait_for_pin_clear",
+                        lambda engine, **kw: _real_wait(engine, timeout=0.05, poll_interval=0.01))
     live = _FakeEngine("gemma", active_requests=1)
     hs._engines["gemma"] = live
     hs._engines_lru.append("gemma")
@@ -194,7 +207,7 @@ def test_vram_gate_honors_pin_does_not_free_busy_engine(hsclean, monkeypatch):
 
     status = _drive_evict(live, monkeypatch)
 
-    assert status == "in_use"
+    assert status == "confirm_required"
     assert live.unloaded == 0, "a pinned (in-use) shared engine must never be evicted"
     assert live.loaded is True
     assert hs._active_model_name == "gemma", "pointers untouched when nothing was freed"

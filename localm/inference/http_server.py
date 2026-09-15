@@ -143,6 +143,16 @@ _switch_cancel: Optional["threading.Event"] = None
 # {"instance_id", "port", "host", "scheme", "token"}.
 _gpu_coord: Optional[dict] = None
 
+# The coder plugin's SessionManager, published as a module global (mirroring
+# _gpu_coord above) so a free function like unload_one_model can ask "is any
+# live coder session bound to this model" without needing app/request
+# threaded through it. None until mount_gui_surface() attaches the GUI (a
+# bare create_app() test app, or an --isolated/API-only instance, never
+# mounts it, so this stays None on those). Set alongside the identical
+# app.state.coder_sessions assignment in mount_gui_surface - same object,
+# reachable two ways for two different kinds of caller.
+_coder_session_manager = None
+
 # The running server's HangAlarm instance (see localm.inference._hang_alarm),
 # None until lifespan startup constructs one, None again once that lifespan
 # shuts down, and None whenever recovery is disabled
@@ -473,7 +483,8 @@ _INCONCLUSIVE_LOAD_RETRIES = 2
 _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 
 
-async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
+async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
+                        force: bool = False) -> dict:
     global _engines, _engines_lru, _active_model_name, _last_active_model_name, _engine_factory, _last_activity_per_model
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
 
@@ -570,10 +581,22 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # attempts, making this branch fire again instead of the loop
             # converging to either a successful load or the final 503.
             embedder_evict_attempted = False
+            # Bounds the busy-victim eviction attempt below to once per load,
+            # mirroring embedder_evict_attempted just above and asked_peers
+            # below - without this, a candidate that fails to clear would be
+            # retried every loop iteration instead of the loop converging.
+            busy_evict_attempted = False
             inconclusive_retries = 0
             load_attempt_started = time.monotonic()
 
             while True:
+                # Reset every iteration: it is read right after evict_name is
+                # computed below, in the SAME iteration, and defaults to False
+                # for the ordinary idle-victim path (pick_eviction_victim
+                # above finding a candidate directly skips the busy-eviction
+                # block entirely, which is the only place that ever sets it
+                # True).
+                force_busy_evict = False
                 # Off the event loop: vram_capacity()/gpu_split_shortfall() route
                 # through discover.list_gpus(), which is deadline-bounded but is
                 # still a REAL hardware probe that can take up to that deadline -
@@ -755,170 +778,239 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                                             before_bytes=free_vram))
                                 continue
 
-                    # Nothing idle left to evict.
-                    if cannot_measure:
-                        # This BOX cannot report free VRAM at all, and every remaining
-                        # model is busy (or none loaded): free what can safely be
-                        # freed and load best-effort. Refusing here would brick every
-                        # CPU-only / GGUF-only / registry-tier box, which can NEVER
-                        # measure.
-                        break
-                    if inconclusive:
-                        # The probe did not complete, so free VRAM is unknown, and
-                        # the failure modes are not symmetric. A wrong permit hands
-                        # a too-big model to the native loader, which "can hard-abort
-                        # the process rather than return NULL" (gpu_split_shortfall's
-                        # docstring) - unrecoverable. A wrong refusal only costs a
-                        # retry, by which time the abandoned probe has usually landed
-                        # and the driver is warm. So refuse-and-retry, quoting no
-                        # figure, since none was measured.
-                        #
-                        # Two ways the probe fails to complete, and both the long
-                        # deadline and wait_for_inflight=True above are aimed at
-                        # them: (1) a cold init on a fresh process - the deadline
-                        # waits it out; (2) a CONCURRENT probe holding the slot (the
-                        # GUI's 2500ms /api/stats heartbeat through a cold init) -
-                        # the join waits on ITS result instead of taking an instant
-                        # BUSY. So reaching here needs the probe to blow the FULL
-                        # deadline even after joining, i.e. a genuinely stuck or
-                        # wedged driver, or a fresh, still-completing cold init
-                        # elsewhere in this process, rather than an ordinary cold
-                        # init or heartbeat collision this call itself started.
-                        #
-                        # A caller-visible refusal is deferred behind
-                        # _INCONCLUSIVE_LOAD_RETRIES automatic retries: the load
-                        # itself re-probes from scratch instead of reporting a
-                        # transient condition as a request the caller must repeat.
-                        if inconclusive_retries < _INCONCLUSIVE_LOAD_RETRIES:
-                            inconclusive_retries += 1
-                            await asyncio.sleep(_INCONCLUSIVE_LOAD_RETRY_DELAY)
-                            continue
-                        elapsed = time.monotonic() - load_attempt_started
-                        # Escalate to the same seamless self-restart the hang
-                        # alarm's own loop-freeze/transport-death detectors use,
-                        # sharing its latch and storm guard. See
-                        # TestSwitchEngineEscalatesToSelfRestartWhenStillInconclusive.
-                        restarting = (
-                            _hang_alarm_instance.trigger_restart(
-                                f"GPU probe still inconclusive after "
-                                f"{inconclusive_retries + 1} attempts loading '{name}'")
-                            if _hang_alarm_instance is not None else False)
-                        if restarting:
+                    if evict_name is None:
+                        # Nothing idle left to evict yet (a busy candidate may
+                        # still be evictable, tried further below as the
+                        # last local resort - after cooperative unload).
+                        if cannot_measure:
+                            # This BOX cannot report free VRAM at all, and every remaining
+                            # model is busy (or none loaded): free what can safely be
+                            # freed and load best-effort. Refusing here would brick every
+                            # CPU-only / GGUF-only / registry-tier box, which can NEVER
+                            # measure.
+                            break
+                        if inconclusive:
+                            # The probe did not complete, so free VRAM is unknown, and
+                            # the failure modes are not symmetric. A wrong permit hands
+                            # a too-big model to the native loader, which "can hard-abort
+                            # the process rather than return NULL" (gpu_split_shortfall's
+                            # docstring) - unrecoverable. A wrong refusal only costs a
+                            # retry, by which time the abandoned probe has usually landed
+                            # and the driver is warm. So refuse-and-retry, quoting no
+                            # figure, since none was measured.
+                            #
+                            # Two ways the probe fails to complete, and both the long
+                            # deadline and wait_for_inflight=True above are aimed at
+                            # them: (1) a cold init on a fresh process - the deadline
+                            # waits it out; (2) a CONCURRENT probe holding the slot (the
+                            # GUI's 2500ms /api/stats heartbeat through a cold init) -
+                            # the join waits on ITS result instead of taking an instant
+                            # BUSY. So reaching here needs the probe to blow the FULL
+                            # deadline even after joining, i.e. a genuinely stuck or
+                            # wedged driver, or a fresh, still-completing cold init
+                            # elsewhere in this process, rather than an ordinary cold
+                            # init or heartbeat collision this call itself started.
+                            #
+                            # A caller-visible refusal is deferred behind
+                            # _INCONCLUSIVE_LOAD_RETRIES automatic retries: the load
+                            # itself re-probes from scratch instead of reporting a
+                            # transient condition as a request the caller must repeat.
+                            if inconclusive_retries < _INCONCLUSIVE_LOAD_RETRIES:
+                                inconclusive_retries += 1
+                                await asyncio.sleep(_INCONCLUSIVE_LOAD_RETRY_DELAY)
+                                continue
+                            elapsed = time.monotonic() - load_attempt_started
+                            # Escalate to the same seamless self-restart the hang
+                            # alarm's own loop-freeze/transport-death detectors use,
+                            # sharing its latch and storm guard. See
+                            # TestSwitchEngineEscalatesToSelfRestartWhenStillInconclusive.
+                            restarting = (
+                                _hang_alarm_instance.trigger_restart(
+                                    f"GPU probe still inconclusive after "
+                                    f"{inconclusive_retries + 1} attempts loading '{name}'")
+                                if _hang_alarm_instance is not None else False)
+                            if restarting:
+                                raise HTTPException(
+                                    503, f"Cannot load '{name}' right now: the server "
+                                    "detected a stuck GPU check and is restarting "
+                                    "automatically. This page will reconnect once it "
+                                    "comes back up.")
                             raise HTTPException(
-                                503, f"Cannot load '{name}' right now: the server "
-                                "detected a stuck GPU check and is restarting "
-                                "automatically. This page will reconnect once it "
-                                "comes back up.")
-                        raise HTTPException(
-                            503, f"Cannot load '{name}': tried measuring free VRAM "
-                            f"{inconclusive_retries + 1} times over about "
-                            f"{elapsed:.0f}s without a conclusive reading, could not "
-                            "free anything, and automatic recovery is unavailable. "
-                            "Please file a bug report if this keeps happening.")
-                    # Local eviction exhausted: before giving up, best-effort ask a
-                    # sibling localm instance to release ITS VRAM (multi-instance
-                    # coordination, see localm.gpu_registry). Off the event loop (it
-                    # may make a blocking loopback call). Advisory: any failure falls
-                    # through to the 503 below, never a harder failure than baseline.
-                    # Bounded and fit-checked (see _attempt_cooperative_unload): each
-                    # peer is asked at most once per load attempt, so this loop always
-                    # progresses, and a yank that provably could not free enough is
-                    # not worth destroying a sibling's models for.
-                    # A PIN is a local preference, exactly like the cap above, so
-                    # it must not cost a SIBLING instance its models either. If an
-                    # unpinned peer WOULD have been evictable, the pin is the only
-                    # reason local eviction came up empty - so do not escalate.
-                    # Fall through to the backend's own split-aware sizing
-                    # (partial offload) instead, which honors the pin locally at
-                    # this instance's own expense rather than another's. Unlike
-                    # the cap case, VRAM here is genuinely short, so this is a
-                    # slower load rather than a free one - still the right trade
-                    # against destroying another instance's work.
-                    pin_blocked = bool(pinned) and residency.pick_eviction_victim(
-                        _engines_lru, _engines, requested=name) is not None
-                    if pin_blocked:
-                        from localm.debuglog import logger as _dbg
-                        _dbg.warning(
-                            "pinned_models=%s is the only reason no local model "
-                            "could be evicted for %s; NOT asking a peer instance "
-                            "to unload - deferring to the backend's own sizing",
-                            sorted(pinned), name)
-                    cooperated = False if pin_blocked else await loop.run_in_executor(
-                        None,
-                        lambda: _attempt_cooperative_unload(
-                            needed_bytes=vram_required + headroom,
-                            free_bytes=free_vram, asked=asked_peers))
-                    if cooperated:
-                        continue
-                    if shortfall and not shares_adaptive:
-                        # Aggregate may well be enough - it is specifically the
-                        # configured split's per-device share that is short, so name
-                        # the device(s), not a generic aggregate message. An
-                        # unmeasurable aggregate cannot reach here: shortfall is
-                        # always [] when free is unmeasurable, because list_gpus()
-                        # DROPS a device that fails to report rather than emitting
-                        # free=None, and the inconclusive branch empties shortfall.
-                        #
-                        # STATIC shares only (pinned ratios, or auto declined into
-                        # the equal fallback - a stale configured index, a device
-                        # without a free reading): this stays a hard refusal even
-                        # though everything below it defers to the backend, because
-                        # with static shares apply_gpu_split() divides the model by
-                        # a ratio that ignores live per-device free VRAM
-                        # (discover.gpu_split_shortfall's own docstring), and the
-                        # backend's own sizing (_auto_gpu_layers / _check_vram,
-                        # llamacpp/_sizing.py) budgets the split's COMBINED capacity
-                        # (_split_free_total_bytes), never any one device's static
-                        # share - so this per-device check is still the only gate
-                        # that can catch one split device being individually short
-                        # while the aggregate fits. Letting a real per-device
-                        # shortfall through would trade a precise, actionable
-                        # message for a native worker abort with no such visibility.
-                        # Keyed on shares_adaptive, NOT on whether ratios are set in
-                        # config: with ratios unset but auto DECLINED, the loader
-                        # applies the same equal fallback the gate just checked, so
-                        # the hazard is live in that case too.
-                        detail = "; ".join(
-                            f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
-                            f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
-                        raise HTTPException(
-                            503, f"Not enough VRAM on the configured split "
-                            f"device(s) to load '{name}' ({detail}).")
-                    # ADAPTIVE shares (live auto free-VRAM-proportional split): a
-                    # non-empty shortfall can only mean the COMBINED estimate is
-                    # short (each device's auto share fits its free whenever the
-                    # aggregate fits - gpu_split_shortfall computed with the same
-                    # auto ratios the loader will pin), so it falls through to
-                    # the same defer-to-backend path as the aggregate-only miss
-                    # below, where the backend's split-aware sizing is the
-                    # accurate judge and partial offload is available.
-                    #
-                    # Local + cooperative eviction exhausted, no hard-refusable
-                    # (pinned-share) shortfall - what remains is this loop's own
-                    # coarse "vram_required = file_size * 1.2" estimate not
-                    # being met (combined across an auto split, or single-GPU). That
-                    # estimate assumes the WHOLE model lands in VRAM, while the
-                    # backend's own load() can make a too-big model fit anyway:
-                    # GgufBackend's n_gpu_layers_auto (default ON -
-                    # _effective_gpu_layers/_auto_gpu_layers/_check_vram in
-                    # llamacpp/_sizing.py) sizes how many layers actually fit free
-                    # VRAM and puts the rest on system RAM, and HFBackend's
-                    # device_map="auto" (hf.py) does the unconditional equivalent -
-                    # both being the promise behind a "too-big"
-                    # discover.fit_label() badge in the GUI's model browser.
-                    #
-                    # So fall through to a real load attempt: _check_vram() is the
-                    # accurate, backend-owned final gate - it raises only when the
-                    # model genuinely cannot fit even at 0 GPU layers, which the
-                    # except handler around new_engine.load() below turns into a
-                    # clean 503 for every caller.
-                    from localm.debuglog import logger as _dbg
-                    _dbg.info(
-                        "switch_engine: '%s' exceeds the whole-model VRAM estimate "
-                        "(need ~%s MB, %s MB free) after eviction - deferring to the "
-                        "backend's own load-time sizing instead of refusing",
-                        name, vram_required // 1024 ** 2, free_vram // 1024 ** 2)
-                    break
+                                503, f"Cannot load '{name}': tried measuring free VRAM "
+                                f"{inconclusive_retries + 1} times over about "
+                                f"{elapsed:.0f}s without a conclusive reading, could not "
+                                "free anything, and automatic recovery is unavailable. "
+                                "Please file a bug report if this keeps happening.")
+                        # Local eviction exhausted: before giving up, best-effort ask a
+                        # sibling localm instance to release ITS VRAM (multi-instance
+                        # coordination, see localm.gpu_registry). Off the event loop (it
+                        # may make a blocking loopback call). Advisory: any failure falls
+                        # through to the 503 below, never a harder failure than baseline.
+                        # Bounded and fit-checked (see _attempt_cooperative_unload): each
+                        # peer is asked at most once per load attempt, so this loop always
+                        # progresses, and a yank that provably could not free enough is
+                        # not worth destroying a sibling's models for.
+                        # A PIN is a local preference, exactly like the cap above, so
+                        # it must not cost a SIBLING instance its models either. If an
+                        # unpinned peer WOULD have been evictable, the pin is the only
+                        # reason local eviction came up empty - so do not escalate.
+                        # Fall through to the backend's own split-aware sizing
+                        # (partial offload) instead, which honors the pin locally at
+                        # this instance's own expense rather than another's. Unlike
+                        # the cap case, VRAM here is genuinely short, so this is a
+                        # slower load rather than a free one - still the right trade
+                        # against destroying another instance's work.
+                        pin_blocked = bool(pinned) and residency.pick_eviction_victim(
+                            _engines_lru, _engines, requested=name) is not None
+                        if pin_blocked:
+                            from localm.debuglog import logger as _dbg
+                            _dbg.warning(
+                                "pinned_models=%s is the only reason no local model "
+                                "could be evicted for %s; NOT asking a peer instance "
+                                "to unload - deferring to the backend's own sizing",
+                                sorted(pinned), name)
+                        cooperated = False if pin_blocked else await loop.run_in_executor(
+                            None,
+                            lambda: _attempt_cooperative_unload(
+                                needed_bytes=vram_required + headroom,
+                                free_bytes=free_vram, asked=asked_peers))
+                        if cooperated:
+                            continue
+                        # Local + cooperative eviction both exhausted: a BUSY
+                        # resident model is the last local resort before
+                        # falling through to a degraded/refused load below -
+                        # cancel_all it and give it a grace period (the common
+                        # case is the caller's own just-stopped generation, or
+                        # - with force - an explicit override that must
+                        # proceed regardless of what is running). Bounded to
+                        # once per load like the embedder/peer attempts
+                        # above. Gated on preempt, exactly like the
+                        # single-slot preemption at the top of this function:
+                        # this is an explicit user switch (GUI/CLI
+                        # switch_model), never an API-routed load (get_engine's
+                        # preempt=False auto-load-on-demand), which must not
+                        # cancel a generation - possibly another caller's -
+                        # just because it wanted a different model. Tried
+                        # AFTER cooperative unload, never before: asking a
+                        # peer instance to free ITS own VRAM is strictly less
+                        # disruptive than interrupting a live generation on
+                        # this box.
+                        if preempt and not busy_evict_attempted:
+                            busy_name = residency.pick_busy_eviction_victim(
+                                _engines_lru, _engines, requested=name, pinned=pinned)
+                            if busy_name is not None:
+                                busy_evict_attempted = True
+                                busy_engine = _engines[busy_name]
+                                residency.cancel_all(busy_name)
+                                if not force and not await _wait_for_pin_clear(busy_engine):
+                                    return {
+                                        "status": "confirm_required", "model": name,
+                                        "detail": (
+                                            f"loading '{name}' needs to free "
+                                            f"'{busy_name}', which is {_in_use_description(busy_name, busy_engine)}"),
+                                    }
+                                # Either the wait cleared it for real (the
+                                # common case - active_requests is genuinely 0
+                                # now, and the defensive re-check below passes
+                                # normally), or force=True skipped the wait
+                                # entirely and the pin may still be held -
+                                # force_busy_evict tells the defensive
+                                # re-check to proceed anyway, exactly like
+                                # unload_one_model's force path:
+                                # engine.unload() below still forcibly kills
+                                # the worker if it does not stop on its own.
+                                evict_name = busy_name
+                                force_busy_evict = force
+                        if evict_name is None:
+                            if shortfall and not shares_adaptive:
+                                # Aggregate may well be enough - it is specifically the
+                                # configured split's per-device share that is short, so name
+                                # the device(s), not a generic aggregate message. An
+                                # unmeasurable aggregate cannot reach here: shortfall is
+                                # always [] when free is unmeasurable, because list_gpus()
+                                # DROPS a device that fails to report rather than emitting
+                                # free=None, and the inconclusive branch empties shortfall.
+                                #
+                                # STATIC shares only (pinned ratios, or auto declined into
+                                # the equal fallback - a stale configured index, a device
+                                # without a free reading): this stays a hard refusal even
+                                # though everything below it defers to the backend, because
+                                # with static shares apply_gpu_split() divides the model by
+                                # a ratio that ignores live per-device free VRAM
+                                # (discover.gpu_split_shortfall's own docstring), and the
+                                # backend's own sizing (_auto_gpu_layers / _check_vram,
+                                # llamacpp/_sizing.py) budgets the split's COMBINED capacity
+                                # (_split_free_total_bytes), never any one device's static
+                                # share - so this per-device check is still the only gate
+                                # that can catch one split device being individually short
+                                # while the aggregate fits. Letting a real per-device
+                                # shortfall through would trade a precise, actionable
+                                # message for a native worker abort with no such visibility.
+                                # Keyed on shares_adaptive, NOT on whether ratios are set in
+                                # config: with ratios unset but auto DECLINED, the loader
+                                # applies the same equal fallback the gate just checked, so
+                                # the hazard is live in that case too.
+                                detail = "; ".join(
+                                    f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
+                                    f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
+                                raise HTTPException(
+                                    503, f"Not enough VRAM on the configured split "
+                                    f"device(s) to load '{name}' ({detail}).")
+                            # ADAPTIVE shares (live auto free-VRAM-proportional split): a
+                            # non-empty shortfall can only mean the COMBINED estimate is
+                            # short (each device's auto share fits its free whenever the
+                            # aggregate fits - gpu_split_shortfall computed with the same
+                            # auto ratios the loader will pin), so it falls through to
+                            # the same defer-to-backend path as the aggregate-only miss
+                            # below, where the backend's split-aware sizing is the
+                            # accurate judge and partial offload is available.
+                            #
+                            # Local + cooperative eviction exhausted, no hard-refusable
+                            # (pinned-share) shortfall - what remains is this loop's own
+                            # coarse "vram_required = file_size * 1.2" estimate not
+                            # being met (combined across an auto split, or single-GPU). That
+                            # estimate assumes the WHOLE model lands in VRAM, while the
+                            # backend's own load() can make a too-big model fit anyway:
+                            # GgufBackend's n_gpu_layers_auto (default ON -
+                            # _effective_gpu_layers/_auto_gpu_layers/_check_vram in
+                            # llamacpp/_sizing.py) sizes how many layers actually fit free
+                            # VRAM and puts the rest on system RAM, and HFBackend's
+                            # device_map="auto" (hf.py) does the unconditional equivalent -
+                            # both being the promise behind a "too-big"
+                            # discover.fit_label() badge in the GUI's model browser.
+                            #
+                            # So fall through to a real load attempt: _check_vram() is the
+                            # accurate, backend-owned final gate - it raises only when the
+                            # model genuinely cannot fit even at 0 GPU layers, which the
+                            # except handler around new_engine.load() below turns into a
+                            # clean 503 for every caller.
+                            #
+                            # An explicit switch (preempt=True) warns first instead of
+                            # silently accepting a degraded (partial-CPU-offload) load -
+                            # same confirm/force contract as the busy-eviction attempt
+                            # above, gated the same way and for the same reason:
+                            # get_engine's own API-routed auto-load (preempt=False) must
+                            # keep proceeding silently, since there is no caller in a
+                            # position to confirm anything and refusing an ordinary chat
+                            # request outright would be a worse regression than a
+                            # possibly-degraded load.
+                            if preempt and not force:
+                                return {
+                                    "status": "confirm_required", "model": name,
+                                    "detail": (
+                                        f"'{name}' does not fit the estimated free VRAM "
+                                        f"(need ~{vram_required // 1024 ** 2} MB, "
+                                        f"{free_vram // 1024 ** 2} MB free) even after "
+                                        "eviction; loading it anyway will let the backend "
+                                        "fall back to partial CPU offload, which is slower"),
+                                }
+                            from localm.debuglog import logger as _dbg
+                            _dbg.info(
+                                "switch_engine: '%s' exceeds the whole-model VRAM estimate "
+                                "(need ~%s MB, %s MB free) after eviction - deferring to the "
+                                "backend's own load-time sizing instead of refusing",
+                                name, vram_required // 1024 ** 2, free_vram // 1024 ** 2)
+                            break
 
                 evict_engine = _engines[evict_name]
                 free_before = free_vram
@@ -926,10 +1018,16 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # victim-semaphore, which would reintroduce the two-switch
                 # lock-ordering deadlock described below. The LRU scan above
                 # already required active_requests==0 and there is no await
-                # between it and here, so this cannot currently fire; it guards
-                # against a future await in the scan reopening the window. If the
-                # victim became pinned, abandon it and re-scan.
-                if getattr(evict_engine, "active_requests", 0) != 0:
+                # between it and here, so this cannot currently fire for an
+                # ORDINARY (idle) victim; it guards against a future await in
+                # the scan reopening the window. If the victim became pinned,
+                # abandon it and re-scan. force_busy_evict is the one
+                # deliberate exception: an explicit force=True override on a
+                # BUSY victim that never actually cleared its pin (see the
+                # busy-eviction attempt above) - the owner's action is final,
+                # so this proceeds regardless; engine.unload() below still
+                # forcibly kills the worker if it does not stop on its own.
+                if not force_busy_evict and getattr(evict_engine, "active_requests", 0) != 0:
                     continue
 
                 # Detach the victim from the live registry BEFORE the native free,
@@ -1342,7 +1440,59 @@ async def _unload_engine_off_loop(loop, engine, on_unloaded) -> None:
         on_unloaded()
 
 
-async def unload_all_models() -> dict:
+async def _wait_for_pin_clear(engine, *, timeout: float = 2.0,
+                              poll_interval: float = 0.05) -> bool:
+    """Poll ``engine.active_requests`` until it reads 0, or *timeout* elapses.
+    Meant to run right after ``residency.cancel_all()``: a generation that
+    was only still running because nobody had told it to stop (the caller's
+    own just-cancelled request, most commonly) clears within a token or two,
+    so this resolves the common "still generating" complaint without ever
+    surfacing a confirm box for it. Returns whether the pin is clear."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        active = getattr(engine, "active_requests", 0)
+        if not (isinstance(active, int) and active > 0):
+            return True
+        await asyncio.sleep(poll_interval)
+    active = getattr(engine, "active_requests", 0)
+    return not (isinstance(active, int) and active > 0)
+
+
+def _coder_sessions_using(name: str) -> list[str]:
+    """Labels for live coder sessions currently BUSY and bound to model
+    *name* - informational only, for a confirm_required message. Empty when
+    no coder GUI is mounted (an --isolated/API-only instance never sets
+    _coder_session_manager) or none match. Never raises: a best-effort
+    attribution probe must not turn an unload into a 500."""
+    mgr = _coder_session_manager
+    if mgr is None:
+        return []
+    try:
+        infos = mgr.list(is_owner=True)
+    except Exception:
+        return []
+    return [f"a coder session in {info.get('cwd') or info.get('id')}"
+           for info in infos if info.get("busy") and info.get("model") == name]
+
+
+def _in_use_description(name: str, engine) -> str:
+    """Human-readable "who is using this" for a confirm_required response.
+    Best-effort: names what is KNOWN (a busy coder session bound to this
+    model) and folds whatever residency can only see as a bare pin count
+    into a generic remainder, rather than double-counting a coder session's
+    own request against the raw active_requests total."""
+    users = _coder_sessions_using(name)
+    active = getattr(engine, "active_requests", 0)
+    remaining = active if isinstance(active, int) else 0
+    other = max(0, remaining - len(users))
+    parts = list(users)
+    if other:
+        parts.append(f"{other} other active request{'s' if other != 1 else ''}")
+    return " and ".join(parts) if parts else "still in use"
+
+
+async def unload_all_models(*, force: bool = False) -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
     driver-hang guard: otherwise a media model can load on top of a
@@ -1366,6 +1516,7 @@ async def unload_all_models() -> dict:
     before, before_fresh, before_scope = _vram_free_reading()
     unloaded_models = []
     skipped_in_use = []
+    confirm_required: dict[str, str] = {}
 
     def _reset_active_pointers():
         global _active_model_name, _last_active_model_name, _engine, _inference_sem
@@ -1381,7 +1532,8 @@ async def unload_all_models() -> dict:
 
     try:
         embedder_was_loaded = await _unload_engines_and_embedder(
-            loop, _embedder_mod, unloaded_models, skipped_in_use)
+            loop, _embedder_mod, unloaded_models, skipped_in_use,
+            confirm_required=confirm_required, force=force)
     except asyncio.CancelledError:
         # The caller stopped waiting: an engine already unloaded above still
         # gets the pointer reset the normal path does below.
@@ -1416,6 +1568,11 @@ async def unload_all_models() -> dict:
     }
     if skipped_in_use:
         result["skipped_in_use"] = skipped_in_use
+    if confirm_required:
+        # Present only for a model that is STILL in use after cancel_all()
+        # was given its grace period - describes what to tell the caller
+        # before it retries this same call with force=True.
+        result["confirm_required"] = confirm_required
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
     # Cross-install GPU coordination: reflect the now-empty/changed state for a
@@ -1426,7 +1583,8 @@ async def unload_all_models() -> dict:
 
 
 async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
-                                       skipped_in_use) -> bool:
+                                       skipped_in_use, *,
+                                       confirm_required: dict, force: bool = False) -> bool:
     """The releasing half of ``unload_all_models``: unload every loaded, unpinned
     chat engine (appending to *unloaded_models* / *skipped_in_use*), then the
     shared embedder. Returns whether the embedder was released."""
@@ -1442,8 +1600,15 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
         # _pin/_unpin: a non-int active_requests (a bare test double) is "not pinned".
         active = getattr(engine, "active_requests", 0)
         if isinstance(active, int) and active > 0:
-            skipped_in_use.append(name)
-            continue
+            residency.cancel_all(name)
+            if not force and not await _wait_for_pin_clear(engine):
+                skipped_in_use.append(name)
+                confirm_required[name] = _in_use_description(name, engine)
+                continue
+            # Either the grace period cleared it (the common case: the
+            # caller's own just-stopped generation), or force=True proceeds
+            # regardless - engine.unload() below still forcibly kills the
+            # worker if something is genuinely still running.
         sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
         # Flag BEFORE acquiring the semaphore so no request that arrives after the
         # pin check above can take get_engine's fast path and pin this engine while
@@ -1581,7 +1746,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
-async def unload_one_model(name: str) -> dict:
+async def unload_one_model(name: str, *, force: bool = False) -> dict:
     """Release ONE currently-loaded model from GPU/CPU memory, leaving any
     other loaded models untouched - the targeted counterpart to
     ``unload_all_models()`` (same VRAM-release-wait + gpu-registry-sync
@@ -1591,7 +1756,19 @@ async def unload_one_model(name: str) -> dict:
     requests. A *name* that is registered but not currently loaded is a
     no-op success (idempotent, matching unload_all_models()'s "nothing to do"
     case), not an error - callers that need to reject an unknown model name
-    outright should check the registry themselves before calling this."""
+    outright should check the registry themselves before calling this.
+
+    A pinned engine is no longer refused outright: ``residency.cancel_all``
+    is broadcast first, and a short grace period lets a generation that was
+    only running because nobody had told it to stop (the caller's own
+    just-cancelled request, most commonly) clear on its own - the common
+    case resolves with no confirm box at all. If it is still in use after
+    that, the owner's explicit action is final: pass *force* to evict
+    immediately regardless of what is running (the underlying
+    ``engine.unload()`` forcibly kills the isolated worker if it does not
+    exit within its own grace period); without it, this returns
+    ``{"status": "confirm_required", ...}`` describing what was found using
+    it, for the caller to show a confirmation before retrying with force."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -1609,7 +1786,11 @@ async def unload_one_model(name: str) -> dict:
     # isinstance(int) guard matches _pin/_unpin (a bare test double is not pinned).
     active = getattr(engine, "active_requests", 0)
     if isinstance(active, int) and active > 0:
-        return {"status": "in_use", "model": name, "vram_freed": 0}
+        residency.cancel_all(name)
+        if not force and not await _wait_for_pin_clear(engine):
+            return {"status": "confirm_required", "model": name,
+                    "detail": _in_use_description(name, engine)}
+        # Cleared during the grace period, or force=True - proceed below.
 
     _free = _live_free_vram_bytes
 
@@ -3012,7 +3193,7 @@ def mount_gui_surface(app) -> bool:
     semaphore are this instance's own (it already loaded the model for /v1), so no
     second model load happens; ``switch_model`` swaps the shared ``_engine`` under
     ``_inference_sem`` exactly as the GUI launcher does."""
-    global _engine
+    global _engine, _coder_session_manager
     if getattr(app.state, "gui_mounted", False):
         return False
 
@@ -3052,10 +3233,10 @@ def mount_gui_surface(app) -> bool:
             mmproj_path=mmproj,
         )
 
-    async def switch_model(name: str) -> dict:
+    async def switch_model(name: str, *, force: bool = False) -> dict:
         # Preemptive switch: a newer selection aborts an in-flight load rather
         # than waiting for the abandoned model to finish (see switch_engine).
-        return await switch_engine(name, _build_engine)
+        return await switch_engine(name, _build_engine, force=force)
 
     from localm.plugins.gui.web import attach_gui
     # Claim the mount BEFORE attaching so a re-entrant/concurrent call cannot
@@ -3072,6 +3253,7 @@ def mount_gui_surface(app) -> bool:
     # attach_gui re-affirms app.state.gui_mounted; reflect the surface change in
     # discovery so /whoami and the registry report this is now a full instance.
     app.state.coder_sessions = manager
+    _coder_session_manager = manager
     app.state.instance_mode = "full"
     app.openapi_schema = None   # force the schema to include the new routes
     try:
@@ -4866,6 +5048,7 @@ async def _stream_sse(
                 # early-exit check the main generation loop below already
                 # does per token, applied here too.
                 _compact_cancel = threading.Event()
+                residency.register_cancel(engine.display_name, _compact_cancel)
                 def _gen_for_compact(ms: list[dict], max_t: int) -> str:
                     parts = []
                     gen = engine.chat_stream(ms, max_tokens=max_t, temperature=0.3)
@@ -4885,11 +5068,14 @@ async def _stream_sse(
                 # generation below is.
                 _loop = asyncio.get_running_loop()
                 try:
-                    new_messages, changed = await _loop.run_in_executor(
-                        None, compact_messages, messages, _gen_for_compact)
-                except (asyncio.CancelledError, GeneratorExit):
-                    _compact_cancel.set()
-                    raise
+                    try:
+                        new_messages, changed = await _loop.run_in_executor(
+                            None, compact_messages, messages, _gen_for_compact)
+                    except (asyncio.CancelledError, GeneratorExit):
+                        _compact_cancel.set()
+                        raise
+                finally:
+                    residency.unregister_cancel(engine.display_name, _compact_cancel)
                 if changed:
                     messages = list(new_messages)
                     prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -4913,7 +5099,11 @@ async def _stream_sse(
     # driving engine.chat_stream() all the way to end-of-generation, holding
     # llama.py's per-model _inference_lock the whole time and blocking the next
     # request to THIS model. cancel_event lets the disconnect unwind stop it.
+    # Also registered with residency's cancel broadcast so an unload/switch can
+    # trigger the same stop proactively, instead of only reading active_requests
+    # once and refusing.
     cancel_event = threading.Event()
+    residency.register_cancel(engine.display_name, cancel_event)
 
     def _generate():
         # engine.chat_stream is called INSIDE the try: Engine.chat_stream is not a
@@ -4976,33 +5166,41 @@ async def _stream_sse(
         completion_parts: list[str] = []
         gen_error: Exception | None = None
         try:
-            while True:
-                token = await token_queue.get()
-                if token is _DONE:
-                    break
-                if isinstance(token, Exception):
-                    gen_error = token
-                    continue
-                if first_token_at is None:
-                    first_token_at = time.perf_counter()
-                # Stream hook transforms the piece before it is recorded and sent,
-                # so usage reflects exactly what the client receives.
-                if pipeline is not None and ctx is not None and pipeline.has("stream"):
-                    token = pipeline.run_stream(token, ctx)
-                completion_parts.append(token)
-                for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
-                    yield data
-        finally:
-            # Signal the producer to stop. On a clean finish this is a no-op: the
-            # thread already exited after _DONE, so t.join() below returns at once.
-            # On a disconnect (GeneratorExit raised at the yield above) it makes the
-            # thread break its loop, close the generator chain, and release
-            # _inference_lock instead of running to end-of-generation. GeneratorExit
-            # then keeps propagating, so t.join() below is skipped - the daemon
-            # thread self-terminates within ~one token of the cancel.
-            cancel_event.set()
+            try:
+                while True:
+                    token = await token_queue.get()
+                    if token is _DONE:
+                        break
+                    if isinstance(token, Exception):
+                        gen_error = token
+                        continue
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    # Stream hook transforms the piece before it is recorded and sent,
+                    # so usage reflects exactly what the client receives.
+                    if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                        token = pipeline.run_stream(token, ctx)
+                    completion_parts.append(token)
+                    for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
+                        yield data
+            finally:
+                # Signal the producer to stop. On a clean finish this is a no-op: the
+                # thread already exited after _DONE, so t.join() below returns at once.
+                # On a disconnect (GeneratorExit raised at the yield above) it makes the
+                # thread break its loop, close the generator chain, and release
+                # _inference_lock instead of running to end-of-generation. GeneratorExit
+                # then keeps propagating, so t.join() below is skipped - the daemon
+                # thread self-terminates within ~one token of the cancel.
+                cancel_event.set()
 
-        t.join()
+            t.join()
+        finally:
+            # t has fully exited by now on every path that reaches here (the
+            # normal one; a GeneratorExit skips straight past to this finally
+            # without joining, which is fine - the thread notices cancel_event
+            # within a token or two on its own and this registration merely
+            # stops being reachable, same as an unpin with nothing pinned).
+            residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
         # Release any tail held back while disambiguating a partial <think> tag.
         for data in _reason_sse(*think.flush(), model_id, chunk_id, ts):
@@ -5068,12 +5266,12 @@ async def _stream_sse_completion(
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue = asyncio.Queue()
 
-    import threading
-
     # See _stream_sse: a mid-stream disconnect must stop the producer thread so it
     # releases llama.py's per-model _inference_lock instead of running to
-    # end-of-generation and blocking the next request to this model.
+    # end-of-generation and blocking the next request to this model. Also
+    # registered with residency's cancel broadcast - see _stream_sse.
     cancel_event = threading.Event()
+    residency.register_cancel(engine.display_name, cancel_event)
 
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
@@ -5121,32 +5319,35 @@ async def _stream_sse_completion(
         completion_parts: list[str] = []
         gen_error: Exception | None = None
         try:
-            while True:
-                token = await token_queue.get()
-                if token is None:
-                    break
-                if isinstance(token, Exception):
-                    gen_error = token
-                    continue
-                if first_token_at is None:
-                    first_token_at = time.perf_counter()
-                # Stream hook transforms each piece before it is recorded and sent,
-                # so usage and the audit trail reflect what the client receives.
-                if pipeline is not None and ctx is not None and pipeline.has("stream"):
-                    token = pipeline.run_stream(token, ctx)
-                completion_parts.append(token)
-                chunk = {
-                    "id": chunk_id, "object": "text_completion.chunk",
-                    "created": ts, "model": model_id,
-                    "choices": [{"text": token, "index": 0, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-        finally:
-            # No-op on a clean finish (thread already exited after the sentinel);
-            # on a disconnect it stops the producer so _inference_lock is released.
-            cancel_event.set()
+            try:
+                while True:
+                    token = await token_queue.get()
+                    if token is None:
+                        break
+                    if isinstance(token, Exception):
+                        gen_error = token
+                        continue
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    # Stream hook transforms each piece before it is recorded and sent,
+                    # so usage and the audit trail reflect what the client receives.
+                    if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                        token = pipeline.run_stream(token, ctx)
+                    completion_parts.append(token)
+                    chunk = {
+                        "id": chunk_id, "object": "text_completion.chunk",
+                        "created": ts, "model": model_id,
+                        "choices": [{"text": token, "index": 0, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            finally:
+                # No-op on a clean finish (thread already exited after the sentinel);
+                # on a disconnect it stops the producer so _inference_lock is released.
+                cancel_event.set()
 
-        t.join()
+            t.join()
+        finally:
+            residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
 
     if gen_error is not None:
@@ -5219,6 +5420,7 @@ async def _generate_full(engine, messages: list, request=None, *,
     """
     loop = asyncio.get_running_loop()
     cancel_event = threading.Event()
+    residency.register_cancel(engine.display_name, cancel_event)
 
     # Resolve a working disconnect poll. In the real server the endpoint sits
     # behind BaseHTTPMiddleware, which makes request.is_disconnected() permanently
@@ -5294,6 +5496,7 @@ async def _generate_full(engine, messages: list, request=None, *,
             await watcher
         except (asyncio.CancelledError, Exception):
             pass
+        residency.unregister_cancel(engine.display_name, cancel_event)
 
 
 def _capability_route_header(route) -> dict:

@@ -355,7 +355,14 @@ def register(app: FastAPI, ctx) -> None:
         # selection took over), or cancelled (aborted for any other reason) -
         # none of these is an error.
         try:
-            result = await switch_model(req.model)
+            # Omit force entirely when False (the overwhelming common case):
+            # switch_model is a pluggable callback, and every test double
+            # across the suite still implements the older single-arg
+            # contract. Passing force=True is still forwarded when a caller
+            # actually asks for it.
+            result = await (
+                switch_model(req.model, force=True) if req.force
+                else switch_model(req.model))
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}")
         # A switch_model that does not report a status (a minimal/legacy callable)
@@ -370,8 +377,8 @@ def register(app: FastAPI, ctx) -> None:
         loaded models untouched - the GUI's per-row Unload button."""
         if req.model:
             _require_registered(req.model)
-            return await unload_one_model(req.model)
-        return await unload_all_models()
+            return await unload_one_model(req.model, force=req.force)
+        return await unload_all_models(force=req.force)
 
     @app.post("/api/embedding/warmup",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
