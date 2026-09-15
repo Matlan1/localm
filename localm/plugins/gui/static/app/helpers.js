@@ -1383,14 +1383,31 @@ function _reportUncuratedMiss(missingModel, log) {
   }
 }
 
+/** Report that the pre-check itself could not run for *kind* (the server's
+ *  status came back "unavailable", e.g. its workflow template failed to
+ *  build): a distinct, honest state instead of silently reading as "nothing
+ *  missing". Never blocks: the real generate call's own preflight_models()
+ *  gate remains authoritative regardless of whether this pre-check ran. */
+function _reportPreflightUnavailable(kind, log) {
+  const msg = t("common.modelDownload.preflightUnavailable", { kind });
+  toast(msg, true);
+  if (log) {
+    log.style.display = "block";
+    log.textContent += msg + "\n";
+  }
+}
+
 /** Pre-generate model-existence check: calls the read-only preflight endpoint
  *  for *kind* ("image" | "video" | "music"). A missing model WITH a curated
  *  download source is offered via _offerModelDownload; one WITHOUT gets an
  *  honest _reportUncuratedMiss instead of disappearing - the user learns what's
  *  missing and where to put it before submitting, not only from the real
- *  generate call's later preflight_models() failure. Always resolves true
- *  (proceed) - neither path blocks generation on its own account.
- *  Best-effort: any failure to reach the pre-check itself also resolves true. */
+ *  generate call's later preflight_models() failure. When the server reports
+ *  status "unavailable" (the check itself could not run), that is reported
+ *  too via _reportPreflightUnavailable rather than read as "nothing missing".
+ *  Always resolves true (proceed) - no path here blocks generation on its own
+ *  account. Best-effort: any failure to reach the pre-check itself also
+ *  resolves true. */
 export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
   let data;
   try {
@@ -1400,6 +1417,10 @@ export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
     if (!r.ok) return true;
     data = await r.json();
   } catch {
+    return true;
+  }
+  if (data && data.status === "unavailable") {
+    _reportPreflightUnavailable(kind, log);
     return true;
   }
   const missing = (data && data.missing) || [];

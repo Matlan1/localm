@@ -80,6 +80,8 @@ export const I18N_EN = {
   "common.modelDownload.download": "Download",
   "common.modelDownload.failed": "Download failed: {message}",
   "common.modelDownload.notNow": "Not now",
+  "common.modelDownload.preflightUnavailable":
+    "Could not check for missing {kind} models before generating - the check will run again when you press Generate.",
   "common.modelDownload.progress": "Downloading {filename} from {repo}…",
   "common.modelDownload.source": "Source: {repo} / {file}",
   "common.modelDownload.starting": "Starting…",

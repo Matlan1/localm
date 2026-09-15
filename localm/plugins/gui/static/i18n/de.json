@@ -442,6 +442,7 @@
   "common.modelDownload.download": "Herunterladen",
   "common.modelDownload.failed": "Herunterladen fehlgeschlagen: {message}",
   "common.modelDownload.notNow": "Nicht jetzt",
+  "common.modelDownload.preflightUnavailable": "Fehlende {kind}-Modelle konnten vor dem Generieren nicht geprüft werden - die Prüfung läuft erneut, wenn Sie auf Generieren klicken.",
   "common.modelDownload.progress": "{filename} wird von {repo} heruntergeladen…",
   "common.modelDownload.source": "Quelle: {repo} / {file}",
   "common.modelDownload.starting": "Wird gestartet…",

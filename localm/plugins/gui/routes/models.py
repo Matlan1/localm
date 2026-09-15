@@ -702,6 +702,13 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/media/{kind}/preflight",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def media_preflight(kind: str, req: MediaPreflightRequest):
+        """Read-only pre-check for missing ComfyUI models. Returns
+        {"status": "verified"|"unavailable", "missing": [...], "warning": str}.
+        "unavailable" means the check itself could not run (the workflow
+        template failed to build); "missing" is [] in that case too, so a
+        caller must read status rather than infer success from an empty
+        list. "verified" means the check ran to completion, whether or not
+        it found anything missing."""
         if kind not in ("image", "video", "music"):
             raise HTTPException(404, f"Unknown media kind: {kind}")
         if kind == "image" and req.lora_name:
@@ -722,7 +729,11 @@ def register(app: FastAPI, ctx) -> None:
                 workflow = _build_check_workflow(kind, req)
             except Exception as e:
                 logger.debug("preflight workflow build failed for %s: %s", kind, e)
-                return []
+                return {
+                    "status": "unavailable",
+                    "missing": [],
+                    "warning": f"Could not check {kind} models before generating.",
+                }
             target = resolve_comfy_target(plugin=kind)
             missing = describe_missing_models(workflow, target.api_url)
 
@@ -747,11 +758,10 @@ def register(app: FastAPI, ctx) -> None:
                     }
                     entry["dest_dir"] = str(dest_dir) if dest_dir is not None else None
                 results.append(entry)
-            return results
+            return {"status": "verified", "missing": results, "warning": ""}
 
         loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(get_plugin_executor(), _check)
-        return {"missing": results}
+        return await loop.run_in_executor(get_plugin_executor(), _check)
 
     @app.post("/api/models/pull-comfy-source",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
