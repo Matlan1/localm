@@ -143,6 +143,16 @@ _switch_cancel: Optional["threading.Event"] = None
 # {"instance_id", "port", "host", "scheme", "token"}.
 _gpu_coord: Optional[dict] = None
 
+# The coder plugin's SessionManager, published as a module global (mirroring
+# _gpu_coord above) so a free function like unload_one_model can ask "is any
+# live coder session bound to this model" without needing app/request
+# threaded through it. None until mount_gui_surface() attaches the GUI (a
+# bare create_app() test app, or an --isolated/API-only instance, never
+# mounts it, so this stays None on those). Set alongside the identical
+# app.state.coder_sessions assignment in mount_gui_surface - same object,
+# reachable two ways for two different kinds of caller.
+_coder_session_manager = None
+
 # The running server's HangAlarm instance (see localm.inference._hang_alarm),
 # None until lifespan startup constructs one, None again once that lifespan
 # shuts down, and None whenever recovery is disabled
@@ -1342,7 +1352,59 @@ async def _unload_engine_off_loop(loop, engine, on_unloaded) -> None:
         on_unloaded()
 
 
-async def unload_all_models() -> dict:
+async def _wait_for_pin_clear(engine, *, timeout: float = 2.0,
+                              poll_interval: float = 0.05) -> bool:
+    """Poll ``engine.active_requests`` until it reads 0, or *timeout* elapses.
+    Meant to run right after ``residency.cancel_all()``: a generation that
+    was only still running because nobody had told it to stop (the caller's
+    own just-cancelled request, most commonly) clears within a token or two,
+    so this resolves the common "still generating" complaint without ever
+    surfacing a confirm box for it. Returns whether the pin is clear."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        active = getattr(engine, "active_requests", 0)
+        if not (isinstance(active, int) and active > 0):
+            return True
+        await asyncio.sleep(poll_interval)
+    active = getattr(engine, "active_requests", 0)
+    return not (isinstance(active, int) and active > 0)
+
+
+def _coder_sessions_using(name: str) -> list[str]:
+    """Labels for live coder sessions currently BUSY and bound to model
+    *name* - informational only, for a confirm_required message. Empty when
+    no coder GUI is mounted (an --isolated/API-only instance never sets
+    _coder_session_manager) or none match. Never raises: a best-effort
+    attribution probe must not turn an unload into a 500."""
+    mgr = _coder_session_manager
+    if mgr is None:
+        return []
+    try:
+        infos = mgr.list(is_owner=True)
+    except Exception:
+        return []
+    return [f"a coder session in {info.get('cwd') or info.get('id')}"
+           for info in infos if info.get("busy") and info.get("model") == name]
+
+
+def _in_use_description(name: str, engine) -> str:
+    """Human-readable "who is using this" for a confirm_required response.
+    Best-effort: names what is KNOWN (a busy coder session bound to this
+    model) and folds whatever residency can only see as a bare pin count
+    into a generic remainder, rather than double-counting a coder session's
+    own request against the raw active_requests total."""
+    users = _coder_sessions_using(name)
+    active = getattr(engine, "active_requests", 0)
+    remaining = active if isinstance(active, int) else 0
+    other = max(0, remaining - len(users))
+    parts = list(users)
+    if other:
+        parts.append(f"{other} other active request{'s' if other != 1 else ''}")
+    return " and ".join(parts) if parts else "still in use"
+
+
+async def unload_all_models(*, force: bool = False) -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
     driver-hang guard: otherwise a media model can load on top of a
@@ -1366,6 +1428,7 @@ async def unload_all_models() -> dict:
     before, before_fresh, before_scope = _vram_free_reading()
     unloaded_models = []
     skipped_in_use = []
+    confirm_required: dict[str, str] = {}
 
     def _reset_active_pointers():
         global _active_model_name, _last_active_model_name, _engine, _inference_sem
@@ -1381,7 +1444,8 @@ async def unload_all_models() -> dict:
 
     try:
         embedder_was_loaded = await _unload_engines_and_embedder(
-            loop, _embedder_mod, unloaded_models, skipped_in_use)
+            loop, _embedder_mod, unloaded_models, skipped_in_use,
+            confirm_required=confirm_required, force=force)
     except asyncio.CancelledError:
         # The caller stopped waiting: an engine already unloaded above still
         # gets the pointer reset the normal path does below.
@@ -1416,6 +1480,11 @@ async def unload_all_models() -> dict:
     }
     if skipped_in_use:
         result["skipped_in_use"] = skipped_in_use
+    if confirm_required:
+        # Present only for a model that is STILL in use after cancel_all()
+        # was given its grace period - describes what to tell the caller
+        # before it retries this same call with force=True.
+        result["confirm_required"] = confirm_required
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
     # Cross-install GPU coordination: reflect the now-empty/changed state for a
@@ -1426,7 +1495,8 @@ async def unload_all_models() -> dict:
 
 
 async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
-                                       skipped_in_use) -> bool:
+                                       skipped_in_use, *,
+                                       confirm_required: dict, force: bool = False) -> bool:
     """The releasing half of ``unload_all_models``: unload every loaded, unpinned
     chat engine (appending to *unloaded_models* / *skipped_in_use*), then the
     shared embedder. Returns whether the embedder was released."""
@@ -1442,8 +1512,15 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
         # _pin/_unpin: a non-int active_requests (a bare test double) is "not pinned".
         active = getattr(engine, "active_requests", 0)
         if isinstance(active, int) and active > 0:
-            skipped_in_use.append(name)
-            continue
+            residency.cancel_all(name)
+            if not force and not await _wait_for_pin_clear(engine):
+                skipped_in_use.append(name)
+                confirm_required[name] = _in_use_description(name, engine)
+                continue
+            # Either the grace period cleared it (the common case: the
+            # caller's own just-stopped generation), or force=True proceeds
+            # regardless - engine.unload() below still forcibly kills the
+            # worker if something is genuinely still running.
         sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
         # Flag BEFORE acquiring the semaphore so no request that arrives after the
         # pin check above can take get_engine's fast path and pin this engine while
@@ -1581,7 +1658,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
-async def unload_one_model(name: str) -> dict:
+async def unload_one_model(name: str, *, force: bool = False) -> dict:
     """Release ONE currently-loaded model from GPU/CPU memory, leaving any
     other loaded models untouched - the targeted counterpart to
     ``unload_all_models()`` (same VRAM-release-wait + gpu-registry-sync
@@ -1591,7 +1668,19 @@ async def unload_one_model(name: str) -> dict:
     requests. A *name* that is registered but not currently loaded is a
     no-op success (idempotent, matching unload_all_models()'s "nothing to do"
     case), not an error - callers that need to reject an unknown model name
-    outright should check the registry themselves before calling this."""
+    outright should check the registry themselves before calling this.
+
+    A pinned engine is no longer refused outright: ``residency.cancel_all``
+    is broadcast first, and a short grace period lets a generation that was
+    only running because nobody had told it to stop (the caller's own
+    just-cancelled request, most commonly) clear on its own - the common
+    case resolves with no confirm box at all. If it is still in use after
+    that, the owner's explicit action is final: pass *force* to evict
+    immediately regardless of what is running (the underlying
+    ``engine.unload()`` forcibly kills the isolated worker if it does not
+    exit within its own grace period); without it, this returns
+    ``{"status": "confirm_required", ...}`` describing what was found using
+    it, for the caller to show a confirmation before retrying with force."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -1609,7 +1698,11 @@ async def unload_one_model(name: str) -> dict:
     # isinstance(int) guard matches _pin/_unpin (a bare test double is not pinned).
     active = getattr(engine, "active_requests", 0)
     if isinstance(active, int) and active > 0:
-        return {"status": "in_use", "model": name, "vram_freed": 0}
+        residency.cancel_all(name)
+        if not force and not await _wait_for_pin_clear(engine):
+            return {"status": "confirm_required", "model": name,
+                    "detail": _in_use_description(name, engine)}
+        # Cleared during the grace period, or force=True - proceed below.
 
     _free = _live_free_vram_bytes
 
@@ -3012,7 +3105,7 @@ def mount_gui_surface(app) -> bool:
     semaphore are this instance's own (it already loaded the model for /v1), so no
     second model load happens; ``switch_model`` swaps the shared ``_engine`` under
     ``_inference_sem`` exactly as the GUI launcher does."""
-    global _engine
+    global _engine, _coder_session_manager
     if getattr(app.state, "gui_mounted", False):
         return False
 
@@ -3072,6 +3165,7 @@ def mount_gui_surface(app) -> bool:
     # attach_gui re-affirms app.state.gui_mounted; reflect the surface change in
     # discovery so /whoami and the registry report this is now a full instance.
     app.state.coder_sessions = manager
+    _coder_session_manager = manager
     app.state.instance_mode = "full"
     app.openapi_schema = None   # force the schema to include the new routes
     try:
