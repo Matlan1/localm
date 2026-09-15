@@ -176,6 +176,17 @@ class TestProviderFromConfig:
                             lambda: {"net_search_url": "https://s.example"})
         assert isinstance(provider_from_config(), SearXNGProvider)
 
+    def test_unreadable_config_selects_duckduckgo_and_warns(self, monkeypatch,
+                                                            caplog):
+        def boom():
+            raise OSError("config unreadable")
+        monkeypatch.setattr("localm.config.load_config", boom)
+        with caplog.at_level("WARNING", logger=netpolicy.logger.name):
+            provider = provider_from_config()
+        assert isinstance(provider, DuckDuckGoHTMLProvider)
+        assert any("could not load config" in r.getMessage()
+                   for r in caplog.records)
+
 
 class TestSearchFunction:
     def test_empty_query_rejected_before_provider_call(self):

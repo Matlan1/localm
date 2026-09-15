@@ -180,6 +180,19 @@ class TestCharset:
         assert "Grüße aus Linz" in b.evidence_text()
         assert "Gr��e" not in b.evidence_text()
 
+    def test_declared_codec_that_is_not_a_text_encoding_falls_back_to_utf8(
+            self, monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        _search_route(t, [("Linz", "https://linz.example/", "Linz page")])
+        markup = html_page(f"<main><p>{_LONG} Grüße aus Linz. {ANSWER}</p></main>")
+        t.route("GET", "https://linz.example/",
+                html_response(markup, charset="utf-8",
+                              content_type="text/html; charset=base64"))
+        b = retrieve(QUERY)
+        assert b.sources[0].grounding == GROUNDING_PAGE_BACKED
+        assert "Grüße aus Linz" in b.evidence_text()
+
     def test_meta_charset_used_when_header_has_none(self, monkeypatch):
         allow_public(monkeypatch)
         t = Transport().install(monkeypatch)
