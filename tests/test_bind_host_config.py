@@ -272,7 +272,7 @@ def gui_probe(cfg_home, monkeypatch):
     ensure_cert is doubled so no real crypto runs."""
     calls = {}
 
-    def fake_pick_port(requested=None, host="127.0.0.1"):
+    def fake_pick_port(requested=None, host="127.0.0.1", *, restart_grace_window=0.0):
         calls["pick_port_host"] = host
         raise _Sentinel("stop before any server starts")
 
