@@ -126,6 +126,20 @@ export function truncateAtWord(text, max) {
   return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + " ...[truncated]";
 }
 
+/** A text-only copy of a message for the compaction archive: role, text,
+ *  id, note tag and terminal flags are kept; images, audio and video are
+ *  replaced by a count note; a nested compaction archive is kept as is. */
+export function archiveCopy(m) {
+  const out = { role: m.role, content: msgText(m) };
+  for (const k of ["id", "tag", "web", "model", "truncated", "stopped", "failed", "bridge"]) {
+    if (m[k] !== undefined) out[k] = m[k];
+  }
+  const media = msgImages(m).length + (m.audio ? 1 : 0) + (m.video ? 1 : 0);
+  if (media) out.content += `\n\n*[${media} attachment(s) not archived]*`;
+  if (Array.isArray(m.compacted) && m.compacted.length) out.compacted = m.compacted;
+  return out;
+}
+
 export async function compactConversation(conv) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
   // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
@@ -171,19 +185,32 @@ export async function compactConversation(conv) {
     });
     if (r.ok) {
       const data = await r.json();
-      summary = (data.choices?.[0]?.message?.content || "").trim();
+      const choice = data.choices?.[0];
+      // A summary is accepted only from a generation that finished normally
+      // (finish_reason "stop"); an "error" or "length" choice, whose content
+      // is the server's error text or a cut-off summary, is treated as
+      // summarisation unavailable.
+      if (choice && choice.finish_reason === "stop") {
+        summary = (choice.message?.content || "").trim();
+      }
     }
   } catch { /* summarisation unavailable - fall back to a note below */ }
   // R44: sanitise the summary so leaked <think>/markers never re-enter context.
   summary = stripThink(scrubMarkers(summary)).trim();
 
+  // The removed turns are archived on the bridge message (text only, with an
+  // earlier bridge's own archive kept nested) and listed by exportConversation.
+  const archived = older.map(archiveCopy);
+  // Both halves of the bridge carry `bridge: true` so a later archive walk
+  // can tell them from real turns.
   const bridge = summary
-    ? [{ role: "user", content: "[Conversation summary]\n" + summary },
-       { role: "assistant", content: "Understood. Continuing from this summary." }]
+    ? [{ role: "user", content: "[Conversation summary]\n" + summary,
+         compacted: archived, bridge: true },
+       { role: "assistant", content: "Understood. Continuing from this summary.", bridge: true }]
     : [{ role: "user", content:
          "[Earlier conversation was trimmed to fit the context window; " +
-         "the recent messages below are intact.]" },
-       { role: "assistant", content: "Understood." }];
+         "the recent messages below are intact.]", compacted: archived, bridge: true },
+       { role: "assistant", content: "Understood.", bridge: true }];
 
   conv.messages = [...bridge, ...recent];
   // Forks anchored in the summarised-away region can no longer be reached by
@@ -427,9 +454,11 @@ function _writeScoped(key, value) {
 
 // R34: the per-chat Web-access and Speak-aloud toggles used to reset to OFF on
 // every load, so the user had to re-enable them in every session. Reflect the
-// user's saved choice; for web, when there is no saved choice fall back to the
-// global net policy (net_mode=allow auto-enables web; ask/off leave it off so
-// consent still applies). Writes are gated on privacy mode (no traces there).
+// user's saved choice; for web, when there is no saved choice follow the
+// global net policy: "allow" and "ask" both enable web (under "ask" the model
+// knows the tools and every model-initiated request still goes through the
+// approval card in settings-perf.js); "off" leaves it off. Writes are gated
+// on privacy mode (no traces there).
 export function hydrateChatToggles(cfg) {
   const webEl = $("p-web"), speakEl = $("p-speak");
   if (!webEl || !speakEl) return;
@@ -438,7 +467,7 @@ export function hydrateChatToggles(cfg) {
   if (savedSpeak !== null) speakEl.checked = savedSpeak === "1";
   const savedWeb = chat.privacy ? null : lsGet("localm.webAccess");
   if (savedWeb !== null) webEl.checked = savedWeb === "1";
-  else if (cfg && cfg.net_mode === "allow") webEl.checked = true;
+  else if (cfg && (cfg.net_mode === "allow" || cfg.net_mode === "ask")) webEl.checked = true;
   // The brain toggle mirrors the server-side memory_enabled config (default on).
   const memEl = $("p-memory");
   if (memEl && cfg && typeof cfg.memory_enabled === "boolean")
@@ -1310,7 +1339,9 @@ export function renderChat() {
         next: () => switchBranch(conv, i, +1),
       };
     }
-    const noteSuffix = m.truncated
+    const noteSuffix = m.failed
+      ? "\n\n*[generation failed - the model's reply ended in an inference error; regenerate or ask again]*"
+      : m.truncated
       ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”]*"
       : m.stopped
       ? "\n\n*[stopped]*"

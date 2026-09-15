@@ -44,7 +44,7 @@ localm config net_mode allow   # no confirmation
 | mode | coder `fetch_url` / `web_search` | chat web access |
 |---|---|---|
 | `off` | tool returns a policy error | `/web` and the toggle return a clear error |
-| `ask` (default) | approval prompt per request (terminal y/N or GUI approval card showing the URL/query) | `/web` runs immediately (typing the command is the consent); the toggle still shows a per-request approval card for each model-initiated request |
+| `ask` (default) | approval prompt per request (terminal y/N or GUI approval card showing the URL/query) | `/web` runs immediately (typing the command is the consent); the "Web access" toggle is on by default so the model knows the tools exist, and every model-initiated request shows a per-request approval card |
 | `allow` | runs without asking | works |
 
 The `LOCALM_NET_MODE` env var overrides the config (like `LOCALM_MODE` for
@@ -110,7 +110,13 @@ localm config net_allow_private true    # if the instance is on your LAN
    The model can emit a `web_search` or `fetch_url` request mid-conversation;
    the GUI executes it through the policy, injects the results, and the model
    continues (at most 3 web rounds per send). Every request and result is
-   visible in the conversation - nothing happens silently.
+   visible in the conversation - nothing happens silently. With no saved
+   choice the toggle follows the policy: on under `allow` and `ask` (under
+   `ask` each request is approved first), off under `off`. When the toggle is
+   off the model is told plainly that it has no internet access. A reply that
+   only announces a lookup ("I will now search ...") without making the call
+   gets one repair prompt asking for the call or a final answer; it is never
+   repeated.
 
 ## The coder
 

@@ -4902,16 +4902,33 @@ def _log_assembled_prompt(messages: list) -> None:
                     len(messages), _debug_prompt_dump(messages))
 
 
-def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
-    """Record one chat exchange (log/full modes; no-op log in privacy)."""
+def _turn_outcome(gen_error, finish_reason: str) -> str:
+    """The ChatHookContext outcome for a finished generation: "error" when the
+    backend raised, "length" when the token budget ran out, else "success"."""
+    if gen_error is not None:
+        return "error"
+    return "length" if finish_reason == "length" else "success"
+
+
+def _audit_exchange(audit, transcript, messages: list, reply: str,
+                    outcome: str = "success") -> None:
+    """Record one chat exchange (log/full modes; no-op log in privacy). A
+    non-"success" *outcome* is recorded as an audit notice and as a trailing
+    ``[finish_reason: ...]`` line in the transcript, so a failed or cut-off
+    generation never reads as a short normal reply."""
     if audit is None:
         return
     try:
         user_text = _last_user_text(messages)
         audit.user(user_text)
         audit.llm(reply)
+        if outcome != "success":
+            audit.notice("finish_reason", outcome)
         if transcript is not None:
-            transcript.exchange(user_text, reply)
+            recorded = reply
+            if outcome != "success":
+                recorded = f"{reply}\n\n[finish_reason: {outcome}]"
+            transcript.exchange(user_text, recorded)
     except Exception as e:
         # In log/full mode a failed write silently drops the record; surface it
         # so the gap is discoverable instead of invisible.
@@ -5165,6 +5182,7 @@ async def _stream_sse(
 
         completion_parts: list[str] = []
         gen_error: Exception | None = None
+        drained = False
         try:
             try:
                 while True:
@@ -5183,6 +5201,7 @@ async def _stream_sse(
                     completion_parts.append(token)
                     for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
                         yield data
+                drained = True
             finally:
                 # Signal the producer to stop. On a clean finish this is a no-op: the
                 # thread already exited after _DONE, so t.join() below returns at once.
@@ -5192,6 +5211,8 @@ async def _stream_sse(
                 # then keeps propagating, so t.join() below is skipped - the daemon
                 # thread self-terminates within ~one token of the cancel.
                 cancel_event.set()
+                if not drained and ctx is not None:
+                    ctx.outcome = "abort"
 
             t.join()
         finally:
@@ -5206,20 +5227,31 @@ async def _stream_sse(
         for data in _reason_sse(*think.flush(), model_id, chunk_id, ts):
             yield data
 
+    error_text = ""
     if gen_error is not None:
-        err_chunk = ChatChunk.token(
-            inference_error_text(gen_error), model_id, chunk_id, ts)
+        error_text = inference_error_text(gen_error)
+        err_chunk = ChatChunk.token(error_text, model_id, chunk_id, ts)
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
+    # finish_reason is fixed before the outlet phase; ctx.outcome, the audit
+    # record and the terminal frame all carry the same value. A mid-stream
+    # error reports "error", never a clean "stop".
+    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
+    outcome = _turn_outcome(gen_error, finish_reason)
+    if ctx is not None:
+        ctx.outcome = outcome
     # Outlet runs after every chunk has been sent, so it cannot alter the live
     # stream (a stream hook does that). Here it only shapes the recorded reply
     # (audit / transcript / side-effects); usage stays tied to what was streamed.
-    reply = streamed
-    if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+    # A failed generation skips the outlet; its recorded reply is the streamed
+    # text plus the visible error chunk.
+    reply = streamed + error_text
+    if (gen_error is None and pipeline is not None and ctx is not None
+            and pipeline.has("outlet")):
         reply = await pipeline.run_outlet(streamed, messages, ctx)
 
-    _audit_exchange(audit, transcript, messages, reply)
+    _audit_exchange(audit, transcript, messages, reply, outcome=outcome)
 
     # Count tokens on the streamed text - what the client actually received
     completion_tokens = await _count_streamed_tokens(engine, streamed)
@@ -5233,10 +5265,6 @@ async def _stream_sse(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=engine.context_capacity(),
     )
-    # Honesty: a mid-stream error must not report a clean "stop" on the terminal
-    # frame. The error text was already streamed, but a PROGRAMMATIC client keys
-    # off finish_reason, so mark it "error" to make the failure machine-detectable.
-    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
     yield f"data: {done.model_dump_json()}\n\n"
@@ -5318,6 +5346,7 @@ async def _stream_sse_completion(
 
         completion_parts: list[str] = []
         gen_error: Exception | None = None
+        drained = False
         try:
             try:
                 while True:
@@ -5340,32 +5369,41 @@ async def _stream_sse_completion(
                         "choices": [{"text": token, "index": 0, "finish_reason": None}],
                     }
                     yield f"data: {json.dumps(chunk)}\n\n"
+                drained = True
             finally:
                 # No-op on a clean finish (thread already exited after the sentinel);
                 # on a disconnect it stops the producer so _inference_lock is released.
                 cancel_event.set()
+                if not drained and ctx is not None:
+                    ctx.outcome = "abort"
 
             t.join()
         finally:
             residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
 
+    error_text = ""
     if gen_error is not None:
+        error_text = inference_error_text(gen_error)
         err = {
             "id": chunk_id, "object": "text_completion.chunk",
             "created": ts, "model": model_id,
-            "choices": [{"text": inference_error_text(gen_error),
-                         "index": 0, "finish_reason": None}],
+            "choices": [{"text": error_text, "index": 0, "finish_reason": None}],
         }
         yield f"data: {json.dumps(err)}\n\n"
 
     streamed = "".join(completion_parts)
+    outcome = _turn_outcome(gen_error, "stop")
+    if ctx is not None:
+        ctx.outcome = outcome
     # Outlet shapes only the recorded reply (the live stream already went out);
-    # then record the exchange (audit + transcript), exactly like chat.
-    reply = streamed
-    if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+    # then record the exchange (audit + transcript), exactly like chat. A failed
+    # generation skips the outlet; its recorded reply includes the error chunk.
+    reply = streamed + error_text
+    if (gen_error is None and pipeline is not None and ctx is not None
+            and pipeline.has("outlet")):
         reply = await pipeline.run_outlet(streamed, messages, ctx)
-    _audit_exchange(audit, transcript, messages, reply)
+    _audit_exchange(audit, transcript, messages, reply, outcome=outcome)
 
     completion_tokens = await _count_streamed_tokens(engine, streamed)
     # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
@@ -5735,12 +5773,16 @@ async def _complete(
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
 
+    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
+    outcome = _turn_outcome(gen_error, finish_reason)
+    if ctx is not None:
+        ctx.outcome = outcome
     # Outlet fully controls the returned content in the non-streaming path (but a
     # failed generation surfaces its error verbatim, not reshaped by the outlet).
     if gen_error is None and pipeline is not None and ctx is not None and pipeline.has("outlet"):
         text = await pipeline.run_outlet(text, messages, ctx)
 
-    _audit_exchange(audit, transcript, messages, text)
+    _audit_exchange(audit, transcript, messages, text, outcome=outcome)
 
     # Split the model's <think> reasoning out of the visible answer into a
     # separate field, so API clients get clean content (token count stays on
@@ -5770,8 +5812,7 @@ async def _complete(
             FullChoice(
                 message=Message(role="assistant", content=answer,
                                 reasoning_content=reasoning or None),
-                finish_reason=("error" if gen_error is not None
-                               else _engine_finish_reason(engine)),
+                finish_reason=finish_reason,
             )
         ],
         usage=usage,

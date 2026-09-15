@@ -1242,10 +1242,20 @@ def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) ->
     return "\n".join(texts)[:max_chars].strip()      # texts[0] is the newest turn
 
 
+def _ctx_outcome(ctx) -> str:
+    """The turn's terminal outcome from a chat-pipeline ctx ("success" when the
+    ctx carries none, so a pipeline-less caller counts as a completed turn)."""
+    outcome = getattr(ctx, "outcome", None)
+    return outcome if isinstance(outcome, str) and outcome else "success"
+
+
 def _memory_outlet(text, messages, ctx):
     """After a completed turn, opportunistically grow the memory in the background
     (debounced). Side-effect only: returns the text unchanged. Any failure is
-    contained so it can never affect the reply."""
+    contained so it can never affect the reply. A turn whose generation failed
+    (ctx.outcome "error") or that never completed ("abort") triggers nothing."""
+    if _ctx_outcome(ctx) in ("error", "abort"):
+        return text
     try:
         # Owner (ADMIN scope) collapses to the shared "owner" namespace, matching
         # memory_principal on the request-based paths and the recall inlet. Shared with

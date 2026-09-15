@@ -890,6 +890,39 @@ export function looksLikeWebToolAttempt(text) {
   return /"name"\s*:/.test(clean) && /web_search|fetch_url/.test(clean);
 }
 
+const _ACTION_VERBS =
+  "search|look(?:ing)? (?:it |that |this )?up|check|fetch|browse|google|" +
+  "find out|look into|run a (?:web )?search|do a (?:web |quick )?search|" +
+  "read (?:the|that|this) page|open (?:the|that) (?:page|link|url)|" +
+  "suche|nachschauen|nachsehen|recherchiere|schaue? (?:im internet|online) nach";
+const _ACTION_ANNOUNCE_RE = new RegExp(
+  "(?:\\b(?:I will|I'll|I am going to|I'm going to|I can|I could|let me|" +
+  "allow me to|I will now|I'll now|ich werde|ich kann|lass mich|" +
+  "lassen sie mich)\\s+(?:now\\s+|just\\s+|quickly\\s+|jetzt\\s+|mal\\s+|" +
+  "kurz\\s+|gleich\\s+)?(?:" + _ACTION_VERBS + ")\\b)|" +
+  "(?:\\b(?:will|and) (?:then )?(?:report|get) back\\b)|" +
+  "(?:\\b(?:I will|I'll|ich werde)\\s+(?:now\\s+|noch\\s+|jetzt\\s+)?" +
+  "(?:do|perform|take|proceed with)?\\s*(?:the\\s+)?(?:following|folgendes)\\b)|" +
+  "(?:\\bich (?:suche|schaue|recherchiere) (?:jetzt|nun|mal|gleich|kurz)\\b)|" +
+  "(?:\\bich werde\\b[^.!?\\n]{0,80}\\b(?:nachschauen|nachsehen|suchen|" +
+  "recherchieren|nachschlagen|abrufen)\\b)",
+  "i");
+const _ACTION_ANNOUNCE_MAX_CHARS = 600;
+
+const _ACTION_ANNOUNCE_TAIL_CHARS = 240;
+
+/** True when a reply only ANNOUNCES a web action instead of performing one: a
+ *  short, plain-prose reply with no tool call and no URL whose closing
+ *  sentences promise a lookup ("I will now search ...", "let me look that
+ *  up", "... and report back"). */
+export function looksLikeActionAnnouncement(text) {
+  const clean = stripThink(text || "").trim();
+  if (!clean || clean.length > _ACTION_ANNOUNCE_MAX_CHARS) return false;
+  if (/https?:\/\//i.test(clean)) return false;
+  if (looksLikeWebToolAttempt(clean) || parseWebCalls(clean, 1).length) return false;
+  return _ACTION_ANNOUNCE_RE.test(clean.slice(-_ACTION_ANNOUNCE_TAIL_CHARS));
+}
+
 /** Run a web tool call through the policy-enforced server endpoints. Returns
  *  {content, untrusted_spans}: content is the note text to inject into the
  *  conversation, and untrusted_spans are the [[start, end], ...] character
@@ -2007,7 +2040,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // cannot loop on the same search; `ask` caches the net policy so a transient
   // /v1/config blip mid-loop cannot silently flip approval off; `forced` ensures
   // we only inject the "limit reached, answer now" nudge once per send.
-  if (!web) web = { seen: new Set(), ask: null, forced: false };
+  if (!web) web = { seen: new Set(), ask: null, forced: false, repaired: false };
   await maybeCompactConversation(conv);
   const params = chatParams();
   const webEnabled = $("p-web").checked;
@@ -2271,6 +2304,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     return;
   }
   if (!full.trim() && !reasoning.trim()) {
+    if (finishReason === "error") {
+      // The server reported a failed generation without any visible text:
+      // leave a failure marker in the live bubble and persist nothing.
+      renderMarkdown(liveBody, "*[generation failed]*");
+      toast("The model's reply failed (inference error) - nothing was generated", true);
+      return;
+    }
     if (requestFailed) {
       // A generic failure (e.g. a 400 before any token streamed) already
       // rendered "*[error: ...]*" into the live bubble above. renderChat()
@@ -2283,6 +2323,25 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // A successful-but-empty completion: no error to show, just drop the
     // stray empty live bubble by re-rendering from (unchanged) history.
     renderChat();
+    return;
+  }
+
+  // finish_reason "error": the server streamed what it had, then the visible
+  // "[inference error: ...]" chunk. The turn is persisted with `failed: true`
+  // (the "*[generation failed]*" marker is added at render time, in chat.js)
+  // and is never spoken, parsed for tool calls, or continued.
+  if (finishReason === "error") {
+    const failedReply = {
+      role: "assistant",
+      content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+      model: modelName || undefined,
+      failed: true,
+    };
+    if (usage) failedReply.usage = usage;
+    conv.messages.push(failedReply);
+    saveConversations(conv);
+    renderChat();
+    toast("The model's reply failed partway (inference error) - see the message for details", true);
     return;
   }
 
@@ -2400,6 +2459,25 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     renderChat();
     await runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
     return;
+  } else if (canWeb && !web.repaired && finishReason === "stop" &&
+             looksLikeActionAnnouncement(full)) {
+    // The model announced a web action ("I will now search ...") and then
+    // stopped without emitting a call. One repair round per send: `web.repaired`
+    // is set before the recursive call and gates this branch, so the repair
+    // reply cannot enter it again.
+    web.repaired = true;
+    conv.messages.push({
+      role: "user", web: true,
+      content:
+        "[pending action] Your last reply announced an action but did not " +
+        "perform it. Do exactly ONE of these now: emit exactly one tool call in " +
+        "the required format, or give your final answer now without promising " +
+        "further work. Never say you searched or looked something up unless " +
+        "you actually emitted a tool call and received its result.",
+    });
+    saveConversations(conv);
+    renderChat();
+    await runCompletion(conv, webDepth + 1, web);
   } else if ($("p-speak").checked && full) {
     speak(full);   // read the finished reply aloud (offline browser voices)
   } else if (full && ttsProvider && typeof ttsProvider.ready === "function") {
@@ -2557,6 +2635,20 @@ function exportLabel(m) {
   return noteLabel(m) || (m.role === "user" ? "You" : (modelCache.active || "Model"));
 }
 
+/** Every real message that a compaction archived, oldest first, walking
+ *  nested archives recursively. The synthetic bridge pair of an earlier
+ *  compaction (`bridge: true`) is descended into but never listed. */
+export function compactedTurns(messages) {
+  const out = [];
+  for (const m of messages || []) {
+    if (Array.isArray(m.compacted) && m.compacted.length) {
+      out.push(...compactedTurns(m.compacted));
+      out.push(...m.compacted.filter((x) => !x.bridge && !(Array.isArray(x.compacted) && x.compacted.length)));
+    }
+  }
+  return out;
+}
+
 export function exportConversation() {
   const conv = currentConv();
   if (!conv || !conv.messages.length) { toast("Nothing to export", true); return; }
@@ -2581,6 +2673,19 @@ export function exportConversation() {
         lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
       }
     });
+  }
+  // Messages that compaction replaced with a summary or trim note are archived
+  // on that bridge message (chat.js compactConversation -> m.compacted),
+  // listed oldest first.
+  const archived = compactedTurns(conv.messages);
+  if (archived.length) {
+    lines.push("---", "",
+      `## Archived compacted messages (${archived.length})`,
+      "*These older messages were replaced by a summary or trimmed by context "
+      + "compaction and preserved here so they are not lost.*", "");
+    for (const m of archived) {
+      lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
+    }
   }
   const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
   const a = document.createElement("a");

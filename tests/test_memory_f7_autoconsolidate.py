@@ -33,6 +33,12 @@ def chat_home(tmp_path, monkeypatch):
     return tmp_path, plug
 
 
+# The collection write lock's heartbeat subclasses threading.Thread at import
+# time; importing it here binds it to the real class before any test below
+# replaces threading.Thread with a stub.
+import localm.rag.collection_lock  # noqa: E402,F401
+
+
 class _SyncThread:
     """Drop-in for threading.Thread that runs the target synchronously on
     .start(), so the background consolidation is deterministic in tests."""

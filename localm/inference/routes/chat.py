@@ -596,12 +596,15 @@ def register(app: FastAPI, ctx) -> None:
                     # text, which a model-load RuntimeError carries verbatim.
                     text = _hs.inference_error_text(e)
 
+            outcome = "error" if gen_error is not None else "success"
+            if ctx is not None:
+                ctx.outcome = outcome
             # The outlet controls the returned content on the non-streaming path,
             # except for a failed generation, whose error surfaces verbatim. Then
             # record the exchange (audit + transcript), exactly like chat.
             if gen_error is None and pipeline is not None and ctx is not None and pipeline.has("outlet"):
                 text = await pipeline.run_outlet(text, messages, ctx)
-            _audit_exchange(_audit, _transcript, messages, text)
+            _audit_exchange(_audit, _transcript, messages, text, outcome=outcome)
 
             completion_tokens = await loop.run_in_executor(
                 None, count_tokens_or_estimate, engine.count_tokens, text,

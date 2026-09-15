@@ -22,12 +22,37 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Settings > Network.
 
 ### Changed
+- **With the network policy at `ask` (the default), the chat's "Web access"
+  toggle is now on for a new browser.** The model is told the web tools exist
+  and every request it makes still shows the approval card before it runs.
+  Before, a fresh install told the model it had no internet access until the
+  toggle was switched on by hand. `off` still leaves the toggle off, and a
+  choice you saved in the browser still wins.
 - **Settings translates more of itself into German.** Server controls, other
   running instances, Report a bug, Changelog, Updates (app update, roll back,
   the app launcher and the inference runtime), Issues, Logs and Upload files
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **A reply whose generation failed partway (the model reports an inference
+  error) is now shown and saved as a failed turn.** It is marked "generation
+  failed" in the chat, stays marked after a reload, is not read aloud, and a
+  web search it had started to write is not run. Before, it was saved as an
+  ordinary reply.
+- **Automatic context compaction no longer replaces older messages with an
+  error message.** When the summary request fails, the chat falls back to
+  trimming the oldest messages and says so, instead of reporting that they
+  were summarised. Every message a compaction removes, summarised or trimmed,
+  is now kept with the conversation and included in "Export" under "Archived
+  compacted messages".
+- **A reply that only announces a web lookup ("I will now search ...") and
+  then stops is no longer accepted as the final answer.** With web access on,
+  the chat asks the model once to either make the call or answer now; this
+  happens at most once per message.
+- **Chat plugins no longer treat a failed generation as a completed turn.**
+  Memory consolidation is not scheduled after a failed reply, and the audit
+  log and transcript record that the generation ended in an error or a
+  token-limit cut-off instead of showing it as a short normal reply.
 - **Stopping another running localm instance (Settings > other running
   instances, or `localm stop`) no longer disables this server's own
   native-crash reporting.** Only the stopped instance's own crash marker and
