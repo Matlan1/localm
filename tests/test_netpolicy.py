@@ -320,6 +320,88 @@ class TestSafeFetch:
 
 
 # ------------------------------------------------------------------ #
+#  safe_fetch: declared charset (WEB-FUNC-004)                        #
+# ------------------------------------------------------------------ #
+
+class TestSafeFetchCharset:
+    def _public_dns(self, monkeypatch):
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+    def test_header_charset_iso_8859_1_decodes_correctly(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        text = "Grüße aus Linz"   # "Grüße aus Linz"
+        body = f"<html><body>{text}</body></html>".encode("iso-8859-1")
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/html; charset=iso-8859-1"}, body=body))
+        _, _, decoded = safe_fetch("https://example.com/de")
+        assert text in decoded
+
+    def test_header_charset_windows_1252_decodes_correctly(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        text = "café naïve, price €5"   # the euro sign is windows-1252-only, not latin-1
+        body = text.encode("windows-1252")
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/plain; charset=Windows-1252"}, body=body))
+        _, _, decoded = safe_fetch("https://example.com/fr")
+        assert decoded == text
+
+    def test_meta_charset_tag_used_when_the_header_declares_none(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        text = "Grüße"
+        html = f'<html><head><meta charset="iso-8859-1"></head><body>{text}</body></html>'
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/html"}, body=html.encode("iso-8859-1")))
+        _, _, decoded = safe_fetch("https://example.com/meta")
+        assert text in decoded
+
+    def test_meta_http_equiv_charset_form_is_also_recognized(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        text = "Grüße"
+        html = ('<html><head><meta http-equiv="Content-Type" '
+                f'content="text/html; charset=iso-8859-1"></head><body>{text}</body></html>')
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/html"}, body=html.encode("iso-8859-1")))
+        _, _, decoded = safe_fetch("https://example.com/httpequiv")
+        assert text in decoded
+
+    def test_header_charset_wins_over_a_disagreeing_meta_tag(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        text = "Grüße"
+        html = f'<html><head><meta charset="utf-8"></head><body>{text}</body></html>'
+        body = html.encode("iso-8859-1")   # actual bytes are iso-8859-1; the meta tag lies
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/html; charset=iso-8859-1"}, body=body))
+        _, _, decoded = safe_fetch("https://example.com/conflict")
+        assert text in decoded
+
+    def test_no_declared_charset_falls_back_to_utf8(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        text = "café \U0001f600"
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/plain"}, body=text.encode("utf-8")))
+        _, _, decoded = safe_fetch("https://example.com/plain")
+        assert decoded == text
+
+    def test_unknown_declared_charset_falls_back_to_utf8_without_raising(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        text = "plain ascii, but a lying header"
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/plain; charset=totally-bogus-xyz"},
+            body=text.encode("utf-8")))
+        _, _, decoded = safe_fetch("https://example.com/bogus")
+        assert decoded == text
+
+
+# ------------------------------------------------------------------ #
 #  safe_fetch_bytes: extra_headers (ADR-0015's optional bearer tokens) #
 # ------------------------------------------------------------------ #
 

@@ -1032,7 +1032,10 @@ function speakToggle(btn, text) {
 }
 
 export function addMessageRow(container, role, text, opts = {}) {
-  const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
+  // A note row (opts.cls set: injected web/kb/doc results, a queued-task
+  // marker) is not something the human typed, so it must not carry the role
+  // class and inherit the user turn's right-aligned bubble layout.
+  const row = el("div", "msg-row " + (opts.cls || role));
   const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
   const roleEl = el("div", "msg-role", opts.label || (role === "user" ? (chat.userName || "You") : mName));
   const avatarEl = buildAvatarEl(avatarInfoFor(role, mName));

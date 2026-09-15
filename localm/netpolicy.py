@@ -40,6 +40,7 @@ Redirects are re-validated hop by hop.
 
 from __future__ import annotations
 
+import codecs
 import html.parser
 import ipaddress
 import os
@@ -553,6 +554,32 @@ def safe_fetch_bytes(
         f"Too many redirects (>{_MAX_REDIRECTS}) fetching {url}")
 
 
+_CHARSET_RE_HEADER = re.compile(r'charset\s*=\s*["\']?([\w.:-]+)', re.IGNORECASE)
+_CHARSET_RE_META = re.compile(
+    rb'<meta[^>]{0,512}?charset\s*=\s*["\']?([\w.:-]+)', re.IGNORECASE)
+
+
+def _declared_charset(content_type: str, body: bytes) -> "str | None":
+    """The charset named by the Content-Type header, else by an HTML
+    <meta charset> or <meta http-equiv=Content-Type content=...charset=...>
+    tag in the first 2048 bytes. None when neither declares one, or the
+    declared name is not a codec Python has.
+    """
+    m = _CHARSET_RE_HEADER.search(content_type or "")
+    name = m.group(1) if m else None
+    if not name:
+        m = _CHARSET_RE_META.search(body[:2048])
+        if m:
+            name = m.group(1).decode("ascii", errors="ignore")
+    if not name:
+        return None
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        return None
+    return name
+
+
 def safe_fetch(
     url: str,
     *,
@@ -563,12 +590,21 @@ def safe_fetch(
     Policy-checked GET. Returns (final_url, content_type, body_text).
 
     Thin text wrapper over safe_fetch_bytes (which does the policy check,
-    per-hop redirect re-validation and size cap); the body is decoded as UTF-8.
+    per-hop redirect re-validation and size cap). The body is decoded using
+    the charset the response declares - the Content-Type header, then an
+    HTML <meta charset> tag - falling back to UTF-8 when neither declares
+    one or the declared one fails to decode.
 
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
     final_url, content_type, body = safe_fetch_bytes(
         url, max_bytes=max_bytes, timeout=timeout)
+    charset = _declared_charset(content_type, body)
+    if charset:
+        try:
+            return final_url, content_type, body.decode(charset, errors="replace")
+        except Exception:
+            pass
     return final_url, content_type, body.decode("utf-8", errors="replace")
 
 
