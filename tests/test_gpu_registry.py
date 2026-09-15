@@ -501,7 +501,10 @@ class TestSwitchEngineCooperativeUnload:
         --isolated run) -> the coordination branch is a pure no-op, cooperation
         is never attempted, and the load still ends in a clean 503 when the
         backend's own sizing (simulated here - see _UnfittableEngine) genuinely
-        cannot fit it."""
+        cannot fit it. force=True: without it this now returns
+        confirm_required BEFORE ever reaching the backend (the estimate
+        alone already says it will not fit) - see
+        TestSwitchEngineDeferToBackendConfirm for that gate itself."""
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
         _pin(monkeypatch, "model-a")
@@ -510,7 +513,7 @@ class TestSwitchEngineCooperativeUnload:
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1  # not locally evictable
             with pytest.raises(HTTPException) as exc:
-                await hs.switch_engine("model-b", _make_unfittable_engine)
+                await hs.switch_engine("model-b", _make_unfittable_engine, force=True)
             return exc.value
 
         exc = asyncio.run(scenario())
@@ -541,7 +544,7 @@ class TestSwitchEngineCooperativeUnload:
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1
             with pytest.raises(HTTPException) as exc:
-                await hs.switch_engine("model-b", _make_unfittable_engine)
+                await hs.switch_engine("model-b", _make_unfittable_engine, force=True)
             return exc.value
 
         exc = asyncio.run(scenario())
@@ -566,7 +569,7 @@ class TestSwitchEngineCooperativeUnload:
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1
             with pytest.raises(HTTPException) as exc:
-                await hs.switch_engine("model-b", _make_unfittable_engine)
+                await hs.switch_engine("model-b", _make_unfittable_engine, force=True)
             return exc.value
 
         exc = asyncio.run(scenario())
@@ -761,6 +764,82 @@ class TestSwitchEngineBusyEviction:
         assert state["cooperated"] is True
         assert cancelled == [], "cooperation succeeded - the busy local peer must never be touched"
         assert "model-a" in hs._engines, "freed via cooperation, never locally evicted"
+
+
+# ------------------------------------------------------------------ #
+#  switch_engine's final defer-to-the-backend's-own-sizing branch:    #
+#  same confirm/force contract, nothing left to evict at all         #
+# ------------------------------------------------------------------ #
+
+def _tight_vram():
+    """2 GB free, 6 GB total, unaffected by what is loaded - small enough
+    that even a single registered model's UNKNOWN_FOOTPRINT_BYTES estimate
+    (4 GB, since these tests' fake registry paths do not exist on disk)
+    never fits, with nothing resident to evict in the first place. Isolates
+    the defer-to-backend gate from every eviction path above it."""
+    return lambda: {"free": 2 * 1024 ** 3, "total": 6 * 1024 ** 3}
+
+
+class TestSwitchEngineDeferToBackendConfirm:
+    def test_explicit_switch_confirms_before_a_degraded_load_with_nothing_to_evict(
+            self, multi_model_registry, monkeypatch):
+        """Nothing is resident, nothing is pinned or busy, no coordination
+        is configured - every eviction path above legitimately finds
+        nothing to do, and the crude whole-model estimate alone already
+        says this will not fit. An explicit switch must ask before letting
+        the backend fall back to a degraded (partial-CPU-offload) load,
+        never attempt it silently."""
+        assert hs._gpu_coord is None
+        monkeypatch.setattr("localm.discover.vram_info", probe_double(_tight_vram()))
+
+        result = asyncio.run(hs.switch_engine("model-a", _make_unfittable_engine))
+
+        assert result["status"] == "confirm_required"
+        assert result["model"] == "model-a"
+        assert "model-a" not in hs._engines, \
+            "must not have attempted the load without confirmation"
+
+    def test_get_engine_style_load_defers_silently_with_nothing_to_evict(
+            self, multi_model_registry, monkeypatch):
+        """preempt=False (get_engine's own auto-load-on-demand) must keep
+        proceeding straight to the backend's own sizing, exactly as before
+        this gate existed - there is no caller in a position to confirm
+        anything, and refusing an ordinary chat request outright over a
+        crude estimate would be a worse regression than a load that might
+        turn out fine, or might degrade to partial CPU offload."""
+        assert hs._gpu_coord is None
+        monkeypatch.setattr("localm.discover.vram_info", probe_double(_tight_vram()))
+
+        result = asyncio.run(hs.switch_engine("model-a", _make_engine, preempt=False))
+
+        assert result["status"] == "loaded"
+        assert "model-a" in hs._engines
+
+    def test_explicit_switch_force_proceeds_to_a_genuinely_unfittable_backend_failure(
+            self, multi_model_registry, monkeypatch):
+        """force=True skips the confirmation and lets the backend's own
+        final sizing decide - if it genuinely cannot fit even at 0 GPU
+        layers, that is still a clean 503, never a crash."""
+        assert hs._gpu_coord is None
+        monkeypatch.setattr("localm.discover.vram_info", probe_double(_tight_vram()))
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(hs.switch_engine("model-a", _make_unfittable_engine, force=True))
+        assert exc.value.status_code == 503
+
+    def test_explicit_switch_force_succeeds_when_the_backend_can_actually_fit_it(
+            self, multi_model_registry, monkeypatch):
+        """The estimate is deliberately crude (a whole-model guess); once
+        confirmed, a backend that CAN make it fit (partial offload, or
+        simply a better real sizing than our guess) must still succeed,
+        not be held to our own pessimistic estimate a second time."""
+        assert hs._gpu_coord is None
+        monkeypatch.setattr("localm.discover.vram_info", probe_double(_tight_vram()))
+
+        result = asyncio.run(hs.switch_engine("model-a", _make_engine, force=True))
+
+        assert result["status"] == "loaded"
+        assert "model-a" in hs._engines
 
 
 # ------------------------------------------------------------------ #

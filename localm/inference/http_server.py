@@ -984,6 +984,26 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             # model genuinely cannot fit even at 0 GPU layers, which the
                             # except handler around new_engine.load() below turns into a
                             # clean 503 for every caller.
+                            #
+                            # An explicit switch (preempt=True) warns first instead of
+                            # silently accepting a degraded (partial-CPU-offload) load -
+                            # same confirm/force contract as the busy-eviction attempt
+                            # above, gated the same way and for the same reason:
+                            # get_engine's own API-routed auto-load (preempt=False) must
+                            # keep proceeding silently, since there is no caller in a
+                            # position to confirm anything and refusing an ordinary chat
+                            # request outright would be a worse regression than a
+                            # possibly-degraded load.
+                            if preempt and not force:
+                                return {
+                                    "status": "confirm_required", "model": name,
+                                    "detail": (
+                                        f"'{name}' does not fit the estimated free VRAM "
+                                        f"(need ~{vram_required // 1024 ** 2} MB, "
+                                        f"{free_vram // 1024 ** 2} MB free) even after "
+                                        "eviction; loading it anyway will let the backend "
+                                        "fall back to partial CPU offload, which is slower"),
+                                }
                             from localm.debuglog import logger as _dbg
                             _dbg.info(
                                 "switch_engine: '%s' exceeds the whole-model VRAM estimate "
