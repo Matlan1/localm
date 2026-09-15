@@ -782,6 +782,7 @@ class AgentJob(BackgroundJob):
         payload = {
             "summary": compose(untrusted_span(poll_value.get("summary") or "")),
             "turns": poll_value.get("turns", 0),
+            "ok": poll_value.get("ok", True),
         }
         if poll_value.get("error"):
             payload["error"] = poll_value["error"]
