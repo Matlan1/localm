@@ -29,8 +29,27 @@ test("R34: net_mode=allow auto-enables web when there is no saved choice", () =>
   assert.equal(w.document.getElementById("p-web").checked, true);
 });
 
-test("R34: net_mode=ask leaves web off so consent still applies", () => {
+test("net_mode=ask auto-enables web: the model knows the tools, each request is approved per call", () => {
   const w = appWithChat();
+  w.hydrateChatToggles({ net_mode: "ask" });
+  assert.equal(w.document.getElementById("p-web").checked, true);
+});
+
+test("net_mode=off leaves web off when there is no saved choice", () => {
+  const w = appWithChat();
+  w.hydrateChatToggles({ net_mode: "off" });
+  assert.equal(w.document.getElementById("p-web").checked, false);
+});
+
+test("no net_mode in the config leaves web off when there is no saved choice", () => {
+  const w = appWithChat();
+  w.hydrateChatToggles({});
+  assert.equal(w.document.getElementById("p-web").checked, false);
+});
+
+test("a saved OFF choice beats net_mode=ask", () => {
+  const w = appWithChat();
+  w.localStorage.setItem("localm.webAccess", "0");
   w.hydrateChatToggles({ net_mode: "ask" });
   assert.equal(w.document.getElementById("p-web").checked, false);
 });
@@ -64,8 +83,9 @@ test("R34: privacy mode neither restores nor persists toggle state", () => {
   w.localStorage.setItem("localm.webAccess", "1");
   w.chatState.privacy = true;
 
-  // Does not restore from storage under privacy.
-  w.hydrateChatToggles({ net_mode: "ask" });
+  // Does not restore from storage under privacy (net_mode=off so the policy
+  // default cannot mask a restore).
+  w.hydrateChatToggles({ net_mode: "off" });
   assert.equal(w.document.getElementById("p-web").checked, false,
     "privacy does not restore the toggle from storage");
 

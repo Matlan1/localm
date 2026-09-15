@@ -171,18 +171,27 @@ export async function compactConversation(conv) {
     });
     if (r.ok) {
       const data = await r.json();
-      summary = (data.choices?.[0]?.message?.content || "").trim();
+      const choice = data.choices?.[0];
+      // Only a generation the server finished normally is a summary. The
+      // server reports a mid-generation failure as HTTP 200 with the error
+      // text as content and finish_reason "error"; storing that text as the
+      // summary would replace the removed turns with an error message.
+      if (choice && choice.finish_reason === "stop") {
+        summary = (choice.message?.content || "").trim();
+      }
     }
   } catch { /* summarisation unavailable - fall back to a note below */ }
   // R44: sanitise the summary so leaked <think>/markers never re-enter context.
   summary = stripThink(scrubMarkers(summary)).trim();
 
+  // The removed turns ride on the bridge message so they survive persistence
+  // and remain recoverable through export, on both the summary and trim paths.
   const bridge = summary
-    ? [{ role: "user", content: "[Conversation summary]\n" + summary },
+    ? [{ role: "user", content: "[Conversation summary]\n" + summary, compacted: older },
        { role: "assistant", content: "Understood. Continuing from this summary." }]
     : [{ role: "user", content:
          "[Earlier conversation was trimmed to fit the context window; " +
-         "the recent messages below are intact.]" },
+         "the recent messages below are intact.]", compacted: older },
        { role: "assistant", content: "Understood." }];
 
   conv.messages = [...bridge, ...recent];
@@ -427,9 +436,11 @@ function _writeScoped(key, value) {
 
 // R34: the per-chat Web-access and Speak-aloud toggles used to reset to OFF on
 // every load, so the user had to re-enable them in every session. Reflect the
-// user's saved choice; for web, when there is no saved choice fall back to the
-// global net policy (net_mode=allow auto-enables web; ask/off leave it off so
-// consent still applies). Writes are gated on privacy mode (no traces there).
+// user's saved choice; for web, when there is no saved choice follow the
+// global net policy: "allow" and "ask" both enable web (under "ask" the model
+// knows the tools and every model-initiated request still goes through the
+// approval card in settings-perf.js); "off" leaves it off. Writes are gated
+// on privacy mode (no traces there).
 export function hydrateChatToggles(cfg) {
   const webEl = $("p-web"), speakEl = $("p-speak");
   if (!webEl || !speakEl) return;
@@ -438,7 +449,7 @@ export function hydrateChatToggles(cfg) {
   if (savedSpeak !== null) speakEl.checked = savedSpeak === "1";
   const savedWeb = chat.privacy ? null : lsGet("localm.webAccess");
   if (savedWeb !== null) webEl.checked = savedWeb === "1";
-  else if (cfg && cfg.net_mode === "allow") webEl.checked = true;
+  else if (cfg && (cfg.net_mode === "allow" || cfg.net_mode === "ask")) webEl.checked = true;
   // The brain toggle mirrors the server-side memory_enabled config (default on).
   const memEl = $("p-memory");
   if (memEl && cfg && typeof cfg.memory_enabled === "boolean")
@@ -1310,7 +1321,9 @@ export function renderChat() {
         next: () => switchBranch(conv, i, +1),
       };
     }
-    const noteSuffix = m.truncated
+    const noteSuffix = m.failed
+      ? "\n\n*[generation failed - the model's reply ended in an inference error; regenerate or ask again]*"
+      : m.truncated
       ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”]*"
       : m.stopped
       ? "\n\n*[stopped]*"

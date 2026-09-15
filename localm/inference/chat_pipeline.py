@@ -54,6 +54,11 @@ from localm.debuglog import logger as _log
 #: The valid hook phases, in pipeline order.
 PHASES = ("inlet", "stream", "outlet")
 
+#: The terminal outcomes a turn can end in, as seen by an outlet hook:
+#: "success" (the model finished), "length" (the token budget ran out),
+#: "error" (generation failed mid-turn), "abort" (the client disconnected).
+OUTCOMES = ("success", "length", "error", "abort")
+
 
 @dataclass
 class ChatHookContext:
@@ -64,6 +69,12 @@ class ChatHookContext:
     how an Open WebUI Filter threads state through the request body).
     ``principal`` / ``scopes`` are reserved for future per-user gating (Open
     WebUI's ``__user__``) and are unset in open mode.
+    ``outcome`` is how the turn ended, one of ``OUTCOMES``. It is "success"
+    until the server sets it right before the outlet phase, so an inlet or
+    stream hook always reads "success". The outlet runs only for "success"
+    and "length"; an "error" turn skips the outlet on every path, and an
+    "abort" turn never reaches it (the value is still set on the context so
+    a caller holding it can tell the cases apart).
     """
     model_id: str
     stream: bool
@@ -71,6 +82,7 @@ class ChatHookContext:
     state: dict = field(default_factory=dict)
     principal: Optional[str] = None
     scopes: tuple = ()
+    outcome: str = "success"
 
 
 @dataclass(order=True)

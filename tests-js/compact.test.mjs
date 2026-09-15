@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
 
-function summFetch(summary) {
+function summFetch(summary, finishReason = "stop") {
   const calls = [];
   const impl = async (url, opts = {}) => {
     let body;
@@ -11,7 +11,8 @@ function summFetch(summary) {
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/chat/completions") {
       return { ok: true, status: 200, text: async () => "",
-        json: async () => ({ choices: [{ message: { content: summary } }] }) };
+        json: async () => ({ choices: [{ message: { content: summary },
+                                          finish_reason: finishReason }] }) };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
   };
@@ -86,6 +87,85 @@ test("R44: a failed summary keeps the recent turns rather than nuking history", 
     JSON.stringify(tail.slice(-kept).map((m) => m.content)));
 });
 
+
+test("F-02: an HTTP-200 inference error is not accepted as a summary", async () => {
+  // The server reports a failed summarisation as 200 + error content +
+  // finish_reason "error"; that text must never replace the older turns.
+  const { impl } = summFetch("[inference error: decode failed]", "error");
+  const { window } = loadApp({ fetchImpl: impl });
+  const toasts = [];
+  window.toast = (msg) => toasts.push(String(msg));
+  runScript(window, "chat.ctxMax = 160;");
+  const conv = makeConv(20);
+  const original = conv.messages.map((m) => m.content);
+  const ok = await window.compactConversation(conv);
+  assert.equal(ok, true, "compaction still ran (hard-trim fallback)");
+  const all = JSON.stringify(conv.messages.map((m) => m.content));
+  assert.doesNotMatch(all, /inference error/, "the error text is not in the transcript");
+  assert.doesNotMatch(all, /\[Conversation summary\]/, "no summary bridge was claimed");
+  assert.match(conv.messages[0].content, /trimmed to fit the context window/,
+    "the documented hard-trim bridge was used instead");
+  assert.ok(toasts.some((t) => /trimmed/.test(t)), "the user is told it was trimmed");
+  assert.ok(!toasts.some((t) => /summarised/.test(t)), "no summarised-success message");
+  const archived = window.compactedTurns(conv.messages).map((m) => m.content);
+  const kept = conv.messages.length - 2;
+  assert.equal(JSON.stringify(archived), JSON.stringify(original.slice(0, 20 - kept)),
+    "every removed original turn is archived, in order");
+});
+
+test("F-02: a finish_reason other than stop (length) is not accepted as a summary", async () => {
+  const { impl } = summFetch("A summary that was cut off mid", "length");
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 160;");
+  const conv = makeConv(20);
+  await window.compactConversation(conv);
+  assert.doesNotMatch(conv.messages[0].content, /\[Conversation summary\]/);
+  assert.match(conv.messages[0].content, /trimmed to fit/);
+});
+
+test("F-02: a successful summary still takes the normal path and archives the originals", async () => {
+  const { impl } = summFetch("A clean summary of the earlier turns.");
+  const { window } = loadApp({ fetchImpl: impl });
+  const toasts = [];
+  window.toast = (msg) => toasts.push(String(msg));
+  runScript(window, "chat.ctxMax = 160;");
+  const conv = makeConv(20);
+  const original = conv.messages.map((m) => m.content);
+  await window.compactConversation(conv);
+  assert.match(conv.messages[0].content, /\[Conversation summary\]\nA clean summary/);
+  assert.ok(toasts.some((t) => /summarised/.test(t)), "success wording on a real summary");
+  const kept = conv.messages.length - 2;
+  const archived = window.compactedTurns(conv.messages).map((m) => m.content);
+  assert.equal(JSON.stringify(archived), JSON.stringify(original.slice(0, 20 - kept)));
+});
+
+test("F-02: a second compaction nests the first bridge; compactedTurns still lists every turn once, oldest first", async () => {
+  const { impl } = summFetch("Summary.");
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 160;");
+  const conv = makeConv(20);
+  const original = conv.messages.map((m) => m.content);
+  await window.compactConversation(conv);
+  const firstKept = conv.messages.length - 2;
+  // grow the tail again so a second compaction has something to remove
+  for (let i = 20; i < 40; i++) {
+    conv.messages.push({ role: i % 2 === 0 ? "user" : "assistant",
+                         content: ("msg-" + i).padEnd(16, ".") });
+    original.push(("msg-" + i).padEnd(16, "."));
+  }
+  await window.compactConversation(conv);
+  const archived = window.compactedTurns(conv.messages).map((m) => m.content);
+  // the archive holds the originals removed by BOTH passes (the first bridge
+  // itself is synthetic and is not listed), each exactly once, oldest first
+  const removedByFirst = original.slice(0, 20 - firstKept);
+  assert.equal(JSON.stringify(archived.slice(0, removedByFirst.length)),
+    JSON.stringify(removedByFirst), "first-pass originals come first");
+  assert.equal(new Set(archived).size, archived.length, "no turn is archived twice");
+  assert.ok(!archived.some((c) => /\[Conversation summary\]/.test(c)),
+    "the synthetic bridge is not listed as an archived turn");
+  const survivors = conv.messages.slice(2).map((m) => m.content);
+  assert.ok(archived.every((c) => !survivors.includes(c)), "archived turns are the removed ones");
+});
 
 test("F5: compaction archives (not silently deletes) branches anchored in the summarised-away region", async () => {
   const { impl } = summFetch("A clean summary of the earlier turns.");

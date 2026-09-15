@@ -84,7 +84,7 @@
   "chat.voice.title": "Welche Stimme Antworten vorliest, in diesem Browser gespeichert. Neuronale Kokoro-Stimmen mit installiertem tts-Plugin, sonst die Offline-Stimmen Ihres Browsers.",
   "chat.waitForReply": "Warten Sie, bis die aktuelle Antwort fertig ist",
   "chat.web": "Web-Zugriff - das Modell darf suchen und Seiten lesen",
-  "chat.web.title": "Erlaubt dem Modell, mitten im Gespräch im Web zu suchen und Seiten zu lesen (nutzt die Netzwerkrichtlinie des Servers). Aus = vollständig offline.",
+  "chat.web.title": "Erlaubt dem Modell, mitten im Gespräch im Web zu suchen und Seiten zu lesen (nutzt die Netzwerkrichtlinie des Servers; bei net_mode=ask muss jede Anfrage des Modells zuerst bestätigt werden). Aus = vollständig offline.",
   "cmdk.aria": "Befehlspalette",
   "cmdk.exportConversation": "Unterhaltung exportieren",
   "cmdk.goTo": "Gehe zu {view}",

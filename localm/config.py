@@ -689,7 +689,9 @@ DEFAULT_CONFIG: dict = {
     # Network policy for model-initiated requests (coder fetch_url/web_search,
     # chat web access). See localm/netpolicy.py and docs/network.md.
     #   off   = all policy-routed network access fails fast
-    #   ask   = allowed; the coder asks for approval per request (default)
+    #   ask   = allowed; the coder asks for approval per request, and the chat
+    #           GUI advertises the web tools with an approval card per
+    #           model-initiated request (default)
     #   allow = no confirmation
     "net_mode": "ask",
     "net_allow": [],            # domains; empty = any. "x.com" covers *.x.com

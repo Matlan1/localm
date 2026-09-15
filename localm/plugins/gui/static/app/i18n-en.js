@@ -186,7 +186,7 @@ export const I18N_EN = {
   "chat.waitForReply": "Wait for the current reply to finish",
   "chat.web": "Web access - the model may search and read pages",
   "chat.web.title":
-    "Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat.",
+    "Lets the model search the web and read pages mid-conversation (uses the server's network policy; under net_mode=ask every request the model makes must be approved first). Off = fully offline chat.",
 
   // ---- Coder panel ----
   "coder.attach.readError": "could not read file",
