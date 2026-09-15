@@ -186,8 +186,8 @@ def _recorder(monkeypatch):
     import localm.inference.http_server as hs
     calls = []
 
-    def _rec(audit, transcript, messages, reply):
-        calls.append({"messages": messages, "reply": reply})
+    def _rec(audit, transcript, messages, reply, outcome="success"):
+        calls.append({"messages": messages, "reply": reply, "outcome": outcome})
     monkeypatch.setattr(hs, "_audit_exchange", _rec)
     return calls
 
@@ -215,3 +215,4 @@ def test_completion_audited_streaming(env, monkeypatch):
     assert _sse_text(r) == "audit-stream"
     assert len(calls) == 1, "streamed completion exchange was not audited"
     assert calls[0]["reply"] == "audit-stream"
+    assert calls[0]["outcome"] == "success"
