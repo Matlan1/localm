@@ -2635,14 +2635,15 @@ function exportLabel(m) {
   return noteLabel(m) || (m.role === "user" ? "You" : (modelCache.active || "Model"));
 }
 
-/** Every message that a compaction archived, oldest first, walking nested
- *  archives (a bridge inside an older archive) recursively. */
+/** Every real message that a compaction archived, oldest first, walking
+ *  nested archives recursively. The synthetic bridge pair of an earlier
+ *  compaction (`bridge: true`) is descended into but never listed. */
 export function compactedTurns(messages) {
   const out = [];
   for (const m of messages || []) {
     if (Array.isArray(m.compacted) && m.compacted.length) {
       out.push(...compactedTurns(m.compacted));
-      out.push(...m.compacted.filter((x) => !(Array.isArray(x.compacted) && x.compacted.length)));
+      out.push(...m.compacted.filter((x) => !x.bridge && !(Array.isArray(x.compacted) && x.compacted.length)));
     }
   }
   return out;

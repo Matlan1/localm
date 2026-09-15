@@ -163,6 +163,10 @@ test("F-02: a second compaction nests the first bridge; compactedTurns still lis
   assert.equal(new Set(archived).size, archived.length, "no turn is archived twice");
   assert.ok(!archived.some((c) => /\[Conversation summary\]/.test(c)),
     "the synthetic bridge is not listed as an archived turn");
+  assert.ok(!archived.some((c) => /^Understood\./.test(c)),
+    "the bridge's synthetic assistant half is not listed either");
+  assert.equal(archived.length, 40 - (conv.messages.length - 2),
+    "the archive holds exactly the real turns both passes removed");
   const survivors = conv.messages.slice(2).map((m) => m.content);
   assert.ok(archived.every((c) => !survivors.includes(c)), "archived turns are the removed ones");
 });

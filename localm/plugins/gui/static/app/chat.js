@@ -131,7 +131,7 @@ export function truncateAtWord(text, max) {
  *  replaced by a count note; a nested compaction archive is kept as is. */
 export function archiveCopy(m) {
   const out = { role: m.role, content: msgText(m) };
-  for (const k of ["id", "tag", "web", "model", "truncated", "stopped", "failed"]) {
+  for (const k of ["id", "tag", "web", "model", "truncated", "stopped", "failed", "bridge"]) {
     if (m[k] !== undefined) out[k] = m[k];
   }
   const media = msgImages(m).length + (m.audio ? 1 : 0) + (m.video ? 1 : 0);
@@ -201,13 +201,16 @@ export async function compactConversation(conv) {
   // The removed turns are archived on the bridge message (text only, with an
   // earlier bridge's own archive kept nested) and listed by exportConversation.
   const archived = older.map(archiveCopy);
+  // Both halves of the bridge carry `bridge: true` so a later archive walk
+  // can tell them from real turns.
   const bridge = summary
-    ? [{ role: "user", content: "[Conversation summary]\n" + summary, compacted: archived },
-       { role: "assistant", content: "Understood. Continuing from this summary." }]
+    ? [{ role: "user", content: "[Conversation summary]\n" + summary,
+         compacted: archived, bridge: true },
+       { role: "assistant", content: "Understood. Continuing from this summary.", bridge: true }]
     : [{ role: "user", content:
          "[Earlier conversation was trimmed to fit the context window; " +
-         "the recent messages below are intact.]", compacted: archived },
-       { role: "assistant", content: "Understood." }];
+         "the recent messages below are intact.]", compacted: archived, bridge: true },
+       { role: "assistant", content: "Understood.", bridge: true }];
 
   conv.messages = [...bridge, ...recent];
   // Forks anchored in the summarised-away region can no longer be reached by
