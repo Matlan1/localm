@@ -9,6 +9,7 @@ than a tidy error, so the permit tests below are adversarial: each one takes an
 otherwise-fitting load and breaks exactly one precondition.
 """
 
+import threading
 from types import SimpleNamespace
 
 from localm.inference import residency
@@ -288,6 +289,69 @@ class TestPinSurface:
         evictor.join(5)
         assert outcome == {"pinned": True, "unload": False}
         assert e.unloading is False
+
+
+class TestCancelBroadcast:
+    """cancel_all(model_name) lets an unload/switch actively stop whatever is
+    running against a model instead of only reading the pin count once."""
+
+    def teardown_method(self):
+        # register_cancel/unregister_cancel are meant to always pair, but a
+        # test that asserts mid-registration (by design, to prove the
+        # registry works) leaves an entry behind - clear it so one test's
+        # state can never leak into the next.
+        residency._cancel_events.clear()
+
+    def test_cancel_all_signals_every_registered_event_for_that_model(self):
+        a, b = threading.Event(), threading.Event()
+        residency.register_cancel("m", a)
+        residency.register_cancel("m", b)
+        assert residency.cancel_all("m") == 2
+        assert a.is_set() and b.is_set()
+
+    def test_cancel_all_does_not_touch_a_different_models_events(self):
+        other = threading.Event()
+        residency.register_cancel("other-model", other)
+        assert residency.cancel_all("m") == 0
+        assert not other.is_set()
+
+    def test_cancel_all_on_an_unregistered_model_signals_nothing_and_does_not_raise(self):
+        assert residency.cancel_all("nothing-here") == 0
+
+    def test_unregister_removes_exactly_that_event(self):
+        a, b = threading.Event(), threading.Event()
+        residency.register_cancel("m", a)
+        residency.register_cancel("m", b)
+        residency.unregister_cancel("m", a)
+        assert residency.cancel_all("m") == 1
+        assert not a.is_set()
+        assert b.is_set()
+
+    def test_unregister_an_already_absent_event_does_not_raise(self):
+        residency.unregister_cancel("never-registered", threading.Event())
+
+    def test_the_model_entry_is_cleaned_up_once_empty(self):
+        e = threading.Event()
+        residency.register_cancel("m", e)
+        residency.unregister_cancel("m", e)
+        assert "m" not in residency._cancel_events
+
+    def test_concurrent_register_unregister_is_thread_safe(self):
+        """A stress pass, not a proof of absence of races - but 200 threads
+        registering and immediately unregistering their own event must
+        leave the registry exactly empty, every time."""
+        events = [threading.Event() for _ in range(200)]
+
+        def _one(ev):
+            residency.register_cancel("m", ev)
+            residency.unregister_cancel("m", ev)
+
+        threads = [threading.Thread(target=_one, args=(ev,)) for ev in events]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        assert residency._cancel_events == {}
 
 
 class TestSingleMutationSite:

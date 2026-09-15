@@ -137,6 +137,53 @@ def fits_alongside_residents(
 _PIN_LOCK = threading.Lock()
 
 
+# --------------------------------------------------------------------------- #
+#  Cancel broadcast: let an unload/switch actively stop whatever is running   #
+#  against a model, instead of only reading the pin count once and giving    #
+#  up. Every per-request cancel_event (one per streaming/non-streaming       #
+#  generation call, plus the pre-stream compaction call) registers itself    #
+#  here for the duration of the call it belongs to.                          #
+# --------------------------------------------------------------------------- #
+
+_CANCEL_LOCK = threading.Lock()
+_cancel_events: dict[str, set] = {}
+
+
+def register_cancel(model_name: str, event) -> None:
+    """Make *event* reachable by ``cancel_all(model_name)`` for as long as the
+    caller's generation is in flight. Pair with ``unregister_cancel`` in a
+    ``finally``, exactly like ``pin_engine``/``unpin_engine``."""
+    with _CANCEL_LOCK:
+        _cancel_events.setdefault(model_name, set()).add(event)
+
+
+def unregister_cancel(model_name: str, event) -> None:
+    """Undo ``register_cancel``. Never raises if the event or the model's
+    entry is already gone (a normal outcome once the generation finishes)."""
+    with _CANCEL_LOCK:
+        events = _cancel_events.get(model_name)
+        if events is None:
+            return
+        events.discard(event)
+        if not events:
+            del _cancel_events[model_name]
+
+
+def cancel_all(model_name: str) -> int:
+    """Signal every generation currently registered against *model_name*.
+    Returns how many were signaled. Setting a threading.Event is the same
+    per-token check every generation loop here already makes for an ordinary
+    client disconnect - this just triggers it from the eviction side instead
+    of a closed connection, so a model's own just-stopped generation clears
+    within a token or two rather than needing the caller to wait out
+    whatever `max_tokens` was set to."""
+    with _CANCEL_LOCK:
+        events = list(_cancel_events.get(model_name, ()))
+    for event in events:
+        event.set()
+    return len(events)
+
+
 def pin_engine(engine) -> None:
     """Count one in-flight request on *engine*. A pinned engine
     (``active_requests > 0``) is never chosen by ``pick_eviction_victim``.

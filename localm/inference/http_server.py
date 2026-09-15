@@ -4866,6 +4866,7 @@ async def _stream_sse(
                 # early-exit check the main generation loop below already
                 # does per token, applied here too.
                 _compact_cancel = threading.Event()
+                residency.register_cancel(engine.display_name, _compact_cancel)
                 def _gen_for_compact(ms: list[dict], max_t: int) -> str:
                     parts = []
                     gen = engine.chat_stream(ms, max_tokens=max_t, temperature=0.3)
@@ -4885,11 +4886,14 @@ async def _stream_sse(
                 # generation below is.
                 _loop = asyncio.get_running_loop()
                 try:
-                    new_messages, changed = await _loop.run_in_executor(
-                        None, compact_messages, messages, _gen_for_compact)
-                except (asyncio.CancelledError, GeneratorExit):
-                    _compact_cancel.set()
-                    raise
+                    try:
+                        new_messages, changed = await _loop.run_in_executor(
+                            None, compact_messages, messages, _gen_for_compact)
+                    except (asyncio.CancelledError, GeneratorExit):
+                        _compact_cancel.set()
+                        raise
+                finally:
+                    residency.unregister_cancel(engine.display_name, _compact_cancel)
                 if changed:
                     messages = list(new_messages)
                     prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -4913,7 +4917,11 @@ async def _stream_sse(
     # driving engine.chat_stream() all the way to end-of-generation, holding
     # llama.py's per-model _inference_lock the whole time and blocking the next
     # request to THIS model. cancel_event lets the disconnect unwind stop it.
+    # Also registered with residency's cancel broadcast so an unload/switch can
+    # trigger the same stop proactively, instead of only reading active_requests
+    # once and refusing.
     cancel_event = threading.Event()
+    residency.register_cancel(engine.display_name, cancel_event)
 
     def _generate():
         # engine.chat_stream is called INSIDE the try: Engine.chat_stream is not a
@@ -4976,33 +4984,41 @@ async def _stream_sse(
         completion_parts: list[str] = []
         gen_error: Exception | None = None
         try:
-            while True:
-                token = await token_queue.get()
-                if token is _DONE:
-                    break
-                if isinstance(token, Exception):
-                    gen_error = token
-                    continue
-                if first_token_at is None:
-                    first_token_at = time.perf_counter()
-                # Stream hook transforms the piece before it is recorded and sent,
-                # so usage reflects exactly what the client receives.
-                if pipeline is not None and ctx is not None and pipeline.has("stream"):
-                    token = pipeline.run_stream(token, ctx)
-                completion_parts.append(token)
-                for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
-                    yield data
-        finally:
-            # Signal the producer to stop. On a clean finish this is a no-op: the
-            # thread already exited after _DONE, so t.join() below returns at once.
-            # On a disconnect (GeneratorExit raised at the yield above) it makes the
-            # thread break its loop, close the generator chain, and release
-            # _inference_lock instead of running to end-of-generation. GeneratorExit
-            # then keeps propagating, so t.join() below is skipped - the daemon
-            # thread self-terminates within ~one token of the cancel.
-            cancel_event.set()
+            try:
+                while True:
+                    token = await token_queue.get()
+                    if token is _DONE:
+                        break
+                    if isinstance(token, Exception):
+                        gen_error = token
+                        continue
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    # Stream hook transforms the piece before it is recorded and sent,
+                    # so usage reflects exactly what the client receives.
+                    if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                        token = pipeline.run_stream(token, ctx)
+                    completion_parts.append(token)
+                    for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
+                        yield data
+            finally:
+                # Signal the producer to stop. On a clean finish this is a no-op: the
+                # thread already exited after _DONE, so t.join() below returns at once.
+                # On a disconnect (GeneratorExit raised at the yield above) it makes the
+                # thread break its loop, close the generator chain, and release
+                # _inference_lock instead of running to end-of-generation. GeneratorExit
+                # then keeps propagating, so t.join() below is skipped - the daemon
+                # thread self-terminates within ~one token of the cancel.
+                cancel_event.set()
 
-        t.join()
+            t.join()
+        finally:
+            # t has fully exited by now on every path that reaches here (the
+            # normal one; a GeneratorExit skips straight past to this finally
+            # without joining, which is fine - the thread notices cancel_event
+            # within a token or two on its own and this registration merely
+            # stops being reachable, same as an unpin with nothing pinned).
+            residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
         # Release any tail held back while disambiguating a partial <think> tag.
         for data in _reason_sse(*think.flush(), model_id, chunk_id, ts):
@@ -5068,12 +5084,12 @@ async def _stream_sse_completion(
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue = asyncio.Queue()
 
-    import threading
-
     # See _stream_sse: a mid-stream disconnect must stop the producer thread so it
     # releases llama.py's per-model _inference_lock instead of running to
-    # end-of-generation and blocking the next request to this model.
+    # end-of-generation and blocking the next request to this model. Also
+    # registered with residency's cancel broadcast - see _stream_sse.
     cancel_event = threading.Event()
+    residency.register_cancel(engine.display_name, cancel_event)
 
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
@@ -5121,32 +5137,35 @@ async def _stream_sse_completion(
         completion_parts: list[str] = []
         gen_error: Exception | None = None
         try:
-            while True:
-                token = await token_queue.get()
-                if token is None:
-                    break
-                if isinstance(token, Exception):
-                    gen_error = token
-                    continue
-                if first_token_at is None:
-                    first_token_at = time.perf_counter()
-                # Stream hook transforms each piece before it is recorded and sent,
-                # so usage and the audit trail reflect what the client receives.
-                if pipeline is not None and ctx is not None and pipeline.has("stream"):
-                    token = pipeline.run_stream(token, ctx)
-                completion_parts.append(token)
-                chunk = {
-                    "id": chunk_id, "object": "text_completion.chunk",
-                    "created": ts, "model": model_id,
-                    "choices": [{"text": token, "index": 0, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-        finally:
-            # No-op on a clean finish (thread already exited after the sentinel);
-            # on a disconnect it stops the producer so _inference_lock is released.
-            cancel_event.set()
+            try:
+                while True:
+                    token = await token_queue.get()
+                    if token is None:
+                        break
+                    if isinstance(token, Exception):
+                        gen_error = token
+                        continue
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    # Stream hook transforms each piece before it is recorded and sent,
+                    # so usage and the audit trail reflect what the client receives.
+                    if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                        token = pipeline.run_stream(token, ctx)
+                    completion_parts.append(token)
+                    chunk = {
+                        "id": chunk_id, "object": "text_completion.chunk",
+                        "created": ts, "model": model_id,
+                        "choices": [{"text": token, "index": 0, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            finally:
+                # No-op on a clean finish (thread already exited after the sentinel);
+                # on a disconnect it stops the producer so _inference_lock is released.
+                cancel_event.set()
 
-        t.join()
+            t.join()
+        finally:
+            residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
 
     if gen_error is not None:
@@ -5219,6 +5238,7 @@ async def _generate_full(engine, messages: list, request=None, *,
     """
     loop = asyncio.get_running_loop()
     cancel_event = threading.Event()
+    residency.register_cancel(engine.display_name, cancel_event)
 
     # Resolve a working disconnect poll. In the real server the endpoint sits
     # behind BaseHTTPMiddleware, which makes request.is_disconnected() permanently
@@ -5294,6 +5314,7 @@ async def _generate_full(engine, messages: list, request=None, *,
             await watcher
         except (asyncio.CancelledError, Exception):
             pass
+        residency.unregister_cancel(engine.display_name, cancel_event)
 
 
 def _capability_route_header(route) -> dict:
