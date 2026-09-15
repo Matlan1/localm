@@ -126,6 +126,20 @@ export function truncateAtWord(text, max) {
   return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + " ...[truncated]";
 }
 
+/** A text-only copy of a message for the compaction archive: role, text,
+ *  id, note tag and terminal flags are kept; images, audio and video are
+ *  replaced by a count note; a nested compaction archive is kept as is. */
+export function archiveCopy(m) {
+  const out = { role: m.role, content: msgText(m) };
+  for (const k of ["id", "tag", "web", "model", "truncated", "stopped", "failed"]) {
+    if (m[k] !== undefined) out[k] = m[k];
+  }
+  const media = msgImages(m).length + (m.audio ? 1 : 0) + (m.video ? 1 : 0);
+  if (media) out.content += `\n\n*[${media} attachment(s) not archived]*`;
+  if (Array.isArray(m.compacted) && m.compacted.length) out.compacted = m.compacted;
+  return out;
+}
+
 export async function compactConversation(conv) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
   // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
@@ -172,10 +186,10 @@ export async function compactConversation(conv) {
     if (r.ok) {
       const data = await r.json();
       const choice = data.choices?.[0];
-      // Only a generation the server finished normally is a summary. The
-      // server reports a mid-generation failure as HTTP 200 with the error
-      // text as content and finish_reason "error"; storing that text as the
-      // summary would replace the removed turns with an error message.
+      // A summary is accepted only from a generation that finished normally
+      // (finish_reason "stop"); an "error" or "length" choice, whose content
+      // is the server's error text or a cut-off summary, is treated as
+      // summarisation unavailable.
       if (choice && choice.finish_reason === "stop") {
         summary = (choice.message?.content || "").trim();
       }
@@ -184,14 +198,15 @@ export async function compactConversation(conv) {
   // R44: sanitise the summary so leaked <think>/markers never re-enter context.
   summary = stripThink(scrubMarkers(summary)).trim();
 
-  // The removed turns ride on the bridge message so they survive persistence
-  // and remain recoverable through export, on both the summary and trim paths.
+  // The removed turns are archived on the bridge message (text only, with an
+  // earlier bridge's own archive kept nested) and listed by exportConversation.
+  const archived = older.map(archiveCopy);
   const bridge = summary
-    ? [{ role: "user", content: "[Conversation summary]\n" + summary, compacted: older },
+    ? [{ role: "user", content: "[Conversation summary]\n" + summary, compacted: archived },
        { role: "assistant", content: "Understood. Continuing from this summary." }]
     : [{ role: "user", content:
          "[Earlier conversation was trimmed to fit the context window; " +
-         "the recent messages below are intact.]", compacted: older },
+         "the recent messages below are intact.]", compacted: archived },
        { role: "assistant", content: "Understood." }];
 
   conv.messages = [...bridge, ...recent];

@@ -909,16 +909,18 @@ const _ACTION_ANNOUNCE_RE = new RegExp(
   "i");
 const _ACTION_ANNOUNCE_MAX_CHARS = 600;
 
+const _ACTION_ANNOUNCE_TAIL_CHARS = 240;
+
 /** True when a reply only ANNOUNCES a web action instead of performing one: a
- *  short, plain-prose reply with no tool call, no URL, and a future-tense
- *  "I will now search / look it up / report back" sentence. Such a reply used
- *  to be accepted as the final answer, leaving the promised action undone. */
+ *  short, plain-prose reply with no tool call and no URL whose closing
+ *  sentences promise a lookup ("I will now search ...", "let me look that
+ *  up", "... and report back"). */
 export function looksLikeActionAnnouncement(text) {
   const clean = stripThink(text || "").trim();
   if (!clean || clean.length > _ACTION_ANNOUNCE_MAX_CHARS) return false;
   if (/https?:\/\//i.test(clean)) return false;
   if (looksLikeWebToolAttempt(clean) || parseWebCalls(clean, 1).length) return false;
-  return _ACTION_ANNOUNCE_RE.test(clean);
+  return _ACTION_ANNOUNCE_RE.test(clean.slice(-_ACTION_ANNOUNCE_TAIL_CHARS));
 }
 
 /** Run a web tool call through the policy-enforced server endpoints. Returns
@@ -2325,10 +2327,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
 
   // finish_reason "error": the server streamed what it had, then the visible
-  // "[inference error: ...]" chunk, and marked the terminal frame. That is a
-  // FAILED turn, not a short reply: it is persisted with `failed: true` (the
-  // "*[generation failed]*" marker is added at render time only, in chat.js),
-  // never spoken, never parsed for tool calls, never continued.
+  // "[inference error: ...]" chunk. The turn is persisted with `failed: true`
+  // (the "*[generation failed]*" marker is added at render time, in chat.js)
+  // and is never spoken, parsed for tool calls, or continued.
   if (finishReason === "error") {
     const failedReply = {
       role: "assistant",
@@ -2461,9 +2462,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   } else if (canWeb && !web.repaired && finishReason === "stop" &&
              looksLikeActionAnnouncement(full)) {
     // The model announced a web action ("I will now search ...") and then
-    // stopped without emitting a call. Exactly ONE repair round per send:
-    // `web.repaired` is set before the recursive call and gates this branch,
-    // so the repair reply can never trigger a second repair.
+    // stopped without emitting a call. One repair round per send: `web.repaired`
+    // is set before the recursive call and gates this branch, so the repair
+    // reply cannot enter it again.
     web.repaired = true;
     conv.messages.push({
       role: "user", web: true,
@@ -2673,9 +2674,8 @@ export function exportConversation() {
     });
   }
   // Messages that compaction replaced with a summary or trim note are archived
-  // on that bridge message (chat.js compactConversation -> m.compacted); an
-  // earlier compaction's bridge sits inside a later one's archive, so the
-  // walk is recursive and emits the oldest turns first.
+  // on that bridge message (chat.js compactConversation -> m.compacted),
+  // listed oldest first.
   const archived = compactedTurns(conv.messages);
   if (archived.length) {
     lines.push("---", "",

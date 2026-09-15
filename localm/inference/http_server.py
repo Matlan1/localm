@@ -5234,9 +5234,9 @@ async def _stream_sse(
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
-    # The terminal reason is fixed here, before the outlet, so the outlet phase
-    # and the audit record see the same outcome the client is about to receive.
-    # A mid-stream error never reports a clean "stop" on the terminal frame.
+    # finish_reason is fixed before the outlet phase; ctx.outcome, the audit
+    # record and the terminal frame all carry the same value. A mid-stream
+    # error reports "error", never a clean "stop".
     finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
     outcome = _turn_outcome(gen_error, finish_reason)
     if ctx is not None:
@@ -5244,8 +5244,8 @@ async def _stream_sse(
     # Outlet runs after every chunk has been sent, so it cannot alter the live
     # stream (a stream hook does that). Here it only shapes the recorded reply
     # (audit / transcript / side-effects); usage stays tied to what was streamed.
-    # A failed generation skips the outlet and is recorded with the visible
-    # error chunk appended, exactly as the client saw it.
+    # A failed generation skips the outlet; its recorded reply is the streamed
+    # text plus the visible error chunk.
     reply = streamed + error_text
     if (gen_error is None and pipeline is not None and ctx is not None
             and pipeline.has("outlet")):
@@ -5398,7 +5398,7 @@ async def _stream_sse_completion(
         ctx.outcome = outcome
     # Outlet shapes only the recorded reply (the live stream already went out);
     # then record the exchange (audit + transcript), exactly like chat. A failed
-    # generation skips the outlet and is recorded with the visible error chunk.
+    # generation skips the outlet; its recorded reply includes the error chunk.
     reply = streamed + error_text
     if (gen_error is None and pipeline is not None and ctx is not None
             and pipeline.has("outlet")):
