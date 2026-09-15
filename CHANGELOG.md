@@ -34,6 +34,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **Switching models or unloading one while it is still generating no longer
+  gets refused or silently degraded.** The switch/unload now stops that
+  generation and completes right away for the common case (press Stop, then
+  switch or unload); if something is still genuinely using the model, or the
+  load would otherwise fall back to slow CPU offload, you are asked to
+  confirm before it proceeds anyway. Before, you could be told a model was
+  "still generating" moments after stopping it, or end up with it loaded on
+  CPU with no warning.
 - **A reply whose generation failed partway (the model reports an inference
   error) is now shown and saved as a failed turn.** It is marked "generation
   failed" in the chat, stays marked after a reload, is not read aloud, and a
