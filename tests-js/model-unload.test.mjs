@@ -104,24 +104,33 @@ test("model-unload: the global Unload-all button POSTs with no model field", asy
   assert.deepEqual(calls[0].body, {}, "Unload-all sends no model field, preserving unload-everything");
 });
 
-// unload_one_model() (http_server.py) answers HTTP 200 with status:"in_use" when
-// the target engine is mid-generation, which is not a completed unload.
+// unload_one_model() (http_server.py) answers HTTP 200 with
+// status:"confirm_required" when the target engine is still in use, which is
+// not a completed unload.
 //
 // The GET /api/models mock below answers "model-a is still loaded and active"
 // whatever the unload call returned, so row and button state are the same either
 // way and the toast text is the discriminating signal.
-test("model-unload: an in-use engine (HTTP 200, status 'in_use') is not reported as unloaded", async () => {
-  const models = [
-    { name: "model-a", active: true, loaded: true, model_type: "llm", size_bytes: 1000 },
-  ];
-  const calls = [];
-  const fetchImpl = async (url, opts = {}) => {
+function makeConfirmRequiredFetch(models, calls, { onForcedUnload } = {}) {
+  return async (url, opts = {}) => {
     const u = String(url);
     if (u.startsWith("/api/models/unload")) {
-      calls.push({ url: u, body: opts.body ? JSON.parse(opts.body) : {} });
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      calls.push({ url: u, body });
+      if (!body.force) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            status: "confirm_required", model: "model-a",
+            detail: "'model-a' is still generating",
+          }),
+          text: async () => "",
+        };
+      }
+      if (onForcedUnload) onForcedUnload();
       return {
         ok: true, status: 200,
-        json: async () => ({ status: "in_use", model: "model-a", vram_freed: 0 }),
+        json: async () => ({ status: "unloaded", unloaded_models: ["model-a"] }),
         text: async () => "",
       };
     }
@@ -134,9 +143,20 @@ test("model-unload: an in-use engine (HTTP 200, status 'in_use') is not reported
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
   };
+}
+
+test("model-unload: a busy engine (confirm_required) is not reported as unloaded, and declining stops after one request", async () => {
+  const models = [
+    { name: "model-a", active: true, loaded: true, model_type: "llm", size_bytes: 1000 },
+  ];
+  const calls = [];
+  const fetchImpl = makeConfirmRequiredFetch(models, calls, {
+    onForcedUnload: () => assert.fail("must not force-unload without confirmation"),
+  });
   const { window } = loadAppWithPages({ fetchImpl });
   await window.refreshModelsPage();
   await new Promise((r) => setTimeout(r, 0));
+  window.confirmDangerAsync = async () => false;   // decline
 
   const row = window.document.querySelector("#models-table tbody tr");
   const unloadBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "unload");
@@ -145,12 +165,34 @@ test("model-unload: an in-use engine (HTTP 200, status 'in_use') is not reported
   unloadBtn.click();
   await new Promise((r) => setTimeout(r, 0));
 
-  assert.equal(calls.length, 1, "exactly one unload POST was attempted");
+  assert.equal(calls.length, 1, "declining must not post a forced retry");
   const toastText = window.document.getElementById("toast").textContent;
-  assert.match(toastText, /still generating/,
-    `the toast must say the model is still in use, not claim it was unloaded (got: ${toastText})`);
   assert.doesNotMatch(toastText, /^Unloaded/,
     `must never claim success for an unload that did not happen (got: ${toastText})`);
+});
+
+test("model-unload: a busy engine (confirm_required) unloads once confirmed, via a forced retry", async () => {
+  const models = [
+    { name: "model-a", active: true, loaded: true, model_type: "llm", size_bytes: 1000 },
+  ];
+  const calls = [];
+  let forced = false;
+  const fetchImpl = makeConfirmRequiredFetch(models, calls, { onForcedUnload: () => { forced = true; } });
+  const { window } = loadAppWithPages({ fetchImpl });
+  await window.refreshModelsPage();
+  await new Promise((r) => setTimeout(r, 0));
+  window.confirmDangerAsync = async () => true;   // confirm
+
+  const row = window.document.querySelector("#models-table tbody tr");
+  const unloadBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "unload");
+  unloadBtn.click();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(calls.length, 2, "confirming retries exactly once, with force");
+  assert.equal(calls[1].body.force, true, "the retry must carry force: true");
+  assert.ok(forced, "the forced retry actually reached the server's force path");
+  const toastText = window.document.getElementById("toast").textContent;
+  assert.match(toastText, /^Unloaded/, "confirming and forcing through reports the real success");
 });
 
 // unload_all_models() reports a pinned (mid-generation) engine in skipped_in_use
@@ -234,4 +276,60 @@ test("model-unload: Unload-all reports a partial result honestly (some unloaded,
     `should still report the genuine success count (got: ${toastText})`);
   assert.match(toastText, /still generating/,
     `must not silently drop the skipped-as-in-use model (got: ${toastText})`);
+});
+
+// Confirming the force-retry offer once something is skipped_in_use must
+// actually re-post with force: true and report the follow-up success -
+// otherwise "Unload all" would have no way to push through a genuinely
+// stuck model at all.
+test("model-unload: Unload-all's force-retry offer, once confirmed, unloads the rest with force", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.startsWith("/api/models/unload")) {
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      calls.push(body);
+      if (!body.force) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            status: "in_use", unloaded_models: [],
+            embedder_unloaded: false, skipped_in_use: ["model-a"],
+          }),
+          text: async () => "",
+        };
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ status: "unloaded", unloaded_models: ["model-a"] }),
+        text: async () => "",
+      };
+    }
+    if (u === "/api/models" || u.startsWith("/api/models?")) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          models: [{ name: "model-a", active: true, loaded: true, model_type: "llm", size_bytes: 1000 }],
+          active: "model-a",
+        }),
+        text: async () => "",
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  await window.refreshModelsPage();
+  await new Promise((r) => setTimeout(r, 0));
+  window.confirmDangerAsync = async () => true;   // confirm the force-retry offer
+
+  const btn = window.document.getElementById("models-unload-all-btn");
+  btn.click();
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(calls.length, 2, "the confirm must trigger exactly one forced retry");
+  assert.equal(calls[1].force, true, "the retry must carry force: true");
+  assert.equal(calls[1].model, undefined, "the retry is still an unload-everything call");
+  const toastText = window.document.getElementById("toast").textContent;
+  assert.match(toastText, /Unloaded 1 model/,
+    `confirming and forcing through should report the real success (got: ${toastText})`);
 });

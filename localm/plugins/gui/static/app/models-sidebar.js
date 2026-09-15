@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
-import { $, GIB, authHeaders, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
+import { $, GIB, authHeaders, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
@@ -991,27 +991,45 @@ async function _maybeRoutePeer(model) {
   return data;
 }
 
+async function _postLoad(model, force) {
+  const r = await fetch("/api/models/load", {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(force ? { model, force: true } : { model }),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+  return await r.json().catch(() => ({ status: "loaded", model }));
+}
+
 // Switch the active model. Returns the server status object
 // ({status: "loaded" | "already_active" | "superseded" | "cancelled" |
 // "peer_routed", model, ...}).
 // "superseded" means another model was selected while this one was still loading;
-// "cancelled" means the load was aborted for some other reason. Either way the
-// server aborted this load, so we do NOT claim success or reset status here
-// (that would flash a model that never actually loaded). Callers should skip
-// their success toast for both. "peer_routed" means the user accepted an offer
-// to route to a live sibling instance instead of loading a local copy - see
+// "cancelled" means the load was aborted for some other reason (including the
+// user declining the confirm_required dialog below). Either way the server
+// aborted this load, so we do NOT claim success or reset status here (that
+// would flash a model that never actually loaded). Callers should skip their
+// success toast for both. "peer_routed" means the user accepted an offer to
+// route to a live sibling instance instead of loading a local copy - see
 // _maybeRoutePeer, which always asks before ever touching /api/models/load.
+//
+// A "confirm_required" response (something else is in the way - a busy peer
+// that will not clear, or a load the server's own estimate says will degrade
+// to slow CPU offload) is never returned to the caller: it is resolved right
+// here, so every caller gets the same final outcome without each needing its
+// own confirm/force plumbing.
 export async function switchModel(model) {
   const routed = await _maybeRoutePeer(model);
   if (routed) return routed;
   setStatus("busy", t("sidebar.status.loading", { model }));
-  const r = await fetch("/api/models/load", {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ model }),
-  });
-  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-  const data = await r.json().catch(() => ({ status: "loaded", model }));
+  let data = await _postLoad(model, false);
+  if (data.status === "confirm_required") {
+    const confirmed = await confirmDangerAsync(
+      t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
+    if (!confirmed) return { status: "cancelled", reason: "declined by user", model };
+    setStatus("busy", t("sidebar.status.loading", { model }));
+    data = await _postLoad(model, true);
+  }
   if (data.status === "superseded" || data.status === "cancelled") return data;
   setStatus("ok", data.model || model);
   // Publish the newly active model NOW. refreshModels() is the only other writer
@@ -1078,6 +1096,17 @@ modelSelect.onchange = async () => {
 // exists as the Models page's own "Unload all" and would be a surprising
 // thing for this control to do silently to OTHER loaded-but-inactive models
 // the sidebar cannot even show.
+async function _postUnload(model, force) {
+  const r = await fetch("/api/models/unload", {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(force ? { model, force: true } : { model }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || "Unload failed");
+  return data;
+}
+
 if (sidebarUnloadBtn) {
   sidebarUnloadBtn.onclick = async () => {
     const model = modelCache.active;
@@ -1085,30 +1114,22 @@ if (sidebarUnloadBtn) {
     sidebarUnloadBtn.disabled = true;
     setStatus("busy", t("sidebar.status.unloading", { model }));
     try {
-      const r = await fetch("/api/models/unload", {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({ model }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setStatus("err", t("sidebar.status.unloadFailed"));
-        toast(data.detail || "Unload failed", true);
-        return;
-      }
-      // unload_one_model() (http_server.py) answers HTTP 200 for an in-use
+      let data = await _postUnload(model, false);
+      // unload_one_model() (http_server.py) answers HTTP 200 for a busy
       // engine too - it is a legitimate "not done yet, not an error" outcome
-      // (a request is mid-generation against it right now), not the same
-      // thing as a real unload. Reporting "Unloaded" here regardless of
-      // `status` would claim a VRAM release that did not happen (AGENTS.md
-      // rule 5). Reset the status line here too (still the same model,
-      // still busy) - skip it and _statusBusy stays true forever, which
-      // would leave refreshModels()'s own status write gated off below.
-      if (data.status === "in_use") {
-        setStatus("ok", model);
-        toast(t("models.unload.inUse", { name: model }), true);
-        refreshModels();
-        return;
+      // (a request is mid-generation against it right now, or a coder
+      // session is using it), not the same thing as a real unload. Reporting
+      // "Unloaded" here regardless of `status` would claim a VRAM release
+      // that did not happen (AGENTS.md rule 5).
+      if (data.status === "confirm_required") {
+        const confirmed = await confirmDangerAsync(
+          t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
+        if (!confirmed) {
+          setStatus("ok", model);
+          return;
+        }
+        setStatus("busy", t("sidebar.status.unloading", { model }));
+        data = await _postUnload(model, true);
       }
       toast(`Unloaded '${model}'`);
       // Publish immediately, same reasoning as switchModel's own comment

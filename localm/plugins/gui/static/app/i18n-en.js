@@ -1130,6 +1130,8 @@ export const I18N_EN = {
   "models.sizeUnknown": "size unknown",
   "models.splitHint":
     "may not fit on one GPU, but may fit split across your {count} GPUs - see Settings > Split across GPUs",
+  "models.switch.confirmLabel": "Switch anyway",
+  "models.switch.confirmTitle": "Confirm model switch",
   "models.tab.all": "All",
   "models.tab.diffusionUnet": "Diffusion",
   "models.tab.embedding": "Embedding",
@@ -1147,13 +1149,18 @@ export const I18N_EN = {
   "models.typeSelect.notSet": "not set",
   "models.typeSelect.titleChange": "Change this model's type",
   "models.typeSelect.titleUnset": "No type is recorded for this model - pick one",
+  "models.unload.confirmLabel": "Unload anyway",
+  "models.unload.confirmTitle": "Model in use",
   "models.unload.failed": "Unload failed",
-  "models.unload.inUse": "'{name}' is still generating - try again once it finishes",
   "models.unload.title":
     "Release this model from GPU/CPU memory (it reloads automatically on the next chat request)",
   "models.unload.toast": "Unloaded '{name}'",
   "models.unloadAll.allUnloaded": "Unloaded {n} model(s)",
   "models.unloadAll.button": "Unload all",
+  "models.unloadAll.confirmBody":
+    "{skipped} model(s) are still in use. Unloading them anyway will stop whatever is running against them.",
+  "models.unloadAll.confirmLabel": "Unload all anyway",
+  "models.unloadAll.confirmTitle": "Some models are in use",
   "models.unloadAll.failedException": "Unload failed: {message}",
   "models.unloadAll.nothingLoaded": "Nothing was loaded",
   "models.unloadAll.someStillGenerating":
