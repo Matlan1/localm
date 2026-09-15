@@ -393,6 +393,168 @@ def test_polling_a_failed_background_child_does_not_report_it_finished(tmp_path)
 
 
 # --------------------------------------------------------------------------- #
+#  The producer itself: AgentJob._run() -> _result_for() -> status()
+#
+#  The two tests above only prove the CONSUMERS handle "ok": False correctly -
+#  they hand-fabricate a payload that already carries the field. They cannot
+#  catch _result_for() dropping it, because a fixture that never derives its
+#  data from a real AgentJob cannot fail on that defect (diff-review-
+#  discipline.md item 19). These build a REAL AgentJob and read its REAL
+#  status() back, so the producer-to-consumer wire is what's under test.
+# --------------------------------------------------------------------------- #
+
+class _RealAgentJobChild:
+    """A minimal stand-in for Agent, just enough to drive a REAL AgentJob:
+    ``run_task`` + ``last_run_ok`` (read by AgentJob._run) and ``parent``
+    (read by persistence._spawned_by). Not a scripted backend/Agent - the
+    thing under test is AgentJob's own plumbing, not the agent loop that
+    decides ok/not-ok (that belongs to test_last_run_ok_per_run.py)."""
+
+    def __init__(self, *, ok: bool, summary: str, raises: Exception = None):
+        self.last_run_ok = ok
+        self.turns = 3
+        self.parent = None
+        self._summary = summary
+        self._raises = raises
+
+    def run_task(self, task: str) -> str:
+        if self._raises is not None:
+            raise self._raises
+        return self._summary
+
+
+def _wait_for_terminal(job, timeout: float = 10.0) -> dict:
+    deadline = time.monotonic() + timeout
+    st = job.status()
+    while st["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+        st = job.status()
+    assert st["state"] != "running", f"job never reached a terminal state: {st}"
+    return st
+
+
+@pytest.mark.parametrize("ok_flag", [True, False], ids=["succeeds", "fails"])
+def test_agent_job_result_for_preserves_the_real_ok_field(ok_flag):
+    """The producer pin: background.py:778-794 must carry the child's real
+    ``ok`` verdict into the published result, not silently drop it. ``True``
+    is the positive control - it proves the assertion isn't vacuous."""
+    from localm.plugins.coder.background import AgentJob
+
+    child = _RealAgentJobChild(ok=ok_flag, summary="child summary")
+    job = AgentJob(child, "task", label="kid")
+    st = _wait_for_terminal(job)
+
+    assert st["state"] == "done", st
+    assert st["result"] is not None
+    assert st["result"]["ok"] is ok_flag, (
+        f"_result_for() lost the child's real last_run_ok={ok_flag}: {st['result']}")
+
+
+def test_agent_job_raised_exception_fails_the_job_independent_of_ok_default(tmp_path):
+    """Positive control for the OTHER producer branch: when run_task itself
+    raises (a job-transport failure, distinct from the child merely finishing
+    with last_run_ok=False), the job must land as state=failed with .error
+    set - regardless of whatever _result_for() defaults a missing 'ok' to."""
+    from localm.plugins.coder.background import AgentJob
+
+    child = _RealAgentJobChild(ok=True, summary="", raises=RuntimeError("boom"))
+    job = AgentJob(child, "task", label="kid")
+    st = _wait_for_terminal(job)
+
+    assert st["state"] == "failed", st
+    assert st["error"] and "boom" in st["error"], st
+
+
+def test_drain_background_agents_records_a_real_failed_agent_job_as_error(tmp_path):
+    """The persistence.py consumer's OWN gap, per the bug report: once a
+    finished job has aged out of the registry, registry.get(job_id) -> None,
+    so _drain_background_agents' live-child fallback (getattr(child,
+    "last_run_ok", ...)) has nothing to fall back to either - result["ok"],
+    set by the REAL _result_for() (not a fabricated payload), is the only
+    thing left telling the truth. drain_finished() is called for real, on a
+    real AgentJob, before the job is "pruned"; only the registry lookup
+    that follows is simulated as gone, which is exactly what aging out of
+    _KEEP_FINISHED looks like from this consumer's side."""
+    from localm.plugins.coder import background as bg
+    from localm.plugins.coder import delegated as _delegated
+
+    reg = bg.JobRegistry(kind_caps={"agent": 4})
+    agent = _agent(tmp_path)
+    child = _RealAgentJobChild(ok=False, summary="[max_turns=10 reached]")
+
+    def finalize(_child):
+        return {"branch": "coder/worker-abc", "base": "deadbeef",
+                "file_count": 1, "diff": "diff --git a/x b/x"}
+
+    job = reg.submit(
+        lambda: bg.AgentJob(child, "task", label="worker", finalize=finalize,
+                            owner=agent.job_owner),
+        kind="agent")
+    _wait_for_terminal(job)
+    finished = reg.drain_finished(kind="agent", owner=agent.job_owner,
+                                  select=lambda j: True)
+
+    class _PrunedRegistry:
+        def drain_finished(self, kind=None, owner=None, select=None):
+            return finished
+
+        def get(self, job_id):
+            return None
+
+    with patch("localm.plugins.coder.background.get_registry",
+               return_value=_PrunedRegistry()):
+        notes = agent._drain_background_agents()
+
+    sets = list(getattr(agent, "_delegated", []))
+    assert sets and sets[0].status == "error", (
+        "a REAL failed-but-pruned background AgentJob was folded in as an ok "
+        f"change set: {[s.status for s in sets]}")
+    assert notes and "DID NOT COMPLETE" in notes[0], notes
+    assert _delegated.footer_for(agent)
+
+
+_REAL_NOT_OK_VERDICTS = [
+    pytest.param("[max_turns=10 reached]", id="max_turns"),
+    pytest.param(
+        "[circuit breaker: run_shell failed 3 times in a row - stopping so "
+        "you can take a look instead of burning more turns. The "
+        "conversation is intact; adjust the approach and continue.]",
+        id="circuit_breaker"),
+    pytest.param(
+        "some final answer\n\n[verification FAILED] `pytest` still exits 1 "
+        "after 2 fix attempt(s). This task is NOT verified.",
+        id="verification_failure"),
+    pytest.param(
+        "[stopped by user after 12 turns - task exceeded its turn budget]",
+        id="user_stop"),
+]
+
+
+@pytest.mark.parametrize("summary", _REAL_NOT_OK_VERDICTS)
+def test_check_agent_job_reports_every_real_not_ok_verdict_as_not_complete(
+        tmp_path, summary):
+    """Agent._loop clears last_run_ok (without raising) for each of these
+    four verdict shapes. Each must survive the real AgentJob ->
+    _result_for() -> tool_check_agent_job() path as "did not complete", not
+    just the one shape the fabricated-payload tests above happened to pick."""
+    from localm.plugins.coder import background as bg
+    from localm.plugins.coder.tools.agents import tool_check_agent_job
+
+    reg = bg.JobRegistry(kind_caps={"agent": 4})
+    child = _RealAgentJobChild(ok=False, summary=summary)
+    job = reg.submit(lambda: bg.AgentJob(child, "task", label="kid"), kind="agent")
+    st = _wait_for_terminal(job)
+
+    assert st["result"]["ok"] is False, st
+
+    with patch("localm.plugins.coder.background.get_registry", return_value=reg):
+        res = tool_check_agent_job(tmp_path, job.id)
+
+    assert "DID NOT COMPLETE" in res.output, res.output
+    assert "finished in" not in res.output, res.output
+
+
+# --------------------------------------------------------------------------- #
 #  A queued child that never started, and the budget it holds
 # --------------------------------------------------------------------------- #
 
