@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Integration-test scaffold. Beyond the coarse `integration` marker, real
 end-to-end paths are tagged with a resource-specific marker - `real_gguf`,
-`real_comfy`, `real_browser` - that conftest gates: a test carrying one is
-skipped (not failed) unless its resource is actually available.
+`real_comfy` - that conftest gates: a test carrying one is skipped (not
+failed) unless its resource is actually available.
 
-This module holds the always-runnable oracle (the markers are registered) plus
-gated skeletons for the comfy and browser paths; the gguf path is the existing
-tests/test_gguf_smoke_integration.py, now also tagged `real_gguf`.
+This module holds the always-runnable oracle (the markers are registered), a
+comfy preflight check plus adapter-level integration tests gated on
+`real_comfy`, and the gguf path is the existing
+tests/test_gguf_smoke_integration.py, tagged `real_gguf`. Real-browser boot
+coverage - loading the actual shipped ES-module graph in headless Chromium -
+lives in tests-e2e/boot-and-click.spec.mjs, run with `npm run test:e2e`.
 """
 
 from __future__ import annotations
@@ -42,10 +45,12 @@ def test_gguf_smoke_is_tagged_real_gguf():
 #  CI they appear as skips, never failures.                                     #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.integration
 @pytest.mark.real_comfy
-def test_comfy_reachable():
-    """A real ComfyUI (set LOCALM_TEST_COMFY_URL) answers its stats endpoint."""
+def test_comfy_preflight_server_reachable():
+    """Preflight only: a real ComfyUI (set LOCALM_TEST_COMFY_URL) answers its own
+    /system_stats. Exercises ComfyUI's endpoint directly, none of localm's own
+    comfy_client code - see test_comfy_adapter_round_trip for that coverage. No
+    `integration` marker."""
     import urllib.request
 
     base = os.environ["LOCALM_TEST_COMFY_URL"].rstrip("/")
@@ -54,17 +59,53 @@ def test_comfy_reachable():
 
 
 @pytest.mark.integration
-@pytest.mark.real_browser
-def test_gui_loads_in_a_real_browser():
-    """The GUI shell loads its static index in a real browser (Playwright)."""
-    from playwright.sync_api import sync_playwright
+@pytest.mark.real_comfy
+def test_comfy_adapter_round_trip(tmp_path):
+    """localm's own comfy_client adapter - submission, job status, and artifact
+    fetch - against a real ComfyUI, through the same functions the image/video/
+    music backends call. A model-free EmptyImage -> SaveImage workflow keeps
+    this runnable without any checkpoint installed on the target Comfy."""
+    from localm.media import comfy_client as cc
 
-    index = ROOT / "localm" / "plugins" / "gui" / "static" / "index.html"
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        try:
-            page = browser.new_page()
-            page.goto(index.as_uri())
-            assert page.title() is not None
-        finally:
-            browser.close()
+    base = os.environ["LOCALM_TEST_COMFY_URL"].rstrip("/")
+    workflow = {
+        "1": {"class_type": "EmptyImage",
+              "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}},
+        "2": {"class_type": "SaveImage",
+              "inputs": {"images": ["1", 0],
+                         "filename_prefix": "localm_integration_scaffold"}},
+    }
+
+    kind, value = cc.comfy_submit_prompt(base, workflow)
+    assert kind == cc.SUBMIT_OK, f"workflow submission failed: {kind} {value}"
+
+    status, result = cc.comfy_poll_until_done(base, value, max_poll_seconds=60)
+    assert status == cc.POLL_FINISHED, (
+        cc.comfy_exec_error_message(result, base) if status == cc.POLL_EXEC_ERROR
+        else f"job did not finish: {status} {result}")
+
+    info = cc.select_output_info(result, ("images",))
+    assert info is not None, "no output artifact recorded for the finished job"
+
+    out_path = tmp_path / "out.png"
+    cc.comfy_fetch_output(base, info, out_path, timeout=10.0)
+    assert out_path.stat().st_size > 0, "fetched output artifact is empty"
+
+
+@pytest.mark.integration
+@pytest.mark.real_comfy
+def test_comfy_adapter_maps_submission_errors():
+    """A workflow ComfyUI rejects (an unregistered node type) comes back through
+    comfy_submit_prompt as a classified SUBMIT_HTTP_ERROR, not a silent
+    SUBMIT_OK or an unhandled exception - the same mapping the media backends
+    rely on to tell a user why generation refused to start."""
+    from localm.media import comfy_client as cc
+
+    base = os.environ["LOCALM_TEST_COMFY_URL"].rstrip("/")
+    workflow = {
+        "1": {"class_type": "LocalmIntegrationScaffoldDoesNotExist", "inputs": {}},
+    }
+
+    kind, value = cc.comfy_submit_prompt(base, workflow)
+    assert kind == cc.SUBMIT_HTTP_ERROR, (
+        f"expected a classified submit error, got {kind} {value!r}")
