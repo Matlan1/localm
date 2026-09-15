@@ -56,7 +56,7 @@ from localm.pathsafe import is_unc_or_device_path
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 
 # Wall-clock bound on how long a load waits for a resident that is still
 # serving a request to free itself before the load is refused as busy. The
