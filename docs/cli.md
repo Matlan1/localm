@@ -197,7 +197,9 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 ### Model type
 
 Every registered model has a type, detected deterministically from the file
-itself, never from fuzzy tag matching: a GGUF or Ollama blob is an `llm`; a
+itself, never from fuzzy tag matching: a GGUF or Ollama blob is classified from
+its own metadata (a vision-projector signal makes it `mmproj`, an
+embedding/pooling signal makes it `embedding`, otherwise it is an `llm`); a
 HuggingFace directory is read from its `config.json` architectures (or
 `adapter_config.json` for a `lora`). Anything without a hard signal is left as
 `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
@@ -532,7 +534,7 @@ Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `code
 localm completion powershell   # also: bash, zsh, fish
 ```
 
-In bash/zsh/fish, model names complete everywhere a model argument is expected. In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `gui`) complete only the command name, not the model.
+In bash/zsh/fish, model names complete everywhere a model argument is expected. In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `bench-mtp`, `gui`) complete only the command name, not the model.
 
 ---
 
@@ -570,7 +572,7 @@ value for a field instead of sharing the global `comfy_*` default. Any other
 plugin declares its settings as it loads, so listing or setting those needs a
 running localm (found the way `localm status` finds it, or set `LOCALM_URL`).
 
-The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](../docs/plugins.md).
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](../docs/plugins.md).
 
 Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](../docs/plugins.md) for the full authoring contract.
 
@@ -694,10 +696,10 @@ task, feeding any blocking issue back for one more fix pass. The reviewer can be
 agent's own model (the default, same-model self-review), a second small model loaded on
 CPU (`coder_reviewer = "local"`), a cloud model (`"openai"`/`"anthropic"`), or a second
 OpenAI-compatible server (a URL) - set with `coder_reviewer` / `coder_reviewer_model`. A
-network reviewer (cloud, or a non-loopback URL) is skipped in privacy mode and for
-restricted sessions, falling back to the local model with a warning. Ask for a second
-opinion on demand, at any point in a REPL session and independent of the `coder_review`
-setting, with `/review`.
+network reviewer (cloud, or a non-loopback URL) is skipped in privacy mode, falling back
+to the same-model reviewer with a warning; a restricted session runs no reviewer at all,
+regardless of `coder_reviewer`. Ask for a second opinion on demand, at any point in a
+REPL session and independent of the `coder_review` setting, with `/review`.
 
 **Reproducible runs.** `--seed N` pins the sampler's RNG, so the same seed with the same
 model, prompt and settings reproduces the same output. Measured bit-for-bit on one AMD
@@ -761,7 +763,7 @@ localm make-launcher                     # build the native LocaLM app launcher 
 localm make-launcher --force             # rebuild it (use after a Python upgrade)
 
 localm doctor                            # check Python, llama.dll, GPU driver, VRAM, packages
-localm info                              # data directory, config file, registry, registry file
+localm info                              # models dir, registry file, config file, native binaries dir, and the full config
 localm memory list                       # what localm has remembered about you (see docs/memory.md)
 localm status                            # show the localm server serving this directory, and what it is doing
 localm ps                                # list running localm servers (per-directory instances)

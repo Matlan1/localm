@@ -29,9 +29,10 @@ request is handled.
 
 Online coder providers (`--online`, `--anthropic`) are a separate case and
 are not covered by this policy at all: every request to OpenAI/Anthropic
-goes straight out over plain HTTP, with no `net_mode` check anywhere in
-that path. The only gate is the explicit CLI flag itself, plus a warning
-if you try it in privacy mode.
+goes out over HTTPS through a direct provider client, outside
+`netpolicy`, with no `net_mode` check anywhere in that path. The only gate
+is the explicit CLI flag itself, plus a warning if you try it in privacy
+mode.
 
 ## Modes
 

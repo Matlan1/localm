@@ -491,8 +491,7 @@ which enumerates every builtin so a new one is covered the moment it ships):
   See [Per-plugin config and privacy](#per-plugin-config-and-privacy). A
   browser-only or read-only plugin needs no gating.
 - **No published personal choices**: model ids, encoders, and workflows live in a
-  tracked `*.example.json` template or user config, never hardcoded or committed
-  (see `AGENTS.md`).
+  tracked `*.example.json` template or user config, never hardcoded or committed.
 - **Tested**: behaviour changes are covered by a test that fails before the fix;
   `python scripts/check_hygiene.py` and `pytest -m "not integration"` pass.
   This bullet is about contributing a plugin into the localm repo itself,

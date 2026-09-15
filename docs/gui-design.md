@@ -130,9 +130,9 @@ match.
 
 Nothing else. Rationale, threat models, upstream issue numbers, history and
 "why it is off by default" do not belong in help text - a comment states
-behaviour, never why (AGENTS.md rule 5), so that reasoning goes in a test, in
-`dev-notes/`, or in the docs. A control's help is read while deciding; a
-paragraph is not read at all, so a 452-character warning protects nobody.
+behaviour, never why, so that reasoning goes in a test, in `dev-notes/`, or in
+the docs. A control's help is read while deciding; a paragraph is not read at
+all, so a 452-character warning protects nobody.
 
 - **Target 150 characters. Hard cap 200**, enforced over `CORE_FIELDS`,
   `MEDIA_PLUGIN_FIELDS` and `TTS_FIELDS` by `tests/test_settings_help_budget.py`.
@@ -155,9 +155,9 @@ paragraph is not read at all, so a 452-character warning protects nobody.
   Five load/timeout fields once carried the same paragraph five times.
 
 When you cut, the removed reasoning does not move into a code comment - a
-comment states what the code does, never why (AGENTS.md rule 5). If it is worth
-keeping, it goes in a test or in `dev-notes/`; otherwise it was help text that
-should not have carried an argument in the first place.
+comment states what the code does, never why. If it is worth keeping, it goes
+in a test or in `dev-notes/`; otherwise it was help text that should not have
+carried an argument in the first place.
 
 ---
 
