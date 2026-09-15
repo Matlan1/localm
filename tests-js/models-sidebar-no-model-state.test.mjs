@@ -136,18 +136,26 @@ test("the sidebar Unload button is hidden when nothing is active", async () => {
   assert.equal(btn.hidden, true);
 });
 
-test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded", async () => {
-  // unload_one_model() (http_server.py) answers HTTP 200 with status "in_use"
-  // for a model that is mid-generation, so r.ok alone does not mean unloaded.
-  const models = [{ name: "model-a", size_bytes: 1000 }];
-  const calls = [];
-  const fetchImpl = async (url, opts = {}) => {
+function makeConfirmRequiredFetch(models, calls, { onForcedUnload } = {}) {
+  return async (url, opts = {}) => {
     const u = String(url);
     if (u.startsWith("/api/models/unload")) {
-      calls.push({ url: u, body: opts.body ? JSON.parse(opts.body) : {} });
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      calls.push({ url: u, body });
+      if (!body.force) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            status: "confirm_required", model: "model-a",
+            detail: "'model-a' is still generating",
+          }),
+          text: async () => "",
+        };
+      }
+      if (onForcedUnload) onForcedUnload();
       return {
         ok: true, status: 200,
-        json: async () => ({ status: "in_use", model: "model-a", vram_freed: 0 }),
+        json: async () => ({ status: "unloaded", unloaded_models: ["model-a"] }),
         text: async () => "",
       };
     }
@@ -160,8 +168,21 @@ test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded",
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
   };
+}
+
+test("a busy engine (confirm_required) is NOT reported as unloaded, and declining stops after one request", async () => {
+  // unload_one_model() (http_server.py) answers HTTP 200 with status
+  // "confirm_required" for a model that is still in use, so r.ok alone does
+  // not mean unloaded, and declining the resulting confirm must never post a
+  // forced retry.
+  const models = [{ name: "model-a", size_bytes: 1000 }];
+  const calls = [];
+  const fetchImpl = makeConfirmRequiredFetch(models, calls, {
+    onForcedUnload: () => assert.fail("must not force-unload without confirmation"),
+  });
   const { window: win } = loadApp({ fetchImpl });
   await render(win);
+  runScript(win, "confirmDangerAsync = async () => false;");   // decline
 
   const select = win.document.getElementById("model-select");
   const btn = win.document.getElementById("sidebar-unload-btn");
@@ -170,12 +191,8 @@ test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded",
   btn.click();
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 
-  assert.equal(calls.length, 1, "exactly one unload POST was attempted");
-  // The toast text is what the click handler itself reported, before the
-  // reconciling refresh.
+  assert.equal(calls.length, 1, "declining must not post a forced retry");
   const toastText = win.document.getElementById("toast").textContent;
-  assert.match(toastText, /still generating/,
-    "the toast must say the model is still in use, not claim it was unloaded");
   assert.doesNotMatch(toastText, /^Unloaded/,
     "must never claim success for an unload that did not happen");
   assert.equal(select.value, "model-a",
@@ -183,4 +200,24 @@ test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded",
   assert.equal(btn.hidden, false, "the unload button stays visible - there is still something to unload");
   assert.notEqual(win.document.getElementById("status-text").textContent, "unloading model-a…",
     "the status line must not stay stuck on the busy message");
+});
+
+test("a busy engine (confirm_required) unloads once confirmed, via a forced retry", async () => {
+  const models = [{ name: "model-a", size_bytes: 1000 }];
+  const calls = [];
+  let forced = false;
+  const fetchImpl = makeConfirmRequiredFetch(models, calls, { onForcedUnload: () => { forced = true; } });
+  const { window: win } = loadApp({ fetchImpl });
+  await render(win);
+  runScript(win, "confirmDangerAsync = async () => true;");   // confirm
+
+  const btn = win.document.getElementById("sidebar-unload-btn");
+  btn.click();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(calls.length, 2, "confirming retries exactly once, with force");
+  assert.equal(calls[1].body.force, true, "the retry must carry force: true");
+  assert.ok(forced, "the forced retry actually reached the server's force path");
+  const toastText = win.document.getElementById("toast").textContent;
+  assert.match(toastText, /^Unloaded/, "confirming and forcing through reports the real success");
 });

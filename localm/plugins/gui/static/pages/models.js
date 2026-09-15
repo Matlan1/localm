@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast } from "../app/helpers.js";
+import { $, GIB, authHeaders, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -542,23 +542,30 @@ export async function refreshModelsPage() {
         unload.onclick = async () => {
           unload.disabled = true;
           try {
-            const r = await fetch("/api/models/unload", {
-              method: "POST", headers: authHeaders(),
-              body: JSON.stringify({ model: m.name }),
-            });
-            const data = await r.json().catch(() => ({}));
-            if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
-            // unload_one_model() (http_server.py) answers HTTP 200 for an
-            // in-use engine too - a request is mid-generation against it, so
-            // nothing was released. Report that rather than "Unloaded".
-            if (data.status === "in_use") {
-              toast(t("models.unload.inUse", { name: m.name }), true);
-              refreshModelsPage();
-              return;
+            const post = async (force) => {
+              const r = await fetch("/api/models/unload", {
+                method: "POST", headers: authHeaders(),
+                body: JSON.stringify(force ? { model: m.name, force: true } : { model: m.name }),
+              });
+              const data = await r.json().catch(() => ({}));
+              if (!r.ok) throw new Error(data.detail || t("models.unload.failed"));
+              return data;
+            };
+            let data = await post(false);
+            // unload_one_model() (http_server.py) answers HTTP 200 for a
+            // busy engine too - a request is mid-generation against it, or a
+            // coder session is using it, so nothing was released yet.
+            if (data.status === "confirm_required") {
+              const confirmed = await confirmDangerAsync(
+                t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
+              if (!confirmed) { refreshModelsPage(); return; }
+              data = await post(true);
             }
             toast(t("models.unload.toast", { name: m.name }));
             refreshModelsPage();
             refreshPerfEstimate();
+          } catch (e) {
+            toast(e.message || t("models.unload.failed"), true);
           } finally { unload.disabled = false; }
         };
         actions.appendChild(unload);
@@ -2746,6 +2753,28 @@ if (unloadAllBtn) {
       toast(msg, skipped.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
+      // Offer to force through whatever is still in the way - the owner's
+      // action is final, mirroring the per-row unload's own confirm/force
+      // contract. skipped_in_use is a real, non-empty count here, so there is
+      // something concrete to confirm.
+      if (skipped.length) {
+        const confirmed = await confirmDangerAsync(
+          t("models.unloadAll.confirmTitle"),
+          t("models.unloadAll.confirmBody", { skipped: skipped.length }),
+          t("models.unloadAll.confirmLabel"));
+        if (confirmed) {
+          const r2 = await fetch("/api/models/unload", {
+            method: "POST", headers: authHeaders(),
+            body: JSON.stringify({ force: true }),
+          });
+          const data2 = await r2.json().catch(() => ({}));
+          if (!r2.ok) { toast(data2.detail || t("models.unload.failed"), true); return; }
+          const n2 = (data2.unloaded_models || []).length + (data2.embedder_unloaded ? 1 : 0);
+          toast(t("models.unloadAll.allUnloaded", { n: n2 }));
+          refreshModelsPage();
+          refreshPerfEstimate();
+        }
+      }
     } catch (e) {
       toast(t("models.unloadAll.failedException", { message: e.message }), true);
     } finally {

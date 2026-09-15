@@ -69,6 +69,69 @@ test("a superseded load does NOT claim to be the active model", async () => {
     "a superseded load must not publish itself as active");
 });
 
+// switch_engine (http_server.py) answers HTTP 200 with status:"confirm_required"
+// when something is in the way (a busy peer that will not clear, or a load
+// that would degrade to CPU offload) and the caller did not pass force. That
+// is resolved inside switchModel itself via confirmDangerAsync - never
+// returned to the caller as a final outcome.
+function _confirmRequiredStub(window, calls) {
+  window.fetch = (url, opts = {}) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.includes("/api/models/load")) {
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      if (!body.force) {
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: async () => ({
+            status: "confirm_required", model: "busy-model",
+            detail: "'other-model' is still generating",
+          }),
+          text: async () => "",
+        });
+      }
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: async () => ({ status: "loaded", model: "busy-model" }),
+        text: async () => "",
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}), text: async () => "" });
+  };
+}
+
+test("declining a confirm_required switch does not publish the new model as active", async () => {
+  const { window } = loadApp();
+  runScript(window, "modelCache.active = 'other-model';");
+  const calls = [];
+  _confirmRequiredStub(window, calls);
+  runScript(window, "confirmDangerAsync = async () => false;");   // decline
+
+  const res = await window.switchModel("busy-model");
+
+  assert.equal(calls.filter((u) => u.includes("/api/models/load")).length, 1,
+    "declining must not retry with force");
+  assert.equal(res.status, "cancelled", "a declined confirm reports as cancelled, not loaded");
+  assert.equal(activeOf(window), "other-model",
+    "a declined switch must not publish the requested model as active");
+});
+
+test("confirming a confirm_required switch retries with force and publishes the new active model", async () => {
+  const { window } = loadApp();
+  runScript(window, "modelCache.active = 'other-model';");
+  const calls = [];
+  _confirmRequiredStub(window, calls);
+  runScript(window, "confirmDangerAsync = async () => true;");   // confirm
+
+  const res = await window.switchModel("busy-model");
+
+  const loadCalls = calls.filter((u) => u.includes("/api/models/load"));
+  assert.equal(loadCalls.length, 2, "confirming retries exactly once, with force");
+  assert.equal(res.status, "loaded");
+  assert.equal(activeOf(window), "busy-model",
+    "confirming and forcing through must publish the new model as active");
+});
+
 test("picking a model in the sidebar lets the very next chat send through", async () => {
   // no model -> pick one in the sidebar -> send immediately, with no
   // refreshModels() poll in between

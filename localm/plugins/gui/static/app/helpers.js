@@ -1260,6 +1260,40 @@ export function confirmDanger(title, message, confirmLabel, onConfirm) {
   });
 }
 
+/** Async, Promise-returning sibling of confirmDanger, for a caller that needs
+ *  to `await` the outcome (e.g. only retrying a request with `force: true`
+ *  once confirmed) instead of continuing inside a callback. Resolves true if
+ *  confirmed, false if cancelled OR dismissed via the shared modal chrome
+ *  (x / backdrop) - same polling pattern as promptText above, since those
+ *  handlers are not ours. */
+export function confirmDangerAsync(title, message, confirmLabel) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(title, (body) => {
+      body.appendChild(el("p", "", message));
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
+      cancel.onclick = () => finish(false);
+      const ok = el("button", "btn-secondary btn-danger", confirmLabel);
+      ok.onclick = () => finish(true);
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      body.appendChild(row);
+    });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
+  });
+}
+
 /** In-page text-input equivalent of confirmDanger, for the free-text half of
  *  the same NET-1 class: window.prompt() is suppressed in the same mobile/PWA
  *  browsers confirmDanger's own comment names, so a raw prompt() call goes
