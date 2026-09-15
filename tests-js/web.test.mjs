@@ -260,6 +260,26 @@ test("parseWebCall: trailing comma, single-quoted keys, and the arguments alias"
     { name: "web_search", args: { query: "x" } });
 });
 
+test("parseWebCall: the XML-tag dialect a non-compliant model emits instead of <tool_call>", () => {
+  const { window: w } = loadApp();
+  // The exact shape from a live bug report: a Llama3.3 finetune, told the
+  // canonical <tool_call>{"name":...} format, emitted the tool name as a
+  // literal XML tag with the url as an attribute instead.
+  eq(
+    w.parseWebCall(
+      '<fetch_url url="https://api.open-meteo.com/v1/forecast?latitude=48.3&longitude=14.3"></fetch_url>'),
+    { name: "fetch_url", args: {
+      url: "https://api.open-meteo.com/v1/forecast?latitude=48.3&longitude=14.3" } });
+  eq(
+    w.parseWebCall('<web_search query="today weather in Linz" />'),
+    { name: "web_search", args: { query: "today weather in Linz" } });
+});
+
+test("parseWebCall: an XML tag naming a non-web tool is not a web call", () => {
+  const { window: w } = loadApp();
+  assert.equal(w.parseWebCall('<read_file path="x.txt"></read_file>'), null);
+});
+
 test("parseWebCall: a non-web tool name is not treated as a web call", () => {
   const { window: w } = loadApp();
   assert.equal(w.parseWebCall('<tool_call>{"name": "read_file", "args": {"path": "x"}}</tool_call>'), null);
@@ -414,6 +434,20 @@ test("web ON: the periodic /v1/config poll (refreshCtxLimit) does not resurrect 
 // ---------------------------------------------------------------------------
 //  End-to-end: a lenient call actually runs the tool; a botched one re-prompts
 // ---------------------------------------------------------------------------
+
+test("web ON: the XML-tag dialect still runs the real fetch (not silently accepted as an answer)", async () => {
+  const { conv, calls, completions } = await runChat({
+    web: true,
+    rounds: [
+      content('<fetch_url url="https://api.open-meteo.com/v1/forecast?latitude=48.3&longitude=14.3"></fetch_url>'),
+      content("It is 18C and mostly cloudy. Source: open-meteo."),
+    ],
+  });
+  assert.equal(calls.filter((c) => c.url === "/api/web/fetch").length, 1,
+    "the fetch endpoint was actually called instead of the reply being " +
+    "accepted as an ordinary, un-grounded answer");
+  assert.equal(completions.length, 2, "the model continued after the fetch result arrived");
+});
 
 test("web ON: a mangled tool call still runs the real search", async () => {
   const { conv, calls, completions } = await runChat({

@@ -1402,6 +1402,60 @@ def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
 
 
+def gguf_n_embd(path: Path) -> Optional[int]:
+    """The embedding width a llama.cpp load would compare for compatibility:
+    a text model's own ``"<architecture>.embedding_length"``, or - for a clip
+    mmproj (``general.architecture == "clip"``) - its
+    ``"clip.vision.projection_dim"``, the value the projector's OUTPUT must
+    match the paired text model's ``embedding_length`` for
+    ``mtmd_init_from_file`` to accept the pair (its own error names both
+    "n_embd"; confirmed against a real mismatching pair: a text model
+    reporting ``qwen2.embedding_length = 3584`` and a mmproj reporting
+    ``clip.vision.projection_dim = 5120`` is exactly the failure
+    ``mtmd_init_from_file: error: mismatch between text model (n_embd = 3584)
+    and mmproj (n_embd = 5120)`` reports).
+
+    Returns ``None`` on any parse failure, truncation, or missing key -
+    never a guessed number - so a caller comparing two of these must treat
+    ``None`` as "unknown" and never as a mismatch."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return None
+    architecture = None
+    result = None
+    try:
+        if buf[:4] != b"GGUF":
+            return None
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return None
+        tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            wanted = (key == "clip.vision.projection_dim"
+                     if architecture == _GGUF_MMPROJ_ARCHITECTURE
+                     else architecture and key == f"{architecture}.embedding_length")
+            if wanted:
+                try:
+                    v, off = _gguf_read_scalar(buf, off, vtype)
+                    result = int(v) if v and v > 0 else None
+                    break
+                except struct.error:
+                    pass
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+    return result
+
+
 def gguf_registry_metadata(path: Path, meta: Optional[dict] = None) -> dict:
     """Architecture family and MoE expert count for a GGUF file, to persist on
     its registry entry at registration time - the same real header the

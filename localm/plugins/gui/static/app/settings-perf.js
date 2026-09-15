@@ -716,6 +716,39 @@ export function lastTurnHasWebResults(conv) {
 // silently dropped (which let the model's un-grounded answer through).
 export const _WEB_TOOLS = new Set(["web_search", "fetch_url"]);
 
+// A model that ignores the exact <tool_call>{"name":...} instruction
+// sometimes emits the tool name as a literal XML tag instead, e.g.
+// <fetch_url url="https://...">...</fetch_url> - unambiguous because the tag
+// NAME itself must be one of _WEB_TOOLS, so it is safe to both detect (this
+// pattern) and execute (see _webToolTagCalls) rather than only flagging it
+// for a re-prompt: the URL/query is right there in the attribute.
+const _WEB_TOOL_TAG_RE = /<(web_search|fetch_url)\b([^>]*?)\/?>(?:[\s\S]*?<\/\1>)?/g;
+
+/** Parse `key="value"` / `key='value'` pairs out of an XML-tag attribute
+ *  string into a plain object. Malformed/unquoted attributes are skipped,
+ *  not guessed. */
+function _attrsToArgs(attrString) {
+  const args = {};
+  const re = /([\w-]+)\s*=\s*"([^"]*)"|([\w-]+)\s*=\s*'([^']*)'/g;
+  let m;
+  while ((m = re.exec(attrString))) {
+    const key = m[1] !== undefined ? m[1] : m[3];
+    const val = m[1] !== undefined ? m[2] : m[4];
+    args[key] = val;
+  }
+  return args;
+}
+
+/** Every <web_search .../> / <fetch_url .../> XML-tag call in *text*, each
+ *  as {name, args}. See _WEB_TOOL_TAG_RE for why this dialect is trusted. */
+function _webToolTagCalls(text) {
+  const out = [];
+  for (const mm of text.matchAll(_WEB_TOOL_TAG_RE)) {
+    out.push({ name: mm[1], args: _attrsToArgs(mm[2]) });
+  }
+  return out;
+}
+
 /** Lenient JSON parse for the mangles local finetunes produce (single-quoted
  *  keys, trailing commas). Returns the parsed object, or null. */
 export function _lenientJSON(body) {
@@ -805,6 +838,14 @@ export function parseWebCalls(text, limit = Infinity) {
     }
   }
   if (found.length) return found;
+  // The XML-tag dialect (see _WEB_TOOL_TAG_RE): checked before the bare-JSON
+  // last resort, at the same confidence as the wrapper/fence tier above,
+  // since the tag name alone already names a known tool unambiguously.
+  for (const call of _webToolTagCalls(clean)) {
+    found.push(call);
+    if (found.length >= limit) return found;
+  }
+  if (found.length) return found;
   // Last resort: a bare {...} object anywhere in the reply naming a web tool.
   for (const chunk of _topLevelObjects(clean)) {
     const call = _asWebCall(_lenientJSON(chunk));
@@ -845,6 +886,7 @@ export function ignoredCallsNote(calls) {
 export function looksLikeWebToolAttempt(text) {
   const clean = stripThink(text);
   if (/<\|?\/?tool_call\|?>/.test(clean) || /```[ \t]*tool_call\b/.test(clean)) return true;
+  if (/<\/?(web_search|fetch_url)\b/.test(clean)) return true;
   return /"name"\s*:/.test(clean) && /web_search|fetch_url/.test(clean);
 }
 

@@ -3798,7 +3798,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 from localm import gpu_registry
                 gpu_registry.reap_stale(gpu_registry.registry_dir(),
                                         self_id=_instance_id)
-                _gpu_registry_sync()
+                # Offloaded for the same reason as the heartbeat's own call
+                # below: a non-zero main_gpu_index makes this probe the GPU
+                # driver, which can take seconds on this box.
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _gpu_registry_sync)
                 gpu_task = asyncio.create_task(_gpu_registry_heartbeat_loop())
             except Exception as e:
                 from localm.debuglog import logger as _dbg
@@ -4853,8 +4857,26 @@ async def _stream_sse(
             buffer = max(2048, int(capacity * 0.10))
             if capacity - prompt_tokens < buffer:
                 from localm.inference.compact import compact_messages
+                # A disconnect during compaction must stop the native call, not
+                # just unpin around it: run_in_executor's own .cancel() is a
+                # no-op once the thread has started, so without this the
+                # summarization generation (up to ~1024 tokens, holding the
+                # per-model inference lock the whole time) runs to completion
+                # regardless of the client having gone away - the same
+                # early-exit check the main generation loop below already
+                # does per token, applied here too.
+                _compact_cancel = threading.Event()
                 def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                    return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+                    parts = []
+                    gen = engine.chat_stream(ms, max_tokens=max_t, temperature=0.3)
+                    try:
+                        for tok in gen:
+                            if _compact_cancel.is_set():
+                                break
+                            parts.append(tok)
+                    finally:
+                        gen.close()
+                    return "".join(parts)
                 # Off the event loop: compact_messages runs a FULL summarization
                 # generation (engine.chat_stream holds the per-model inference lock for
                 # up to ~1024 tokens). Run directly on the single-threaded loop it would
@@ -4862,8 +4884,12 @@ async def _stream_sse(
                 # for its whole duration, so offload it exactly as the real
                 # generation below is.
                 _loop = asyncio.get_running_loop()
-                new_messages, changed = await _loop.run_in_executor(
-                    None, compact_messages, messages, _gen_for_compact)
+                try:
+                    new_messages, changed = await _loop.run_in_executor(
+                        None, compact_messages, messages, _gen_for_compact)
+                except (asyncio.CancelledError, GeneratorExit):
+                    _compact_cancel.set()
+                    raise
                 if changed:
                     messages = list(new_messages)
                     prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -4881,8 +4907,6 @@ async def _stream_sse(
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue = asyncio.Queue()
     _DONE = object()
-
-    import threading
 
     # A mid-stream client disconnect makes Starlette throw GeneratorExit into this
     # async generator. Without a cancel path the producer thread below would keep

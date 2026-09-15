@@ -5,6 +5,8 @@ else a sibling projector auto-detected next to the GGUF. The end-to-end mtmd
 vision path is covered separately.
 """
 
+import struct
+
 import localm.model_manager as mm
 from localm.model_manager import find_sibling_mmproj, get_model_mmproj
 
@@ -12,6 +14,47 @@ from localm.model_manager import find_sibling_mmproj, get_model_mmproj
 def _gguf(p):
     p.write_bytes(b"GGUF\x00")
     return p
+
+
+_T_UINT32 = 4
+_T_STRING = 8
+
+
+def _s(text: str) -> bytes:
+    raw = text.encode("utf-8")
+    return struct.pack("<Q", len(raw)) + raw
+
+
+def _real_text_model_gguf(path, architecture: str, embedding_length: int):
+    """A minimal but REAL GGUF header for a text model: general.architecture
+    plus its embedding_length, the exact two keys gguf_n_embd reads. Ground-
+    truthed against a real Qwen2.5-Coder-7B-Instruct GGUF, which reports
+    general.architecture='qwen2' and qwen2.embedding_length=3584."""
+    kv = [("general.architecture", _T_STRING, architecture),
+         (f"{architecture}.embedding_length", _T_UINT32, embedding_length)]
+    out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, len(kv))]
+    for key, vtype, val in kv:
+        out.append(_s(key))
+        out.append(struct.pack("<I", vtype))
+        out.append(_s(val) if vtype == _T_STRING else struct.pack("<I", val))
+    path.write_bytes(b"".join(out))
+    return path
+
+
+def _real_mmproj_gguf(path, projection_dim: int):
+    """A minimal but REAL GGUF header for a clip mmproj: general.architecture
+    plus clip.vision.projection_dim, the exact two keys gguf_n_embd reads for
+    a clip file. Ground-truthed against a real mmproj-*-F16.gguf, which
+    reports general.architecture='clip' and clip.vision.projection_dim=5120."""
+    kv = [("general.architecture", _T_STRING, "clip"),
+         ("clip.vision.projection_dim", _T_UINT32, projection_dim)]
+    out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, len(kv))]
+    for key, vtype, val in kv:
+        out.append(_s(key))
+        out.append(struct.pack("<I", vtype))
+        out.append(_s(val) if vtype == _T_STRING else struct.pack("<I", val))
+    path.write_bytes(b"".join(out))
+    return path
 
 
 class TestFindSiblingMmproj:
@@ -47,6 +90,42 @@ class TestFindSiblingMmproj:
         model = _gguf(tmp_path / "gemma-3-4b-Q8.gguf")
         proj = _gguf(tmp_path / "mmproj-gemma-3-4b-f16.gguf")
         _gguf(tmp_path / "mmproj-qwen-f16.gguf")
+        assert find_sibling_mmproj(model) == proj
+
+    def test_lone_sibling_with_mismatched_embedding_width_is_not_attached(self, tmp_path):
+        """The live regression: a leftover mmproj for a DIFFERENT, larger
+        model (here: projection_dim=5120, matching the real
+        mmproj-Qwen3.8-27B-Uncensored-F16.gguf from the bug report) sits
+        alone next to an unrelated 7B model (embedding_length=3584, matching
+        the real Qwen2.5-Coder-7B-Instruct-Q6_K.gguf from the same report).
+        Being the ONLY mmproj-looking file in the directory must not be
+        enough to auto-attach it - that is exactly how llama.cpp's own
+        mtmd_init_from_file ends up failing with "mismatch between text
+        model (n_embd = 3584) and mmproj (n_embd = 5120)" after the load was
+        already attempted."""
+        model = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-Coder-7B-Instruct-Q6_K.gguf", "qwen2", 3584)
+        _real_mmproj_gguf(
+            tmp_path / "mmproj-Qwen3.8-27B-Uncensored-F16.gguf", 5120)
+        assert find_sibling_mmproj(model) is None
+
+    def test_lone_sibling_with_matching_embedding_width_is_attached(self, tmp_path):
+        """The legitimate case the fix must not break: a lone mmproj whose
+        projection_dim genuinely matches its model's embedding_length is
+        still auto-attached."""
+        model = _real_text_model_gguf(
+            tmp_path / "some-vl-model-Q8.gguf", "qwen2", 5120)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-some-vl-model-f16.gguf", 5120)
+        assert find_sibling_mmproj(model) == proj
+
+    def test_lone_sibling_with_unreadable_header_is_still_attached(self, tmp_path):
+        """gguf_n_embd() returns None (unknown) for the placeholder
+        b"GGUF\\x00" fixtures every other test in this class uses - that
+        must fall through to the pre-existing behavior, not be treated as a
+        mismatch. Guards against the fix regressing every other test here
+        that never bothered writing a real header."""
+        model = _gguf(tmp_path / "gemma-3-4b-it-Q8_0.gguf")
+        proj = _gguf(tmp_path / "mmproj-gemma-3-4b-it-f16.gguf")
         assert find_sibling_mmproj(model) == proj
 
 
