@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from localm.audit import SessionMode
 from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
 from .parser import strip_tool_calls
 from .verify import VerifyCommand as _VerifyCommand, command_text as _verify_text
@@ -208,6 +209,10 @@ class CoderSession:
         # SSE stream open can still read it (GET .../result). None until a task
         # has actually finished.
         self.last_result: Optional[dict] = None
+        # True when the last checkpoint-save attempt raised; a later
+        # successful save clears it. Never set for a restricted or
+        # privacy-mode session, since those intentionally skip persistence.
+        self.checkpoint_degraded = False
         self.events: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
         # Bounded replay buffer so a reloaded page can rebuild the feed.
         self.history: list = []
@@ -754,20 +759,47 @@ class CoderSession:
         return self.agent.session_diff(path)
 
     def persist_checkpoint(self) -> None:
-        """Save the conversation so it can be resumed later. The agent no-ops in
-        privacy mode and on an empty conversation, so this is safe to call after
-        every task and on close; it never raises."""
+        """Save the conversation so it can be resumed later.
+
+        No-ops for a restricted session, a privacy-mode session, and an empty
+        conversation - none of those is a failure, so none of them touches
+        ``self.checkpoint_degraded`` or pushes an event.
+
+        Otherwise attempts ``agent.save_checkpoint()`` and never lets an
+        exception from it escape: on failure it sets
+        ``self.checkpoint_degraded`` and pushes a visible "info" event
+        naming the failure; on success it clears the flag. Either way, when
+        ``self.last_result`` is already latched (a task has finished), its
+        ``checkpoint_degraded`` key is updated to match, so GET .../result
+        reflects the same status as :meth:`info`.
+
+        Safe to call after every task and on close; it never raises.
+        """
         # Restricted (scoped-key) sessions are ephemeral and cannot be resumed
         # (resume is owner-only), and they all share the forced project-root
         # cwd, so persisting them would clobber the OWNER's checkpoint for that
         # root.
         if self.restricted:
             return
+        # Privacy mode intentionally never writes a checkpoint. Checked here,
+        # not only inside agent.save_checkpoint(), so this session never
+        # reports a failure for a save it deliberately never attempted.
+        if self.agent.mode == SessionMode.PRIVACY:
+            return
+        if not self.agent._messages:
+            return
         try:
-            if self.agent._messages:
-                self.agent.save_checkpoint()
-        except Exception:
-            pass
+            self.agent.save_checkpoint()
+        except Exception as exc:
+            self.checkpoint_degraded = True
+            self.agent._audit.notice("checkpoint_persist_failed", str(exc))
+            self._push({"type": "info",
+                        "text": "Task completed, but the resume checkpoint "
+                                "could not be saved."})
+        else:
+            self.checkpoint_degraded = False
+        if self.last_result is not None:
+            self.last_result["checkpoint_degraded"] = self.checkpoint_degraded
 
     @property
     def checkpoint_id(self) -> str:
@@ -827,6 +859,10 @@ class CoderSession:
             # Which SAVED conversation is loaded here; "id" above names this
             # live session. Matches a /api/coder/dormant row id.
             "checkpoint_id": self.checkpoint_id,
+            # True when the last save of that checkpoint failed; a later
+            # successful save clears it back to false. Always false for a
+            # restricted or privacy-mode session, which never attempt one.
+            "checkpoint_degraded": self.checkpoint_degraded,
             "cwd": str(self.cwd),
             "model": self.model,
             "mode": self.mode,
