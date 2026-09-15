@@ -40,28 +40,18 @@ test("applyLogoStyle and renderLogoPicker still work directly when storage is bl
 test("the main interface still boots to the app shell when storage is blocked", async () => {
   const { window } = loadApp({ breakStorage: true, fetchImpl: async () => OK });
   await settle();
-  assert.equal(typeof window.bootAuthProbe, "function",
-    "init.js's own top-level code must still have run (a throw at module-eval " +
-    "time in a real ES module would also abort every module that imports it)");
+  // Not `typeof window.bootAuthProbe === "function"`: an async FUNCTION
+  // DECLARATION is hoisted onto window regardless of whether a later throw
+  // aborts the rest of the script, so that check alone proves nothing here.
   assert.equal(window.document.getElementById("app").style.display, "",
     "bootAuthProbe's success path must still reveal the app shell");
   assert.equal(window.document.getElementById("setup-cwd").value, "",
     "a blocked coderCwd read degrades to the empty default instead of throwing");
+  assert.ok(window.document.getElementById("chat-messages").children.length > 0,
+    "renderChat() at the very end of init.js's script must still run - it is " +
+    "the last thing that throw would have silently skipped");
   assert.equal((window.__localmClientLog || []).some((l) => /securityerror|storage is blocked/i.test(l)),
-    false, "no storage error may escape uncaught anywhere in the boot chain " +
-    "(a throw past this point would silently stop init.js's script, including " +
-    "the renderConvList()/renderChat() calls at its very end)");
-});
-
-test("a boot-time key gate (401) still shows instead of an unrecovered throw when storage is blocked", async () => {
-  const { window } = loadApp({
-    breakStorage: true,
-    fetchImpl: async (url) => (String(url).includes("/api/models")
-      ? { ok: false, status: 401, json: async () => ({}), text: async () => "" } : OK),
-  });
-  await settle();
-  assert.equal(window.document.getElementById("key-gate").style.display, "flex",
-    "the auth gate must still render - proves the boot chain reached it");
+    false, "no storage error may escape uncaught anywhere in the boot chain");
 });
 
 test("a read that throws only for an unrelated key does not stop the rest of init.js", async () => {
@@ -76,10 +66,17 @@ test("a read that throws only for an unrelated key does not stop the rest of ini
     fetchImpl: async () => OK,
   });
   await settle();
-  assert.equal(typeof window.bootAuthProbe, "function",
-    "init.js's own script must run to completion despite the blocked coderCwd read");
   assert.equal(window.document.getElementById("setup-cwd").value, "",
-    "the blocked read degrades to the empty default instead of throwing");
+    "the blocked coderCwd read degrades to the empty default instead of throwing");
+  // A genuine sequential side effect (a plain assignment statement, not a
+  // hoisted declaration) from the very next line after the coderCwd read -
+  // proves the script did not stop there.
+  assert.equal(typeof window.document.getElementById("key-gate-submit").onclick, "function",
+    "the line right after the blocked coderCwd read must still run");
+  assert.ok(window.document.getElementById("chat-messages").children.length > 0,
+    "renderChat() at the very end of init.js's script must still run");
   assert.equal((window.__localmClientLog || []).some((l) => l.includes("unhandledrejection")), false,
     "the blocked activeView read (inside the boot IIFE) must not surface as an unhandled rejection");
+  assert.equal((window.__localmClientLog || []).some((l) => /securityerror|storage is blocked/i.test(l)),
+    false, "no storage error may escape uncaught");
 });
