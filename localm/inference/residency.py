@@ -283,6 +283,40 @@ def pick_eviction_victim(
     return None
 
 
+def pick_busy_eviction_victim(
+    lru: Iterable[str],
+    engines: Mapping[str, Any],
+    *,
+    requested: Optional[str] = None,
+    pinned: Iterable[str] = (),
+) -> Optional[str]:
+    """Least-recently-used resident model worth ATTEMPTING to clear via
+    ``cancel_all`` + a grace period, when ``pick_eviction_victim`` found no
+    already-idle candidate.
+
+    Same exclusions as ``pick_eviction_victim`` EXCEPT ``is_serving``: this
+    is the one difference, and the whole point - it is the only way an
+    explicit model switch can ever make room by evicting the model that is
+    ACTIVELY serving a request, which the caller may have every right to do
+    (their own just-cancelled generation, or an owner's force override).
+    Still never the requested model, never pinned, never already mid-unload
+    - a busy engine mid-unload would double-free a native context exactly
+    like the idle case guards against."""
+    pinned_set = set(pinned)
+    for candidate in lru:
+        if requested is not None and candidate == requested:
+            continue
+        if candidate in pinned_set:
+            continue
+        engine = engines.get(candidate)
+        if engine is None:
+            continue
+        if getattr(engine, "unloading", False) is True:
+            continue
+        return candidate
+    return None
+
+
 def resident_cap(config: Optional[Mapping] = None) -> Optional[int]:
     """
     ``max_resident_models``, or None for "no cap" (the default).

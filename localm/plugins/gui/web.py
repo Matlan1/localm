@@ -361,6 +361,12 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
 
 class LoadModelRequest(BaseModel):
     model: str
+    # If loading this model needs to evict one that is still in use (another
+    # session, a busy coder session, or a load that would land mostly on
+    # CPU), the switch reports {"status": "confirm_required", "detail": ...}
+    # instead of proceeding. Setting this on a retry makes it proceed
+    # regardless of what is running or how badly the load would fit.
+    force: bool = False
 
 
 class PullRequest(BaseModel):
@@ -442,6 +448,8 @@ class UnloadModelRequest(BaseModel):
     # None (the default, and an empty POST body) unloads every loaded model -
     # unchanged behavior; a name unloads only that one.
     model: str | None = None
+    # See LoadModelRequest.force - same confirm-then-retry contract.
+    force: bool = False
 
 
 class AliasRequest(BaseModel):
@@ -694,6 +702,8 @@ def attach_gui(
         model through it (e.g. ``http://127.0.0.1:8642/v1``).
     switch_model:
         ``Callable[[str], Awaitable[None]]`` - swaps the active engine.
+        Accepts an optional keyword-only ``force`` (default False, every
+        existing caller unaffected) - see switch_engine's own docstring.
     active_model:
         ``Callable[[], str]`` - name of the currently served model.
     """

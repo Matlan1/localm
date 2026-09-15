@@ -150,6 +150,42 @@ class TestPickEvictionVictim:
         assert residency.pick_eviction_victim(["ghost", "b"], engines) == "b"
 
 
+class TestPickBusyEvictionVictim:
+    """The one difference from TestPickEvictionVictim: a busy engine is a
+    valid candidate here - everything else (requested/pinned/mid-unload)
+    stays excluded exactly the same way."""
+
+    def test_picks_a_busy_engine_pick_eviction_victim_would_have_skipped(self):
+        engines = {"a": _engine(active=1), "b": _engine()}
+        assert residency.pick_busy_eviction_victim(["a", "b"], engines) == "a"
+
+    def test_still_never_evicts_the_requested_model(self):
+        engines = {"a": _engine(active=1), "b": _engine(active=1)}
+        assert residency.pick_busy_eviction_victim(
+            ["a", "b"], engines, requested="a") == "b"
+
+    def test_still_skips_a_pinned_model(self):
+        engines = {"a": _engine(active=1), "b": _engine(active=1)}
+        assert residency.pick_busy_eviction_victim(
+            ["a", "b"], engines, pinned={"a"}) == "b"
+
+    def test_still_skips_an_engine_already_mid_unload(self):
+        """Busy candidates are now in scope, but one already being freed by
+        another path must still never be picked twice - same double-free
+        hazard pick_eviction_victim guards against."""
+        engines = {"a": _engine(active=1, unloading=True), "b": _engine(active=1)}
+        assert residency.pick_busy_eviction_victim(["a", "b"], engines) == "b"
+
+    def test_returns_none_when_nothing_at_all_qualifies(self):
+        engines = {"a": _engine(active=1, unloading=True)}
+        assert residency.pick_busy_eviction_victim(
+            ["a"], engines, pinned=set()) is None
+
+    def test_ignores_a_name_with_no_engine_behind_it(self):
+        engines = {"b": _engine(active=1)}
+        assert residency.pick_busy_eviction_victim(["ghost", "b"], engines) == "b"
+
+
 class TestResidentCap:
     def test_default_is_no_cap(self):
         assert residency.resident_cap({}) is None

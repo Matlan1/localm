@@ -483,7 +483,8 @@ _INCONCLUSIVE_LOAD_RETRIES = 2
 _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 
 
-async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
+async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
+                        force: bool = False) -> dict:
     global _engines, _engines_lru, _active_model_name, _last_active_model_name, _engine_factory, _last_activity_per_model
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
 
@@ -580,10 +581,22 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # attempts, making this branch fire again instead of the loop
             # converging to either a successful load or the final 503.
             embedder_evict_attempted = False
+            # Bounds the busy-victim eviction attempt below to once per load,
+            # mirroring embedder_evict_attempted just above and asked_peers
+            # below - without this, a candidate that fails to clear would be
+            # retried every loop iteration instead of the loop converging.
+            busy_evict_attempted = False
             inconclusive_retries = 0
             load_attempt_started = time.monotonic()
 
             while True:
+                # Reset every iteration: it is read right after evict_name is
+                # computed below, in the SAME iteration, and defaults to False
+                # for the ordinary idle-victim path (pick_eviction_victim
+                # above finding a candidate directly skips the busy-eviction
+                # block entirely, which is the only place that ever sets it
+                # True).
+                force_busy_evict = False
                 # Off the event loop: vram_capacity()/gpu_split_shortfall() route
                 # through discover.list_gpus(), which is deadline-bounded but is
                 # still a REAL hardware probe that can take up to that deadline -
@@ -765,170 +778,219 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                                             before_bytes=free_vram))
                                 continue
 
-                    # Nothing idle left to evict.
-                    if cannot_measure:
-                        # This BOX cannot report free VRAM at all, and every remaining
-                        # model is busy (or none loaded): free what can safely be
-                        # freed and load best-effort. Refusing here would brick every
-                        # CPU-only / GGUF-only / registry-tier box, which can NEVER
-                        # measure.
-                        break
-                    if inconclusive:
-                        # The probe did not complete, so free VRAM is unknown, and
-                        # the failure modes are not symmetric. A wrong permit hands
-                        # a too-big model to the native loader, which "can hard-abort
-                        # the process rather than return NULL" (gpu_split_shortfall's
-                        # docstring) - unrecoverable. A wrong refusal only costs a
-                        # retry, by which time the abandoned probe has usually landed
-                        # and the driver is warm. So refuse-and-retry, quoting no
-                        # figure, since none was measured.
-                        #
-                        # Two ways the probe fails to complete, and both the long
-                        # deadline and wait_for_inflight=True above are aimed at
-                        # them: (1) a cold init on a fresh process - the deadline
-                        # waits it out; (2) a CONCURRENT probe holding the slot (the
-                        # GUI's 2500ms /api/stats heartbeat through a cold init) -
-                        # the join waits on ITS result instead of taking an instant
-                        # BUSY. So reaching here needs the probe to blow the FULL
-                        # deadline even after joining, i.e. a genuinely stuck or
-                        # wedged driver, or a fresh, still-completing cold init
-                        # elsewhere in this process, rather than an ordinary cold
-                        # init or heartbeat collision this call itself started.
-                        #
-                        # A caller-visible refusal is deferred behind
-                        # _INCONCLUSIVE_LOAD_RETRIES automatic retries: the load
-                        # itself re-probes from scratch instead of reporting a
-                        # transient condition as a request the caller must repeat.
-                        if inconclusive_retries < _INCONCLUSIVE_LOAD_RETRIES:
-                            inconclusive_retries += 1
-                            await asyncio.sleep(_INCONCLUSIVE_LOAD_RETRY_DELAY)
-                            continue
-                        elapsed = time.monotonic() - load_attempt_started
-                        # Escalate to the same seamless self-restart the hang
-                        # alarm's own loop-freeze/transport-death detectors use,
-                        # sharing its latch and storm guard. See
-                        # TestSwitchEngineEscalatesToSelfRestartWhenStillInconclusive.
-                        restarting = (
-                            _hang_alarm_instance.trigger_restart(
-                                f"GPU probe still inconclusive after "
-                                f"{inconclusive_retries + 1} attempts loading '{name}'")
-                            if _hang_alarm_instance is not None else False)
-                        if restarting:
+                    if evict_name is None:
+                        # Nothing idle left to evict yet (a busy candidate may
+                        # still be evictable, tried further below as the
+                        # last local resort - after cooperative unload).
+                        if cannot_measure:
+                            # This BOX cannot report free VRAM at all, and every remaining
+                            # model is busy (or none loaded): free what can safely be
+                            # freed and load best-effort. Refusing here would brick every
+                            # CPU-only / GGUF-only / registry-tier box, which can NEVER
+                            # measure.
+                            break
+                        if inconclusive:
+                            # The probe did not complete, so free VRAM is unknown, and
+                            # the failure modes are not symmetric. A wrong permit hands
+                            # a too-big model to the native loader, which "can hard-abort
+                            # the process rather than return NULL" (gpu_split_shortfall's
+                            # docstring) - unrecoverable. A wrong refusal only costs a
+                            # retry, by which time the abandoned probe has usually landed
+                            # and the driver is warm. So refuse-and-retry, quoting no
+                            # figure, since none was measured.
+                            #
+                            # Two ways the probe fails to complete, and both the long
+                            # deadline and wait_for_inflight=True above are aimed at
+                            # them: (1) a cold init on a fresh process - the deadline
+                            # waits it out; (2) a CONCURRENT probe holding the slot (the
+                            # GUI's 2500ms /api/stats heartbeat through a cold init) -
+                            # the join waits on ITS result instead of taking an instant
+                            # BUSY. So reaching here needs the probe to blow the FULL
+                            # deadline even after joining, i.e. a genuinely stuck or
+                            # wedged driver, or a fresh, still-completing cold init
+                            # elsewhere in this process, rather than an ordinary cold
+                            # init or heartbeat collision this call itself started.
+                            #
+                            # A caller-visible refusal is deferred behind
+                            # _INCONCLUSIVE_LOAD_RETRIES automatic retries: the load
+                            # itself re-probes from scratch instead of reporting a
+                            # transient condition as a request the caller must repeat.
+                            if inconclusive_retries < _INCONCLUSIVE_LOAD_RETRIES:
+                                inconclusive_retries += 1
+                                await asyncio.sleep(_INCONCLUSIVE_LOAD_RETRY_DELAY)
+                                continue
+                            elapsed = time.monotonic() - load_attempt_started
+                            # Escalate to the same seamless self-restart the hang
+                            # alarm's own loop-freeze/transport-death detectors use,
+                            # sharing its latch and storm guard. See
+                            # TestSwitchEngineEscalatesToSelfRestartWhenStillInconclusive.
+                            restarting = (
+                                _hang_alarm_instance.trigger_restart(
+                                    f"GPU probe still inconclusive after "
+                                    f"{inconclusive_retries + 1} attempts loading '{name}'")
+                                if _hang_alarm_instance is not None else False)
+                            if restarting:
+                                raise HTTPException(
+                                    503, f"Cannot load '{name}' right now: the server "
+                                    "detected a stuck GPU check and is restarting "
+                                    "automatically. This page will reconnect once it "
+                                    "comes back up.")
                             raise HTTPException(
-                                503, f"Cannot load '{name}' right now: the server "
-                                "detected a stuck GPU check and is restarting "
-                                "automatically. This page will reconnect once it "
-                                "comes back up.")
-                        raise HTTPException(
-                            503, f"Cannot load '{name}': tried measuring free VRAM "
-                            f"{inconclusive_retries + 1} times over about "
-                            f"{elapsed:.0f}s without a conclusive reading, could not "
-                            "free anything, and automatic recovery is unavailable. "
-                            "Please file a bug report if this keeps happening.")
-                    # Local eviction exhausted: before giving up, best-effort ask a
-                    # sibling localm instance to release ITS VRAM (multi-instance
-                    # coordination, see localm.gpu_registry). Off the event loop (it
-                    # may make a blocking loopback call). Advisory: any failure falls
-                    # through to the 503 below, never a harder failure than baseline.
-                    # Bounded and fit-checked (see _attempt_cooperative_unload): each
-                    # peer is asked at most once per load attempt, so this loop always
-                    # progresses, and a yank that provably could not free enough is
-                    # not worth destroying a sibling's models for.
-                    # A PIN is a local preference, exactly like the cap above, so
-                    # it must not cost a SIBLING instance its models either. If an
-                    # unpinned peer WOULD have been evictable, the pin is the only
-                    # reason local eviction came up empty - so do not escalate.
-                    # Fall through to the backend's own split-aware sizing
-                    # (partial offload) instead, which honors the pin locally at
-                    # this instance's own expense rather than another's. Unlike
-                    # the cap case, VRAM here is genuinely short, so this is a
-                    # slower load rather than a free one - still the right trade
-                    # against destroying another instance's work.
-                    pin_blocked = bool(pinned) and residency.pick_eviction_victim(
-                        _engines_lru, _engines, requested=name) is not None
-                    if pin_blocked:
-                        from localm.debuglog import logger as _dbg
-                        _dbg.warning(
-                            "pinned_models=%s is the only reason no local model "
-                            "could be evicted for %s; NOT asking a peer instance "
-                            "to unload - deferring to the backend's own sizing",
-                            sorted(pinned), name)
-                    cooperated = False if pin_blocked else await loop.run_in_executor(
-                        None,
-                        lambda: _attempt_cooperative_unload(
-                            needed_bytes=vram_required + headroom,
-                            free_bytes=free_vram, asked=asked_peers))
-                    if cooperated:
-                        continue
-                    if shortfall and not shares_adaptive:
-                        # Aggregate may well be enough - it is specifically the
-                        # configured split's per-device share that is short, so name
-                        # the device(s), not a generic aggregate message. An
-                        # unmeasurable aggregate cannot reach here: shortfall is
-                        # always [] when free is unmeasurable, because list_gpus()
-                        # DROPS a device that fails to report rather than emitting
-                        # free=None, and the inconclusive branch empties shortfall.
-                        #
-                        # STATIC shares only (pinned ratios, or auto declined into
-                        # the equal fallback - a stale configured index, a device
-                        # without a free reading): this stays a hard refusal even
-                        # though everything below it defers to the backend, because
-                        # with static shares apply_gpu_split() divides the model by
-                        # a ratio that ignores live per-device free VRAM
-                        # (discover.gpu_split_shortfall's own docstring), and the
-                        # backend's own sizing (_auto_gpu_layers / _check_vram,
-                        # llamacpp/_sizing.py) budgets the split's COMBINED capacity
-                        # (_split_free_total_bytes), never any one device's static
-                        # share - so this per-device check is still the only gate
-                        # that can catch one split device being individually short
-                        # while the aggregate fits. Letting a real per-device
-                        # shortfall through would trade a precise, actionable
-                        # message for a native worker abort with no such visibility.
-                        # Keyed on shares_adaptive, NOT on whether ratios are set in
-                        # config: with ratios unset but auto DECLINED, the loader
-                        # applies the same equal fallback the gate just checked, so
-                        # the hazard is live in that case too.
-                        detail = "; ".join(
-                            f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
-                            f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
-                        raise HTTPException(
-                            503, f"Not enough VRAM on the configured split "
-                            f"device(s) to load '{name}' ({detail}).")
-                    # ADAPTIVE shares (live auto free-VRAM-proportional split): a
-                    # non-empty shortfall can only mean the COMBINED estimate is
-                    # short (each device's auto share fits its free whenever the
-                    # aggregate fits - gpu_split_shortfall computed with the same
-                    # auto ratios the loader will pin), so it falls through to
-                    # the same defer-to-backend path as the aggregate-only miss
-                    # below, where the backend's split-aware sizing is the
-                    # accurate judge and partial offload is available.
-                    #
-                    # Local + cooperative eviction exhausted, no hard-refusable
-                    # (pinned-share) shortfall - what remains is this loop's own
-                    # coarse "vram_required = file_size * 1.2" estimate not
-                    # being met (combined across an auto split, or single-GPU). That
-                    # estimate assumes the WHOLE model lands in VRAM, while the
-                    # backend's own load() can make a too-big model fit anyway:
-                    # GgufBackend's n_gpu_layers_auto (default ON -
-                    # _effective_gpu_layers/_auto_gpu_layers/_check_vram in
-                    # llamacpp/_sizing.py) sizes how many layers actually fit free
-                    # VRAM and puts the rest on system RAM, and HFBackend's
-                    # device_map="auto" (hf.py) does the unconditional equivalent -
-                    # both being the promise behind a "too-big"
-                    # discover.fit_label() badge in the GUI's model browser.
-                    #
-                    # So fall through to a real load attempt: _check_vram() is the
-                    # accurate, backend-owned final gate - it raises only when the
-                    # model genuinely cannot fit even at 0 GPU layers, which the
-                    # except handler around new_engine.load() below turns into a
-                    # clean 503 for every caller.
-                    from localm.debuglog import logger as _dbg
-                    _dbg.info(
-                        "switch_engine: '%s' exceeds the whole-model VRAM estimate "
-                        "(need ~%s MB, %s MB free) after eviction - deferring to the "
-                        "backend's own load-time sizing instead of refusing",
-                        name, vram_required // 1024 ** 2, free_vram // 1024 ** 2)
-                    break
+                                503, f"Cannot load '{name}': tried measuring free VRAM "
+                                f"{inconclusive_retries + 1} times over about "
+                                f"{elapsed:.0f}s without a conclusive reading, could not "
+                                "free anything, and automatic recovery is unavailable. "
+                                "Please file a bug report if this keeps happening.")
+                        # Local eviction exhausted: before giving up, best-effort ask a
+                        # sibling localm instance to release ITS VRAM (multi-instance
+                        # coordination, see localm.gpu_registry). Off the event loop (it
+                        # may make a blocking loopback call). Advisory: any failure falls
+                        # through to the 503 below, never a harder failure than baseline.
+                        # Bounded and fit-checked (see _attempt_cooperative_unload): each
+                        # peer is asked at most once per load attempt, so this loop always
+                        # progresses, and a yank that provably could not free enough is
+                        # not worth destroying a sibling's models for.
+                        # A PIN is a local preference, exactly like the cap above, so
+                        # it must not cost a SIBLING instance its models either. If an
+                        # unpinned peer WOULD have been evictable, the pin is the only
+                        # reason local eviction came up empty - so do not escalate.
+                        # Fall through to the backend's own split-aware sizing
+                        # (partial offload) instead, which honors the pin locally at
+                        # this instance's own expense rather than another's. Unlike
+                        # the cap case, VRAM here is genuinely short, so this is a
+                        # slower load rather than a free one - still the right trade
+                        # against destroying another instance's work.
+                        pin_blocked = bool(pinned) and residency.pick_eviction_victim(
+                            _engines_lru, _engines, requested=name) is not None
+                        if pin_blocked:
+                            from localm.debuglog import logger as _dbg
+                            _dbg.warning(
+                                "pinned_models=%s is the only reason no local model "
+                                "could be evicted for %s; NOT asking a peer instance "
+                                "to unload - deferring to the backend's own sizing",
+                                sorted(pinned), name)
+                        cooperated = False if pin_blocked else await loop.run_in_executor(
+                            None,
+                            lambda: _attempt_cooperative_unload(
+                                needed_bytes=vram_required + headroom,
+                                free_bytes=free_vram, asked=asked_peers))
+                        if cooperated:
+                            continue
+                        # Local + cooperative eviction both exhausted: a BUSY
+                        # resident model is the last local resort before
+                        # falling through to a degraded/refused load below -
+                        # cancel_all it and give it a grace period (the common
+                        # case is the caller's own just-stopped generation, or
+                        # - with force - an explicit override that must
+                        # proceed regardless of what is running). Bounded to
+                        # once per load like the embedder/peer attempts
+                        # above. Gated on preempt, exactly like the
+                        # single-slot preemption at the top of this function:
+                        # this is an explicit user switch (GUI/CLI
+                        # switch_model), never an API-routed load (get_engine's
+                        # preempt=False auto-load-on-demand), which must not
+                        # cancel a generation - possibly another caller's -
+                        # just because it wanted a different model. Tried
+                        # AFTER cooperative unload, never before: asking a
+                        # peer instance to free ITS own VRAM is strictly less
+                        # disruptive than interrupting a live generation on
+                        # this box.
+                        if preempt and not busy_evict_attempted:
+                            busy_name = residency.pick_busy_eviction_victim(
+                                _engines_lru, _engines, requested=name, pinned=pinned)
+                            if busy_name is not None:
+                                busy_evict_attempted = True
+                                busy_engine = _engines[busy_name]
+                                residency.cancel_all(busy_name)
+                                if not force and not await _wait_for_pin_clear(busy_engine):
+                                    return {
+                                        "status": "confirm_required", "model": name,
+                                        "detail": (
+                                            f"loading '{name}' needs to free "
+                                            f"'{busy_name}', which is {_in_use_description(busy_name, busy_engine)}"),
+                                    }
+                                # Either the wait cleared it for real (the
+                                # common case - active_requests is genuinely 0
+                                # now, and the defensive re-check below passes
+                                # normally), or force=True skipped the wait
+                                # entirely and the pin may still be held -
+                                # force_busy_evict tells the defensive
+                                # re-check to proceed anyway, exactly like
+                                # unload_one_model's force path:
+                                # engine.unload() below still forcibly kills
+                                # the worker if it does not stop on its own.
+                                evict_name = busy_name
+                                force_busy_evict = force
+                        if evict_name is None:
+                            if shortfall and not shares_adaptive:
+                                # Aggregate may well be enough - it is specifically the
+                                # configured split's per-device share that is short, so name
+                                # the device(s), not a generic aggregate message. An
+                                # unmeasurable aggregate cannot reach here: shortfall is
+                                # always [] when free is unmeasurable, because list_gpus()
+                                # DROPS a device that fails to report rather than emitting
+                                # free=None, and the inconclusive branch empties shortfall.
+                                #
+                                # STATIC shares only (pinned ratios, or auto declined into
+                                # the equal fallback - a stale configured index, a device
+                                # without a free reading): this stays a hard refusal even
+                                # though everything below it defers to the backend, because
+                                # with static shares apply_gpu_split() divides the model by
+                                # a ratio that ignores live per-device free VRAM
+                                # (discover.gpu_split_shortfall's own docstring), and the
+                                # backend's own sizing (_auto_gpu_layers / _check_vram,
+                                # llamacpp/_sizing.py) budgets the split's COMBINED capacity
+                                # (_split_free_total_bytes), never any one device's static
+                                # share - so this per-device check is still the only gate
+                                # that can catch one split device being individually short
+                                # while the aggregate fits. Letting a real per-device
+                                # shortfall through would trade a precise, actionable
+                                # message for a native worker abort with no such visibility.
+                                # Keyed on shares_adaptive, NOT on whether ratios are set in
+                                # config: with ratios unset but auto DECLINED, the loader
+                                # applies the same equal fallback the gate just checked, so
+                                # the hazard is live in that case too.
+                                detail = "; ".join(
+                                    f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
+                                    f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
+                                raise HTTPException(
+                                    503, f"Not enough VRAM on the configured split "
+                                    f"device(s) to load '{name}' ({detail}).")
+                            # ADAPTIVE shares (live auto free-VRAM-proportional split): a
+                            # non-empty shortfall can only mean the COMBINED estimate is
+                            # short (each device's auto share fits its free whenever the
+                            # aggregate fits - gpu_split_shortfall computed with the same
+                            # auto ratios the loader will pin), so it falls through to
+                            # the same defer-to-backend path as the aggregate-only miss
+                            # below, where the backend's split-aware sizing is the
+                            # accurate judge and partial offload is available.
+                            #
+                            # Local + cooperative eviction exhausted, no hard-refusable
+                            # (pinned-share) shortfall - what remains is this loop's own
+                            # coarse "vram_required = file_size * 1.2" estimate not
+                            # being met (combined across an auto split, or single-GPU). That
+                            # estimate assumes the WHOLE model lands in VRAM, while the
+                            # backend's own load() can make a too-big model fit anyway:
+                            # GgufBackend's n_gpu_layers_auto (default ON -
+                            # _effective_gpu_layers/_auto_gpu_layers/_check_vram in
+                            # llamacpp/_sizing.py) sizes how many layers actually fit free
+                            # VRAM and puts the rest on system RAM, and HFBackend's
+                            # device_map="auto" (hf.py) does the unconditional equivalent -
+                            # both being the promise behind a "too-big"
+                            # discover.fit_label() badge in the GUI's model browser.
+                            #
+                            # So fall through to a real load attempt: _check_vram() is the
+                            # accurate, backend-owned final gate - it raises only when the
+                            # model genuinely cannot fit even at 0 GPU layers, which the
+                            # except handler around new_engine.load() below turns into a
+                            # clean 503 for every caller.
+                            from localm.debuglog import logger as _dbg
+                            _dbg.info(
+                                "switch_engine: '%s' exceeds the whole-model VRAM estimate "
+                                "(need ~%s MB, %s MB free) after eviction - deferring to the "
+                                "backend's own load-time sizing instead of refusing",
+                                name, vram_required // 1024 ** 2, free_vram // 1024 ** 2)
+                            break
 
                 evict_engine = _engines[evict_name]
                 free_before = free_vram
@@ -936,10 +998,16 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # victim-semaphore, which would reintroduce the two-switch
                 # lock-ordering deadlock described below. The LRU scan above
                 # already required active_requests==0 and there is no await
-                # between it and here, so this cannot currently fire; it guards
-                # against a future await in the scan reopening the window. If the
-                # victim became pinned, abandon it and re-scan.
-                if getattr(evict_engine, "active_requests", 0) != 0:
+                # between it and here, so this cannot currently fire for an
+                # ORDINARY (idle) victim; it guards against a future await in
+                # the scan reopening the window. If the victim became pinned,
+                # abandon it and re-scan. force_busy_evict is the one
+                # deliberate exception: an explicit force=True override on a
+                # BUSY victim that never actually cleared its pin (see the
+                # busy-eviction attempt above) - the owner's action is final,
+                # so this proceeds regardless; engine.unload() below still
+                # forcibly kills the worker if it does not stop on its own.
+                if not force_busy_evict and getattr(evict_engine, "active_requests", 0) != 0:
                     continue
 
                 # Detach the victim from the live registry BEFORE the native free,
@@ -3145,10 +3213,10 @@ def mount_gui_surface(app) -> bool:
             mmproj_path=mmproj,
         )
 
-    async def switch_model(name: str) -> dict:
+    async def switch_model(name: str, *, force: bool = False) -> dict:
         # Preemptive switch: a newer selection aborts an in-flight load rather
         # than waiting for the abandoned model to finish (see switch_engine).
-        return await switch_engine(name, _build_engine)
+        return await switch_engine(name, _build_engine, force=force)
 
     from localm.plugins.gui.web import attach_gui
     # Claim the mount BEFORE attaching so a re-entrant/concurrent call cannot

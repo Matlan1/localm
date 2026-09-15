@@ -897,12 +897,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             model_less = True
     app = hs.create_app(engine)
 
-    async def switch_model(name: str) -> dict:
+    async def switch_model(name: str, *, force: bool = False) -> dict:
         """Swap engines, PREEMPTING any in-flight load so the latest selection
         wins immediately instead of waiting for an abandoned model to finish
         loading (see http_server.switch_engine). Serialised on the inference
         semaphore so no generation is mid-flight."""
-        return await hs.switch_engine(name, _make_engine)
+        return await hs.switch_engine(name, _make_engine, force=force)
 
     manager = None
     if not api_mode:
