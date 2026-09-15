@@ -41,7 +41,7 @@ def test_checkpoint_written_under_home_not_project(tmp_path, monkeypatch):
 
     a = _agent(proj, mode=SessionMode.LOG)
     a._messages = [{"role": "user", "content": "hi"}]
-    a.save_checkpoint()
+    assert a.save_checkpoint() is True
 
     cp = a._checkpoint_path
     assert home in cp.parents                 # under HOME/checkpoints/...
@@ -119,7 +119,10 @@ def test_distinct_sessions_in_one_project_get_distinct_checkpoint_files(
 def test_save_checkpoint_failure_is_logged_not_silent(tmp_path, monkeypatch, caplog):
     """NEW-CODER-CHECKPOINT-NONATOMIC: a save failure must not be swallowed
     outright - the user has no other way to learn their resume checkpoint did
-    not persist."""
+    not persist. It also has to be OBSERVABLE by a caller other than the log:
+    save_checkpoint() reports False on this exact failure, which is what
+    CoderSession.persist_checkpoint() (sessions.py) checks to decide whether
+    to surface a session-level warning."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"; proj.mkdir()
@@ -129,8 +132,9 @@ def test_save_checkpoint_failure_is_logged_not_silent(tmp_path, monkeypatch, cap
     with patch("localm.plugins.coder.agent.persistence.atomic_write",
                side_effect=OSError("disk full")):
         with caplog.at_level("WARNING"):
-            a.save_checkpoint()          # must not raise
+            result = a.save_checkpoint()          # must not raise
 
+    assert result is False
     assert any("save_checkpoint" in r.message for r in caplog.records)
     assert not a._checkpoint_path.exists()   # no torn/partial file either
 

@@ -438,15 +438,21 @@ class _PersistenceMixin:
     def _legacy_home_checkpoint_path(self) -> Path:
         return _legacy_home_checkpoint_path_for(self.cwd)
 
-    def save_checkpoint(self) -> None:
+    def save_checkpoint(self) -> bool:
         """Persist current conversation state so it can be resumed later.
 
-        No-op in privacy mode - the checkpoint contains the full
-        conversation, which privacy mode promises never to write to disk.
-        The task list rides along in the same file and is therefore covered by
-        the same promise: in privacy mode it stays in memory only."""
+        No-op (returns True) in privacy mode - the checkpoint contains the
+        full conversation, which privacy mode promises never to write to
+        disk. The task list rides along in the same file and is therefore
+        covered by the same promise: in privacy mode it stays in memory
+        only.
+
+        Never raises. Returns False when the write itself failed (already
+        logged at WARNING); a caller that needs to surface that condition
+        checks the return value, and every other caller can keep ignoring
+        it exactly as before."""
         if self.mode == SessionMode.PRIVACY:
-            return
+            return True
         data = {
             "version": 1,
             "interrupted_at": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -491,10 +497,9 @@ class _PersistenceMixin:
             p.parent.mkdir(parents=True, exist_ok=True)
             atomic_write(p, json.dumps(data, indent=2, ensure_ascii=False))
         except Exception:
-            # Never let checkpoint failure crash the session, but warn rather
-            # than silence it - a resume checkpoint failing to save is exactly
-            # the case a user needs to know about.
             logger.warning("save_checkpoint: failed to persist %s", p, exc_info=True)
+            return False
+        return True
 
     def clear_checkpoint(self) -> None:
         """Remove THIS agent's own saved checkpoint - its own per-session id under

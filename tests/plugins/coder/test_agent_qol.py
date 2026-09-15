@@ -395,7 +395,7 @@ class TestCheckpoint:
     def test_privacy_mode_never_writes_checkpoint(self, tmp_path):
         agent = _make_agent(tmp_path, mode=SessionMode.PRIVACY)
         agent._messages = [{"role": "user", "content": "secret"}]
-        agent.save_checkpoint()
+        assert agent.save_checkpoint() is True
         assert not agent._checkpoint_path.exists()
 
     def test_corrupted_checkpoint_returns_none(self, tmp_path):
