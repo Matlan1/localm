@@ -156,6 +156,28 @@ def test_completions_stream_success_runs_outlet_once():
     assert seen["outlet"] == [("partial", "success")]
 
 
+def test_completions_nonstream_error_skips_outlet_and_marks_ctx_error():
+    app, seen = _hooked_app(_engine(raise_after=True))
+    with TestClient(app) as c:
+        r = c.post("/v1/completions", json={
+            "model": "test-model", "prompt": "hi", "stream": False})
+    assert r.status_code == 200
+    choice = r.json()["choices"][0]
+    assert choice["finish_reason"] == "error"
+    assert "[inference error" in choice["text"]
+    assert seen["ctx"][0].outcome == "error"
+    assert seen["outlet"] == []
+
+
+def test_completions_nonstream_success_runs_outlet_once():
+    app, seen = _hooked_app(_engine())
+    with TestClient(app) as c:
+        r = c.post("/v1/completions", json={
+            "model": "test-model", "prompt": "hi", "stream": False})
+    assert r.json()["choices"][0]["finish_reason"] == "stop"
+    assert seen["outlet"] == [("partial", "success")]
+
+
 # --------------------------------------------------------------------------- #
 #  non-streaming path                                                         #
 # --------------------------------------------------------------------------- #
