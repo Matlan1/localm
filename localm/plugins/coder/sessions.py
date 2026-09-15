@@ -444,6 +444,12 @@ class CoderSession:
             self._push({"type": "user", "text": text})
 
         def _run():
+            # This run's OWN result dict, captured at the point it is built so
+            # persist_checkpoint() below always annotates it specifically -
+            # never whatever self.last_result happens to hold when that call
+            # returns, which a second task started after busy clears could
+            # already have replaced with its own.
+            own_result: Optional[dict] = None
             try:
                 final = self.agent.run_task(text)
                 payload = {
@@ -466,6 +472,7 @@ class CoderSession:
                 self.last_result = {k: v for k, v in payload.items()
                                     if k != "type"}
                 self.last_result["response"] = final
+                own_result = self.last_result
                 self._push(payload)
             except Exception as e:
                 self._push({"type": "error", "text": f"{type(e).__name__}: {e}"})
@@ -475,7 +482,7 @@ class CoderSession:
                 # Save the conversation so it can be resumed later. The agent
                 # clears the checkpoint on a clean finish, so the current state
                 # is re-persisted here after every task. No-op in privacy mode.
-                self.persist_checkpoint()
+                self.persist_checkpoint(own_result)
                 # A message queued in the task's final moments would otherwise
                 # sit until the user sends again - run it as a follow-up task.
                 leftover = self.agent._drain_queued()
@@ -758,22 +765,30 @@ class CoderSession:
         """Cumulative diff of the session's changes (all files or one)."""
         return self.agent.session_diff(path)
 
-    def persist_checkpoint(self) -> None:
+    def persist_checkpoint(self, result: Optional[dict] = None) -> None:
         """Save the conversation so it can be resumed later.
 
         No-ops for a restricted session, a privacy-mode session, and an empty
         conversation - none of those is a failure, so none of them touches
-        ``self.checkpoint_degraded`` or pushes an event.
+        ``self.checkpoint_degraded`` or pushes an event. The privacy-mode
+        check is repeated here rather than left to ``agent.save_checkpoint()``
+        alone, so this method's own failure branch is never reached for a
+        save this session never attempts.
 
-        Otherwise attempts ``agent.save_checkpoint()`` and never lets an
-        exception from it escape: on failure it sets
-        ``self.checkpoint_degraded`` and pushes a visible "info" event
-        naming the failure; on success it clears the flag. Either way, when
-        ``self.last_result`` is already latched (a task has finished), its
-        ``checkpoint_degraded`` key is updated to match, so GET .../result
-        reflects the same status as :meth:`info`.
+        Otherwise calls ``agent.save_checkpoint()`` and treats both a raised
+        exception and a returned ``False`` (the write itself failed) as
+        failure: either one sets ``self.checkpoint_degraded`` and pushes a
+        visible "info" event naming it. A successful save clears the flag.
+        This method itself never raises.
 
-        Safe to call after every task and on close; it never raises.
+        *result* is the caller's OWN task-result dict - never re-read from
+        ``self.last_result`` here, because a second task can replace that
+        attribute with ITS OWN dict before this call returns, which would
+        attach one task's checkpoint status to a different task's result.
+        When given, its "checkpoint_degraded" key is updated to match, so
+        GET .../result reflects the same status as :meth:`info`.
+
+        Safe to call after every task and on close.
         """
         # Restricted (scoped-key) sessions are ephemeral and cannot be resumed
         # (resume is owner-only), and they all share the forced project-root
@@ -781,25 +796,25 @@ class CoderSession:
         # root.
         if self.restricted:
             return
-        # Privacy mode intentionally never writes a checkpoint. Checked here,
-        # not only inside agent.save_checkpoint(), so this session never
-        # reports a failure for a save it deliberately never attempted.
         if self.agent.mode == SessionMode.PRIVACY:
             return
         if not self.agent._messages:
             return
+        detail = None
         try:
-            self.agent.save_checkpoint()
+            ok = self.agent.save_checkpoint()
         except Exception as exc:
-            self.checkpoint_degraded = True
-            self.agent._audit.notice("checkpoint_persist_failed", str(exc))
+            ok = False
+            detail = str(exc)
+        if not ok:
+            self.agent._audit.notice(
+                "checkpoint_persist_failed", detail or "write failed; see the debug log")
             self._push({"type": "info",
                         "text": "Task completed, but the resume checkpoint "
                                 "could not be saved."})
-        else:
-            self.checkpoint_degraded = False
-        if self.last_result is not None:
-            self.last_result["checkpoint_degraded"] = self.checkpoint_degraded
+        self.checkpoint_degraded = not ok
+        if result is not None:
+            result["checkpoint_degraded"] = self.checkpoint_degraded
 
     @property
     def checkpoint_id(self) -> str:

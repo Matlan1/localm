@@ -11,7 +11,9 @@ checkpoint at all, so they must never report this status, even when the
 underlying save call would itself raise if it were ever reached."""
 
 import queue
+import threading
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -161,3 +163,74 @@ def test_restricted_session_never_reports_checkpoint_degraded(tmp_path, make_ses
     assert session.checkpoint_degraded is False
     assert session.info()["checkpoint_degraded"] is False
     assert not any(_WARNING_TEXT in e.get("text", "") for e in session.history)
+
+
+def test_checkpoint_save_failure_surfaces_for_a_real_write_error(tmp_path, make_session):
+    """The warning must fire for the REAL failure path too - Agent.save_checkpoint()
+    (persistence.py) catches an atomic_write failure internally and logs it,
+    without raising, so persist_checkpoint() only learns about it through the
+    return value. A test that replaces the whole save_checkpoint() method (as
+    the tests above do) cannot tell this path apart from a broken one, since
+    it never runs the real method at all."""
+    session = make_session(tmp_path, ScriptedBackend(), auto_approve=True,
+                           mode="log")
+
+    with patch("localm.plugins.coder.agent.persistence.atomic_write",
+               side_effect=OSError("disk full")):
+        session.send_message("say hi")
+        _drain(session, until_types={"final"})
+        session._thread.join(timeout=10)
+
+    assert session.checkpoint_degraded is True
+    assert any(_WARNING_TEXT in e.get("text", "") for e in session.history)
+    assert not session.agent._checkpoint_path.exists()
+
+
+def test_checkpoint_failure_status_never_crosses_into_a_different_tasks_result(
+        tmp_path, make_session):
+    """A slow, failing save for one task must not have its degraded status
+    land on a LATER task's result dict just because that later task finished
+    and replaced session.last_result before the slow task's own
+    persist_checkpoint() call returned. Reproduced with real threads and no
+    mocked timing: task A's save blocks until task B has genuinely finished,
+    including B's own (real, successful) checkpoint save."""
+    session = make_session(tmp_path, ScriptedBackend(), auto_approve=True,
+                           mode="log")
+    real_save = session.agent.save_checkpoint
+    a_started = threading.Event()
+    b_done = threading.Event()
+    calls = []
+
+    def controlled_save():
+        calls.append(1)
+        if len(calls) == 1:
+            a_started.set()
+            assert b_done.wait(timeout=10), "task B never finished"
+            raise OSError("disk full")
+        return real_save()
+
+    session.agent.save_checkpoint = controlled_save
+
+    assert session.send_message("say hi") == "started"
+    assert a_started.wait(timeout=10), "task A's save never started"
+    assert session.busy is False, \
+        "task A must have released busy before its save is still in flight"
+    a_result = session.last_result
+    assert a_result is not None
+
+    assert session.send_message("say hi again") == "started"
+    _drain(session, until_types={"final"})
+    session._thread.join(timeout=10)
+    b_result = session.last_result
+    assert b_result is not a_result
+    assert b_result["checkpoint_degraded"] is False
+
+    b_done.set()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "checkpoint_degraded" not in a_result:
+        time.sleep(0.02)
+
+    assert a_result.get("checkpoint_degraded") is True, \
+        "task A's own result dict never learned its save failed"
+    assert b_result["checkpoint_degraded"] is False, \
+        "task A's late failure must not overwrite task B's already-correct status"
