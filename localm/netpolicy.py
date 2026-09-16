@@ -69,7 +69,7 @@ class NetworkPolicyError(Exception):
     surfaces this to a browser (a GUI/API route, never the model) has no CLI
     to run and should build its own remedy instead of showing this message's
     CLI-flavored one, the same way DiscoverError.off is used in
-    localm/plugins/gui/routes/models.py's _run_discover."""
+    localm/plugins/gui/routes/models/discovery.py's _run_discover."""
 
     def __init__(self, message: str, *, off: bool = False):
         super().__init__(message)

@@ -9,11 +9,11 @@ test below drives the real consumer with a good model plus one malformed sibling
 and asserts it does not 500 or raise.
 
 Sites covered:
-  1. GET /api/models            (plugins/gui/routes/models.py list loop)
+  1. GET /api/models            (plugins/gui/routes/models/inventory.py list loop)
   2. GET /v1/models/{id}        (inference/routes/models.py model_detail)
   3. _pull_hf_snapshot dedup    (model_manager/pull.py "same repo?" scan)
   4. scan_comfy_models          (model_manager/scan.py existing_paths build)
-  5. GET /api/vram-estimate     (plugins/gui/routes/models.py, same file as #1)
+  5. GET /api/vram-estimate     (plugins/gui/routes/models/inventory.py, same file as #1)
 """
 
 import os
@@ -43,7 +43,7 @@ _GOOD = {"path": "Z:/nonexistent/good.gguf", "source": "local", "model_type": "l
 
 
 # --------------------------------------------------------------------------- #
-# Site 1 + 5: the GUI model routes (plugins/gui/routes/models.py)
+# Site 1 + 5: the GUI model routes (plugins/gui/routes/models/inventory.py)
 # --------------------------------------------------------------------------- #
 
 def _gui_app():

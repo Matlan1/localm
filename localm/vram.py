@@ -450,7 +450,7 @@ def _live_free_vram_bytes():
     every time the probe merely ran slow.
 
     ``sysstats.vram_capacity()`` behind GET /api/stats and
-    ``gui/routes/models.py``'s /api/vram-estimate gate on
+    ``gui/routes/models/inventory.py``'s /api/vram-estimate gate on
     ``sysstats._vram_reading_trusted()`` (fresh AND device-global) before showing
     `used`/`free` at all. ``http_server.switch_engine``'s 503 refusals (via
     ``discover.gpu_split_shortfall``) require a fresh GPU_PROBE_OK reading before

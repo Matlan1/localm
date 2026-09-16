@@ -32,7 +32,10 @@ _PLUGIN_TIER_FILES = [
     "localm/plugins/builtin/voice/plug.py",
     "localm/plugins/builtin/rag/plug.py",
     "localm/plugins/builtin/coder/plug.py",
-    "localm/plugins/gui/routes/models.py",
+    "localm/plugins/gui/routes/models/inventory.py",
+    "localm/plugins/gui/routes/models/acquisition.py",
+    "localm/plugins/gui/routes/models/mutation.py",
+    "localm/plugins/gui/routes/models/discovery.py",
     "localm/plugins/gui/routes/system.py",
 ]
 

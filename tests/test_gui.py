@@ -1242,7 +1242,7 @@ class TestGpusEndpoint:
         here via the exact validate_update + load_config/save_config sequence
         localm/inference/routes/config.py's patch_config route runs, not a
         mock of it - a subsequent GET /api/gpus must echo the persisted value
-        back. gui_gpus() (localm/plugins/gui/routes/models.py) does not
+        back. gui_gpus() (localm/plugins/gui/routes/models/inventory.py) does not
         cross-check the indices against list_gpus(); it returns
         cfg.get("gpu_split_indices") verbatim, so list_gpus is monkeypatched
         here only to supply the two devices the split names (per the route's

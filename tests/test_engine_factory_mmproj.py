@@ -116,7 +116,7 @@ class TestHttpServerFactoriesAlreadyCorrect:
         monkeypatch.setattr(hs, "Engine", _spy)
 
         # switch_model is the closure mount_gui_surface wired into attach_gui
-        # and stashed on app.state; reach it the way routes/models.py does.
+        # and stashed on app.state; reach it the way routes/models/inventory.py does.
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(app.state.switch_model("vision-model"))
