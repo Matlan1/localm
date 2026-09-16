@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Repository hygiene check (see AGENTS.md).
+"""Repository hygiene check.
 
 Scans tracked files and fails on:
   1. The em-dash (U+2014) or en-dash (U+2013) in any text file.
@@ -2183,7 +2183,7 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
         return [], [
             "release-manifest gate SKIPPED: scripts/check_manifest.py is not present "
             "in this checkout. Expected on CI and most external clones - it is "
-            "intentionally gitignored (AGENTS.md rule 6). This checkout's hygiene "
+            "intentionally gitignored. This checkout's hygiene "
             "pass does NOT mean the release-manifest classification is clean; run "
             "'python scripts/check_manifest.py' by hand on a checkout that has it "
             "(e.g. the maintainer's own) before cutting a release."]

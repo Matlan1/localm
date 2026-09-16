@@ -8,7 +8,7 @@ extra), and previously only ``python -m playwright install chromium`` could
 fetch it - this wraps that step as a localm-native command, the same shape as
 ``setup-llama`` and ``setup-embeddings``: it goes through the network policy
 like every other explicit download, and it never reports success it has not
-verified (AGENTS.md rule 5).
+verified.
 """
 
 from __future__ import annotations
@@ -147,8 +147,8 @@ def install_chromium(*, force: bool = False,
 
     Never returns ``ok=True`` on the strength of the subprocess exit code
     alone: the Chromium executable is re-resolved from disk afterward and
-    must actually be there (AGENTS.md rule 5 - a provisioning step that fails
-    must never report success)."""
+    must actually be there (a provisioning step that fails must never
+    report success)."""
     try:
         import playwright  # noqa: F401
     except ImportError:

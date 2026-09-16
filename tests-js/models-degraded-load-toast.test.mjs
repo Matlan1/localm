@@ -66,7 +66,7 @@ test("a partial-offload (silent CPU fallback) load warns with the real layer cou
     "must name the real placement, not just say something degraded");
   assert.match(toastEl.textContent, /CPU/i);
   assert.ok(toastEl.className.includes("error"),
-    "a silent CPU fallback must not read as a plain success toast (AGENTS.md rule 5)");
+    "a silent CPU fallback must not read as a plain success toast");
 });
 
 test("a zero-offload (fully CPU) load still warns, not just a full offload", async () => {

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CoderSession.persist_checkpoint() must not swallow a save failure silently
-(AGENTS.md rule 5): a task that finishes fine but whose resume checkpoint
+"""CoderSession.persist_checkpoint() must not swallow a save failure silently:
+a task that finishes fine but whose resume checkpoint
 fails to save must still report ok=true (the task itself did not fail), but
 the failure has to be VISIBLE - a warning event in the feed and a
 "checkpoint_degraded" status on both session.info() and the task result -

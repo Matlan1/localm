@@ -216,7 +216,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,rag]"
 
-      # The mandated repo-hygiene gate (AGENTS.md): no em/en dashes, no personal
+      # The mandated repo-hygiene gate: no em/en dashes, no personal
       # disclosure, no machine-absolute paths in code. It also runs the release-file
       # manifest gate (scripts/check_manifest.py, folded into check_hygiene): every
       # tracked file must be classified release-include/-exclude in release-manifest.toml,
@@ -235,8 +235,7 @@ jobs:
       # -n auto (pytest-xdist) distributes across worker processes; every test
       # already gets its own LOCALM_HOME via the autouse tmp_path fixture in
       # tests/conftest.py and the few tests that bind a real socket use an
-      # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
-      # cadence".
+      # OS-assigned ephemeral port, so this is safe.
       - name: Tests
         run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 

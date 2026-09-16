@@ -1023,8 +1023,8 @@ export async function startCoderSession(opts = {}) {
     }
     activateSession(info.id);
     // An option the server could not honour is SAID, not silently swallowed -
-    // otherwise a ticked box and an ignored one look identical (AGENTS.md
-    // rule 5). The server decides; this only relays.
+    // otherwise a ticked box and an ignored one look identical. The server
+    // decides; this only relays.
     for (const note of info.notes || []) toast(note, true);
     if (info.resumed) toast(t("coder.session.resumedToast"));
     else if (resume && !info.notes?.length) toast(t("coder.session.noSavedResume"));

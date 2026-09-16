@@ -89,7 +89,6 @@ chatlogs_errorlogs/
 # Local-only issue tracker / scratch report (machine-specific notes, never
 # public). DO NOT DELETE this directory or its contents - it is the user's
 # working backlog and is not recoverable from git (it is ignored on purpose).
-# See AGENTS.md "Protected local paths".
 issues/
 
 # Local by-hand test campaign: the exhaustive feature matrix, results, plans, and

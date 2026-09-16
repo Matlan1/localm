@@ -85,7 +85,7 @@ dependencies = [
     # gpu_usage.py's own module docstring called it "already a dependency", which
     # was simply not true of any clean install. The gap was invisible precisely
     # where it was written: on an AMD box ADL answers first and PDH is never
-    # reached, so nothing local degrades (AGENTS.md: design for every setup, not
+    # reached, so nothing local degrades (design for every setup, not
     # this one). Windows-gated because PDH is a Windows API and the module never
     # reaches for it elsewhere.
     #

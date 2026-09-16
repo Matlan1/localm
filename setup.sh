@@ -204,7 +204,7 @@ fi
 # per-user Python + cache. Asked BEFORE the uv bootstrap below so a Portable pick
 # also confines uv's own binary to this folder, not just the runtime it manages -
 # silently installing a tool into the user's home directory without ever asking
-# where is exactly the kind of outside-the-root write AGENTS.md rule 4 forbids.
+# where is exactly the kind of outside-the-root write this project forbids.
 # The UV_* vars are exported for THIS setup process only (not persisted / not
 # global), so they never touch any other uv project. --python-preference
 # only-managed forces the contained download instead of reusing a system Python.
@@ -432,8 +432,8 @@ fi
 # Windows; qtpy + PyQt6 + PyQt6-WebEngine on Linux - see pyproject.toml's
 # desktop extra comment for why Linux gets Qt, not GTK, and why that is
 # entirely pip-installable, no system package manager involved). Default
-# stays Browser for exactly that reason (AGENTS.md rule 1/5: no surprise new
-# deps, no silent behavior change). Runtime override without re-running
+# stays Browser for exactly that reason (no surprise new deps, no silent
+# behavior change). Runtime override without re-running
 # setup: Settings -> Desktop app -> Default window mode (config key
 # desktop_window_mode, "auto" - use it if installed - or "browser"). Leaving
 # that key at its "auto" default here is deliberate: once the extra IS

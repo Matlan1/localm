@@ -3,7 +3,7 @@
 honestly: refuse cleanly under the network policy instead of letting
 playwright's own downloader surface a raw error, do nothing on the network
 when Chromium is already present, and never report success it has not
-verified on disk (AGENTS.md rule 5) - including the case where playwright's
+verified on disk - including the case where playwright's
 own exit code says success but the binary still is not there, and the case
 where a `--force` reinstall fails after playwright has already removed the
 previous build.
@@ -121,7 +121,7 @@ def test_force_reinstalls_even_when_already_present(cli_runner, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Honest reporting of the subprocess outcome (AGENTS.md rule 5)              #
+#  Honest reporting of the subprocess outcome                                 #
 # --------------------------------------------------------------------------- #
 
 def test_subprocess_failure_is_reported_honestly(cli_runner, monkeypatch):

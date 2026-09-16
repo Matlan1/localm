@@ -14,8 +14,8 @@ name: "localm CodeQL config"
 # which 80 were in product code doing exactly that - model_manager/registry.py,
 # the llamacpp _loader/_sizing pair, media/comfy_client.py, plugins/mcpserver/
 # server.py, inference/embedder.py. They were closed as "fixed" with zero lines of
-# code changed, which is precisely the kind of silently-hidden problem AGENTS.md
-# rule 5 exists to prevent.
+# code changed, which is precisely the kind of silently-hidden problem this
+# project's hygiene rules exist to prevent.
 threat-models: local
 
 paths-ignore:

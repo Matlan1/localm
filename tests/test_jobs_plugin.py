@@ -775,9 +775,8 @@ def test_plugin_routes_via_engine(home, monkeypatch):
 
 
 def test_list_jobs_surfaces_scheduler_warning(home, monkeypatch):
-    """GET /api/jobs carries scheduler_warning: a failing tick halts every
-    scheduled job silently otherwise (own comment in scheduler.py cites
-    AGENTS.md rule 5)."""
+    """GET /api/jobs carries scheduler_warning: a failing tick would otherwise
+    halt every scheduled job silently."""
     from pathlib import Path
 
     from fastapi import FastAPI

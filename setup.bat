@@ -51,7 +51,7 @@ rem  per-user location and reuses its per-user Python + cache. Asked BEFORE the
 rem  uv bootstrap below so a Portable pick also confines uv's own binary to this
 rem  folder, not just the runtime it manages - silently installing a tool into
 rem  the user's profile without ever asking where is exactly the kind of
-rem  outside-the-root write AGENTS.md rule 4 forbids. The UV_* vars are set for
+rem  outside-the-root write this project forbids. The UV_* vars are set for
 rem  THIS setup process only (not setx / not global), so they never touch any
 rem  other uv project. --python-preference only-managed forces the contained
 rem  download instead of reusing a system Python.
@@ -82,8 +82,8 @@ rem  the venv and resolves the GPU wheels. Rather than dead-ending with "go inst
 rem  it yourself", fetch it via Astral's official installer, then make it callable in
 rem  THIS process. The installer updates the persistent USER PATH, but not the PATH
 rem  of a shell that was already running, so we prepend its install dir here. We do
-rem  not hide a bootstrap failure (AGENTS.md rule 5): we re-check that uv is actually
-rem  callable and, if it is not, say so and show the manual options.
+rem  not hide a bootstrap failure: we re-check that uv is actually callable and, if
+rem  it is not, say so and show the manual options.
 rem  Portable (CONTAINED=1) must not settle for whatever uv happens to already be
 rem  on PATH - that could be a Shared install, winget, or a different clone
 rem  entirely, and reusing it silently would break the "uv itself ... inside this
@@ -129,8 +129,8 @@ rem  %USERPROFILE%\.local\bin default, the older .cargo\bin, and the domain
 rem  redirected-home %HOMEDRIVE%%HOMEPATH% form. If uv still is not found (an exotic
 rem  install dir), the honest "open a new terminal" fallback below recovers via the
 rem  persistent PATH the installer set.
-rem  Harmless caveat (AGENTS.md rule 5): under this file's EnableDelayedExpansion a
-rem  `!` inside the user's INHERITED PATH is dropped when PATH is re-assigned here.
+rem  Harmless caveat: under this file's EnableDelayedExpansion a `!` inside the
+rem  user's INHERITED PATH is dropped when PATH is re-assigned here.
 rem  Proven harmless: this runs only in the uv-missing branch, the change is
 rem  process-local (never the persistent PATH), and every OTHER tool the rest of
 rem  setup runs resolves via an explicit path (.venv\Scripts, System32). A dir
@@ -270,8 +270,8 @@ type nul > ".venv\.localm-venv"
 rem ---- browser tab or standalone app window? ---------------------------------
 rem  Decides whether the `desktop` extra (pywebview) gets installed at all - a
 rem  NEW dependency (pythonnet) every fresh install would otherwise take on
-rem  unasked. Default stays Browser for exactly that reason (AGENTS.md rule
-rem  1/5: no surprise new deps, no silent behavior change). Runtime override
+rem  unasked. Default stays Browser for exactly that reason (no surprise new
+rem  deps, no silent behavior change). Runtime override
 rem  without re-running setup: Settings -> Desktop app -> Default window mode
 rem  (config key desktop_window_mode, "auto" - use it if installed - or
 rem  "browser"). Leaving that key at its "auto" default here is deliberate:

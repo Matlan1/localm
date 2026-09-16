@@ -1050,7 +1050,7 @@ export async function switchModel(model) {
 // offload rather than refusing), so a plain "switched" toast would read as
 // success even when the load quietly fell back to (slow) CPU layers -
 // res.degraded (from /api/models/load's gpu_layers_offloaded/gpu_layers_total)
-// says so; warn instead of a bare success toast (AGENTS.md rule 5).
+// says so; warn instead of a bare success toast.
 export function toastLoadResult(res, model) {
   if (res && res.degraded) {
     toast(`Model switched to ${model} (${res.gpu_layers_offloaded}/` +
@@ -1120,7 +1120,7 @@ if (sidebarUnloadBtn) {
       // (a request is mid-generation against it right now, or a coder
       // session is using it), not the same thing as a real unload. Reporting
       // "Unloaded" here regardless of `status` would claim a VRAM release
-      // that did not happen (AGENTS.md rule 5).
+      // that did not happen.
       if (data.status === "confirm_required") {
         const confirmed = await confirmDangerAsync(
           t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
