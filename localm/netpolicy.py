@@ -135,7 +135,8 @@ def _config() -> dict:
 
     check_url reads the config itself, once, up front, and refuses outright on
     a read failure, so it never reaches this fallback. The remaining callers
-    are _resolve_pinned (net_allow_private) and web_search (net_search_url);
+    are _resolve_pinned (net_allow_private) and the search provider
+    selection (net_search_url);
     neither reads net_deny/net_allow, so an unreadable config here only means
     those two settings fall back to their defaults (False / unset) for this
     call."""
@@ -688,154 +689,14 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     Search the web. Returns [{"title", "url", "snippet"}, ...].
 
     Backend: a SearXNG instance when net_search_url is configured (its JSON
-    API must be enabled), otherwise DuckDuckGo's no-key HTML endpoint.
+    API must be enabled), otherwise DuckDuckGo's no-key HTML endpoint. The
+    providers live in ``localm.web_retrieval.providers`` and send their one
+    request through this module's policy check and pinned transport.
     Raises NetworkPolicyError when the policy refuses, or RuntimeError when
     the backend yields nothing parseable.
     """
-    query = (query or "").strip()
-    if not query:
-        raise ValueError("Empty search query")
-    max_results = max(1, min(int(max_results), 10))
-
-    base = _config().get("net_search_url")
-    if base:
-        results = _searxng_search(str(base).rstrip("/"), query, max_results)
-    else:
-        results = _ddg_search(query, max_results)
-    if not results:
-        raise RuntimeError(
-            "The search backend returned no parseable results. It may be "
-            "rate-limiting; try again, or set a Search backend URL (SearXNG) with:  "
-            "localm config net_search_url http://...")
-    return results
-
-
-def _refuse_redirect(resp, backend: str) -> None:
-    """Refuse a 3xx from a search backend.
-
-    The search backends call check_url ONCE on the request URL, so unlike
-    safe_fetch they cannot re-validate a redirect target per hop: a followed
-    3xx would reach 127.0.0.1 / 169.254.169.254 / an RFC1918 service with no
-    policy check. The callers pass allow_redirects=False and any 3xx raises
-    NetworkPolicyError here."""
-    # getattr default: a real requests.Response always exposes these
-    # properties; the False default only applies to minimal test doubles.
-    if getattr(resp, "is_redirect", False) or \
-            getattr(resp, "is_permanent_redirect", False):
-        raise NetworkPolicyError(
-            f"{backend} tried to redirect (to "
-            f"{resp.headers.get('Location', '?')!r}); refusing - a search "
-            "backend's redirect target is not policy-checked.")
-
-
-def _searxng_search(base: str, query: str, max_results: int) -> list[dict]:
-    url = f"{base}/search?{urllib.parse.urlencode({'q': query, 'format': 'json'})}"
-    check_url(url)
-    parsed = urllib.parse.urlparse(url)
-    with _session_for(url) as session:   # pinned to the validated IP
-        resp = session.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=False,
-                           headers={"User-Agent": _USER_AGENT,
-                                    "Host": _host_header(parsed)})
-        _refuse_redirect(resp, "The SearXNG search backend")
-        resp.raise_for_status()
-        items = resp.json().get("results", [])[:max_results]
-    out = []
-    for item in items:
-        out.append({
-            "title": str(item.get("title", ""))[:300],
-            "url": str(item.get("url", "")),
-            "snippet": str(item.get("content", ""))[:500],
-        })
-    return out
-
-
-class _DDGParser(html.parser.HTMLParser):
-    """Parse DuckDuckGo's html.duckduckgo.com result page.
-
-    Result anchors carry class ``result__a``; snippets ``result__snippet``.
-    Anchor hrefs are //duckduckgo.com/l/?uddg=<encoded-target> redirects -
-    the real URL is extracted from the uddg parameter."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.results: list[dict] = []
-        self._in_title = False
-        self._in_snippet = False
-        self._current: Optional[dict] = None
-
-    @staticmethod
-    def _classes(attrs) -> set:
-        return set((dict(attrs).get("class") or "").split())
-
-    @staticmethod
-    def _real_url(href: str) -> str:
-        if href.startswith("//"):
-            href = "https:" + href
-        parsed = urllib.parse.urlparse(href)
-        if parsed.path.startswith("/l/"):
-            qs = urllib.parse.parse_qs(parsed.query)
-            target = qs.get("uddg", [""])[0]
-            if target:
-                return target
-        return href
-
-    def handle_starttag(self, tag, attrs):
-        classes = self._classes(attrs)
-        if tag == "a" and "result__a" in classes:
-            href = dict(attrs).get("href", "")
-            self._current = {"title": "", "url": self._real_url(href),
-                             "snippet": ""}
-            self._in_title = True
-        elif "result__snippet" in classes and self.results:
-            self._in_snippet = True
-
-    def handle_endtag(self, tag):
-        if self._in_title and tag == "a":
-            self._in_title = False
-            if self._current and self._current["url"]:
-                self.results.append(self._current)
-            self._current = None
-        elif self._in_snippet and tag in ("a", "div", "td", "span"):
-            self._in_snippet = False
-
-    def handle_data(self, data):
-        if self._in_title and self._current is not None:
-            self._current["title"] += data
-        elif self._in_snippet and self.results:
-            self.results[-1]["snippet"] += data
-
-
-def _ddg_search(query: str, max_results: int) -> list[dict]:
-    url = "https://html.duckduckgo.com/html/"
-    check_url(url)
-    parsed = urllib.parse.urlparse(url)
-    with _session_for(url) as session:   # pinned to the validated IP
-        resp = session.post(   # the HTML endpoint prefers POST for queries
-            url,
-            data={"q": query},
-            timeout=_DEFAULT_TIMEOUT,
-            allow_redirects=False,
-            headers={"User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
-        )
-        _refuse_redirect(resp, "The DuckDuckGo search backend")
-        resp.raise_for_status()
-        text = resp.text
-    parser = _DDGParser()
-    try:
-        parser.feed(text)
-    except Exception:
-        # Malformed results HTML: return whatever was parsed so far instead of
-        # failing the whole search. The HTTP status was already checked above,
-        # so this guards only the lenient scrape, not network errors.
-        pass
-    out = []
-    for item in parser.results[:max_results]:
-        out.append({
-            "title": item["title"].strip()[:300],
-            "url": item["url"],
-            "snippet": " ".join(item["snippet"].split())[:500],
-        })
-    return out
+    from localm.web_retrieval.providers import search
+    return [r.to_legacy() for r in search(query, max_results)]
 
 
 def format_results(results: list[dict]) -> str:

@@ -59,10 +59,10 @@ units = ["media", "media_workflows", "setup_llama", "browser", "voice"]
 
 [[tier]]
 name = "services"
-role = "Host services composed from one or more platform units: browser sessions over the key store, the cross-install GPU registry over instance discovery, agent memory over the rag store, the self-updater and the proxy client over failure reporting, the native app identity, the remote-model gate, the issue tracker."
+role = "Host services composed from one or more platform units: browser sessions over the key store, the cross-install GPU registry over instance discovery, agent memory over the rag store, the self-updater and the proxy client over failure reporting, the native app identity, the remote-model gate, the issue tracker, web retrieval (search providers, page reading and evidence selection) over the network policy."
 units = [
     "sessions", "gpu_registry", "memory", "updater", "_apply_update", "_proxy",
-    "issue_tracker", "applaunch", "remotegate",
+    "issue_tracker", "applaunch", "remotegate", "web_retrieval",
 ]
 
 [[tier]]
