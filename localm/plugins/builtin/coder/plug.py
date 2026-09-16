@@ -564,7 +564,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         # expand INTO a UNC string after a pre-expansion check had already
         # cleared it - the check must see the same string that reaches
         # is_dir()/resolve(). Same guard as run_coder_task in
-        # mcpserver/server.py. This is the branch the OWNER (or open-mode's
+        # mcpserver/tools/media_coder.py. This is the branch the OWNER (or open-mode's
         # default-owner caller) and coder:full keys take - the `restricted`
         # branch above already
         # ignores req.cwd entirely and uses root_dir instead, so it needs no

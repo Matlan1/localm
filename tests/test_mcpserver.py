@@ -1712,7 +1712,7 @@ class TestNewToolCalls:
     def test_run_doctor(self):
         server, _ = _server()
         fake_proc = MagicMock(stdout="doctor-ok", stderr="", returncode=0)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake_proc) as mock_run:
+        with patch("localm.plugins.mcpserver.tools.diagnostics.subprocess.run", return_value=fake_proc) as mock_run:
             resp = _req(server, "tools/call", {"name": "run_doctor", "arguments": {}})
         assert resp["result"]["isError"] is False
         assert "doctor-ok" in resp["result"]["content"][0]["text"]
@@ -1729,7 +1729,7 @@ class TestNewToolCalls:
         from localm.config import home_dir
         server, _ = _server()
         fake_proc = MagicMock(stdout="doctor-ok", stderr="", returncode=0)
-        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake_proc) as mock_run:
+        with patch("localm.plugins.mcpserver.tools.diagnostics.subprocess.run", return_value=fake_proc) as mock_run:
             _req(server, "tools/call", {"name": "run_doctor", "arguments": {}})
         env = mock_run.call_args.kwargs["env"]
         assert env["LOCALM_HOME"] == str(home_dir())

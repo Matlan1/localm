@@ -149,7 +149,7 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     guard). A raw ``entry["path"]`` / ``entry.get("path")`` crashes on a non-dict
     or null/int path. The known consumers, all guarded, are: this module
     (list/info/vision/external/alias/dedup/sync), the MCP ``list_models``
-    (plugins/mcpserver/server.py), the GUI ``/api/models`` + ``/api/vram-estimate``
+    (plugins/mcpserver/tools/models.py), the GUI ``/api/models`` + ``/api/vram-estimate``
     (plugins/gui/routes/models/inventory.py), the API ``model_detail``
     (inference/routes/models.py), the pull dedup scan (model_manager/pull.py), and
     the ComfyUI scan (model_manager/scan.py). There is no blanket syntactic linter
