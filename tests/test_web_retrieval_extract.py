@@ -170,6 +170,17 @@ class TestTextRendering:
         for bad in ("<div><p>ok<", "<<<>>>", "<a href='x", "", None):
             assert isinstance(extract_page(bad).text, str)
 
+    def test_thousands_of_nested_unclosed_tags_do_not_overflow(self):
+        deep = "<div>" * 5000 + f"<p>{_LONG}</p>" + "</div>" * 5000
+        page = extract_page(html_page(deep))
+        assert _LONG in page.text
+
+    def test_deeply_nested_main_still_selected(self):
+        deep = "<div>" * 300 + f"<main><p>{_LONG}</p></main>" + "</div>" * 300
+        page = extract_page(html_page(f"<nav>Menu one two</nav>{deep}"))
+        assert _LONG in page.text
+        assert "Menu one" not in page.text
+
     def test_html_to_main_text_is_the_text(self):
         markup = html_page(f"<main><p>{_LONG}</p></main>")
         assert html_to_main_text(markup) == extract_page(markup).text

@@ -57,6 +57,9 @@ _LINK_BLOCK_TAGS = frozenset({"ul", "ol", "dl", "div", "section", "table",
 _HEADINGS = ("h1", "h2", "h3", "h4", "h5", "h6")
 
 _MIN_REGION_CHARS = 200
+#: Open elements beyond this depth are not pushed; their content attaches to
+#: the deepest open element.
+_MAX_DEPTH = 200
 _LINK_DENSITY_THRESHOLD = 0.65
 _LINK_DENSITY_MIN_ANCHORS = 3
 _TITLE_CAP = 300
@@ -81,7 +84,9 @@ class _Node:
 class _TreeBuilder(html.parser.HTMLParser):
     """Build a ``_Node`` tree. An end tag closes the nearest matching open
     element (and everything opened after it); an unmatched end tag is
-    ignored; void elements never open."""
+    ignored; void elements never open; an element opened at depth
+    ``_MAX_DEPTH`` or deeper is added but never opened, so its content
+    attaches to the deepest open element."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -97,7 +102,7 @@ class _TreeBuilder(html.parser.HTMLParser):
     def handle_starttag(self, tag, attrs):
         t = tag.lower()
         node = self._add(t, attrs)
-        if t not in _VOID_TAGS:
+        if t not in _VOID_TAGS and len(self._open) < _MAX_DEPTH:
             self._open.append(node)
 
     def handle_startendtag(self, tag, attrs):
