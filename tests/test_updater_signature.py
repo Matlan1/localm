@@ -231,7 +231,7 @@ def test_sign_release_script_roundtrip(tmp_path, monkeypatch):
         # file. The import runs while the test executes, so a plain pytest.skip
         # is enough; the rest of the file keeps running.
         pytest.skip(f"{script} not present (gitignored maintainer-only "
-                    "release tooling, AGENTS.md rule 6) - skipping the "
+                    "release tooling) - skipping the "
                     "sign_release.py round-trip")
     spec = importlib.util.spec_from_file_location("sign_release", script)
     mod = importlib.util.module_from_spec(spec)

@@ -1015,8 +1015,8 @@ function foldFilledCount(fold) {
 }
 
 /** Refresh one fold's "n set" badge and return that count. A collapsed fold
- *  holding live overrides would otherwise read as empty, which is the hidden
- *  problem AGENTS.md rule 5 forbids; the badge says so without opening it. */
+ *  holding live overrides would otherwise silently read as empty; the badge
+ *  says so without opening it. */
 export function updateAdvancedCount(fold) {
   const n = foldFilledCount(fold);
   const badge = fold.querySelector("summary .adv-fold-count");

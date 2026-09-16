@@ -3,8 +3,8 @@
 # when localm will not start AND no Python is available (e.g. setup failed before
 # uv provisioned one). It reads the proxy URL+token from localm/config.py, shows
 # exactly what will be sent, and files an account-less GitHub issue via the proxy
-# after you confirm. A failed or declined send is NEVER reported as success
-# (AGENTS.md rule 5): it saves the report and points at the maintainer email.
+# after you confirm. A failed or declined send is NEVER reported as success:
+# it saves the report and points at the maintainer email.
 #
 # Args (passed through by report-issue.bat): --summary --detail --log --yes
 # No param()/[CmdletBinding()] on purpose: the --foo pass-through args must land in

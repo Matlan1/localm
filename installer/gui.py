@@ -184,7 +184,7 @@ class Plan:
 
 
 class StepFailed(Exception):
-    """A step that must not be reported as success (AGENTS.md rule 5)."""
+    """A step that must not be reported as success."""
 
 
 def uv_argv(*args: str) -> List[str]:

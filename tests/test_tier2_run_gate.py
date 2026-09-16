@@ -21,8 +21,8 @@ if not _PATH.is_file():
     # clone (or a worktree that did not get it copied in) does not have this file.
     # Skip with a reason rather than importing, so collection never hard-crashes
     # over a file the repo itself excludes.
-    pytest.skip(f"{_PATH} not present (gitignored maintainer-only harness, "
-               "AGENTS.md rule 6) - skipping tests that need it",
+    pytest.skip(f"{_PATH} not present (gitignored maintainer-only harness) "
+               "- skipping tests that need it",
                allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("run_gate", _PATH)
 run_gate = importlib.util.module_from_spec(_spec)

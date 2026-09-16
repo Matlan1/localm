@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Shared environment for the GUI end-to-end (real-browser) test. Everything here
 // is resolved at runtime relative to the repo - no hardcoded absolute or
-// machine-specific paths (AGENTS.md rule 1), and it depends only on this repo's
-// own venv + a throwaway data dir (rule 4).
+// machine-specific paths, and it depends only on this repo's own venv + a
+// throwaway data dir.
 
 import path from "node:path";
 import { existsSync } from "node:fs";

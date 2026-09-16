@@ -3,8 +3,8 @@
 
 An exception, a log line, a CLI print, a pytest skip reason, or an assert
 message that reads "(see dev-notes/foo.md)" or "(issues/bar.txt)" points a
-reader at a file that exists only on the maintainer's machine (AGENTS.md
-rule 6) - this repo is public. Five such sites shipped: a
+reader at a file that exists only on the maintainer's machine - this repo
+is public. Five such sites shipped: a
 click.ClickException in setup_llama.py, a logger.debug call in
 gpu_usage.py, a print() in check_llama_abi.py, a pytest skip reason in
 conftest.py, and an assert message in test_gpu_split_native_vulkan.py.
@@ -176,4 +176,4 @@ def test_no_tracked_python_file_leaks_a_gitignored_path_in_a_runtime_string():
     assert not all_hits, (
         "a tracked Python file's runtime string (not a docstring) names a "
         "gitignored internal path that does not exist outside the "
-        "maintainer's machine (AGENTS.md rule 6):\n" + "\n".join(all_hits))
+        "maintainer's machine:\n" + "\n".join(all_hits))

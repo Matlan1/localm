@@ -238,8 +238,8 @@ let _instanceUnknownWarned = false;   // one warning per breakage, re-armed on s
  *  wipe nothing) and it is emphatically not a match either, so it lands on the
  *  same "unknown" state an older server without an instance_id produces: keep
  *  showing whatever is cached, never authorise a write into a store we have not
- *  identified. Loud rather than silent (AGENTS.md rule 5) - the round trip that
- *  produced this used to be swallowed with no trace at all. */
+ *  identified. Loud rather than silent - the round trip that produced this
+ *  used to be swallowed with no trace at all. */
 function markInstanceUnknown(why) {
   chat.instanceState = "unknown";
   chat.instanceMatch = false;
@@ -439,7 +439,7 @@ export function lsSetScoped(key, value) {
 function _writeScoped(key, value) {
   if (chat.privacy) return;
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
-    // Loud, not silent (AGENTS.md rule 5): a key reaching here that is not in
+    // Loud, not silent: a key reaching here that is not in
     // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw
     // so a real write still succeeds; tests-js/privacy-scoped-keys.test.mjs
     // source-scans every lsSetScoped call site and fails before this ever
@@ -1208,7 +1208,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     } catch {
       // Matches the image branch above: a real failure (permission denied,
       // insecure context) must never be reported as "copied" - that is
-      // claiming a step happened that did not (AGENTS.md rule 5).
+      // claiming a step happened that did not.
       toast(t("chat.copyBlocked"), true);
     }
   };

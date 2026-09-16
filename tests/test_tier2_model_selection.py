@@ -18,8 +18,8 @@ if not _PATH.is_file():
     # scripts/tier2_gpu_split/ is gitignored, maintainer-only tooling, so a
     # fresh clone or an uncopied worktree does not have this file. Skip with a
     # reason instead of failing collection.
-    pytest.skip(f"{_PATH} not present (gitignored maintainer-only harness, "
-               "AGENTS.md rule 6) - skipping tests that need it",
+    pytest.skip(f"{_PATH} not present (gitignored maintainer-only harness) "
+               "- skipping tests that need it",
                allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("model_selection", _PATH)
 model_selection = importlib.util.module_from_spec(_spec)

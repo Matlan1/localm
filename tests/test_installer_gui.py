@@ -350,7 +350,7 @@ class TestUvResolution:
     def test_a_machine_with_no_uv_reports_it_instead_of_running_nothing(
             self, machine, tmp_path, monkeypatch):
         """No uv anywhere is a step that FAILS, never a command handed to the
-        OS that cannot start (AGENTS.md rule 5)."""
+        OS that cannot start."""
         assert machine.find_uv(tmp_path) is None
         with pytest.raises(machine.StepFailed) as excinfo:
             self._commands(machine, monkeypatch)
@@ -581,7 +581,7 @@ class TestToolingLocation:
 
 
 class TestHonestFailures:
-    """AGENTS.md rule 5: a step that failed is never reported as done."""
+    """A step that failed is never reported as done."""
 
     def test_an_unanswerable_torch_probe_is_not_no_torch_needed(
             self, gui, monkeypatch):

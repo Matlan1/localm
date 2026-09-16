@@ -133,7 +133,7 @@ class TestMissingFileIsSafeNotSilent:
 
         assert after != before, "a missing file must still force a cache-bust"
         assert any("vanished.js" in r.message for r in caplog.records), \
-            "the read failure must be logged, not silent (AGENTS.md rule 5)"
+            "the read failure must be logged, not silent"
 
     def test_route_still_returns_200(self, fake_static, monkeypatch):
         self._with_a_ghost_file(fake_static, monkeypatch)

@@ -86,7 +86,7 @@ test("boot survives CORRUPT localStorage (does not blank the shell)", async ({ p
   expect(chatChildren, "chat view still renders").toBeGreaterThan(3);
 
   expect(pageErrors, "corrupt storage must not throw an uncaught error").toEqual([]);
-  // ...and the corruption is SURFACED, not silently swallowed (AGENTS.md rule 5).
+  // ...and the corruption is SURFACED, not silently swallowed.
   expect(warnings.some((w) => /corrupt localStorage/i.test(w)),
     "a warning should surface the corrupt localStorage entry").toBe(true);
 });

@@ -299,8 +299,8 @@ def test_clear_erases_the_corrections_sidecars_too(home):
     `proposed_text`) and `.corrections-dismissed.json` (a rejected proposal's text,
     casefolded, inside its dedup key). `localm memory clear -y` still reported
     "Erased N remembered and M forgotten fact(s)." and exited 0 while a grep of
-    the home directory returned the sentence verbatim - exactly what AGENTS.md
-    rule 5 forbids for a privacy step."""
+    the home directory returned the sentence verbatim - a privacy step must
+    never report success while leaving the data behind."""
     _run("add", "My bank PIN reminder is my dog Rex birth year")
     store = _cli_store()
     target = store.all()[0].id
