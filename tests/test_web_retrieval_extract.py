@@ -195,12 +195,12 @@ class TestTextRendering:
         assert "intro" in page.text and _LONG in page.text
 
     def test_adversarial_nesting_is_processed_in_linear_cpu_time(self):
-        markup = "<div>" * 150_000 + _LONG
+        markup = "<div>" * 200_000 + _LONG
         started = time.process_time()
         page = extract_page(markup)
         cpu = time.process_time() - started
         assert _LONG in page.text
-        assert cpu < 6.0, f"extract_page used {cpu:.1f}s of CPU"
+        assert cpu < 4.0, f"extract_page used {cpu:.1f}s of CPU"
 
 
 class TestFormWrappedPages:
