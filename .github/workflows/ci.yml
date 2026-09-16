@@ -359,22 +359,21 @@ jobs:
   # scripts/affected_tests.py selects for the diff, not the suite.
   #
   # scripts/run_affected_tests.py turns the selector's exit status into what
-  # runs, and never exits 0 for anything it did not run:
+  # runs, never runs the whole suite, and never exits 0 for anything it did
+  # not run:
   #   0 + paths     pytest runs exactly those files
   #   0 + sentinel  no test file is affected (a docs-only change): no pytest
-  #   3             the selection exceeds a quarter of the suite: the whole
-  #                 unit suite runs once on this host, without coverage
-  #                 (--wide full); the two-platform matrix stays behind the
-  #                 `full-ci` label
+  #   3             the selection exceeds a quarter of the suite: the selector
+  #                 runs again at --depth 0 and that selection runs; still
+  #                 wide, empty or failed at depth 0 fails the job, which
+  #                 means the change needs the `full-ci` matrix
   #   anything else the job fails: a crashed selector, an empty selection,
   #                 or a path that is not an existing tests/**/test_*.py
-  # The selection, its reasons and the pytest command line go to the job
-  # summary.
+  # The selection, its depth, its reasons and the pytest command line go to
+  # the job summary.
   python-pr-gate:
     name: Python PR gate (lock, hygiene, ruff, affected tests)
     runs-on: ubuntu-latest
-    # Bounds the wide fallback, a whole unit run on this host; a targeted run
-    # is far shorter.
     timeout-minutes: 30
     if: github.event_name == 'pull_request'
     steps:
@@ -415,7 +414,7 @@ jobs:
         run: ruff check .
 
       - name: Affected tests
-        run: python scripts/run_affected_tests.py --depth 1 --wide full
+        run: python scripts/run_affected_tests.py --depth 1
 
   # Validate the hand-written ctypes binding against the ACTUAL upstream binary.
   # Heavy (downloads the cpu prebuilt) and checks a MOVING upstream target, so it

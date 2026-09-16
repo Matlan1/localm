@@ -2,14 +2,15 @@
 """scripts/run_affected_tests.py, the per-PR Python gate, and the ci.yml job
 that runs it.
 
-The wrapper's contract is that pytest's exit status becomes the job's, and
-that every way the selection can be wrong or too wide is refused rather than
-read as green: a selector exit 3 runs the whole unit suite (or fails, by flag),
-a selector crash fails, an empty selection fails, a path that is not an
-existing tests/**/test_*.py fails, and only the nothing-affected sentinel on
-its own skips pytest. The last section binds the wrapper to the real tree and
-pins the shape of the ci.yml job so the gate cannot be quietly narrowed,
-label-gated or made non-blocking.
+The wrapper's contract is that pytest's exit status becomes the job's, that
+it never runs the whole suite, and that every way the selection can be wrong
+or too wide is refused rather than read as green: a selector exit 3 is retried
+at depth 0 and fails when that is wide, empty or failed too, a selector crash
+fails, an empty selection fails, a path that is not an existing
+tests/**/test_*.py fails, and only the nothing-affected sentinel on its own
+skips pytest. The last section binds the wrapper to the real tree and pins the
+shape of the ci.yml job so the gate cannot be quietly narrowed, label-gated or
+made non-blocking.
 """
 
 import importlib.util
@@ -141,20 +142,77 @@ def test_any_other_exit_status_is_a_failure_even_with_a_plausible_list(rat, repo
 
 def test_selected_runs_exactly_the_selection_with_the_unit_marker(rat):
     s = rat.Selection("selected", paths=["tests/test_a.py", "tests/sub/test_b.py"])
-    assert rat.pytest_args(s, "full", ["-x"]) == [
+    assert rat.pytest_args(s, ["-x"]) == [
         "tests/test_a.py", "tests/sub/test_b.py", "-m", "not integration", "-n", "auto", "-x"]
 
 
-def test_wide_full_runs_the_whole_unit_suite_without_coverage(rat):
-    args = rat.pytest_args(rat.Selection("wide"), "full", [])
-    assert args == ["tests", "-m", "not integration", "-n", "auto"]
-    assert not any(a.startswith("--cov") for a in args)
+def test_wide_nothing_and_failed_run_no_pytest_and_never_the_whole_suite(rat):
+    for mode in ("wide", "nothing", "failed"):
+        assert rat.pytest_args(rat.Selection(mode), []) is None
+    assert "tests" not in rat.pytest_args(rat.Selection("selected", paths=["tests/test_a.py"]), [])
 
 
-def test_wide_fail_nothing_and_failed_run_no_pytest(rat):
-    assert rat.pytest_args(rat.Selection("wide"), "fail", []) is None
-    assert rat.pytest_args(rat.Selection("nothing"), "full", []) is None
-    assert rat.pytest_args(rat.Selection("failed"), "full", []) is None
+# --- select: the depth-0 retry of a wide selection ----------------------------
+
+def _selector_by_depth(monkeypatch, rat, by_depth):
+    calls = []
+
+    def fake(depth, base, files):
+        calls.append(depth)
+        return by_depth[depth]
+
+    monkeypatch.setattr(rat, "_run_selector", fake)
+    return calls
+
+
+def test_a_wide_depth_one_selection_is_retried_at_depth_zero_and_that_one_runs(
+        rat, repo, monkeypatch):
+    calls = _selector_by_depth(monkeypatch, rat, {
+        1: CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+                            "700 of 800 test files affected by 1 changed file(s)\nWIDE: 88% ..."),
+        0: CompletedProcess([], 0, "tests/test_a.py  # imports localm.a\n",
+                            "1 of 800 test files affected by 1 changed file(s)")})
+    monkeypatch.setattr(rat, "REPO", repo)
+    s = rat.select(1, "origin/master", None)
+    assert calls == [1, 0]
+    assert s.mode == "selected" and s.depth == 0 and s.paths == ["tests/test_a.py"]
+    assert s.wider is not None and s.wider.mode == "wide" and s.wider.depth == 1
+    text = rat.render_summary(s, rat.pytest_args(s, []))
+    assert "selected at `--depth 0`" in text
+    assert "at `--depth 1` was wider" in text and "WIDE: 88%" in text
+    assert "1 of 800 test files" in text
+
+
+@pytest.mark.parametrize("retry", [
+    CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n", "WIDE: 40%"),
+    CompletedProcess([], 0, "tests/NO_TEST_FILE_IS_AFFECTED\n", "0 of 800 ..."),
+    CompletedProcess([], 1, "tests/AFFECTED_TESTS_FAILED_SEE_STDERR\n", "Traceback"),
+    CompletedProcess([], 0, "", ""),
+], ids=["still-wide", "nothing", "crash", "empty"])
+def test_a_depth_zero_retry_that_selects_nothing_keeps_the_wide_result(
+        rat, repo, monkeypatch, retry):
+    """A hub-module change whose depth-0 selection is not a list of test files
+    is wide, never nothing: the job must fail rather than run no test."""
+    calls = _selector_by_depth(monkeypatch, rat, {
+        1: CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+                            "WIDE: 88%"),
+        0: retry})
+    monkeypatch.setattr(rat, "REPO", repo)
+    s = rat.select(1, "origin/master", None)
+    assert calls == [1, 0]
+    assert s.mode == "wide" and s.depth == 1
+    assert "WIDE: 88%" in s.detail and "at --depth 0:" in s.detail
+    assert rat.pytest_args(s, []) is None
+
+
+def test_a_wide_selection_at_depth_zero_is_not_retried(rat, repo, monkeypatch):
+    calls = _selector_by_depth(monkeypatch, rat, {
+        0: CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+                            "WIDE: 30%")})
+    monkeypatch.setattr(rat, "REPO", repo)
+    s = rat.select(0, "origin/master", None)
+    assert calls == [0]
+    assert s.mode == "wide" and s.depth == 0
 
 
 # --- main: exit status and the summary ----------------------------------------
@@ -209,40 +267,32 @@ def test_nothing_affected_runs_no_pytest_and_passes(rat, repo, monkeypatch):
     assert "No test file is affected" in text and "pytest was not run" in text
 
 
-def test_wide_runs_the_whole_unit_suite_and_propagates_its_status(rat, repo, monkeypatch):
-    for pytest_status in (0, 1):
-        status, run_pytest, text = _drive(
-            rat, monkeypatch, repo,
-            _cp(3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
-                "800 of 800 test files affected by 3 changed file(s)\nWIDE: 100% ..."),
-            pytest_status=pytest_status, argv=["--wide", "full"])
-        assert status == pytest_status
-        run_pytest.assert_called_once_with(["tests", "-m", "not integration", "-n", "auto"])
-        assert "wider than the selector's limit" in text
-        assert "whole unit suite runs once" in text
-        assert "WIDE: 100%" in text
-
-
-def test_wide_fail_flag_fails_without_running_pytest(rat, repo, monkeypatch):
+def test_wide_at_both_depths_fails_without_running_pytest(rat, repo, monkeypatch):
+    """The same wide result at depth 1 and at the depth-0 retry: the job fails,
+    nothing runs, and the summary says the change needs the full suite."""
     status, run_pytest, text = _drive(
         rat, monkeypatch, repo,
-        _cp(3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n", "WIDE: 100% ..."),
-        argv=["--wide", "fail"])
+        _cp(3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+            "800 of 800 test files affected by 3 changed file(s)\nWIDE: 100% ..."))
     assert status == 1
     run_pytest.assert_not_called()
+    assert "wider than the selector's limit" in text and "at `--depth 0`" in text
     assert "job fails" in text and "needs the full suite" in text
+    assert "never runs the whole suite" in text
+    assert "WIDE: 100%" in text
 
 
 def test_wide_is_never_treated_as_nothing_affected(rat, repo, monkeypatch):
     """The wide sentinel arrives with exit 3 AND a path pytest would refuse;
-    neither half may read as a docs-only change."""
+    neither half may read as a docs-only change, at either depth."""
     for stdout in ("tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
                    "tests/NO_TEST_FILE_IS_AFFECTED\n", ""):
-        status, run_pytest, text = _drive(rat, monkeypatch, repo, _cp(3, stdout, "WIDE"),
-                                          argv=["--wide", "fail"])
-        assert status == 1, stdout
-        run_pytest.assert_not_called()
-        assert "No test file is affected" not in text
+        for depth in ("0", "1"):
+            status, run_pytest, text = _drive(rat, monkeypatch, repo, _cp(3, stdout, "WIDE"),
+                                              argv=["--depth", depth])
+            assert status == 1, (stdout, depth)
+            run_pytest.assert_not_called()
+            assert "No test file is affected" not in text
 
 
 def test_a_selector_crash_fails_without_running_pytest(rat, repo, monkeypatch):
@@ -315,6 +365,8 @@ def test_selector_flags_are_passed_through(rat, repo, monkeypatch):
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     assert rat.main(["--depth", "2", "--base", "origin/dev", "--files", "a.py", "b.md"]) == 0
     assert seen == {"depth": 2, "base": "origin/dev", "files": ["a.py", "b.md"]}
+    assert rat.main(["--depth", "0"]) == 0
+    assert seen["depth"] == 0
     assert rat.main([]) == 0
     assert seen == {"depth": 1, "base": "origin/master", "files": None}
 
@@ -370,7 +422,7 @@ def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
 
     runs = [s.get("run", "") for s in job["steps"]]
     wanted = ["uv lock --check", "python scripts/check_hygiene.py", "ruff check .",
-              "python scripts/run_affected_tests.py --depth 1 --wide full"]
+              "python scripts/run_affected_tests.py --depth 1"]
     positions = []
     for cmd in wanted:
         hits = [i for i, r in enumerate(runs) if cmd in r]
@@ -380,6 +432,9 @@ def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
     for step in job["steps"]:
         assert not step.get("continue-on-error"), f"{step.get('name')} must be able to fail the job"
         assert step.get("if") is None, f"{step.get('name')} must run unconditionally"
+    tests_step = [r for r in runs if "run_affected_tests.py" in r][0]
+    assert "--wide" not in tests_step and "pytest tests" not in tests_step, (
+        "the gate runs the selection only, never the whole suite")
 
 
 def test_the_full_ci_matrix_is_left_in_place_as_its_own_gate():

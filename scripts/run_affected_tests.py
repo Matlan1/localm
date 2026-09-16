@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Run the test files scripts/affected_tests.py selects for a change, as the
-per-PR Python gate.
+per-PR Python gate. It never runs the whole suite.
 
 The selector's exit status and output decide what runs:
 
   selected   exit 0 and one or more paths: pytest runs exactly those files.
   nothing    exit 0 and the NO_TEST_FILE_IS_AFFECTED sentinel alone: pytest is
              not run and this script exits 0.
-  wide       exit 3 (the selection exceeds the selector's --max-share):
-             --wide full runs the whole unit suite once on this host, without
-             coverage; --wide fail exits 1 without running pytest.
+  wide       exit 3 (the selection exceeds the selector's --max-share): with
+             --depth above 0 the selector runs again at depth 0 and its
+             selection, if there is one, runs instead; a selection that is
+             still wide, empty or failed at depth 0 exits 1 without running
+             pytest, as does a wide selection at --depth 0.
   failed     any other exit status, no output, or a line that is not an
              existing tests/**/test_*.py file: exit 1 without running pytest.
 
@@ -18,11 +20,12 @@ pytest runs with `-m "not integration" -n auto` plus any arguments after `--`,
 and its exit status is this script's, except that 5 (every selected test was
 deselected by the marker expression) exits 0 after saying so.
 
-The selection, its reasons and the mode are printed, and appended to the file
-named by GITHUB_STEP_SUMMARY when that variable is set.
+The selection, its reasons, the depth it was computed at and the mode are
+printed, and appended to the file named by GITHUB_STEP_SUMMARY when that
+variable is set.
 
     python scripts/run_affected_tests.py [--depth N] [--base REF] [--files ...]
-                                         [--wide full|fail] [--dry-run] [-- pytest args]
+                                         [--dry-run] [-- pytest args]
 
 Stdlib only, apart from the pytest it launches.
 """
@@ -56,23 +59,27 @@ class Selection:
     reasons: dict[str, str] = field(default_factory=dict)
     detail: str = ""                            # the selector's stderr, or the reason it failed
     exit_status: int = 0
+    depth: int = 0                              # the --depth the selector ran at
+    wider: Selection | None = None              # the wide result this one replaced
 
 
-def parse_selection(exit_status: int, stdout: str, stderr: str, repo: Path | None = None) -> Selection:
+def parse_selection(exit_status: int, stdout: str, stderr: str, repo: Path | None = None,
+                    depth: int = 0) -> Selection:
     """Classify the selector's exit status and `--why` output. Every path must
     be an existing tests/**/test_*.py file under *repo*; the nothing sentinel
     counts only when it is the whole output."""
     repo = REPO if repo is None else repo
     lines = [ln.rstrip("\r") for ln in stdout.splitlines() if ln.strip()]
     if exit_status == WIDE_EXIT:
-        return Selection("wide", detail=stderr.strip(), exit_status=exit_status)
+        return Selection("wide", detail=stderr.strip(), exit_status=exit_status, depth=depth)
     if exit_status != 0:
         return Selection("failed", detail=f"selector exited {exit_status}\n{stderr.strip()}".strip(),
-                         exit_status=exit_status)
+                         exit_status=exit_status, depth=depth)
     if lines == [NOTHING_AFFECTED]:
-        return Selection("nothing", detail=stderr.strip())
+        return Selection("nothing", detail=stderr.strip(), depth=depth)
     if not lines:
-        return Selection("failed", detail="selector exited 0 and printed no selection", exit_status=1)
+        return Selection("failed", detail="selector exited 0 and printed no selection",
+                         exit_status=1, depth=depth)
     paths: list[str] = []
     reasons: dict[str, str] = {}
     for line in lines:
@@ -80,10 +87,11 @@ def parse_selection(exit_status: int, stdout: str, stderr: str, repo: Path | Non
         path = path.strip()
         if not _TEST_PATH.match(path) or not (repo / path).is_file():
             return Selection("failed", detail=f"selector printed a line that is not an existing "
-                                              f"tests/**/test_*.py file: {line!r}", exit_status=1)
+                                              f"tests/**/test_*.py file: {line!r}",
+                             exit_status=1, depth=depth)
         paths.append(path)
         reasons[path] = why.strip()
-    return Selection("selected", paths=paths, reasons=reasons, detail=stderr.strip())
+    return Selection("selected", paths=paths, reasons=reasons, detail=stderr.strip(), depth=depth)
 
 
 def _run_selector(depth: int, base: str, files: list[str] | None) -> subprocess.CompletedProcess:
@@ -98,38 +106,63 @@ def _run_pytest(args: list[str]) -> int:
     return subprocess.run([sys.executable, "-m", "pytest", *args], cwd=str(REPO)).returncode
 
 
-def pytest_args(selection: Selection, wide: str, extra: list[str]) -> list[str] | None:
+def select(depth: int, base: str, files: list[str] | None) -> Selection:
+    """The selection to run: the selector's result at *depth*, or, when that
+    is wide and *depth* is above 0, its result at depth 0 if that one selects
+    test files. A depth-0 retry that is wide, nothing or failed is returned
+    as the original wide result, carrying the retry as its detail."""
+    proc = _run_selector(depth, base, files)
+    selection = parse_selection(proc.returncode, proc.stdout, proc.stderr, depth=depth)
+    if selection.mode != "wide" or depth == 0:
+        return selection
+    proc0 = _run_selector(0, base, files)
+    narrower = parse_selection(proc0.returncode, proc0.stdout, proc0.stderr, depth=0)
+    if narrower.mode == "selected":
+        narrower.wider = selection
+        return narrower
+    selection.detail = (f"{selection.detail}\n\nat --depth 0: {narrower.mode}\n"
+                        f"{narrower.detail}").strip()
+    return selection
+
+
+def pytest_args(selection: Selection, extra: list[str]) -> list[str] | None:
     """The pytest argument list for *selection*, or None when pytest is not run."""
     if selection.mode == "selected":
         return [*selection.paths, *_PYTEST_ARGS, *extra]
-    if selection.mode == "wide" and wide == "full":
-        return ["tests", *_PYTEST_ARGS, *extra]
     return None
 
 
-def render_summary(selection: Selection, wide: str, depth: int, args: list[str] | None,
+def render_summary(selection: Selection, args: list[str] | None,
                    pytest_status: int | None = None) -> str:
-    """Markdown for the step summary: the mode, the selection with reasons,
-    and the selector's own count line."""
+    """Markdown for the step summary: the mode, the depth, the selection with
+    reasons, and the selector's own count lines."""
     lines = ["### Affected tests (python-pr-gate)", ""]
     if selection.mode == "selected":
-        lines.append(f"**{len(selection.paths)} test file(s)** selected at `--depth {depth}`; "
-                     f"pytest runs exactly those.")
+        lines.append(f"**{len(selection.paths)} test file(s)** selected at "
+                     f"`--depth {selection.depth}`; pytest runs exactly those.")
+        if selection.wider is not None:
+            lines.append(f"The selection at `--depth {selection.wider.depth}` was wider than the "
+                         f"selector's limit (exit 3); the depth-0 selection runs instead.")
     elif selection.mode == "nothing":
         lines.append("**No test file is affected** by this change; pytest was not run.")
     elif selection.mode == "wide":
-        lines.append("**Selection wider than the selector's limit** (exit 3): " + (
-            "the whole unit suite runs once on this host, without coverage."
-            if wide == "full" else "pytest was not run and the job fails; this change needs "
-                                   "the full suite."))
+        lines.append(f"**Selection wider than the selector's limit** (exit 3) at "
+                     f"`--depth {selection.depth}`" +
+                     (" and at `--depth 0`" if selection.depth > 0 else "") +
+                     ": pytest was not run and the job fails. This gate never runs the whole "
+                     "suite; this change needs the full suite (the `full-ci` label).")
     else:
         lines.append("**The selector failed**; pytest was not run and the job fails.")
     if pytest_status == PYTEST_NO_TESTS_COLLECTED:
         lines.append("")
         lines.append("pytest collected no test: every test in the selection is deselected by "
                      "`-m \"not integration\"`.")
-    if selection.detail:
-        lines += ["", "```", selection.detail, "```"]
+    details = [selection.detail]
+    if selection.wider is not None:
+        details.insert(0, f"at --depth {selection.wider.depth}: wide\n{selection.wider.detail}")
+    for detail in details:
+        if detail:
+            lines += ["", "```", detail, "```"]
     if selection.paths:
         lines += ["", "<details><summary>Selection with reasons</summary>", "", "```"]
         lines += [f"{p}  # {selection.reasons.get(p, '')}".rstrip(" #") for p in selection.paths]
@@ -150,30 +183,27 @@ def _publish(text: str) -> None:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     ap.add_argument("--depth", type=int, default=1,
-                    help="passed to the selector: follow importers this many hops (default 1)")
+                    help="passed to the selector: follow importers this many hops (default 1); "
+                         "a wide selection above 0 is retried at depth 0")
     ap.add_argument("--base", default="origin/master",
                     help="passed to the selector: ref the committed changes are diffed from")
     ap.add_argument("--files", nargs="*", help="passed to the selector: use these changed paths")
-    ap.add_argument("--wide", choices=("full", "fail"), default="full",
-                    help="on a wide selection (selector exit 3): run the whole unit suite "
-                         "without coverage, or fail (default full)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would run without running pytest")
     ap.add_argument("pytest_args", nargs="*", help="arguments after -- are passed to pytest")
     args = ap.parse_args(argv)
 
-    proc = _run_selector(args.depth, args.base, args.files)
-    selection = parse_selection(proc.returncode, proc.stdout, proc.stderr)
-    cmd = pytest_args(selection, args.wide, args.pytest_args)
+    selection = select(args.depth, args.base, args.files)
+    cmd = pytest_args(selection, args.pytest_args)
 
     if cmd is None:
-        _publish(render_summary(selection, args.wide, args.depth, cmd))
+        _publish(render_summary(selection, cmd))
         return 0 if selection.mode == "nothing" else 1
     if args.dry_run:
-        _publish(render_summary(selection, args.wide, args.depth, cmd))
+        _publish(render_summary(selection, cmd))
         return 0
     status = _run_pytest(cmd)
-    _publish(render_summary(selection, args.wide, args.depth, cmd, pytest_status=status))
+    _publish(render_summary(selection, cmd, pytest_status=status))
     if status == PYTEST_NO_TESTS_COLLECTED:
         return 0
     return status
