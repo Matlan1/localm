@@ -227,12 +227,15 @@ def select_evidence(
 ) -> list[EvidenceChunk]:
     """Pick evidence for *query* from *sources*, each ``(source_id, kind,
     text)`` in source order with *kind* ``page`` (extracted page text) or
-    ``snippet`` (the provider snippet, taken whole). Returns chunks grouped by
-    source in the given order and by offset within a source. A snippet longer
-    than *per_source* is cut at *per_source*."""
+    ``snippet`` (the provider snippet, taken whole). Each source id may appear
+    once (``ValueError`` otherwise). Returns chunks grouped by source in the
+    given order and by offset within a source. A snippet longer than
+    *per_source* is cut at *per_source*."""
     remaining = budget
     used: dict[str, int] = defaultdict(int)
     order = [sid for sid, _, _ in sources]
+    if len(set(order)) != len(order):
+        raise ValueError("select_evidence: a source id appears more than once")
     picked: dict[str, list[ScoredChunk]] = defaultdict(list)
     snippets: dict[str, str] = {}
 

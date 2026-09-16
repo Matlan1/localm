@@ -173,9 +173,11 @@ class EvidenceBundle:
 
     @property
     def grounding(self) -> str:
-        """``page-backed`` when any source is page-backed, else ``snippet-only``
-        when any evidence chunk exists, else ``failed``."""
-        if any(s.grounding == GROUNDING_PAGE_BACKED for s in self.sources):
+        """``page-backed`` when the bundle carries at least one page chunk,
+        else ``snippet-only`` when any evidence chunk exists, else ``failed``.
+        A page-backed source that contributed no chunk (budget exhausted) does
+        not make the bundle page-backed."""
+        if any(c.kind == CHUNK_PAGE for c in self.chunks):
             return GROUNDING_PAGE_BACKED
         if self.chunks:
             return GROUNDING_SNIPPET_ONLY

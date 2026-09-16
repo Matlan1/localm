@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from localm.web_retrieval import (
     make_chunks,
     query_terms,
@@ -197,6 +199,11 @@ class TestSelectEvidence:
     def test_empty_and_blank_sources_yield_nothing(self):
         assert select_evidence([("S1", "page", ""), ("S2", "snippet", "  ")],
                                QUERY) == []
+
+    def test_duplicate_source_id_is_rejected(self):
+        with pytest.raises(ValueError, match="more than once"):
+            select_evidence([("S1", "snippet", "ten chars!"),
+                             ("S1", "snippet", "ten chars!")], "q")
 
     def test_tiny_budget_selects_only_what_fits(self):
         sources = [("S1", "snippet", "short"), ("S2", "page", _doc([ANSWER]))]

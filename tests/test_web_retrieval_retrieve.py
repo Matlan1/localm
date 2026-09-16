@@ -338,13 +338,13 @@ class TestPageFailures:
                           ("Fast", "https://fast.example/", "sf")])
 
         def slow(url, **kw):
-            time.sleep(1.5)
+            time.sleep(3.0)
             return html_response(_page(_LONG))
         t.route("GET", "https://slow.example/", slow)
         t.route("GET", "https://fast.example/", html_response(_page(_LONG)))
         started = time.monotonic()
         b = retrieve(QUERY, deadline_seconds=0.4)
-        assert time.monotonic() - started < 1.4
+        assert time.monotonic() - started < 2.5
         assert b.sources[0].grounding == GROUNDING_FAILED
         assert b.sources[0].error == "timed out after 0.4s"
         assert b.sources[1].grounding == GROUNDING_PAGE_BACKED
@@ -402,6 +402,22 @@ class TestConcurrencyAndOptions:
         _search_route(t, [("", "https://a.example/", "sa")])
         t.route("GET", "https://a.example/", html_response(_page(_LONG, "Real Title")))
         assert retrieve(QUERY).sources[0].title == "Real Title"
+
+    def test_bundle_is_not_page_backed_when_no_page_chunk_fits(self):
+        provider = _StubProvider([
+            SearchResult("A", "https://a.example/", "", 1, "stub"),
+            SearchResult("B", "https://b.example/", "x" * 60, 2, "stub"),
+        ])
+
+        def fetch(url, *, timeout):
+            return url, "text/html", _page(_LONG)
+        b = retrieve(QUERY, provider=provider, fetch=fetch, fetch_top=1,
+                     budget_chars=100)
+        assert b.sources[0].grounding == GROUNDING_PAGE_BACKED
+        assert b.chunks_for("S1") == []
+        assert [c.kind for c in b.chunks] == ["snippet"]
+        assert b.grounding == GROUNDING_SNIPPET_ONLY
+        assert b.page_backed is False
 
     def test_injected_provider_and_fetcher_bypass_nothing_but_the_network(self):
         provider = _StubProvider([

@@ -5,6 +5,8 @@ a short article."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from localm.netpolicy import html_to_text
@@ -175,11 +177,52 @@ class TestTextRendering:
         page = extract_page(html_page(deep))
         assert _LONG in page.text
 
-    def test_deeply_nested_main_still_selected(self):
+    def test_main_within_the_depth_cap_is_selected(self):
+        deep = "<div>" * 150 + f"<main><p>{_LONG}</p></main>" + "</div>" * 150
+        page = extract_page(html_page(f"<nav>Menu one two</nav>{deep}"))
+        assert page.region == "main"
+        assert _LONG in page.text and "Menu one" not in page.text
+
+    def test_main_beyond_the_depth_cap_survives_through_the_body_fallback(self):
         deep = "<div>" * 300 + f"<main><p>{_LONG}</p></main>" + "</div>" * 300
         page = extract_page(html_page(f"<nav>Menu one two</nav>{deep}"))
+        assert page.region == "body"
+        assert _LONG in page.text and "Menu one" not in page.text
+
+    def test_content_after_a_premature_body_end_tag_is_kept(self):
+        page = extract_page(
+            f"<html><body><p>intro</p></body><div><p>{_LONG}</p></div></html>")
+        assert "intro" in page.text and _LONG in page.text
+
+    def test_adversarial_nesting_is_processed_in_linear_cpu_time(self):
+        markup = "<div>" * 150_000 + _LONG
+        started = time.process_time()
+        page = extract_page(markup)
+        cpu = time.process_time() - started
         assert _LONG in page.text
-        assert "Menu one" not in page.text
+        assert cpu < 6.0, f"extract_page used {cpu:.1f}s of CPU"
+
+
+class TestFormWrappedPages:
+    def test_page_wrapped_in_one_form_is_extracted(self):
+        page = extract_page(html_page(
+            f"<form id='aspnetForm'><div><h1>Title</h1><p>{_LONG}</p>"
+            f"<p>{_LONG}</p></div></form>"))
+        assert _LONG in page.text
+        assert "Title" in page.text
+
+    def test_main_wrapped_in_one_form_is_extracted(self):
+        page = extract_page(html_page(
+            f"<nav>Menu one two</nav><main><form><div><p>{_LONG}</p>"
+            f"<p>{_LONG}</p></div></form></main>"))
+        assert page.region == "main"
+        assert _LONG in page.text and "Menu one" not in page.text
+
+    def test_small_form_inside_content_is_still_removed(self):
+        page = extract_page(html_page(
+            f"<main><p>{_LONG}</p><p>{_LONG}</p><form><label>Email</label>"
+            "<button>Subscribe now</button></form></main>"))
+        assert "Subscribe now" not in page.text and _LONG in page.text
 
     def test_html_to_main_text_is_the_text(self):
         markup = html_page(f"<main><p>{_LONG}</p></main>")
