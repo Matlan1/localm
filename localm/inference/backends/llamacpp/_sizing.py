@@ -545,6 +545,49 @@ class VramSizingMixin:
             )
         return p.stat().st_size if p.is_file() else 0
 
+    def _gguf_parsed_tensor_entries(self):
+        """This load's own ``_gguf_tensor_offset_entries(model_path)`` result
+        (or its ``None`` failure), read at most once per instance and shared
+        by every excluded-tensor-byte probe in
+        ``_effective_model_bytes_for_vram``. Degrades to ``None`` - the same
+        outcome as a parse the function's own contract already reports as a
+        failure - on any exception, so a violation of that contract cannot
+        crash the caller."""
+        if not hasattr(self, "_gguf_parsed_entries_cache"):
+            from localm.model_manager.gguf import _gguf_tensor_offset_entries
+            try:
+                parsed = _gguf_tensor_offset_entries(Path(self.model_path))
+            except Exception as exc:  # contracted not to raise - surface if it does
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf tensor-offset parse failed (%s); VRAM sizing "
+                           "will charge the affected tensors' bytes",
+                           type(exc).__name__)
+                parsed = None
+            self._gguf_parsed_entries_cache = parsed
+        return self._gguf_parsed_entries_cache
+
+    def _gguf_excluded_bytes(self, attr: str, probe, desc: str) -> int:
+        """Probe/memoize/degrade one VRAM-excluded-tensor-byte subtraction:
+        call *probe* (no arguments) at most once per instance, cache the
+        result under *attr*, and degrade to 0 - charging those bytes as
+        still VRAM-resident - on any exception from *probe*, logged at debug
+        with *desc*. Shared by the input-layer and MoE-pinned-expert
+        subtractions in ``_effective_model_bytes_for_vram``, which differ
+        only in *probe* and *attr*."""
+        cached = getattr(self, attr, None)
+        if cached is not None:
+            return cached
+        try:
+            value = probe()
+        except Exception as exc:  # contracted not to raise - surface if it does
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("gguf %s probe failed (%s); charging those bytes for "
+                       "VRAM sizing", desc, type(exc).__name__)
+            value = None
+        result = value if value is not None else 0
+        setattr(self, attr, result)
+        return result
+
     def _effective_model_bytes_for_vram(self) -> int:
         """VRAM-resident weight bytes for THIS load: ``_model_bytes()``, minus
         every tensor llama.cpp itself never places in VRAM regardless of
@@ -563,39 +606,30 @@ class VramSizingMixin:
         Both are computed from each excluded tensor's EXACT size via its own
         file's tensor-info offsets (never a per-quantization-type size
         table), and both degrade to charging the tensor's bytes anyway on a
-        probe failure or an unparseable header. Each memoised per instance:
-        its file read happens once per load."""
+        probe failure or an unparseable header. Each subtraction's result is
+        memoised per instance; the underlying GGUF header/tensor-info parse
+        (``_gguf_tensor_offset_entries``) additionally runs at most once per
+        load, shared by both."""
         model_bytes = self._model_bytes()
+        parsed = self._gguf_parsed_tensor_entries()
 
-        input_bytes = getattr(self, "_gguf_input_layer_bytes", None)
-        if input_bytes is None:
-            from localm.model_manager.gguf import gguf_input_layer_bytes
-            try:
-                input_bytes = gguf_input_layer_bytes(Path(self.model_path))
-            except Exception as exc:  # contracted not to raise - surface if it does
-                from localm.debuglog import logger as _dbg
-                _dbg.debug("gguf input-layer byte probe failed (%s); charging "
-                           "the input layer for VRAM sizing", type(exc).__name__)
-                input_bytes = None
-            self._gguf_input_layer_bytes = input_bytes if input_bytes is not None else 0
-        model_bytes = max(0, model_bytes - self._gguf_input_layer_bytes)
+        from localm.model_manager.gguf import gguf_input_layer_bytes
+        input_bytes = self._gguf_excluded_bytes(
+            "_gguf_input_layer_bytes",
+            lambda: gguf_input_layer_bytes(self.model_path, _parsed=parsed),
+            "input-layer byte")
+        model_bytes = max(0, model_bytes - input_bytes)
 
         n_cpu_moe = getattr(self, "n_cpu_moe", 0) or 0
         if n_cpu_moe <= 0:
             return model_bytes
-        pinned = getattr(self, "_gguf_moe_pinned_bytes", None)
-        if pinned is None:
-            from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
-            try:
-                pinned = gguf_moe_pinned_expert_bytes(
-                    Path(self.model_path), n_cpu_moe)
-            except Exception as exc:  # contracted not to raise - surface if it does
-                from localm.debuglog import logger as _dbg
-                _dbg.debug("gguf MoE expert-byte probe failed (%s); charging "
-                           "the whole file for VRAM sizing", type(exc).__name__)
-                pinned = None
-            self._gguf_moe_pinned_bytes = pinned if pinned is not None else 0
-        return max(0, model_bytes - self._gguf_moe_pinned_bytes)
+        from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
+        pinned = self._gguf_excluded_bytes(
+            "_gguf_moe_pinned_bytes",
+            lambda: gguf_moe_pinned_expert_bytes(
+                self.model_path, n_cpu_moe, _parsed=parsed),
+            "MoE expert-byte")
+        return max(0, model_bytes - pinned)
 
     def _vram_holder_hint(self) -> str:
         """Best-effort: name a concrete live sibling localm instance holding
@@ -1041,12 +1075,17 @@ class VramSizingMixin:
         redundant), and this model actually has routed-expert weight tensors
         pinning would move off VRAM - probed directly rather than trusting a
         header flag, so a MoE architecture with nothing pinnable in range
-        stays silent too."""
+        stays silent too. Reuses this instance's shared parsed tensor entries
+        (see ``_gguf_parsed_tensor_entries``) rather than parsing again - by
+        the time a partial-offload notice is being considered,
+        ``_effective_model_bytes_for_vram`` has already primed it."""
         if (getattr(self, "n_cpu_moe", 0) or 0) > 0:
             return False
         from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
         try:
-            pinned = gguf_moe_pinned_expert_bytes(Path(self.model_path), 1)
+            pinned = gguf_moe_pinned_expert_bytes(
+                Path(self.model_path), 1,
+                _parsed=self._gguf_parsed_tensor_entries())
         except Exception as exc:  # contracted not to raise - surface if it does
             from localm.debuglog import logger as _dbg
             _dbg.debug("gguf MoE expert-byte probe failed (%s); no n_cpu_moe "
