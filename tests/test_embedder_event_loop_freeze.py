@@ -44,6 +44,8 @@ def hsclean():
     hs._engines_lru.clear()
     hs._inference_sems.clear()
     hs._active_model_name = None
+    hs._default_model_name = None
+    hs._last_active_model_name = None
     hs._engine = None
     hs._inference_sem = None
     yield
@@ -51,6 +53,8 @@ def hsclean():
     hs._engines_lru.clear()
     hs._inference_sems.clear()
     hs._active_model_name = None
+    hs._default_model_name = None
+    hs._last_active_model_name = None
     hs._engine = None
     hs._inference_sem = None
 
