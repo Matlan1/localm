@@ -15,6 +15,7 @@ show up here first.
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from unittest.mock import MagicMock, patch
@@ -22,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import localm.plugins.mcpserver.server as srv
+import localm.plugins.mcpserver.tools as toolpkg
 from localm.plugins.mcpserver.server import EngineCache, MCPStdioServer, build_tools
 
 # A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1), so
@@ -715,3 +717,83 @@ class TestPluginAdministration:
             reply = _call(all_tools, "uninstall_plugin", {"plugin": "p", "delete_data": True})
         assert reply["isError"] is False
         un.assert_called_once_with("p", delete_data=True)
+
+
+# --------------------------------------------------------------------- #
+#  Composition                                                          #
+# --------------------------------------------------------------------- #
+
+# Family module -> the tools it owns. Together the families partition the
+# whole table; build_tools() only merges them and applies the gates.
+FAMILIES = {
+    "chat": {"chat", "embed"},
+    "memory": {"memory_recall", "memory_append"},
+    "models": {"list_models", "search_models", "list_model_files", "pull_model",
+               "setup_embeddings", "remove_model"},
+    "media_coder": {"generate_image", "run_coder_task"},
+    "diagnostics": {"server_activity", "system_stats", "run_doctor"},
+    "plugin_admin": {"list_plugins", "install_plugin", "enable_plugin", "disable_plugin",
+                     "uninstall_plugin"},
+}
+
+
+def _build_family(name, engines):
+    mod = importlib.import_module(f"localm.plugins.mcpserver.tools.{name}")
+    if name == "memory":
+        return mod.build(enable_memory_write=True)
+    if name in ("diagnostics", "plugin_admin"):
+        return mod.build()
+    return mod.build(engines)
+
+
+class TestComposition:
+    def test_the_families_partition_the_tool_table(self):
+        engines = _engines()
+        seen = set()
+        for family, expected in FAMILIES.items():
+            built = _build_family(family, engines)
+            assert set(built) == expected, family
+            assert not (seen & set(built)), f"{family} re-defines {seen & set(built)}"
+            seen |= set(built)
+        assert seen == set(ALL_TOOLS)
+
+    def test_a_family_builds_every_tool_it_owns_regardless_of_the_gates(self):
+        """Gating is the server's job: a family never hides its own tools."""
+        assert set(_build_family("chat", _engines())) == {"chat", "embed"}
+        mod = importlib.import_module("localm.plugins.mcpserver.tools.memory")
+        assert set(mod.build(enable_memory_write=False)) == {"memory_recall", "memory_append"}
+
+    def test_a_name_defined_by_two_families_is_a_build_time_error(self):
+        with pytest.raises(toolpkg.ToolNameCollision) as excinfo:
+            toolpkg.merge_tool_groups([("first", {"dup": {}}), ("second", {"dup": {}})])
+        message = str(excinfo.value)
+        assert "'dup'" in message and "'first'" in message and "'second'" in message
+
+    def test_merge_keeps_family_order_and_the_original_spec_objects(self):
+        first = {"x": {"description": "x"}, "y": {"description": "y"}}
+        second = {"z": {"description": "z"}}
+        merged = toolpkg.merge_tool_groups([("a", first), ("b", second)])
+        assert list(merged) == ["x", "y", "z"]
+        assert merged["x"] is first["x"] and merged["z"] is second["z"]
+
+    def test_build_tools_refuses_a_colliding_family_instead_of_overwriting(self, monkeypatch):
+        from localm.plugins.mcpserver.tools import plugin_admin
+        real_build = plugin_admin.build
+
+        def colliding():
+            tools = real_build()
+            tools["chat"] = {"description": "impostor", "inputSchema": {"type": "object",
+                             "properties": {}}, "handler": lambda args: None}
+            return tools
+
+        monkeypatch.setattr(plugin_admin, "build", colliding)
+        _force_gates(monkeypatch)
+        with pytest.raises(toolpkg.ToolNameCollision, match="'chat'"):
+            build_tools(_engines())
+
+    def test_build_tools_advertises_the_families_in_order(self, all_tools):
+        names = [n for n in all_tools if n != "_engines"]
+        expected = []
+        for family in FAMILIES:
+            expected.extend(n for n in names if n in FAMILIES[family])
+        assert names == expected
