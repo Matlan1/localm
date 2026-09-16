@@ -150,7 +150,7 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     or null/int path. The known consumers, all guarded, are: this module
     (list/info/vision/external/alias/dedup/sync), the MCP ``list_models``
     (plugins/mcpserver/server.py), the GUI ``/api/models`` + ``/api/vram-estimate``
-    (plugins/gui/routes/models.py), the API ``model_detail``
+    (plugins/gui/routes/models/inventory.py), the API ``model_detail``
     (inference/routes/models.py), the pull dedup scan (model_manager/pull.py), and
     the ComfyUI scan (model_manager/scan.py). There is no blanket syntactic linter
     for this - ``["path"]`` / ``.get("source")`` occur all over unrelated code

@@ -16,7 +16,7 @@ silently.
 registry.py backs several localm/cli/models.py commands one layer down, and
 several of its functions (alias_model, set_model_type, relocate_model) are
 called DIRECTLY IN-PROCESS from GUI HTTP routes with raw request-body values
-(localm/plugins/gui/routes/models.py) - no subprocess boundary at all.
+(localm/plugins/gui/routes/models/mutation.py) - no subprocess boundary at all.
 remove_model is additionally reachable via a spawned `localm rm <model>
 --yes` subprocess whose stdout is re-pushed into the GUI job/activity log
 verbatim (POST /api/models/remove).

@@ -104,7 +104,7 @@ class DiscoverError(Exception):
     *off* is True specifically for the net_mode=off refusal, so a caller that
     shows this to a GUI/API surface (a browser has no CLI to run) can
     substitute its own remedy instead of this message's CLI-flavored one -
-    see ``localm/plugins/gui/routes/models.py``'s ``_run_discover``."""
+    see ``localm/plugins/gui/routes/models/discovery.py``'s ``_run_discover``."""
 
     def __init__(self, message: str, *, off: bool = False):
         super().__init__(message)

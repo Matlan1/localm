@@ -131,7 +131,7 @@ def test_unload_embedder_if_matches_does_not_freeze_event_loop(hsclean, monkeypa
 
 
 def test_gui_models_route_does_not_freeze_event_loop(hsclean, monkeypatch):
-    """Same hazard, the GET /api/models route (gui/routes/models.py)."""
+    """Same hazard, the GET /api/models route (gui/routes/models/inventory.py)."""
     from localm.plugins.gui.web import attach_gui
     from fastapi import FastAPI
 
@@ -254,7 +254,7 @@ def test_embedding_warmup_does_not_freeze_event_loop(hsclean, monkeypatch):
     # so the real JobManager runs. The handler re-imports from
     # localm.inference.embedder on every request, so that is stubbed to keep the
     # background job from attempting a genuine load.
-    monkeypatch.setattr("localm.plugins.gui.routes.models.principal_id",
+    monkeypatch.setattr("localm.plugins.gui.routes.models.inventory.principal_id",
                         lambda request: None)
     monkeypatch.setattr(emb, "get_embedder", lambda **kw: _FakeLoadedEmbedder())
 
