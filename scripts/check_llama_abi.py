@@ -113,23 +113,26 @@ _ENUM_BINDINGS = (
 # --------------------------------------------------------------------------- #
 
 def _resolve_ref(ref: str) -> str:
-    """Resolve ``latest`` to the newest upstream release tag (for CI drift checks);
-    any other value is used as-is. Falls back to the pin if the lookup fails."""
+    """Resolve ``latest`` to the newest upstream release tag with an uploaded
+    build (for CI drift checks); any other value is used as-is. Falls back to
+    the pin if the lookup fails or finds nothing usable.
+
+    Goes through check_llama_pin.upstream_tags() rather than GitHub's own
+    ``releases/latest`` endpoint: that endpoint resolves to the newest
+    non-prerelease release, and upstream flags every real build release
+    prerelease=true, so it returns a semver pointer tag with no per-platform
+    assets instead of the newest build."""
     if ref != "latest":
         return ref
-    import json
-    api = f"https://api.github.com/repos/{_REPO}/releases/latest"
-    try:
-        req = urllib.request.Request(
-            api, headers={"User-Agent": "localm-abi-check",
-                          "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            tag = json.loads(r.read().decode("utf-8")).get("tag_name")
-        if tag:
-            return tag
-    except Exception as e:  # noqa: BLE001
-        print(f"  (could not resolve latest tag, using {LLAMA_ABI_REF}: {e})",
-              file=sys.stderr)
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import check_llama_pin
+    tags, err = check_llama_pin.upstream_tags()
+    if tags:
+        return tags[0]
+    print(f"  (could not resolve latest tag ({err or 'none found'}), using "
+          f"{LLAMA_ABI_REF})", file=sys.stderr)
     return LLAMA_ABI_REF
 
 

@@ -1015,13 +1015,17 @@ def _latest_tag() -> str:
         return tags[0]
     # Surface it: the user asked to track upstream and is not getting upstream's
     # newest, which they would otherwise discover much later as "localm installed
-    # an old build". Name what they got and why.
-    console.print(f"[yellow]Could not find a ggml-org/llama.cpp release with "
-                  f"uploaded assets (the release lookup was unreachable, or the "
-                  f"newest releases have not finished uploading). Installing "
-                  f"localm's confirmed build {_PINNED_TAG} instead - rerun later "
-                  "for upstream's newest.[/yellow]")
+    # an old build". Name what they got.
+    console.print(f"[yellow]No ggml-org/llama.cpp release with an uploaded build "
+                  f"was found among the most recent releases. Installing localm's "
+                  f"confirmed build {_PINNED_TAG} instead - rerun later for "
+                  "upstream's newest.[/yellow]")
     return _PINNED_TAG
+
+
+# Upstream build tags are "b" plus a monotonically increasing build number.
+# Matches scripts/check_llama_pin.py's _TAG_RE.
+_RELEASE_TAG_RE = re.compile(r"^b(\d+)$")
 
 
 def _recent_tags(limit: int = 10) -> list:
@@ -1042,13 +1046,17 @@ def _recent_tags(limit: int = 10) -> list:
         with verified_urlopen(req, timeout=10) as r:
             releases = json.loads(r.read().decode("utf-8"))
         for rel in releases:
-            if rel.get("draft") or rel.get("prerelease"):
+            if not isinstance(rel, dict) or rel.get("draft"):
                 continue
             tag = rel.get("tag_name")
+            # Not excluded on prerelease: upstream flags every real build
+            # release prerelease=true. See
+            # test_recent_tags_includes_a_prerelease_flagged_release.
+            #
             # The asset check is the whole point of scanning rather than taking
             # /releases/latest: a release is published before its CI uploads the
             # ~25 archives, so a tag with an empty assets array 404s on download.
-            if isinstance(tag, str) and tag and rel.get("assets"):
+            if isinstance(tag, str) and _RELEASE_TAG_RE.match(tag) and rel.get("assets"):
                 out.append(tag)
     except Exception as e:
         # Best-effort like its two siblings (_release_assets, _pypi_wheel_url_

@@ -454,3 +454,35 @@ def test_comments_do_not_leak_into_enum_values():
     members, unreadable = abichk._parse_enum_members(
         "A = 0, // memory map the model\n    B = 1, /* both */\n")
     assert members == {"A": 0, "B": 1} and not unreadable
+
+
+# --------------------------------------------------------------------------- #
+#  _resolve_ref: "latest" through check_llama_pin, not releases/latest         #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def pin_module():
+    """scripts/check_llama_pin imported the same way _resolve_ref imports it,
+    so monkeypatching an attribute on it is visible to the code under test."""
+    import sys
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import check_llama_pin
+    return check_llama_pin
+
+
+def test_resolve_ref_passes_through_a_non_latest_ref():
+    assert abichk._resolve_ref("b12345") == "b12345"
+
+
+def test_resolve_ref_latest_takes_the_newest_upstream_tag(pin_module, monkeypatch):
+    monkeypatch.setattr(pin_module, "upstream_tags", lambda: (["b99999", "b99998"], ""))
+    assert abichk._resolve_ref("latest") == "b99999"
+
+
+def test_resolve_ref_latest_falls_back_to_the_pin_when_nothing_is_usable(
+        pin_module, monkeypatch, capsys):
+    monkeypatch.setattr(pin_module, "upstream_tags", lambda: ([], "boom"))
+    assert abichk._resolve_ref("latest") == abichk.LLAMA_ABI_REF
+    assert "boom" in capsys.readouterr().err
