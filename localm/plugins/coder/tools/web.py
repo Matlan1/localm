@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Network tools: ``fetch_url`` and ``web_search``, both routed through
-localm.netpolicy (imported lazily inside each call)."""
+"""Network tools: ``fetch_url`` (one page through localm.netpolicy) and
+``web_search`` (the shared localm.web_retrieval controller: search, read the
+top result pages, select evidence). Both import lazily inside the call."""
 
 from __future__ import annotations
 
@@ -57,25 +58,51 @@ def tool_web_search(
     _privacy: bool = False,
 ) -> ToolResult:
     """
-    Search the web and return numbered results (title, URL, snippet).
+    Search the web, read the top result pages and return an evidence bundle:
+    a grounding label, the sources labelled S1, S2, ... (title, URL, what
+    backs each) and evidence excerpts from the pages that could be read.
 
-    Use fetch_url on a result URL to read the full page. Routed through
-    localm.netpolicy like fetch_url.
+    ``max_results`` is the number of search candidates (1..10; the top three
+    are read). Use fetch_url to read a page the evidence did not cover.
+    Every request goes through localm.netpolicy like fetch_url. A provider
+    failure or an empty search is a tool error. In privacy mode
+    (``_privacy=True``) the query and then every attempted page read are
+    echoed to stderr as network audit lines.
+
+    The evidence text is remote-controlled: the output is built with
+    ``untrusted_span``, which neutralises it and records it as an untrusted
+    range; the grounding label stays trusted.
     """
-    from localm.netpolicy import NetworkPolicyError, format_results, web_search
+    from localm.netpolicy import NetworkPolicyError
+    from localm.textguard import compose, neutralise, untrusted_span
+    from localm.web_retrieval import retrieve
+    import sys as _sys
 
     if _privacy:
-        import sys as _sys
         print(f"[localm privacy] web_search: {query}", file=_sys.stderr, flush=True)
 
     try:
-        results = web_search(query, max_results=max_results)
+        bundle = retrieve(query, search_candidates=max_results)
     except NetworkPolicyError as e:
         return ToolResult.error(str(e))
     except Exception as e:
         return ToolResult.error(f"Web search failed: {e}")
 
+    if _privacy:
+        # Every page read the retrieval attempted is an outbound request too.
+        for src in bundle.sources:
+            if src.retrieval_status != "skipped":
+                print(f"[localm privacy] web_search read: {src.url}",
+                      file=_sys.stderr, flush=True)
+
+    if bundle.search_status != "ok":
+        return ToolResult.error(
+            "Web search failed: "
+            + neutralise(bundle.search_error or bundle.search_status))
+
     return ToolResult.success(
-        format_results(results),
-        summary=f"web_search '{query[:50]}' ({len(results)} results)",
+        compose(f"[{bundle.grounding_summary()}]\n",
+                untrusted_span(bundle.to_prompt_text())),
+        summary=(f"web_search '{query[:50]}' ({len(bundle.sources)} sources, "
+                 f"{bundle.pages_read} pages read, {bundle.grounding})"),
     )

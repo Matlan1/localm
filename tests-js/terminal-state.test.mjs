@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
+import { bundleOf } from "./web-fixtures.mjs";
 
 const jsonResp = (obj) => ({
   ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj),
@@ -29,8 +30,8 @@ function driver({ web = false, speak = false, rounds }) {
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/config") return jsonResp({ net_mode: "allow" });
-    if (String(url) === "/api/web/search")
-      return jsonResp({ query: "q", results: [{ title: "T", url: "https://example.com/", snippet: "S" }] });
+    if (String(url) === "/api/web/retrieve")
+      return jsonResp(bundleOf("q", [{ title: "T", url: "https://example.com/", snippet: "S", page: "P" }]));
     return jsonResp({});
   };
   const { window } = loadApp({ fetchImpl: impl });
@@ -188,7 +189,7 @@ test("announcement: a repair reply that emits a real call takes the normal web p
   ] });
   d.window.confirmWebRequest = async () => true;
   await d.window.runCompletion(d.conv);
-  assert.equal(d.calls.filter((c) => c.url === "/api/web/search").length, 1, "the repaired call ran");
+  assert.equal(d.calls.filter((c) => c.url === "/api/web/retrieve").length, 1, "the repaired call ran");
   assert.equal(d.completions().length, 3);
   assert.equal(d.conv.messages[d.conv.messages.length - 1].content, "Answer from results.");
 });

@@ -597,7 +597,7 @@ export const I18N_EN = {
   "slash.chatCmd.rename.hint": "rename this conversation",
   "slash.chatCmd.system.hint": "edit the system prompt",
   "slash.chatCmd.web.args": "<query>",
-  "slash.chatCmd.web.hint": "search the web, then answer with sources",
+  "slash.chatCmd.web.hint": "search the web and read the top pages, then answer with sources",
   "slash.coderCmd.compact.hint": "summarise older turns",
   "slash.coderCmd.end.hint": "end this session",
   "slash.coderCmd.export.hint": "download this session's feed as markdown",
@@ -632,6 +632,7 @@ export const I18N_EN = {
   "slash.usage.web": "Usage: /web <query>",
   "slash.videoFailed": "Video generation failed: {message}",
   "slash.videoStatus": "Video generation {status} - see the Video page for details.",
+  "slash.webNoPageRead": "No page could be read - the answer is grounded in search snippets only",
   "slash.webSearchFailed": "Web search failed: {message}",
 
   // ---- File/folder picker (shared widget, app/picker.js) ----

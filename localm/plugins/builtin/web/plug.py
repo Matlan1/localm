@@ -2,8 +2,10 @@
 """Web plugin: search and page fetch for the chat surface.
 
 Routes (mounted by the engine, auto-scoped to the ``web`` capability):
-  POST /api/web/search  - run a web search, return ranked results
-  POST /api/web/fetch   - fetch a URL and return readable text
+  POST /api/web/retrieve - search, read the top result pages and return an
+                           evidence bundle (``localm.web_retrieval``)
+  POST /api/web/search   - run a web search, return ranked results
+  POST /api/web/fetch    - fetch a URL and return readable text
 
 Every request is enforced by ``localm.netpolicy`` (net_mode, net_allow/
 net_deny, and the private-address SSRF guard). "off" blocks; "allow" permits;
@@ -22,10 +24,11 @@ straight into the model's message list. Both backends tokenise with
 special-token parsing on, so a literal chat-template control token in a
 page/snippet is parsed as a REAL role delimiter and can forge a turn.
 ``neutralise()`` defangs that here, at the boundary, so every consumer gets
-defanged content. ``jobs/webtool.py`` calls ``localm.netpolicy`` directly rather
-than these HTTP endpoints, so it neutralises its own copy at that boundary.
+defanged content. ``jobs/webtool.py`` and the coder's ``tools/web.py`` call
+``localm.web_retrieval`` and ``localm.netpolicy`` directly rather than these
+HTTP endpoints, so each neutralises its own copy at that boundary.
 
-Both responses also carry ``untrusted_fields``, naming the fields whose value is
+Every response also carries ``untrusted_fields``, naming the fields whose value is
 wholly remote-controlled. A caller that splices one of them into a prompt uses
 that to set ``Message.untrusted_spans`` over the range it landed on, so the
 backend tokenises it with special-token parsing off. Defanging is unconditional
@@ -54,6 +57,21 @@ _router = APIRouter()
 # needs the offset it spliced them at.
 _UNTRUSTED_SEARCH_FIELDS = ["title", "snippet"]
 _UNTRUSTED_FETCH_FIELDS = ["text"]
+_UNTRUSTED_RETRIEVE_FIELDS = ["prompt_text", "search_error"]
+_UNTRUSTED_SOURCE_FIELDS = ["title", "snippet", "error"]
+_UNTRUSTED_CHUNK_FIELDS = ["text"]
+
+
+def _neutralise_fields(record: dict, fields: list) -> dict:
+    """Defang chat control / frame tokens in each of *fields* that *record*
+    carries as a string, and set ``record["untrusted_fields"]`` to the fields
+    it carries."""
+    for f in fields:
+        if isinstance(record.get(f), str):
+            record[f] = neutralise(record[f])
+    record["untrusted_fields"] = [f for f in fields
+                                  if isinstance(record.get(f), str)]
+    return record
 
 
 def _neutralise_results(results: list) -> list:
@@ -70,13 +88,25 @@ def _neutralise_results(results: list) -> list:
     """
     for r in results:
         if isinstance(r, dict):
-            if isinstance(r.get("title"), str):
-                r["title"] = neutralise(r["title"])
-            if isinstance(r.get("snippet"), str):
-                r["snippet"] = neutralise(r["snippet"])
-            r["untrusted_fields"] = [f for f in _UNTRUSTED_SEARCH_FIELDS
-                                     if isinstance(r.get(f), str)]
+            _neutralise_fields(r, _UNTRUSTED_SEARCH_FIELDS)
     return results
+
+
+def _neutralise_bundle(bundle) -> dict:
+    """Serialise an ``EvidenceBundle`` with every prose field defanged: each
+    source's title/snippet/error, each chunk's text, ``search_error`` and the
+    ``prompt_text`` rendering, all declared in ``untrusted_fields`` at their
+    level. URL fields are locators, not prose, and are left untouched.
+    ``grounding_summary`` is built from states and counts only and stays
+    trusted."""
+    data = bundle.to_dict()
+    data["prompt_text"] = bundle.to_prompt_text()
+    for src in data.get("sources", []):
+        _neutralise_fields(src, _UNTRUSTED_SOURCE_FIELDS)
+    for chunk in data.get("chunks", []):
+        _neutralise_fields(chunk, _UNTRUSTED_CHUNK_FIELDS)
+    _neutralise_fields(data, _UNTRUSTED_RETRIEVE_FIELDS)
+    return data
 
 
 class WebSearchRequest(BaseModel):
@@ -87,6 +117,31 @@ class WebSearchRequest(BaseModel):
 class WebFetchRequest(BaseModel):
     url: str
     max_chars: int = 8000
+
+
+class WebRetrieveRequest(BaseModel):
+    query: str
+
+
+@_router.post("/api/web/retrieve")
+@route_errors({
+    NetworkPolicyError: 403,
+    Exception: lambda e: (502, f"Retrieval failed: {e}"),
+})
+async def web_retrieve_endpoint(req: WebRetrieveRequest):
+    """Search *query*, read the top result pages and return the evidence
+    bundle (``EvidenceBundle.to_dict()`` plus ``prompt_text``), every prose
+    field defanged and declared in ``untrusted_fields``. A provider failure
+    is reported inside the bundle (``search_status``, ``grounding``
+    ``failed``); a policy refusal is 403."""
+    from localm.web_retrieval import retrieve
+    if not req.query.strip():
+        raise HTTPException(400, "Empty query")
+    loop = asyncio.get_running_loop()
+    # The retrieval and the defanging of its text both run in the executor.
+    return await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: _neutralise_bundle(retrieve(req.query)))
 
 
 @_router.post("/api/web/search")

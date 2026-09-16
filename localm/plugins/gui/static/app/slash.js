@@ -7,7 +7,7 @@ import { addMessageRow, chat, currentConv, newConversation, renderChat, renderCo
 import { exportCoderSession, openFilesModal } from "./coder.js";
 import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
-import { applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
+import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
 /* ================================================================ */
 /*  Slash commands                                                   */
@@ -85,8 +85,12 @@ export async function runImagineInChat(promptText) {
   }
 }
 
-/** /web <query> - search, inject the results into the conversation, and let the
- *  model answer from them. */
+/** /web <query> - search, read the top result pages (the shared retrieval
+ *  controller behind POST /api/web/retrieve), inject the evidence into the
+ *  conversation, and let the model answer from it citing source IDs. The
+ *  explicit command is the consent for that one search and its bounded page
+ *  reads; net_mode=off, the domain lists and the SSRF guard still apply on
+ *  the server, only the per-chat web toggle is bypassed. */
 export async function runWebInChat(query) {
   if (!query) { toast(t("slash.usage.web"), true); return; }
   if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
@@ -101,10 +105,18 @@ export async function runWebInChat(query) {
   renderChat();
   let note, untrusted_spans = [];
   try {
-    ({ content: note, untrusted_spans } =
+    let grounding;
+    ({ content: note, untrusted_spans, grounding } =
       await requestWebTool({ name: "web_search", args: { query } }));
     // Model-directed text, appended to the message the model reads next; left untranslated.
-    note += `\n\nUsing these results, answer: ${query}\nName the sources you used.`;
+    note += `\n\nUsing this evidence, answer: ${query}\n` +
+            "Cite the source IDs (S1, S2, ...) you relied on; never cite a URL " +
+            "whose page was not read.";
+    if (grounding !== GROUNDING_PAGE_BACKED) {
+      note += "\nNo page could be read: the evidence above is search snippets " +
+              "only, or empty. Say so plainly instead of implying you read the pages.";
+      toast(t("slash.webNoPageRead"), true);
+    }
   } catch (e) {
     toast(t("slash.webSearchFailed", { message: e.message }), true);
     // Model-directed text (see above), left untranslated.
