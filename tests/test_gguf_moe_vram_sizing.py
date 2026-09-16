@@ -499,6 +499,26 @@ class TestAutoGpuLayersMoeHintOnPartialOffload:
         assert "gpu layers auto" in out
         assert "n_cpu_moe" not in out   # nothing pinnable - the hint would be noise
 
+    def test_hint_probe_failure_degrades_to_no_hint_not_a_crash(self, tmp_path, capsys):
+        # gguf_moe_pinned_expert_bytes is documented never-raising, but its
+        # tensor-name matching is not itself wrapped, so a pathological file
+        # (or any other unexpected failure) can still raise there. The hint
+        # probe must degrade to "no hint" like every other sizing probe in
+        # this file, never abort the load over a hint.
+        f = tmp_path / "moe.gguf"
+        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
+        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
+                        n_cpu_moe=0)
+        p1, p2, p3 = self._vram(500_000, 1_500_000)
+        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000), \
+             patch("localm.model_manager.gguf.gguf_moe_pinned_expert_bytes",
+                   side_effect=ValueError("simulated probe failure")):
+            n = b._effective_gpu_layers()   # must not raise
+        assert n < 99
+        out = self._flat(capsys)
+        assert "gpu layers auto" in out   # the main notice still fires
+        assert "n_cpu_moe" not in out     # degraded to no hint, not a crash
+
 
 class TestAutoCtxMaxHonoursNCpuMoe:
     def test_larger_ceiling_once_experts_are_pinned(self, tmp_path):

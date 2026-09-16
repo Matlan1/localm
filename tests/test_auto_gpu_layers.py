@@ -17,6 +17,7 @@ import pytest
 from unittest.mock import patch
 
 from localm.inference.backends.gguf import GgufBackend
+from localm.inference.backends.llamacpp import _loader
 
 
 GB = 1024 ** 3
@@ -229,6 +230,32 @@ class TestEffectiveGpuLayers:
         assert "kv cache for a 131,072-token context" in out
         assert "lower n_ctx" in out
         assert "only has" not in out
+
+    def test_cause_attribution_still_works_via_isolated_probe_fallback(
+            self, tmp_path, capsys):
+        # On hardware where torch cannot answer at all (broken/wedged/absent -
+        # the isolated native probe's whole reason to exist, see
+        # test_vram_preflight.py's TestFreeVramBytesUsesIsolatedNativeFallback),
+        # _total_vram_bytes() used to return None even though a real total WAS
+        # available via that same probe, silently collapsing every
+        # partial-offload notice to the generic KV-cache cause regardless of
+        # the real one. Prove case (a) still fires correctly when free AND
+        # total both come from the isolated probe alone, torch never answering.
+        b = _model(tmp_path, 20 * GB, n_gpu_layers=99, auto=True, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_total_vram_bytes",
+                          return_value=(None, None)), \
+             patch.object(_loader, "gpu_memory_isolated",
+                          return_value=(4 * GB, 16 * GB)), \
+             patch.object(GgufBackend, "_device_global_free_bytes",
+                          return_value=None), \
+             patch.object(GgufBackend, "_vram_holder_hint",
+                          side_effect=AssertionError("case (b)/(c) must not run")):
+            n = b._effective_gpu_layers()
+        assert n < 99
+        out = self._flat(capsys)
+        assert "16.0 gb total" in out
+        assert "the model needs" in out
+        assert "kv cache" not in out
 
 
 # --------------------------------------------------------------------------- #

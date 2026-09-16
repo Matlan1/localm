@@ -326,10 +326,18 @@ class VramSizingMixin:
     @classmethod
     def _total_vram_bytes(cls) -> Optional[int]:
         """Total VRAM in bytes on the configured main GPU device, or None when
-        not measurable. The hard physical ceiling: nothing can be freed to
-        raise it, so a load that needs more than this can never fit on this
-        device."""
-        return cls._free_total_vram_bytes()[1]
+        not measurable by ANY path - same torch-then-isolated-probe fallback
+        as _free_vram_bytes, so a caller that already has a real free reading
+        via the isolated probe (torch unavailable/broken/wedged) is not left
+        holding a None total purely because torch specifically could not
+        answer. The hard physical ceiling: nothing can be freed to raise it,
+        so a load that needs more than this can never fit on this device."""
+        total = cls._free_total_vram_bytes()[1]
+        if total is not None:
+            return total
+        from localm.inference.backends.llamacpp import _loader
+        mem = _loader.gpu_memory_isolated()
+        return int(mem[1]) if mem is not None else None
 
     @classmethod
     def _split_free_total_bytes(cls) -> "tuple[Optional[int], Optional[int], int]":
@@ -1017,7 +1025,13 @@ class VramSizingMixin:
         if (getattr(self, "n_cpu_moe", 0) or 0) > 0:
             return False
         from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
-        pinned = gguf_moe_pinned_expert_bytes(Path(self.model_path), 1)
+        try:
+            pinned = gguf_moe_pinned_expert_bytes(Path(self.model_path), 1)
+        except Exception as exc:  # contracted not to raise - surface if it does
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("gguf MoE expert-byte probe failed (%s); no n_cpu_moe "
+                       "hint this load", type(exc).__name__)
+            return False
         return bool(pinned and pinned > 0)
 
     def _effective_gpu_layers(self) -> int:
