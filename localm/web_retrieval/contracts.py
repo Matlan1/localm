@@ -188,6 +188,34 @@ class EvidenceBundle:
         return self.grounding == GROUNDING_PAGE_BACKED
 
     @property
+    def pages_read(self) -> int:
+        """Sources whose page text was extracted."""
+        return sum(1 for s in self.sources
+                   if s.grounding == GROUNDING_PAGE_BACKED)
+
+    def grounding_summary(self) -> str:
+        """One line naming what backs the bundle, built from states and counts
+        only (never from remote text): ``page-backed: 2 of 5 sources read``,
+        ``snippet-only: no page was read, 5 search snippets only`` or
+        ``failed: no evidence, search failed``."""
+        grounding = self.grounding
+        read = self.pages_read
+        if grounding == GROUNDING_PAGE_BACKED:
+            return f"{grounding}: {read} of {len(self.sources)} sources read"
+        if read:
+            pages = ("no page text was selected from the "
+                     f"{read} page{'' if read == 1 else 's'} read")
+        else:
+            pages = "no page was read"
+        if grounding == GROUNDING_SNIPPET_ONLY:
+            snippets = sum(1 for c in self.chunks if c.kind == CHUNK_SNIPPET)
+            return (f"{grounding}: {pages}, {snippets} search "
+                    f"snippet{'' if snippets == 1 else 's'} only")
+        detail = ("search " + self.search_status
+                  if self.search_status != SEARCH_OK else pages)
+        return f"{grounding}: no evidence, {detail}"
+
+    @property
     def total_chars(self) -> int:
         return sum(len(c.text) for c in self.chunks)
 
@@ -211,6 +239,7 @@ class EvidenceBundle:
             "search_status": self.search_status,
             "search_error": self.search_error,
             "grounding": self.grounding,
+            "grounding_summary": self.grounding_summary(),
             "budget_chars": self.budget_chars,
             "per_source_cap_chars": self.per_source_cap_chars,
             "total_chars": self.total_chars,
@@ -219,10 +248,10 @@ class EvidenceBundle:
         }
 
     def to_prompt_text(self) -> str:
-        """A plain-text rendering: a source list with id, title, URL and
-        grounding, then every chunk prefixed with its source id. Untrusted
-        text is included verbatim."""
-        lines: list[str] = []
+        """A plain-text rendering: the grounding summary, a source list with
+        id, title, URL and grounding, then every chunk prefixed with its
+        source id. Untrusted text is included verbatim."""
+        lines: list[str] = [f"Grounding: {self.grounding_summary()}"]
         if self.search_status != SEARCH_OK:
             lines.append(f"Search {self.search_status}"
                          + (f": {self.search_error}" if self.search_error else ""))

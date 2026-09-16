@@ -22,6 +22,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Settings > Network.
 
 ### Changed
+- **Web search now reads the pages, not just the search snippets.** `/web`,
+  a model-requested `web_search` in the chat, the coder's `web_search` tool
+  and a scheduled chat job's web lookup all run the same retrieval: search,
+  read the top three result pages, and hand the model evidence excerpts
+  labelled by source (`S1`, `S2`, ...) with a grounding label. The model is
+  asked to cite those source IDs rather than URLs it never read, and when no
+  page could be read the result is labelled `snippet-only` (or `failed`) in
+  the conversation and in the prompt instead of being presented as read
+  pages; `/web` also shows a notice in that case. The retrieval is available
+  to API clients as `POST /api/web/retrieve`; `/api/web/search` and
+  `/api/web/fetch` are unchanged, and `fetch_url` still reads a single page
+  on request. `/web` now needs no web toggle to read pages; the network
+  policy (`net_mode`, the domain lists, the private-address guard) applies
+  exactly as before.
 - **With the network policy at `ask` (the default), the chat's "Web access"
   toggle is now on for a new browser.** The model is told the web tools exist
   and every request it makes still shows the approval card before it runs.

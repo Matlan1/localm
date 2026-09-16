@@ -274,3 +274,60 @@ def nav_heavy_page(mode: str = "semantic", *, nav_chars: int = 7000,
     else:
         raise ValueError(mode)
     return html_page(body, title="City guide")
+
+
+class StubProvider:
+    """A ``SearchProvider`` that returns canned ``(title, url, snippet)`` rows
+    (or ``SearchResult`` objects) and records every ``(query, max_results)``
+    call. A ``fail`` exception is raised instead of returning."""
+
+    name = "stub"
+
+    def __init__(self, rows, *, fail: Optional[BaseException] = None):
+        self.rows = list(rows)
+        self.fail = fail
+        self.calls: list[tuple[str, int]] = []
+
+    def search(self, query: str, max_results: int):
+        from localm.web_retrieval import SearchResult
+        self.calls.append((query, max_results))
+        if self.fail is not None:
+            raise self.fail
+        out = []
+        for i, row in enumerate(self.rows[:max_results], 1):
+            if isinstance(row, SearchResult):
+                out.append(row)
+            else:
+                title, url, snippet = row
+                out.append(SearchResult(title=title, url=url, snippet=snippet,
+                                        rank=i, provider=self.name))
+        return out
+
+
+def stub_retrieval(monkeypatch, rows, pages: Optional[dict] = None, *,
+                   fail: Optional[BaseException] = None) -> list[str]:
+    """Route ``localm.web_retrieval.retrieve`` through a ``StubProvider`` built
+    from *rows* and an in-memory page fetch (``pages`` maps a URL to its HTML
+    body; an unmapped URL fails with ``RuntimeError("HTTP 404")``), so the
+    real controller, extraction and evidence selection run with no socket.
+    Returns the list the retrieve calls' queries are appended to."""
+    from localm import web_retrieval
+
+    real_retrieve = web_retrieval.retrieve
+    provider = StubProvider(rows, fail=fail)
+    queries: list[str] = []
+
+    def fake_fetch(url, *, timeout):
+        body = (pages or {}).get(url)
+        if body is None:
+            raise RuntimeError("HTTP 404")
+        return url, "text/html; charset=utf-8", body
+
+    def fake_retrieve(query, **kw):
+        queries.append(query)
+        kw.setdefault("provider", provider)
+        kw.setdefault("fetch", fake_fetch)
+        return real_retrieve(query, **kw)
+
+    monkeypatch.setattr("localm.web_retrieval.retrieve", fake_retrieve)
+    return queries

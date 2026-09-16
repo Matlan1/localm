@@ -374,13 +374,17 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         name="web_search",
         fn=tool_web_search,
         description=(
-            "Search the web; returns numbered results with title, URL, and "
-            "snippet. Use when you need current information (versions, docs, "
-            "errors, facts). Follow up with fetch_url to read a full page."
+            "Search the web and read the top result pages; returns sources "
+            "labelled S1, S2, ... with a grounding label (page-backed, "
+            "snippet-only or failed) and evidence excerpts from the pages "
+            "read. Use when you need current information (versions, docs, "
+            "errors, facts) and cite the source IDs you relied on. A "
+            "snippet-only or failed result means no page could be read. Use "
+            "fetch_url only to read a page the evidence did not cover."
         ),
         params={
             "query":       {"type": "string", "description": "Search query",                       "required": True},
-            "max_results": {"type": "int",    "description": "How many results (default 5, max 10)", "required": False},
+            "max_results": {"type": "int",    "description": "How many search candidates (default 5, max 10); the top three are read", "required": False},
         },
     ),
     "spawn_agent": ToolDef(

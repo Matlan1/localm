@@ -137,10 +137,93 @@ class TestEvidenceStatesAndDuplicates:
 
     def test_prompt_text_names_sources_and_states(self, bundle):
         text = bundle.to_prompt_text()
+        assert text.startswith("Grounding: page-backed: 2 of 5 sources read\n")
         assert "[S1] Broken - https://a.example/down (failed, RuntimeError: HTTP 503)" in text
         assert "[S2] Good B - https://b.example/page (page-backed)" in text
         assert "[S1 snippet] Snippet for the broken page" in text
         assert "[S2] " in text and ANSWER in text
+
+    def test_grounding_summary_counts_pages_read(self, bundle):
+        assert bundle.pages_read == 2
+        assert bundle.grounding_summary() == "page-backed: 2 of 5 sources read"
+        assert bundle.to_dict()["grounding_summary"] == bundle.grounding_summary()
+
+
+class TestGroundingSummary:
+    """The one-line grounding label every consumer shows: built from states
+    and counts only, never from remote text."""
+
+    def test_snippet_only_when_every_read_fails(self):
+        provider = _StubProvider([
+            SearchResult("A", "https://a.example/", "snippet a", 1, "stub"),
+            SearchResult("B", "https://b.example/", "snippet b", 2, "stub"),
+        ])
+
+        def down(url, *, timeout):
+            raise RuntimeError("HTTP 503")
+        b = retrieve(QUERY, provider=provider, fetch=down)
+        assert b.grounding == GROUNDING_SNIPPET_ONLY
+        assert b.pages_read == 0
+        assert b.grounding_summary() == \
+            "snippet-only: no page was read, 2 search snippets only"
+        assert b.to_prompt_text().startswith(
+            "Grounding: snippet-only: no page was read, 2 search snippets only")
+
+    def test_snippet_only_singular(self):
+        provider = _StubProvider([
+            SearchResult("A", "https://a.example/", "snippet a", 1, "stub")])
+        b = retrieve(QUERY, provider=provider, fetch_top=0)
+        assert b.grounding_summary() == \
+            "snippet-only: no page was read, 1 search snippet only"
+
+    def test_failed_search_names_the_search_status(self):
+        class _Boom:
+            name = "stub"
+
+            def search(self, query, max_results):
+                raise RuntimeError("rate-limited")
+        b = retrieve(QUERY, provider=_Boom())
+        assert b.grounding == GROUNDING_FAILED
+        assert b.grounding_summary() == "failed: no evidence, search failed"
+        assert "rate-limited" not in b.grounding_summary()
+        assert b.to_prompt_text().startswith(
+            "Grounding: failed: no evidence, search failed\nSearch failed: ")
+
+    def test_empty_search(self):
+        b = retrieve(QUERY, provider=_StubProvider([]))
+        assert b.grounding_summary() == "failed: no evidence, search empty"
+
+    def test_failed_with_no_snippet_and_no_page(self):
+        provider = _StubProvider([
+            SearchResult("A", "https://a.example/", "", 1, "stub")])
+
+        def down(url, *, timeout):
+            raise RuntimeError("HTTP 503")
+        b = retrieve(QUERY, provider=provider, fetch=down)
+        assert b.grounding == GROUNDING_FAILED
+        assert b.grounding_summary() == "failed: no evidence, no page was read"
+
+    def test_a_page_read_but_unselected_is_not_reported_as_unread(self):
+        # A page-backed source whose text won the read but lost the evidence
+        # selection (budget exhausted) is still a page that was read.
+        from localm.web_retrieval import EvidenceBundle, EvidenceChunk, Source
+        b = EvidenceBundle(query=QUERY, provider="stub", search_status="ok")
+        b.sources = [
+            Source(id="S1", url="https://a.example/", canonical_url="https://a.example/",
+                   title="A", snippet="", provider_rank=1, retrieval_status="fetched",
+                   grounding=GROUNDING_PAGE_BACKED, final_url="https://a.example/"),
+            Source(id="S2", url="https://b.example/", canonical_url="https://b.example/",
+                   title="B", snippet="snippet b", provider_rank=2),
+        ]
+        b.chunks = [EvidenceChunk(source_id="S2", text="snippet b", score=1.0,
+                                  offset=0, kind="snippet")]
+        assert b.grounding == GROUNDING_SNIPPET_ONLY
+        assert b.grounding_summary() == (
+            "snippet-only: no page text was selected from the 1 page read, "
+            "1 search snippet only")
+        b.chunks = []
+        assert b.grounding_summary() == (
+            "failed: no evidence, no page text was selected from the 1 page read")
 
 
 class TestWebFunc002EndToEnd:

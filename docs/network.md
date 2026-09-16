@@ -92,7 +92,18 @@ lists remain an additional control.
 
 ## Web search
 
-`web_search` returns titles, URLs, and snippets; `fetch_url` reads a page.
+`web_search` searches and then reads the top three result pages, returning an
+evidence bundle: each source labelled `S1`, `S2`, ... with its title, URL and
+a grounding label, followed by evidence excerpts selected from the pages that
+could be read (at most 12,000 characters in total, 4,000 per source). The
+bundle's own grounding is `page-backed` when at least one page was read,
+`snippet-only` when only the search snippets are available, and `failed` when
+there is no evidence at all; the chat, the coder and scheduled jobs all show
+that label rather than presenting snippets as read pages. `fetch_url` reads a
+single page on request. The same retrieval is exposed to API clients as
+`POST /api/web/retrieve` (`{"query": "..."}`); `/api/web/search` and
+`/api/web/fetch` remain for explicit low-level use.
+
 The default backend is DuckDuckGo's no-key HTML endpoint - no account, no API
 key, nothing to configure. It can rate-limit or change markup; for a sturdier
 self-hosted option, point localm at a SearXNG instance (JSON API enabled):
@@ -104,12 +115,16 @@ localm config net_allow_private true    # if the instance is on your LAN
 
 ## Chat: two ways to use the web
 
-1. **`/web <query>`** - explicit, one-shot grounding. Searches, shows the
-   results as a dimmed "Web" message in the conversation, and the model
-   answers from them, naming sources.
+1. **`/web <query>`** - explicit, one-shot grounding. Searches, reads the top
+   result pages, shows the evidence as a dimmed "Web" message in the
+   conversation (with its grounding label), and the model answers from it,
+   citing the source IDs. The command itself is the consent for that search
+   and its page reads, so it works with the toggle off; `net_mode=off`, the
+   domain lists and the private-address guard still apply. When no page could
+   be read, the message is labelled snippet-only and a notice says so.
 2. **The "Web access" toggle** (parameters drawer) - lets the *model* decide.
    The model can emit a `web_search` or `fetch_url` request mid-conversation;
-   the GUI executes it through the policy, injects the results, and the model
+   the GUI executes it through the policy, injects the evidence, and the model
    continues (at most 3 web rounds per send). Every request and result is
    visible in the conversation - nothing happens silently. With no saved
    choice the toggle follows the policy: on under `allow` and `ask` (under
