@@ -1581,7 +1581,7 @@ export const I18N_EN = {
   "images.inputImageLabel": "Input image path (optional, img2img)",
   "images.inputImagePlaceholder": "path to a base image",
   "images.intro":
-    "Runs your local ComfyUI FLUX pipeline. The LLM unloads automatically to free VRAM for the image model, and reloads on the next chat request.",
+    "Runs your local ComfyUI FLUX pipeline. The LLM unloads automatically to free VRAM for the image model, and reloads on the next chat request. Needs a GPU to be practical - CPU generation is far too slow for this workflow.",
   "images.item.one": "image",
   "images.item.other": "images",
   "images.loraLabel": "LoRA",

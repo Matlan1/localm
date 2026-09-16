@@ -118,6 +118,7 @@ NVIDIA card with CUDA. Performance varies by hardware:
 - **NVIDIA (CUDA):** 30-60 seconds (Q8_0)
 - **AMD (ROCm):** 60-120 seconds (cold start compiles GPU kernels; subsequent runs faster)
 - **Vulkan (universal):** varies by GPU model
+- **CPU (no GPU):** impractically slow - this workflow is not a realistic target on CPU alone; use a GPU
 
 These numbers are typical, not guaranteed. For AMD hardware, see the ROCm/HIP
 setup notes in [gpu-setup.md](gpu-setup.md).

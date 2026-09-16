@@ -477,7 +477,7 @@
   "images.historyHint": "Miniaturansichten ankreuzen, um sie für Sammelaktionen auszuwählen; auf eine klicken für Details, Metadaten und Aktionen für einzelne Bilder.",
   "images.inputImageLabel": "Pfad zum Eingabebild (optional, img2img)",
   "images.inputImagePlaceholder": "Pfad zu einem Basisbild",
-  "images.intro": "Nutzt Ihre lokale ComfyUI-FLUX-Pipeline. Das LLM wird automatisch entladen, um VRAM für das Bildmodell freizugeben, und beim nächsten Chat wieder geladen.",
+  "images.intro": "Nutzt Ihre lokale ComfyUI-FLUX-Pipeline. Das LLM wird automatisch entladen, um VRAM für das Bildmodell freizugeben, und beim nächsten Chat wieder geladen. Braucht eine GPU, um praktikabel zu sein - CPU-Generierung ist für diesen Workflow viel zu langsam.",
   "images.item.one": "Bild",
   "images.item.other": "Bilder",
   "images.loraLabel": "LoRA",

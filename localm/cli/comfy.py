@@ -405,6 +405,7 @@ def comfy_setup(copy_custom_nodes) -> None:
 
     from rich.markup import escape
 
+    from .. import hwdetect
     from ..config import load_config
     from ..media import managed_comfy_fresh as fresh
     from ..media import managed_comfy_provision as prov
@@ -413,10 +414,12 @@ def comfy_setup(copy_custom_nodes) -> None:
     cfg = load_config()
     # Heads-up before a potentially multi-GB operation: which path will run.
     if prov.discover_user_comfy(cfg) is None:
+        torch_bit = ("PyTorch for your GPU" if hwdetect.detect().gpu_state == "found"
+                    else "PyTorch (CPU torch)")
         console.print(
             "No existing ComfyUI to copy - installing a fresh, hardware-matched "
             "ComfyUI under the localm data folder. This downloads several GB "
-            "(ComfyUI + PyTorch for your GPU) and can take a while...")
+            f"(ComfyUI + {torch_bit}) and can take a while...")
     else:
         console.print("Replicating your existing ComfyUI into the localm data folder. "
                       "This can take a while (a fresh venv + the same packages)...")
