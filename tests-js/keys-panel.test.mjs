@@ -107,9 +107,16 @@ test("keys panel: create with no scope checked does not POST", async () => {
   await bootSettled(window);
   await window.refreshKeysPanel();
   window.document.getElementById("key-name").value = "phone";   // name but no scope
-  await window.document.getElementById("key-create").onclick();
-  assert.equal(posts, 0, "no scope checked (and no confirmation): nothing is minted");
-  // Positive control, same window: with a scope checked the same click POSTs.
+  const clickResult = window.document.getElementById("key-create").onclick();
+  // A zero-scope create asks for confirmation via the in-page modal (not
+  // window.confirm); decline it by clicking Cancel.
+  const cancelBtn = window.document.querySelector("#modal-body .actions button:not(.btn-danger)");
+  assert.ok(cancelBtn, "the chat-only-key confirm modal renders a Cancel button");
+  cancelBtn.click();
+  await clickResult;
+  assert.equal(posts, 0, "no scope checked, confirmation declined: nothing is minted");
+  // Positive control, same window: with a scope checked the same click POSTs,
+  // no confirmation modal involved.
   [...window.document.querySelectorAll(".key-scope-cb")]
     .find((c) => c.value === "chat").checked = true;
   await window.document.getElementById("key-create").onclick();

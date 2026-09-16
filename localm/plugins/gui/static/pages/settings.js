@@ -4,9 +4,10 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
 import { t, tOr } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
+import { loginWithKey } from "../app/models-sidebar.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -620,25 +621,29 @@ export async function refreshCompanion() {
 // are shown but OWNER-ONLY: the /v1/keys API refuses them for a non-owner key
 // (create_key's allow_privileged gate), so a keys:admin device cannot hand
 // itself a broader grant through this form.
+// Catalog key per scope id, not literal English - a module-level array
+// evaluated once at import time would otherwise freeze this in English
+// forever (the EMBED_LABELS trap). Resolved fresh per render in
+// refreshKeysPanel via t().
 export const KEY_SCOPES = [
-  ["coder", "Coder agent - restricted: read + edit this project (no shell)"],
-  ["coder:full", "Coder agent - FULL: shell + edit (owner-only, dangerous)"],
-  ["models:read", "List and inspect models"],
-  ["models:write", "Load, download, or remove models"],
-  ["rag", "Knowledge (RAG)"],
-  ["chat", "Chat history & memory (saved conversations, personas) - NOT needed to chat"],
-  ["image", "Image generation"],
-  ["music", "Music generation"],
-  ["video", "Video generation"],
-  ["voice", "Voice"],
-  ["web", "Web access"],
-  ["browser", "Automated web browser (navigate, read, click, fill)"],
-  ["mcp", "MCP"],
-  ["config:read", "Read settings"],
-  ["config:write", "Change settings (owner-only, dangerous)"],
-  ["plugins:admin", "Enable, disable, install, or uninstall plugins (owner-only, dangerous)"],
-  ["keys:admin", "Create, scope, and revoke API keys (owner-only, dangerous)"],
-  ["admin", "Full admin - owner-equivalent (dangerous, owner-only)"],
+  ["coder", "settings.keyScopes.coder"],
+  ["coder:full", "settings.keyScopes.coderFull"],
+  ["models:read", "settings.keyScopes.modelsRead"],
+  ["models:write", "settings.keyScopes.modelsWrite"],
+  ["rag", "settings.keyScopes.rag"],
+  ["chat", "settings.keyScopes.chat"],
+  ["image", "settings.keyScopes.image"],
+  ["music", "settings.keyScopes.music"],
+  ["video", "settings.keyScopes.video"],
+  ["voice", "settings.keyScopes.voice"],
+  ["web", "settings.keyScopes.web"],
+  ["browser", "settings.keyScopes.browser"],
+  ["mcp", "settings.keyScopes.mcp"],
+  ["config:read", "settings.keyScopes.configRead"],
+  ["config:write", "settings.keyScopes.configWrite"],
+  ["plugins:admin", "settings.keyScopes.pluginsAdmin"],
+  ["keys:admin", "settings.keyScopes.keysAdmin"],
+  ["admin", "settings.keyScopes.admin"],
 ];
 
 // Mirrors localm.scopes.PRIVILEGED_SCOPES exactly, and is bound to it by
@@ -660,14 +665,14 @@ export function buildKeyPresets(presets, isOwner) {
   if (!box) return;
   box.replaceChildren();
   if (presets && presets.length) {
-    box.appendChild(el("span", "sub key-presets-label", "Presets:"));
+    box.appendChild(el("span", "sub key-presets-label", t("settings.keys.presetsLabel")));
     for (const p of presets) {
       const b = el("button", "btn-secondary key-preset-btn", p.name);
       b.type = "button";
       b.onclick = () => applyKeyPreset(p.scopes || []);
       if (isOwner) {
         const x = el("span", "key-preset-del", "×");
-        x.title = `Delete preset "${p.name}"`;
+        x.title = t("settings.keys.deletePresetTooltip", { name: p.name });
         x.onclick = (ev) => { ev.stopPropagation(); deleteKeyPreset(p.name, presets); };
         b.appendChild(x);
       }
@@ -675,7 +680,7 @@ export function buildKeyPresets(presets, isOwner) {
     }
   }
   if (isOwner) {
-    const save = el("button", "btn-secondary key-preset-save", "+ Save as preset");
+    const save = el("button", "btn-secondary key-preset-save", t("settings.keys.savePresetButton"));
     save.type = "button";
     save.onclick = () => saveCurrentAsPreset(presets || []);
     box.appendChild(save);
@@ -711,18 +716,18 @@ export async function saveKeyPresets(presets) {
     headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ key_presets: presets }),
   });
-  if (r.ok) { toast("Presets saved"); refreshKeysPanel(); }
+  if (r.ok) { toast(t("settings.keys.presetsSavedToast")); refreshKeysPanel(); }
   else {
     const e = await r.json().catch(() => ({}));
-    toast(e.detail || "Could not save presets", true);
+    toast(e.detail || t("settings.keys.presetsSaveFailedToast"), true);
   }
 }
 
 export async function saveCurrentAsPreset(presets) {
   const scopes = [...document.querySelectorAll("#key-scopes .key-scope-cb")]
     .filter((c) => c.checked).map((c) => c.value);
-  if (!scopes.length) { toast("Check the scopes for the preset first"); return; }
-  const name = (await promptText("Preset name:") || "").trim();
+  if (!scopes.length) { toast(t("settings.keys.noScopesToast")); return; }
+  const name = (await promptText(t("settings.keys.presetNamePrompt")) || "").trim();
   if (!name) return;
   const next = presets.filter((p) => p.name !== name);   // replace an existing name
   next.push({ name, scopes });
@@ -730,9 +735,10 @@ export async function saveCurrentAsPreset(presets) {
 }
 
 export function deleteKeyPreset(name, presets) {
-  confirmDanger(`Delete preset "${name}"?`, "This can't be undone.", "Delete", () => {
-    saveKeyPresets(presets.filter((p) => p.name !== name));
-  });
+  confirmDanger(t("settings.keys.deletePresetConfirmTitle", { name }),
+    t("settings.keys.deletePresetConfirmBody"), t("settings.keys.deletePresetConfirm"), () => {
+      saveKeyPresets(presets.filter((p) => p.name !== name));
+    });
 }
 
 // Server-rendered pairing QR for a freshly-minted SCOPED key: scan it in localm
@@ -747,8 +753,7 @@ export async function renderKeyQR(box, key) {
     if (!r.ok) return;                        // owner-only / older server: skip the QR
     const svg = await r.text();
     const wrap = el("div", "key-qr");
-    wrap.appendChild(el("div", "sub",
-      "Or scan to pair a phone (open localm on the phone, tap Scan QR code):"));
+    wrap.appendChild(el("div", "sub", t("settings.keys.qrHint")));
     const holder = document.createElement("div");
     holder.className = "key-qr-img";
     // Same-origin server-rendered SVG; sanitized (SVG profile) exactly like
@@ -760,23 +765,23 @@ export async function renderKeyQR(box, key) {
 }
 
 export function keyExpiryLabel(expires) {
-  if (!expires) return "never expires";
+  if (!expires) return t("settings.keyExpiry.never");
   const ms = expires * 1000 - Date.now();
-  if (ms <= 0) return "expired";
+  if (ms <= 0) return t("settings.keyExpiry.expired");
   const days = Math.floor(ms / 86400000);
-  if (days >= 1) return `expires in ${days}d`;
-  return `expires in ${Math.max(1, Math.floor(ms / 3600000))}h`;
+  if (days >= 1) return t("settings.keyExpiry.days", { days });
+  return t("settings.keyExpiry.hours", { hours: Math.max(1, Math.floor(ms / 3600000)) });
 }
 
 export function keyLastUsedLabel(ts) {
-  if (!ts) return "unused";
+  if (!ts) return t("settings.lastUsed.never");
   const ms = Date.now() - ts * 1000;
-  if (ms < 0) return "used just now";
+  if (ms < 0) return t("settings.lastUsed.justNow");
   const days = Math.floor(ms / 86400000);
-  if (days >= 1) return `used ${days}d ago`;
+  if (days >= 1) return t("settings.lastUsed.days", { days });
   const hrs = Math.floor(ms / 3600000);
-  if (hrs >= 1) return `used ${hrs}h ago`;
-  return "used recently";
+  if (hrs >= 1) return t("settings.lastUsed.hours", { hours: hrs });
+  return t("settings.lastUsed.recently");
 }
 
 // Settings -> API keys: mint named, scope-limited keys, list them, revoke them.
@@ -786,22 +791,20 @@ export async function refreshKeysPanel() {
   if (!card || !list || !scopesBox) return;
 
   if (!scopesBox.childElementCount) {           // render the checkboxes once
-    for (const [scope, label] of KEY_SCOPES) {
+    for (const [scope, labelKey] of KEY_SCOPES) {
       const danger = PRIVILEGED_KEY_SCOPES.has(scope);
       const lab = el("label", "key-scope" + (danger ? " key-scope-danger" : ""));
       const cb = document.createElement("input");
       cb.type = "checkbox"; cb.value = scope; cb.className = "key-scope-cb";
       lab.appendChild(cb);
-      lab.appendChild(document.createTextNode(" " + label));
+      lab.appendChild(document.createTextNode(" " + t(labelKey)));
       scopesBox.appendChild(lab);
     }
     // Chat is the baseline: a key needs NO scope to chat (the "chat" scope above
     // only gates server-saved history/personas). Scopes add EXTRA capabilities.
     if (!$("key-scope-note")) {
-      const note = el("div", "sub");
+      const note = el("div", "sub", t("settings.keys.scopeNote"));
       note.id = "key-scope-note";
-      note.textContent = "Chatting needs no scope - any key can chat. These add "
-        + "capabilities; leave all unchecked for a chat-only key.";
       scopesBox.insertAdjacentElement("afterend", note);
     }
   }
@@ -828,8 +831,8 @@ export async function refreshKeysPanel() {
 
   list.replaceChildren();
   if (!keys.length) {
-    list.appendChild(emptyState("key", "No named keys yet",
-      "Mint a scope-limited key above to pair a device or person."));
+    list.appendChild(emptyState("key", t("settings.keys.emptyTitle"),
+      t("settings.keys.emptyHint")));
   }
   for (const k of keys) {
     const row = el("div", "key-row");
@@ -837,14 +840,14 @@ export async function refreshKeysPanel() {
     row.appendChild(el("span", "mono key-scope-tags", (k.scopes || []).join(", ")));
     row.appendChild(el("span", "sub key-expiry-tag", keyExpiryLabel(k.expires)));
     row.appendChild(el("span", "sub key-lastused-tag", keyLastUsedLabel(k.last_used)));
-    const rm = el("button", "btn-secondary", "Revoke");
+    const rm = el("button", "btn-secondary", t("settings.keys.revokeButton"));
     rm.onclick = () => {
-      confirmDanger(`Revoke key "${k.name || k.id}"?`,
-        "Anything using this key immediately loses access.", "Revoke", async () => {
+      confirmDanger(t("settings.keys.revokeConfirmTitle", { name: k.name || k.id }),
+        t("settings.keys.revokeConfirmBody"), t("settings.keys.revokeButton"), async () => {
           const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
                                 { method: "DELETE", headers: authHeaders() });
-          if (d.ok) { toast("Key revoked"); refreshKeysPanel(); }
-          else { toast("Revoke failed"); }
+          if (d.ok) { toast(t("settings.keys.revokedToast")); refreshKeysPanel(); }
+          else { toast(t("settings.keys.revokeFailedToast")); }
         });
     };
     row.appendChild(rm);
@@ -853,13 +856,17 @@ export async function refreshKeysPanel() {
 
   $("key-create").onclick = async () => {
     const name = ($("key-name").value || "").trim();
-    if (!name) { toast("Enter a key name"); return; }
+    if (!name) { toast(t("settings.keys.enterNameToast")); return; }
     const scopes = [...scopesBox.querySelectorAll(".key-scope-cb")]
       .filter((c) => c.checked).map((c) => c.value);
     // A zero-scope key is valid: it can still chat (chat is baseline). Confirm so
-    // an empty pick is intentional rather than a forgotten checkbox.
-    if (!scopes.length
-        && !confirm("Create a chat-only key (no extra capabilities)?")) return;
+    // an empty pick is intentional rather than a forgotten checkbox. The in-page
+    // modal, not window.confirm(): a native dialog blocks the page (and any
+    // automation driving it) until dismissed, with no on-page affordance to
+    // reach it - confirmDanger/-Async exists for exactly this reason.
+    if (!scopes.length && !(await confirmDangerAsync(
+        t("settings.keys.chatOnlyConfirmTitle"), t("settings.keys.chatOnlyConfirmBody"),
+        t("settings.keys.chatOnlyConfirmButton")))) return;
     const body = { name, scopes };
     const ttl = Number(($("key-expiry") || {}).value || 0);
     if (ttl > 0) body.expires_in = ttl;   // server computes the deadline (its own clock)
@@ -870,25 +877,25 @@ export async function refreshKeysPanel() {
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch { toast("Create failed"); return; }
+    } catch { toast(t("settings.keys.createFailedToast")); return; }
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      toast(e.detail || "Create failed"); return;
+      toast(e.detail || t("settings.keys.createFailedToast")); return;
     }
     const made = await r.json();
     const box = $("key-secret");
     box.replaceChildren();
-    box.appendChild(el("div", "sub", `New key "${made.name}" `
-      + `(${(made.scopes || []).join(", ")}) - copy it now, it is shown only once:`));
+    box.appendChild(el("div", "sub",
+      t("settings.keys.newKeyIntro", { name: made.name, scopes: (made.scopes || []).join(", ") })));
     const secret = document.createElement("input");
     secret.type = "text"; secret.readOnly = true; secret.value = made.key;
     secret.className = "key-secret-value";
     box.appendChild(secret);
-    const copy = el("button", "btn-secondary", "Copy");
+    const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
     copy.onclick = () => {
       secret.select();
       if (navigator.clipboard) navigator.clipboard.writeText(made.key);
-      toast("Copied");
+      toast(t("settings.keys.copiedToast"));
     };
     box.appendChild(copy);
     await renderKeyQR(box, made.key);
@@ -937,7 +944,10 @@ export async function refreshOwnerKeyPanel() {
   } catch { setHidden(true); setWarnHidden(true); return; }
   setHidden(false);
 
-  const rotate = async (body, verb) => {
+  // Two full templates per branch rather than gluing a translated `verb` into
+  // an English "${verb} failed" - the same trap as buildSettingControl's
+  // live-port sentence (settings.field.livePort.*).
+  const rotate = async (body, failedKey) => {
     let r;
     try {
       r = await fetch("/api/auth/key/rotate", {
@@ -945,10 +955,10 @@ export async function refreshOwnerKeyPanel() {
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch { toast(`${verb} failed`, true); return; }
+    } catch { toast(t(failedKey), true); return; }
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      toast(e.detail || `${verb} failed`, true);
+      toast(e.detail || t(failedKey), true);
       return;
     }
     const out = await r.json();
@@ -959,24 +969,22 @@ export async function refreshOwnerKeyPanel() {
     // the lie the route's shape exists to prevent: someone rotating a leaked key would
     // be told the leaked one was dead while it still authenticates.
     if (out.rotated) {
-      toast("Owner key updated");
-      box.appendChild(el("div", "sub",
-        "New owner key - copy it now, it is shown only once:"));
+      toast(t("settings.ownerKey.updatedToast"));
+      box.appendChild(el("div", "sub", t("settings.ownerKey.newKeyIntro")));
     } else {
-      toast("Key saved but NOT in effect", true);
+      toast(t("settings.ownerKey.notInEffectToast"), true);
       for (const w of out.warnings || []) box.appendChild(el("div", "key-warn", w));
-      box.appendChild(el("div", "sub",
-        "The key that was written (not currently in effect):"));
+      box.appendChild(el("div", "sub", t("settings.ownerKey.writtenNotEffectiveIntro")));
     }
     const secret = document.createElement("input");
     secret.type = "text"; secret.readOnly = true; secret.value = out.key;
     secret.className = "key-secret-value";
     box.appendChild(secret);
-    const copy = el("button", "btn-secondary", "Copy");
+    const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
     copy.onclick = () => {
       secret.select();
       if (navigator.clipboard) navigator.clipboard.writeText(out.key);
-      toast("Copied");
+      toast(t("settings.keys.copiedToast"));
     };
     box.appendChild(copy);
     box.style.display = "";
@@ -985,8 +993,7 @@ export async function refreshOwnerKeyPanel() {
 
   // Confirm both paths: this cuts off every other device holding the old key, which is
   // not obvious from a button labelled "Generate".
-  const WARN = "Every other device holding the current key loses access until you give "
-    + "it the new one. This browser stays signed in.";
+  const WARN = t("settings.ownerKey.rotateWarning");
   // Guarded, unlike its siblings: a missing control here would otherwise throw
   // partway through this refresh and take the whole Owner key panel with it.
   const clearBtn = $("owner-key-clear");
@@ -995,22 +1002,21 @@ export async function refreshOwnerKeyPanel() {
     // server put into protected mode from here could never be taken back out of it
     // from here. This is a real downgrade, so it goes through confirmDanger like
     // the other destructive key actions rather than a bare click.
-    confirmDanger("Remove the owner key?",
-      "This server returns to open mode: anyone who can reach it gets full "
-      + "access, with no key needed.", "Remove", async () => {
+    confirmDanger(t("settings.ownerKey.removeConfirmTitle"),
+      t("settings.ownerKey.removeConfirmBody"), t("settings.ownerKey.removeConfirm"), async () => {
         let r;
         try {
           r = await fetch("/api/auth/key/clear",
                           { method: "POST", headers: authHeaders() });
-        } catch { toast("Could not remove the owner key", true); return; }
+        } catch { toast(t("settings.ownerKey.removeFailedToast"), true); return; }
         if (!r.ok) {
           const e = await r.json().catch(() => ({}));
-          toast(e.detail || "Could not remove the owner key", true);
+          toast(e.detail || t("settings.ownerKey.removeFailedToast"), true);
           return;
         }
         const out = await r.json().catch(() => ({}));
         if (out.cleared === true) {
-          toast("Owner key removed - this server is open again");
+          toast(t("settings.ownerKey.removedToast"));
           // That call invalidates this session cookie, so re-read the page state
           // rather than leaving a view authed by a session that no longer exists.
           window.location.reload();
@@ -1019,29 +1025,52 @@ export async function refreshOwnerKeyPanel() {
         // Not fully cleared. The session cookie is already gone regardless (the
         // route drops it either way), so a reload here would only discard the
         // warnings below without restoring anything.
-        toast("Owner key was not fully removed", true);
+        toast(t("settings.ownerKey.notFullyRemovedToast"), true);
         box.replaceChildren();
         for (const w of out.warnings || []) box.appendChild(el("div", "key-warn", w));
-        box.appendChild(el("div", "sub",
-          "The server may still require the previous owner key. You have been "
-          + "signed out in this browser and will need to sign in again with it."));
+        box.appendChild(el("div", "sub", t("settings.ownerKey.notFullyRemovedBody")));
         box.style.display = "";
       });
   };
 
   $("owner-key-roll").onclick = () => {
-    confirmDanger("Generate a new owner key?", WARN, "Generate",
-                  () => rotate({}, "Generate"));
+    confirmDanger(t("settings.ownerKey.generateConfirmTitle"), WARN, t("settings.ownerKey.generateConfirm"),
+                  () => rotate({}, "settings.ownerKey.generateFailedToast"));
   };
   $("owner-key-set").onclick = () => {
     const chosen = ($("owner-key-value").value || "").trim();
     // Guard here as well as server-side: an empty value GENERATES a random key on the
     // server, which is not what a user pressing "Set this key" asked for.
-    if (!chosen) { toast("Paste a key, or use Generate new key", true); return; }
-    confirmDanger("Set this as the owner key?", WARN, "Set key",
-                  () => rotate({ key: chosen }, "Set"));
+    if (!chosen) { toast(t("settings.ownerKey.pasteOrGenerateToast"), true); return; }
+    confirmDanger(t("settings.ownerKey.setConfirmTitle"), WARN, t("settings.ownerKey.setConfirm"),
+                  () => rotate({ key: chosen }, "settings.ownerKey.setFailedToast"));
   };
 }
+
+// Settings -> Sign in on this device: save (or, blank, clear) the API-key cookie
+// this browser uses. Moved here from workflow.js, where it lived only because
+// #gui-key-save/#gui-api-key were originally rendered from that file too.
+const guiKeySave = $("gui-key-save");
+if (guiKeySave) guiKeySave.onclick = async () => {
+  const key = $("gui-api-key").value.trim();
+  if (key) {
+    const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
+    if (!ok) { toast(t("settings.signIn.keyRejected"), true); return; }
+    try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
+    toast(t("settings.signIn.keySaved"));
+    setTimeout(() => location.reload(), 600);
+    return;
+  }
+  // Empty -> sign out (clear the session cookie).
+  let signedOut = false;
+  try {
+    const r = await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
+    signedOut = r.ok;
+  } catch { /* fetch failed */ }
+  if (!signedOut) { toast(t("settings.signIn.signOutFailed"), true); return; }
+  toast(t("settings.signIn.signedOut"));
+  setTimeout(() => location.reload(), 600);
+};
 
 // Friendly section label per plugin owner (falls back to the capitalized scope).
 export const PLUGIN_SECTION_LABEL = {
@@ -1265,10 +1294,19 @@ export function buildSettingsNav() {
 // interface language changes.
 document.addEventListener("localm:language", () => {
   buildSettingsNav();
+  // refreshKeysPanel only builds the scope checkboxes once (a real fetch cost,
+  // not just a render one - see its own comment). Clear that memo here so the
+  // language switch gets a fresh build with the new catalog, same as every
+  // other language-sensitive element on this page.
+  const scopesBox = $("key-scopes");
+  if (scopesBox) scopesBox.replaceChildren();
+  const scopeNote = $("key-scope-note");
+  if (scopeNote) scopeNote.remove();
   // The schema-driven fields (CORE_FIELDS label/help, section headings) are
   // painted from fetched data, not markup, so a language switch has to
   // re-fetch and redraw them. refreshSettingsPage() is already safe to call
-  // more than once (see _settingsRenderToken above).
+  // more than once (see _settingsRenderToken above); it also re-runs
+  // refreshKeysPanel/refreshOwnerKeyPanel/refreshCompanion at its own tail.
   refreshSettingsPage();
 });
 
