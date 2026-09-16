@@ -205,7 +205,7 @@ class TestTextRendering:
         finally:
             gc.enable()
         assert _LONG in page.text
-        assert cpu < 6.0, f"extract_page used {cpu:.1f}s of CPU"
+        assert cpu < 3.5, f"extract_page used {cpu:.1f}s of CPU"
 
 
 class TestFormWrappedPages:
