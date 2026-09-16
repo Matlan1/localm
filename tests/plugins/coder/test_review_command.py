@@ -181,6 +181,39 @@ def test_review_prints_blocking_issues_when_flagged(home, tmp_path, monkeypatch)
     assert any("fix it" in p for p in prints)
 
 
+def test_review_prints_a_partial_warning_under_the_approved_line_for_a_huge_diff(
+        home, tmp_path, monkeypatch):
+    """The exact reported bug: /review prints 'Approved' for a diff it only
+    partly saw, with nothing telling the user that happened."""
+    agent = _agent(_proj(tmp_path))
+    monkeypatch.setattr(agent, "session_diff", lambda *a, **k: "+" + "x" * 50_000)
+    agent._reviewer = Reviewer(
+        _backend_returning('{"approved": true, "blocking": [], "notes": "clean"}'))
+    from localm.plugins.coder.cli import repl as repl_mod
+    successes = []
+    warnings = []
+    monkeypatch.setattr(repl_mod, "print_success", lambda msg: successes.append(msg))
+    monkeypatch.setattr(repl_mod, "print_warning", lambda msg: warnings.append(msg))
+    repl_mod._handle_command("/review", agent)
+    assert successes and "no blocking issues" in successes[0].lower()
+    assert any("only saw" in w.lower() for w in warnings), warnings
+
+
+def test_review_partial_warning_silent_for_an_ordinary_diff(home, tmp_path, monkeypatch):
+    """Control: an ordinary, untruncated diff draws no partial-review
+    warning, or the warning above means nothing."""
+    agent = _agent(_proj(tmp_path))
+    monkeypatch.setattr(agent, "session_diff", lambda *a, **k: "diff text")
+    agent._reviewer = Reviewer(
+        _backend_returning('{"approved": true, "blocking": [], "notes": "clean"}'))
+    from localm.plugins.coder.cli import repl as repl_mod
+    warnings = []
+    monkeypatch.setattr(repl_mod, "print_success", lambda msg: None)
+    monkeypatch.setattr(repl_mod, "print_warning", lambda msg: warnings.append(msg))
+    repl_mod._handle_command("/review", agent)
+    assert not warnings
+
+
 def test_review_surfaces_a_failed_review_as_a_warning(home, tmp_path, monkeypatch):
     """A crashed/unparseable review must read as a warning, not a silent
     approval - the same fail-open-but-visible contract as the automatic pass

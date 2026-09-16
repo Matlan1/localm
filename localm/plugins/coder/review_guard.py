@@ -104,3 +104,25 @@ def render_warning(flags: dict) -> str:
         lines.append("  CI / lint config (weakening the gate makes the gate lie):")
         lines.extend("    - " + p for p in ci)
     return "\n".join(lines)
+
+
+def render_reviewer_note(flags: dict) -> str:
+    """A short instruction for the REVIEWER MODEL's own prompt, or "" if none.
+
+    Distinct from ``render_warning``: that one is addressed to a human reading
+    the CLI/GUI; this one is addressed to the reviewer LLM itself, telling it
+    to scrutinise the classified files specifically, so a rewritten test
+    assertion or a loosened CI gate does not slide past a review that never
+    knew which hunks were which.
+    """
+    tests = flags.get("tests") or []
+    ci = flags.get("ci_config") or []
+    names = tests + ci
+    if not names:
+        return ""
+    return (
+        "This diff also touches file(s) a passing check cannot vouch for on "
+        "its own - a rewritten test's assertions, or a loosened CI/lint gate, "
+        "can make a green run mean nothing: " + ", ".join(names) + ". "
+        "Scrutinize those hunks specifically for a weakened check."
+    )
