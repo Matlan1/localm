@@ -9,6 +9,10 @@ on:
   #                  OPEN PR starts the run without needing a new push. The
   #                  mutation-test job runs the same way, gated on the
   #                  `mutation-test` label instead - see that job below.
+  #                  python-pr-gate runs on every pull_request WITHOUT that
+  #                  label: lockfile check, hygiene, ruff, and the tests
+  #                  scripts/affected_tests.py selects for the diff. A
+  #                  labelled PR gets the matrix instead.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
   #   workflow_dispatch / schedule   run the matrix unconditionally. The
@@ -349,6 +353,72 @@ jobs:
       # reporting success when it cannot analyze an input.
       - name: Lint workflows (zizmor)
         run: zizmor --offline .github/workflows/
+
+  # The per-PR Python gate: the only job that runs Python tests on a PR
+  # without the `full-ci` label. It runs on every pull_request without that
+  # label and not on a labelled one, whose whole suite the `test` matrix
+  # runs. One host, no coverage; the tests are the ones
+  # scripts/affected_tests.py selects for the diff, not the suite.
+  #
+  # scripts/run_affected_tests.py turns the selector's exit status into what
+  # runs, never runs the whole suite, and never exits 0 for anything it did
+  # not run:
+  #   0 + paths     pytest runs exactly those files
+  #   0 + sentinel  no test file is affected (a docs-only change): no pytest
+  #   3             the selection exceeds a quarter of the suite: the selector
+  #                 runs again at --depth 0 and that selection runs; still
+  #                 wide, empty or failed at depth 0 fails the job, which
+  #                 means the change needs the `full-ci` matrix
+  #   anything else the job fails: a crashed selector, an empty selection,
+  #                 or a path that is not an existing tests/**/test_*.py
+  # The selection, its depth, its reasons and the pytest command line go to
+  # the job summary.
+  python-pr-gate:
+    name: Python PR gate (lock, hygiene, ruff, affected tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    steps:
+      # fetch-depth: 0 is required: the selector diffs from
+      # `git merge-base origin/master HEAD` and the hygiene gate's append-only
+      # checks resolve the same baseline; a shallow checkout has no
+      # origin/master at all.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv (for the lockfile check)
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      - name: Verify uv.lock matches pyproject (no silent drift)
+        run: uv lock --check
+
+      # The project venv on PATH, as in the `test` job: pytest, ruff, the
+      # hygiene gate and the `python -m localm` subprocesses some tests spawn
+      # all run from it.
+      - name: Create the project venv
+        run: python -m venv .venv
+      - name: Put the venv on PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rag]"
+
+      - name: Hygiene gate
+        run: python scripts/check_hygiene.py
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Affected tests
+        run: python scripts/run_affected_tests.py --depth 1
 
   # Validate the hand-written ctypes binding against the ACTUAL upstream binary.
   # Heavy (downloads the cpu prebuilt) and checks a MOVING upstream target, so it

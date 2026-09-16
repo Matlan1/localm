@@ -82,6 +82,17 @@ anyway); when the script itself fails it prints
 `tests/AFFECTED_TESTS_FAILED_SEE_STDERR` and exits 1. None of those paths
 exists, so pytest stops with "file or directory not found".
 
+CI runs that selection on every pull request without the `full-ci` label.
+The `python-pr-gate` job in `.github/workflows/ci.yml`
+(`scripts/run_affected_tests.py`) runs the `--depth 1` selection on ubuntu
+after the lockfile check, the hygiene gate and ruff. It never runs the
+whole suite: when the depth-1 selection is wider than a quarter of the
+suite it runs the depth-0 selection instead, and it fails when that is wide
+too, when the selector fails, prints nothing, names a path that is not an
+existing test file, or cannot resolve the base ref it diffs from. A change
+that fails the gate that way needs the two-platform matrix with coverage,
+which runs on a PR carrying the `full-ci` label in place of the gate.
+
 So before removing or renaming a config key, a route, or a response field:
 search for the old name and for every field name the route derives from
 it, run the hygiene check, and run the affected selection.
