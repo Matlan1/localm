@@ -134,7 +134,9 @@ def test_latest_tag_skips_release_with_no_uploaded_assets(monkeypatch):
     assert sl._latest_tag() == "b9870"     # NOT the not-yet-uploaded b9871
 
 
-def test_latest_tag_skips_draft_and_prerelease(monkeypatch):
+def test_latest_tag_skips_draft_but_not_prerelease(monkeypatch):
+    """Upstream flags every real build release prerelease=true, so that flag
+    is not excluded; draft still is."""
     releases = [
         {"tag_name": "b9872", "draft": True, "prerelease": False,
          "assets": [{"name": "x", "browser_download_url": "https://x", "size": 1}]},
@@ -145,7 +147,7 @@ def test_latest_tag_skips_draft_and_prerelease(monkeypatch):
     ]
     patch_https_transport(monkeypatch,
                         lambda req, timeout=None, context=None: _FakeHTTP(releases))
-    assert sl._latest_tag() == "b9870"
+    assert sl._latest_tag() == "b9871"
 
 
 def test_latest_tag_falls_back_when_nothing_has_assets(monkeypatch):

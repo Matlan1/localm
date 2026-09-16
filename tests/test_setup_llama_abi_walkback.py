@@ -196,11 +196,28 @@ def test_recent_tags_is_newest_first_and_skips_unusable_releases(monkeypatch):
     _fake_releases_api(monkeypatch, _releases(
         ("b300", False, False, False),   # published but assets not uploaded yet
         ("b299", True, True, False),     # draft
-        ("b298", True, False, True),     # prerelease
+        ("v0.4.0", True, False, False),  # non-bNNNNN pointer tag
+        ("b298", True, False, True),     # prerelease-flagged real build
         ("b297", True, False, False),
         ("b296", True, False, False),
     ))
-    assert sl._recent_tags() == ["b297", "b296"]
+    assert sl._recent_tags() == ["b298", "b297", "b296"]
+
+
+def test_recent_tags_includes_a_prerelease_flagged_release(monkeypatch):
+    """Every release ggml-org/llama.cpp publishes is flagged prerelease, with no
+    signal value: a real, asset-bearing, non-draft bNNNNN release must still
+    surface."""
+    _fake_releases_api(monkeypatch, _releases(("b298", True, False, True)))
+    assert sl._recent_tags() == ["b298"]
+
+
+def test_recent_tags_rejects_a_non_build_tag_even_with_assets(monkeypatch):
+    """The semver pointer tags (v0.2.0/v0.3.0/v0.4.0) are non-prerelease and
+    carry a single asset (a small nightly-tag.txt), so they pass a has-assets
+    check and then 404 on the platform archive. Only a bNNNNN tag qualifies."""
+    _fake_releases_api(monkeypatch, _releases(("v0.4.0", True, False, False)))
+    assert sl._recent_tags() == []
 
 
 def test_recent_tags_is_empty_when_the_lookup_fails(monkeypatch):
@@ -223,7 +240,10 @@ def test_latest_tag_falls_back_to_the_confirmed_pin_when_nothing_is_usable(
     the build we tested than by an arbitrary release nobody has run."""
     monkeypatch.setattr(sl, "_recent_tags", lambda *a, **k: [])
     assert sl._latest_tag() == sl._PINNED_TAG
-    assert "rerun later" in _flat(capsys), "the fallback must be visible"
+    out = _flat(capsys)
+    assert "rerun later" in out, "the fallback must be visible"
+    assert "unreachable" not in out, (
+        "an empty result is not evidence the lookup failed")
 
 
 # --------------------------------------------------------------------------- #

@@ -39,6 +39,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   your GPU" when none was found, and prints an honest note that CPU-only
   image generation is far too slow to be practical for the shipped FLUX
   workflow. The Images page intro and the setup docs carry the same warning.
+- **`localm setup-llama --tag latest` (and `update` while tracking it) now
+  installs upstream's actual newest build.** It was silently falling back to
+  the confirmed pinned build instead, because every real release llama.cpp
+  currently publishes upstream is marked as a prerelease and that was being
+  excluded; the fallback message also wrongly claimed the release lookup had
+  failed. It now resolves the real newest build, and the message no longer
+  makes that claim.
 - **Switching models or unloading one while it is still generating no longer
   gets refused or silently degraded.** The switch/unload now stops that
   generation and completes right away for the common case (press Stop, then
