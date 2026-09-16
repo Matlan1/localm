@@ -31,7 +31,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Settings translates more of itself into German.** Server controls, other
   running instances, Report a bug, Changelog, Updates (app update, roll back,
   the app launcher and the inference runtime), Issues, Logs and Upload files
-  now show in German too, alongside the rest of the Settings page.
+  now show in German too, alongside the rest of the Settings page. Every
+  Runtime & GPU, Timeouts, Chat, Server, Security, Coder, Desktop app,
+  Privacy, Memory, Embeddings, Plugin, Update, Knowledge and Network setting's
+  label and help text is now translated as well, along with their section
+  headings.
 
 ### Fixed
 - **Setting up localm's own ComfyUI on a machine with no usable GPU now says

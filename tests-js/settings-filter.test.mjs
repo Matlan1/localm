@@ -31,7 +31,7 @@ const SCHEMA = {
     { key: "require_auth", widget: "toggle", label: "Require an API key",
       help: "", group: "Security", owner: "core", default: false },
     { key: "net_allow", widget: "list", label: "Allowed domains",
-      help: "Domains the web plugin may fetch.",
+      help: "Domains the web plugin may reach.",
       group: "Network", owner: "web", default: ["a.com"] },
     { key: "coder_n_ctx", widget: "number", label: "Coder context window",
       help: "", group: "Coder", owner: "coder", default: 8192 },
@@ -171,7 +171,7 @@ test("filter matches by config KEY and by HELP text", async () => {
   // Case-insensitive, and multi-term is AND across the field's text.
   type("ALLOWED DOMAINS");
   assert.ok(shown("net_allow"), "matching is case-insensitive");
-  type("domains fetch");
+  type("domains reach");
   assert.ok(shown("net_allow"), "all terms may come from label + help together");
   type("domains temperature");
   assert.equal(shown("net_allow"), false, "terms are ANDed, not ORed");

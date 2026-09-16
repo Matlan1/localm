@@ -72,6 +72,13 @@ function hasKey(key) {
   return typeof _catalog[key] === "string" || typeof I18N_EN[key] === "string";
 }
 
+/** key's translation if the catalog carries one, else fallback verbatim - no
+ *  console.warn, since a caller with no catalog entry (a plugin/media field's
+ *  server-supplied text) is expected, not a typo. */
+export function tOr(key, fallback, params) {
+  return hasKey(key) ? t(key, params) : fallback;
+}
+
 /** The CLDR plural category `count` selects in the active language. Falls back
  *  to the English one/other split where Intl.PluralRules is unavailable. */
 export function pluralCategory(count) {

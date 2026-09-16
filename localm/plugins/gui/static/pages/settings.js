@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
-import { t } from "../app/i18n.js";
+import { t, tOr } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
@@ -125,27 +125,38 @@ export function settingsTopGroupFor(group) {
 // Note Server's heading is no longer "Network". That collided with the group
 // literally CALLED Network (the net_* egress policy), so the page had two different
 // panels a user could reasonably call Network and the search box indexed both.
-export const CORE_SECTION_HEADING = {
-  Engine: "Runtime & GPU",
-  Timeouts: "Timeouts & limits",
-  Chat: "Generation defaults",
-  Models: "Library",
-  Embeddings: "Embeddings",
-  Server: "Server",
-  Network: "Outbound access",
-  Security: "Access",
-  Plugins: "Plugin management",
-  Privacy: "Session persistence",
-  Memory: "Memory",
-  Diagnostics: "Diagnostics",
-  Updates: "Updates",
-  "Bug reports": "Bug reports",
-  General: "Appearance",
-  Coder: "Coder",
-  Knowledge: "Knowledge (RAG)",
-  Voice: "Voice",
-  Desktop: "Desktop app",
+//
+// Catalog key per group (a function, not a plain object: a module-level object
+// literal would freeze this in English forever, the same trap as models.js's
+// EMBED_LABELS). English text is the fallback for a schema `group` this map
+// does not recognise (SETTINGS_GROUPS' own catalog keys cover that case via
+// t()/settingsTopGroupFor elsewhere; this one is display-only per group).
+const CORE_SECTION_HEADING_KEY = {
+  Engine: "settings.sectionHeading.engine",
+  Timeouts: "settings.sectionHeading.timeouts",
+  Chat: "settings.sectionHeading.chat",
+  Models: "settings.sectionHeading.models",
+  Embeddings: "settings.sectionHeading.embeddings",
+  Server: "settings.sectionHeading.server",
+  Network: "settings.sectionHeading.network",
+  Security: "settings.sectionHeading.security",
+  Plugins: "settings.sectionHeading.plugins",
+  Privacy: "settings.sectionHeading.privacy",
+  Memory: "settings.sectionHeading.memory",
+  Diagnostics: "settings.sectionHeading.diagnostics",
+  Updates: "settings.sectionHeading.updates",
+  "Bug reports": "settings.sectionHeading.bugReports",
+  General: "settings.sectionHeading.general",
+  Coder: "settings.sectionHeading.coder",
+  Knowledge: "settings.sectionHeading.knowledge",
+  Voice: "settings.sectionHeading.voice",
+  Desktop: "settings.sectionHeading.desktop",
 };
+
+export function coreSectionHeading(group) {
+  const key = CORE_SECTION_HEADING_KEY[group];
+  return key ? t(key) : undefined;
+}
 
 /** The top-level group id a section element belongs to (defaults to "system"). */
 export function sectionTopGroup(sec) {
@@ -189,6 +200,14 @@ export function saveActiveSettingsSection() {
 }
 window.saveActiveSettingsSection = saveActiveSettingsSection;
 
+/** settings_schema.py field keys are snake_case (binary_dir); catalog keys
+ *  follow this app's own camelCase convention (settings.field.binaryDir.*),
+ *  matching every other namespace in the catalog - so a server field key is
+ *  never used verbatim as (part of) a catalog key. */
+function settingsFieldCatalogKey(fieldKey) {
+  return fieldKey.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+}
+
 /** Build one labelled control for a schema field. Returns { field, read } or
  *  null for HIDDEN fields (never rendered). */
 export function buildSettingControl(field) {
@@ -209,7 +228,8 @@ export function buildSettingControl(field) {
 
   const wrap = el("div");
   wrap.dataset.fieldKey = field.key;   // so cross-field wiring can find a control
-  const label = el("label", "", field.label || field.key);
+  const label = el("label", "",
+    tOr(`settings.field.${settingsFieldCatalogKey(field.key)}.label`, field.label || field.key));
   label.title = field.key;
   wrap.appendChild(label);
 
@@ -221,7 +241,7 @@ export function buildSettingControl(field) {
       for (const opt of field.options || []) {
         const o = document.createElement("option");
         o.value = opt;
-        o.textContent = opt === "" ? "(inherit)" : opt;
+        o.textContent = opt === "" ? t("settings.field.inheritOption") : opt;
         input.appendChild(o);
       }
       input.value = value == null ? "" : String(value);
@@ -271,7 +291,7 @@ export function buildSettingControl(field) {
       // rather than a solid value indistinguishable from something the user
       // typed. read() below already omits a blank box from the save payload -
       // that contract predates this fix and is unchanged.
-      if (value != null && isShippedDefault) input.placeholder = "default (" + value + ")";
+      if (value != null && isShippedDefault) input.placeholder = t("settings.field.defaultPlaceholder", { value });
       else if (value != null) input.value = value;
       read = () => (input.value.trim() === "" ? undefined : Number(input.value));
       break;
@@ -280,7 +300,7 @@ export function buildSettingControl(field) {
       input = document.createElement("input");
       input.type = "password";
       input.value = "";                 // never prefill a real secret
-      input.placeholder = "unchanged";
+      input.placeholder = t("settings.field.secretPlaceholder");
       // Only send a secret when the user actually typed one.
       read = () => (input.value === "" ? undefined : input.value);
       break;
@@ -289,7 +309,7 @@ export function buildSettingControl(field) {
       input = document.createElement("input");
       input.type = "text";
       input.value = Array.isArray(value) ? value.join(", ") : (value ?? "");
-      input.placeholder = "comma-separated";
+      input.placeholder = t("settings.field.listPlaceholder");
       read = () => input.value.split(",").map((s) => s.trim()).filter(Boolean);
       break;
     }
@@ -309,19 +329,19 @@ export function buildSettingControl(field) {
         const inp = document.createElement("input");
         inp.type = "text";
         inp.value = path;
-        inp.placeholder = "folder path";
+        inp.placeholder = t("settings.field.pathlistRowPlaceholder");
         inp.dataset.key = field.key;
         inp.addEventListener("input", dirty);
         inp.addEventListener("change", dirty);
-        const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
+        const browse = el("button", "btn-secondary dir-picker-btn", t("settings.field.browse"));
         browse.type = "button";
         browse.onclick = async () => {
-          const picked = await pickDirectory("Pick a folder to allow", inp.value.trim());
+          const picked = await pickDirectory(t("settings.field.pathlistPickTitle"), inp.value.trim());
           if (picked) { inp.value = picked; dirty(); }
         };
         const rm = el("button", "btn-secondary pathlist-rm");
         rm.type = "button";
-        rm.title = "Remove this folder";
+        rm.title = t("settings.field.pathlistRemoveTitle");
         rm.appendChild(iconEl("trash", "ic"));
         rm.onclick = () => { row.remove(); dirty(); };
         row.append(inp, browse, rm);
@@ -333,11 +353,11 @@ export function buildSettingControl(field) {
       const add = el("button", "btn-secondary pathlist-add");
       add.type = "button";
       add.appendChild(iconEl("plus", "ic"));
-      add.appendChild(document.createTextNode("Add folder"));
+      add.appendChild(document.createTextNode(t("settings.field.pathlistAddButton")));
       add.onclick = async () => {
         // Open the picker straight away (the common case); if the user cancels,
         // still add an empty row they can type into.
-        const picked = await pickDirectory("Pick a folder to allow", "");
+        const picked = await pickDirectory(t("settings.field.pathlistPickTitle"), "");
         addRow(picked || "");
         dirty();
       };
@@ -350,7 +370,7 @@ export function buildSettingControl(field) {
       };
       wrap.appendChild(list);
       wrap.appendChild(add);
-      if (field.help) wrap.appendChild(el("div", "sub", field.help));
+      if (field.help) wrap.appendChild(el("div", "sub", tOr(`settings.field.${settingsFieldCatalogKey(field.key)}.help`, field.help)));
       return { field, node: wrap, read, write };
     }
     case "textarea": {   // free-form multi-line (e.g. the default system prompt)
@@ -399,7 +419,7 @@ export function buildSettingControl(field) {
         // common "clear it back to empty" case) always takes the plain `else`
         // branch below instead, whose null-on-blank explicit-clear semantics
         // are completely untouched by this branch's existence.
-        input.placeholder = "default (" + stored + ")";
+        input.placeholder = t("settings.field.defaultPlaceholder", { value: stored });
         read = () => {
           const v = input.value.trim();
           if (v === "" || v === stored) return undefined;
@@ -458,15 +478,15 @@ export function buildSettingControl(field) {
   if ((isPath || isDir) && caps.fsAccess !== "host") return null;
   if (isPath || isDir) {
     const row = el("div", "dir-picker-row");
-    const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
+    const browse = el("button", "btn-secondary dir-picker-btn", t("settings.field.browse"));
     browse.type = "button";                 // never submit the settings form
     browse.dataset.browse = field.key;
     browse.onclick = async () => {
       let picked;
       if (isPath) {
-        picked = await pickFile("Pick a file", input.value.trim());
+        picked = await pickFile(t("picker.pickFileTitle"), input.value.trim());
       } else {
-        picked = await pickDirectory("Pick a directory", input.value.trim());
+        picked = await pickDirectory(t("picker.pickDirTitle"), input.value.trim());
       }
       if (picked) { input.value = picked; input.classList.remove("auto-detected"); }
     };
@@ -475,17 +495,22 @@ export function buildSettingControl(field) {
   } else {
     wrap.appendChild(input);
   }
-  if (field.help) wrap.appendChild(el("div", "sub", field.help));
+  if (field.help) wrap.appendChild(el("div", "sub", tOr(`settings.field.${settingsFieldCatalogKey(field.key)}.help`, field.help)));
   // The server port: show the LIVE bound port when it is known and differs
   // from the persisted default above (an explicit -p override, or an
   // auto-bump onto a different free port never gets written back to disk).
+  // Two full templates rather than gluing a translated fragment ("the saved
+  // value") into an English sentence - the fragment would stay English inside
+  // an otherwise-translated sentence in any language whose word order differs.
   if (field.key === "port" && field.live_port != null && field.live_port !== value) {
-    const saved = value == null ? "The saved value" : `The saved value (${value})`;
-    wrap.appendChild(el("div", "sub",
-      `Currently running on port ${field.live_port}. ${saved} takes effect on the next restart.`));
+    const msg = value == null
+      ? t("settings.field.livePort.unknownValue", { port: field.live_port })
+      : t("settings.field.livePort.knownValue", { port: field.live_port, value });
+    wrap.appendChild(el("div", "sub", msg));
   }
   if (field.link) {
-    const link = el("a", "settings-field-link", field.link.label);
+    const link = el("a", "settings-field-link",
+      tOr(`settings.field.${settingsFieldCatalogKey(field.key)}.link.label`, field.link.label));
     link.href = field.link.url;
     link.target = "_blank";
     link.rel = "noopener";
@@ -499,11 +524,11 @@ export function buildSettingControl(field) {
     btn.onclick = async () => {
       const r = await fetch(field.action.endpoint, { method: "POST", headers: authHeaders() });
       if (r.ok) {
-        toast(field.action.success_msg || "Action completed");
+        toast(field.action.success_msg || t("settings.field.actionCompleted"));
         refreshSettingsPage();
       } else {
         const err = await r.json().catch(() => ({}));
-        toast(err.error || "Action failed", true);
+        toast(err.error || t("settings.field.actionFailed"), true);
       }
     };
     actRow.appendChild(btn);
@@ -1238,7 +1263,14 @@ export function buildSettingsNav() {
 
 // The nav labels are built from the catalog, so they are redrawn when the
 // interface language changes.
-document.addEventListener("localm:language", () => buildSettingsNav());
+document.addEventListener("localm:language", () => {
+  buildSettingsNav();
+  // The schema-driven fields (CORE_FIELDS label/help, section headings) are
+  // painted from fetched data, not markup, so a language switch has to
+  // re-fetch and redraw them. refreshSettingsPage() is already safe to call
+  // more than once (see _settingsRenderToken above).
+  refreshSettingsPage();
+});
 
 /** Which group the settings page should be SHOWING: the user's explicit choice if it
  *  still has a visible section, else the first group that does (Model). Extracted from
@@ -1436,11 +1468,10 @@ export async function refreshSettingsPage() {
       updateToggleBlock.hidden = false;
       continue;
     }
-    // Every group has a real heading now (CORE_SECTION_HEADING is total, and an
+    // Every group has a real heading now (coreSectionHeading is total, and an
     // empty string is no longer representable), so a section can never render as
     // a bare grey block again - design rule 4.
-    const heading = (sec.label in CORE_SECTION_HEADING)
-      ? CORE_SECTION_HEADING[sec.label] : sec.label;
+    const heading = coreSectionHeading(sec.label) ?? sec.label;
     const topGroup = settingsTopGroupFor(sec.label);
     const panel = el("section", "card settings-section");
     panel.id = "settings-sec-" + sec.id;
