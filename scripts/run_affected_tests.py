@@ -61,6 +61,7 @@ class Selection:
     exit_status: int = 0
     depth: int = 0                              # the --depth the selector ran at
     wider: Selection | None = None              # the wide result this one replaced
+    retry: str = ""                             # the depth-0 retry's mode, on a kept wide result
 
 
 def parse_selection(exit_status: int, stdout: str, stderr: str, repo: Path | None = None,
@@ -132,14 +133,16 @@ def select(depth: int, base: str, files: list[str] | None) -> Selection:
     if narrower.mode == "selected":
         narrower.wider = selection
         return narrower
+    selection.retry = narrower.mode
     selection.detail = (f"{selection.detail}\n\nat --depth 0: {narrower.mode}\n"
                         f"{narrower.detail}").strip()
     return selection
 
 
 def pytest_args(selection: Selection, extra: list[str]) -> list[str] | None:
-    """The pytest argument list for *selection*, or None when pytest is not run."""
-    if selection.mode == "selected":
+    """The pytest argument list for *selection*, or None when pytest is not
+    run. Never an argument list without test paths: that is a whole-suite run."""
+    if selection.mode == "selected" and selection.paths:
         return [*selection.paths, *_PYTEST_ARGS, *extra]
     return None
 
@@ -158,13 +161,15 @@ def render_summary(selection: Selection, args: list[str] | None,
     elif selection.mode == "nothing":
         lines.append("**No test file is affected** by this change; pytest was not run.")
     elif selection.mode == "wide":
+        retry = {"wide": " and at `--depth 0`", "nothing": ", and nothing at `--depth 0`",
+                 "failed": ", and the selector failed at `--depth 0`"}.get(selection.retry, "")
         lines.append(f"**Selection wider than the selector's limit** (exit 3) at "
-                     f"`--depth {selection.depth}`" +
-                     (" and at `--depth 0`" if selection.depth > 0 else "") +
-                     ": pytest was not run and the job fails. This gate never runs the whole "
-                     "suite; this change needs the full suite (the `full-ci` label).")
+                     f"`--depth {selection.depth}`{retry}: pytest was not run and the job "
+                     "fails. This gate never runs the whole suite; this change needs the full "
+                     "suite (the `full-ci` label).")
     else:
-        lines.append("**The selector failed**; pytest was not run and the job fails.")
+        lines.append("**The selection could not be computed**; pytest was not run and the job "
+                     "fails.")
     if pytest_status == PYTEST_NO_TESTS_COLLECTED:
         lines.append("")
         lines.append("pytest collected no test: every test in the selection is deselected by "

@@ -152,6 +152,13 @@ def test_wide_nothing_and_failed_run_no_pytest_and_never_the_whole_suite(rat):
     assert "tests" not in rat.pytest_args(rat.Selection("selected", paths=["tests/test_a.py"]), [])
 
 
+def test_a_selection_without_paths_runs_no_pytest(rat):
+    """An argument list with no test path is a whole-suite run under
+    testpaths; the argv builder refuses it whatever the mode says."""
+    assert rat.pytest_args(rat.Selection("selected", paths=[]), []) is None
+    assert rat.pytest_args(rat.Selection("selected", paths=[]), ["-x"]) is None
+
+
 # --- select: the depth-0 retry of a wide selection ----------------------------
 
 def _selector_by_depth(monkeypatch, rat, by_depth):
@@ -204,6 +211,13 @@ def test_a_depth_zero_retry_that_selects_nothing_keeps_the_wide_result(
     assert s.mode == "wide" and s.depth == 1
     assert "WIDE: 88%" in s.detail and "at --depth 0:" in s.detail
     assert rat.pytest_args(s, []) is None
+    headline = rat.render_summary(s, None).splitlines()[2]
+    assert headline.startswith("**Selection wider than the selector's limit** (exit 3) at `--depth 1`")
+    expected = {3: " and at `--depth 0`", 0: ", and nothing at `--depth 0`" if retry.stdout.strip()
+                else ", and the selector failed at `--depth 0`",
+                1: ", and the selector failed at `--depth 0`"}[retry.returncode]
+    assert expected in headline, headline
+    assert "job fails" in headline and "needs the full suite" in headline
 
 
 def test_a_wide_selection_at_depth_zero_is_not_retried(rat, repo, monkeypatch):
@@ -256,7 +270,7 @@ def test_main_fails_on_an_unresolvable_base_without_running_pytest(rat, repo, mo
         argv=["--base", "refs/nonexistent/branch"], base_resolves=False)
     assert status == 1
     run_pytest.assert_not_called()
-    assert "selector failed" in text and "does not resolve" in text
+    assert "could not be computed" in text and "does not resolve" in text
     assert "No test file is affected" not in text
 
 
@@ -347,7 +361,7 @@ def test_a_selector_crash_fails_without_running_pytest(rat, repo, monkeypatch):
         _cp(1, "tests/AFFECTED_TESTS_FAILED_SEE_STDERR\n", "Traceback (most recent call last)"))
     assert status == 1
     run_pytest.assert_not_called()
-    assert "selector failed" in text and "selector exited 1" in text and "Traceback" in text
+    assert "could not be computed" in text and "selector exited 1" in text and "Traceback" in text
 
 
 def test_an_empty_selection_fails_without_running_pytest(rat, repo, monkeypatch):
