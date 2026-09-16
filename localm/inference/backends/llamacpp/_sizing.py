@@ -611,13 +611,12 @@ class VramSizingMixin:
         (``_gguf_tensor_offset_entries``) additionally runs at most once per
         load, shared by both."""
         model_bytes = self._model_bytes()
-        path = Path(self.model_path)
         parsed = self._gguf_parsed_tensor_entries()
 
         from localm.model_manager.gguf import gguf_input_layer_bytes
         input_bytes = self._gguf_excluded_bytes(
             "_gguf_input_layer_bytes",
-            lambda: gguf_input_layer_bytes(path, _parsed=parsed),
+            lambda: gguf_input_layer_bytes(self.model_path, _parsed=parsed),
             "input-layer byte")
         model_bytes = max(0, model_bytes - input_bytes)
 
@@ -627,7 +626,8 @@ class VramSizingMixin:
         from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
         pinned = self._gguf_excluded_bytes(
             "_gguf_moe_pinned_bytes",
-            lambda: gguf_moe_pinned_expert_bytes(path, n_cpu_moe, _parsed=parsed),
+            lambda: gguf_moe_pinned_expert_bytes(
+                self.model_path, n_cpu_moe, _parsed=parsed),
             "MoE expert-byte")
         return max(0, model_bytes - pinned)
 
