@@ -553,14 +553,8 @@ class VramSizingMixin:
         Two independent, always-additive subtractions:
 
         - The INPUT-LAYER tensors (``token_embd`` and its siblings - see
-          ``gguf_input_layer_bytes``/``_INPUT_LAYER_TENSOR_NAMES``).
-          llama.cpp's ``load_tensors()`` pins these to the CPU
-          UNCONDITIONALLY (``src/llama-model.cpp``: ``dev_input = {cpu_dev,
-          ...}``, with no ``n_gpu_layers``/architecture gate at all), so they
-          never draw on the VRAM budget for ANY load, dense or MoE, n_cpu_moe
-          set or not. On an architecture with Per-Layer Embeddings (Gemma
-          3n/4) this is a large fraction of the file - verified against
-          upstream source at the pin (see that constant's comment).
+          ``gguf_input_layer_bytes``/``_INPUT_LAYER_TENSOR_NAMES``). Applies
+          to every load, dense or MoE, n_cpu_moe set or not.
         - Whatever ``n_cpu_moe`` ADDITIONALLY pins to SYSTEM RAM (see
           llama.py's ``_apply_cpu_moe`` - the routed-expert tensors of the
           first ``n_cpu_moe`` layers never touch VRAM at all either). Opt-in,
@@ -568,11 +562,9 @@ class VramSizingMixin:
 
         Both are computed from each excluded tensor's EXACT size via its own
         file's tensor-info offsets (never a per-quantization-type size
-        table), and both degrade to charging the tensor's bytes anyway - the
-        existing, more conservative default - on a probe failure or an
-        unparseable header, rather than raising or ever claiming LESS VRAM is
-        needed than an unproven number would justify. Each memoised per
-        instance: its file read happens once per load."""
+        table), and both degrade to charging the tensor's bytes anyway on a
+        probe failure or an unparseable header. Each memoised per instance:
+        its file read happens once per load."""
         model_bytes = self._model_bytes()
 
         input_bytes = getattr(self, "_gguf_input_layer_bytes", None)

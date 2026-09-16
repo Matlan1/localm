@@ -1068,25 +1068,10 @@ _MOE_TENSOR_SUFFIX = r"\.ffn_(gate|down|up)_exps"
 # _apply_cpu_moe actually builds per-layer.
 _MOE_EXPERT_TENSOR_RE = re.compile(_MOE_TENSOR_PREFIX + r"(\d+)" + _MOE_TENSOR_SUFFIX)
 
-# The tensor NAMES llama.cpp's own tensor-info registry (LLM_TENSOR_INFOS in
-# src/llama-arch.cpp) maps to LLM_TENSOR_LAYER_INPUT - the input-layer bucket
-# load_tensors() assigns unconditionally to the CPU device (dev_input =
-# {cpu_dev, ...} in src/llama-model.cpp, with no n_gpu_layers/architecture
-# gate at all), regardless of how many layers a load offloads. Verified
-# directly against upstream source at the pin (_PINNED_TAG in setup_llama.py):
-# token_embd (every architecture), position_embd/token_types (older
-# GPT-2/BERT-style models), per_layer_token_embd (Gemma 3n/4's Per-Layer
-# Embeddings - the one that made this worth measuring: ~47% of a Gemma 4 E4B
-# file), masked_embd_centroids/masked_embd_ordering (Nemotron-family). This is
-# generic model-loading code with no backend-specific (CUDA/HIP/Vulkan)
-# branch, so it applies identically regardless of which GPU backend is active.
-#
-# NAMES ONLY, EXACT MATCH REQUIRED: LLM_TENSOR_TOKEN_EMBD_NORM ("token_embd_
-# norm") sits immediately next to LLM_TENSOR_TOKEN_EMBD ("token_embd") in that
-# registry and is a DIFFERENT tensor mapped to LLM_TENSOR_LAYER_REPEATING (a
-# real per-layer, GPU-offloadable tensor) - a prefix/substring match would
-# wrongly also catch it and every other tensor that happens to start with one
-# of these names, so the regex below anchors on the full ".weight" suffix.
+# Tensor names llama.cpp keeps on the CPU for every load, regardless of
+# n_gpu_layers or architecture. EXACT match required (the regex below anchors
+# on the full ".weight" suffix): token_embd_norm is a different,
+# GPU-offloadable tensor. See test_excludes_the_similarly_named_token_embd_norm.
 _INPUT_LAYER_TENSOR_NAMES = (
     "token_embd", "position_embd", "token_types", "per_layer_token_embd",
     "masked_embd_centroids", "masked_embd_ordering",
