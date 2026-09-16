@@ -491,7 +491,8 @@ from localm.vram import VRAM_OVERHEAD_BYTES as _VRAM_OVERHEAD_BYTES
 
 def estimate_vram(model_bytes: int, n_ctx: int,
                   n_gpu_layers: int = 99, n_layers: int | None = None,
-                  kv_bytes_per_token: int = 0, moe_pinned_bytes: int = 0) -> dict:
+                  kv_bytes_per_token: int = 0, moe_pinned_bytes: int = 0,
+                  input_layer_bytes: int = 0) -> dict:
     """Rough VRAM footprint (bytes) to load a GGUF model at *n_ctx* with
     *n_gpu_layers* offloaded. Returns a breakdown {weights, kv_cache, overhead,
     needed} so the UI can show where the memory goes. A model/ctx of 0 yields 0
@@ -513,9 +514,19 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     VRAM (see llamacpp/_sizing.py's VramSizingMixin._effective_model_bytes_for_vram,
     which applies the identical discount to the preflight that decides whether
     a load is even attempted). Same "0 means no signal, do nothing" contract as
-    kv_bytes_per_token - this function cannot read a header itself."""
+    kv_bytes_per_token - this function cannot read a header itself.
+
+    *input_layer_bytes*, when > 0, is the caller's own read of
+    gguf_input_layer_bytes(path) - the exact byte count of the input-layer
+    tensors (token_embd and its siblings) llama.cpp keeps on the CPU for
+    every load, not only an n_cpu_moe one. Same contract and same mirrored
+    function as moe_pinned_bytes above; applied first, unconditionally."""
     model_bytes = max(0, int(model_bytes or 0))
     n_ctx = max(0, int(n_ctx or 0))
+    # The input-layer share never touches VRAM for any load, dense or MoE -
+    # applied first and unconditionally, mirroring
+    # _effective_model_bytes_for_vram's ordering.
+    model_bytes = max(0, model_bytes - max(0, int(input_layer_bytes or 0)))
     # The MoE-pinned share never touches VRAM regardless of n_gpu_layers - it
     # is subtracted from the file's total BEFORE the GPU-offload fraction
     # below is applied, mirroring _effective_model_bytes_for_vram's ordering.

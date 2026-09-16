@@ -987,6 +987,36 @@ class TestVramEstimate:
         assert with_moe["weights"] == without["weights"] - pinned
         assert with_moe["weights"] < without["weights"]
 
+    def test_estimate_discounts_the_input_layer_for_every_load(
+            self, gui_app, tmp_path):
+        """The GUI estimate must apply the same input-layer discount
+        _sizing.py's VramSizingMixin._effective_model_bytes_for_vram applies
+        in the load-time preflight - unconditionally, not only for an
+        n_cpu_moe load - or a model with a large embedding table (e.g. a
+        Gemma Per-Layer-Embeddings architecture) shows as needing more VRAM
+        than the real load actually will."""
+        from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
+        from localm.model_manager.gguf import gguf_input_layer_bytes
+        app, _ = gui_app
+        tensors = [
+            ("token_embd.weight", [4], 0, 300_000),
+            ("blk.0.attn_q.weight", [4], 0, 2_000),
+        ]
+        kv = [("general.architecture", _T_STRING, "testarch")]
+        model_file = _gguf_with_tensors(tmp_path / "m.gguf", kv, tensors)
+        input_bytes = gguf_input_layer_bytes(model_file)
+        assert input_bytes == 300_000   # precondition: matches the fixture
+
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        import os
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_ctx": 0}).json()
+        assert data["weights"] == os.path.getsize(model_file) - input_bytes
+
     def test_estimate_skips_moe_probe_when_registry_confirms_dense(
             self, gui_app, tmp_path):
         """expert_count is persisted on a registry entry at registration time,
