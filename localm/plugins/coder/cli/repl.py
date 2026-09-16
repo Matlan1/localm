@@ -623,6 +623,12 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                         console.print(f"  - {safe_markup(b)}")
                     if result.notes:
                         console.print(f"[dim]{safe_markup(result.notes)}[/dim]")
+                # A truncated diff means the verdict above - approved or
+                # blocking - covers only what the reviewer actually saw, not
+                # the whole change; say so regardless of which branch printed.
+                partial = reviewer.partial_warning(result)
+                if partial:
+                    print_warning(partial)
 
     elif cmd == "scope":
         if not arg:

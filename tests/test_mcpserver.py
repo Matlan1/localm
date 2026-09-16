@@ -2253,6 +2253,34 @@ class TestRunCoderTaskInProcess:
         assert "success=True" in text and "denied=0" in text
         assert "[denied]" not in text
 
+    def test_sensitive_file_warning_reaches_the_mcp_response(self, coder_env, tmp_path):
+        """review_guard's "a passing check cannot vouch for this" warning used
+        to be console-only (runner.warn_sensitive_changes, reached only via
+        finish_agent): an MCP caller's stdout is swallowed by _quiet_stdout
+        and TaskResult.response is captured before finish_agent ever runs, so
+        it never reached here at all. Proven by actually driving the MCP path
+        and reading the RETURNED TEXT, not by checking a function was called."""
+        project = _project(tmp_path)
+        call = _tool_call("write_file", path="tests/test_x.py",
+                          content="def test_x():\n    pass\n")
+        server, _ = _coder_server(_scripted_engine_factory([call, "Done."]))
+        resp = _run_task(server, project)
+        assert (project / "tests" / "test_x.py").is_file()
+        result = resp["result"]
+        text = result["content"][0]["text"]
+        assert "tests/test_x.py" in text
+        assert "review these by hand" in text.lower()
+
+    def test_no_sensitive_file_warning_for_an_ordinary_source_write(self, coder_env, tmp_path):
+        """Control: an ordinary source file must not draw the warning, or it
+        would be noise on every task instead of signal on the rare one."""
+        project = _project(tmp_path)
+        call = _tool_call("write_file", path="app.py", content="x = 1\n")
+        server, _ = _coder_server(_scripted_engine_factory([call, "Done."]))
+        resp = _run_task(server, project)
+        text = resp["result"]["content"][0]["text"]
+        assert "review these by hand" not in text.lower()
+
     def test_a_denied_write_is_an_error_that_names_the_call(self, coder_env, tmp_path):
         """A call denied for want of a confirmation is reported on the
         result, never hidden behind success."""

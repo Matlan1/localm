@@ -45,6 +45,34 @@ def test_prompt_truncates_a_huge_diff():
     assert len(p) < 30_000
 
 
+def test_prompt_includes_the_sensitive_note_when_given():
+    p = build_review_prompt("diff body", task="t", sensitive_note="scrutinize tests/x.py")
+    assert "scrutinize tests/x.py" in str(p)
+
+
+def test_prompt_omits_any_sensitive_section_when_not_given():
+    p = build_review_prompt("diff body", task="t")
+    assert "scrutinize" not in str(p).lower()
+
+
+# --------------------------------------------------------------------------- #
+#  _truncate_diff: reports how much it elided, not just the marker text        #
+# --------------------------------------------------------------------------- #
+
+def test_truncate_diff_reports_elided_count_for_a_huge_diff():
+    from localm.plugins.coder.reviewer import _MAX_DIFF_CHARS, _truncate_diff
+    text, elided = _truncate_diff("x" * 50_000)
+    assert elided == 50_000 - _MAX_DIFF_CHARS
+    assert f"[{elided} chars of diff elided]" in text
+
+
+def test_truncate_diff_reports_zero_when_the_diff_fits():
+    from localm.plugins.coder.reviewer import _truncate_diff
+    text, elided = _truncate_diff("a small diff")
+    assert elided == 0
+    assert text == "a small diff"
+
+
 # --------------------------------------------------------------------------- #
 #  parse_review                                                                #
 # --------------------------------------------------------------------------- #
@@ -138,6 +166,72 @@ def test_reviewer_failure_warning_names_a_heterogeneous_reviewer():
     b.chat.side_effect = RuntimeError("connection refused")
     rv = Reviewer(b, heterogeneous=True)
     assert "separate reviewer model" in rv.failure_warning(rv.review("diff"))
+
+
+# --------------------------------------------------------------------------- #
+#  A truncated diff must not read as a full review (silent partial approval)   #
+# --------------------------------------------------------------------------- #
+
+def test_review_of_a_huge_diff_marks_the_result_truncated():
+    from localm.plugins.coder.reviewer import _MAX_DIFF_CHARS
+    rv = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
+    res = rv.review("x" * 50_000)
+    assert res.elided_chars == 50_000 - _MAX_DIFF_CHARS
+
+
+def test_review_of_a_small_diff_is_not_marked_truncated():
+    """Control: the common case stays untruncated, or every review would warn."""
+    rv = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
+    res = rv.review("a small diff")
+    assert res.elided_chars == 0
+
+
+def test_review_records_elided_chars_even_when_the_backend_crashes():
+    b = MagicMock()
+    b.chat.side_effect = RuntimeError("backend down")
+    rv = Reviewer(b)
+    res = rv.review("x" * 50_000)
+    assert res.ok is False and res.elided_chars > 0
+
+
+def test_partial_warning_fires_for_a_truncated_approval():
+    """The exact bug: an APPROVED verdict over a diff the reviewer only
+    partly saw must not read as a clean, full review."""
+    from localm.plugins.coder.reviewer import ReviewResult
+    rv = Reviewer(_backend_returning(""))
+    result = ReviewResult(approved=True, blocking=[], ok=True, elided_chars=5000)
+    warning = rv.partial_warning(result)
+    assert warning, "an approval over a truncated diff produced no warning"
+    assert "5,000" in warning or "5000" in warning
+    assert "only saw" in warning.lower() or "partly" in warning.lower()
+
+
+def test_partial_warning_fires_for_a_truncated_blocking_verdict_too():
+    """Not only the approved case: blocking issues found in the visible part
+    do not mean there is nothing to worry about in the elided part."""
+    from localm.plugins.coder.reviewer import ReviewResult
+    rv = Reviewer(_backend_returning(""))
+    result = ReviewResult(approved=False, blocking=["bug"], ok=True, elided_chars=100)
+    assert rv.partial_warning(result)
+
+
+def test_partial_warning_silent_when_the_diff_was_not_truncated():
+    """Control: the ordinary, untruncated case must stay silent, or the
+    warning is noise on every review rather than signal on the rare one."""
+    from localm.plugins.coder.reviewer import ReviewResult
+    rv = Reviewer(_backend_returning(""))
+    result = ReviewResult(approved=True, blocking=[], ok=True, elided_chars=0)
+    assert rv.partial_warning(result) == ""
+
+
+def test_partial_warning_silent_when_the_review_itself_failed():
+    """A crashed/unparseable review already gets failure_warning; a second,
+    different warning about truncation on top would be confusing and the
+    elided_chars count from a crashed call is not meaningful anyway."""
+    from localm.plugins.coder.reviewer import ReviewResult
+    rv = Reviewer(_backend_returning(""))
+    result = ReviewResult(approved=True, blocking=[], ok=False, elided_chars=5000)
+    assert rv.partial_warning(result) == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -392,6 +486,111 @@ def test_successful_approval_emits_no_failure_warning(tmp_path):
         assert _final_answer(agent.run_task("change code")) == "All done!"
     assert not [c for c in warn.call_args_list if "self-review" in str(c)]
     assert not agent._audit.notice.call_args_list
+
+
+# --------------------------------------------------------------------------- #
+#  A diff too big for the reviewer's cap: an approval must not read as full   #
+# --------------------------------------------------------------------------- #
+
+def _run_with_truncated_diff_reviewer(tmp_path, *, approved: bool = True):
+    """Drive a full run_task over a diff so large the reviewer's cap truncates
+    it, and return (result, warnings, events, audit, reviewer)."""
+    events: list = []
+    agent = _agent_that_changed_something(tmp_path, on_event=events.append)
+    verdict = ('{"approved": true, "blocking": []}' if approved else
+               '{"approved": false, "blocking": ["issue in the visible part"]}')
+    agent._reviewer = Reviewer(_backend_returning(verdict))
+    agent._audit = MagicMock()
+    huge_diff = "+" + ("x" * 50_000)
+    with patch("localm.plugins.coder.agent.print_warning") as warn, \
+         patch.object(agent, "_call_llm", return_value="All done!"), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
+         patch.object(agent, "session_diff", return_value=huge_diff):
+        result = agent.run_task("change code")
+    warnings = [str(c.args[0]) for c in warn.call_args_list]
+    return result, warnings, events, agent._audit, agent._reviewer
+
+
+def test_pre_done_review_surfaces_a_partial_warning_for_an_approved_huge_diff(tmp_path):
+    """The exact reported bug: 'Approved' for a diff the reviewer only partly
+    saw, with nothing telling the user that happened."""
+    _, warnings, _, _, _ = _run_with_truncated_diff_reviewer(tmp_path, approved=True)
+    hits = [w for w in warnings if "only saw" in w.lower()]
+    assert hits, f"a truncated-but-approved review produced no warning; got {warnings}"
+
+
+def test_pre_done_review_partial_warning_is_recorded_in_the_audit_trail(tmp_path):
+    _, _, _, audit, _ = _run_with_truncated_diff_reviewer(tmp_path, approved=True)
+    kinds = [c.args[0] for c in audit.notice.call_args_list]
+    assert "review_partial" in kinds
+
+
+def test_pre_done_review_partial_warning_reaches_a_gui_session_over_on_event(tmp_path):
+    """Same channel as the crashed-review warning above: a GUI/MCP caller has
+    no console, so the partial-review warning must ride on_event too."""
+    _, _, events, _, _ = _run_with_truncated_diff_reviewer(tmp_path, approved=True)
+    texts = [str(e.get("text", "")) for e in events if e.get("type") == "info"]
+    assert any("only saw" in t.lower() for t in texts), texts
+
+
+def test_pre_done_review_partial_warning_also_fires_when_blocking(tmp_path):
+    """Blocking issues found in the visible part are not the whole story when
+    the diff was truncated - the caveat applies to either verdict."""
+    _, warnings, _, _, _ = _run_with_truncated_diff_reviewer(tmp_path, approved=False)
+    assert any("only saw" in w.lower() for w in warnings), warnings
+
+
+def test_pre_done_review_small_diff_produces_no_partial_warning(tmp_path):
+    """Control: an ordinary, untruncated diff must not warn at all, or the
+    warning above means nothing."""
+    agent = _agent_that_changed_something(tmp_path)
+    agent._reviewer = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
+    agent._audit = MagicMock()
+    with patch("localm.plugins.coder.agent.print_warning") as warn, \
+         patch.object(agent, "_call_llm", return_value="All done!"), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
+         patch.object(agent, "session_diff", return_value="a small diff"):
+        agent.run_task("change code")
+    assert not [c for c in warn.call_args_list if "only saw" in str(c).lower()]
+    assert "review_partial" not in [c.args[0] for c in agent._audit.notice.call_args_list]
+
+
+# --------------------------------------------------------------------------- #
+#  The reviewer's own prompt is told which files a check cannot vouch for     #
+# --------------------------------------------------------------------------- #
+
+def test_pre_done_review_passes_the_sensitive_file_note_to_the_reviewer_prompt(tmp_path):
+    """A rewritten test's assertions can make a green run mean nothing; the
+    reviewer model itself should be told which hunks are which, not just the
+    human reading the final answer."""
+    agent = _agent_that_changed_something(tmp_path)
+    agent._record_changed_file("tests/test_x.py", None, "write_file")
+    agent._reviewer = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
+    agent._audit = MagicMock()
+    with patch("localm.plugins.coder.agent.print_warning"), \
+         patch.object(agent, "_call_llm", return_value="All done!"), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
+         patch.object(agent, "session_diff", return_value="some diff"):
+        agent.run_task("change code")
+    sent_prompt = str(agent._reviewer.backend.chat.call_args[0][0][0]["content"])
+    assert "tests/test_x.py" in sent_prompt
+    assert "scrutinize" in sent_prompt.lower()
+
+
+def test_pre_done_review_prompt_has_no_sensitive_note_when_nothing_sensitive_changed(tmp_path):
+    """Control: an ordinary source-only change adds nothing extra to the
+    reviewer's prompt."""
+    agent = _agent_that_changed_something(tmp_path)
+    agent._record_changed_file("app.py", None, "write_file")
+    agent._reviewer = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
+    agent._audit = MagicMock()
+    with patch("localm.plugins.coder.agent.print_warning"), \
+         patch.object(agent, "_call_llm", return_value="All done!"), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
+         patch.object(agent, "session_diff", return_value="some diff"):
+        agent.run_task("change code")
+    sent_prompt = str(agent._reviewer.backend.chat.call_args[0][0][0]["content"])
+    assert "scrutinize" not in sent_prompt.lower()
 
 
 # --------------------------------------------------------------------------- #

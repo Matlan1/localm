@@ -164,6 +164,7 @@ class TestReplCommandsSurviveHostileModelData:
         reviewer = MagicMock()
         reviewer.review.return_value = result
         reviewer.failure_warning.return_value = None
+        reviewer.partial_warning.return_value = None
         reviewer.heterogeneous = False
         agent._reviewer = reviewer
         repl._handle_command_extended("review", "", agent)

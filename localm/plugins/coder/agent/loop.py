@@ -640,7 +640,8 @@ class _LoopMixin:
                 "- nothing was run or written"))
 
         footer = self._grounding_footer()
-        final_text = response + enforcement + (footer or "")
+        sensitive = self._sensitive_changes_notice()
+        final_text = response + enforcement + (footer or "") + sensitive
         if not interactive and self.on_event is None:
             print_assistant_response(final_text, name=self.name)
         self._add_assistant(response)
@@ -781,6 +782,29 @@ class _LoopMixin:
             parts.append(f"verify: {self._last_verify_state}")
         return "\n\n[session record: " + "; ".join(parts) + "]"
 
+    def _sensitive_changes_notice(self) -> str:
+        """A footer noting files a passing check cannot vouch for on its own
+        (a rewritten test, a loosened CI/lint gate), or ``""`` when none.
+
+        This used to be console-only (runner.py's ``warn_sensitive_changes``,
+        reached only via ``finish_agent``), so a GUI session - whose
+        ``CoderSession.close()`` never calls ``finish_agent`` at all - and an
+        MCP ``run_coder_task`` call - whose caller sees only the returned
+        response text, with every console print swallowed - never saw it.
+        Folding it into the final answer itself, the same way
+        ``_grounding_footer`` does, reaches every surface by construction
+        instead of by remembering to wire up each one separately.
+        """
+        try:
+            from ..review_guard import classify_sensitive_changes, render_warning
+            message = render_warning(classify_sensitive_changes(self.changed_files()))
+        except Exception:
+            return ""
+        if not message:
+            return ""
+        self._emit("info", text=message)
+        return "\n\n" + message
+
     def _run_pre_done_review(self, diff: str) -> str:
         """Run the pre-done review over *diff* and return the feedback to feed
         back (``""`` when the answer stands).
@@ -790,15 +814,33 @@ class _LoopMixin:
         a warning plus an audit entry, distinct from an approval, so the user
         knows the diff went out unchecked. Visibility only; control flow is the
         same in both cases.
+
+        A diff over the reviewer's size cap is truncated before it is sent -
+        the reviewer then only ever saw part of the change, so its verdict
+        (approved OR blocking) is surfaced with that caveat too, the same way
+        as a failed review: printed, emitted, and recorded in the audit trail.
         """
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
-        result = self._reviewer.review(diff, self._review_task)
+        sensitive_note = ""
+        try:
+            from ..review_guard import classify_sensitive_changes, render_reviewer_note
+            sensitive_note = render_reviewer_note(
+                classify_sensitive_changes(self.changed_files()))
+        except Exception:
+            pass
+        result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
         warning = self._reviewer.failure_warning(result)
         if warning:
             print_warning(warning)
             self._emit("info", text=warning)
             self._audit.notice("review_failed", warning)
+        partial = self._reviewer.partial_warning(result)
+        if partial:
+            print_warning(partial)
+            self._emit("info", text=partial)
+            self._audit.notice("review_partial", partial)
         return self._reviewer.feedback_for(result)
+
     def _write_total(self) -> int:
         """Total file writes recorded this session. Compared against a per-task
         snapshot so the verify gate can tell "this task changed something" from
@@ -898,7 +940,8 @@ class _LoopMixin:
         self._add_assistant(response)
         # The grounding footer is unconditional. _last_verify_state is already
         # "failed" here, so the same call includes it.
-        return (True, response + notice + self._grounding_footer())
+        return (True, response + notice + self._grounding_footer()
+                + self._sensitive_changes_notice())
 
     def _check_post_batch_breakers(self) -> "str | None":
         """After a tool batch, return a circuit-breaker message (and mark the run

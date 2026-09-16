@@ -58,26 +58,42 @@ class ReviewResult:
     # but ok=False is NOT an approval and the caller must surface it. ``notes``
     # always carries the failure detail when this is False.
     ok: bool = True
+    # >0 when the diff sent for review exceeded _MAX_DIFF_CHARS and was
+    # truncated (head+tail kept, middle elided) before the reviewer ever saw
+    # it. A verdict with this set - approved or blocking - covers only what
+    # was actually shown, not the whole change.
+    elided_chars: int = 0
 
 
-def _truncate_diff(diff: str, max_chars: int = _MAX_DIFF_CHARS) -> str:
+def _truncate_diff(diff: str, max_chars: int = _MAX_DIFF_CHARS) -> tuple:
+    """Return ``(text, elided_chars)``; ``elided_chars`` is 0 when *diff* fits."""
     if len(diff) <= max_chars:
-        return diff
+        return diff, 0
     half = max_chars // 2
-    return (diff[:half]
-            + f"\n\n... [{len(diff) - max_chars} chars of diff elided] ...\n\n"
+    elided = len(diff) - max_chars
+    text = (diff[:half]
+            + f"\n\n... [{elided} chars of diff elided] ...\n\n"
             + diff[-half:])
+    return text, elided
 
 
-def build_review_prompt(diff: str, task: str = ""):
+def build_review_prompt(diff: str, task: str = "", sensitive_note: str = ""):
     """The reviewer prompt for *diff* and the optional *task*, both defanged.
+
+    *sensitive_note*, when given, is localm's OWN text (never derived from the
+    diff or task) naming files a passing check cannot vouch for on its own - a
+    rewritten test, a loosened CI gate - so the reviewer scrutinises those
+    hunks specifically. It is trusted instruction text, not untrusted data.
 
     Returns a ``GuardedText`` recording the task and diff as untrusted ranges.
     """
     task_raw = (task or "").strip()[:1000]
-    diff_raw = _truncate_diff((diff or "").strip())
+    diff_raw, _ = _truncate_diff((diff or "").strip())
+    instructions = _REVIEW_INSTRUCTIONS
+    if sensitive_note:
+        instructions = instructions + sensitive_note.strip() + "\n\n"
     return compose(
-        _REVIEW_INSTRUCTIONS,
+        instructions,
         "TASK:\n", untrusted_span(task_raw) if task_raw else "(not provided)",
         "\n\nDIFF:\n", untrusted_span(diff_raw) if diff_raw else "(empty diff)",
     )
@@ -137,16 +153,19 @@ class Reviewer:
         # Whether this reviewer is a DIFFERENT model than the agent's (for display).
         self.heterogeneous = heterogeneous
 
-    def review(self, diff: str, task: str = "") -> ReviewResult:
-        prompt = build_review_prompt(diff, task)
+    def review(self, diff: str, task: str = "", sensitive_note: str = "") -> ReviewResult:
+        _, elided = _truncate_diff((diff or "").strip())
+        prompt = build_review_prompt(diff, task, sensitive_note)
         try:
             raw = self.backend.chat(
                 [{"role": "user", "content": prompt}], max_tokens=600)
         except Exception as e:
             # Fail-open: a reviewer error does not block the agent.
             return ReviewResult(approved=True, blocking=[], notes=f"reviewer error: {e}",
-                                raw="", ok=False)
-        return parse_review(raw)
+                                raw="", ok=False, elided_chars=elided)
+        result = parse_review(raw)
+        result.elided_chars = elided
+        return result
 
     def failure_warning(self, result: ReviewResult) -> str:
         """The user-facing warning for a review that FAILED, else ``""``.
@@ -162,6 +181,26 @@ class Reviewer:
             f"self-review did NOT run: {who} failed ({why}). "
             "Proceeding UNREVIEWED - this is not an approval, the changes were "
             "never checked."
+        )
+
+    def partial_warning(self, result: ReviewResult) -> str:
+        """The user-facing warning for a review that RAN but only saw PART of
+        the diff, else ``""``.
+
+        A diff over ``_MAX_DIFF_CHARS`` is truncated (head+tail kept, middle
+        elided) before the reviewer ever sees it. Its verdict - approved or
+        blocking - is real, but it covers only what was shown, not the whole
+        change; silently printing "Approved" for that reads as a full review
+        when it was not. Fires only on a review that actually ran
+        (``result.ok``); a crashed review already gets ``failure_warning``."""
+        if not result.ok or not result.elided_chars:
+            return ""
+        seen = _MAX_DIFF_CHARS
+        total = seen + result.elided_chars
+        return (
+            f"the reviewer only saw {seen:,} of {total:,} diff characters "
+            f"({result.elided_chars:,} elided from the middle) - its verdict "
+            "covers only what it actually saw, not the whole change."
         )
 
     def feedback_for(self, result: ReviewResult) -> str:
@@ -184,9 +223,9 @@ class Reviewer:
         else ``""`` (the agent's answer stands).
 
         Convenience wrapper that DISCARDS the ReviewResult, so its ``""`` cannot
-        tell an approval from a failed review. A caller that must distinguish the
-        two uses ``review()`` + ``failure_warning()`` + ``feedback_for()``
-        instead."""
+        tell an approval from a failed or a partially-seen review. A caller that
+        must distinguish those uses ``review()`` + ``failure_warning()`` +
+        ``partial_warning()`` + ``feedback_for()`` instead."""
         return self.feedback_for(self.review(diff, task))
 
 
