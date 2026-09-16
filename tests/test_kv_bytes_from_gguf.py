@@ -562,6 +562,42 @@ class TestEstimateVramUsesTheRealShape:
         assert est["weights"] == 0
         assert est["needed"] >= 0
 
+    def test_input_layer_bytes_reduces_the_weights_estimate(self, tmp_path):
+        """_sizing.py's VramSizingMixin._effective_model_bytes_for_vram
+        discounts EVERY load's weight footprint by the input-layer tensors
+        llama.cpp keeps on the CPU, and this GUI estimate applies the SAME
+        discount. input_layer_bytes=0 (the default) is a no-op."""
+        from localm.sysstats import estimate_vram
+        model_bytes = 800 * 1024 * 1024
+        input_layer = 300 * 1024 * 1024
+
+        without = estimate_vram(model_bytes, n_ctx=0, n_gpu_layers=99)
+        with_input = estimate_vram(model_bytes, n_ctx=0, n_gpu_layers=99,
+                                   input_layer_bytes=input_layer)
+        assert with_input["weights"] == model_bytes - input_layer
+        assert with_input["weights"] < without["weights"]
+        assert with_input["needed"] < without["needed"]
+
+    def test_input_layer_and_moe_pinned_bytes_compose(self, tmp_path):
+        # Both discounts apply together, input layer first - the same order
+        # _effective_model_bytes_for_vram applies them in.
+        from localm.sysstats import estimate_vram
+        model_bytes = 800 * 1024 * 1024
+        est = estimate_vram(model_bytes, n_ctx=0, n_gpu_layers=99,
+                            input_layer_bytes=300 * 1024 * 1024,
+                            moe_pinned_bytes=200 * 1024 * 1024)
+        assert est["weights"] == model_bytes - 300 * 1024 * 1024 - 200 * 1024 * 1024
+
+    def test_input_layer_bytes_never_goes_negative(self, tmp_path):
+        # An input-layer count larger than the file itself clamps to zero
+        # rather than underflowing into a negative "weights" value, and never
+        # goes negative again once moe_pinned_bytes is applied on top.
+        from localm.sysstats import estimate_vram
+        est = estimate_vram(100, n_ctx=0, n_gpu_layers=99,
+                            input_layer_bytes=999, moe_pinned_bytes=999)
+        assert est["weights"] == 0
+        assert est["needed"] >= 0
+
 
 # --------------------------------------------------------------------------- #
 #  HYBRID architectures: layers that hold NO KV cache                          #

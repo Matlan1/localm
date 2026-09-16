@@ -547,19 +547,39 @@ class VramSizingMixin:
 
     def _effective_model_bytes_for_vram(self) -> int:
         """VRAM-resident weight bytes for THIS load: ``_model_bytes()``, minus
-        whatever ``n_cpu_moe`` pins to SYSTEM RAM instead (see llama.py's
-        ``_apply_cpu_moe`` - the routed-expert tensors of the first
-        ``n_cpu_moe`` layers never touch VRAM at all).
+        every tensor llama.cpp itself never places in VRAM regardless of
+        settings.
 
-        Computed via ``gguf_moe_pinned_expert_bytes``, which reads each pinned
-        tensor's EXACT size from the file's own tensor-info offsets.
+        Two independent, always-additive subtractions:
 
-        Falls back to the unadjusted ``_model_bytes()`` when ``n_cpu_moe`` is
-        unset or 0, the header cannot be parsed, or nothing in the pinned range
-        matched (e.g. a dense model, where ``n_cpu_moe`` has no effect per
-        ``_apply_cpu_moe``'s own ``gguf_expert_count() == 0`` guard).
-        Memoised per instance: the file read happens once per load."""
+        - The INPUT-LAYER tensors (``token_embd`` and its siblings - see
+          ``gguf_input_layer_bytes``/``_INPUT_LAYER_TENSOR_NAMES``). Applies
+          to every load, dense or MoE, n_cpu_moe set or not.
+        - Whatever ``n_cpu_moe`` ADDITIONALLY pins to SYSTEM RAM (see
+          llama.py's ``_apply_cpu_moe`` - the routed-expert tensors of the
+          first ``n_cpu_moe`` layers never touch VRAM at all either). Opt-in,
+          unlike the input layer above: only applies when configured.
+
+        Both are computed from each excluded tensor's EXACT size via its own
+        file's tensor-info offsets (never a per-quantization-type size
+        table), and both degrade to charging the tensor's bytes anyway on a
+        probe failure or an unparseable header. Each memoised per instance:
+        its file read happens once per load."""
         model_bytes = self._model_bytes()
+
+        input_bytes = getattr(self, "_gguf_input_layer_bytes", None)
+        if input_bytes is None:
+            from localm.model_manager.gguf import gguf_input_layer_bytes
+            try:
+                input_bytes = gguf_input_layer_bytes(Path(self.model_path))
+            except Exception as exc:  # contracted not to raise - surface if it does
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf input-layer byte probe failed (%s); charging "
+                           "the input layer for VRAM sizing", type(exc).__name__)
+                input_bytes = None
+            self._gguf_input_layer_bytes = input_bytes if input_bytes is not None else 0
+        model_bytes = max(0, model_bytes - self._gguf_input_layer_bytes)
+
         n_cpu_moe = getattr(self, "n_cpu_moe", 0) or 0
         if n_cpu_moe <= 0:
             return model_bytes

@@ -38,6 +38,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   headings.
 
 ### Fixed
+- **GPU VRAM sizing no longer overcounts a model's embedding table.**
+  llama.cpp always keeps the input embedding layer on the CPU, regardless of
+  how many layers are offloaded, but the preflight sizing used to charge it
+  against the VRAM budget anyway. It is now excluded for every load, which
+  can mean more layers (or the whole model) now offload to the GPU where
+  they previously did not; the effect is small for most models and large for
+  ones with a big embedding table relative to their size (Gemma's Per-Layer
+  Embeddings architectures in particular).
 - **Setting up localm's own ComfyUI on a machine with no usable GPU now says
   so plainly.** The installer no longer claims it is fetching "PyTorch for
   your GPU" when none was found, and prints an honest note that CPU-only

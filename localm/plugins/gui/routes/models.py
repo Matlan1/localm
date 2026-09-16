@@ -436,13 +436,15 @@ def register(app: FastAPI, ctx) -> None:
         from localm.model_meta import cached_n_layers
         from localm.model_manager import _entry_path
         from localm.model_manager.gguf import (
-            gguf_kv_bytes_per_token, gguf_moe_pinned_expert_bytes)
+            gguf_input_layer_bytes, gguf_kv_bytes_per_token,
+            gguf_moe_pinned_expert_bytes)
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
         n_layers = None
         kv_bytes_per_token = 0
         moe_pinned_bytes = 0
+        input_layer_bytes = 0
         # n_cpu_moe has no GUI slider of its own (unlike n_ctx / n_gpu_layers, which
         # the caller sends as the sliders' live positions), so it is read from the
         # saved config.
@@ -478,6 +480,17 @@ def register(app: FastAPI, ctx) -> None:
                                 "gguf KV-shape probe failed (%s) for %s; the VRAM "
                                 "estimate falls back to the size-class heuristic",
                                 type(exc).__name__, ep)
+                        # Unconditional, unlike the MoE probe below: llama.cpp
+                        # pins the input layer to the CPU for every load, dense
+                        # or MoE, n_cpu_moe set or not.
+                        input_bytes = 0
+                        try:
+                            input_bytes = int(gguf_input_layer_bytes(p) or 0)
+                        except Exception as exc:  # contracted not to raise - surface if it does
+                            logger.debug(
+                                "gguf input-layer probe failed (%s) for %s; "
+                                "the VRAM estimate charges the input layer",
+                                type(exc).__name__, ep)
                         moe_pinned = 0
                         if n_cpu_moe > 0 and not known_dense:
                             try:
@@ -490,17 +503,19 @@ def register(app: FastAPI, ctx) -> None:
                                     "file (today's behavior)",
                                     type(exc).__name__, ep)
                         return (p.stat().st_size, cached_n_layers(str(p)), kv_bpt,
-                                moe_pinned)
+                                moe_pinned, input_bytes)
                 except (OSError, ValueError):
                     pass
-                return model_bytes, n_layers, kv_bytes_per_token, moe_pinned_bytes
+                return (model_bytes, n_layers, kv_bytes_per_token,
+                        moe_pinned_bytes, input_layer_bytes)
 
-            (model_bytes, n_layers, kv_bytes_per_token,
-             moe_pinned_bytes) = await asyncio.get_running_loop().run_in_executor(
+            (model_bytes, n_layers, kv_bytes_per_token, moe_pinned_bytes,
+             input_layer_bytes) = await asyncio.get_running_loop().run_in_executor(
                 get_plugin_executor(), _measure, epath)
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers,
                             kv_bytes_per_token=kv_bytes_per_token,
-                            moe_pinned_bytes=moe_pinned_bytes)
+                            moe_pinned_bytes=moe_pinned_bytes,
+                            input_layer_bytes=input_layer_bytes)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it off the event
         # loop so a stats read never stalls the WebUI. return_status=True so a stale
         # (timed-out) or process-blind free reading is not weighed as current. When
