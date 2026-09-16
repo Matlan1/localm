@@ -20,6 +20,7 @@ from localm.inference.backends.base import (
 )
 from localm.inference.backends.llamacpp.llama import _build_sampler
 from localm.inference.gbnf import TOOL_CALL_TRIGGER, TOOL_CALLS_ONLY
+from tests._real_gguf import fetch_gguf, require_native_runtime
 
 _API = "localm.inference.backends.llamacpp.llama.api"
 
@@ -204,19 +205,11 @@ _FILE = "SmolLM2-135M-Instruct-Q4_K_M.gguf"
 @pytest.mark.integration
 @pytest.mark.real_gguf
 def test_lazy_grammar_activates_at_trigger_on_real_model():
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned: {e}")
+    require_native_runtime()
     from localm.inference.backends.llamacpp import _api as api
     if not api.has_lazy_grammar():
         pytest.skip("this llama build lacks the lazy grammar export")
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
+    path = fetch_gguf(_REPO, _FILE)
 
     from localm.inference.backends.llamacpp._structs import llama_token
     from localm.inference.backends.llamacpp.llama import LlamaCpp

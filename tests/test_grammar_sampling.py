@@ -19,6 +19,7 @@ import pytest
 
 from localm.inference.backends.llamacpp.llama import LlamaCpp
 from tests._bare_llama import make_bare_llama
+from tests._real_gguf import fetch_gguf, require_native_runtime
 
 
 def _bare_llama() -> LlamaCpp:
@@ -323,16 +324,8 @@ _FILE = "SmolLM2-135M-Instruct-Q4_K_M.gguf"
 @pytest.mark.integration
 @pytest.mark.real_gguf
 def test_grammar_constrains_real_generation():
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned: {e}")
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
+    require_native_runtime()
+    path = fetch_gguf(_REPO, _FILE)
 
     from localm.inference.backends.gguf import GgufBackend
     backend = GgufBackend(path, n_ctx=1024)
@@ -360,16 +353,8 @@ def test_invalid_grammar_does_not_poison_later_valid_grammars():
     latches _grammar_unsupported, which strips grammar from every later request.
     A bad grammar is rejected up front (InvalidGrammarError) so the latch never
     trips and valid grammars keep constraining."""
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned: {e}")
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
+    require_native_runtime()
+    path = fetch_gguf(_REPO, _FILE)
 
     from localm.inference.backends.base import InvalidGrammarError
     from localm.inference.backends.gguf import GgufBackend

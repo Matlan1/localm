@@ -11,8 +11,9 @@ layers x 32 experts) and drives GgufBackend against it. VRAM readings ARE mocked
 what GPU (or lack of one) runs this test.
 
 @integration so the default `pytest -m "not integration"` skips it: it needs
-~784 MB of network on first run. Skips cleanly (does not fail) when the model
-cannot be fetched.
+~784 MB of network on first run. Skips when the model cannot be fetched or the
+native runtime is not provisioned; once both are on disk, a load failure is a
+real failure.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+
+from tests._real_gguf import fetch_gguf, require_native_runtime
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_gguf]
 
@@ -29,12 +32,7 @@ _FILE = "granite-3.0-1b-a400m-instruct-Q4_K_M.gguf"
 
 @pytest.fixture(scope="module")
 def moe_model_path():
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
-    return path
+    return fetch_gguf(_REPO, _FILE)
 
 
 @pytest.fixture(scope="module")
@@ -121,18 +119,10 @@ def test_real_load_with_n_cpu_moe_generates_coherent_text(moe_facts):
     just the preflight arithmetic around it (llama.py's _apply_cpu_moe sources
     its pattern from model_manager.gguf)."""
     from localm.inference.backends.gguf import GgufBackend
-    from localm.inference.backends.llamacpp._loader import load_lib
-    try:
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned (run 'localm "
-                    f"setup-llama'): {e}")
+    require_native_runtime()
 
     b = GgufBackend(moe_facts["path"], n_ctx=1024, n_gpu_layers=99, n_cpu_moe=24)
-    try:
-        b.load()
-    except Exception as e:
-        pytest.skip(f"MoE model failed to load on this machine: {e}")
+    b.load()
     try:
         out = "".join(b.chat_stream(
             [{"role": "user",

@@ -621,17 +621,20 @@ def _report_installer_runs(session):
 #  Resource-gated integration markers (V2)                                     #
 #                                                                              #
 #  A test tagged real_gguf / real_comfy / real_browser is skipped, never       #
-#  failed, unless its resource is actually available.                          #
+#  failed, when its resource is absent. A resource that is present but        #
+#  unusable (a provisioned runtime that fails to load) errors the test.       #
 # --------------------------------------------------------------------------- #
 
 def _runtime_available() -> bool:
-    """True when the native llama.cpp runtime is provisioned and loadable."""
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-        return True
-    except Exception:
+    """True once the native llama.cpp runtime is provisioned and loaded; False
+    when no candidate directory holds the library file. Raises when the
+    library is on disk but ``load_lib()`` fails."""
+    from tests._real_gguf import native_runtime_lib_path
+    if native_runtime_lib_path() is None:
         return False
+    from localm.inference.backends.llamacpp._loader import load_lib
+    load_lib()
+    return True
 
 
 def _comfy_configured() -> bool:
@@ -680,17 +683,27 @@ _resource_available: dict = {}
 
 
 def pytest_runtest_setup(item):
-    """Skip resource-gated tests whose resource is unavailable - evaluated
-    LAZILY, at a gated test's own setup, never at collection.
+    """Skip resource-gated tests whose resource is absent - evaluated LAZILY,
+    at a gated test's own setup, never at collection.
 
     A deselected gated test triggers nothing, and a selected one loads the
-    runtime at its own setup. Results are memoized per marker, per process."""
+    runtime at its own setup. Results are memoized per marker, per process,
+    including a check that raised: every later test behind that marker errors
+    with the same cause instead of re-running the check."""
     for marker, check, reason in _RESOURCE_GATES:
         if marker not in item.keywords:
             continue
         ok = _resource_available.get(marker)
         if ok is None:
-            ok = _resource_available[marker] = check()
+            try:
+                ok = check()
+            except Exception as e:
+                ok = e
+            _resource_available[marker] = ok
+        if isinstance(ok, Exception):
+            raise RuntimeError(
+                f"{marker}: the resource is present but unusable "
+                f"({type(ok).__name__}: {ok})") from ok
         if not ok:
             pytest.skip(f"{marker}: {reason}")
 

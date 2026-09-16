@@ -55,6 +55,8 @@ import re
 
 import pytest
 
+from tests._real_gguf import fetch_gguf, require_native_runtime
+
 pytestmark = [pytest.mark.integration, pytest.mark.real_vulkan_split]
 
 _REPO = "bartowski/SmolLM2-135M-Instruct-GGUF"
@@ -68,10 +70,7 @@ def _split_indices() -> list:
 
 @pytest.fixture(scope="module")
 def vulkan_split_model_path():
-    try:
-        from localm.inference.backends.llamacpp import _loader
-    except Exception as e:
-        pytest.skip(f"native llamacpp binding unavailable: {e}")
+    from localm.inference.backends.llamacpp import _loader
 
     if _loader._loaded_lib is not None:
         pytest.skip(
@@ -96,17 +95,8 @@ def vulkan_split_model_path():
         # CPU-type; a real GPU pair would not need it.
         os.environ["GGML_VK_VISIBLE_DEVICES"] = ",".join(str(i) for i in _split_indices())
 
-    try:
-        _loader.load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned (run 'localm setup-llama vulkan'): {e}")
-
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
-    return path
+    require_native_runtime(setup_hint="localm setup-llama --backend vulkan")
+    return fetch_gguf(_REPO, _FILE)
 
 
 def test_split_load_uses_both_native_devices(vulkan_split_model_path, monkeypatch, capfd):

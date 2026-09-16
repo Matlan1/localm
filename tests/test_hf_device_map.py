@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm.inference.backends._hf_worker import _cuda_device_map
+from tests._real_gguf import require_native_runtime
 
 _HEADROOM = int(0.5e9)   # must match the headroom baked into _cuda_device_map
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -338,15 +339,10 @@ class TestSurvivesPriorLlamaCppNativeLoad:
     def test_survives_prior_llamacpp_native_load(self):
         _skip_unless_torch_and_accelerate_available()
 
-        from localm.inference.backends.llamacpp import _loader
-        try:
-            _loader.load_lib()
-        except RuntimeError as e:
-            pytest.skip(
-                f"native llama.cpp runtime not provisioned on this box: {e}")
+        require_native_runtime()
 
-        # Also import LlamaCpp itself; the lib is already loaded by the explicit
-        # load_lib() call above.
+        # Also import LlamaCpp itself; the lib is already loaded by
+        # require_native_runtime() above.
         from localm.inference.backends.llamacpp.llama import LlamaCpp  # noqa: F401
 
         result = _run_isolated_script(_CPU_OFFLOAD_CHILD_SCRIPT)
