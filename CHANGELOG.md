@@ -49,7 +49,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Runtime & GPU, Timeouts, Chat, Server, Security, Coder, Desktop app,
   Privacy, Memory, Embeddings, Plugin, Update, Knowledge and Network setting's
   label and help text is now translated as well, along with their section
-  headings.
+  headings. Owner key, Keys & devices (including scopes, presets and the QR
+  pairing flow) and Sign in on this device are now translated too.
 
 ### Fixed
 - **GPU VRAM sizing no longer overcounts a model's embedding table.**
@@ -60,6 +61,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   they previously did not; the effect is small for most models and large for
   ones with a big embedding table relative to their size (Gemma's Per-Layer
   Embeddings architectures in particular).
+- **Creating an API key with no capabilities checked no longer freezes the
+  page.** The confirmation for a chat-only key used the browser's native
+  confirm dialog, which some browsers block entirely and which locks up the
+  whole page until dismissed. It now uses the same in-page confirmation
+  dialog as every other confirmation in Settings.
 - **Setting up localm's own ComfyUI on a machine with no usable GPU now says
   so plainly.** The installer no longer claims it is fetching "PyTorch for
   your GPU" when none was found, and prints an honest note that CPU-only

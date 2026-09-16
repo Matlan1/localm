@@ -6,7 +6,6 @@
 import { $, authHeaders, confirmDanger, el, toast } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
-import { loginWithKey } from "../app/models-sidebar.js";
 import { MEDIA_PLUGIN_ORDER } from "./settings.js";
 
 /* ================================================================ */
@@ -300,27 +299,6 @@ if (showMmprojCheckbox) {
     localStorage.setItem("localm.showMmprojFiles", e.target.checked ? "true" : "false");
   });
 }
-
-$("gui-key-save").onclick = async () => {
-  const key = $("gui-api-key").value.trim();
-  if (key) {
-    const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
-    if (!ok) { toast("Key was not accepted", true); return; }
-    try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
-    toast("Key saved - reloading");
-    setTimeout(() => location.reload(), 600);
-    return;
-  }
-  // Empty -> sign out (clear the session cookie).
-  let signedOut = false;
-  try {
-    const r = await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
-    signedOut = r.ok;
-  } catch { /* fetch failed */ }
-  if (!signedOut) { toast("Could not sign out", true); return; }
-  toast("Signed out - reloading");
-  setTimeout(() => location.reload(), 600);
-};
 
 // The workflow panels are painted from fetched data, not marked up in
 // index.html, so re-fetch and redraw whichever ones are on the page when the
