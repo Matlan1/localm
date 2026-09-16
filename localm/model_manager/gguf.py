@@ -1068,6 +1068,98 @@ _MOE_TENSOR_SUFFIX = r"\.ffn_(gate|down|up)_exps"
 # _apply_cpu_moe actually builds per-layer.
 _MOE_EXPERT_TENSOR_RE = re.compile(_MOE_TENSOR_PREFIX + r"(\d+)" + _MOE_TENSOR_SUFFIX)
 
+# The tensor NAMES llama.cpp's own tensor-info registry (LLM_TENSOR_INFOS in
+# src/llama-arch.cpp) maps to LLM_TENSOR_LAYER_INPUT - the input-layer bucket
+# load_tensors() assigns unconditionally to the CPU device (dev_input =
+# {cpu_dev, ...} in src/llama-model.cpp, with no n_gpu_layers/architecture
+# gate at all), regardless of how many layers a load offloads. Verified
+# directly against upstream source at the pin (_PINNED_TAG in setup_llama.py):
+# token_embd (every architecture), position_embd/token_types (older
+# GPT-2/BERT-style models), per_layer_token_embd (Gemma 3n/4's Per-Layer
+# Embeddings - the one that made this worth measuring: ~47% of a Gemma 4 E4B
+# file), masked_embd_centroids/masked_embd_ordering (Nemotron-family). This is
+# generic model-loading code with no backend-specific (CUDA/HIP/Vulkan)
+# branch, so it applies identically regardless of which GPU backend is active.
+#
+# NAMES ONLY, EXACT MATCH REQUIRED: LLM_TENSOR_TOKEN_EMBD_NORM ("token_embd_
+# norm") sits immediately next to LLM_TENSOR_TOKEN_EMBD ("token_embd") in that
+# registry and is a DIFFERENT tensor mapped to LLM_TENSOR_LAYER_REPEATING (a
+# real per-layer, GPU-offloadable tensor) - a prefix/substring match would
+# wrongly also catch it and every other tensor that happens to start with one
+# of these names, so the regex below anchors on the full ".weight" suffix.
+_INPUT_LAYER_TENSOR_NAMES = (
+    "token_embd", "position_embd", "token_types", "per_layer_token_embd",
+    "masked_embd_centroids", "masked_embd_ordering",
+)
+_INPUT_LAYER_TENSOR_RE = re.compile(
+    r"^(?:" + "|".join(_INPUT_LAYER_TENSOR_NAMES) + r")\.weight$")
+
+
+def _gguf_tensor_offset_entries(
+        path: Path) -> "Optional[tuple[list[tuple[str, int]], int, int]]":
+    """Parse *path*'s GGUF header and tensor-info section into ``(entries,
+    file_size, data_start)`` - *entries* is every tensor's ``(name, offset)``
+    pair, sorted by offset (*offset* relative to *data_start*, the
+    alignment-padded byte at which the tensor DATA section begins).
+
+    The shared parse behind every by-name, offset-delta byte-accounting probe
+    in this module (``gguf_moe_pinned_expert_bytes``,
+    ``gguf_input_layer_bytes``): each only needs to filter *entries* by its
+    own tensor-name pattern and sum ``next_offset - this_offset`` per match
+    (the last entry's size comes from ``file_size - data_start`` instead, as
+    it has no next tensor to diff against) - EXACT regardless of quantization
+    scheme, with no per-type block-size table, as long as tensors are laid
+    out contiguously in offset order, which every llama.cpp-produced GGUF is.
+
+    Returns ``None`` - never raises - on any parse failure: not a GGUF, GGUF
+    v1, a truncated/malformed KV or tensor-info section, an implausible
+    dims/string length, or a hostile KV array whose declared element count
+    seeks past what Python's file API can address (``f.seek`` raising
+    ``ValueError``, not ``OSError``, for an offset outside a ``Py_ssize_t``)."""
+    try:
+        file_size = path.stat().st_size
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return None
+            tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
+            for _ in range(kv_count):
+                _gguf_read_string_stream(f)          # key (value unused here)
+                (vtype,) = struct.unpack("<I", f.read(4))
+                _gguf_skip_value_stream(f, vtype)
+            entries = []
+            for _ in range(tensor_count):
+                name = _gguf_read_string_stream(f)
+                (n_dims,) = struct.unpack("<I", f.read(4))
+                if n_dims > _GGUF_MAX_TENSOR_DIMS:
+                    raise struct.error(f"implausible tensor n_dims {n_dims}")
+                f.seek(8 * n_dims, 1)   # dims[] - unneeded for offset-delta sizing
+                f.seek(4, 1)            # ggml_type - unneeded too
+                (offset,) = struct.unpack("<Q", f.read(8))
+                entries.append((name, offset))
+            data_start = f.tell()
+    # ValueError: an out-of-range seek from a hostile KV array count.
+    except (OSError, struct.error, IndexError, UnicodeDecodeError,
+            ValueError) as exc:
+        logger.debug("gguf tensor-offset probe: could not parse %s (%s)",
+                     path.name, type(exc).__name__)
+        return None
+
+    if not entries:
+        return None
+    remainder = data_start % _GGUF_DEFAULT_ALIGNMENT
+    if remainder:
+        # Only the LAST tensor's size below depends on this: every other
+        # tensor's size comes from the delta to the NEXT tensor's offset,
+        # which cancels alignment padding out entirely. A file that overrides
+        # the default alignment skews the last tensor's size by at most one
+        # alignment unit.
+        data_start += _GGUF_DEFAULT_ALIGNMENT - remainder
+    entries.sort(key=lambda e: e[1])
+    return entries, file_size, data_start
+
 
 def _gguf_read_string_stream(f) -> str:
     """Read a length-prefixed GGUF string from an open, positioned file
@@ -1131,12 +1223,9 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
     ``_MOE_EXPERT_TENSOR_RE`` above for which tensors).
 
     Computed from each matching tensor's OFFSET DELTA in the file's own
-    tensor-info section (the next tensor's offset minus this one's, sorted by
-    offset; the last tensor's size comes from the file's total size instead)
-    rather than decoding ggml's per-quantization-type block format. It needs no
-    per-type size table and is EXACT regardless of quantization scheme, as long
-    as tensors are laid out contiguously in offset order, which every
-    llama.cpp-produced GGUF is.
+    tensor-info section (see ``_gguf_tensor_offset_entries``) rather than
+    decoding ggml's per-quantization-type block format - EXACT regardless of
+    quantization scheme, with no per-type size table.
 
     Returns ``None`` - never raises - when the file cannot be parsed as a
     GGUF, or *n_pinned_layers* is <= 0; the caller then falls back to charging
@@ -1146,53 +1235,46 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
     its own ``gguf_expert_count() == 0`` guard."""
     if n_pinned_layers <= 0:
         return None
-    try:
-        file_size = path.stat().st_size
-        with open(path, "rb") as f:
-            if f.read(4) != b"GGUF":
-                return None
-            (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
-                return None
-            tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
-            for _ in range(kv_count):
-                _gguf_read_string_stream(f)          # key (value unused here)
-                (vtype,) = struct.unpack("<I", f.read(4))
-                _gguf_skip_value_stream(f, vtype)
-            entries = []
-            for _ in range(tensor_count):
-                name = _gguf_read_string_stream(f)
-                (n_dims,) = struct.unpack("<I", f.read(4))
-                if n_dims > _GGUF_MAX_TENSOR_DIMS:
-                    raise struct.error(f"implausible tensor n_dims {n_dims}")
-                f.seek(8 * n_dims, 1)   # dims[] - unneeded for offset-delta sizing
-                f.seek(4, 1)            # ggml_type - unneeded too
-                (offset,) = struct.unpack("<Q", f.read(8))
-                entries.append((name, offset))
-            data_start = f.tell()
-    # ValueError: an out-of-range seek from a hostile KV array count.
-    except (OSError, struct.error, IndexError, UnicodeDecodeError,
-            ValueError) as exc:
-        logger.debug("gguf MoE expert-byte probe: could not parse %s (%s)",
-                     path.name, type(exc).__name__)
+    parsed = _gguf_tensor_offset_entries(path)
+    if parsed is None:
         return None
-
-    if not entries:
-        return None
-    remainder = data_start % _GGUF_DEFAULT_ALIGNMENT
-    if remainder:
-        # Only the LAST tensor's size below depends on this: every other
-        # tensor's size comes from the delta to the NEXT tensor's offset,
-        # which cancels alignment padding out entirely. A file that overrides
-        # the default alignment skews the last tensor's size by at most one
-        # alignment unit.
-        data_start += _GGUF_DEFAULT_ALIGNMENT - remainder
-
-    entries.sort(key=lambda e: e[1])
+    entries, file_size, data_start = parsed
     total = 0
     for idx, (name, offset) in enumerate(entries):
         m = _MOE_EXPERT_TENSOR_RE.search(name)
         if not m or int(m.group(1)) >= n_pinned_layers:
+            continue
+        nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
+        size = nxt - offset
+        if size > 0:
+            total += size
+    return total
+
+
+def gguf_input_layer_bytes(path: Path) -> Optional[int]:
+    """Bytes occupied by *path*'s input-layer tensors (see
+    ``_INPUT_LAYER_TENSOR_NAMES`` above for exactly which ones and why) -
+    llama.cpp keeps these on the CPU UNCONDITIONALLY, regardless of
+    n_gpu_layers, so they never draw on a GPU load's VRAM budget.
+
+    Computed from each matching tensor's OFFSET DELTA in the file's own
+    tensor-info section (see ``_gguf_tensor_offset_entries``), the same exact,
+    quantization-agnostic technique ``gguf_moe_pinned_expert_bytes`` uses.
+
+    Returns ``None`` - never raises - when the file cannot be parsed as a
+    GGUF; the caller then falls back to charging the whole file. In practice
+    every real LLM GGUF has at least a ``token_embd.weight``, so a successful
+    parse returning ``0`` would itself be unusual - an embedding-only file, or
+    a naming convention this probe does not yet know - but is returned as a
+    real answer rather than raised, matching every other probe in this
+    module's contract."""
+    parsed = _gguf_tensor_offset_entries(path)
+    if parsed is None:
+        return None
+    entries, file_size, data_start = parsed
+    total = 0
+    for idx, (name, offset) in enumerate(entries):
+        if not _INPUT_LAYER_TENSOR_RE.match(name):
             continue
         nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
         size = nxt - offset

@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""MoE-aware VRAM preflight (n_cpu_moe): _check_vram, _auto_gpu_layers and
-_auto_ctx_max all read self.n_cpu_moe rather than charging VRAM for the WHOLE
-file, so routed-expert weights pinned to system RAM (llama.py's _apply_cpu_moe)
-are not counted against the VRAM budget. Without that a model that fits once its
-experts are pinned is refused outright (_check_vram), under-offloaded
-(_auto_gpu_layers), or under-budgeted for context (_auto_ctx_max).
+"""VRAM preflight for weight bytes llama.cpp itself never places in VRAM:
+
+- n_cpu_moe (opt-in): _check_vram, _auto_gpu_layers and _auto_ctx_max all read
+  self.n_cpu_moe rather than charging VRAM for the WHOLE file, so routed-expert
+  weights pinned to system RAM (llama.py's _apply_cpu_moe) are not counted
+  against the VRAM budget. Without that a model that fits once its experts are
+  pinned is refused outright (_check_vram), under-offloaded (_auto_gpu_layers),
+  or under-budgeted for context (_auto_ctx_max).
+- The input layer (unconditional, every load): llama.cpp's load_tensors()
+  pins token_embd and its siblings to the CPU regardless of n_gpu_layers or
+  architecture (src/llama-model.cpp's dev_input assignment), so
+  _effective_model_bytes_for_vram subtracts those bytes from EVERY load, not
+  only an MoE one - on a Per-Layer-Embeddings architecture (Gemma 3n/4) this
+  is a large fraction of the file.
 
 These tests build REAL GGUF files byte by byte (header + KV block + real
 tensor-info entries + real tensor data, offsets and file size all internally
@@ -19,7 +27,8 @@ from unittest.mock import patch
 import pytest
 
 from localm.inference.backends.gguf import GgufBackend
-from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
+from localm.model_manager.gguf import (gguf_input_layer_bytes,
+                                       gguf_moe_pinned_expert_bytes)
 
 
 GB = 1024 ** 3
@@ -237,6 +246,106 @@ class TestGgufMoePinnedExpertBytes:
 
 
 # --------------------------------------------------------------------------- #
+#  gguf_input_layer_bytes: the header/tensor-info read                        #
+# --------------------------------------------------------------------------- #
+
+class TestGgufInputLayerBytes:
+    def test_sums_the_known_input_tensors_only(self, tmp_path):
+        tensors = [
+            ("token_embd.weight", [4, 4], 0, 500),
+            ("position_embd.weight", [4], 0, 200),
+            ("token_types.weight", [4], 0, 100),
+            ("per_layer_token_embd.weight", [4, 4, 8], 0, 700),
+            ("masked_embd_centroids.weight", [4], 0, 50),
+            ("masked_embd_ordering.weight", [4], 0, 25),
+            ("blk.0.attn_q.weight", [4, 4], 0, 1000),  # not an input tensor
+            ("output.weight", [4, 4], 0, 900),          # not an input tensor
+        ]
+        f = _gguf_with_tensors(
+            tmp_path / "m.gguf",
+            [("general.architecture", _T_STRING, "testarch")], tensors)
+        assert gguf_input_layer_bytes(f) == 500 + 200 + 100 + 700 + 50 + 25
+
+    def test_excludes_the_similarly_named_token_embd_norm(self, tmp_path):
+        # token_embd_norm sits right next to token_embd in llama.cpp's own
+        # tensor-info registry and is a DIFFERENT, GPU-offloadable tensor
+        # (LLM_TENSOR_LAYER_REPEATING, not LLM_TENSOR_LAYER_INPUT) - a
+        # prefix/substring match on "token_embd" would wrongly catch it too.
+        tensors = [
+            ("token_embd.weight", [4, 4], 0, 500),
+            ("token_embd_norm.weight", [4], 0, 300),
+        ]
+        f = _gguf_with_tensors(
+            tmp_path / "m.gguf",
+            [("general.architecture", _T_STRING, "testarch")], tensors)
+        assert gguf_input_layer_bytes(f) == 500
+
+    def test_out_of_offset_order_tensor_info_still_sums_correctly(self, tmp_path):
+        tensors = [
+            ("per_layer_token_embd.weight", [4], 0, 700),
+            ("token_embd.weight", [4], 0, 500),
+        ]
+        f = _gguf_with_tensors(
+            tmp_path / "m.gguf",
+            [("general.architecture", _T_STRING, "testarch")], tensors)
+        assert gguf_input_layer_bytes(f) == 1200
+
+    def test_last_tensor_in_file_sized_from_file_size(self, tmp_path):
+        tensors = [
+            ("blk.0.attn_q.weight", [4], 0, 64),
+            ("token_embd.weight", [4], 0, 500),   # last -> sized from EOF
+        ]
+        f = _gguf_with_tensors(
+            tmp_path / "m.gguf",
+            [("general.architecture", _T_STRING, "testarch")], tensors)
+        assert gguf_input_layer_bytes(f) == 500
+
+    def test_zero_when_no_input_tensor_present(self, tmp_path):
+        # Parsing succeeds and nothing matched: 0 is a real answer, not a
+        # failure - unusual for a genuine LLM GGUF (every real one has at
+        # least token_embd), but the contract still holds for a header this
+        # probe's fixed name list does not recognise.
+        tensors = [("blk.0.attn_q.weight", [4, 4], 0, 100)]
+        f = _gguf_with_tensors(
+            tmp_path / "m.gguf",
+            [("general.architecture", _T_STRING, "testarch")], tensors)
+        assert gguf_input_layer_bytes(f) == 0
+
+    def test_none_when_not_a_gguf(self, tmp_path):
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"\0" * 4096)
+        assert gguf_input_layer_bytes(f) is None
+
+    def test_none_when_file_missing(self, tmp_path):
+        assert gguf_input_layer_bytes(tmp_path / "nope.gguf") is None
+
+    def test_none_on_gguf_v1(self, tmp_path):
+        tensors = [("token_embd.weight", [4], 0, 10)]
+        f = _gguf_with_tensors(tmp_path / "m.gguf", [], tensors, version=1)
+        assert gguf_input_layer_bytes(f) is None
+
+    def test_does_not_raise_on_truncated_metadata(self, tmp_path):
+        tensors = [("token_embd.weight", [4, 4], 0, 500)]
+        full = _gguf_with_tensors(
+            tmp_path / "m.gguf",
+            [("general.architecture", _T_STRING, "testarch")], tensors)
+        data = full.read_bytes()
+        cut = tmp_path / "cut.gguf"
+        cut.write_bytes(data[:40])   # well inside the KV block, before tensor-info
+        assert gguf_input_layer_bytes(cut) is None   # no signal, no exception
+
+    def test_hostile_kv_array_count_does_not_crash(self, tmp_path):
+        f = tmp_path / "hostile.gguf"
+        f.write_bytes(b"".join([
+            b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, 1),
+            _s("evil"), struct.pack("<I", _T_ARRAY),
+            struct.pack("<I", _T_UINT32),                # element type: uint32
+            struct.pack("<Q", 2 ** 62),                    # declared count
+        ]))
+        assert gguf_input_layer_bytes(f) is None
+
+
+# --------------------------------------------------------------------------- #
 #  VramSizingMixin._effective_model_bytes_for_vram: the memoized adapter        #
 # --------------------------------------------------------------------------- #
 
@@ -286,6 +395,52 @@ class TestEffectiveModelBytesForVram:
         tensors = [("blk.0.attn_q.weight", [4], 0, 100)]
         b, f = self._backend(tmp_path, n_cpu_moe=10, tensors=tensors)
         assert b._effective_model_bytes_for_vram() == b._model_bytes()
+
+    def test_subtracts_input_layer_bytes_even_with_n_cpu_moe_off(self, tmp_path):
+        # Unlike n_cpu_moe, the input-layer subtraction is NOT opt-in: it
+        # applies to every load, dense or MoE, n_cpu_moe set or not, because
+        # llama.cpp pins the input layer to CPU unconditionally.
+        tensors = [
+            ("token_embd.weight", [4, 4], 0, 700),
+            ("blk.0.attn_q.weight", [4], 0, 100),
+        ]
+        b, f = self._backend(tmp_path, n_cpu_moe=0, tensors=tensors)
+        raw = b._model_bytes()
+        assert b._effective_model_bytes_for_vram() == raw - 700
+
+    def test_input_layer_and_n_cpu_moe_subtractions_compose(self, tmp_path):
+        # Both discounts apply together: the input layer is always excluded,
+        # and n_cpu_moe additionally excludes the pinned expert tensors.
+        tensors = [
+            ("token_embd.weight", [4, 4], 0, 700),
+            ("blk.0.attn_q.weight", [4], 0, 100),
+            ("blk.0.ffn_gate_exps.weight", [4], 0, 500),
+            ("blk.0.ffn_down_exps.weight", [4], 0, 600),
+        ]
+        b, f = self._backend(tmp_path, n_cpu_moe=1, tensors=tensors)
+        raw = b._model_bytes()
+        assert b._effective_model_bytes_for_vram() == raw - 700 - 1100
+
+    def test_input_layer_bytes_memoised_across_repeated_calls(self, tmp_path):
+        tensors = [("token_embd.weight", [4, 4], 0, 700)]
+        b, f = self._backend(tmp_path, n_cpu_moe=0, tensors=tensors)
+        with patch("localm.model_manager.gguf.gguf_input_layer_bytes",
+                   wraps=gguf_input_layer_bytes) as spy:
+            first = b._effective_model_bytes_for_vram()
+            second = b._effective_model_bytes_for_vram()
+        assert first == second
+        assert spy.call_count == 1
+
+    def test_input_layer_probe_failure_degrades_to_charging_the_tensor(
+            self, tmp_path):
+        # A probe failure must degrade to the pre-existing, more conservative
+        # behaviour (charge the tensor's bytes anyway), never raise and never
+        # claim LESS VRAM is needed than an unproven number would justify.
+        tensors = [("token_embd.weight", [4, 4], 0, 700)]
+        b, f = self._backend(tmp_path, n_cpu_moe=0, tensors=tensors)
+        with patch("localm.model_manager.gguf.gguf_input_layer_bytes",
+                   side_effect=ValueError("simulated probe failure")):
+            assert b._effective_model_bytes_for_vram() == b._model_bytes()
 
 
 # --------------------------------------------------------------------------- #
