@@ -145,7 +145,21 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
             note=("no verified ROCm torch wheel for this AMD GPU on Windows; using "
                   "CPU torch so ComfyUI still runs (on CPU) - add a GPU torch by hand "
                   "if a matching wheel exists for your card"))
-    # Apple Silicon (MPS via the default macOS wheel) or no GPU -> CPU / PyPI default.
+    # Apple Silicon falls through here with no note (gpu_state "found"). A
+    # genuine no-GPU box and a failed hardware probe each get their own note.
+    if det.gpu_state == "none":
+        return _cpu_spec(
+            note=("no GPU detected; using CPU torch so ComfyUI still runs (on CPU) "
+                  "- CPU torch is far slower than any GPU, and the shipped 20-step "
+                  "1024x1024 FLUX.1-dev workflow is not a practical CPU target"))
+    if det.gpu_state == "unknown":
+        return _cpu_spec(
+            note=("could not determine whether this machine has a usable GPU; "
+                  "using CPU torch so ComfyUI still runs (on CPU) - run 'localm "
+                  "doctor' to check hardware detection if you do have a supported "
+                  "GPU. CPU torch is far slower than any GPU, and the shipped "
+                  "20-step 1024x1024 FLUX.1-dev workflow is not a practical CPU "
+                  "target"))
     return _cpu_spec()
 
 

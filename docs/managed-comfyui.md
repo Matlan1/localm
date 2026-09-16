@@ -52,7 +52,8 @@ localm comfy setup                 # provision localm's own ComfyUI - media rout
   installs one: it clones a pinned ComfyUI version, makes a localm venv, installs
   the PyTorch build for your GPU (the same hardware detection that picks your
   llama.cpp backend selects the torch variant: CUDA for NVIDIA, ROCm for AMD, XPU
-  for Intel, CPU otherwise), and adds only the custom nodes its shipped workflows
+  for Intel, CPU otherwise - CPU torch runs but is impractically slow for the
+  shipped FLUX workflow), and adds only the custom nodes its shipped workflows
   need (today just city96's GGUF loader, for GGUF image models).
 
 Either path can download several GB and take a while; localm tells you which path

@@ -119,10 +119,11 @@ def _freeze(venv_python: Path) -> list:
 # --------------------------------------------------------------------------- #
 #  Fake stubs for hardware detection.                                          #
 # --------------------------------------------------------------------------- #
-def _det(vendors, gpu_names=""):
+def _det(vendors, gpu_names="", probe_ok=True):
     """A hwdetect.Detection-shaped object for comfy_torch_spec() to consume."""
     from localm import hwdetect
-    return hwdetect.Detection(vendors=list(vendors), gpu_names=gpu_names.lower())
+    return hwdetect.Detection(vendors=list(vendors), gpu_names=gpu_names.lower(),
+                              probe_ok=probe_ok)
 
 
 # =========================================================================== #
@@ -171,12 +172,46 @@ def test_torch_spec_nvidia_is_cuda(monkeypatch):
 
 
 def test_torch_spec_no_gpu_is_cpu(monkeypatch):
-    """No GPU -> CPU torch (ComfyUI needs torch to run at all; never 'skip torch')."""
+    """No GPU -> CPU torch (ComfyUI needs torch to run at all; never 'skip torch'),
+    with an honest note about the practical consequence (gpu_state "none")."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "linux")
-    spec = fresh.comfy_torch_spec(_det([], ""))
+    spec = fresh.comfy_torch_spec(_det([], "", probe_ok=True))
     assert spec.variant == "cpu"
     assert spec.index_url == "https://download.pytorch.org/whl/cpu"
+    assert spec.note and "slow" in spec.note.lower()
+    assert "no gpu detected" in spec.note.lower()
+
+
+def test_torch_spec_failed_probe_gets_its_own_honest_note(monkeypatch):
+    """A failed hardware probe (gpu_state "unknown") is NOT the same claim as a
+    measured no-GPU box (gpu_state "none"): it must degrade to CPU torch too, but
+    with its own, separately-worded note - never silently folded into the
+    no-GPU wording, and never left without a note at all."""
+    from localm.media import managed_comfy_fresh as fresh
+    monkeypatch.setattr(sys, "platform", "linux")
+    det = _det([], "", probe_ok=False)
+    assert det.gpu_state == "unknown"
+    spec = fresh.comfy_torch_spec(det)
+    assert spec.variant == "cpu"
+    assert spec.note and "slow" in spec.note.lower()
+    assert "could not determine" in spec.note.lower()
+    # Distinct wording from the measured-no-GPU case, not a shared string.
+    no_gpu_note = fresh.comfy_torch_spec(_det([], "", probe_ok=True)).note
+    assert spec.note != no_gpu_note
+
+
+def test_torch_spec_apple_silicon_gets_no_degrade_note(monkeypatch):
+    """Apple Silicon (MPS via the default macOS wheel) is a real, usable GPU
+    path under the "cpu"-labelled spec (gpu_state "found") and must not trigger
+    either of the new honest-degrade notes."""
+    from localm.media import managed_comfy_fresh as fresh
+    monkeypatch.setattr(sys, "platform", "darwin")
+    det = _det(["apple"], "")
+    assert det.gpu_state == "found"
+    spec = fresh.comfy_torch_spec(det)
+    assert spec.variant == "cpu"
+    assert spec.note == ""
 
 
 def test_torch_spec_intel_is_xpu(monkeypatch):
@@ -502,4 +537,46 @@ def test_cli_setup_no_user_comfy_runs_fresh(cli_runner, monkeypatch):
                             message="localm's managed ComfyUI is ready (fresh)."))
     res = cli_runner.invoke(main, ["comfy", "setup"])
     assert res.exit_code == 0, res.output
-    assert "fresh" in res.output.lower() or "ready" in res.output.lower()
+
+
+def test_cli_setup_preflight_does_not_claim_a_gpu_when_none_found(cli_runner, monkeypatch):
+    """The pre-install heads-up must not say "PyTorch for your GPU" on a box
+    hwdetect finds no GPU on - the CLI's own instance of the honesty gap the
+    comfy_torch_spec note tests above cover."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
+    from localm import hwdetect
+    from localm.cli import main
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import managed_comfy_provision as prov
+
+    monkeypatch.setattr(prov, "discover_user_comfy", lambda cfg: None)
+    monkeypatch.setattr(hwdetect, "detect",
+                        lambda: hwdetect.Detection(vendors=[], probe_ok=True))
+    monkeypatch.setattr(fresh, "setup_managed_comfy",
+                        lambda *a, **kw: prov.ProvisionResult(ok=True, status="fresh",
+                                                              message="ready"))
+    res = cli_runner.invoke(main, ["comfy", "setup"])
+    assert res.exit_code == 0, res.output
+    assert "for your GPU" not in res.output
+    assert "PyTorch (CPU torch)" in res.output
+
+
+def test_cli_setup_preflight_claims_a_gpu_only_when_found(cli_runner, monkeypatch):
+    """A real detected GPU keeps the "PyTorch for your GPU" wording."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
+    from localm import hwdetect
+    from localm.cli import main
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import managed_comfy_provision as prov
+
+    monkeypatch.setattr(prov, "discover_user_comfy", lambda cfg: None)
+    monkeypatch.setattr(hwdetect, "detect",
+                        lambda: hwdetect.Detection(vendors=["nvidia"], probe_ok=True))
+    monkeypatch.setattr(fresh, "setup_managed_comfy",
+                        lambda *a, **kw: prov.ProvisionResult(ok=True, status="fresh",
+                                                              message="ready"))
+    res = cli_runner.invoke(main, ["comfy", "setup"])
+    assert res.exit_code == 0, res.output
+    assert "PyTorch for your GPU" in res.output

@@ -34,6 +34,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now show in German too, alongside the rest of the Settings page.
 
 ### Fixed
+- **Setting up localm's own ComfyUI on a machine with no usable GPU now says
+  so plainly.** The installer no longer claims it is fetching "PyTorch for
+  your GPU" when none was found, and prints an honest note that CPU-only
+  image generation is far too slow to be practical for the shipped FLUX
+  workflow. The Images page intro and the setup docs carry the same warning.
 - **Switching models or unloading one while it is still generating no longer
   gets refused or silently degraded.** The switch/unload now stops that
   generation and completes right away for the common case (press Stop, then
