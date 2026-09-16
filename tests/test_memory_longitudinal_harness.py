@@ -40,6 +40,8 @@ import time
 
 import pytest
 
+from tests._real_gguf import fetch_gguf, require_native_runtime
+
 pytestmark = [pytest.mark.integration, pytest.mark.real_gguf]
 
 # Default chat model: a small non-thinking baseline, reliable enough at the 4-way
@@ -56,11 +58,7 @@ _THINKING_MODEL_ENV = "LOCALM_TEST_THINKING_MODEL"
 
 @pytest.fixture(scope="module")
 def native_runtime():
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned (run 'localm setup-llama'): {e}")
+    require_native_runtime()
 
 
 @pytest.fixture(scope="module")
@@ -72,21 +70,14 @@ def chat_backend(native_runtime):
             pytest.skip(f"{_THINKING_MODEL_ENV} does not point to a file: {override}")
         path = override
     else:
-        from huggingface_hub import hf_hub_download
-        try:
-            path = hf_hub_download(repo_id=_CHAT_REPO, filename=_CHAT_FILE)
-        except Exception as e:
-            pytest.skip(f"could not fetch {_CHAT_REPO}/{_CHAT_FILE}: {e}")
+        path = fetch_gguf(_CHAT_REPO, _CHAT_FILE)
 
     from localm.inference.backends.gguf import GgufBackend
     # CPU-only (n_gpu_layers=0): this harness tests the memory PIPELINE's logic,
     # not GPU inference performance, and a 0.5B model is fast enough on CPU for a
     # handful of short prompts.
     be = GgufBackend(path, n_ctx=4096, n_gpu_layers=0)
-    try:
-        be.load()
-    except Exception as e:
-        pytest.skip(f"chat GGUF failed to load on this machine: {e}")
+    be.load()
     be._harness_is_thinking = is_thinking
     yield be
     be.unload()
@@ -101,20 +92,12 @@ def real_embedder(native_runtime):
     instead of ``get_embedder()`` resolving nothing in the throwaway
     LOCALM_HOME (no config.json, no models/embeddings/ dir) and every
     consolidation-added record silently landing with no vector."""
-    from huggingface_hub import hf_hub_download
-
     from localm.inference.embedder import KNOWN_EMBEDDING_MODELS
     repo, filename = KNOWN_EMBEDDING_MODELS["bge-small-en-v1.5"]
-    try:
-        path = hf_hub_download(repo_id=repo, filename=filename)
-    except Exception as e:
-        pytest.skip(f"could not fetch embedding model {repo}/{filename}: {e}")
+    path = fetch_gguf(repo, filename)
 
     from localm.inference.embedder import GGUFEmbedder
-    try:
-        emb = GGUFEmbedder(path)
-    except Exception as e:
-        pytest.skip(f"bge embedder failed to load on this machine: {e}")
+    emb = GGUFEmbedder(path)
     yield emb
     emb.close()
 

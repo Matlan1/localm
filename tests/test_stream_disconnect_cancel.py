@@ -474,30 +474,20 @@ def test_complete_happy_path_returns_response_and_releases_lock():
 
 import pytest   # noqa: E402
 
+from tests._real_gguf import fetch_gguf, require_native_runtime   # noqa: E402
+
 _REPO = "bartowski/SmolLM2-135M-Instruct-GGUF"
 _FILE = "SmolLM2-135M-Instruct-Q4_K_M.gguf"
 
 
 @pytest.fixture(scope="module")
 def gguf_backend():
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned (run 'localm setup-llama'): {e}")
-
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
+    require_native_runtime()
+    path = fetch_gguf(_REPO, _FILE)
 
     from localm.inference.backends.gguf import GgufBackend
     be = GgufBackend(path, n_ctx=2048)
-    try:
-        be.load()
-    except Exception as e:
-        pytest.skip(f"GGUF model failed to load on this machine: {e}")
+    be.load()
     yield be
     be.unload()
 

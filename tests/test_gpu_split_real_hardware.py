@@ -40,6 +40,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._real_gguf import fetch_gguf, require_native_runtime
+
 pytestmark = [pytest.mark.integration, pytest.mark.real_multi_gpu_hardware]
 
 _TINY_REPO = "bartowski/SmolLM2-135M-Instruct-GGUF"
@@ -105,16 +107,8 @@ def two_real_gpus():
 
 @pytest.fixture(scope="module")
 def tiny_model_path():
-    try:
-        from localm.inference.backends.llamacpp import _loader
-        _loader.load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned (run 'localm setup-llama'): {e}")
-    from huggingface_hub import hf_hub_download
-    try:
-        return hf_hub_download(repo_id=_TINY_REPO, filename=_TINY_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_TINY_REPO}/{_TINY_FILE}: {e}")
+    require_native_runtime()
+    return fetch_gguf(_TINY_REPO, _TINY_FILE)
 
 
 def test_split_load_honors_configured_ratio(two_real_gpus, tiny_model_path, monkeypatch):

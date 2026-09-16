@@ -39,6 +39,7 @@ import pytest
 from localm import scopes
 from localm.memory import MemoryRecord
 from localm.plugins.builtin.memory import plug
+from tests._real_gguf import fetch_gguf, require_native_runtime
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_gguf]
 
@@ -80,12 +81,7 @@ _ON_TOPIC_NO_ANSWER = (
 
 @pytest.fixture(scope="module")
 def native_runtime():
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned "
-                    f"(run 'localm setup-llama'): {e}")
+    require_native_runtime()
 
 
 @pytest.fixture(scope="module")
@@ -94,18 +90,11 @@ def chat_backend(native_runtime):
     whether the model READS supplied context, not GPU inference, and a 0.5B model
     is fast enough on CPU for a handful of short prompts. CPU-only also keeps the
     probe off the box's single shared GPU entirely."""
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_CHAT_REPO, filename=_CHAT_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_CHAT_REPO}/{_CHAT_FILE}: {e}")
+    path = fetch_gguf(_CHAT_REPO, _CHAT_FILE)
 
     from localm.inference.backends.gguf import GgufBackend
     be = GgufBackend(path, n_ctx=4096, n_gpu_layers=0)
-    try:
-        be.load()
-    except Exception as e:
-        pytest.skip(f"chat GGUF failed to load on this machine: {e}")
+    be.load()
     yield be
     be.unload()
 

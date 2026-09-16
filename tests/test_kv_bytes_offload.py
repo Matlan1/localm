@@ -26,6 +26,7 @@ import pytest
 from localm.inference.backends.llamacpp import _api
 from localm.inference.backends.llamacpp.llama import LlamaCpp
 from tests._bare_llama import make_bare_llama
+from tests._real_gguf import require_native_runtime
 
 _LOAD_LIB = "localm.inference.backends.llamacpp._api.load_lib"
 _API = "localm.inference.backends.llamacpp.llama.api"
@@ -413,11 +414,7 @@ def test_real_runtime_exports_kv_head_api():
     must export llama_model_n_head + llama_model_n_head_kv, or the accurate KV
     size silently falls back to the under-counting heuristic and the Vulkan crash
     returns. Skips cleanly when the native runtime is not provisioned."""
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned: {e}")
+    require_native_runtime()
     assert _api.has_kv_head_api() is True
 
 
@@ -428,10 +425,7 @@ def test_real_runtime_gpu_memory_query(monkeypatch):
     from the backend itself - the free-VRAM signal the offload decision relies on,
     with no torch involved. Skips on a CPU-only build (no GPU device)."""
     from localm.inference.backends.llamacpp import _loader
-    try:
-        _loader.load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned: {e}")
+    require_native_runtime()
     # The autouse conftest fixture neutralises the cache for hermetic unit tests;
     # clear it so this integration test exercises the REAL resolution + query.
     monkeypatch.setattr(_loader, "_gpu_mem_cache", None)

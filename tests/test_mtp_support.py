@@ -22,6 +22,7 @@ from localm.inference.backends.llamacpp import _api as api
 from localm.inference.engine import Engine
 from localm.inference.backends.llamacpp import llama as LlamaCppModule
 from tests._bare_llama import make_bare_llama
+from tests._real_gguf import fetch_gguf, require_native_runtime
 
 
 def test_mtp_constants_and_structs():
@@ -782,11 +783,7 @@ _MTP_FILE = "Qwen3.5-0.8B-Q4_K_M.gguf"
 
 @pytest.fixture(scope="module")
 def real_mtp_model_path():
-    from huggingface_hub import hf_hub_download
-    try:
-        return hf_hub_download(repo_id=_MTP_REPO, filename=_MTP_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_MTP_REPO}/{_MTP_FILE}: {e}")
+    return fetch_gguf(_MTP_REPO, _MTP_FILE)
 
 
 @pytest.mark.integration
@@ -802,14 +799,9 @@ def test_real_mtp_model_verification_is_distribution_exact(real_mtp_model_path):
     request's own chain.
     """
     from localm.inference.backends.llamacpp.llama import LlamaCpp
-    from localm.inference.backends.llamacpp._loader import load_lib
     from localm.inference.backends.llamacpp import _api as api
 
-    try:
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned (run 'localm "
-                    f"setup-llama'): {e}")
+    require_native_runtime()
 
     seed = 20260901
     sampling = dict(temperature=0.8, top_p=0.95, top_k=40, repeat_penalty=1.1)
@@ -817,11 +809,8 @@ def test_real_mtp_model_verification_is_distribution_exact(real_mtp_model_path):
                  "content": "Write a short paragraph about a cat exploring a garden."}]
 
     def _run(mtp_enabled):
-        try:
-            llm = LlamaCpp(real_mtp_model_path, n_ctx=2048, n_gpu_layers=99,
-                            seed=seed, mtp_enabled=mtp_enabled)
-        except Exception as e:
-            pytest.skip(f"model failed to load on this machine: {e}")
+        llm = LlamaCpp(real_mtp_model_path, n_ctx=2048, n_gpu_layers=99,
+                       seed=seed, mtp_enabled=mtp_enabled)
         accepted = 0
         rejected = 0
         try:

@@ -8,12 +8,15 @@ text.
 
 @integration so the default `pytest -m "not integration"` skips it: it needs the
 native runtime provisioned (localm setup-llama) and ~88 MB of network on first
-run. Skips cleanly (does not fail) when either is unavailable.
+run. Skips when the runtime is not provisioned or the model cannot be fetched;
+once both are on disk, a load failure is a real failure.
 """
 
 from __future__ import annotations
 
 import pytest
+
+from tests._real_gguf import fetch_gguf, require_native_runtime
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_gguf]
 
@@ -23,26 +26,12 @@ _FILE = "SmolLM2-135M-Instruct-Q4_K_M.gguf"
 
 @pytest.fixture(scope="module")
 def gguf_backend():
-    # The native llama runtime must be provisioned (llama.dll + ggml). If it is
-    # not, this is an environment gap, not a test failure - skip.
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned (run 'localm setup-llama'): {e}")
-
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
+    require_native_runtime()
+    path = fetch_gguf(_REPO, _FILE)
 
     from localm.inference.backends.gguf import GgufBackend
     be = GgufBackend(path, n_ctx=2048)   # default GPU offload; load() falls back as needed
-    try:
-        be.load()
-    except Exception as e:
-        pytest.skip(f"GGUF model failed to load on this machine: {e}")
+    be.load()
     yield be
     be.unload()
 

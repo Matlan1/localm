@@ -30,6 +30,7 @@ from unittest.mock import patch
 import pytest
 
 from localm.inference.backends.llamacpp import llama as llama_mod
+from tests._real_gguf import fetch_gguf, require_native_runtime
 
 _T_UINT32 = 4
 _T_STRING = 8
@@ -571,24 +572,12 @@ def test_real_moe_load_reports_nontrivial_placement(capsys):
     truth). Checks the SHAPE (positive figures, a plausible backend count)
     rather than hardcoding exact floats, which would break on any other GPU
     vendor/build."""
-    try:
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()
-    except Exception as e:
-        pytest.skip(f"native llama runtime not provisioned: {e}")
-
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(repo_id=_MOE_REPO, filename=_MOE_FILE)
-    except Exception as e:
-        pytest.skip(f"could not fetch {_MOE_REPO}/{_MOE_FILE}: {e}")
+    require_native_runtime()
+    path = fetch_gguf(_MOE_REPO, _MOE_FILE)
 
     from localm.inference.backends.gguf import GgufBackend
     backend = GgufBackend(path, n_ctx=64, n_gpu_layers=99, n_cpu_moe=1)
-    try:
-        backend.load()
-    except Exception as e:
-        pytest.skip(f"MoE GGUF failed to load on this machine: {e}")
+    backend.load()
     try:
         out = capsys.readouterr().out
         assert "not reported" not in out, (

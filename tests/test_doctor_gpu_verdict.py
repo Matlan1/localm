@@ -26,6 +26,7 @@ import types
 import pytest
 
 import localm.cli as cli
+from tests._real_gguf import require_native_runtime
 
 # The doctor MODULE (localm.cli.doctor resolves to the re-exported click Command,
 # so import the module object explicitly for monkeypatching its globals).
@@ -422,11 +423,9 @@ def test_compute_devices_reports_real_devices_when_provisioned():
     runtime is present (e.g. CI without setup-llama)."""
     from localm.inference.backends.llamacpp import _loader
 
-    try:
-        if not _loader.compute_backends_available():
-            pytest.skip("no computing llama runtime provisioned on this machine")
-    except Exception as e:
-        pytest.skip(f"no loadable llama runtime on this machine: {e}")
+    require_native_runtime()
+    if not _loader.compute_backends_available():
+        pytest.skip("the provisioned llama runtime registered no compute backend")
 
     devices = _loader.compute_devices()
     if not devices:
