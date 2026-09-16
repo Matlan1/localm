@@ -1201,7 +1201,16 @@ _GGUF_DEFAULT_ALIGNMENT = 32
 _GGUF_MAX_TENSOR_DIMS = 8
 
 
-def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[int]:
+# Sentinel default for the *_parsed* override on gguf_moe_pinned_expert_bytes
+# and gguf_input_layer_bytes below - distinct from a real, already-parsed
+# ``None`` (a failed parse the caller already knows about), which must skip
+# a second parse attempt rather than trigger one.
+_UNSET = object()
+
+
+def gguf_moe_pinned_expert_bytes(
+        path: Path, n_pinned_layers: int,
+        *, _parsed: object = _UNSET) -> Optional[int]:
     """Bytes occupied by the routed-expert weight tensors of the FIRST
     *n_pinned_layers* transformer layers - the exact tensors ``_apply_cpu_moe``
     (llamacpp/llama.py) pins to system RAM for an ``n_cpu_moe=N`` load (see
@@ -1212,6 +1221,11 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
     decoding ggml's per-quantization-type block format - EXACT regardless of
     quantization scheme, with no per-type size table.
 
+    *_parsed*, if given, is used instead of reading *path* again - an
+    already-computed ``_gguf_tensor_offset_entries(path)`` result, or its
+    ``None`` failure. Left unset (the default), *path* is parsed here exactly
+    as before.
+
     Returns ``None`` - never raises - when the file cannot be parsed as a
     GGUF, or *n_pinned_layers* is <= 0; the caller then falls back to charging
     the whole file. Returns ``0`` (a real answer, not a failure) when parsing
@@ -1220,7 +1234,7 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
     its own ``gguf_expert_count() == 0`` guard."""
     if n_pinned_layers <= 0:
         return None
-    parsed = _gguf_tensor_offset_entries(path)
+    parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
     if parsed is None:
         return None
     entries, file_size, data_start = parsed
@@ -1236,7 +1250,8 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
     return total
 
 
-def gguf_input_layer_bytes(path: Path) -> Optional[int]:
+def gguf_input_layer_bytes(
+        path: Path, *, _parsed: object = _UNSET) -> Optional[int]:
     """Bytes occupied by *path*'s input-layer tensors (see
     ``_INPUT_LAYER_TENSOR_NAMES`` above for exactly which ones and why) -
     llama.cpp keeps these on the CPU UNCONDITIONALLY, regardless of
@@ -1246,6 +1261,11 @@ def gguf_input_layer_bytes(path: Path) -> Optional[int]:
     tensor-info section (see ``_gguf_tensor_offset_entries``), the same exact,
     quantization-agnostic technique ``gguf_moe_pinned_expert_bytes`` uses.
 
+    *_parsed*, if given, is used instead of reading *path* again - an
+    already-computed ``_gguf_tensor_offset_entries(path)`` result, or its
+    ``None`` failure. Left unset (the default), *path* is parsed here exactly
+    as before.
+
     Returns ``None`` - never raises - when the file cannot be parsed as a
     GGUF; the caller then falls back to charging the whole file. In practice
     every real LLM GGUF has at least a ``token_embd.weight``, so a successful
@@ -1253,7 +1273,7 @@ def gguf_input_layer_bytes(path: Path) -> Optional[int]:
     a naming convention this probe does not yet know - but is returned as a
     real answer rather than raised, matching every other probe in this
     module's contract."""
-    parsed = _gguf_tensor_offset_entries(path)
+    parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
     if parsed is None:
         return None
     entries, file_size, data_start = parsed

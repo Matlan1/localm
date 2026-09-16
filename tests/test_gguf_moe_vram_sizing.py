@@ -27,7 +27,8 @@ from unittest.mock import patch
 import pytest
 
 from localm.inference.backends.gguf import GgufBackend
-from localm.model_manager.gguf import (gguf_input_layer_bytes,
+from localm.model_manager.gguf import (_gguf_tensor_offset_entries,
+                                       gguf_input_layer_bytes,
                                        gguf_moe_pinned_expert_bytes)
 
 
@@ -441,6 +442,27 @@ class TestEffectiveModelBytesForVram:
         with patch("localm.model_manager.gguf.gguf_input_layer_bytes",
                    side_effect=ValueError("simulated probe failure")):
             assert b._effective_model_bytes_for_vram() == b._model_bytes()
+
+    def test_underlying_parse_happens_once_with_both_discounts_applied(
+            self, tmp_path):
+        # The input-layer and n_cpu_moe subtractions each used to read the
+        # file's tensor-info section independently via
+        # gguf_input_layer_bytes/gguf_moe_pinned_expert_bytes - two full
+        # header parses per load. The parse itself is shared and must run at
+        # most once even when both discounts apply together.
+        tensors = [
+            ("token_embd.weight", [4, 4], 0, 700),
+            ("blk.0.attn_q.weight", [4], 0, 100),
+            ("blk.0.ffn_gate_exps.weight", [4], 0, 500),
+            ("blk.0.ffn_down_exps.weight", [4], 0, 600),
+        ]
+        b, f = self._backend(tmp_path, n_cpu_moe=1, tensors=tensors)
+        raw = b._model_bytes()
+        with patch("localm.model_manager.gguf._gguf_tensor_offset_entries",
+                   wraps=_gguf_tensor_offset_entries) as spy:
+            result = b._effective_model_bytes_for_vram()
+        assert result == raw - 700 - 1100
+        assert spy.call_count == 1
 
 
 # --------------------------------------------------------------------------- #
