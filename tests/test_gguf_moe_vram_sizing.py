@@ -409,6 +409,117 @@ class TestAutoGpuLayersHonoursNCpuMoe:
         assert n_on == 99   # full offload fits once the experts are pinned
 
 
+# --------------------------------------------------------------------------- #
+#  The partial-offload notice's MoE (n_cpu_moe) hint                          #
+# --------------------------------------------------------------------------- #
+
+class TestAutoGpuLayersMoeHintOnPartialOffload:
+    """A partial-offload notice should point a MoE-model user at n_cpu_moe -
+    but only when it isn't already in use and the model actually has
+    pinnable expert weights (VramSizingMixin._moe_hint_applicable), never for
+    a dense model where the knob would do nothing."""
+
+    @staticmethod
+    def _vram(free, total):
+        return patch.object(
+            GgufBackend, "_split_free_total_bytes",
+            return_value=(None, None, 0)), \
+            patch.object(GgufBackend, "_free_vram_bytes", return_value=free), \
+            patch.object(GgufBackend, "_total_vram_bytes", return_value=total)
+
+    # Same single-layer MoE shape as TestAutoGpuLayersHonoursNCpuMoe: attn
+    # 2,000 B + ffn_gate_exps 900,000 B, free=500,000 < model+kv+overhead, so
+    # the load is a partial offload and the notice (and hint) must fire.
+    _MOE_KV = [("general.architecture", _T_STRING, "testmoe"),
+               ("testmoe.block_count", _T_UINT32, 1),
+               ("testmoe.embedding_length", _T_UINT32, 64),
+               ("testmoe.attention.head_count", _T_UINT32, 4),
+               ("testmoe.attention.head_count_kv", _T_UINT32, 4)]
+    _MOE_TENSORS = [
+        ("blk.0.attn_q.weight", [4], 0, 2_000),
+        ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),
+    ]
+
+    @staticmethod
+    def _flat(capsys) -> str:
+        # console.print() word-wraps at the Console's detected width (~80 cols
+        # under capsys, which is not a real terminal), so a multi-word phrase
+        # can straddle a "\n" the wrap inserted. Collapse all whitespace runs
+        # to a single space before checking a phrase.
+        return " ".join(capsys.readouterr().out.lower().split())
+
+    def test_hint_shown_for_moe_model_not_yet_using_n_cpu_moe(self, tmp_path, capsys):
+        f = tmp_path / "moe.gguf"
+        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
+        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
+                        n_cpu_moe=0)
+        p1, p2, p3 = self._vram(500_000, 1_500_000)
+        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
+            n = b._effective_gpu_layers()
+        assert n < 99   # partial - the notice (and hint) must have fired
+        out = self._flat(capsys)
+        assert "n_cpu_moe" in out
+        assert "mixture-of-experts" in out
+
+    def test_hint_not_shown_when_n_cpu_moe_already_set(self, tmp_path, capsys):
+        f = tmp_path / "moe.gguf"
+        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
+        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
+                        n_cpu_moe=1)
+        # n_cpu_moe=1 pins the 900,000 B expert tensor off the VRAM budget, so
+        # the SAME free/total TestAutoGpuLayersHonoursNCpuMoe uses to prove a
+        # pinned load fits FULLY (99) would fit here too and never reach the
+        # notice at all. Free must stay below the PINNED need (attn 2,000 +
+        # kv 16,384 + overhead 10,000 = 28,384) so this load is still partial
+        # with pinning active, and the suppressed hint is actually exercised.
+        p1, p2, p3 = self._vram(15_000, 1_500_000)
+        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
+            n = b._effective_gpu_layers()
+        assert n < 99   # still partial even with the experts pinned
+        out = self._flat(capsys)
+        assert "gpu layers auto" in out   # the partial-offload notice itself still fires
+        assert "n_cpu_moe" not in out     # already using it - the hint would be redundant
+
+    def test_hint_not_shown_for_a_dense_model(self, tmp_path, capsys):
+        tensors = [("blk.0.attn_q.weight", [4], 0, 2_000)]
+        kv = [("general.architecture", _T_STRING, "dense"),
+              ("dense.block_count", _T_UINT32, 1),
+              ("dense.embedding_length", _T_UINT32, 64),
+              ("dense.attention.head_count", _T_UINT32, 4),
+              ("dense.attention.head_count_kv", _T_UINT32, 4)]
+        f = tmp_path / "dense.gguf"
+        _gguf_with_tensors(f, kv, tensors)
+        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
+                        n_cpu_moe=0)
+        p1, p2, p3 = self._vram(500, 1_500_000)
+        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
+            n = b._effective_gpu_layers()
+        assert n < 99   # partial - the notice itself must have fired
+        out = self._flat(capsys)
+        assert "gpu layers auto" in out
+        assert "n_cpu_moe" not in out   # nothing pinnable - the hint would be noise
+
+    def test_hint_probe_failure_degrades_to_no_hint_not_a_crash(self, tmp_path, capsys):
+        # gguf_moe_pinned_expert_bytes is documented never-raising, but its
+        # tensor-name matching is not itself wrapped, so a pathological file
+        # (or any other unexpected failure) can still raise there. The hint
+        # probe must degrade to "no hint" like every other sizing probe in
+        # this file, never abort the load over a hint.
+        f = tmp_path / "moe.gguf"
+        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
+        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
+                        n_cpu_moe=0)
+        p1, p2, p3 = self._vram(500_000, 1_500_000)
+        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000), \
+             patch("localm.model_manager.gguf.gguf_moe_pinned_expert_bytes",
+                   side_effect=ValueError("simulated probe failure")):
+            n = b._effective_gpu_layers()   # must not raise
+        assert n < 99
+        out = self._flat(capsys)
+        assert "gpu layers auto" in out   # the main notice still fires
+        assert "n_cpu_moe" not in out     # degraded to no hint, not a crash
+
+
 class TestAutoCtxMaxHonoursNCpuMoe:
     def test_larger_ceiling_once_experts_are_pinned(self, tmp_path):
         """Same single-layer model as TestAutoGpuLayersHonoursNCpuMoe

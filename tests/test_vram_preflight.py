@@ -546,6 +546,58 @@ class TestFreeVramBytesUsesIsolatedNativeFallback:
         fake.cuda.is_available.assert_not_called()
 
 
+class TestTotalVramBytesUsesIsolatedNativeFallback:
+    """_total_vram_bytes() must fall back to the isolated native probe exactly
+    like _free_vram_bytes() does (see TestFreeVramBytesUsesIsolatedNativeFallback
+    above) - it used to stop at torch alone, so on hardware where only the
+    isolated probe can answer (torch unavailable/broken/wedged), a caller
+    holding a real, isolated-probe-sourced FREE reading was still handed a
+    None TOTAL, purely because _total_vram_bytes() itself never tried the same
+    fallback. That silently broke any decision needing both figures together
+    (see _sizing.py's _auto_gpu_layers_cause, which needs total to tell "the
+    model exceeds this GPU's capacity" apart from "something else is using
+    it")."""
+
+    @pytest.fixture(autouse=True)
+    def _uncorrected_reading(self, monkeypatch):
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped",
+                            lambda: False)
+
+    def test_isolated_fallback_never_called_when_torch_answers(self, monkeypatch):
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = True
+        fake.cuda.device_count.return_value = 1
+        fake.cuda.mem_get_info.return_value = (7_000, 9_000)
+        sentinel = MagicMock(side_effect=AssertionError(
+            "gpu_memory_isolated() must not be called when torch already answered"))
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated", sentinel)
+        with patch.dict(sys.modules, {"torch": fake}):
+            total = GgufBackend._total_vram_bytes()
+        assert total == 9_000
+        sentinel.assert_not_called()
+
+    def test_falls_back_to_isolated_probe_when_torch_unmeasurable(self, monkeypatch):
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = False
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+            lambda: (3_000, 5_000))
+        with patch.dict(sys.modules, {"torch": fake}):
+            total = GgufBackend._total_vram_bytes()
+        assert total == 5_000
+
+    def test_none_when_neither_torch_nor_isolated_probe_can_answer(self, monkeypatch):
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = False
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+            lambda: None)
+        with patch.dict(sys.modules, {"torch": fake}):
+            total = GgufBackend._total_vram_bytes()
+        assert total is None
+
+
 class _FakeStream:
     """A minimal write()/flush() or readline() double for a fake daemon proc's
     stdin/stdout, scripted with a fixed queue of responses."""

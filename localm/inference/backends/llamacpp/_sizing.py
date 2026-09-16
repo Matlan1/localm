@@ -22,7 +22,7 @@ see ``_free_total_vram_bytes``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from localm.console import console
 from localm.vram import VRAM_OVERHEAD_BYTES
@@ -51,6 +51,20 @@ def embedder_ctx_reservation_bytes() -> int:
         _dbg.debug("embedder ctx reservation unavailable (%s); reserving "
                    "nothing", type(e).__name__)
         return 0
+
+
+class _AutoLayerBudget(NamedTuple):
+    """The sizing inputs behind one ``_auto_gpu_layers()`` decision - the same
+    numbers ``_effective_gpu_layers()`` needs to explain WHY a partial offload
+    happened, kept so the VRAM budget is computed once and read twice rather
+    than probed again for the notice."""
+    layers: int
+    free: int
+    total: Optional[int]
+    model: int
+    kv: int
+    overhead: int
+    split_devices: int
 
 
 class VramSizingMixin:
@@ -312,10 +326,18 @@ class VramSizingMixin:
     @classmethod
     def _total_vram_bytes(cls) -> Optional[int]:
         """Total VRAM in bytes on the configured main GPU device, or None when
-        not measurable. The hard physical ceiling: nothing can be freed to
-        raise it, so a load that needs more than this can never fit on this
-        device."""
-        return cls._free_total_vram_bytes()[1]
+        not measurable by ANY path - same torch-then-isolated-probe fallback
+        as _free_vram_bytes, so a caller that already has a real free reading
+        via the isolated probe (torch unavailable/broken/wedged) is not left
+        holding a None total purely because torch specifically could not
+        answer. The hard physical ceiling: nothing can be freed to raise it,
+        so a load that needs more than this can never fit on this device."""
+        total = cls._free_total_vram_bytes()[1]
+        if total is not None:
+            return total
+        from localm.inference.backends.llamacpp import _loader
+        mem = _loader.gpu_memory_isolated()
+        return int(mem[1]) if mem is not None else None
 
     @classmethod
     def _split_free_total_bytes(cls) -> "tuple[Optional[int], Optional[int], int]":
@@ -898,6 +920,47 @@ class VramSizingMixin:
         from localm.model_meta import cached_n_layers
         return cached_n_layers(self.model_path)
 
+    def _auto_gpu_layers_budget(self) -> Optional[_AutoLayerBudget]:
+        """The full computation behind ``_auto_gpu_layers()``: the same
+        layer-count decision, plus the free/total/model/kv/overhead breakdown
+        a partial-offload notice needs to name the actual cause. None under
+        the exact same "VRAM unmeasurable" condition ``_auto_gpu_layers()``
+        returns None for.
+
+        "Free VRAM" is the COMBINED free across every device the load will
+        actually spread over when that is measurable (see
+        _split_free_total_bytes) - a CONFIGURED split, and equally the IMPLICIT
+        one llama.cpp performs by default on any multi-GPU box."""
+        free, total, split_devices = self._split_free_total_bytes()
+        if free is None:
+            free = self._free_vram_bytes()
+            if free is None:
+                return None                   # unmeasurable - honest fallback (A0)
+            total = self._total_vram_bytes()
+            split_devices = 1                 # single-device reading - the flat overhead
+        if self._model_bytes() <= 0:
+            # Can't size - attempt full offload. model/kv/overhead are left 0:
+            # nothing that reaches this needs them (auto >= 99 skips the notice).
+            return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total, 0, 0, 0,
+                                     split_devices)
+        # Only the EXISTENCE check above needs the raw file size; an n_cpu_moe
+        # load's pinned expert weights never draw on this budget.
+        model = self._effective_model_bytes_for_vram()
+        kv = self.n_ctx * self._kv_bytes_per_token()
+        overhead = (self._split_overhead_bytes(split_devices)
+                    + self._mtp_draft_context_vram_bytes())
+        if model <= 0 or free >= model + kv + overhead:
+            layers = self._DEFAULT_GPU_LAYERS  # full offload fits (or nothing left to size)
+        else:
+            weight_budget = free - kv - overhead
+            if weight_budget <= 0:
+                layers = 0                     # no room even for one layer's share
+            else:
+                fraction = min(max(weight_budget / model, 0.0), 1.0)
+                layer_count = self._cached_layer_count() or self._ASSUMED_LAYERS
+                layers = max(0, min(self._DEFAULT_GPU_LAYERS, int(fraction * layer_count)))
+        return _AutoLayerBudget(layers, free, total, model, kv, overhead, split_devices)
+
     def _auto_gpu_layers(self) -> Optional[int]:
         """Pick how many layers to offload to the GPU from free VRAM, or None when
         VRAM is not measurable by ANY path - neither torch.cuda nor the isolated
@@ -910,35 +973,66 @@ class VramSizingMixin:
         in free VRAM; otherwise the largest layer count whose weight share fits the
         GPU budget left after reserving the KV cache + overhead (conservative: the
         KV cache is charged wholly to the GPU). 0 means even that budget is gone -
-        run entirely on CPU.
+        run entirely on CPU."""
+        budget = self._auto_gpu_layers_budget()
+        return budget.layers if budget is not None else None
 
-        "Free VRAM" is the COMBINED free across every device the load will
-        actually spread over when that is measurable (see
-        _split_free_total_bytes) - a CONFIGURED split, and equally the IMPLICIT
-        one llama.cpp performs by default on any multi-GPU box."""
-        free, _split_total, split_devices = self._split_free_total_bytes()
-        if free is None:
-            free = self._free_vram_bytes()
-            split_devices = 1   # single-device reading - the flat overhead
-        if free is None:
-            return None                       # unmeasurable - honest fallback (A0)
-        if self._model_bytes() <= 0:
-            return self._DEFAULT_GPU_LAYERS    # can't size - attempt full offload
-        # Only the EXISTENCE check above needs the raw file size; an n_cpu_moe
-        # load's pinned expert weights never draw on this budget.
-        model = self._effective_model_bytes_for_vram()
-        kv = self.n_ctx * self._kv_bytes_per_token()
-        overhead = (self._split_overhead_bytes(split_devices)
-                    + self._mtp_draft_context_vram_bytes())
-        if model <= 0 or free >= model + kv + overhead:
-            return self._DEFAULT_GPU_LAYERS    # full offload fits (or nothing left to size)
-        weight_budget = free - kv - overhead
-        if weight_budget <= 0:
-            return 0                           # no room even for one layer's share
-        fraction = min(max(weight_budget / model, 0.0), 1.0)
-        layers = self._cached_layer_count() or self._ASSUMED_LAYERS
-        n = int(fraction * layers)
-        return max(0, min(self._DEFAULT_GPU_LAYERS, n))
+    def _auto_gpu_layers_cause(self, budget: _AutoLayerBudget) -> "tuple[str, bool]":
+        """One-line explanation for why ``_effective_gpu_layers()`` sized a
+        PARTIAL offload (``0 <= budget.layers < 99``), and whether the
+        free-VRAM-blind caveat applies to it. Checked in priority order:
+
+        (a) the model's weights alone already exceed this GPU's TOTAL capacity
+            - no amount of freed VRAM or a smaller context would help;
+        (b) weights + this context's KV cache WOULD fit a clean card (total),
+            but not the VRAM actually free right now - something else is
+            holding it;
+        (c) neither of the above: the KV cache for the configured context is
+            what tips an otherwise-fitting model over the free budget.
+
+        Mirrors the same total-vs-free distinction ``_check_vram()`` already
+        draws between "can never fit" and "something else is using the GPU",
+        extended with the KV-specific case _check_vram has no need to separate
+        (it already has a fixed n_ctx to charge in full). TOTAL is not subject
+        to the cross-process blindness that only affects a FREE reading, so
+        the caveat is reported False for case (a)."""
+        total = budget.total
+        if total is not None and budget.model + budget.overhead > total:
+            where = (
+                f"the {budget.split_devices} GPUs in the configured split only "
+                f"have {total / 1024**3:.1f} GB combined"
+                if budget.split_devices >= 2 else
+                f"this GPU only has {total / 1024**3:.1f} GB total"
+            )
+            return (f"{where} - the model needs {budget.model / 1024**3:.1f} GB "
+                    f"regardless of context size"), False
+        if (total is not None and budget.free < total
+                and budget.model + budget.kv > budget.free):
+            hint = self._vram_holder_hint().rstrip(".")
+            return (f"only {budget.free / 1024**3:.1f} of {total / 1024**3:.1f} "
+                    f"GB free - {hint}"), True
+        return (f"the KV cache for a {self.n_ctx:,}-token context takes "
+                f"{budget.kv / 1024**3:.1f} GB - lower n_ctx to fit more "
+                f"layers on GPU"), True
+
+    def _moe_hint_applicable(self) -> bool:
+        """Whether a partial-offload notice should point a MoE-model user at
+        n_cpu_moe: the load is not already using it (where the hint would be
+        redundant), and this model actually has routed-expert weight tensors
+        pinning would move off VRAM - probed directly rather than trusting a
+        header flag, so a MoE architecture with nothing pinnable in range
+        stays silent too."""
+        if (getattr(self, "n_cpu_moe", 0) or 0) > 0:
+            return False
+        from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
+        try:
+            pinned = gguf_moe_pinned_expert_bytes(Path(self.model_path), 1)
+        except Exception as exc:  # contracted not to raise - surface if it does
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("gguf MoE expert-byte probe failed (%s); no n_cpu_moe "
+                       "hint this load", type(exc).__name__)
+            return False
+        return bool(pinned and pinned > 0)
 
     def _effective_gpu_layers(self) -> int:
         """The n_gpu_layers this load will actually use.
@@ -946,14 +1040,14 @@ class VramSizingMixin:
         Auto only acts when it is ON and the user left n_gpu_layers at the
         "everything" default (99): an explicit value (e.g. -g 24) is honoured
         verbatim. When auto sizes a partial offload it prints a one-line
-        notice. When VRAM is unmeasurable it says so and attempts the
-        configured value."""
+        notice naming the actual cause. When VRAM is unmeasurable it says so
+        and attempts the configured value."""
         if not self.n_gpu_layers_auto:
             return self.n_gpu_layers
         if self.n_gpu_layers != self._DEFAULT_GPU_LAYERS:
             return self.n_gpu_layers          # explicit choice - respect it as-is
-        auto = self._auto_gpu_layers()
-        if auto is None:
+        budget = self._auto_gpu_layers_budget()
+        if budget is None:
             # Unmeasurable VRAM still needs a working default: attempt the
             # configured value. A debug line rather than a per-load console
             # notice; a full offload that then does not fit fails loudly in
@@ -962,13 +1056,24 @@ class VramSizingMixin:
             _dbg.debug("gpu layers auto: VRAM not measurable; using configured "
                        "n_gpu_layers=%s", self.n_gpu_layers)
             return self.n_gpu_layers
+        auto = budget.layers
         if auto >= self._DEFAULT_GPU_LAYERS:
             return auto                        # full offload fits - no scary notice
         count = self._cached_layer_count()
         of = f"{count}" if count else f"~{self._ASSUMED_LAYERS} (estimated)"
+        cause, maybe_blind = self._auto_gpu_layers_cause(budget)
+        blind_note = ("  [yellow](this reading may not see other processes' "
+                      "VRAM use)[/yellow]" if maybe_blind and self._free_reading_may_be_blind()
+                      else "")
         console.print(
             f"[yellow]  gpu layers auto:[/yellow] offloading {auto}/{of} layers to "
-            f"the GPU, the rest on CPU (model too big for full GPU offload - "
-            f"slower). Set n_gpu_layers to override, or n_gpu_layers_auto false."
+            f"the GPU, the rest on CPU (slower) - {cause}.{blind_note} Set "
+            f"n_gpu_layers to override, or n_gpu_layers_auto false."
         )
+        if self._moe_hint_applicable():
+            console.print(
+                "[dim]  hint: this is a Mixture-of-Experts model - n_cpu_moe "
+                "pins routed-expert weights to system RAM instead of VRAM, "
+                "freeing GPU room for more layers.[/dim]"
+            )
         return auto

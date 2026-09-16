@@ -17,6 +17,7 @@ import pytest
 from unittest.mock import patch
 
 from localm.inference.backends.gguf import GgufBackend
+from localm.inference.backends.llamacpp import _loader
 
 
 GB = 1024 ** 3
@@ -141,6 +142,10 @@ class TestEffectiveGpuLayers:
         out = capsys.readouterr().out.lower()
         assert "gpu layers auto" in out          # mandatory notice printed
         assert "cpu" in out and "slower" in out
+        # The old notice blamed "model too big" unconditionally, even when the
+        # real cause was something else (VRAM held elsewhere, a large n_ctx) -
+        # it must never appear regardless of which real cause this fixture hits.
+        assert "model too big for full gpu offload" not in out
 
     def test_auto_full_fit_no_scary_notice(self, tmp_path, capsys):
         b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True)
@@ -158,6 +163,99 @@ class TestEffectiveGpuLayers:
         out = capsys.readouterr().out.lower()
         assert "could not measure" not in out
         assert "gpu layers auto" not in out          # no scary partial-offload line
+
+    @staticmethod
+    def _flat(capsys) -> str:
+        # console.print() word-wraps at the Console's detected width (~80 cols
+        # under capsys, which is not a real terminal), so a multi-word phrase
+        # can straddle a "\n" the wrap inserted. Collapse all whitespace runs
+        # to a single space before checking a phrase, exactly as a reader
+        # scanning wrapped terminal output would.
+        return " ".join(capsys.readouterr().out.lower().split())
+
+    def test_partial_offload_cause_model_exceeds_total_vram(self, tmp_path, capsys):
+        # The model alone (no KV, nothing else on the GPU) already exceeds this
+        # GPU's TOTAL capacity - freeing other VRAM or shrinking n_ctx cannot
+        # help, so the notice must name the hardware ceiling rather than the
+        # generic "model too big" or the free-VRAM-holder hint. Guarding
+        # _vram_holder_hint to raise proves case (b)'s branch was never taken -
+        # a plain substring check on its own output text is not reliable here,
+        # since the unrelated free-reading-blind caveat also mentions "other
+        # processes" and would defeat a naive "not in" check.
+        b = _model(tmp_path, 20 * GB, n_gpu_layers=99, auto=True, n_ctx=4096)
+        with _vram(4 * GB, 16 * GB), \
+             patch.object(GgufBackend, "_vram_holder_hint",
+                          side_effect=AssertionError("case (b)/(c) must not run")):
+            n = b._effective_gpu_layers()
+        assert n < 99
+        out = self._flat(capsys)
+        assert "16.0 gb total" in out
+        assert "the model needs" in out
+        assert "kv cache" not in out
+
+    def test_partial_offload_cause_other_process_holding_vram(self, tmp_path, capsys):
+        # Weights + this context's KV cache would fit a CLEAN card (total), but
+        # not the VRAM actually free right now: the notice must point at what
+        # is holding it, reusing _vram_holder_hint(), rather than the old
+        # blanket "model too big" wording.
+        b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True, n_ctx=4096)
+        with _vram(6 * GB, 16 * GB), \
+             patch.object(GgufBackend, "_vram_holder_hint",
+                          return_value="another localm instance is holding it."):
+            n = b._effective_gpu_layers()
+        assert 0 < n < 99
+        out = self._flat(capsys)
+        assert "6.0 of 16.0 gb free" in out
+        assert "another localm instance is holding it" in out
+        assert "this gpu only has" not in out
+        assert "kv cache for a" not in out
+
+    def test_partial_offload_cause_kv_cache_too_large(self, tmp_path, capsys):
+        # Weights alone would fit the currently-free VRAM (free == total:
+        # nothing else is holding memory), but weights + this context's KV
+        # cache do not - the notice must name the KV cache/n_ctx, not the
+        # holder hint or a hardware ceiling. Guarding _vram_holder_hint to
+        # raise proves case (b) was never taken - see the comment on the
+        # model-exceeds-total-vram test above for why a plain "not in" check
+        # on the free-VRAM-holder wording is not reliable here (the unrelated
+        # blind-reading caveat also says "other processes").
+        b = _model(tmp_path, 6 * GB, n_gpu_layers=99, auto=True, n_ctx=131072)
+        with _vram(9 * GB, 9 * GB), \
+             patch.object(GgufBackend, "_kv_bytes_per_token", return_value=32_000), \
+             patch.object(GgufBackend, "_vram_holder_hint",
+                          side_effect=AssertionError("case (b) must not run")):
+            n = b._effective_gpu_layers()
+        assert 0 < n < 99
+        out = self._flat(capsys)
+        assert "kv cache for a 131,072-token context" in out
+        assert "lower n_ctx" in out
+        assert "only has" not in out
+
+    def test_cause_attribution_still_works_via_isolated_probe_fallback(
+            self, tmp_path, capsys):
+        # On hardware where torch cannot answer at all (broken/wedged/absent -
+        # the isolated native probe's whole reason to exist, see
+        # test_vram_preflight.py's TestFreeVramBytesUsesIsolatedNativeFallback),
+        # _total_vram_bytes() used to return None even though a real total WAS
+        # available via that same probe, silently collapsing every
+        # partial-offload notice to the generic KV-cache cause regardless of
+        # the real one. Prove case (a) still fires correctly when free AND
+        # total both come from the isolated probe alone, torch never answering.
+        b = _model(tmp_path, 20 * GB, n_gpu_layers=99, auto=True, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_total_vram_bytes",
+                          return_value=(None, None)), \
+             patch.object(_loader, "gpu_memory_isolated",
+                          return_value=(4 * GB, 16 * GB)), \
+             patch.object(GgufBackend, "_device_global_free_bytes",
+                          return_value=None), \
+             patch.object(GgufBackend, "_vram_holder_hint",
+                          side_effect=AssertionError("case (b)/(c) must not run")):
+            n = b._effective_gpu_layers()
+        assert n < 99
+        out = self._flat(capsys)
+        assert "16.0 gb total" in out
+        assert "the model needs" in out
+        assert "kv cache" not in out
 
 
 # --------------------------------------------------------------------------- #

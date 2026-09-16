@@ -46,6 +46,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   excluded; the fallback message also wrongly claimed the release lookup had
   failed. It now resolves the real newest build, and the message no longer
   makes that claim.
+- **The auto-offload notice for a partial GPU load now names the real cause
+  instead of always blaming the model's size.** It now says when the model
+  genuinely exceeds this GPU's total capacity, when another process is
+  holding VRAM right now, or when the requested context's KV cache is what
+  does not fit - each with the relevant number or a suggestion (lower the
+  context, free the other process's VRAM). A Mixture-of-Experts model not
+  already using `n_cpu_moe` is also told the option exists. Before, the same
+  "model too big for full GPU offload" message showed regardless of the real
+  cause.
 - **Switching models or unloading one while it is still generating no longer
   gets refused or silently degraded.** The switch/unload now stops that
   generation and completes right away for the common case (press Stop, then
