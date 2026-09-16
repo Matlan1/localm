@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """MCP tools that run a local generation pipeline: ``generate_image`` (FLUX
-via ComfyUI) and ``run_coder_task`` (the coder agent, in this process)."""
+via ComfyUI) and ``run_coder_task`` (the coder agent, in this process).
+
+``run_coder_task`` reads the timeout cap and the server log function from the
+server module at call time, so they resolve to whatever that module currently
+binds.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +16,8 @@ from typing import Dict
 from localm import pathsafe
 from localm.pathsafe import is_unc_or_device_path
 
-from ..server import (MAX_CODER_TIMEOUT_SECONDS, EngineCache, _log,
-                      _quiet_stdout, _text_result)
+from .. import server as _srv
+from ..server import EngineCache, _quiet_stdout, _text_result
 from ._common import MODEL_PARAM
 
 
@@ -145,9 +150,9 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                 or timeout <= 0):
             return _text_result("'timeout_seconds' must be a positive number",
                                 is_error=True)
-        if timeout > MAX_CODER_TIMEOUT_SECONDS:
+        if timeout > _srv.MAX_CODER_TIMEOUT_SECONDS:
             return _text_result(
-                f"'timeout_seconds' must be at most {MAX_CODER_TIMEOUT_SECONDS:g}",
+                f"'timeout_seconds' must be at most {_srv.MAX_CODER_TIMEOUT_SECONDS:g}",
                 is_error=True)
         timeout = float(timeout)
         # One deadline for the whole call: the model load and the agent's
@@ -171,7 +176,7 @@ def build(engines: EngineCache) -> Dict[str, dict]:
         # `yes` file writes still happen but run_shell is denied, since there
         # is nobody to confirm it.
         if coder_runner.unattended_shell_gated(task, cfg.auto_approve):
-            _log("coder task: run_shell is denied for this run (no 'yes')")
+            _srv._log("coder task: run_shell is denied for this run (no 'yes')")
 
         # Pinned for the whole run; released on the worker thread when the run
         # ends, even after a timeout has abandoned it.

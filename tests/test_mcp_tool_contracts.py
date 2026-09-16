@@ -529,6 +529,16 @@ class TestClientSuppliedStringsAreGuarded:
         assert "at most" in _text(reply)
         assert all_tools["_engines"]._engines == {}, "nothing may be loaded first"
 
+    def test_the_coder_timeout_cap_is_the_servers_current_value(
+            self, all_tools, monkeypatch, tmp_path):
+        """The cap is read from the server module on every call."""
+        monkeypatch.setattr(srv, "MAX_CODER_TIMEOUT_SECONDS", 1.0)
+        reply = _call(all_tools, "run_coder_task",
+                      {"task": "x", "cwd": str(tmp_path), "timeout_seconds": 2})
+        assert reply["isError"] is True
+        assert "at most 1" in _text(reply)
+        assert all_tools["_engines"]._engines == {}
+
     @pytest.mark.parametrize("bad", [-1, True, "soon"])
     def test_run_coder_task_refuses_a_non_positive_timeout(self, all_tools, tmp_path, bad):
         reply = _call(all_tools, "run_coder_task",
@@ -585,6 +595,26 @@ class TestMemoryGatesAtCallTime:
         reply = _call(all_tools, name, args)
         assert reply["isError"] is True
         assert "privacy mode" in _text(reply)
+
+    @pytest.mark.parametrize("name,args", [
+        ("memory_recall", {"query": "x"}), ("memory_append", {"text": "y"})])
+    def test_the_privacy_gate_is_the_chat_surface_not_the_global_mode(
+            self, all_tools, monkeypatch, name, args):
+        """The memory tools read and write the chat namespace, so the mode that
+        gates them is chat_mode: a privacy chat_mode refuses even under a
+        permissive global mode, and a permissive chat_mode allows even under a
+        privacy global mode."""
+        from localm.config import update_config
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+        update_config(lambda c: c.update({"mode": "full", "chat_mode": "privacy"}))
+        reply = _call(all_tools, name, args)
+        assert reply["isError"] is True, reply
+        assert "privacy mode" in _text(reply)
+
+        update_config(lambda c: c.update({"mode": "privacy", "chat_mode": "full"}))
+        reply = _call(all_tools, name, args)
+        assert reply["isError"] is False, reply
+        assert "privacy mode" not in _text(reply)
 
     def test_recall_of_an_empty_store_says_so_without_an_error(self, all_tools):
         reply = _call(all_tools, "memory_recall", {"query": "anything"})

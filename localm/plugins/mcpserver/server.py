@@ -631,8 +631,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         ("plugin_admin", plugin_admin.build()),
     ])
 
-    # Advertisement gates. Every gated handler re-checks its own gate at call
-    # time; each plugin probe runs at most once here.
+    # Advertisement gates; each probe runs at most once. The memory handlers
+    # re-check their plugin and privacy gates on every call; the other gated
+    # handlers rely on this list alone.
     can_embed = _backend_can_embed(engines)
     coder_on = enable_coder and _coder_available()
     memory_on = enable_memory and _memory_available()
