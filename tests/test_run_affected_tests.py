@@ -387,3 +387,7 @@ def test_the_full_ci_matrix_is_left_in_place_as_its_own_gate():
     assert "full-ci" in ci["jobs"]["test"]["if"]
     assert ci["jobs"]["test"]["strategy"]["matrix"]["os"] == ["windows-latest", "ubuntu-latest"]
     assert "labeled" in ci["on"]["pull_request"]["types"]
+
+
+def test_gate_probe_deliberately_failing():
+    assert False, "PROBE: the python-pr-gate must go red on a failing affected test"
