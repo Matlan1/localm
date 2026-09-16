@@ -162,6 +162,7 @@ def _selector_by_depth(monkeypatch, rat, by_depth):
         return by_depth[depth]
 
     monkeypatch.setattr(rat, "_run_selector", fake)
+    monkeypatch.setattr(rat, "_base_resolves", lambda base: True)
     return calls
 
 
@@ -215,15 +216,60 @@ def test_a_wide_selection_at_depth_zero_is_not_retried(rat, repo, monkeypatch):
     assert s.mode == "wide" and s.depth == 0
 
 
+# --- the base ref: an unresolvable one must never read as nothing affected ----
+
+def test_the_base_ref_check_answers_for_the_real_checkout(rat):
+    assert rat._base_resolves("HEAD") is True
+    assert rat._base_resolves("refs/nonexistent/branch") is False
+    assert rat._base_resolves("") is False
+
+
+def test_an_unresolvable_base_is_a_failed_selection_and_the_selector_never_runs(
+        rat, repo, monkeypatch):
+    """The selector diffs HEAD against the merge base with --base; with no such
+    ref it diffs HEAD against HEAD, selects nothing and exits 0. The wrapper
+    refuses before that can happen."""
+    calls = []
+    monkeypatch.setattr(rat, "_run_selector", lambda depth, base, files: calls.append(depth))
+    monkeypatch.setattr(rat, "_base_resolves", lambda base: False)
+    monkeypatch.setattr(rat, "REPO", repo)
+    s = rat.select(1, "origin/master", None)
+    assert s.mode == "failed" and calls == []
+    assert "'origin/master' does not resolve" in s.detail
+    assert rat.pytest_args(s, []) is None
+
+
+def test_an_explicit_file_list_needs_no_base(rat, repo, monkeypatch):
+    calls = _selector_by_depth(monkeypatch, rat, {
+        1: CompletedProcess([], 0, "tests/test_a.py  # names a.py\n", "1 of 3 ...")})
+    monkeypatch.setattr(rat, "_base_resolves", lambda base: False)
+    monkeypatch.setattr(rat, "REPO", repo)
+    s = rat.select(1, "refs/nonexistent/branch", ["a.py"])
+    assert calls == [1] and s.mode == "selected"
+
+
+def test_main_fails_on_an_unresolvable_base_without_running_pytest(rat, repo, monkeypatch):
+    """Even when the selector would answer nothing-affected (which is what it
+    does answer for a base it cannot resolve)."""
+    status, run_pytest, text = _drive(
+        rat, monkeypatch, repo, _cp(0, "tests/NO_TEST_FILE_IS_AFFECTED\n", "0 of 3 ..."),
+        argv=["--base", "refs/nonexistent/branch"], base_resolves=False)
+    assert status == 1
+    run_pytest.assert_not_called()
+    assert "selector failed" in text and "does not resolve" in text
+    assert "No test file is affected" not in text
+
+
 # --- main: exit status and the summary ----------------------------------------
 
-def _drive(rat, monkeypatch, tmp_path, selector, pytest_status=0, argv=()):
-    """Run main() with the selector and pytest replaced; returns
-    (exit status, the pytest mock, the step summary text)."""
+def _drive(rat, monkeypatch, tmp_path, selector, pytest_status=0, argv=(), base_resolves=True):
+    """Run main() with the selector, the base-ref check and pytest replaced;
+    returns (exit status, the pytest mock, the step summary text)."""
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setattr(rat, "REPO", tmp_path)
     monkeypatch.setattr(rat, "_run_selector", lambda depth, base, files: selector)
+    monkeypatch.setattr(rat, "_base_resolves", lambda base: base_resolves)
     run_pytest = MagicMock(return_value=pytest_status)
     monkeypatch.setattr(rat, "_run_pytest", run_pytest)
     status = rat.main(list(argv))
@@ -361,6 +407,7 @@ def test_selector_flags_are_passed_through(rat, repo, monkeypatch):
 
     monkeypatch.setattr(rat, "REPO", repo)
     monkeypatch.setattr(rat, "_run_selector", fake_selector)
+    monkeypatch.setattr(rat, "_base_resolves", lambda base: True)
     monkeypatch.setattr(rat, "_run_pytest", MagicMock(return_value=0))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     assert rat.main(["--depth", "2", "--base", "origin/dev", "--files", "a.py", "b.md"]) == 0
@@ -408,8 +455,10 @@ def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
     ci = _load_workflow(_CI)
     job = ci["jobs"]["python-pr-gate"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert _norm(job["if"]) == "github.event_name == 'pull_request'"
-    assert "full-ci" not in job["if"], "the gate must not be label-gated"
+    assert _norm(job["if"]) == _norm("""
+        github.event_name == 'pull_request' &&
+        !contains(github.event.pull_request.labels.*.name, 'full-ci')"""), (
+        "every unlabelled PR, and never a labelled one, whose whole suite the matrix runs")
     assert isinstance(job.get("timeout-minutes"), int)
     assert "strategy" not in job, "one host: a subset cannot be measured per platform"
 

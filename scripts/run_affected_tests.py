@@ -106,11 +106,23 @@ def _run_pytest(args: list[str]) -> int:
     return subprocess.run([sys.executable, "-m", "pytest", *args], cwd=str(REPO)).returncode
 
 
+def _base_resolves(base: str) -> bool:
+    """Whether *base* names a commit in this checkout."""
+    return subprocess.run(["git", "-C", str(REPO), "rev-parse", "--verify", "--quiet",
+                           f"{base}^{{commit}}"], capture_output=True).returncode == 0
+
+
 def select(depth: int, base: str, files: list[str] | None) -> Selection:
     """The selection to run: the selector's result at *depth*, or, when that
     is wide and *depth* is above 0, its result at depth 0 if that one selects
     test files. A depth-0 retry that is wide, nothing or failed is returned
-    as the original wide result, carrying the retry as its detail."""
+    as the original wide result, carrying the retry as its detail. Without
+    *files*, a *base* that does not resolve is a failed selection: the
+    selector would diff HEAD against itself and select nothing."""
+    if files is None and not _base_resolves(base):
+        return Selection("failed", detail=f"base ref {base!r} does not resolve in this checkout, "
+                                          "so the change cannot be computed (a shallow checkout "
+                                          "has no origin/master)", exit_status=1, depth=depth)
     proc = _run_selector(depth, base, files)
     selection = parse_selection(proc.returncode, proc.stdout, proc.stderr, depth=depth)
     if selection.mode != "wide" or depth == 0:

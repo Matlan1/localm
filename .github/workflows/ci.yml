@@ -9,9 +9,10 @@ on:
   #                  OPEN PR starts the run without needing a new push. The
   #                  mutation-test job runs the same way, gated on the
   #                  `mutation-test` label instead - see that job below.
-  #                  python-pr-gate runs on EVERY pull_request, label or not:
-  #                  lockfile check, hygiene, ruff, and the tests
-  #                  scripts/affected_tests.py selects for the diff.
+  #                  python-pr-gate runs on every pull_request WITHOUT that
+  #                  label: lockfile check, hygiene, ruff, and the tests
+  #                  scripts/affected_tests.py selects for the diff. A
+  #                  labelled PR gets the matrix instead.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
   #   workflow_dispatch / schedule   run the matrix unconditionally. The
@@ -353,9 +354,10 @@ jobs:
       - name: Lint workflows (zizmor)
         run: zizmor --offline .github/workflows/
 
-  # The per-PR Python gate. Runs on every pull_request, labelled or not, and
-  # is the only job that runs Python tests on a PR without the `full-ci`
-  # label. One host, no coverage; the tests are the ones
+  # The per-PR Python gate: the only job that runs Python tests on a PR
+  # without the `full-ci` label. It runs on every pull_request without that
+  # label and not on a labelled one, whose whole suite the `test` matrix
+  # runs. One host, no coverage; the tests are the ones
   # scripts/affected_tests.py selects for the diff, not the suite.
   #
   # scripts/run_affected_tests.py turns the selector's exit status into what
@@ -375,7 +377,9 @@ jobs:
     name: Python PR gate (lock, hygiene, ruff, affected tests)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'full-ci')
     steps:
       # fetch-depth: 0 is required: the selector diffs from
       # `git merge-base origin/master HEAD` and the hygiene gate's append-only
