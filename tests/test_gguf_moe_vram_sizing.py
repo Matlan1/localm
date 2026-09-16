@@ -696,6 +696,26 @@ class TestAutoGpuLayersMoeHintOnPartialOffload:
         assert "gpu layers auto" in out   # the main notice still fires
         assert "n_cpu_moe" not in out     # degraded to no hint, not a crash
 
+    def test_underlying_parse_shared_with_the_hint_probe(self, tmp_path, capsys):
+        # _moe_hint_applicable runs right after the auto-layers budget in the
+        # same _effective_gpu_layers() call, and both used to read the file's
+        # tensor-info section independently. The underlying parse must be
+        # shared across the whole call, not only within
+        # _effective_model_bytes_for_vram.
+        f = tmp_path / "moe.gguf"
+        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
+        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
+                        n_cpu_moe=0)
+        p1, p2, p3 = self._vram(500_000, 1_500_000)
+        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000), \
+             patch("localm.model_manager.gguf._gguf_tensor_offset_entries",
+                   wraps=_gguf_tensor_offset_entries) as spy:
+            n = b._effective_gpu_layers()
+        assert n < 99   # partial - both the budget and the hint probe ran
+        out = self._flat(capsys)
+        assert "n_cpu_moe" in out   # confirms the hint probe actually ran
+        assert spy.call_count == 1
+
 
 class TestAutoCtxMaxHonoursNCpuMoe:
     def test_larger_ceiling_once_experts_are_pinned(self, tmp_path):

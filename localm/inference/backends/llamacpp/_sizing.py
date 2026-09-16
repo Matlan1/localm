@@ -549,11 +549,21 @@ class VramSizingMixin:
         """This load's own ``_gguf_tensor_offset_entries(model_path)`` result
         (or its ``None`` failure), read at most once per instance and shared
         by every excluded-tensor-byte probe in
-        ``_effective_model_bytes_for_vram``."""
+        ``_effective_model_bytes_for_vram``. Degrades to ``None`` - the same
+        outcome as a parse the function's own contract already reports as a
+        failure - on any exception, so a violation of that contract cannot
+        crash the caller."""
         if not hasattr(self, "_gguf_parsed_entries_cache"):
             from localm.model_manager.gguf import _gguf_tensor_offset_entries
-            self._gguf_parsed_entries_cache = _gguf_tensor_offset_entries(
-                Path(self.model_path))
+            try:
+                parsed = _gguf_tensor_offset_entries(Path(self.model_path))
+            except Exception as exc:  # contracted not to raise - surface if it does
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf tensor-offset parse failed (%s); VRAM sizing "
+                           "will charge the affected tensors' bytes",
+                           type(exc).__name__)
+                parsed = None
+            self._gguf_parsed_entries_cache = parsed
         return self._gguf_parsed_entries_cache
 
     def _gguf_excluded_bytes(self, attr: str, probe, desc: str) -> int:
@@ -1065,12 +1075,17 @@ class VramSizingMixin:
         redundant), and this model actually has routed-expert weight tensors
         pinning would move off VRAM - probed directly rather than trusting a
         header flag, so a MoE architecture with nothing pinnable in range
-        stays silent too."""
+        stays silent too. Reuses this instance's shared parsed tensor entries
+        (see ``_gguf_parsed_tensor_entries``) rather than parsing again - by
+        the time a partial-offload notice is being considered,
+        ``_effective_model_bytes_for_vram`` has already primed it."""
         if (getattr(self, "n_cpu_moe", 0) or 0) > 0:
             return False
         from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
         try:
-            pinned = gguf_moe_pinned_expert_bytes(Path(self.model_path), 1)
+            pinned = gguf_moe_pinned_expert_bytes(
+                Path(self.model_path), 1,
+                _parsed=self._gguf_parsed_tensor_entries())
         except Exception as exc:  # contracted not to raise - surface if it does
             from localm.debuglog import logger as _dbg
             _dbg.debug("gguf MoE expert-byte probe failed (%s); no n_cpu_moe "
