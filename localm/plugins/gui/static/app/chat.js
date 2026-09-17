@@ -10,16 +10,119 @@ import { $, applyChatBackground, authHeaders, autoGrow, confirmDanger, el, fetch
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
-import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
+import { openMemoryModal, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
 import { showView } from "./tabs.js";
 import { applyCoderRailSide } from "./coder.js";
+
+/* ================================================================ */
+/*  Tool events                                                      */
+/* ================================================================ */
+
+/* A tool event is an entry of conv.messages that is neither a user nor an
+   assistant turn: a web search, a page read, an approval outcome or a control
+   note the chat injected. It carries no `role` key. runCompletion renders it
+   to fenced user-role text when it assembles a request (toolEventPrompt);
+   renderChat draws it as a collapsed activity card (addToolEventRow).
+
+   Shape: { kind: "tool", id?, tool: "search"|"fetch"|"note",
+            status: "running"|"done"|"failed"|"denied"|"duplicate",
+            query?, url?, started_at?, finished_at?, error?,
+            search (done): provider, search_status, search_error, grounding,
+              grounding_summary, sources[], chunks[], prompt_text
+            fetch (done): page {url, text, truncated}
+            note?: trusted model-directed prose appended after the result, or
+              the whole text of a control note; reason? ("format"|"limit"|
+              "pending") names a control note
+            text?, untrusted_spans?: a row migrated from the legacy
+              {role:"user", web:true} shape, rendered verbatim } */
+export const TOOL_EVENT_KIND = "tool";
+
+export function isToolEvent(m) {
+  return !!m && m.kind === TOOL_EVENT_KIND;
+}
+
+/** A new tool event with *fields* (tool, status, query/url, ...). */
+export function newToolEvent(fields) {
+  return { kind: TOOL_EVENT_KIND, ...fields };
+}
+
+// Legacy web notes were pre-rendered text; the header names what they were.
+const _LEGACY_WEB_NOTE_SHAPES = [
+  [/^\[Results of web_search "([^"]*)"\]/, (q) => ({ tool: "search", status: "done", query: q })],
+  [/^\[web_search results(?: for "([^"]*)")?\]/, (q) => ({ tool: "search", status: "done", query: q || "" })],
+  [/^\[Content of (\S+)\]/, (u) => ({ tool: "fetch", status: "done", url: u })],
+  [/^\[Web (?:request|search) failed: ([^\]]*)\]/, (e) => ({ tool: "search", status: "failed", error: e })],
+  [/^\[duplicate web request\]/, () => ({ tool: "search", status: "duplicate" })],
+  [/^\[web access denied\]/, () => ({ tool: "search", status: "denied" })],
+  [/^\[tool-call format\]/, () => ({ tool: "note", status: "done", reason: "format" })],
+  [/^\[web search limit reached\]/, () => ({ tool: "note", status: "done", reason: "limit" })],
+  [/^\[pending action\]/, () => ({ tool: "note", status: "done", reason: "pending" })],
+];
+
+/** The tool event a legacy {role:"user", web:true} row becomes: its header
+ *  decides tool/status/query/url, and the original text and untrusted spans
+ *  are kept for rendering and prompt assembly. */
+export function legacyWebNoteToToolEvent(m) {
+  const text = typeof m.content === "string" ? m.content
+    : (m.content || []).filter((p) => p.type === "text").map((p) => p.text).join("");
+  let fields = { tool: "note", status: "done" };
+  for (const [re, make] of _LEGACY_WEB_NOTE_SHAPES) {
+    const hit = re.exec(text);
+    if (hit) { fields = make(hit[1]); break; }
+  }
+  const ev = newToolEvent(fields);
+  if (m.id !== undefined) ev.id = m.id;
+  ev.text = text;
+  if (Array.isArray(m.untrusted_spans) && m.untrusted_spans.length) {
+    ev.untrusted_spans = m.untrusted_spans.map((s) => s.slice());
+  }
+  if (Array.isArray(m.compacted) && m.compacted.length) ev.compacted = m.compacted;
+  return ev;
+}
+
+/** Migrate *list* (an array of messages) in place: every legacy
+ *  {role:"user", web:true} row becomes a tool event, a tool event still
+ *  `running` from an interrupted page load becomes `failed`, and nested
+ *  compaction archives are walked. Idempotent. Returns *list*. */
+export function migrateToolEvents(list) {
+  if (!Array.isArray(list)) return list;
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    if (!m || typeof m !== "object") continue;
+    if (m.role === "user" && m.web === true) list[i] = legacyWebNoteToToolEvent(m);
+    else if (isToolEvent(m) && m.status === "running") {
+      m.status = "failed";
+      m.error = "interrupted before a result arrived";
+      if (m.finished_at === undefined) m.finished_at = m.started_at;
+    }
+    if (Array.isArray(list[i].compacted)) migrateToolEvents(list[i].compacted);
+  }
+  return list;
+}
+
+/** Migrate a conversation in place: the live messages, every parked branch
+ *  tail and every archived dropped branch. Returns *conv*. */
+export function migrateConversation(conv) {
+  if (!conv || typeof conv !== "object") return conv;
+  migrateToolEvents(conv.messages);
+  for (const rec of conv.branches || []) {
+    for (const tail of (rec && rec.tails) || []) migrateToolEvents(tail);
+  }
+  for (const tail of conv.droppedBranches || []) migrateToolEvents(tail);
+  return conv;
+}
+
+export function migrateConversations(list) {
+  if (Array.isArray(list)) for (const c of list) migrateConversation(c);
+  return list;
+}
 
 /* ================================================================ */
 /*  Chat                                                             */
 /* ================================================================ */
 
 export const chat = {
-  conversations: readStoredJSON("localm.conversations", []),
+  conversations: migrateConversations(readStoredJSON("localm.conversations", [])),
   activeId: null,
   abort: null,
   attachments: [],   // image attachments: {name, dataUri}
@@ -76,21 +179,17 @@ export const chat = {
   privacyWiped: false,
 };
 
-// System-injected messages (retrieved web/kb/doc content) are pushed with
-// role:"user" so the MODEL reads them as conversation context - changing that
-// would be a model-behaviour change, not a labelling fix. noteLabel() is the
-// single source of truth for the human-facing override instead: renderChat()
-// below AND exportConversation() (settings-perf.js) both call it, so a message
-// flagged here can never render as "You:" in the live UI but slip through
-// unlabelled in an exported transcript, or the reverse. Extracted after
-// NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-RESULTS-TO-USER - the export path
-// used to check only m.role, attributing raw web-search/knowledge-base/
-// document text to the user as though they had typed it.
+// Retrieved knowledge-base excerpts and attached documents are pushed with
+// role:"user" and a tag so the MODEL reads them as conversation context.
+// noteLabel() is the single source of truth for the human-facing label:
+// renderChat() below and exportConversation() (settings-perf.js) both call
+// it, so a tagged row or a tool event never reads as "You:" on screen or in
+// an exported transcript.
 const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
 
 export function noteLabel(m) {
-  const tag = m.tag || (m.web ? "web" : null);
-  return tag ? NOTE_LABELS[tag] : null;
+  if (isToolEvent(m)) return NOTE_LABELS.web;
+  return m.tag ? NOTE_LABELS[m.tag] : null;
 }
 
 // Conversation compaction mirrors localm/inference/compact.py: once the estimate
@@ -130,8 +229,9 @@ export function truncateAtWord(text, max) {
  *  id, note tag and terminal flags are kept; images, audio and video are
  *  replaced by a count note; a nested compaction archive is kept as is. */
 export function archiveCopy(m) {
+  if (isToolEvent(m)) return { ...m };
   const out = { role: m.role, content: msgText(m) };
-  for (const k of ["id", "tag", "web", "model", "truncated", "stopped", "failed", "bridge"]) {
+  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "bridge"]) {
     if (m[k] !== undefined) out[k] = m[k];
   }
   const media = msgImages(m).length + (m.audio ? 1 : 0) + (m.video ? 1 : 0);
@@ -163,7 +263,8 @@ export async function compactConversation(conv) {
   // R44: feed whole messages truncated at a word boundary, with reasoning blocks
   // stripped, so the summariser never sees half-words or display-only <think>.
   const excerpt = older.map((m) =>
-    `${m.role.toUpperCase()}: ${truncateAtWord(stripThink(msgText(m)), 1200)}`).join("\n\n");
+    `${isToolEvent(m) ? "WEB" : m.role.toUpperCase()}: ` +
+    truncateAtWord(stripThink(msgText(m)), 1200)).join("\n\n");
 
   let summary = "";
   try {
@@ -620,6 +721,7 @@ export async function hydrateConversation(conv) {
     if (data.title != null) conv.title = data.title;
     conv.pinned = !!data.pinned;
     conv.folder = data.folder || null;
+    migrateConversation(conv);
     delete conv._meta;
     saveConversations();   // cache the now-full conversation locally
     return true;
@@ -718,8 +820,10 @@ export function newConversation() {
   renderChat();
 }
 
-/* message content helpers - content is a string or OpenAI multipart list */
+/* message content helpers - content is a string or OpenAI multipart list.
+   A tool event's text is the fenced prompt text it renders to. */
 export function msgText(m) {
+  if (isToolEvent(m)) return toolEventPrompt(m).content;
   if (typeof m.content === "string") return m.content;
   return (m.content || []).filter((p) => p.type === "text").map((p) => p.text).join("");
 }
@@ -1239,6 +1343,147 @@ export function addMessageRow(container, role, text, opts = {}) {
   return { row, body, meta };
 }
 
+// Catalog keys for a tool event's card, looked up by field value.
+const TOOL_LABEL_KEYS = {
+  search: "chat.tool.search", fetch: "chat.tool.fetch", note: "chat.tool.note",
+};
+const TOOL_STATUS_KEYS = {
+  running: "chat.tool.status.running", done: "chat.tool.status.done",
+  failed: "chat.tool.status.failed", denied: "chat.tool.status.denied",
+  duplicate: "chat.tool.status.duplicate",
+};
+const TOOL_GROUNDING_KEYS = {
+  "page-backed": "chat.tool.grounding.pageBacked",
+  "snippet-only": "chat.tool.grounding.snippetOnly",
+  failed: "chat.tool.grounding.failed",
+};
+const TOOL_READ_KEYS = {
+  fetched: "chat.tool.read.fetched", failed: "chat.tool.read.failed",
+  skipped: "chat.tool.read.skipped", duplicate: "chat.tool.read.duplicate",
+};
+
+/** The card's one-line title: the tool's name plus its query or URL. */
+export function toolEventTitle(ev) {
+  const what = t(TOOL_LABEL_KEYS[ev.tool] || TOOL_LABEL_KEYS.note);
+  const subject = ev.tool === "search" ? (ev.query || "")
+    : ev.tool === "fetch" ? ((ev.page && ev.page.url) || ev.url || "") : "";
+  return subject ? `${what}: ${subject}` : what;
+}
+
+/** A link for a source URL when it is a web URL, else the text alone. */
+function toolSourceLink(url, label) {
+  if (!/^https?:\/\//i.test(url || "")) return el("span", "tool-link", label);
+  const a = el("a", "tool-link", label);
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
+/** Append a section heading and a block of verbatim text to *body*. */
+function toolTextSection(body, heading, text) {
+  if (heading) body.appendChild(el("div", "tool-section", heading));
+  body.appendChild(el("div", "tool-evidence", text));
+}
+
+/** Render a tool event as a collapsed activity-and-sources card: a summary
+ *  line (tool, query or URL, status, grounding, source count, elapsed time)
+ *  that expands to the source list and the evidence, page text, error or
+ *  note it carries. Every remote string is set as text, never as markup. */
+export function addToolEventRow(container, ev, opts = {}) {
+  const row = el("div", "msg-row tool-event");
+  row.appendChild(el("div", "msg-role", noteLabel(ev)));
+  const card = el("details", "tool-card");
+  card.dataset.status = ev.status || "done";
+  const summary = el("summary", "tool-summary");
+  summary.appendChild(iconEl(ev.tool === "fetch" ? "file" : "web", "ic"));
+  summary.appendChild(el("span", "tool-title", toolEventTitle(ev)));
+  summary.appendChild(el("span", "tool-status",
+    t(TOOL_STATUS_KEYS[ev.status] || TOOL_STATUS_KEYS.done)));
+  if (ev.status === "done" && TOOL_GROUNDING_KEYS[ev.grounding]) {
+    summary.appendChild(el("span", "tool-grounding", t(TOOL_GROUNDING_KEYS[ev.grounding])));
+  }
+  const sources = Array.isArray(ev.sources) ? ev.sources : [];
+  if (sources.length) {
+    summary.appendChild(el("span", "tool-count", tn("chat.tool.sources", sources.length)));
+  }
+  if (ev.started_at && ev.finished_at && ev.finished_at >= ev.started_at) {
+    const seconds = ((ev.finished_at - ev.started_at) / 1000).toFixed(1);
+    summary.appendChild(el("span", "tool-elapsed", t("chat.tool.elapsed", { seconds })));
+  }
+  card.appendChild(summary);
+
+  const body = el("div", "tool-body");
+  if (sources.length) {
+    body.appendChild(el("div", "tool-section", t("chat.tool.sourcesTitle")));
+    const list = el("ol", "tool-sources");
+    for (const s of sources) {
+      const li = el("li");
+      li.appendChild(el("span", "tool-sid", s.id || ""));
+      const url = s.final_url || s.url || "";
+      const title = (s.title || "").trim() || url;
+      li.appendChild(toolSourceLink(url, title));
+      const meta = [];
+      if (TOOL_GROUNDING_KEYS[s.grounding]) meta.push(t(TOOL_GROUNDING_KEYS[s.grounding]));
+      if (TOOL_READ_KEYS[s.retrieval_status]) meta.push(t(TOOL_READ_KEYS[s.retrieval_status]));
+      if (s.error) meta.push(s.error);
+      if (meta.length) li.appendChild(el("span", "tool-source-meta", meta.join(" · ")));
+      list.appendChild(li);
+    }
+    body.appendChild(list);
+  }
+  const chunks = Array.isArray(ev.chunks) ? ev.chunks : [];
+  if (chunks.length) {
+    body.appendChild(el("div", "tool-section", t("chat.tool.evidence")));
+    for (const c of chunks) {
+      const p = el("div", "tool-evidence");
+      p.appendChild(el("span", "tool-sid",
+        (c.source_id || "") + (c.kind === "snippet" ? " snippet" : "")));
+      p.appendChild(document.createTextNode(" " + (c.text || "")));
+      body.appendChild(p);
+    }
+  }
+  if (ev.page && typeof ev.page.text === "string") {
+    toolTextSection(body,
+      t("chat.tool.page") + (ev.page.truncated ? " " + t("chat.tool.truncated") : ""),
+      ev.page.text);
+  }
+  if (ev.error) toolTextSection(body, t("chat.tool.error"), ev.error);
+  if (typeof ev.text === "string") toolTextSection(body, "", ev.text);
+  if (ev.note) toolTextSection(body, t("chat.tool.instruction"), ev.note);
+  card.appendChild(body);
+  row.appendChild(card);
+
+  const meta = el("div", "msg-meta");
+  const copy = el("button", "copy-btn", t("chat.copy"));
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(msgText(ev));
+      copy.textContent = t("chat.copied");
+      setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
+    } catch {
+      toast(t("chat.copyBlocked"), true);
+    }
+  };
+  meta.appendChild(copy);
+  if (opts.variant) {
+    const nav = el("span", "variant");
+    const prev = el("button", "action", "‹");
+    prev.title = t("chat.variant.previous");
+    prev.onclick = opts.variant.prev;
+    const next = el("button", "action", "›");
+    next.title = t("chat.variant.next");
+    next.onclick = opts.variant.next;
+    nav.appendChild(prev);
+    nav.appendChild(el("span", "k", `${opts.variant.k}/${opts.variant.n}`));
+    nav.appendChild(next);
+    meta.appendChild(nav);
+  }
+  row.appendChild(meta);
+  container.appendChild(row);
+  return { row, card, body };
+}
+
 export function buildEmptyHint() {
   const div = el("div", "empty-hint");
   const big = el("div", "big");
@@ -1315,18 +1560,6 @@ export function renderChat() {
       }
       lastAssistantModel = currentModel;
     }
-    const tag = m.tag || (m.web ? "web" : null);
-    const actions = [];
-    if (m.role === "user" && !tag && !chat.abort) {
-      actions.push(["edit", () => editMessage(conv, i)]);
-      actions.push(["revert", () => revertTo(conv, i)]);
-    }
-    if (m.role === "assistant" && !tag) {
-      actions.push(["Speak this reply aloud", (btn) => speakToggle(btn, msgText(m)), "speak"]);
-    }
-    if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
-      actions.push(["regenerate", () => regenerate(conv)]);
-    }
     // ‹ k/N › on the first message of a fork point with siblings
     let variant = null;
     const pid = i > 0 ? conv.messages[i - 1].id : "root";
@@ -1338,6 +1571,22 @@ export function renderChat() {
         prev: () => switchBranch(conv, i, -1),
         next: () => switchBranch(conv, i, +1),
       };
+    }
+    if (isToolEvent(m)) {
+      addToolEventRow(box, m, { variant });
+      return;
+    }
+    const tag = m.tag;
+    const actions = [];
+    if (m.role === "user" && !tag && !chat.abort) {
+      actions.push(["edit", () => editMessage(conv, i)]);
+      actions.push(["revert", () => revertTo(conv, i)]);
+    }
+    if (m.role === "assistant" && !tag) {
+      actions.push(["Speak this reply aloud", (btn) => speakToggle(btn, msgText(m)), "speak"]);
+    }
+    if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
+      actions.push(["regenerate", () => regenerate(conv)]);
     }
     const noteSuffix = m.failed
       ? "\n\n*[generation failed - the model's reply ended in an inference error; regenerate or ask again]*"

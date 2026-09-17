@@ -615,10 +615,87 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
    collapsing whitespace the way rendered markdown would. */
 .msg-body.msg-literal { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* injected web search/fetch results - visible but visually secondary */
+/* injected knowledge-base / document notes - visible but visually secondary */
 .msg-row.web-note { opacity: 0.7; }
 .msg-row.web-note .msg-body { font-size: 13px; max-height: 180px; overflow-y: auto; }
 .msg-row.web-note .msg-role { color: var(--yellow); }
+/* tool activity card (a web search, page read, approval outcome or control
+   note): its own third kind of row, neither the user bubble nor the
+   assistant column - a dashed, collapsed card that expands to its sources */
+.msg-row.tool-event .msg-role { color: var(--yellow); margin-bottom: 4px; }
+.tool-card {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.tool-card > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.tool-card > summary::-webkit-details-marker { display: none; }
+.tool-card > summary::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-left: 6px solid var(--text-dim);
+  margin-right: -2px;
+}
+.tool-card[open] > summary::before { transform: rotate(90deg) translateX(1px); }
+.tool-card > summary .ic { width: 14px; height: 14px; flex: none; color: var(--yellow); }
+.tool-card .tool-title { color: var(--text); overflow-wrap: anywhere; }
+.tool-card .tool-status, .tool-card .tool-grounding, .tool-card .tool-count,
+.tool-card .tool-elapsed {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.tool-card[data-status="running"] .tool-status { color: var(--accent); border-color: var(--accent); }
+.tool-card[data-status="done"] .tool-status { color: var(--green); border-color: var(--green); }
+.tool-card[data-status="failed"] .tool-status,
+.tool-card[data-status="denied"] .tool-status { color: var(--red); border-color: var(--red); }
+.tool-card .tool-body {
+  padding: 2px 12px 10px 28px;
+  max-height: 320px;
+  overflow-y: auto;
+  border-top: 1px dashed var(--border);
+}
+.tool-card .tool-section {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin: 10px 0 4px;
+}
+.tool-card .tool-sources { margin: 0; padding-left: 18px; }
+.tool-card .tool-sources li { margin: 3px 0; overflow-wrap: anywhere; }
+.tool-card .tool-sid {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--yellow);
+  margin-right: 6px;
+}
+.tool-card .tool-link { color: var(--text); }
+.tool-card .tool-source-meta { margin-left: 6px; font-size: 11px; }
+.tool-card .tool-evidence {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.msg-row.tool-event .msg-meta { margin-top: 4px; }
 /* NEW-1: inline marker where the active model changed between turns */
 .model-switch {
   text-align: center;

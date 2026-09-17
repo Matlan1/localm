@@ -163,9 +163,11 @@ test("announcement: 'I will now search' with no call triggers exactly one repair
     { deltas: [content("Here is the answer: 42."), done("stop")] },
   ] });
   await d.window.runCompletion(d.conv);
-  const pending = d.conv.messages.filter((m) => /\[pending action\]/.test(String(m.content)));
+  const pending = d.conv.messages.filter((m) => m.kind === "tool" && m.reason === "pending");
   assert.equal(pending.length, 1, "exactly one repair note was injected");
-  assert.equal(pending[0].web, true, "the note is a dimmed control message, not a user turn");
+  assert.equal(pending[0].role, undefined, "the note is a tool event, not a user turn");
+  assert.match(pending[0].note, /^\[pending action\]/);
+  assert.match(d.window.msgText(pending[0]), /^\[pending action\]/);
   assert.equal(d.completions().length, 2, "one original round plus one repair round");
   assert.equal(d.conv.messages[d.conv.messages.length - 1].content, "Here is the answer: 42.");
 });
@@ -176,7 +178,7 @@ test("announcement: the repair round cannot recurse on its own announcement", as
     { deltas: [content("Let me look that up and get back to you."), done("stop")] },
   ] });
   await d.window.runCompletion(d.conv);
-  const pending = d.conv.messages.filter((m) => /\[pending action\]/.test(String(m.content)));
+  const pending = d.conv.messages.filter((m) => m.kind === "tool" && m.reason === "pending");
   assert.equal(pending.length, 1, "a second announcement gets no second repair");
   assert.equal(d.completions().length, 2, "no third round: the repair is bounded to one");
 });
@@ -200,7 +202,7 @@ test("announcement: no repair when web access is off", async () => {
   ] });
   await d.window.runCompletion(d.conv);
   assert.equal(d.completions().length, 1);
-  assert.ok(!d.conv.messages.some((m) => /\[pending action\]/.test(String(m.content))));
+  assert.ok(!d.conv.messages.some((m) => m.kind === "tool" && m.reason === "pending"));
 });
 
 test("announcement: no repair on a length cut-off (that is the truncation path)", async () => {

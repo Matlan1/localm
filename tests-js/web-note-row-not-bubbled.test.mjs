@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// WEB-FUNC-003: an injected web/kb/doc note is stored with role:"user" (see
+// WEB-FUNC-003: an injected kb/doc note is stored with role:"user" (see
 // chat.js's noteLabel() comment) so the model reads it as user-turn content,
 // but on screen it must never inherit the real user turn's right-aligned
-// bubble layout, and its Web/Doc/Sources label must stay visible. Both broke
+// bubble layout, and its Doc/Sources label must stay visible. Both broke
 // because addMessageRow put "user" and "web-note" on the same row, and
 // style.css's .msg-row.user rules (flex/right-align, the bubble background,
 // and .msg-role{display:none}) applied right alongside .msg-row.web-note's.
+// A web result is now a tool event (no role at all) rendered as its own
+// card; tool-events.test.mjs covers that card in depth.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -16,13 +18,14 @@ function setActiveConv(window, conv) {
     `chat.conversations = [${JSON.stringify(conv)}]; chat.activeId = ${JSON.stringify(conv.id)};`);
 }
 
-test("renderChat: a web-search-result row is not styled like a user bubble, and shows the Web label", () => {
+test("renderChat: a web-search tool event is not styled like a user bubble, and shows the Web label", () => {
   const { window } = loadApp();
   setActiveConv(window, {
     id: "c1", title: "t",
     messages: [
       { role: "user", content: "what's the weather", id: "m1" },
-      { role: "user", web: true, id: "m2", content: "[web_search results] Cloudy, 18C." },
+      { kind: "tool", tool: "search", status: "done", id: "m2", query: "weather",
+        text: "[web_search results] Cloudy, 18C." },
     ],
   });
   window.renderChat();
@@ -37,7 +40,8 @@ test("renderChat: a web-search-result row is not styled like a user bubble, and 
   assert.ok(!note.classList.contains("user"),
     "a web-result row must not carry the user row class - that is what let " +
     ".msg-row.user's bubble/right-align rules apply to it (WEB-FUNC-003)");
-  assert.ok(note.classList.contains("web-note"), "the note-styling class is present");
+  assert.ok(!note.classList.contains("web-note"), "a tool event is not a kb/doc note row");
+  assert.ok(note.classList.contains("tool-event"), "the tool-event row class is present");
   const label = note.querySelector(".msg-role");
   assert.ok(label, "the row still has a role label element");
   assert.equal(label.textContent, "Web", "the Web label survives (not the You default)");
