@@ -623,19 +623,20 @@ jobs:
         run: python scripts/check_llama_rocm_pin.py
 
   # The one check that sums up the others (docs/architecture.md, "Merge
-  # policy"). Runs on every pull_request once the four jobs it needs have
+  # policy"). Runs on every pull_request once the five jobs it needs have
   # finished, whatever their results, and never on push, dispatch or
   # schedule. scripts/merge_policy.py reads those results and the change:
   # lint and gui-tests must have succeeded; without the `full-ci` label
   # python-pr-gate must have succeeded and the change must not be a release
-  # (VERSION unchanged); with the label the test matrix must have succeeded.
-  # A release PR without the label fails here with the label named; every
-  # other PR merges without the matrix. A skipped needed job never passes.
+  # (VERSION unchanged); with the label the test matrix must have succeeded;
+  # mutation-test must not have failed when it ran (skipped is neutral). A
+  # release PR without the label fails here with the label named; every
+  # other PR merges without the matrix. A skipped required job never passes.
   merge-policy:
     name: merge-policy
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [python-pr-gate, lint, gui-tests, test]
+    needs: [python-pr-gate, lint, gui-tests, test, mutation-test]
     # Runs after a needed job failed or was skipped. See
     # test_the_merge_policy_job_cannot_be_skipped_green.
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
@@ -660,9 +661,11 @@ jobs:
           RESULT_LINT: ${{ needs.lint.result }}
           RESULT_GUI_TESTS: ${{ needs.gui-tests.result }}
           RESULT_TEST: ${{ needs.test.result }}
+          RESULT_MUTATION_TEST: ${{ needs.mutation-test.result }}
         run: >-
           python scripts/merge_policy.py --full-ci "$FULL_CI"
           --result "python-pr-gate=$RESULT_PYTHON_PR_GATE"
           --result "lint=$RESULT_LINT"
           --result "gui-tests=$RESULT_GUI_TESTS"
           --result "test=$RESULT_TEST"
+          --result "mutation-test=$RESULT_MUTATION_TEST"

@@ -95,12 +95,14 @@ which runs on a PR carrying the `full-ci` label in place of the gate.
 
 `merge-policy` (`scripts/merge_policy.py`) is the one check that sums the
 others up. It runs on every pull request once `python-pr-gate`, `lint`,
-`gui-tests` and `test` have finished, whatever their results, and it is
-never skipped on a pull request, so a needed job that was skipped or failed
-cannot read as a pass. It passes when `lint` and `gui-tests` succeeded and,
-on a PR without the `full-ci` label, `python-pr-gate` succeeded and the
-change is not a release (`VERSION` unchanged); on a PR with the label, when
-the `test` matrix succeeded. The two-platform matrix runs at release, not on
+`gui-tests`, `test` and `mutation-test` have finished, whatever their
+results, and it is never skipped on a pull request, so a needed job that
+was skipped or failed cannot read as a pass. It passes when `lint` and
+`gui-tests` succeeded, `mutation-test` did not fail when it ran (skipped is
+neutral) and, on a PR without the `full-ci` label, `python-pr-gate`
+succeeded and the change is not a release (`VERSION` unchanged); on a PR
+with the label, when the `test` matrix succeeded. The two-platform matrix
+runs at release, not on
 an ordinary pull request: a release PR without the label fails
 `merge-policy` with the label named, and every other PR merges on the three
 cheap jobs. Adding the label to an open PR leaves the earlier unlabelled

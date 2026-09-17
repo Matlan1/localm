@@ -4,9 +4,11 @@ ci.yml, and the shape of that job.
 
 The policy's contract: lint and gui-tests must succeed on every pull request;
 without the `full-ci` label python-pr-gate must succeed and the change must
-not be a release; with the label the matrix must succeed; a release PR
-without the label fails with the label named, every other PR merges without
-the matrix; a skipped, failed, cancelled or missing needed job never passes.
+not be a release; with the label the matrix must succeed; mutation-test
+blocks when it ran and failed and is neutral when it was skipped; a release
+PR without the label fails with the label named, every other PR merges
+without the matrix; a skipped, failed, cancelled or missing needed job never
+passes.
 The last section binds the script to the real tree and pins the ci.yml job so
 it cannot be quietly skipped, narrowed or made non-blocking.
 """
@@ -25,9 +27,9 @@ _SCRIPT = REPO_ROOT / "scripts" / "merge_policy.py"
 _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 GREEN_UNLABELLED = {"python-pr-gate": "success", "lint": "success",
-                    "gui-tests": "success", "test": "skipped"}
+                    "gui-tests": "success", "test": "skipped", "mutation-test": "skipped"}
 GREEN_LABELLED = {"python-pr-gate": "skipped", "lint": "success",
-                  "gui-tests": "success", "test": "success"}
+                  "gui-tests": "success", "test": "success", "mutation-test": "skipped"}
 
 
 def _load(path=_SCRIPT, name="merge_policy"):
@@ -244,7 +246,17 @@ def test_a_job_skipped_by_design_on_one_arm_still_fails_that_arm_when_it_ran_red
     assert f"{job}: {result}" in v.reasons
 
 
-@pytest.mark.parametrize("job", ["python-pr-gate", "lint", "gui-tests", "test"])
+@pytest.mark.parametrize("full_ci, results", [(False, GREEN_UNLABELLED), (True, GREEN_LABELLED)])
+def test_mutation_test_blocks_when_it_ran_red_and_is_neutral_when_skipped(mp, full_ci, results):
+    assert mp.decide(full_ci, {**results, "mutation-test": "skipped"}, {}).ok
+    assert mp.decide(full_ci, {**results, "mutation-test": "success"}, {}).ok
+    for result in ("failure", "cancelled"):
+        v = mp.decide(full_ci, {**results, "mutation-test": result}, {})
+        assert not v.ok
+        assert v.reasons == [f"mutation-test: {result}"]
+
+
+@pytest.mark.parametrize("job", ["python-pr-gate", "lint", "gui-tests", "test", "mutation-test"])
 def test_a_missing_result_never_passes(mp, job):
     for full_ci, results in ((False, GREEN_UNLABELLED), (True, GREEN_LABELLED)):
         results = {k: v for k, v in results.items() if k != job}
@@ -282,10 +294,10 @@ def _run(args, env_extra=None):
 
 _GREEN_UNLABELLED_ARGS = ["--full-ci", "false", "--result", "python-pr-gate=success",
                           "--result", "lint=success", "--result", "gui-tests=success",
-                          "--result", "test=skipped"]
+                          "--result", "test=skipped", "--result", "mutation-test=skipped"]
 _GREEN_LABELLED_ARGS = ["--full-ci", "true", "--result", "python-pr-gate=skipped",
                         "--result", "lint=success", "--result", "gui-tests=success",
-                        "--result", "test=success"]
+                        "--result", "test=success", "--result", "mutation-test=skipped"]
 
 
 def test_main_passes_a_docs_only_change():
@@ -332,9 +344,9 @@ def test_main_writes_the_summary_to_the_step_summary_file(tmp_path):
 
 
 def test_main_refuses_a_result_for_a_job_the_policy_does_not_know():
-    proc = _run(["--full-ci", "false", "--result", "mutation-test=success"])
+    proc = _run(["--full-ci", "false", "--result", "abi-check=success"])
     assert proc.returncode == 2
-    assert "python-pr-gate, lint, gui-tests, test" in proc.stderr
+    assert "python-pr-gate, lint, gui-tests, test, mutation-test" in proc.stderr
 
 
 def test_evaluate_reads_the_change_from_git_when_no_files_are_given(mp, monkeypatch):
@@ -373,7 +385,7 @@ def test_the_merge_policy_job_cannot_be_skipped_green():
     ci = _load_workflow(_CI)
     job = ci["jobs"]["merge-policy"]
     assert job["name"] == "merge-policy", "the one check name to read"
-    assert sorted(job["needs"]) == ["gui-tests", "lint", "python-pr-gate", "test"]
+    assert sorted(job["needs"]) == ["gui-tests", "lint", "mutation-test", "python-pr-gate", "test"]
     cond = _norm(job["if"])
     assert "!cancelled()" in cond or "always()" in cond, (
         "without a status function success() is implied and a failed or skipped needed job "
@@ -399,7 +411,7 @@ def test_the_merge_policy_job_feeds_the_script_every_needed_result_and_the_label
     cmd = _norm(step["run"])
     env = step["env"]
     assert env["FULL_CI"] == "${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}"
-    for needed in ("python-pr-gate", "lint", "gui-tests", "test"):
+    for needed in ("python-pr-gate", "lint", "gui-tests", "test", "mutation-test"):
         var = "RESULT_" + needed.upper().replace("-", "_")
         assert env[var] == "${{ needs.%s.result }}" % needed
         assert f'--result "{needed}=${var}"' in cmd

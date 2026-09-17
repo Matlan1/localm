@@ -3,10 +3,12 @@
 """Decide whether a pull request may merge, as the `merge-policy` job in
 .github/workflows/ci.yml: the one check that sums up the others.
 
-The job runs on every pull_request once python-pr-gate, lint, gui-tests and
-test have finished, whatever their results, and passes only when:
+The job runs on every pull_request once python-pr-gate, lint, gui-tests,
+test and mutation-test have finished, whatever their results, and passes
+only when:
 
-  - lint and gui-tests succeeded, and no needed job failed or was cancelled;
+  - lint and gui-tests succeeded, and no needed job failed or was cancelled
+    (mutation-test counts when it ran and is neutral when it was skipped);
   - without the `full-ci` label: python-pr-gate succeeded and the change is
     not a release (VERSION is unchanged);
   - with the `full-ci` label: the test matrix succeeded.
@@ -49,7 +51,7 @@ import affected_tests  # noqa: E402
 import run_affected_tests  # noqa: E402
 
 LABEL = "full-ci"
-JOBS = ("python-pr-gate", "lint", "gui-tests", "test")
+JOBS = ("python-pr-gate", "lint", "gui-tests", "test", "mutation-test")
 ALWAYS_REQUIRED = ("lint", "gui-tests")
 RELEASE = "release"
 
