@@ -65,6 +65,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Stopping or restarting the server no longer leaves the coder plugin's
+  background shell commands and sub-agents running.** They already stopped
+  when the GUI's own background jobs and any localm-launched ComfyUI
+  instance did; the coder plugin's own background jobs were missed, so a
+  background shell command or sub-agent could keep running after the server
+  that started it was gone.
+- **Windows setup now looks for what is actually locking `.venv` before
+  telling you to close it yourself.** When creating the environment fails
+  with "Access is denied" (or a sharing violation), setup clears a leftover
+  read-only attribute, finds any localm process from this folder still
+  holding it and offers to stop it for you, and waits and retries once for a
+  brief lock such as antivirus scanning. If it still cannot create the
+  environment, the message now names a OneDrive-synced folder as the likely
+  cause when that is what is happening, rather than only guessing at a
+  stray process.
 - **`localm serve -H` / `localm gui -H` no longer accept a hostname.** The `bind_host`
   setting already required an IP literal or `localhost`, but the command-line flag was passed
   through unchecked, so a server could be started bound by a name that the rest of localm (the

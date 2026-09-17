@@ -3284,10 +3284,12 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
 def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     """The stop sequence, WITHOUT the process exit.
 
-    Stops in-flight job children, unloads the model so the native context is
-    freed cleanly (a hard exit while it is loaded segfaults during teardown),
-    releases the shared embedder, and clears the crash marker so this
-    intentional stop is not reported as a crash on the next boot.
+    Stops in-flight job children (both the GUI's and the coder plugin's own
+    background shell/agent jobs) and any localm-launched ComfyUI instance,
+    unloads the model so the native context is freed cleanly (a hard exit
+    while it is loaded segfaults during teardown), releases the shared
+    embedder, and clears the crash marker so this intentional stop is not
+    reported as a crash on the next boot.
 
     Safe to run twice: every step tolerates already-stopped state.
 
@@ -3321,6 +3323,20 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("terminating job child processes during shutdown failed "
                      "(non-fatal); a child may be left running")
+    # The coder plugin's own background shell/agent jobs are a SEPARATE
+    # registry (localm.plugins.coder.background.JobRegistry) that reaps
+    # itself through an atexit hook, same as the one above - and os._exit
+    # bypasses atexit exactly the same way. Left uncalled, a coder background
+    # shell command or sub-agent outlives the server that started it.
+    try:
+        from localm.plugins.coder.background import terminate_all_for_exit
+        _coder_killed = terminate_all_for_exit()
+        if _coder_killed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("terminated %d coder background job(s) on shutdown", _coder_killed)
+    except Exception:
+        _dbg_swallow("terminating coder background jobs during shutdown failed "
+                     "(non-fatal); a job may be left running")
     # Any ComfyUI instance localm itself launched (image/music/video, each
     # possibly its own api_url) runs in a detached process group so
     # stop_comfy() can kill its whole tree on demand - which also means it
@@ -3541,6 +3557,18 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     except Exception:
         _dbg_swallow("terminating job child processes during restart failed "
                      "(non-fatal); a child may be left running")
+    # Same reasoning as the job-children step above, for the coder plugin's
+    # separate background shell/agent registry: os.execv bypasses atexit too,
+    # so without this a coder background job survives the re-exec'd server.
+    try:
+        from localm.plugins.coder.background import terminate_all_for_exit
+        _coder_killed = terminate_all_for_exit()
+        if _coder_killed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("terminated %d coder background job(s) on restart", _coder_killed)
+    except Exception:
+        _dbg_swallow("terminating coder background jobs during restart failed "
+                     "(non-fatal); a job may be left running")
     # Any ComfyUI instance localm itself launched runs in a detached process
     # group so stop_comfy() can kill its whole tree on demand - which also
     # means it does NOT die on its own when this process re-execs. Left
