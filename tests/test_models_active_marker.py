@@ -124,6 +124,24 @@ def test_remote_model_status_none_loaded_is_empty(monkeypatch):
     assert remote_model_status("http://x/v1")[0] == "empty"
 
 
+@pytest.mark.parametrize("bad_id", [123, ["x"], {"a": 1}, None, ""])
+def test_remote_model_status_skips_an_entry_whose_id_is_not_a_string(monkeypatch, bad_id):
+    """The returned id is compared (names_same_model) and printed (rich escape)
+    by every attach caller, both of which raise on a non-string. A malformed
+    entry is skipped, so a well-formed loaded sibling still wins and a reply
+    with nothing else reads as empty rather than as ("loaded", <garbage>)."""
+    payload = {"object": "list", "data": [
+        {"id": bad_id, "loaded": True, "active": True},
+        {"id": "good-model", "loaded": True},
+    ]}
+    monkeypatch.setattr("requests.get", lambda *a, **k: _resp(payload))
+    assert remote_model_status("http://x/v1") == ("loaded", "good-model")
+
+    payload = {"object": "list", "data": [{"id": bad_id, "loaded": True}]}
+    monkeypatch.setattr("requests.get", lambda *a, **k: _resp(payload))
+    assert remote_model_status("http://x/v1") == ("empty", None)
+
+
 def test_remote_model_status_single_loaded_still_works(monkeypatch):
     """Back-compat: the common single-model reply still resolves."""
     payload = {"object": "list", "data": [{"id": "gemma-4", "loaded": True}]}

@@ -411,23 +411,40 @@ def _canon(p: str) -> str:
 
 def fetch_whoami(scheme: str, port: int, instance_id: Optional[str],
                  timeout: float, bind_host: Optional[str] = None) -> Optional[dict]:
-    """One handshake: GET <scheme>://<loopback>:<port>/whoami, returning the
-    verified identity payload, or None if it is not THIS localm instance
+    """One handshake: GET <scheme>://<this machine>:<port>/whoami, returning
+    the verified identity payload, or None if it is not THIS localm instance
     (app==localm AND the advertised instance_id matches the registry file - the
-    impostor guard). Always probes loopback: discovery is same-machine, even for
-    a network-bound instance.
+    impostor guard). Only ever dials an address this machine holds: discovery
+    is same-machine, even for a network-bound instance.
 
-    WHICH loopback comes from the entry's recorded *bind_host*. "Loopback" is
-    two addresses, not one: a server bound on ``::1`` has nothing listening on
-    127.0.0.1, so hardcoding the IPv4 one reports a healthy IPv6-bound server as
-    DEAD. Omitted, it still dials 127.0.0.1, which is what an entry with no
-    recorded bind host wants.
+    WHICH address comes from the entry's recorded *bind_host*, via
+    ``self_connect_host``: a wildcard or ``localhost`` dials 127.0.0.1, ``::``
+    dials ``::1``, and a specific literal dials itself (a server bound on
+    ``::1`` or on one interface's address has nothing listening on 127.0.0.1).
+    Omitted, it dials 127.0.0.1, which is what an entry with no recorded bind
+    host wants.
+
+    A *bind_host* that is not an address this machine holds
+    (``bindhost.is_own_address``: a hostname, a non-string, or a literal no
+    interface here carries) returns None without sending anything. See
+    test_a_forged_host_is_never_dialed_and_never_verified. The request is a
+    single hop: a redirect answer is not followed and, not being a 200, reads
+    as not verified. See test_a_redirect_from_a_local_listener_is_not_followed.
 
     The payload carries ``version``, ``root_dir`` and ``mode``; a network-bound
     instance omits ``root_dir``."""
     import requests
-    from localm.bindhost import self_connect_host, url_host
-    host = url_host(self_connect_host(bind_host))
+    from localm.bindhost import is_own_address, self_connect_host, url_host
+    if bind_host is not None and not isinstance(bind_host, str):
+        logger.warning("whoami probe refused: registry entry's host %r is not a "
+                       "string; not dialing it", bind_host)
+        return None
+    dial = self_connect_host(bind_host)
+    if not is_own_address(dial):
+        logger.warning("whoami probe refused: registry entry's host %r is not "
+                       "an address this machine holds; not dialing it", bind_host)
+        return None
+    host = url_host(dial)
     url = f"{scheme}://{host}:{port}/whoami"
     try:
         from localm.tls import requests_verify
@@ -442,7 +459,8 @@ def fetch_whoami(scheme: str, port: int, instance_id: Optional[str],
         logger.debug("could not determine TLS verification for %s: %s; skipping", url, e)
         return None
     try:
-        r = requests.get(url, timeout=timeout, verify=verify)
+        r = requests.get(url, timeout=timeout, verify=verify,
+                         allow_redirects=False)
     except requests.RequestException:
         return None
     if r.status_code != 200:

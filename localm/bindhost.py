@@ -16,6 +16,7 @@ peer always looks like 127.0.0.1 even for a genuinely remote client.
 from __future__ import annotations
 
 import ipaddress
+import socket
 from typing import Optional
 
 
@@ -118,3 +119,54 @@ def self_connect_host(bind_host: Optional[str]) -> str:
     if h == "::":
         return "::1"
     return h
+
+
+def _interface_addresses() -> frozenset:
+    """Every IPv4/IPv6 address configured on one of this machine's network
+    interfaces, as ``ipaddress`` objects with any zone id stripped. Empty when
+    psutil is unavailable or the enumeration fails; the failure is logged at
+    warning, so a refusal that follows can be read back to its cause."""
+    try:
+        import psutil
+        nics = psutil.net_if_addrs()
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("bindhost: could not enumerate this machine's interface "
+                       "addresses (%s); only a loopback address can be "
+                       "recognised as this machine's until that works", e)
+        return frozenset()
+    out = set()
+    for addrs in nics.values():
+        for a in addrs:
+            if a.family not in (socket.AF_INET, socket.AF_INET6):
+                continue
+            try:
+                out.add(ipaddress.ip_address(str(a.address).split("%", 1)[0]))
+            except ValueError:
+                continue
+    return frozenset(out)
+
+
+def is_own_address(host) -> bool:
+    """True when *host* is an IP literal THIS machine holds: a loopback address,
+    or an address configured on one of its network interfaces. A zone id in an
+    interface's own listing is ignored (``fe80::1%eth0`` there matches a
+    *host* of ``fe80::1``); a zone id IN *host* is refused, the same as
+    ``is_valid_bind_host`` refuses one for a bind.
+
+    A hostname is False, and this never resolves one (no DNS lookup happens
+    here). A wildcard (``0.0.0.0``, ``::``), an empty value and a non-string
+    are False; ``self_connect_host`` maps a wildcard to loopback before
+    anything dials it.
+
+    Interface addresses come from ``psutil.net_if_addrs``. Without psutil only
+    loopback is recognised. See test_a_hostname_is_refused_without_a_lookup."""
+    if not host or not isinstance(host, str) or "%" in host:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    return addr in _interface_addresses()

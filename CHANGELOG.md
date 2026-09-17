@@ -53,6 +53,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   pairing flow) and Sign in on this device are now translated too.
 
 ### Fixed
+- **`localm serve -H` / `localm gui -H` no longer accept a hostname.** The `bind_host`
+  setting already required an IP literal or `localhost`, but the command-line flag was passed
+  through unchecked, so a server could be started bound by a name that the rest of localm (the
+  local-only checks, `localm ps`, attaching to a running instance) never treats as an address
+  of this machine. The flag is now refused up front with the same rule the setting uses (an IP
+  literal such as `0.0.0.0`, `::1` or one of this machine's interface addresses, or
+  `localhost`).
 - **GPU VRAM sizing no longer overcounts a model's embedding table.**
   llama.cpp always keeps the input embedding layer on the CPU, regardless of
   how many layers are offloaded, but the preflight sizing used to charge it
@@ -451,6 +458,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   final prompt required an exact match, so it gave up and the whole request fell back to the
   older text-only protection. It now recognises a trimmed message, so the marking applies on
   those models as it already did on the others.
+- **Checking whether one of this install's own instances is still running could send a request
+  to an address that instance's registration claimed, rather than to this machine.** The
+  instance list (`localm ps`, the Instances card) and every command that attaches to a running
+  instance confirm each registration with an identity check at the address it recorded, so a
+  tampered registration naming an outside host, or a hostname, made that check dial it. The
+  check now dials only an address this machine actually holds: loopback, or an address one of
+  its own network interfaces is configured with (an instance bound on `::1` or on a specific
+  interface is still found where it listens). A registration naming anything else is reported
+  as not running, and nothing is sent to it or looked up. The check is also a single request
+  now: a redirect answer from whatever is listening on the recorded port is not followed.
 
 ## [0.2.0] - 2026-09-04
 
