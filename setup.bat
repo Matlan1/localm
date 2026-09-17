@@ -371,29 +371,32 @@ rem  RX 6000, cuda on an NVIDIA card, vulkan otherwise. Listing it twice with no
 rem  relation shown reads as two different options that happen to share a name.
 rem  Mark the twin rather than removing it: the numbering has to stay stable, and
 rem  [1] must keep working even for a REC with no numbered entry of its own.
-set "M2=" & set "M3=" & set "M4=" & set "M5="
+set "M2=" & set "M3=" & set "M4=" & set "M5=" & set "M6="
 if /i "%REC%"=="vulkan"   set "M2=   (same as [1])"
 if /i "%REC%"=="cuda"     set "M3=   (same as [1])"
 if /i "%REC%"=="amd-rocm" set "M4=   (same as [1])"
-if /i "%REC%"=="cpu"      set "M5=   (same as [1])"
+if /i "%REC%"=="sycl"     set "M5=   (same as [1])"
+if /i "%REC%"=="cpu"      set "M6=   (same as [1])"
 echo  Native inference runtime (llama.cpp) - press Enter to accept the recommendation:
 echo    [1] %REC%   (recommended for your hardware)
 echo    [2] vulkan     - any GPU (AMD/NVIDIA/Intel), no vendor toolkit%M2%
 echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for you)%M3%
 echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained%M4%
-echo    [5] cpu        - no GPU%M5%
-echo    [6] I will build / provide my own (skip the download)
+echo    [5] sycl       - Intel GPU (incl. integrated), often faster than Vulkan, self-contained%M5%
+echo    [6] cpu        - no GPU%M6%
+echo    [7] I will build / provide my own (skip the download)
 echo    (your pick is load-tested; a failure offers Vulkan, never a silent swap)
 set "BSEL="
 call :flush
-set /p "BSEL=  Pick 1-6 [1]: "
+set /p "BSEL=  Pick 1-7 [1]: "
 if not defined BSEL set "BSEL=1"
 set "BACKEND=%REC%"
 if "%BSEL%"=="2" set "BACKEND=vulkan"
 if "%BSEL%"=="3" set "BACKEND=cuda"
 if "%BSEL%"=="4" set "BACKEND=amd-rocm"
-if "%BSEL%"=="5" set "BACKEND=cpu"
-if "%BSEL%"=="6" set "BACKEND=own"
+if "%BSEL%"=="5" set "BACKEND=sycl"
+if "%BSEL%"=="6" set "BACKEND=cpu"
+if "%BSEL%"=="7" set "BACKEND=own"
 
 rem ---- PyTorch + transformers for HuggingFace models (FOLLOWS your backend) --
 rem  PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none of

@@ -25,7 +25,10 @@ binary this machine can run), before falling back to vulkan:
     toolkit at all and so beats ``hip`` even when both are viable.
   * ``vulkan`` is the ONE catch-all for a GPU with no better path detected as
     actually runnable here (Intel - no toolkit-presence probe exists yet for
-    oneAPI; AMD with no ROCm/HIP toolkit found; any mixed/unrecognised box).
+    oneAPI, so ``sycl`` stays an explicit, opt-in menu pick rather than the
+    default; AMD with no ROCm/HIP toolkit found; any mixed/unrecognised box).
+    "Intel" here includes integrated graphics (Iris Xe, UHD, built-in Arc), not
+    only discrete Arc/Battlemage cards - see ``detect()``'s vendor matching.
   * ``cpu`` when no GPU is detected.
 
 Detection is conservative: a missing tool or an unparseable name means
@@ -163,7 +166,8 @@ def detect() -> Detection:
             found.append("nvidia")
         if "radeon" in names or "amd " in names or " amd" in names or shutil.which("rocm-smi"):
             found.append("amd")
-        if "intel(r) arc" in names or "intel arc" in names or "arc graphic" in names:
+        if ("intel(r) arc" in names or "intel arc" in names or "arc graphic" in names
+                or ("intel" in names and "graphics" in names)):
             found.append("intel")
         src = "win32 video controllers"
     elif sys.platform == "darwin":
@@ -187,7 +191,7 @@ def detect() -> Detection:
         if (shutil.which("rocminfo") or shutil.which("rocm-smi")
                 or rocm_dir or "amd/ati" in names or "radeon" in names):
             found.append("amd")
-        if "intel" in names and ("arc" in names or "xe" in names or "dg2" in names):
+        if "intel" in names:
             found.append("intel")
         src = "lspci / driver tools"
 
@@ -272,8 +276,11 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
       * AMD, any OS, elsewhere, WITHOUT a detected toolkit -> vulkan (the vendor
         path cannot run here)
       * Intel, any OS                         -> vulkan    (``sycl`` is a real
-        downloadable binary too, but there is no toolkit-presence probe for
-        oneAPI yet, so it stays opt-in)
+        downloadable binary too - self-contained on Windows, needs a system
+        oneAPI install on Linux - and works on integrated Intel GPUs as well
+        as discrete Arc/Battlemage; there is just no toolkit-presence probe
+        for oneAPI yet, so it stays an explicit opt-in menu pick rather than
+        the default, matching every competitor's Intel default of Vulkan)
     The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA
     is both-OS, so only the AMD gfx103X case is narrowed to Windows."""
     d = det or detect()

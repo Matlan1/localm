@@ -266,7 +266,7 @@ def test_darwin_branch_checked_after_vendor_tools_in_source():
 
 def _rec_fallback_case() -> str:
     src = SETUP_SH.read_text(encoding="utf-8")
-    marker = 'case "$REC" in\n  vulkan|cuda|hip|cpu|metal|amd-rocm) ;;'
+    marker = 'case "$REC" in\n  vulkan|cuda|hip|sycl|cpu|metal|amd-rocm) ;;'
     start = src.index(marker)
     end = src.index("esac\n", start) + len("esac\n")
     return src[start:end]
@@ -336,8 +336,8 @@ def _run_backend_menu(tmp_path: Path, *, rec: str, is_apple_silicon: bool, bpick
     return dict(line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line)
 
 
-def test_menu_bpick_7_selects_metal_on_apple_silicon(tmp_path):
-    out = _run_backend_menu(tmp_path, rec="cpu", is_apple_silicon=True, bpick="7")
+def test_menu_bpick_8_selects_metal_on_apple_silicon(tmp_path):
+    out = _run_backend_menu(tmp_path, rec="cpu", is_apple_silicon=True, bpick="8")
     assert out["BACKEND"] == "metal"
 
 
@@ -362,11 +362,11 @@ def test_menu_shows_metal_line_only_on_apple_silicon(tmp_path):
                                text=True, cwd=tmp_path, timeout=15)
     assert out_apple.returncode == 0, out_apple.stderr
     assert out_other.returncode == 0, out_other.stderr
-    assert "[7] metal" in out_apple.stdout
-    assert "[7] metal" not in out_other.stdout
+    assert "[8] metal" in out_apple.stdout
+    assert "[8] metal" not in out_other.stdout
 
 
-def test_menu_pick_range_extends_to_7_only_on_apple_silicon(tmp_path):
+def test_menu_pick_range_extends_to_8_only_on_apple_silicon(tmp_path):
     script_apple = (
         'say() { :; }\n'
         'ask() { printf "%s" "$1" >&2; echo 1; }\n'
@@ -376,13 +376,26 @@ def test_menu_pick_range_extends_to_7_only_on_apple_silicon(tmp_path):
     result = subprocess.run([_bash(), "-c", script_apple], capture_output=True,
                             text=True, cwd=tmp_path, timeout=15)
     assert result.returncode == 0, result.stderr
+    assert "Pick 1-8" in result.stderr
+
+
+def test_menu_pick_range_is_1_to_7_without_apple_silicon(tmp_path):
+    script = (
+        'say() { :; }\n'
+        'ask() { printf "%s" "$1" >&2; echo 1; }\n'
+        'REC="vulkan"\nGPU=irrelevant\nIS_APPLE_SILICON=0\n'
+        + _backend_menu_block()
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
     assert "Pick 1-7" in result.stderr
 
 
 def test_menu_shows_metal_even_when_gpu_was_downgraded_to_cpu(tmp_path):
     # $GPU can be downgraded to "cpu" by the earlier Y/n prompt (a declined
     # GPU); IS_APPLE_SILICON is a separate flag computed once from uname, so a
-    # declined GPU must not also remove the [7] metal choice from the menu.
+    # declined GPU must not also remove the [8] metal choice from the menu.
     script = (
         'say() { printf "%s\\n" "$*"; }\n'
         'ask() { echo 1; }\n'
@@ -392,4 +405,35 @@ def test_menu_shows_metal_even_when_gpu_was_downgraded_to_cpu(tmp_path):
     result = subprocess.run([_bash(), "-c", script], capture_output=True,
                             text=True, cwd=tmp_path, timeout=15)
     assert result.returncode == 0, result.stderr
-    assert "[7] metal" in result.stdout
+    assert "[8] metal" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# sycl: a real, always-offered numbered choice (Intel iGPU/dGPU, selectable
+# on every platform, matching how vulkan/cuda/hip are offered regardless of
+# detected vendor) - not gated behind Intel detection or IS_APPLE_SILICON.
+# ---------------------------------------------------------------------------
+
+
+def test_menu_bpick_5_selects_sycl(tmp_path):
+    out = _run_backend_menu(tmp_path, rec="vulkan", is_apple_silicon=False, bpick="5")
+    assert out["BACKEND"] == "sycl"
+
+
+def test_menu_always_shows_sycl_line_regardless_of_platform(tmp_path):
+    for is_apple in (False, True):
+        script = (
+            'say() { printf "%s\\n" "$*"; }\n'
+            'ask() { echo 1; }\n'
+            f'REC="vulkan"\nGPU=irrelevant\nIS_APPLE_SILICON={1 if is_apple else 0}\n'
+            + _backend_menu_block()
+        )
+        result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                                text=True, cwd=tmp_path, timeout=15)
+        assert result.returncode == 0, result.stderr
+        assert "[5] sycl" in result.stdout
+
+
+def test_rec_sycl_marks_bpick_5_as_the_recommended_twin(tmp_path):
+    out = _run_backend_menu(tmp_path, rec="sycl", is_apple_silicon=False, bpick="1")
+    assert out["BACKEND"] == "sycl"
