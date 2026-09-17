@@ -60,6 +60,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of this machine. The flag is now refused up front with the same rule the setting uses (an IP
   literal such as `0.0.0.0`, `::1` or one of this machine's interface addresses, or
   `localhost`).
+- **Stopping another running instance (the Instances card's Stop button, and `localm stop`)
+  now also confirms the target's registered address is one this machine holds before sending
+  it a shutdown request.** Discovering and listing instances already applied this check;
+  stopping one read the same per-install registration but built the shutdown request from it
+  directly, so a tampered registration naming an outside host would have had that request,
+  carrying the target's own credential, sent there instead. Such a registration is now
+  reported as not an address this machine holds and skips straight to the same direct
+  process-stop fallback already used when a target does not answer.
 - **GPU VRAM sizing no longer overcounts a model's embedding table.**
   llama.cpp always keeps the input embedding layer on the CPU, regardless of
   how many layers are offloaded, but the preflight sizing used to charge it
