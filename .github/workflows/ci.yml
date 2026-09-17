@@ -640,10 +640,20 @@ jobs:
       # several minutes, depending on how many tests map to the mutated
       # function. continue-on-error so a cut-short run still uploads whatever
       # real, partial results exist; the gate below fails on the gap.
+      #
+      # --max-children 16 on a 4-vCPU runner: a hung mutant SLEEPS until its
+      # wall-clock timeout (it holds a lock or waits on a socket), so it costs
+      # memory, not CPU - roughly 0.2-0.5 GB each, forked from one parent.
+      # mutmut's default of one child per CPU lets four sleeping children
+      # idle the whole runner; measured, auth's 212 hanging mutants are 99% of
+      # its worker time (267 min at 4 children, ~70 at 16). The timeout
+      # multiplier itself stays at mutmut's default of 15: two genuine
+      # survivors run 3.4-4.4x slower than clean while still passing, and a
+      # smaller multiplier would count them as detected.
       - name: Mutation test one trust-boundary module
         timeout-minutes: 170
         continue-on-error: true
-        run: python scripts/mutmut_run.py run "localm.${MUTATION_MODULE}.*"
+        run: python scripts/mutmut_run.py run --max-children 16 "localm.${MUTATION_MODULE}.*"
 
       - name: Upload this module's mutation results
         if: always()

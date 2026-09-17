@@ -520,7 +520,8 @@ class TestCommittedBaseline:
         assert sorted(shards) == sorted(Path(m).stem for m in modules)
         run_step = next(st for st in wf["jobs"]["mutation-run"]["steps"]
                         if st.get("name", "").startswith("Mutation test"))
-        assert 'run "localm.${MUTATION_MODULE}.*"' in run_step["run"]
+        assert run_step["run"].endswith(' "localm.${MUTATION_MODULE}.*"')
+        assert "--max-children" in run_step["run"]
         gate = wf["jobs"]["mutation-test"]
         assert gate["needs"] == ["mutation-run"]
         assert any("check_mutation_floors.py" in (st.get("run") or "") for st in gate["steps"])
