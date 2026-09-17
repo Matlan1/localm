@@ -328,14 +328,16 @@ def test_main_fails_a_labelled_pr_whose_matrix_did_not_run():
     assert "test: skipped (must be success on a labelled PR)" in proc.stdout
 
 
-def test_main_runs_the_selector_and_a_wide_selection_needs_the_matrix(mp, monkeypatch, tmp_path):
-    """The wide check reaches the real selector: pyproject.toml affects every
-    test, so the selection is wide at both depths."""
-    proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "pyproject.toml"])
+def test_main_runs_the_selector_and_a_wide_selection_alone_needs_the_matrix(mp):
+    """The wide check reaches the real selector: tests/conftest.py is in no
+    category and affects every test, so the selection is wide at both depths
+    and that alone fails the policy."""
+    assert mp.classify(["tests/conftest.py"]) == {}
+    proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "tests/conftest.py"])
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "packaging and installers: pyproject.toml" in proc.stdout
-    assert "wider than a targeted run" in proc.stdout
+    assert "Because: the affected-test selection is wider than a targeted run" in proc.stdout
     assert "Affected-test selection at depth 1: **wide**." in proc.stdout
+    assert "No changed file is in a matrix category." in proc.stdout
 
 
 def test_main_writes_the_summary_to_the_step_summary_file(tmp_path):
