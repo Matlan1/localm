@@ -30,7 +30,7 @@ function captureExport(window) {
   return () => captured;
 }
 
-test("export: a web-search-result message is labelled Web, not You", async () => {
+test("export: a web-search tool event is labelled Web, not You", async () => {
   const { window } = loadAppWithPages();
   const getBlob = captureExport(window);
   setActiveConv(window, {
@@ -38,8 +38,13 @@ test("export: a web-search-result message is labelled Web, not You", async () =>
     messages: [
       { role: "user", content: "what's the weather in Vienna", id: "m1" },
       {
-        role: "user", web: true, id: "m2",
-        content: "[web_search results for \"weather Vienna\"]\nCloudy, 18C.",
+        kind: "tool", tool: "search", status: "done", id: "m2", query: "weather Vienna",
+        grounding: "page-backed", grounding_summary: "page-backed: 1 of 1 sources read",
+        sources: [{ id: "S1", url: "https://example.com/", final_url: "https://example.com/",
+                    title: "Vienna weather", grounding: "page-backed", retrieval_status: "fetched" }],
+        chunks: [{ source_id: "S1", text: "Cloudy, 18C.", kind: "page" }],
+        prompt_text: "Grounding: page-backed: 1 of 1 sources read\nSources:\n" +
+          "[S1] Vienna weather - https://example.com/ (page-backed)\n\nEvidence:\n[S1] Cloudy, 18C.",
       },
       { role: "assistant", content: "It's cloudy and 18C in Vienna.", id: "m3" },
     ],
@@ -49,10 +54,47 @@ test("export: a web-search-result message is labelled Web, not You", async () =>
   const text = getBlob();
   assert.match(text, /\*\*You:\*\*\n\nwhat's the weather in Vienna/,
     "the genuinely user-typed message still reads as You");
+  assert.doesNotMatch(text, /\*\*You:\*\*\n\n\[Results of web_search/,
+    "the web-search event must NOT be attributed to the user");
+  assert.match(text, /\*\*Web:\*\*\n\n\[Results of web_search "weather Vienna"\] \(page-backed: 1 of 1 sources read\)\n/,
+    "the web-search event is labelled Web and exports its prompt rendering");
+  assert.match(text, /\[S1\] Cloudy, 18C\./);
+});
+
+test("export: a legacy web-result row loaded from the cache migrates and is still labelled Web", async () => {
+  const legacy = {
+    id: "c1b", title: "Web lookup", updated_at: 5,
+    messages: [
+      { role: "user", content: "what's the weather in Vienna", id: "m1" },
+      {
+        role: "user", web: true, id: "m2",
+        content: "[web_search results for \"weather Vienna\"]\nCloudy, 18C.",
+      },
+      { role: "assistant", content: "It's cloudy and 18C in Vienna.", id: "m3" },
+    ],
+  };
+  // A confirmed same-instance cache is the only one init.js paints at boot.
+  const impl = async (url) => String(url) === "/v1/config"
+    ? { ok: true, status: 200, text: async () => "",
+        json: async () => ({ effective_mode: "log", n_ctx_max: 16384, instance_id: "same" }) }
+    : { ok: true, status: 200, text: async () => "", json: async () => ({}) };
+  const { window } = loadAppWithPages({
+    fetchImpl: impl,
+    seedLocalStorage: { "localm.instanceId": "same",
+                        "localm.conversations": JSON.stringify([legacy]) },
+  });
+  const getBlob = captureExport(window);
+  runScript(window, `chat.activeId = ${JSON.stringify(legacy.id)};`);
+  const loaded = window.currentConv().messages[1];
+  assert.equal(loaded.kind, "tool", "the cached legacy row was migrated on load");
+  assert.equal(loaded.role, undefined);
+
+  window.exportConversation();
+  const text = getBlob();
   assert.doesNotMatch(text, /\*\*You:\*\*\n\n\[web_search results/,
-    "the web-search-result message must NOT be attributed to the user");
-  assert.match(text, /\*\*Web:\*\*\n\n\[web_search results for "weather Vienna"\]/,
-    "the web-search-result message is labelled Web");
+    "the migrated row must NOT be attributed to the user");
+  assert.match(text, /\*\*Web:\*\*\n\n\[web_search results for "weather Vienna"\]\nCloudy, 18C\./,
+    "the migrated row is labelled Web and keeps its original text");
 });
 
 test("export: a knowledge-base excerpt is labelled Sources, not You", async () => {
@@ -109,7 +151,8 @@ test("export: dropped/archived branches apply the same label rules", async () =>
     messages: [{ role: "user", content: "hello", id: "m1" }],
     droppedBranches: [
       [
-        { role: "user", web: true, id: "a1", content: "[web_search results] archived search hit" },
+        { kind: "tool", tool: "search", status: "done", id: "a1", query: "archived",
+          text: "[web_search results] archived search hit" },
         { role: "assistant", content: "archived reply", id: "a2" },
       ],
     ],
@@ -118,6 +161,6 @@ test("export: dropped/archived branches apply the same label rules", async () =>
   window.exportConversation();
   const text = getBlob();
   assert.doesNotMatch(text, /\*\*You:\*\*\n\n\[web_search results\] archived search hit/,
-    "an archived web-search message must not be attributed to the user either");
+    "an archived web-search event must not be attributed to the user either");
   assert.match(text, /\*\*Web:\*\*\n\n\[web_search results\] archived search hit/);
 });

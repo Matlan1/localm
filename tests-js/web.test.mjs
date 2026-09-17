@@ -78,17 +78,27 @@ const eq = (out, expected) => assert.equal(JSON.stringify(out), JSON.stringify(e
 //  provenance.py treatment of fetch_url/web_search output.
 // ---------------------------------------------------------------------------
 
-test("requestWebTool: web_search runs the retrieval controller and fences its evidence", async () => {
+test("requestWebTool: web_search runs the retrieval controller and returns a completed search event", async () => {
   const { impl, calls } = recordingFetch([
     { title: "T", url: "https://example.com/", snippet: "S", page: "PAGE TEXT of T" }]);
   const { window: w } = loadApp({ fetchImpl: impl });
-  const { content: note, grounding } =
-    await w.requestWebTool({ name: "web_search", args: { query: "x" } });
+  const ev = await w.requestWebTool({ name: "web_search", args: { query: "x" } });
   const webCalls = calls.filter((c) => c.url.startsWith("/api/web/"));
   assert.deepEqual(webCalls.map((c) => c.url), ["/api/web/retrieve"],
     "web_search goes to the retrieval route, not the raw snippet search");
   assert.equal(webCalls[0].body.query, "x");
-  assert.equal(grounding, "page-backed");
+  assert.equal(ev.tool, "search");
+  assert.equal(ev.status, "done");
+  assert.equal(ev.query, "x");
+  assert.equal(ev.grounding, "page-backed");
+  assert.equal(ev.grounding_summary, "page-backed: 1 of 1 sources read");
+  assert.equal(ev.sources.length, 1);
+  assert.equal(ev.sources[0].id, "S1");
+  assert.equal(ev.chunks.length, 1);
+  assert.equal(ev.role, undefined, "a tool event carries no role");
+  assert.equal(ev.content, undefined, "a tool event carries no pre-rendered content");
+  // The fenced prompt text is rendered from the event, only at assembly time.
+  const { content: note } = w.toolEventPrompt(ev);
   assert.match(note, /^\[Results of web_search "x"\] \(page-backed: 1 of 1 sources read\)\n/);
   assert.match(note, /<untrusted_content>[\s\S]*\[S1\] T - https:\/\/example\.com\/ \(page-backed\)[\s\S]*PAGE TEXT of T[\s\S]*<\/untrusted_content>/);
   assert.match(note, /UNTRUSTED EXTERNAL CONTENT/);
@@ -97,9 +107,9 @@ test("requestWebTool: web_search runs the retrieval controller and fences its ev
 test("requestWebTool: a snippet-only bundle is labelled as such, never as read pages", async () => {
   const { impl } = recordingFetch([{ title: "T", url: "https://example.com/", snippet: "S" }]);
   const { window: w } = loadApp({ fetchImpl: impl });
-  const { content: note, grounding } =
-    await w.requestWebTool({ name: "web_search", args: { query: "x" } });
-  assert.equal(grounding, "snippet-only");
+  const ev = await w.requestWebTool({ name: "web_search", args: { query: "x" } });
+  assert.equal(ev.grounding, "snippet-only");
+  const { content: note } = w.toolEventPrompt(ev);
   assert.match(note, /^\[Results of web_search "x"\] \(snippet-only: no page was read, 1 search snippet only\)/);
   assert.doesNotMatch(note.split("<untrusted_content>")[0], /page-backed/);
 });
@@ -116,10 +126,16 @@ test("requestWebTool: a provider failure inside the bundle takes the failure pat
     /Search failed: RuntimeError: backend rate-limited/);
 });
 
-test("requestWebTool: fetched page text is wrapped in the untrusted_content fence", async () => {
+test("requestWebTool: fetched page text is stored on the event and fenced at assembly", async () => {
   const { impl } = recordingFetch([]);
   const { window: w } = loadApp({ fetchImpl: impl });
-  const { content: note } = await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } });
+  const ev = await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } });
+  assert.equal(ev.tool, "fetch");
+  assert.equal(ev.status, "done");
+  assert.deepEqual(JSON.parse(JSON.stringify(ev.page)),
+    { url: "https://example.com/", text: "page text", truncated: false });
+  const { content: note } = w.toolEventPrompt(ev);
+  assert.match(note, /^\[Content of https:\/\/example\.com\/\]\n/);
   assert.match(note, /<untrusted_content>\npage text\n<\/untrusted_content>/);
   assert.match(note, /UNTRUSTED EXTERNAL CONTENT/);
 });
@@ -140,8 +156,8 @@ test("requestWebTool: web_search untrusted_spans cover the whole evidence body, 
     { title: "Other", url: "https://other.example/", snippet: "EVIL_SNIPPET" },
   ]);
   const { window: w } = loadApp({ fetchImpl: impl });
-  const { content: note, untrusted_spans } =
-    await w.requestWebTool({ name: "web_search", args: { query: "x" } });
+  const { content: note, untrusted_spans } = w.toolEventPrompt(
+    await w.requestWebTool({ name: "web_search", args: { query: "x" } }));
   assert.equal(untrusted_spans.length, 1, "one span: the server-rendered evidence body");
   const [a, b] = untrusted_spans[0];
   const covered = note.slice(a, b);
@@ -162,20 +178,22 @@ test("requestWebTool: fetch_url untrusted_spans cover exactly the fetched text",
     return jsonResp({});
   };
   const { window: w } = loadApp({ fetchImpl: impl });
-  const { content: note, untrusted_spans } =
-    await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } });
+  const { content: note, untrusted_spans } = w.toolEventPrompt(
+    await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } }));
   assert.equal(untrusted_spans.length, 1);
   const [a, b] = untrusted_spans[0];
   assert.equal(note.slice(a, b), "EVIL_PAGE_TEXT");
 });
 
-test("requestWebTool: a response with no untrusted_fields degrades to no spans (never crashes)", async () => {
+test("requestWebTool: a response with no untrusted_fields still fences the evidence as untrusted (never crashes)", async () => {
   const { impl } = recordingFetch(() => bundleOf("x",
     [{ title: "T", url: "https://example.com/", snippet: "S" }], { untrusted_fields: [] }));
   const { window: w } = loadApp({ fetchImpl: impl });
-  const { content: note, untrusted_spans } =
-    await w.requestWebTool({ name: "web_search", args: { query: "x" } });
-  eq(untrusted_spans, []);
+  const { content: note, untrusted_spans } = w.toolEventPrompt(
+    await w.requestWebTool({ name: "web_search", args: { query: "x" } }));
+  assert.equal(untrusted_spans.length, 1, "the evidence body is always one untrusted span");
+  const [a, b] = untrusted_spans[0];
+  assert.match(note.slice(a, b), /^Grounding: [\s\S]*\[S1\] T - https:\/\/example\.com\//);
   assert.match(note, /<untrusted_content>[\s\S]*T[\s\S]*<\/untrusted_content>/);
 });
 
@@ -233,9 +251,12 @@ test("runCompletion: merging a plain user row into an untrusted-spans row shifts
     id: "c1", title: "t",
     messages: [
       { role: "user", content: prefix },
-      // Simulates a persisted web-result row (LM-DA-014) landing right after a
-      // plain user row - the two get merged for strict role alternation.
-      { role: "user", content: "before EVILTEXT after", web: true, untrusted_spans: [[7, 15]] },
+      // A persisted web-result tool event (here in the shape a legacy row is
+      // migrated to: verbatim text plus its spans) landing right after a plain
+      // user row - rendered to user-role text at assembly, the two are merged
+      // for strict role alternation.
+      { kind: "tool", tool: "search", status: "done", query: "q",
+        text: "before EVILTEXT after", untrusted_spans: [[7, 15]] },
     ],
   };
   await window.runCompletion(conv);
@@ -492,7 +513,7 @@ test("web ON: the XML-tag dialect still runs the real fetch (not silently accept
 });
 
 test("web ON: a mangled tool call still runs the real search", async () => {
-  const { conv, calls, completions } = await runChat({
+  const { window, conv, calls, completions } = await runChat({
     web: true,
     rounds: [
       content('<|tool_call>call:web_search{"query": "weather today"}<tool_call|>'),
@@ -501,8 +522,9 @@ test("web ON: a mangled tool call still runs the real search", async () => {
   });
   assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 1,
     "the retrieval endpoint was actually called");
-  assert.ok(conv.messages.some((m) => m.web && /Results of web_search/.test(String(m.content))),
-    "search results were injected back into the conversation");
+  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.tool === "search" &&
+    m.status === "done" && /Results of web_search/.test(window.msgText(m))),
+    "search results were injected back into the conversation as a tool event");
   assert.equal(completions.length, 2, "the model continued after the results arrived");
 });
 
@@ -514,7 +536,8 @@ test("web ON: a botched tool call triggers a re-prompt instead of an un-grounded
       content("Sunny, per the search."),
     ],
   });
-  assert.ok(conv.messages.some((m) => /\[tool-call format\]/.test(String(m.content))),
+  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.reason === "format" &&
+    /\[tool-call format\]/.test(m.note)),
     "the model was asked to re-emit the tool call");
   assert.equal(completions.length, 2, "the model got a second chance to call the tool");
 });
@@ -544,27 +567,31 @@ async function runSlashWeb(webResults, query = "price of bitcoin today") {
   doc.getElementById("p-memory").checked = false;
   doc.getElementById("p-web").checked = false;          // standing toggle OFF
   await window.runWebInChat(query);
-  const webMsg = window.currentConv().messages.find((m) => m.web);
+  const webMsg = window.currentConv().messages.find((m) => m.kind === "tool");
+  const webText = webMsg ? window.msgText(webMsg) : "";
   const completions = calls.filter((c) => c.url === "/v1/chat/completions");
   const sys = (completions[0].body.messages.find((m) => m.role === "system") || {}).content || "";
-  return { window, calls, webMsg, sys, completions };
+  return { window, calls, webMsg, webText, sys, completions };
 }
 
 test("/web with the toggle OFF: real retrieval runs, page evidence is injected, and the answer is grounded, not denied", async () => {
-  const { window, calls, webMsg, sys } = await runSlashWeb([
+  const { window, calls, webMsg, webText, sys } = await runSlashWeb([
     { title: "T", url: "https://example.com/", snippet: "fresh fact", page: "PAGE: the price is 42" }]);
 
   // A real outbound retrieval fired (search + top pages read) and its evidence was injected.
   assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 1);
   assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 0,
     "/web no longer answers from raw snippets (WEB-FUNC-001)");
-  assert.ok(webMsg && /Results of web_search/.test(String(webMsg.content)),
-    "fresh results are in the conversation");
-  assert.match(String(webMsg.content), /\(page-backed: 1 of 1 sources read\)/);
-  assert.match(String(webMsg.content), /PAGE: the price is 42/, "page text, not only the snippet");
-  assert.match(String(webMsg.content), /Cite the source IDs \(S1, S2, \.\.\.\)/,
+  assert.ok(webMsg && webMsg.tool === "search" && webMsg.status === "done",
+    "fresh results are in the conversation as a completed search event");
+  assert.equal(webMsg.query, "price of bitcoin today");
+  assert.equal(webMsg.role, undefined, "the event is not a user turn");
+  assert.match(webText, /Results of web_search/);
+  assert.match(webText, /\(page-backed: 1 of 1 sources read\)/);
+  assert.match(webText, /PAGE: the price is 42/, "page text, not only the snippet");
+  assert.match(webText, /Cite the source IDs \(S1, S2, \.\.\.\)/,
     "the model is told to cite source ids rather than unread urls");
-  assert.doesNotMatch(String(webMsg.content), /No page could be read/);
+  assert.doesNotMatch(webText, /No page could be read/);
   assert.equal(window.document.getElementById("toast").textContent, "", "no warning toast");
 
   // The answering turn is grounded, NOT told it is offline.
@@ -574,9 +601,9 @@ test("/web with the toggle OFF: real retrieval runs, page evidence is injected, 
 });
 
 test("/web: a snippet-only bundle is labelled for the model and the user, never presented as read pages", async () => {
-  const { window, webMsg } = await runSlashWeb([
+  const { window, webMsg, webText: note } = await runSlashWeb([
     { title: "T", url: "https://example.com/", snippet: "fresh fact" }]);
-  const note = String(webMsg.content);
+  assert.equal(webMsg.grounding, "snippet-only");
   assert.match(note, /\(snippet-only: no page was read, 1 search snippet only\)/);
   assert.match(note, /No page could be read: the evidence above is search snippets only/);
   assert.doesNotMatch(note.split("<untrusted_content>")[0], /page-backed/);
@@ -586,13 +613,15 @@ test("/web: a snippet-only bundle is labelled for the model and the user, never 
 });
 
 test("/web: a provider failure is reported as a failed search, not as results", async () => {
-  const { window, webMsg, sys } = await runSlashWeb(() => bundleOf("q", [], {
+  const { window, webMsg, webText, sys } = await runSlashWeb(() => bundleOf("q", [], {
     search_status: "failed", search_error: "RuntimeError: backend rate-limited",
     grounding: "failed", grounding_summary: "failed: no evidence, search failed",
     untrusted_fields: ["prompt_text", "search_error"],
   }));
-  assert.match(String(webMsg.content), /^\[Web search failed: Search failed: RuntimeError: backend rate-limited\]/);
-  assert.doesNotMatch(String(webMsg.content), /Results of web_search/);
+  assert.equal(webMsg.status, "failed");
+  assert.equal(webMsg.error, "Search failed: RuntimeError: backend rate-limited");
+  assert.match(webText, /^\[Web request failed: Search failed: RuntimeError: backend rate-limited\] Answer without the web/);
+  assert.doesNotMatch(webText, /Results of web_search/);
   assert.match(window.document.getElementById("toast").textContent, /Web search failed/);
   // No results were injected, so the model gets the offline floor, not the grounded one.
   assert.doesNotMatch(sys, /Web results were just provided/);
@@ -616,7 +645,8 @@ test("R36: a repeated identical search is not re-run; the model is told to answe
   });
   assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 1,
     "the duplicate search was NOT re-issued");
-  assert.ok(conv.messages.some((m) => /\[duplicate web request\]/.test(String(m.content))),
+  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.status === "duplicate" &&
+    m.query === "weather today" && /\[duplicate web request\]/.test(m.note)),
     "the model was told it already searched and to answer from the results");
   assert.ok(conv.messages.some((m) => m.role === "assistant" && /sunny/i.test(String(m.content))),
     "the model produced a final answer");
@@ -633,7 +663,8 @@ test("R36: when web rounds run out the model is forced to answer, not left mid-s
   });
   assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 3,
     "exactly WEB_MAX_ROUNDS searches ran, no more");
-  assert.ok(conv.messages.some((m) => /\[web search limit reached\]/.test(String(m.content))),
+  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.reason === "limit" &&
+    /\[web search limit reached\]/.test(m.note)),
     "the model was told to stop searching and answer");
   assert.ok(conv.messages.some((m) => m.role === "assistant" &&
     /Final synthesized answer/.test(String(m.content))),
@@ -705,7 +736,7 @@ test("parseWebCalls: two calls are both reported, and parseWebCall still returns
 });
 
 test("web ON: a second tool call in one reply is reported as ignored, not silently dropped", async () => {
-  const { conv, calls } = await runChat({
+  const { window, conv, calls } = await runChat({
     web: true,
     rounds: [twoCalls, content("It is sunny. Source: https://example.com/")],
   });
@@ -714,16 +745,18 @@ test("web ON: a second tool call in one reply is reported as ignored, not silent
   assert.equal(calls.filter((c) => c.url === "/api/web/fetch").length, 0,
     "the second call did NOT run - one call per message is the retained design");
   const note = conv.messages.find(
-    (m) => m.web && /only the first tool call ran/.test(String(m.content)));
+    (m) => m.kind === "tool" && /only the first tool call ran/.test(m.note || ""));
   assert.ok(note, "the model was never told its second call was ignored");
-  assert.match(String(note.content), /fetch_url/,
+  assert.match(note.note, /fetch_url/,
     "the notice must name what was ignored, not just that something was");
-  assert.match(String(note.content), /Results of web_search/,
-    "the notice rides on the result message, keeping user/assistant alternation");
+  assert.equal(note.tool, "search");
+  assert.equal(note.status, "done");
+  const body = window.msgText(note);
+  assert.match(body, /Results of web_search/,
+    "the notice rides on the result event, keeping user/assistant alternation");
   // LM-DA-014: everything inside the fence is DATA the model is told not to obey.
   // A notice that landed in there would be self-defeating - it is our instruction,
   // not fetched content - and "present in the message" cannot tell the two apart.
-  const body = String(note.content);
   assert.ok(body.indexOf("only the first tool call ran") > body.lastIndexOf("</untrusted_content>"),
     "the notice must sit OUTSIDE the untrusted-content fence");
 });
@@ -799,7 +832,8 @@ test("WEB-ask: net_mode=ask + deny does NOT search and tells the model", async (
   });
   assert.equal(prompts.length, 1, "the user was asked");
   assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 0, "denied -> NO search ran");
-  assert.ok(conv.messages.some((m) => /\[web access denied\]/.test(String(m.content))),
+  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.status === "denied" &&
+    m.query === "weather" && /\[web access denied\]/.test(m.note)),
     "the model was told the request was declined");
 });
 

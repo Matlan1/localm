@@ -22,6 +22,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Settings > Network.
 
 ### Changed
+- **Web activity in the chat is its own collapsed card, not a user turn.** A
+  web search, a page read, a declined or repeated request and the chat's own
+  web notes are now stored in the conversation as tool events rather than as
+  messages you typed, and shown as one collapsed "Web" card that opens to the
+  source list (id, title, link, whether the page was read or only its snippet)
+  and the evidence excerpts, with status and timing. The card can no longer be
+  edited or reverted like a message, and a new message cannot be sent while
+  a web request is still running. Existing conversations are converted on
+  load; exports still label these entries `Web`. What the model reads for a
+  completed search or page read is unchanged.
 - **Web search now reads the pages, not just the search snippets.** `/web`,
   a model-requested `web_search` in the chat, the coder's `web_search` tool
   and a scheduled chat job's web lookup all run the same retrieval: search,

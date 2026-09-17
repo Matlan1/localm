@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { addMessageRow, chat, currentConv, newConversation, renderChat, renderConvList, saveConversations } from "./chat.js";
+import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { exportCoderSession, openFilesModal } from "./coder.js";
 import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
@@ -93,7 +93,7 @@ export async function runImagineInChat(promptText) {
  *  the server, only the per-chat web toggle is bypassed. */
 export async function runWebInChat(query) {
   if (!query) { toast(t("slash.usage.web"), true); return; }
-  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/web " + query });
@@ -103,29 +103,30 @@ export async function runWebInChat(query) {
   }
   saveConversations(conv);
   renderChat();
-  let note, untrusted_spans = [];
+  const ev = newToolEvent({ tool: "search", status: "running", query,
+                            started_at: Date.now() });
+  conv.messages.push(ev);
+  chat.webCall = ev;
+  renderChat();
   try {
-    let grounding;
-    ({ content: note, untrusted_spans, grounding } =
-      await requestWebTool({ name: "web_search", args: { query } }));
-    // Model-directed text, appended to the message the model reads next; left untranslated.
-    note += `\n\nUsing this evidence, answer: ${query}\n` +
-            "Cite the source IDs (S1, S2, ...) you relied on; never cite a URL " +
-            "whose page was not read.";
-    if (grounding !== GROUNDING_PAGE_BACKED) {
-      note += "\nNo page could be read: the evidence above is search snippets " +
-              "only, or empty. Say so plainly instead of implying you read the pages.";
+    Object.assign(ev, await requestWebTool({ name: "web_search", args: { query } }));
+    // Model-directed text, appended to the result the model reads next; left untranslated.
+    ev.note = `Using this evidence, answer: ${query}\n` +
+              "Cite the source IDs (S1, S2, ...) you relied on; never cite a URL " +
+              "whose page was not read.";
+    if (ev.grounding !== GROUNDING_PAGE_BACKED) {
+      ev.note += "\nNo page could be read: the evidence above is search snippets " +
+                 "only, or empty. Say so plainly instead of implying you read the pages.";
       toast(t("slash.webNoPageRead"), true);
     }
   } catch (e) {
     toast(t("slash.webSearchFailed", { message: e.message }), true);
-    // Model-directed text (see above), left untranslated.
-    note = `[Web search failed: ${e.message}] Tell the user, and answer ` +
-           "from your own knowledge if you can.";
+    ev.status = "failed";
+    ev.error = e.message;
+  } finally {
+    chat.webCall = null;
   }
-  const webMsg = { role: "user", content: note, web: true };
-  if (untrusted_spans.length) webMsg.untrusted_spans = untrusted_spans;
-  conv.messages.push(webMsg);
+  ev.finished_at = Date.now();
   saveConversations(conv);
   renderChat();
   await runCompletion(conv);

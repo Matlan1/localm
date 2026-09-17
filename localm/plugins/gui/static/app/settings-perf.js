@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, newToolEvent, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -726,14 +726,14 @@ export const WEB_GROUNDED_PROMPT =
   "implying you read the pages. Do not invent facts or details beyond what " +
   "the evidence supports; if it does not answer the question, say so plainly.";
 
-/** True when the most recent message is freshly injected web grounding (search
- *  results or fetched page content), as opposed to a repair note or a failure
+/** True when the most recent message is freshly injected web grounding (a
+ *  completed search or page read), as opposed to a repair note or a failure
  *  note. Used so an explicit /web run is not told it is offline. */
 export function lastTurnHasWebResults(conv) {
   const last = conv.messages[conv.messages.length - 1];
-  if (!last || !last.web) return false;
-  const text = typeof last.content === "string" ? last.content : "";
-  return /Results of web_search|Content of /.test(text);
+  if (!isToolEvent(last)) return false;
+  if (typeof last.text === "string") return /Results of web_search|Content of /.test(last.text);
+  return last.status === "done" && (last.tool === "search" || last.tool === "fetch");
 }
 
 // Tool-call wrappers a local model may emit. We accept the canonical
@@ -899,7 +899,7 @@ export function parseWebCall(text) {
  *  Returns "" when there is nothing to report. */
 export function ignoredCallsNote(calls) {
   if (!calls || calls.length < 2) return "";
-  return "\n\n[only the first tool call ran] Your reply contained more than one " +
+  return "[only the first tool call ran] Your reply contained more than one " +
     `tool call. This chat runs ONE call per message, so only ${calls[0].name} ` +
     `was executed; every later call in that reply, starting with ` +
     `${calls[1].name}, was IGNORED and its results are NOT above. If you still ` +
@@ -953,34 +953,51 @@ export function looksLikeActionAnnouncement(text) {
 /** The grounding states an evidence bundle can carry (web_retrieval). */
 export const GROUNDING_PAGE_BACKED = "page-backed";
 
-/** The conversation note for an evidence bundle returned by
- *  POST /api/web/retrieve: a header naming the query and the bundle's
- *  grounding summary (trusted, built from states and counts only), then the
- *  bundle's prompt text fenced as untrusted content. Returns
- *  {content, untrusted_spans, grounding}. */
-export function evidenceNote(query, data) {
-  const grounding = data.grounding || "failed";
-  const summary = data.grounding_summary || grounding;
-  const untrustedFields = new Set(data.untrusted_fields || []);
-  const body = data.prompt_text || "";
-  const { text, spans } = composeSpans([
-    `[Results of web_search "${query}"] (${summary})\n`,
-    fenceUntrusted([untrustedFields.has("prompt_text") ? untrustedPart(body) : body]),
-  ]);
-  return { content: text, untrusted_spans: spans, grounding };
+const _WEB_FAILED_INSTRUCTION =
+  "Answer without the web, and say that web access did not work.";
+
+/** The fenced user-role text a tool event contributes to an inference
+ *  request, as {content, untrusted_spans}: a completed search is its header
+ *  (query and grounding summary) plus the evidence text fenced as untrusted
+ *  content; a completed page read is its header plus the page text fenced;
+ *  a failure names the error and tells the model to answer without the web;
+ *  a denied or duplicate call and a control note are their note text. The
+ *  event's note, when set, follows the result after a blank line. A row
+ *  migrated from the legacy shape returns its stored text and spans. */
+export function toolEventPrompt(ev) {
+  if (typeof ev.text === "string") {
+    return { content: ev.text,
+             untrusted_spans: (ev.untrusted_spans || []).map((s) => s.slice()) };
+  }
+  let parts = [];
+  if (ev.status === "done" && ev.tool === "search") {
+    const summary = ev.grounding_summary || ev.grounding || "failed";
+    parts = [`[Results of web_search "${ev.query || ""}"] (${summary})\n`,
+             fenceUntrusted([untrustedPart(ev.prompt_text || "")])];
+  } else if (ev.status === "done" && ev.tool === "fetch") {
+    const page = ev.page || {};
+    parts = [`[Content of ${page.url || ev.url || ""}]` +
+             (page.truncated ? " (truncated)" : "") + "\n",
+             fenceUntrusted([untrustedPart(page.text || "")])];
+  } else if (ev.status === "failed") {
+    parts = ["[Web request failed: ", untrustedPart(ev.error || "unknown error"), "] " +
+             _WEB_FAILED_INSTRUCTION];
+  } else if (ev.status === "running") {
+    parts = ["[Web request still in progress; no result is available yet]"];
+  }
+  if (ev.note) parts.push(parts.length ? "\n\n" + ev.note : ev.note);
+  const { text, spans } = composeSpans(parts);
+  return { content: text, untrusted_spans: spans };
 }
 
-/** Run a web tool call through the policy-enforced server endpoints. Returns
- *  {content, untrusted_spans, grounding}: content is the note text to inject
- *  into the conversation, untrusted_spans are the [[start, end], ...]
- *  character ranges within it that came from the remote page/search result
- *  (data.untrusted_fields, set by web/plug.py) - the same format the coder
- *  path already sends over the wire
- *  (localm/plugins/coder/backends/http.py:_with_untrusted_spans) - and
- *  grounding is the evidence bundle's state (page-backed, snippet-only or
- *  failed; undefined for fetch_url).
+/** Run a web tool call through the policy-enforced server endpoints and
+ *  return the completed tool event fields (status "done" plus the result):
  *  web_search runs the shared retrieval controller (search plus reading the
- *  top result pages); fetch_url reads one page. */
+ *  top result pages) and returns the evidence bundle's query, provider,
+ *  search status and error, grounding, grounding summary, sources, chunks
+ *  and prompt text; fetch_url reads one page and returns page {url, text,
+ *  truncated}. Throws on a refused request, a transport failure or a
+ *  provider failure reported inside the bundle. */
 export async function requestWebTool(call) {
   const a = call.args || call.arguments || {};
   if (call.name === "web_search") {
@@ -990,12 +1007,20 @@ export async function requestWebTool(call) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    // A provider failure is reported inside the bundle (search_status), not as
-    // an HTTP error; it takes the same failure path a refused request does.
     if (data.search_status === "failed") {
       throw new Error("Search failed: " + (data.search_error || "no results"));
     }
-    return evidenceNote(a.query || "", data);
+    return {
+      tool: "search", status: "done", query: a.query || "",
+      provider: data.provider || "",
+      search_status: data.search_status || "ok",
+      search_error: data.search_error || null,
+      grounding: data.grounding || "failed",
+      grounding_summary: data.grounding_summary || data.grounding || "failed",
+      sources: Array.isArray(data.sources) ? data.sources : [],
+      chunks: Array.isArray(data.chunks) ? data.chunks : [],
+      prompt_text: typeof data.prompt_text === "string" ? data.prompt_text : "",
+    };
   }
   if (call.name === "fetch_url") {
     const r = await fetch("/api/web/fetch", {
@@ -1004,32 +1029,64 @@ export async function requestWebTool(call) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    const untrustedFields = new Set(data.untrusted_fields || []);
-    const { text, spans } = composeSpans([
-      `[Content of ${data.url}]` + (data.truncated ? " (truncated)" : "") + `\n`,
-      fenceUntrusted([untrustedFields.has("text") ? untrustedPart(data.text) : data.text]),
-    ]);
-    return { content: text, untrusted_spans: spans };
+    return {
+      tool: "fetch", status: "done", url: a.url || "",
+      page: { url: data.url || a.url || "", text: data.text || "",
+              truncated: !!data.truncated },
+    };
   }
   throw new Error("Unknown web tool: " + call.name);
 }
 
-/** Run one model-requested web call, injecting the result (or the failure,
- *  so the model can adapt) as a dimmed "Web" message. *extraNote* is appended to
- *  that same message rather than pushed as a second one, so the user/assistant
- *  alternation the chat templates expect is unchanged. */
+/** A tool event for a model-requested call that did not run: *status* is
+ *  "denied" or "duplicate", *note* the text the model reads instead. */
+export function webCallOutcomeEvent(call, status, note) {
+  const a = call.args || call.arguments || {};
+  const now = Date.now();
+  const ev = newToolEvent({
+    tool: call.name === "fetch_url" ? "fetch" : "search",
+    status, started_at: now, finished_at: now, note,
+  });
+  if (ev.tool === "search") ev.query = a.query || "";
+  else ev.url = a.url || "";
+  return ev;
+}
+
+/** A control-note tool event: *reason* is "format", "limit" or "pending",
+ *  *note* the text the model reads. */
+export function webNoteEvent(reason, note) {
+  const now = Date.now();
+  return newToolEvent({ tool: "note", status: "done", reason,
+                        started_at: now, finished_at: now, note });
+}
+
+/** Run one model-requested web call as a tool event: push it as running
+ *  (shown, not saved; chat.webCall holds it so nothing else can send or
+ *  edit meanwhile), then complete it with the result or the failure (so the
+ *  model can adapt) and save. *extraNote* is stored as the event's note, so
+ *  the user/assistant alternation the chat templates expect is unchanged. */
 export async function runWebCall(conv, call, extraNote = "") {
-  let content, untrusted_spans = [];
+  const a = call.args || call.arguments || {};
+  const ev = newToolEvent({
+    tool: call.name === "fetch_url" ? "fetch" : "search",
+    status: "running", started_at: Date.now(),
+  });
+  if (ev.tool === "search") ev.query = a.query || "";
+  else ev.url = a.url || "";
+  conv.messages.push(ev);
+  chat.webCall = ev;
+  renderChat();
   try {
-    ({ content, untrusted_spans } = await requestWebTool(call));
+    Object.assign(ev, await requestWebTool(call));
   } catch (e) {
-    content = `[Web request failed: ${e.message}] Answer without the web, ` +
-           "and say that web access did not work.";
+    ev.status = "failed";
+    ev.error = e.message;
     toast("Web request failed: " + e.message, true);
+  } finally {
+    chat.webCall = null;
   }
-  const msg = { role: "user", content: content + extraNote, web: true };
-  if (untrusted_spans.length) msg.untrusted_spans = untrusted_spans;
-  conv.messages.push(msg);
+  ev.finished_at = Date.now();
+  if (extraNote) ev.note = extraNote;
   saveConversations(conv);
   renderChat();
 }
@@ -2107,7 +2164,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   if (sysText) messages.push({ role: "system", content: sysText });
   // Server-generated images (/api/ URLs from /generate-image) must not be sent
   // to the model as image parts - replace those messages with a text note.
+  // A tool event is rendered to fenced user-role text here and nowhere else;
+  // its untrusted spans then take the same alternation-merge path below.
   const mapped = conv.messages.map((m) => {
+    if (isToolEvent(m)) {
+      const { content, untrusted_spans } = toolEventPrompt(m);
+      return { role: "user", content,
+               untrusted_spans: untrusted_spans.length ? untrusted_spans : undefined };
+    }
     if (Array.isArray(m.content) &&
         m.content.some((p) => p.type === "image_url" &&
                               p.image_url?.url?.startsWith("/api/"))) {
@@ -2427,13 +2491,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       (nextCall.args && (nextCall.args.query || nextCall.args.url)) || "")
       .trim().toLowerCase();
     if (web.seen.has(key)) {
-      conv.messages.push({
-        role: "user", web: true,
-        content:
-          "[duplicate web request] You already ran that exact search this turn; " +
-          "its results are above. Do not search again - answer now from those " +
-          "results and cite the sources, or say plainly if they are insufficient.",
-      });
+      conv.messages.push(webCallOutcomeEvent(nextCall, "duplicate",
+        "[duplicate web request] You already ran that exact search this turn; " +
+        "its results are above. Do not search again - answer now from those " +
+        "results and cite the sources, or say plainly if they are insufficient."));
       saveConversations(conv);
       renderChat();
       await runCompletion(conv, WEB_MAX_ROUNDS, web);   // stop web; force an answer
@@ -2445,13 +2506,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     if (web.ask === null) web.ask = await webModeIsAsk();
     const approved = web.ask ? await confirmWebRequest(nextCall) : true;
     if (!approved) {
-      conv.messages.push({
-        role: "user", web: true,
-        content:
-          "[web access denied] The user declined this web request. Do not claim " +
-          "you searched or browsed; answer from what you already know, or say " +
-          "plainly that you could not look it up.",
-      });
+      conv.messages.push(webCallOutcomeEvent(nextCall, "denied",
+        "[web access denied] The user declined this web request. Do not claim " +
+        "you searched or browsed; answer from what you already know, or say " +
+        "plainly that you could not look it up."));
       saveConversations(conv);
       renderChat();
       await runCompletion(conv, WEB_MAX_ROUNDS, web);   // no further web rounds this send
@@ -2469,15 +2527,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // The model tried to call a web tool but emitted a block we could not
     // parse. Re-prompt for the exact format instead of letting the un-grounded
     // reply stand (it would otherwise read as a confident, un-searched answer).
-    conv.messages.push({
-      role: "user", web: true,
-      content:
-        "[tool-call format] That looked like a web tool call, but I could not " +
-        "parse it. Re-emit it EXACTLY like this and nothing else:\n" +
-        '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
-        "If you did not mean to search, answer in plain text and do not claim " +
-        "you accessed the web.",
-    });
+    conv.messages.push(webNoteEvent("format",
+      "[tool-call format] That looked like a web tool call, but I could not " +
+      "parse it. Re-emit it EXACTLY like this and nothing else:\n" +
+      '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
+      "If you did not mean to search, answer in plain text and do not claim " +
+      "you accessed the web."));
     saveConversations(conv);
     renderChat();
     await runCompletion(conv, webDepth + 1, web);
@@ -2487,14 +2542,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // of answering (the "never synthesizes an answer" symptom). Force exactly one
     // synthesizing turn from the results already gathered, then accept its answer.
     web.forced = true;
-    conv.messages.push({
-      role: "user", web: true,
-      content:
-        "[web search limit reached] You have used the maximum web lookups for " +
-        "this turn. Stop searching and answer the question now using the results " +
-        "already provided above, citing the sources; if they are insufficient, " +
-        "say so plainly.",
-    });
+    conv.messages.push(webNoteEvent("limit",
+      "[web search limit reached] You have used the maximum web lookups for " +
+      "this turn. Stop searching and answer the question now using the results " +
+      "already provided above, citing the sources; if they are insufficient, " +
+      "say so plainly."));
     saveConversations(conv);
     renderChat();
     await runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
@@ -2506,15 +2558,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // is set before the recursive call and gates this branch, so the repair
     // reply cannot enter it again.
     web.repaired = true;
-    conv.messages.push({
-      role: "user", web: true,
-      content:
-        "[pending action] Your last reply announced an action but did not " +
-        "perform it. Do exactly ONE of these now: emit exactly one tool call in " +
-        "the required format, or give your final answer now without promising " +
-        "further work. Never say you searched or looked something up unless " +
-        "you actually emitted a tool call and received its result.",
-    });
+    conv.messages.push(webNoteEvent("pending",
+      "[pending action] Your last reply announced an action but did not " +
+      "perform it. Do exactly ONE of these now: emit exactly one tool call in " +
+      "the required format, or give your final answer now without promising " +
+      "further work. Never say you searched or looked something up unless " +
+      "you actually emitted a tool call and received its result."));
     saveConversations(conv);
     renderChat();
     await runCompletion(conv, webDepth + 1, web);
@@ -2593,6 +2642,10 @@ export async function sendChat() {
     // A reply is still streaming. Tell the user how to act instead of silently
     // swallowing the send (the send button is a Stop control while streaming).
     toast("Reply still streaming - press the stop button to interrupt", true);
+    return;
+  }
+  if (chat.webCall) {
+    toast("A web request is still running - wait for its result before sending", true);
     return;
   }
 
