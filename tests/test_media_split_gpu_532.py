@@ -59,7 +59,7 @@ def _fake_gpus(monkeypatch, *specs):
     gpus = [{"index": i, "name": f"fake{i}", "free": free, "total": free * 2}
             for i, free in specs]
     monkeypatch.setattr(disc, "list_gpus", lambda **kw: list(gpus))
-    monkeypatch.setattr(disc, "_native_backend_has_vulkan", lambda: False)
+    monkeypatch.setattr(disc, "_native_gpu_index_space_is_opaque", lambda: False)
     return gpus
 
 

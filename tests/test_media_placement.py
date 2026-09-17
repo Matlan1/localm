@@ -74,7 +74,7 @@ def _fake_gpus(monkeypatch, *specs):
         disc, "list_gpus",
         lambda **kw: (list(gpus), disc.GPU_PROBE_OK) if kw.get("return_status")
         else list(gpus))
-    monkeypatch.setattr(disc, "_native_backend_has_vulkan", lambda: False)
+    monkeypatch.setattr(disc, "_native_gpu_index_space_is_opaque", lambda: False)
     return gpus
 
 
@@ -499,7 +499,7 @@ def test_shortfall_none_when_probe_did_not_complete_fresh(home, monkeypatch):
         disc, "list_gpus",
         lambda **kw: (list(gpus), disc.GPU_PROBE_TIMEOUT)
         if kw.get("return_status") else list(gpus))
-    monkeypatch.setattr(disc, "_native_backend_has_vulkan", lambda: False)
+    monkeypatch.setattr(disc, "_native_gpu_index_space_is_opaque", lambda: False)
     conf = {"gpu_split_indices": [0, 1]}
     settings = {"swap_policy": "auto", "vram_estimate_bytes": 4 * GB}
     assert media_single_device_shortfall(settings, config=conf) is None

@@ -209,7 +209,7 @@ def scoped(tmp_path, monkeypatch, engines):
     monkeypatch.setattr("localm.discover.vram_capacity",
                         probe_double({"total": 8 * _GB}))
     monkeypatch.setattr("localm.discover.list_gpus", probe_double([]))
-    monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+    monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
     monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: None)
     monkeypatch.setattr("localm.media.comfy_client.comfy_object_info",
                         lambda *a, **kw: None)
@@ -528,7 +528,7 @@ class TestVramEstimate:
 class TestGpus:
     def test_shape_from_the_generic_probe(self, harness, monkeypatch):
         gpus = [{"index": 0, "name": "GPU", "total": 8 * _GB, "free": 4 * _GB}]
-        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
         monkeypatch.setattr("localm.discover.list_gpus", probe_double(gpus))
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 0, "gpu_split_indices": [0, 1]})
@@ -538,7 +538,7 @@ class TestGpus:
                         "main_gpu_index": 0, "gpu_split_indices": [0, 1]}
 
     def test_inconclusive_probe_is_labelled(self, harness, monkeypatch):
-        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
         monkeypatch.setattr("localm.discover.list_gpus",
                             probe_double([], status=GPU_PROBE_TIMEOUT))
         with TestClient(harness.app) as c:

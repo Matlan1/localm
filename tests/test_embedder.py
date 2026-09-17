@@ -1135,7 +1135,7 @@ def test_isolated_embedder_split_preflight_admits_on_stale_probe(monkeypatch, tm
     # non-vulkan so gpu_split_shortfall reaches the stale-probe path rather than
     # the vulkan skip.
     monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: 2)
-    monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+    monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
     monkeypatch.setattr("localm.discover.list_gpus", _list_gpus)
     monkeypatch.setattr(
         "localm.config.load_config",

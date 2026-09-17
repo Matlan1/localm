@@ -811,9 +811,12 @@ def _reset_gpu_probe_cache() -> None:
     # outside _gpu_probe_lock: _source_selection_lock is a leaf and nothing is
     # ever held while acquiring it.
     global _native_hip_resident, _rocm_sdk_present, _torch_doomed_announced
+    global _native_sycl_resident, _intel_sycl_rt_present
     with _source_selection_lock:
         _native_hip_resident = None
         _rocm_sdk_present = None
+        _native_sycl_resident = None
+        _intel_sycl_rt_present = None
         _torch_doomed_announced = None
     try:
         from localm import gpu_usage
@@ -1068,11 +1071,15 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
 # _native_hip_resident: the native_hip_runtime_resident() answer once the glob has
 # resolved it, or None while the native lib is unloaded and it is still open.
 # _rocm_sdk_present: the find_spec("rocm_sdk") answer, or None before it is taken.
+# _native_sycl_resident / _intel_sycl_rt_present: the same two roles as the pair
+# above, for native_sycl_runtime_resident() / _intel_sycl_rt_installed().
 # _torch_doomed_announced: the last _torch_gpu_probe_known_doomed() answer written
 # to the log, or None before anything has been.
 _source_selection_lock = threading.Lock()
 _native_hip_resident: "bool | None" = None
 _rocm_sdk_present: "bool | None" = None
+_native_sycl_resident: "bool | None" = None
+_intel_sycl_rt_present: "bool | None" = None
 _torch_doomed_announced: "bool | None" = None
 
 
@@ -1154,6 +1161,71 @@ def _rocm_sdk_installed() -> bool:
     return present
 
 
+def native_sycl_runtime_resident() -> bool:
+    """True when llama.cpp's bundled SYCL-linked runtime is resident IN THIS
+    process on Windows: the native lib has been loaded (``_loader.load_lib``)
+    and the resolved runtime ships a SYCL ggml backend (same shipped-DLL-set
+    authority as :func:`_native_backend_has_sycl`).
+
+    Consumed by :func:`_torch_gpu_probe_known_doomed`, which combines this
+    with :func:`_intel_sycl_rt_installed` - see that function's docstring for
+    how the two are combined and how confident that combination actually is.
+
+    Fails closed (False) when the check itself errors.
+
+    Latched for the life of the process once resolved (cleared only by
+    :func:`_reset_gpu_probe_cache`), on the same invariant as
+    :func:`native_hip_runtime_resident`: a loaded native lib is never
+    unloaded and its shipped DLL set does not change."""
+    global _native_sycl_resident
+    import sys
+    if sys.platform != "win32":
+        return False
+    with _source_selection_lock:
+        if _native_sycl_resident is not None:
+            return _native_sycl_resident
+    try:
+        from localm.inference.backends.llamacpp import _loader
+        if not _loader.native_lib_loaded():
+            return False
+        d = _loader.runtime_binary_dir()
+        resident = d is not None and any(
+            "sycl" in p.name.lower() for p in d.glob(_loader._ggml_glob()))
+    except Exception as e:
+        logger.debug("native-SYCL-resident check failed (%s); answering False",
+                     type(e).__name__)
+        return False
+    with _source_selection_lock:
+        _native_sycl_resident = resident
+    return resident
+
+
+def _intel_sycl_rt_installed() -> bool:
+    """Whether the ``intel-sycl-rt`` distribution (Intel's oneAPI DPC++/SYCL
+    compiler runtime, a real pip-installable package torch's ``+xpu`` wheels
+    depend on) is installed, resolved once per process (cleared only by
+    :func:`_reset_gpu_probe_cache`).
+
+    Checked via ``importlib.metadata`` rather than ``importlib.util.find_spec``
+    (:func:`_rocm_sdk_installed`'s approach): unlike ``rocm_sdk``, nothing
+    confirms ``intel-sycl-rt`` exposes an importable Python module rather than
+    being a redistributed-binaries-only package, and a distribution-metadata
+    lookup is the check that works regardless of which shape it has."""
+    global _intel_sycl_rt_present
+    with _source_selection_lock:
+        if _intel_sycl_rt_present is not None:
+            return _intel_sycl_rt_present
+    import importlib.metadata
+    try:
+        importlib.metadata.distribution("intel-sycl-rt")
+        present = True
+    except importlib.metadata.PackageNotFoundError:
+        present = False
+    with _source_selection_lock:
+        _intel_sycl_rt_present = present
+    return present
+
+
 def _announce_torch_doomed(doomed: bool) -> bool:
     """Record *doomed* as the current torch-consultability answer, and return
     whether it CHANGED what was last announced.
@@ -1225,47 +1297,80 @@ def _torch_gpu_probe_known_doomed() -> bool:
       CUDA devices, and a CUDA torch's NVIDIA devices are exactly what the
       nvidia-smi fallback reports anyway.
 
-    Fails OPEN: if the detector itself errors, the probe proceeds with its
+    A SECOND, LESS CERTAIN COMBINATION (:func:`native_sycl_runtime_resident`
+    + :func:`_intel_sycl_rt_installed`): the bundled Windows SYCL llama.cpp
+    build ships Intel's own oneAPI DPC++/SYCL runtime DLLs (sycl8.dll, the
+    oneMKL/oneTBB/Unified-Runtime libraries), and torch's ``+xpu`` wheels
+    depend on ``intel-sycl-rt``, a pip package shipping that same runtime
+    family under the same names, for the same underlying toolchain - both
+    confirmed real (a real, version-pinned pip dependency; matching DLL
+    basenames named against this project's own verified SYCL bundle listing).
+    UNLIKE THE HIP COMBINATION ABOVE, THIS ONE HAS NOT BEEN ROOT-CAUSED ON
+    REAL HARDWARE: no Intel GPU was available to reproduce an actual
+    collision, so this is inferred by mechanism analogy (a bare ``import
+    torch`` bulk-preloads every dependency DLL before any device-specific
+    code runs, on both toolchains alike) plus named-DLL evidence, not proof.
+    It is still wired in because the cost of being wrong is asymmetric and
+    small: no SYCL/XPU torch enumeration exists anywhere in this codebase
+    today, so skipping changes nothing this probe currently returns, while
+    catching it if the analogy holds avoids the HIP case's exact symptoms
+    (a crash-prone import, a repeating stderr trace).
+
+    Fails OPEN: if either detector pair errors, the probe proceeds with its
     normal torch attempt (which catches its own failures) - detection must
     never break the working path. The skip is surfaced at debug level, not
     silenced, the first time it is decided and again whenever the decision
-    changes; an unchanged repeat is not re-logged.
+    changes; an unchanged repeat is not re-logged, and the logged reason
+    names which of the two combinations actually fired.
 
-    Both of the inputs that cost anything to evaluate - the resident-HIP glob
-    and the ``rocm_sdk`` ``sys.path`` walk - are resolved once per process, so
-    a caller polling this on every GPU probe re-runs neither. Only the
-    ``sys.modules`` membership test is re-evaluated, which is what lets the
-    answer still flip when torch becomes resident."""
+    Every input that costs anything to evaluate - both resident-runtime
+    globs, the ``rocm_sdk`` ``sys.path`` walk, the ``intel-sycl-rt``
+    distribution lookup - is resolved once per process, so a caller polling
+    this on every GPU probe re-runs none of them. Only the ``sys.modules``
+    membership test is re-evaluated, which is what lets the answer still
+    flip when torch becomes resident."""
     import sys
     if "torch" in sys.modules:
         # A resident torch (imported for real before the runtime loaded, or a
         # test's injected stand-in) makes `import torch` a plain cache hit: no
-        # rocm_sdk preload runs, so the conflict cannot occur and the working
-        # enumeration must be kept. On the doomed combo torch can never BE
+        # preload runs, so neither conflict can occur and the working
+        # enumeration must be kept. On either doomed combo torch can never BE
         # resident - the faulted module is evicted on every attempt - so this
         # never defuses the real guard.
         _announce_torch_doomed(False)
         return False
+    doomed_reason: "str | None" = None
     try:
-        if not native_hip_runtime_resident():
-            _announce_torch_doomed(False)
-            return False
-        if not _rocm_sdk_installed():
-            _announce_torch_doomed(False)
-            return False
+        if native_hip_runtime_resident() and _rocm_sdk_installed():
+            doomed_reason = "hip"
+        elif native_sycl_runtime_resident() and _intel_sycl_rt_installed():
+            doomed_reason = "sycl"
     except Exception as e:
         logger.debug("list_gpus: torch-conflict detector failed (%s); "
                      "proceeding with the normal torch attempt", type(e).__name__)
         _announce_torch_doomed(False)
         return False
+    if doomed_reason is None:
+        _announce_torch_doomed(False)
+        return False
     if not _announce_torch_doomed(True):
         return True
-    logger.debug(
-        "list_gpus: skipping the torch GPU probe: the bundled HIP llama.cpp "
-        "runtime is already loaded in this process and a ROCm (rocm_sdk) torch "
-        "is installed, so `import torch` here is a known-doomed DLL-identity "
-        "conflict (STATUS_ENTRYPOINT_NOT_FOUND; see "
-        "_torch_gpu_probe_known_doomed's docstring); using the non-torch sources")
+    if doomed_reason == "hip":
+        logger.debug(
+            "list_gpus: skipping the torch GPU probe: the bundled HIP llama.cpp "
+            "runtime is already loaded in this process and a ROCm (rocm_sdk) torch "
+            "is installed, so `import torch` here is a known-doomed DLL-identity "
+            "conflict (STATUS_ENTRYPOINT_NOT_FOUND; see "
+            "_torch_gpu_probe_known_doomed's docstring); using the non-torch sources")
+    else:
+        logger.debug(
+            "list_gpus: skipping the torch GPU probe: the bundled SYCL llama.cpp "
+            "runtime is already loaded in this process and intel-sycl-rt (the "
+            "pip-installed Intel oneAPI SYCL runtime torch's +xpu wheels depend on) "
+            "is installed, so `import torch` here may hit the same class of "
+            "DLL-identity conflict as the proven HIP case - unconfirmed on real "
+            "Intel hardware; see _torch_gpu_probe_known_doomed's docstring); using "
+            "the non-torch sources")
     return True
 
 
@@ -1938,6 +2043,41 @@ def _native_backend_has_vulkan() -> bool:
         return False
 
 
+def _native_backend_has_sycl() -> bool:
+    """True when the currently-resolved native runtime directory ships the
+    SYCL ggml backend (a ``ggml-sycl.*`` file) - i.e. the active install is
+    the ``sycl`` build.
+
+    Same shipped-DLL-set authority as :func:`_native_backend_has_vulkan`, for
+    the same reason: ggml-sycl enumerates Intel GPU devices through its own
+    Level-Zero/SYCL registry, a different index space from list_gpus()'s
+    torch-derived one, which list_gpus() never queries and is therefore
+    structurally blind to."""
+    try:
+        from localm.inference.backends.llamacpp._loader import (
+            runtime_binary_dir, _ggml_glob,
+        )
+        d = runtime_binary_dir()
+        if d is None:
+            return False
+        return any("sycl" in p.name.lower() for p in d.glob(_ggml_glob()))
+    except Exception:
+        return False
+
+
+def _native_gpu_index_space_is_opaque() -> bool:
+    """True when the active native llama.cpp backend enumerates its own GPU
+    devices in an index space list_gpus() (torch.cuda / nvidia-smi) cannot
+    see at all - currently :func:`_native_backend_has_vulkan` or
+    :func:`_native_backend_has_sycl`. On such a build the real device
+    selection happens entirely inside the native runtime's own backend, so a
+    configured ``main_gpu_index``/``gpu_split_indices`` is passed through
+    unchecked below rather than cross-checked against list_gpus(), and any
+    per-device figure comes from :func:`native_gpu_devices` (the native
+    registry, via the isolated probe daemon) instead."""
+    return _native_backend_has_vulkan() or _native_backend_has_sycl()
+
+
 def _llama_visible_devices(devices: list) -> list:
     """The subset of a native non-CPU device inventory that llama.cpp will
     actually place layers on, RENUMBERED into the index space ``mp.main_gpu``
@@ -1999,8 +2139,10 @@ def native_gpu_devices() -> Optional[list]:
 
     The ``index`` values are the index space a configured
     ``gpu_split_indices`` / ``main_gpu_index`` actually means at load time -
-    on the ``vulkan`` build the only source that can express it at all
-    (:func:`list_gpus` is structurally blind to it). That
+    on a build whose GPU index space is opaque to list_gpus() (vulkan or
+    sycl - see :func:`_native_gpu_index_space_is_opaque`) the only source
+    that can express it at all (:func:`list_gpus` is structurally blind to
+    it). That
     is NOT simply the registry's own numbering: llama.cpp drops integrated
     GPUs whenever a discrete card exists and skips accelerators outright, so
     the raw inventory from ``_loader.native_device_inventory`` is passed
@@ -2071,9 +2213,9 @@ def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
     when detection is unmeasurable or skipped (see next paragraph).
 
     When detection itself is unmeasurable (``list_gpus()`` returns nothing -
-    no torch, no nvidia-smi) OR the active native backend is ``vulkan``
-    (whose real device enumeration list_gpus() cannot see at all - see
-    :func:`_native_backend_has_vulkan`), the configured index cannot be
+    no torch, no nvidia-smi) OR the active native backend's own device
+    enumeration is opaque to list_gpus() (vulkan or sycl - see
+    :func:`_native_gpu_index_space_is_opaque`), the configured index cannot be
     cross-checked against a reliable, backend-matching device list either
     way; it is passed through unchecked (aside from the ceiling above) rather
     than discarding an explicit user choice we have no way to disprove (the
@@ -2102,10 +2244,10 @@ def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
     # fails to report (list_gpus() skips it rather than hide the rest) leaves a
     # gap, so "idx < len(gpus)" alone could wrongly wave through an idx that
     # does not actually correspond to any detected device. Skipped entirely
-    # when the active backend is vulkan: list_gpus() is
-    # blind to Vulkan-only devices, so a non-empty result here does not mean
-    # it is authoritative for THIS backend's index space.
-    if gpus and not _native_backend_has_vulkan() and not any(
+    # when the active backend's index space is opaque to list_gpus() (vulkan
+    # or sycl): a non-empty result here does not mean it is authoritative for
+    # THIS backend's index space.
+    if gpus and not _native_gpu_index_space_is_opaque() and not any(
             g.get("index") == idx for g in gpus):
         logger.warning(
             "main_gpu_index=%d does not match any of the %d GPU(s) detected "
@@ -2176,12 +2318,12 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
     occurrence. Fewer than 2 valid indices after validation means "no split"
     (returns ``[]``) - the single-GPU path driven by ``apply_main_gpu`` is
     unaffected. This validation is SKIPPED (indices pass through unchecked)
-    when the active native backend is ``vulkan`` - see
-    :func:`_native_backend_has_vulkan`: ``list_gpus()``
-    cannot see Vulkan-only devices, so on that backend a non-empty result here
-    is not authoritative: acting on it collapses a configured split to
-    single-device and replaces the user's ``gpu_split_ratios`` with
-    llama.cpp's own unrelated auto-split.
+    when the active native backend's device enumeration is opaque to
+    list_gpus() - see :func:`_native_gpu_index_space_is_opaque` (vulkan or
+    sycl): list_gpus() cannot see those devices, so on such a backend a
+    non-empty result here is not authoritative: acting on it collapses a
+    configured split to single-device and replaces the user's
+    ``gpu_split_ratios`` with llama.cpp's own unrelated auto-split.
 
     ``configured_ratios``, when given, must be the SAME LENGTH as
     ``configured_indices`` (before validation) to be honoured - a length
@@ -2221,7 +2363,7 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
 
     if gpus is None:
         gpus = list_gpus()
-    if gpus and not _native_backend_has_vulkan():
+    if gpus and not _native_gpu_index_space_is_opaque():
         known = {g.get("index") for g in gpus}
         valid = [i for i in deduped if i in known]
         dropped = [i for i in deduped if i not in known]
@@ -2232,9 +2374,10 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
                 len(dropped), dropped)
     else:
         # Detection unmeasurable (no torch, no nvidia-smi) OR the active
-        # native backend is vulkan (list_gpus() cannot see Vulkan-only devices,
-        # so a non-empty result here would not be authoritative for this
-        # backend's index space): same boundary as resolve_main_gpu_index -
+        # native backend's index space is opaque to list_gpus() (vulkan or
+        # sycl - list_gpus() cannot see those devices, so a non-empty result
+        # here would not be authoritative for this backend's index space):
+        # same boundary as resolve_main_gpu_index -
         # no cross-check is possible either way, so the configured indices pass
         # through unchanged.
         valid = deduped
@@ -2305,9 +2448,10 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
       device-global (``free_scope != FREE_SCOPE_DEVICE``) - see the
       TRUSTWORTHINESS section below.
 
-    On the ``vulkan`` build the reading comes from
-    :func:`native_gpu_devices` (the isolated probe daemon's view of ggml's
-    own registry) - the ONLY per-device source in ggml-vulkan's
+    On a build whose GPU index space is opaque to list_gpus() (vulkan or
+    sycl - see :func:`_native_gpu_index_space_is_opaque`) the reading comes
+    from :func:`native_gpu_devices` (the isolated probe daemon's view of
+    ggml's own registry) - the ONLY per-device source in that backend's own
     index space, which is the space ``tensor_split`` actually consumes
     (``list_gpus()`` is structurally blind there and
     speaks torch's index space). Everywhere else the reading is
@@ -2331,8 +2475,9 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
       :data:`FREE_SCOPE_DEVICE` before trusting the proportion, unlike
       ``gpu_split_shortfall``'s refuse-only use of the identical reading.
       :func:`native_gpu_devices` carries no such tag, and nothing establishes
-      that ggml-vulkan's own ``ggml_backend_dev_memory`` query is
-      cross-process blind, so the vulkan branch is left UNGATED on scope.
+      that ggml's own ``ggml_backend_dev_memory`` query is cross-process
+      blind on any backend, so the opaque-index-space branch is left UNGATED
+      on scope.
 
     A device reporting 0 bytes free keeps a tiny positive share (1-byte
     floor) instead of a 0.0 ratio: ``resolve_gpu_split`` discards the WHOLE
@@ -2362,10 +2507,11 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
         return None
 
     frees: list = []
-    if _native_backend_has_vulkan():
-        # The configured indices live in ggml-vulkan's own index space, so only
-        # the native registry's reading can be paired with them; a list_gpus()
-        # (torch-space) reading here would compute shares for the WRONG cards.
+    if _native_gpu_index_space_is_opaque():
+        # The configured indices live in the native backend's own index space
+        # (ggml-vulkan or ggml-sycl), so only the native registry's reading
+        # can be paired with them; a list_gpus() (torch-space) reading here
+        # would compute shares for the WRONG cards.
         devices = native_gpu_devices()
         if devices is None:
             return _fallback("the native device registry did not answer")
@@ -2832,20 +2978,21 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
       load is never sized from a frozen last-known-good snapshot, matching
       :func:`gpu_split_shortfall`'s probe-freshness contract.
 
-    On the ``vulkan`` build the reading comes from :func:`native_gpu_devices`
-    (the crash-isolated probe daemon's view of ggml's OWN registry), because
-    that is the device space the layers are actually placed in;
-    :func:`list_gpus` speaks torch's space and is structurally blind there.
-    A sum needs the right device SET rather than an index correspondence, and
-    the set is taken from the space that receives the layers. Same branch as
-    :func:`resolve_auto_split_ratios`.
+    On a build whose GPU index space is opaque to list_gpus() (vulkan or
+    sycl - see :func:`_native_gpu_index_space_is_opaque`) the reading comes
+    from :func:`native_gpu_devices` (the crash-isolated probe daemon's view
+    of ggml's OWN registry), because that is the device space the layers are
+    actually placed in; :func:`list_gpus` speaks torch's space and is
+    structurally blind there. A sum needs the right device SET rather than
+    an index correspondence, and the set is taken from the space that
+    receives the layers. Same branch as :func:`resolve_auto_split_ratios`.
 
     Never raises."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     if cfg.get("gpu_split_indices"):
         return {}
-    if _native_backend_has_vulkan():
+    if _native_gpu_index_space_is_opaque():
         devices = native_gpu_devices()
         if not devices:
             return {}
@@ -2923,10 +3070,12 @@ def split_device_count(config: Optional[dict] = None) -> int:
 
     Do NOT use this to decide "will the loader ACTUALLY apply a multi-device
     split" (a VRAM preflight, a swap decision, a "your split spans N cards"
-    notice): on the ``vulkan`` build the real split devices live in ggml-vulkan's
-    own index space, which ``list_gpus()`` (torch.cuda / nvidia-smi) is
-    structurally blind to, so the detected re-filter here
-    COLLAPSES a live, working 2-way vulkan split to < 2. That is the honest answer
+    notice): on a build whose GPU index space is opaque to list_gpus() (vulkan
+    or sycl - see :func:`_native_gpu_index_space_is_opaque`) the real split
+    devices live in the native backend's own index space, which
+    ``list_gpus()`` (torch.cuda / nvidia-smi) is structurally blind to, so the
+    detected re-filter here COLLAPSES a live, working 2-way split to < 2. That
+    is the honest answer
     for a LABEL (``vram_capacity()`` itself cannot sum a split it cannot measure,
     so it too falls back to the single-GPU number, and calling that "combined"
     would lie), but the WRONG answer for a load-safety gate. Use
@@ -2961,13 +3110,14 @@ def applied_split_device_count(config: Optional[dict] = None) -> int:
     :func:`list_gpus` AFTER ``resolve_gpu_split``. That filter is CORRECT for a
     VRAM LABEL (you cannot honestly call a number "combined across N GPUs" when
     ``list_gpus()`` only measured one device), but WRONG for a load-safety gate on
-    the ``vulkan`` build, where ``resolve_gpu_split`` passes the configured indices
-    through UNVALIDATED in ggml-vulkan's own index space - a
+    a build whose GPU index space is opaque to list_gpus() (vulkan or sycl),
+    where ``resolve_gpu_split`` passes the configured indices through
+    UNVALIDATED in the native backend's own index space - a
     real 2-way split ``list_gpus()`` (torch.cuda / nvidia-smi) is structurally
     blind to. There this returns 2 while :func:`split_device_count` collapses to
-    < 2. On a NON-vulkan box with a detected device list the two are IDENTICAL
-    (``resolve_gpu_split`` already dropped unknown indices, so that later re-filter
-    is a proven no-op).
+    < 2. On a box whose index space is NOT opaque, with a detected device list,
+    the two are IDENTICAL (``resolve_gpu_split`` already dropped unknown
+    indices, so that later re-filter is a proven no-op).
 
     Deliberately does NOT pass ``gpus=`` (so ``resolve_gpu_split`` calls
     ``list_gpus()`` itself) and does NOT re-filter the result - exactly what
@@ -3077,8 +3227,8 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     from the config shape. ``return_shares_adaptive=True`` appends that
     fact: ``True`` only when live auto ratios were actually used for the
     shares below; ``False`` for pinned ratios, the equal fallback, and every
-    early return (no split, vulkan skip, non-OK probe - where the list is
-    empty anyway). Appended AFTER ``status`` when both opt-ins are set:
+    early return (no split, opaque-index-space skip, non-OK probe - where the
+    list is empty anyway). Appended AFTER ``status`` when both opt-ins are set:
     ``(shortfall, status, shares_adaptive)``; alone:
     ``(shortfall, shares_adaptive)``. The bare-call shape is untouched.
 
@@ -3154,24 +3304,27 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     if not cfg.get("gpu_split_indices"):
         # No split configured: a conclusive answer that needs no hardware probe.
         return _ret([], GPU_PROBE_OK)
-    if _native_backend_has_vulkan():
-        # On the vulkan build the configured split indices live in ggml-vulkan's
+    if _native_gpu_index_space_is_opaque():
+        # On a build whose GPU index space is opaque to list_gpus() (vulkan
+        # or sycl) the configured split indices live in the native backend's
         # own index space at load time, which list_gpus() (torch.cuda /
-        # nvidia-smi) cannot see or order - torch index N is NOT ggml-vulkan
-        # index N (resolve_preferred_device documents exactly this hazard). A
-        # per-device share check here would measure the WRONG cards: a silent
-        # no-op when torch sees nothing, a wrong refusal/pass on a mixed box.
-        # Per-device fit cannot be checked honestly on this backend, so it is
-        # not - and the skip is SURFACED rather than presented as a check that
-        # passed. Logged at INFO, not debug and not WARNING: the skip is benign
-        # whenever the model fits. The GGUF load is subprocess-isolated, so an
-        # oversized model still fails as a catchable error.
+        # nvidia-smi) cannot see or order - torch index N is NOT that
+        # backend's index N (resolve_preferred_device documents exactly this
+        # hazard). A per-device share check here would measure the WRONG
+        # cards: a silent no-op when torch sees nothing, a wrong
+        # refusal/pass on a mixed box. Per-device fit cannot be checked
+        # honestly on such a backend, so it is not - and the skip is
+        # SURFACED rather than presented as a check that passed. Logged at
+        # INFO, not debug and not WARNING: the skip is benign whenever the
+        # model fits. The GGUF load is subprocess-isolated, so an oversized
+        # model still fails as a catchable error.
         logger.info(
             "gpu_split_shortfall: skipping the per-device split VRAM preflight on "
-            "the vulkan backend - the configured split indices are in ggml-vulkan's "
-            "index space, which list_gpus() cannot map to a card, so no per-device "
-            "check can name the right device (GPU-SPLIT-VKINDEX); relying on the "
-            "subprocess-isolated loader to catch an oversized load instead.")
+            "this backend - the configured split indices are in the native "
+            "backend's own index space, which list_gpus() cannot map to a card, "
+            "so no per-device check can name the right device (GPU-SPLIT-VKINDEX); "
+            "relying on the subprocess-isolated loader to catch an oversized load "
+            "instead.")
         # Conclusive skip with no probe, so it mirrors the no-split return above
         # and reports GPU_PROBE_OK - NOT a non-OK "stale probe" status: nothing
         # was probed, and (like the no-split branch) this is a deterministic
@@ -3284,10 +3437,11 @@ def resolve_preferred_device(config: Optional[dict] = None, *,
 
     INDEX SPACE (this is load-bearing): the answer is always a TORCH device index,
     because media runs on torch (ComfyUI), and :func:`list_gpus` enumerates via
-    torch.cuda. It must never leak :func:`resolve_gpu_split`'s Vulkan pass-through:
-    on the ``vulkan`` llama.cpp build that function returns indices UNVALIDATED,
-    in ggml-vulkan's own index space, which torch does not share.
-    Handing one of those to ComfyUI as a CUDA/HIP id would name the wrong card. So a
+    torch.cuda. It must never leak :func:`resolve_gpu_split`'s pass-through: on a
+    build whose GPU index space is opaque to list_gpus() (vulkan or sycl - see
+    :func:`_native_gpu_index_space_is_opaque`) that function returns indices
+    UNVALIDATED, in the native backend's own index space, which torch does not
+    share. Handing one of those to ComfyUI as a CUDA/HIP id would name the wrong card. So a
     device is returned only when it is genuinely torch-visible; otherwise ``None``, and
     ComfyUI keeps its own default.
     """
@@ -3323,14 +3477,16 @@ def resolve_preferred_device(config: Optional[dict] = None, *,
                     "which may have less free VRAM than its peers.", visible[0])
                 return visible[0]
             # NOT ONE configured split device is torch-visible. resolve_gpu_split()
-            # passes indices through UNVALIDATED on the vulkan llama.cpp build,
-            # so these are very likely ggml-vulkan indices, which mean something
-            # else entirely to torch. Naming one would point ComfyUI at
-            # the wrong card. Say so and let ComfyUI default.
+            # passes indices through UNVALIDATED on a build whose GPU index space
+            # is opaque to list_gpus() (vulkan or sycl), so these are very likely
+            # native-backend indices, which mean something else entirely to
+            # torch. Naming one would point ComfyUI at the wrong card. Say so and
+            # let ComfyUI default.
             logger.warning(
                 "gpu_split %r resolves to no torch-visible device, so media cannot name "
-                "one: those indices are not in torch's index space (a Vulkan-only "
-                "llama.cpp split does this). Leaving the device to ComfyUI's default.",
+                "one: those indices are not in torch's index space (a vulkan-only or "
+                "sycl-only llama.cpp split does this). Leaving the device to ComfyUI's "
+                "default.",
                 split)
             return None
         # A split was configured but did not resolve to 2+ detected devices.
@@ -3356,7 +3512,8 @@ def visible_device_order(config: Optional[dict] = None, *,
     ``Select*Device`` placement nodes.
 
     Every index is torch-visible by construction (:func:`resolve_preferred_device` and
-    :func:`list_gpus` share torch's index space), so this never emits a Vulkan-space id.
+    :func:`list_gpus` share torch's index space), so this never emits a native-backend
+    (vulkan/sycl) index.
 
     NOTE the consequence, which callers must respect: after this reorder the preferred
     card becomes torch index 0, so a workflow's ``gpu:N`` refers to the REORDERED
@@ -3434,7 +3591,8 @@ def plan_media_placement(config: Optional[dict] = None, *,
     ComfyUI's OWN index space, so a POSITIONAL policy over it inherits NONE of the
     localm-index vs ``gpu:N`` translation hazard (:func:`comfy_gpu_option` exists for a
     future identity-based policy) and never consults ``split_device_count`` (whose
-    Vulkan soundness hole it therefore does not inherit).
+    opaque-index-space soundness hole - see
+    :func:`_native_gpu_index_space_is_opaque` - it therefore does not inherit).
 
     v1 policy - no free-VRAM read (the live free number is not yet trustworthy, and
     per-component byte sizes do not exist): keep the big model on the preferred card (the

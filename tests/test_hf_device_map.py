@@ -122,7 +122,7 @@ class TestMainGpuIndexOnly:
         # confines to what resolve_main_gpu_index RETURNS, not the raw configured
         # value. Pin non-Vulkan so membership validation actually runs, whatever
         # native backend is provisioned in the ambient environment.
-        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
         monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
         mem = {0: (8_000_000_000, 16_000_000_000)}
         with caplog.at_level("WARNING", logger="localm"):

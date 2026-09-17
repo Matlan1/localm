@@ -22,7 +22,8 @@ from localm.discover import (
     GPU_PROBE_TIMEOUT,
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
-    _moe_signal, _native_backend_has_vulkan,
+    _moe_signal, _native_backend_has_sycl,
+    _native_backend_has_vulkan, _native_gpu_index_space_is_opaque,
     _quant_of, applied_split_device_count, apply_gpu_split, apply_main_gpu,
     classify_hf_metadata, fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
@@ -1983,23 +1984,25 @@ class TestListGpusJoinInflight:
 
 @pytest.fixture
 def _non_vulkan_host(monkeypatch):
-    """Pin the active native backend to NON-vulkan.
+    """Pin the active native backend's GPU index space to NOT opaque.
 
     resolve_main_gpu_index/resolve_gpu_split only cross-check a configured index
-    against the detected device list when the active backend is NOT vulkan (on
-    vulkan, list_gpus() is structurally blind to the real device list, so the
-    index is trusted instead - see _native_backend_has_vulkan). That check reads
-    the REAL provisioned runtime dir off disk, so without this pin the classes
-    below assert the drop-the-unknown-index behaviour on a host that skips it:
-    green on an unprovisioned/HIP box, RED on a vulkan-provisioned one (the
-    RECOMMENDED universal build), for the same source.
+    against the detected device list when the active backend's index space is
+    NOT opaque to list_gpus() (on vulkan or sycl, list_gpus() is structurally
+    blind to the real device list, so the index is trusted instead - see
+    _native_gpu_index_space_is_opaque). That check reads the REAL provisioned
+    runtime dir off disk, so without this pin the classes below assert the
+    drop-the-unknown-index behaviour on a host that skips it: green on an
+    unprovisioned/HIP box, RED on a vulkan- or sycl-provisioned one (vulkan is
+    the RECOMMENDED universal build), for the same source.
 
     The vulkan side of the branch is covered by
-    TestVulkanBackendIndexPassthrough, and the detector itself by
-    TestNativeBackendHasVulkan, so pinning here narrows these classes to the
-    branch they test.
+    TestVulkanBackendIndexPassthrough, the sycl side by
+    TestSyclBackendIndexPassthrough, and the detectors themselves by
+    TestNativeBackendHasVulkan / TestNativeBackendHasSycl, so pinning here
+    narrows these classes to the branch they test.
     """
-    monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+    monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
 
 
 @pytest.mark.usefixtures("_non_vulkan_host")
@@ -2306,6 +2309,120 @@ class TestNativeBackendHasVulkan:
             "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
             _boom)
         assert _native_backend_has_vulkan() is False
+
+
+class TestNativeBackendHasSycl:
+    """The sycl side of TestNativeBackendHasVulkan - same authority (the real
+    shipped library set), same fixtures, different substring."""
+
+    @pytest.fixture
+    def _runtime_dir(self, tmp_path, monkeypatch):
+        # _native_backend_has_sycl imports these INSIDE the function, so patch
+        # them on the SOURCE module, not on localm.discover.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: tmp_path)
+        return tmp_path
+
+    def test_true_when_sycl_backend_is_shipped(self, _runtime_dir):
+        (_runtime_dir / _ggml_lib_name("base")).write_bytes(b"")
+        (_runtime_dir / _ggml_lib_name("sycl")).write_bytes(b"")
+        assert _native_backend_has_sycl() is True
+
+    def test_false_when_a_non_sycl_backend_is_shipped(self, _runtime_dir):
+        # e.g. the vulkan build: present, but not sycl.
+        (_runtime_dir / _ggml_lib_name("base")).write_bytes(b"")
+        (_runtime_dir / _ggml_lib_name("vulkan")).write_bytes(b"")
+        assert _native_backend_has_sycl() is False
+
+    def test_false_when_no_backend_libraries_present(self, _runtime_dir):
+        assert _native_backend_has_sycl() is False
+
+    def test_false_when_runtime_dir_unresolved(self, monkeypatch):
+        # No native runtime provisioned at all: not sycl, and must not raise.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: None)
+        assert _native_backend_has_sycl() is False
+
+    def test_false_and_no_raise_when_the_probe_itself_fails(self, monkeypatch):
+        # Detection is best-effort: a broken runtime resolution must degrade to
+        # "not sycl" (the validating branch) rather than break model loading.
+        def _boom():
+            raise OSError("runtime dir exploded")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _boom)
+        assert _native_backend_has_sycl() is False
+
+
+class TestNativeGpuIndexSpaceIsOpaque:
+    """The combinator every index-validation branch actually calls: opaque
+    exactly when either backend detector says so."""
+
+    @pytest.mark.parametrize("vulkan,sycl,expected", [
+        (False, False, False),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ])
+    def test_truth_table(self, monkeypatch, vulkan, sycl, expected):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: vulkan)
+        monkeypatch.setattr("localm.discover._native_backend_has_sycl",
+                            lambda: sycl)
+        assert _native_gpu_index_space_is_opaque() is expected
+
+    def test_sycl_leaf_never_called_once_vulkan_is_true(self, monkeypatch):
+        # OR short-circuit: a vulkan-provisioned box pays no cost for the sycl
+        # glob it does not need.
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: True)
+
+        def _boom():
+            raise AssertionError(
+                "_native_backend_has_sycl must not be called when vulkan "
+                "already answers True")
+
+        monkeypatch.setattr("localm.discover._native_backend_has_sycl", _boom)
+        assert _native_gpu_index_space_is_opaque() is True
+
+
+class TestSyclBackendIndexPassthrough:
+    """The sycl side of TestVulkanBackendIndexPassthrough's pass-through
+    contract, pinning the SYCL leaf specifically (not the combinator) to
+    prove it alone drives the branch exactly as the vulkan leaf does. The
+    shared branching logic itself is already exercised exhaustively by the
+    vulkan class, so this covers a representative subset rather than
+    duplicating every case."""
+
+    @pytest.fixture(autouse=True)
+    def _sycl_host(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._native_backend_has_sycl",
+                            lambda: True)
+
+    def test_main_gpu_index_absent_from_detected_list_is_trusted(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(5, gpus=[{"index": 0}, {"index": 1}])
+        assert idx == 5
+        assert not any("does not match" in r.message for r in caplog.records)
+
+    def test_gpu_split_unknown_index_is_kept(self):
+        assert resolve_gpu_split([0, 9], gpus=[{"index": 0}]) == \
+            [(0, 1.0), (9, 1.0)]
+
+    def test_apply_main_gpu_trusts_configured_index(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
+        mp = SimpleNamespace(main_gpu=0)
+        apply_main_gpu(mp, config={"main_gpu_index": 7})
+        assert mp.main_gpu == 7
+
+    def test_sanity_ceiling_still_enforced_on_sycl(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(500_000, gpus=[{"index": 0}])
+        assert idx == 0
+        assert any("ceiling" in r.message for r in caplog.records)
 
 
 @pytest.mark.usefixtures("_non_vulkan_host")
@@ -2764,7 +2881,8 @@ class TestAppliedSplitDeviceCount:
     ]
 
     def _vulkan(self, monkeypatch, on):
-        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: on)
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque",
+                            lambda: on)
 
     def test_no_split_is_zero_without_probing(self, monkeypatch):
         # Mirrors split_device_count's no-probe contract: the common single-GPU
@@ -2876,6 +2994,36 @@ class TestGpuSplitShortfallVulkan:
         # The guard sits BEFORE the list_gpus() probe, so a torch-blind vulkan box
         # pays no probe cost for a check it structurally cannot do.
         monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: True)
+        called = {"n": 0}
+        monkeypatch.setattr(
+            "localm.discover.list_gpus",
+            lambda *a, **k: called.__setitem__("n", called["n"] + 1) or self._MIXED)
+        gpu_split_shortfall(8_000_000_000, {"gpu_split_indices": [0, 1]})
+        assert called["n"] == 0
+
+
+class TestGpuSplitShortfallSycl:
+    """The sycl side of TestGpuSplitShortfallVulkan's contract, pinning the
+    SYCL leaf specifically to prove it alone drives the same skip."""
+
+    _MIXED = [
+        {"index": 0, "total": 16_000_000_000, "free": 1_000_000_000},
+        {"index": 1, "total": 16_000_000_000, "free": 1_000_000_000},
+    ]
+
+    def test_sycl_skips_per_device_check_and_logs_info(self, monkeypatch, caplog):
+        monkeypatch.setattr("localm.discover._native_backend_has_sycl", lambda: True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._MIXED)
+        cfg = {"gpu_split_indices": [0, 1]}
+        with caplog.at_level(logging.INFO, logger="localm"):
+            result = gpu_split_shortfall(8_000_000_000, cfg)
+        assert result == []
+        info = [r for r in caplog.records
+                if r.levelno == logging.INFO and "GPU-SPLIT-VKINDEX" in r.getMessage()]
+        assert info, "the sycl skip must be surfaced at INFO (reaches a bug report), not debug/silence"
+
+    def test_sycl_skip_does_not_probe_torch(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._native_backend_has_sycl", lambda: True)
         called = {"n": 0}
         monkeypatch.setattr(
             "localm.discover.list_gpus",
@@ -4152,6 +4300,74 @@ class TestNativeHipRuntimeResident:
         assert discover.native_hip_runtime_resident() is False
 
 
+class TestNativeSyclRuntimeResident:
+    """discover.native_sycl_runtime_resident() - the sycl sibling of
+    TestNativeHipRuntimeResident, same shape and same posture: the glob runs
+    REAL detection over a real directory, only the DLL name is faked."""
+
+    def _arm(self, monkeypatch, tmp_path, *, platform="win32",
+             native_loaded=True, sycl_dll=True):
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.native_lib_loaded",
+            lambda: native_loaded)
+        rt = tmp_path / "native-runtime"
+        rt.mkdir()
+        (rt / ("ggml-sycl.dll" if sycl_dll else "ggml-vulkan.dll")).write_bytes(b"")
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: rt)
+
+    def test_true_on_resident_sycl_build(self, monkeypatch, tmp_path):
+        self._arm(monkeypatch, tmp_path)
+        assert discover.native_sycl_runtime_resident() is True
+
+    @pytest.mark.parametrize("absent", ["platform", "native", "sycl"])
+    def test_false_when_any_condition_is_absent(
+            self, monkeypatch, tmp_path, absent):
+        kwargs = {}
+        if absent == "platform":
+            kwargs["platform"] = "linux"
+        elif absent == "native":
+            kwargs["native_loaded"] = False
+        else:
+            kwargs["sycl_dll"] = False
+        self._arm(monkeypatch, tmp_path, **kwargs)
+        assert discover.native_sycl_runtime_resident() is False
+
+    def test_check_failure_answers_false(self, monkeypatch, tmp_path):
+        """Fail closed: the doomed-combo check treats False as 'no special
+        handling'."""
+        self._arm(monkeypatch, tmp_path)
+
+        def _boom():
+            raise RuntimeError("resolver broke")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _boom)
+        assert discover.native_sycl_runtime_resident() is False
+
+
+class TestIntelSyclRtInstalled:
+    """discover._intel_sycl_rt_installed() - a distribution-metadata lookup
+    (not importlib.util.find_spec, unlike its rocm_sdk sibling: intel-sycl-rt
+    is not confirmed to expose an importable module)."""
+
+    def test_true_when_the_distribution_is_present(self, monkeypatch):
+        monkeypatch.setattr("importlib.metadata.distribution", lambda name: object())
+        assert discover._intel_sycl_rt_installed() is True
+
+    def test_false_when_the_distribution_is_absent(self, monkeypatch):
+        import importlib.metadata as _im
+
+        def _boom(name):
+            raise _im.PackageNotFoundError(name)
+
+        monkeypatch.setattr("importlib.metadata.distribution", _boom)
+        assert discover._intel_sycl_rt_installed() is False
+
+
 class TestTorchProbeKnownDoomedSkip:
     """_list_gpus_probe() must skip its `import torch` attempt AT THE ROOT
     exactly when that import is known-doomed: Windows + llama.cpp's bundled
@@ -4257,6 +4473,10 @@ class TestTorchProbeKnownDoomedSkip:
         assert isinstance(result, list)
         # The skip is surfaced, not silent.
         assert "skipping the torch GPU probe" in caplog.text
+        # The log names WHICH combination fired - a hip skip must never claim
+        # the SYCL runtime itself is what is loaded.
+        assert "bundled HIP llama.cpp runtime is already loaded" in caplog.text
+        assert "bundled SYCL llama.cpp runtime is already loaded" not in caplog.text
 
     @pytest.mark.parametrize(
         "absent", ["platform", "native", "hip", "rocm_sdk", "resident_torch"])
@@ -4290,6 +4510,118 @@ class TestTorchProbeKnownDoomedSkip:
     def test_detector_failure_fails_open_to_the_torch_attempt(
             self, monkeypatch, tmp_path):
         """A broken detector must never cost the working path (fail open)."""
+        attempted = self._arm(monkeypatch, tmp_path)
+
+        def _boom():
+            raise RuntimeError("detector broke")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _boom)
+        discover._list_gpus_probe()
+        assert attempted == ["torch"]
+
+
+class TestTorchProbeKnownDoomedSkipSycl:
+    """The sycl sibling of TestTorchProbeKnownDoomedSkip: same shape, same
+    posture (real glob over a real directory, only the DLL name faked), but
+    for the SECOND, less certain combination discover.py's own docstring
+    documents - see _torch_gpu_probe_known_doomed's docstring for why this
+    one is inferred by mechanism analogy rather than root-caused on real
+    Intel hardware. The HIP class above already proves the two combinations
+    do not interfere with each other (neither _arm helper ever writes the
+    other's DLL name), so this class does not repeat that cross-check."""
+
+    def _arm(self, monkeypatch, tmp_path, *, platform="win32",
+             native_loaded=True, sycl_dll=True, intel_sycl_rt_installed=True,
+             torch_resident=False):
+        """Arrange the guard's four conditions (defaults: the doomed combo)
+        and return the list that records every intercepted `import torch`."""
+        import builtins
+        import importlib.metadata
+
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.native_lib_loaded",
+            lambda: native_loaded)
+        rt = tmp_path / "native-runtime"
+        rt.mkdir()
+        # The flavor signal runs the REAL glob over a real directory: only the
+        # DLL name is faked, not the detection logic.
+        (rt / ("ggml-sycl.dll" if sycl_dll else "ggml-vulkan.dll")).write_bytes(b"")
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: rt)
+
+        def _fake_distribution(name):
+            if name == "intel-sycl-rt" and intel_sycl_rt_installed:
+                return object()
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(
+            "importlib.metadata.distribution", _fake_distribution)
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False))
+        if torch_resident:
+            monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        else:
+            monkeypatch.delitem(sys.modules, "torch", raising=False)
+        real_import = builtins.__import__
+        attempted = []
+
+        def _tracking_import(name, *args, **kwargs):
+            if name == "torch":
+                attempted.append(name)
+                monkeypatch.setitem(sys.modules, "torch", fake_torch)
+                return fake_torch
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_isolated",
+            lambda: (attempted.append("torch"), [])[1])
+        return attempted
+
+    def test_skips_torch_on_the_proven_sycl_combo(
+            self, monkeypatch, tmp_path, caplog):
+        attempted = self._arm(monkeypatch, tmp_path)
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            result = discover._list_gpus_probe()
+        assert "torch" not in attempted, (
+            "_list_gpus_probe attempted `import torch` with the native SYCL "
+            "runtime resident and intel-sycl-rt installed")
+        assert isinstance(result, list)
+        assert "skipping the torch GPU probe" in caplog.text
+        # The log names WHICH combination fired - a sycl skip must never
+        # claim the HIP runtime itself is what is loaded.
+        assert "bundled SYCL llama.cpp runtime is already loaded" in caplog.text
+        assert "bundled HIP llama.cpp runtime is already loaded" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "absent",
+        ["platform", "native", "sycl", "intel_sycl_rt", "resident_torch"])
+    def test_attempts_torch_when_any_condition_is_absent(
+            self, monkeypatch, tmp_path, absent):
+        kwargs = {}
+        if absent == "platform":
+            kwargs["platform"] = "linux"
+        elif absent == "native":
+            kwargs["native_loaded"] = False
+        elif absent == "sycl":
+            kwargs["sycl_dll"] = False
+        elif absent == "intel_sycl_rt":
+            kwargs["intel_sycl_rt_installed"] = False
+        else:
+            kwargs["torch_resident"] = True
+        attempted = self._arm(monkeypatch, tmp_path, **kwargs)
+        discover._list_gpus_probe()
+        assert attempted == ["torch"], (
+            f"with {absent!r} absent the combination is not the sycl doomed "
+            "one, so the probe must still attempt torch enumeration")
+
+    def test_detector_failure_fails_open_to_the_torch_attempt(
+            self, monkeypatch, tmp_path):
         attempted = self._arm(monkeypatch, tmp_path)
 
         def _boom():
