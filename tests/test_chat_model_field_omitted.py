@@ -81,7 +81,6 @@ def server(monkeypatch):
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
     hs._inference_sem = None
 
@@ -142,7 +141,6 @@ def test_omitted_model_still_400_when_nothing_can_be_resolved(monkeypatch):
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
 
     client = TestClient(hs.create_app(None))

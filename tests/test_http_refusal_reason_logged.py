@@ -48,7 +48,6 @@ def _reset_globals():
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
 
 

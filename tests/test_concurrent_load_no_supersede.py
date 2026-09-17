@@ -63,7 +63,6 @@ def multi(monkeypatch):
     for d in (hs._engines, hs._engines_lru, hs._inference_sems, hs._last_activity_per_model):
         d.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
     hs._inference_sem = None
     hs._switch_desired = None

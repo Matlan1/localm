@@ -784,6 +784,27 @@ def _reset_coder_privacy_registry():
 
 
 @pytest.fixture(autouse=True)
+def _reset_http_server_model_name_state():
+    """http_server.create_app(engine) publishes engine.display_name into the
+    module globals _default_model_name and _active_model_name for the life of
+    the process, not the life of one create_app() call, and switch_engine /
+    unload_all_models / unload_one_model / rename_model can additionally set
+    _active_model_name and _last_active_model_name at any point afterwards.
+    None of that is reset when a test ends. Clears all three to None before and
+    after every test, so a named engine from one test's create_app() call can
+    never be read back by _resolve_unnamed_model_name() in a later test that
+    never named an engine of its own."""
+    from localm.inference import http_server as hs
+    hs._default_model_name = None
+    hs._active_model_name = None
+    hs._last_active_model_name = None
+    yield
+    hs._default_model_name = None
+    hs._active_model_name = None
+    hs._last_active_model_name = None
+
+
+@pytest.fixture(autouse=True)
 def _neutralise_bare_llama_pointers():
     """tests/_bare_llama.py's make_bare_llama() registers every instance it
     builds in a module-level list; a caller that overrides a pointer to a

@@ -135,7 +135,6 @@ def _install_fakes(monkeypatch, *, free, status=None, fails_to_fit=False):
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
     hs._inference_sem = None
     # No restart authority on a fresh server; the fake-alarm tests install
@@ -394,7 +393,6 @@ def _install_embedder_fakes(monkeypatch, *, free_with_embedder, free_after_evict
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
     hs._inference_sem = None
 
@@ -519,7 +517,6 @@ def test_idle_embedder_evicted_for_split_per_device_shortfall(monkeypatch, tmp_p
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
     hs._inference_sem = None
 
@@ -911,7 +908,6 @@ class TestSplitAwareCapacityGate:
         hs._inference_sems.clear()
         hs._last_activity_per_model.clear()
         hs._active_model_name = None
-        hs._default_model_name = None
         hs._engine = None
         hs._inference_sem = None
 
@@ -1039,7 +1035,6 @@ class TestPerDeviceSplitFitGate:
         hs._inference_sems.clear()
         hs._last_activity_per_model.clear()
         hs._active_model_name = None
-        hs._default_model_name = None
         hs._engine = None
         hs._inference_sem = None
 
@@ -1200,7 +1195,6 @@ class TestPerDeviceSplitFitGate:
         hs._inference_sems.clear()
         hs._last_activity_per_model.clear()
         hs._active_model_name = None
-        hs._default_model_name = None
         hs._engine = None
         hs._inference_sem = None
 
@@ -1278,7 +1272,6 @@ async def test_switch_engine_vram_probe_does_not_block_event_loop(monkeypatch):
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     hs._engine = None
     hs._inference_sem = None
 
