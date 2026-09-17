@@ -56,6 +56,7 @@ _BACKEND_CHOICES = [
     ("cuda", "CUDA - NVIDIA, peak performance"),
     ("hip", "ROCm/HIP - AMD, peak performance (needs the ROCm runtime)"),
     ("amd-rocm", "ROCm - AMD RX 6000 (gfx103X), self-contained"),
+    ("sycl", "SYCL - Intel GPU (incl. integrated), often faster than Vulkan"),
     ("metal", "Metal - Apple Silicon, native GPU acceleration"),
     ("cpu", "CPU only - no GPU"),
     ("own", "I will provide my own llama.cpp build (skip the download)"),

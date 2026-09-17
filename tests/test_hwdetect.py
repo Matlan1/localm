@@ -181,6 +181,19 @@ def test_detect_win_intel_arc(monkeypatch):
     assert hwdetect.detect().vendors == ["intel"]
 
 
+def test_detect_win_intel_igpu_iris_xe(monkeypatch):
+    # Integrated Intel GPUs (Iris Xe, UHD, "Intel Graphics" on Meteor/Lunar
+    # Lake) never contain "arc" in their adapter name, so the arc-only match
+    # missed them entirely - a real box would fall through to "cpu".
+    _win(monkeypatch, "Intel(R) Iris(R) Xe Graphics")
+    assert hwdetect.detect().vendors == ["intel"]
+
+
+def test_detect_win_intel_igpu_uhd(monkeypatch):
+    _win(monkeypatch, "Intel(R) UHD Graphics 770")
+    assert hwdetect.detect().vendors == ["intel"]
+
+
 def test_detect_win_no_gpu_is_cpu(monkeypatch):
     _win(monkeypatch, "Microsoft Basic Display Adapter")
     d = hwdetect.detect()
@@ -260,6 +273,21 @@ def test_detect_linux_no_gpu_is_cpu(monkeypatch):
     d = hwdetect.detect()
     assert d.vendors == []
     assert d.recommended == "cpu"
+
+
+def test_detect_linux_intel_igpu_without_arc_xe_dg2_substring(monkeypatch):
+    # _linux_gpu_names() already filters to vga/3d-controller/display lines, so
+    # any "intel" hit there is real GPU hardware - integrated Intel graphics
+    # (e.g. Raptor Lake-P) reports a name with none of "arc"/"xe"/"dg2" in it,
+    # and used to be invisible to vendor detection entirely.
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    monkeypatch.setattr(
+        hwdetect, "_linux_gpu_names",
+        lambda: ("00:02.0 vga compatible controller: intel corporation "
+                  "raptor lake-p integrated graphics controller", True))
+    monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
+    monkeypatch.setattr(hwdetect.Path, "is_dir", lambda self: False)
+    assert hwdetect.detect().vendors == ["intel"]
 
 
 def test_detect_never_raises_even_with_dead_probes(monkeypatch):
@@ -377,6 +405,21 @@ def test_install_backend_linux_amd_with_rocm_is_hip(monkeypatch):
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 6800")
     assert hwdetect.recommended_install_backend(d) == "hip"
+
+
+@pytest.mark.parametrize("plat", ["win32", "linux"])
+def test_install_backend_intel_is_vulkan_not_sycl(monkeypatch, plat):
+    # Deliberate, not an oversight: sycl is a real downloadable binary (see
+    # setup_llama._ASSET_MATCH) and works on Intel iGPUs too, but there is no
+    # oneAPI/Level-Zero toolkit-presence probe, and every competitor (LM
+    # Studio, Jan, ollama, koboldcpp) also defaults Intel to Vulkan - see
+    # dev-notes/INTEL-acceleration-research-2026-06-22.md. sycl stays an
+    # explicit menu pick (setup.sh/setup.bat/installer/gui.py) rather than the
+    # recommended default. If this ever changes, it is a deliberate policy
+    # decision, not a one-line accident - update this test's name too.
+    monkeypatch.setattr(hwdetect.sys, "platform", plat)
+    d = Detection(vendors=["intel"], gpu_names="intel(r) arc(tm) a770 graphics")
+    assert hwdetect.recommended_install_backend(d) == "vulkan"
 
 
 # ------------------------- _rocm_toolkit_present -------------------------

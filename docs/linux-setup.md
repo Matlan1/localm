@@ -89,7 +89,7 @@ backend (or let auto-detect choose) and it downloads the matching Linux build
 .venv/bin/localm setup-llama --backend vulkan   # any GPU, no vendor toolkit
 .venv/bin/localm setup-llama --backend cuda      # NVIDIA (needs CUDA runtime)
 .venv/bin/localm setup-llama --backend hip       # AMD ROCm (needs ROCm runtime)
-.venv/bin/localm setup-llama --backend sycl      # Intel Arc (needs the oneAPI runtime)
+.venv/bin/localm setup-llama --backend sycl      # Intel GPU, incl. integrated (needs the oneAPI runtime)
 .venv/bin/localm setup-llama --backend cpu       # no GPU
 ```
 

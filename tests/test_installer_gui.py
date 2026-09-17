@@ -646,6 +646,18 @@ class TestBackendMenu:
         """An AMD box with a ROCm toolkit is recommended hip by hwdetect."""
         assert "hip" in [k for k, _ in gui.backend_choices()]
 
+    def test_sycl_is_offered_on_every_platform(self, gui, monkeypatch):
+        # Unlike metal/amd-rocm (real platform gates - no darwin vulkan build,
+        # no non-Windows amd-rocm build), sycl has an upstream asset for both
+        # win32 and linux, so it is never platform-gated - it just is not
+        # auto-RECOMMENDED (see hwdetect.recommended_install_backend).
+        monkeypatch.setattr(gui.sys, "platform", "linux")
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        assert "sycl" in [k for k, _ in gui.backend_choices()]
+        monkeypatch.setattr(gui.sys, "platform", "win32")
+        monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        assert "sycl" in [k for k, _ in gui.backend_choices()]
+
     def test_the_menu_can_show_whatever_hwdetect_recommends(self, gui, monkeypatch):
         """A recommendation with no matching row leaves the group unselected."""
         monkeypatch.setattr(gui.sys, "platform", "darwin")

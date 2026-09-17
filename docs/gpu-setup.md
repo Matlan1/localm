@@ -22,7 +22,7 @@ See the table below for what each backend needs and when to pick it.
 | `cuda` | NVIDIA | auto-picked on every OS (peak performance); setup fetches the CUDA runtime for you (no Toolkit) on both Windows and Linux, then load-tests and falls back to vulkan/cpu if it cannot load |
 | `amd-rocm` | AMD RX 6000/7000/9000 (gfx103X/110X/120X), Windows only | self-contained ROCm build matched to your card's family (bundles its runtime, no toolkit needed); auto-picked for RX 6000 (gfx103X), the best-tested family - request it explicitly (`--backend amd-rocm`) on RX 7000/9000 too, since auto-detect still defaults those to `hip`/`vulkan`; on Linux use `hip` or `--from` instead |
 | `hip` | AMD (any gfx) | upstream ROCm build; auto-picked when a system ROCm/HIP toolkit is detected present, else `vulkan` |
-| `sycl` | Intel Arc | needs the oneAPI runtime; opt-in only (no toolkit-presence probe for it yet) |
+| `sycl` | Intel GPU (Arc/Battlemage, or an 11th-gen+ Core integrated GPU) | self-contained on Windows (bundles the oneAPI runtime), needs a system oneAPI install on Linux; opt-in only (no toolkit-presence probe for it yet) |
 | `metal` | Apple Silicon | auto-picked on macOS; experimental and unverified - see the note below |
 | `cpu` | no GPU | always works |
 
@@ -185,10 +185,19 @@ broken runtime.
 > bundle (Windows) or the CUDA runtime libraries (Linux) are verified by their
 > own separately published checksums instead.
 
-## Intel (Arc)
+## Intel (Arc / integrated Xe, UHD)
 
-`localm setup-llama --backend vulkan` is the easy path (no toolkit). For the
-oneAPI-optimized build use `--backend sycl` (needs the oneAPI runtime present).
+`localm setup-llama --backend vulkan` is the easy path (no toolkit) and the
+installer's default recommendation on Intel, matching every comparable local-LLM
+tool. For the oneAPI-optimized build, often faster, use `--backend sycl`: it is
+self-contained on Windows (bundles the oneAPI/Level-Zero runtime - only the
+Intel GPU driver is needed) and needs a system oneAPI install on Linux. SYCL
+works on integrated GPUs too (11th-gen Core / Tiger Lake and newer, including
+the built-in Arc iGPU on Meteor Lake and Lunar Lake), not only discrete
+Arc/Battlemage cards - though an iGPU with fewer than 80 execution units will
+likely be too slow to be worth it, and needs enough system RAM available as
+GPU-shared memory to hold the model. Neither backend is auto-selected over the
+other; pick with `--backend vulkan` / `--backend sycl` explicitly.
 
 ## CPU-only
 

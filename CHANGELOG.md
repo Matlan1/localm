@@ -503,6 +503,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   interface is still found where it listens). A registration naming anything else is reported
   as not running, and nothing is sent to it or looked up. The check is also a single request
   now: a redirect answer from whatever is listening on the recorded port is not followed.
+- **Intel GPUs were not always detected, and `sycl` was never offered as a runtime choice.**
+  An integrated Intel GPU (Iris Xe, UHD Graphics) could go undetected entirely, since detection
+  only recognised Arc-branded names - a box like this fell back to a "no GPU found" CPU-only
+  recommendation instead of Vulkan. Detection now recognises any Intel GPU, integrated or
+  discrete. Separately, `sycl` - a real, self-contained-on-Windows runtime that is often faster
+  than Vulkan on Intel hardware, including integrated GPUs - was already downloadable via
+  `localm setup-llama --backend sycl` but was never listed in either setup wizard's menu. Both
+  the console and graphical installers now offer it as an explicit choice. Vulkan remains the
+  default recommendation on Intel, matching every comparable local-LLM tool.
 
 ## [0.2.0] - 2026-09-04
 

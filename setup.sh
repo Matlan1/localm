@@ -537,7 +537,7 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
 REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
 case "$REC" in
-  vulkan|cuda|hip|cpu|metal|amd-rocm) ;;   # a known backend from the policy
+  vulkan|cuda|hip|sycl|cpu|metal|amd-rocm) ;;   # a known backend from the policy
   *) case "$GPU" in                        # fallback if the probe failed
        cpu)   REC=cpu ;;
        metal) REC=metal ;;   # see test_probe_failed_fallback_metal_gpu_stays_metal
@@ -557,13 +557,14 @@ if [ "$GPU" = cpu ]; then REC=cpu; fi
 # reads as two different options that happen to share a name. Mark the twin
 # instead of removing it: the numbering has to stay stable.
 _same="   (same as [1])"
-_m2=""; _m3=""; _m4=""; _m5=""; _m7=""
+_m2=""; _m3=""; _m4=""; _m5=""; _m6=""; _m8=""
 case "$REC" in
   vulkan) _m2="$_same" ;;
   cuda)   _m3="$_same" ;;
   hip)    _m4="$_same" ;;
-  cpu)    _m5="$_same" ;;
-  metal)  _m7="$_same" ;;
+  sycl)   _m5="$_same" ;;
+  cpu)    _m6="$_same" ;;
+  metal)  _m8="$_same" ;;
 esac
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
@@ -571,27 +572,28 @@ say "    [1] $REC  (recommended)"
 say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"
 say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)$_m3"
 say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"
-say "    [5] cpu      - no GPU$_m5"
-say "    [6] I will build / provide my own (skip the download)"
+say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"
+say "    [6] cpu      - no GPU$_m6"
+say "    [7] I will build / provide my own (skip the download)"
 # See test_menu_shows_metal_line_only_on_apple_silicon.
-_pick_range="1-6"
+_pick_range="1-7"
 if [ "$IS_APPLE_SILICON" = 1 ]; then
-  say "    [7] metal    - Apple Silicon, native GPU acceleration$_m7"
-  _pick_range="1-7"
+  say "    [8] metal    - Apple Silicon, native GPU acceleration$_m8"
+  _pick_range="1-8"
 fi
 say "    (your pick is load-tested; on failure you can retry after fixing the"
 say "     cause, or continue setup and provision a runtime later - never a"
 say "     silent swap to a different backend)"
 bpick="$(ask "  Pick $_pick_range [1]: " 1)"
 case "$bpick" in
-  2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
-  6) BACKEND=own ;;    7) BACKEND=metal ;; *) BACKEND="$REC" ;;
+  2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=sycl ;;
+  6) BACKEND=cpu ;;    7) BACKEND=own ;;  8) BACKEND=metal ;; *) BACKEND="$REC" ;;
 esac
 if [ "$LOCALM_BIN_OK" != 1 ]; then
   # .venv/bin/localm never got installed (warned above) - it is what setup-llama
   # runs through, so calling it here would just fail again, less clearly.
   say "  Skipped - .venv/bin/localm is missing (see the warning above)."
-  say "  Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
+  say "  Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
 elif [ "$BACKEND" = own ]; then
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
@@ -599,7 +601,7 @@ elif [ "$BACKEND" = own ]; then
       ".venv/bin/localm setup-llama --from <dir>" \
       "Provisioning the native llama.cpp runtime with --from failed during setup."
   else
-    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
+    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
   fi
 else
   .venv/bin/localm setup-llama --backend "$BACKEND" || handle_provision_failure \
@@ -789,7 +791,7 @@ if [ "$LOCALM_BIN_OK" = 1 ]; then
     say ""
     say "  [!] No model can load yet - the native llama.cpp runtime did not finish"
     say "      provisioning. Finish it any time with:"
-    say "        .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
+    say "        .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
   fi
 else
   say "  Done, with one open issue: .venv/bin/localm never got installed (see the"
