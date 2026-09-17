@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Decide whether a pull request may merge, as the `merge-policy` job in
-.github/workflows/ci.yml: the one check to require in branch protection.
+.github/workflows/ci.yml: the one check that sums up the others.
 
 The job runs on every pull_request once python-pr-gate, lint, gui-tests and
 test have finished, whatever their results, and passes only when:
 
   - lint and gui-tests succeeded, and no needed job failed or was cancelled;
-  - without the `full-ci` label: python-pr-gate succeeded AND the change needs
-    no two-platform matrix, which means no changed file is in a matrix
-    category (CATEGORIES below: the release VERSION file, the trust boundary,
-    the plugin engine, inference/workers/the native binding, packaging and
-    installers, the CI workflows and gates) and the affected-test selection
-    scripts/run_affected_tests.py computes for the change is not wide;
+  - without the `full-ci` label: python-pr-gate succeeded and the change is
+    not a release (VERSION is unchanged);
   - with the `full-ci` label: the test matrix succeeded.
 
-A change that needs the matrix on an unlabelled PR fails with the files and
-the label named. A skipped, failed or missing result never reads as a pass.
+The two-platform matrix runs at release, not on an ordinary pull request: a
+release PR (one that changes VERSION) without the label fails with the label
+named, every other PR merges on python-pr-gate, lint and gui-tests alone. A
+skipped, failed or missing result never reads as a pass.
 
-    python scripts/merge_policy.py --full-ci false \
-        --result python-pr-gate=success --result lint=success \
-        --result gui-tests=success --result test=skipped [--files ...]
+The summary also lists the matrix categories the change touches (CATEGORIES
+below: the trust boundary, the plugin engine, inference/workers/the native
+binding, packaging and installers, the CI workflows and gates) for the
+release run to know what it covers; none of them blocks a merge.
 
-The verdict, the results, the matched categories and the selection mode are
-printed, and appended to the file named by GITHUB_STEP_SUMMARY when that
-variable is set. Exit status 0 is a pass, 1 a fail.
+    python scripts/merge_policy.py --full-ci false         --result python-pr-gate=success --result lint=success         --result gui-tests=success --result test=skipped [--files ...]
+
+The verdict, the results and the matched categories are printed, and appended
+to the file named by GITHUB_STEP_SUMMARY when that variable is set. Exit
+status 0 is a pass, 1 a fail.
 
 Stdlib only; imports scripts/affected_tests.py and scripts/run_affected_tests.py.
 """
@@ -48,11 +49,13 @@ import run_affected_tests  # noqa: E402
 LABEL = "full-ci"
 JOBS = ("python-pr-gate", "lint", "gui-tests", "test")
 ALWAYS_REQUIRED = ("lint", "gui-tests")
+RELEASE = "release"
 
 # Category -> patterns. `**` matches across directories, `*` and `?` within
 # one path segment, a leading `!` excludes what it matches from the category.
+# Only RELEASE blocks a merge; the others are reported.
 CATEGORIES: dict[str, tuple[str, ...]] = {
-    "release": ("VERSION",),
+    RELEASE: ("VERSION",),
     "trust boundary (auth, scopes, TLS, bind handling, network policy, path safety, config)": (
         "localm/auth.py",
         "localm/scopes.py",
@@ -160,18 +163,16 @@ class Verdict:
     full_ci: bool
     results: dict[str, str]                     # job -> result as reported
     categories: dict[str, list[str]] = field(default_factory=dict)
-    selection: str = ""                         # the selector's mode, or "" when not run
-    selection_detail: str = ""
 
     @property
-    def needs_matrix(self) -> bool:
-        return bool(self.categories) or self.selection == "wide"
+    def is_release(self) -> bool:
+        return RELEASE in self.categories
 
 
-def decide(full_ci: bool, results: dict[str, str], categories: dict[str, list[str]],
-           selection: str = "", selection_detail: str = "") -> Verdict:
-    """Apply the policy to the label state, the needed jobs' results, the
-    matched categories and the selector's mode."""
+def decide(full_ci: bool, results: dict[str, str],
+           categories: dict[str, list[str]]) -> Verdict:
+    """Apply the policy to the label state, the needed jobs' results and the
+    matched categories."""
     reasons: list[str] = []
     state = {job: results.get(job, "missing") for job in JOBS}
     for job in JOBS:
@@ -181,31 +182,22 @@ def decide(full_ci: bool, results: dict[str, str], categories: dict[str, list[st
         if state[job] == "skipped":
             reasons.append(f"{job}: skipped (must be success on "
                            f"{'a labelled' if full_ci else 'an unlabelled'} PR)")
-    if not full_ci and (categories or selection == "wide"):
-        what = [f"{name}: " + ", ".join(files) for name, files in categories.items()]
-        if selection == "wide":
-            what.append("the affected-test selection is wider than a targeted run")
+    if not full_ci and RELEASE in categories:
         reasons.append(
-            "this change needs the two-platform test matrix, which runs only on a pull "
-            f"request labelled `{LABEL}`: add the label, and merge-policy passes on the "
-            "run the label starts once the matrix is green. Because: " + "; ".join(what))
+            f"this is a release ({', '.join(categories[RELEASE])} changed) and a release "
+            f"runs the two-platform test matrix, which runs only on a pull request "
+            f"labelled `{LABEL}`: add the label, and merge-policy passes on the run the "
+            "label starts once the matrix is green")
     return Verdict(ok=not reasons, reasons=reasons, full_ci=full_ci, results=dict(results),
-                   categories=categories, selection=selection,
-                   selection_detail=selection_detail)
+                   categories=categories)
 
 
 def evaluate(full_ci: bool, results: dict[str, str], base: str,
-             files: list[str] | None, run_selector: bool = True) -> Verdict:
+             files: list[str] | None) -> Verdict:
     """The verdict for the change git reports since the merge base with *base*
-    (or *files*), running the affected-test selector at depth 1 unless
-    *run_selector* is false."""
+    (or *files*)."""
     changed = files if files is not None else affected_tests.changed_files(base)[0]
-    categories = classify(changed)
-    selection = detail = ""
-    if run_selector:
-        sel = run_affected_tests.select(1, base, files)
-        selection, detail = sel.mode, sel.detail
-    return decide(full_ci, results, categories, selection, detail)
+    return decide(full_ci, results, classify(changed))
 
 
 def render_summary(verdict: Verdict) -> str:
@@ -221,15 +213,12 @@ def render_summary(verdict: Verdict) -> str:
         lines.append(f"| {job} | {verdict.results.get(job, 'missing')} |")
     lines.append("")
     if verdict.categories:
-        lines.append("Changed files in a matrix category:")
+        lines.append("Matrix categories this change touches (the two-platform matrix runs at "
+                     "release; only a release blocks here):")
         for name, files in verdict.categories.items():
             lines.append(f"- {name}: " + ", ".join(f"`{f}`" for f in files))
     else:
         lines.append("No changed file is in a matrix category.")
-    if verdict.selection:
-        lines.append(f"Affected-test selection at depth 1: **{verdict.selection}**.")
-        if verdict.selection_detail:
-            lines += ["", "```", verdict.selection_detail, "```"]
     return "\n".join(lines) + "\n"
 
 
@@ -250,11 +239,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--base", default="origin/master",
                     help="ref the committed changes are diffed from (via merge-base)")
     ap.add_argument("--files", nargs="*", help="use these changed paths instead of git")
-    ap.add_argument("--no-selector", action="store_true",
-                    help="do not run the affected-test selector (the wide check)")
     args = ap.parse_args(argv)
-    verdict = evaluate(args.full_ci == "true", dict(args.result), args.base, args.files,
-                       run_selector=not args.no_selector)
+    verdict = evaluate(args.full_ci == "true", dict(args.result), args.base, args.files)
     run_affected_tests._publish(render_summary(verdict))
     return 0 if verdict.ok else 1
 

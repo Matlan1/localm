@@ -13,8 +13,8 @@ on:
   #                  label: lockfile check, hygiene, ruff, and the tests
   #                  scripts/affected_tests.py selects for the diff. A
   #                  labelled PR gets the matrix instead. merge-policy runs
-  #                  on every pull_request after those jobs and is the one
-  #                  check branch protection requires - see that job below.
+  #                  on every pull_request after those jobs and sums them up
+  #                  into one check - see that job below.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
   #   workflow_dispatch / schedule   run the matrix unconditionally. The
@@ -622,16 +622,15 @@ jobs:
         continue-on-error: true
         run: python scripts/check_llama_rocm_pin.py
 
-  # The one check to require in branch protection (docs/architecture.md,
-  # "Merge policy"). Runs on every pull_request once the four jobs it needs
-  # have finished, whatever their results, and never on push, dispatch or
+  # The one check that sums up the others (docs/architecture.md, "Merge
+  # policy"). Runs on every pull_request once the four jobs it needs have
+  # finished, whatever their results, and never on push, dispatch or
   # schedule. scripts/merge_policy.py reads those results and the change:
   # lint and gui-tests must have succeeded; without the `full-ci` label
-  # python-pr-gate must have succeeded and the change must need no
-  # two-platform matrix (no changed file in a matrix category, no wide
-  # affected-test selection); with the label the test matrix must have
-  # succeeded. A change that needs the matrix on an unlabelled PR fails here
-  # with the files and the label named; a skipped needed job never passes.
+  # python-pr-gate must have succeeded and the change must not be a release
+  # (VERSION unchanged); with the label the test matrix must have succeeded.
+  # A release PR without the label fails here with the label named; every
+  # other PR merges without the matrix. A skipped needed job never passes.
   merge-policy:
     name: merge-policy
     runs-on: ubuntu-latest

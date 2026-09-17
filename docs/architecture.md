@@ -93,42 +93,27 @@ existing test file, or cannot resolve the base ref it diffs from. A change
 that fails the gate that way needs the two-platform matrix with coverage,
 which runs on a PR carrying the `full-ci` label in place of the gate.
 
-`merge-policy` (`scripts/merge_policy.py`) is the one check to require in
-branch protection. It runs on every pull request once `python-pr-gate`,
-`lint`, `gui-tests` and `test` have finished, whatever their results, and it
-is never skipped on a pull request, so a needed job that was skipped or
-failed cannot read as a pass. It passes when `lint` and `gui-tests`
-succeeded and, on a PR without the `full-ci` label, `python-pr-gate`
-succeeded and the change needs no matrix; on a PR with the label, when the
-`test` matrix succeeded. A change needs the matrix when a changed file is in
-a matrix category or the depth-1 affected-test selection is wide (the same
-selection `python-pr-gate` runs). The categories, listed in
-`scripts/merge_policy.py`: the release (`VERSION`); the trust boundary
-(`auth`, `scopes`, `tls`, `bindhost`, `netlisten`, `portmux`, `netpolicy`,
-`netpin`, `pathsafe`, `config`); the plugin engine and contract
-(`localm/plugins/*.py`); inference, the workers and the native binding
+`merge-policy` (`scripts/merge_policy.py`) is the one check that sums the
+others up. It runs on every pull request once `python-pr-gate`, `lint`,
+`gui-tests` and `test` have finished, whatever their results, and it is
+never skipped on a pull request, so a needed job that was skipped or failed
+cannot read as a pass. It passes when `lint` and `gui-tests` succeeded and,
+on a PR without the `full-ci` label, `python-pr-gate` succeeded and the
+change is not a release (`VERSION` unchanged); on a PR with the label, when
+the `test` matrix succeeded. The two-platform matrix runs at release, not on
+an ordinary pull request: a release PR without the label fails
+`merge-policy` with the label named, and every other PR merges on the three
+cheap jobs. Adding the label to an open PR leaves the earlier unlabelled
+run's `merge-policy` in place next to the new one; the newest check run of
+that name is the verdict. The summary also lists the matrix categories the
+change touches, for the release run to know what it covers: the trust
+boundary (`auth`, `scopes`, `tls`, `bindhost`, `netlisten`, `portmux`,
+`netpolicy`, `netpin`, `pathsafe`, `config`), the plugin engine and contract
+(`localm/plugins/*.py`), inference, the workers and the native binding
 (`localm/inference/` except `routes/`, `_mp_spawn`, `_torch_gpu_probe`,
-`setup_llama`, `runtime/`); packaging and the installers (`pyproject.toml`,
-`uv.lock`, the setup, install, launcher and rollback scripts, `installer/`,
-`__main__`, `_venvguard`, `install_manifest`, `updater`, `_apply_update`);
-and the CI workflows and gates (`.github/workflows/`, the selector, the
-gate, the policy and the coverage floors). A change in a category on an
-unlabelled PR fails `merge-policy` with the files and the label named;
-labelling the PR starts the matrix run, and `merge-policy` passes on that
-run once the matrix is green. Adding the label to an open PR leaves the
-earlier unlabelled run's failed `merge-policy` in place next to the new one;
-the newest check run of that name is the verdict.
-
-Branch protection on `master` requires exactly that one check. To set it
-(an administrator, once; `strict: false` so a PR need not be rebased onto
-the newest `master` before merging):
-
-    gh api -X PUT repos/Matlan1/localm/branches/master/protection --input - <<'EOF'
-    {"required_status_checks": {"strict": false, "contexts": ["merge-policy"]},
-     "enforce_admins": false, "required_pull_request_reviews": null, "restrictions": null}
-    EOF
-
-`gh api repos/Matlan1/localm/branches/master/protection` reads it back.
+`setup_llama`, `runtime/`), packaging and the installers, and the CI
+workflows and gates. None of those blocks a merge; the list lives in
+`scripts/merge_policy.py`.
 
 So before removing or renaming a config key, a route, or a response field:
 search for the old name and for every field name the route derives from

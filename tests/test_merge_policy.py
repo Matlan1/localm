@@ -4,9 +4,9 @@ ci.yml, and the shape of that job.
 
 The policy's contract: lint and gui-tests must succeed on every pull request;
 without the `full-ci` label python-pr-gate must succeed and the change must
-need no two-platform matrix; with the label the matrix must succeed; a
-change that needs the matrix on an unlabelled PR fails with the files and the
-label named; a skipped, failed, cancelled or missing needed job never passes.
+not be a release; with the label the matrix must succeed; a release PR
+without the label fails with the label named, every other PR merges without
+the matrix; a skipped, failed, cancelled or missing needed job never passes.
 The last section binds the script to the real tree and pins the ci.yml job so
 it cannot be quietly skipped, narrowed or made non-blocking.
 """
@@ -166,71 +166,62 @@ def test_every_pattern_names_something_that_exists_in_the_tree(mp):
 # --- the decision -------------------------------------------------------------
 
 def test_a_docs_only_unlabelled_pr_passes_on_the_three_cheap_jobs(mp):
-    v = mp.decide(False, GREEN_UNLABELLED, {}, "nothing")
+    v = mp.decide(False, GREEN_UNLABELLED, {})
     assert v.ok and v.reasons == []
-    assert v.needs_matrix is False
+    assert v.is_release is False
 
 
-def test_a_trust_boundary_change_without_the_label_fails_naming_the_file_and_the_label(mp):
-    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["localm/auth.py"]), "selected")
+@pytest.mark.parametrize("path", [
+    "localm/auth.py", "localm/inference/engine.py", "pyproject.toml", "setup.sh",
+    ".github/workflows/ci.yml", "localm/plugins/engine.py", "scripts/merge_policy.py"])
+def test_a_matrix_category_alone_never_blocks_an_unlabelled_pr(mp, path):
+    """The two-platform matrix runs at release, not on an ordinary PR."""
+    categories = mp.classify([path])
+    assert categories and mp.RELEASE not in categories
+    v = mp.decide(False, GREEN_UNLABELLED, categories)
+    assert v.ok, v.reasons
+    assert v.categories == categories
+
+
+def test_a_release_without_the_label_fails_naming_version_and_the_label(mp):
+    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["VERSION", "CHANGELOG.md"]))
     assert not v.ok
     assert len(v.reasons) == 1
+    assert "release" in v.reasons[0] and "VERSION" in v.reasons[0]
     assert "full-ci" in v.reasons[0]
-    assert "localm/auth.py" in v.reasons[0]
-    assert "trust boundary" in v.reasons[0]
-    assert v.needs_matrix is True
+    assert v.is_release is True
 
 
-def test_a_trust_boundary_change_with_the_label_and_a_green_matrix_passes(mp):
-    v = mp.decide(True, GREEN_LABELLED, mp.classify(["localm/auth.py"]), "")
+def test_a_release_with_the_label_and_a_green_matrix_passes(mp):
+    v = mp.decide(True, GREEN_LABELLED, mp.classify(["VERSION", "CHANGELOG.md"]))
     assert v.ok, v.reasons
 
 
-def test_a_release_pr_is_named_as_such_and_needs_the_matrix(mp):
-    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["VERSION", "CHANGELOG.md"]), "nothing")
-    assert not v.ok
-    assert "release: VERSION" in v.reasons[0]
-    v = mp.decide(True, GREEN_LABELLED, mp.classify(["VERSION", "CHANGELOG.md"]), "")
-    assert v.ok
-
-
-def test_a_wide_selection_needs_the_matrix_even_outside_every_category(mp):
-    v = mp.decide(False, GREEN_UNLABELLED, {}, "wide")
-    assert not v.ok
-    assert v.needs_matrix is True
-    assert "full-ci" in v.reasons[0]
-    assert "wider than a targeted run" in v.reasons[0]
-
-
-@pytest.mark.parametrize("selection", ["", "nothing", "selected", "failed"])
-def test_only_a_wide_selection_needs_the_matrix(mp, selection):
-    assert mp.decide(False, GREEN_UNLABELLED, {}, selection).ok
-
-
-def test_with_the_label_a_wide_selection_or_a_category_is_not_a_failure(mp):
-    assert mp.decide(True, GREEN_LABELLED, mp.classify(["VERSION"]), "wide").ok
+def test_a_trust_boundary_change_with_the_label_and_a_green_matrix_passes(mp):
+    v = mp.decide(True, GREEN_LABELLED, mp.classify(["localm/auth.py"]))
+    assert v.ok, v.reasons
 
 
 def test_the_labelled_arm_fails_when_the_matrix_was_skipped_rather_than_passing_silently(mp):
-    v = mp.decide(True, {**GREEN_LABELLED, "test": "skipped"}, {}, "")
+    v = mp.decide(True, {**GREEN_LABELLED, "test": "skipped"}, {})
     assert not v.ok
     assert v.reasons == ["test: skipped (must be success on a labelled PR)"]
 
 
 def test_the_labelled_arm_fails_on_a_red_matrix(mp):
-    v = mp.decide(True, {**GREEN_LABELLED, "test": "failure"}, {}, "")
+    v = mp.decide(True, {**GREEN_LABELLED, "test": "failure"}, {})
     assert not v.ok
     assert v.reasons == ["test: failure"]
 
 
 def test_the_unlabelled_arm_fails_when_the_gate_was_skipped_rather_than_passing_silently(mp):
-    v = mp.decide(False, {**GREEN_UNLABELLED, "python-pr-gate": "skipped"}, {}, "nothing")
+    v = mp.decide(False, {**GREEN_UNLABELLED, "python-pr-gate": "skipped"}, {})
     assert not v.ok
     assert v.reasons == ["python-pr-gate: skipped (must be success on an unlabelled PR)"]
 
 
 def test_the_unlabelled_arm_fails_on_a_red_gate(mp):
-    v = mp.decide(False, {**GREEN_UNLABELLED, "python-pr-gate": "failure"}, {}, "selected")
+    v = mp.decide(False, {**GREEN_UNLABELLED, "python-pr-gate": "failure"}, {})
     assert not v.ok
     assert v.reasons == ["python-pr-gate: failure"]
 
@@ -239,7 +230,7 @@ def test_the_unlabelled_arm_fails_on_a_red_gate(mp):
 @pytest.mark.parametrize("full_ci, results", [(False, GREEN_UNLABELLED), (True, GREEN_LABELLED)])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_lint_and_gui_tests_must_succeed_on_both_arms(mp, job, full_ci, results, result):
-    v = mp.decide(full_ci, {**results, job: result}, {}, "nothing")
+    v = mp.decide(full_ci, {**results, job: result}, {})
     assert not v.ok
     assert len(v.reasons) == 1 and v.reasons[0].startswith(f"{job}: {result}")
 
@@ -248,7 +239,7 @@ def test_lint_and_gui_tests_must_succeed_on_both_arms(mp, job, full_ci, results,
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
 def test_a_job_skipped_by_design_on_one_arm_still_fails_that_arm_when_it_ran_red(mp, job, result):
     v = mp.decide(job == "python-pr-gate", {**GREEN_LABELLED, **GREEN_UNLABELLED,
-                                           "test": "success", job: result}, {}, "")
+                                           "test": "success", job: result}, {})
     assert not v.ok
     assert f"{job}: {result}" in v.reasons
 
@@ -257,13 +248,13 @@ def test_a_job_skipped_by_design_on_one_arm_still_fails_that_arm_when_it_ran_red
 def test_a_missing_result_never_passes(mp, job):
     for full_ci, results in ((False, GREEN_UNLABELLED), (True, GREEN_LABELLED)):
         results = {k: v for k, v in results.items() if k != job}
-        v = mp.decide(full_ci, results, {}, "nothing")
+        v = mp.decide(full_ci, results, {})
         assert not v.ok, (full_ci, job)
         assert f"{job}: missing" in v.reasons
 
 
 def test_an_unknown_result_string_never_passes(mp):
-    v = mp.decide(False, {**GREEN_UNLABELLED, "lint": "SUCCESS "}, {}, "nothing")
+    v = mp.decide(False, {**GREEN_UNLABELLED, "lint": "SUCCESS "}, {})
     assert not v.ok
     assert v.reasons[0].startswith("lint: SUCCESS ")
 
@@ -271,18 +262,16 @@ def test_an_unknown_result_string_never_passes(mp):
 # --- the summary and the command line ---------------------------------------
 
 def test_the_summary_carries_the_verdict_the_results_and_the_reasons(mp):
-    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["localm/auth.py"]), "selected",
-                  "3 of 808 test files affected")
+    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["VERSION", "localm/auth.py"]))
     text = mp.render_summary(v)
     assert "**FAIL**" in text and "**PASS**" not in text
+    assert "- this is a release (VERSION changed)" in text
     assert "`full-ci` label: no" in text
     assert "| python-pr-gate | success |" in text and "| test | skipped |" in text
+    assert "- release: `VERSION`" in text
     assert "`localm/auth.py`" in text
-    assert "Affected-test selection at depth 1: **selected**." in text
-    assert "3 of 808 test files affected" in text
-    ok = mp.render_summary(mp.decide(True, GREEN_LABELLED, {}, ""))
+    ok = mp.render_summary(mp.decide(True, GREEN_LABELLED, {}))
     assert "**PASS**" in ok and "No changed file is in a matrix category." in ok
-    assert "Affected-test selection" not in ok
 
 
 def _run(args, env_extra=None):
@@ -299,50 +288,44 @@ _GREEN_LABELLED_ARGS = ["--full-ci", "true", "--result", "python-pr-gate=skipped
                         "--result", "test=success"]
 
 
-def test_main_passes_a_docs_only_change_in_the_real_tree():
+def test_main_passes_a_docs_only_change():
     proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "docs/architecture.md"])
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "**PASS**" in proc.stdout
-    assert ("Affected-test selection at depth 1: **nothing**." in proc.stdout
-            or "Affected-test selection at depth 1: **selected**." in proc.stdout), proc.stdout
+    assert "No changed file is in a matrix category." in proc.stdout
 
 
-def test_main_fails_an_unlabelled_trust_boundary_change_in_the_real_tree():
+def test_main_passes_an_unlabelled_trust_boundary_change_and_lists_the_category():
     proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "localm/auth.py"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "**PASS**" in proc.stdout
+    assert "- trust boundary" in proc.stdout and "`localm/auth.py`" in proc.stdout
+
+
+def test_main_fails_an_unlabelled_release():
+    proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "VERSION", "CHANGELOG.md"])
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "**FAIL**" in proc.stdout
+    assert "this is a release (VERSION changed)" in proc.stdout
     assert "labelled `full-ci`" in proc.stdout
-    assert "localm/auth.py" in proc.stdout
 
 
-def test_main_passes_a_labelled_trust_boundary_change_with_a_green_matrix():
-    proc = _run([*_GREEN_LABELLED_ARGS, "--files", "localm/auth.py", "--no-selector"])
+def test_main_passes_a_labelled_release_with_a_green_matrix():
+    proc = _run([*_GREEN_LABELLED_ARGS, "--files", "VERSION", "CHANGELOG.md"])
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "**PASS**" in proc.stdout
 
 
 def test_main_fails_a_labelled_pr_whose_matrix_did_not_run():
     args = [a if a != "test=success" else "test=skipped" for a in _GREEN_LABELLED_ARGS]
-    proc = _run([*args, "--files", "docs/architecture.md", "--no-selector"])
+    proc = _run([*args, "--files", "docs/architecture.md"])
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "test: skipped (must be success on a labelled PR)" in proc.stdout
 
 
-def test_main_runs_the_selector_and_a_wide_selection_alone_needs_the_matrix(mp):
-    """The wide check reaches the real selector: tests/conftest.py is in no
-    category and affects every test, so the selection is wide at both depths
-    and that alone fails the policy."""
-    assert mp.classify(["tests/conftest.py"]) == {}
-    proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "tests/conftest.py"])
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "Because: the affected-test selection is wider than a targeted run" in proc.stdout
-    assert "Affected-test selection at depth 1: **wide**." in proc.stdout
-    assert "No changed file is in a matrix category." in proc.stdout
-
-
 def test_main_writes_the_summary_to_the_step_summary_file(tmp_path):
     summary = tmp_path / "summary.md"
-    proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "docs/architecture.md", "--no-selector"],
+    proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "docs/architecture.md"],
                 {"GITHUB_STEP_SUMMARY": str(summary)})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert summary.read_text(encoding="utf-8").startswith("### Merge policy")
@@ -357,18 +340,14 @@ def test_main_refuses_a_result_for_a_job_the_policy_does_not_know():
 def test_evaluate_reads_the_change_from_git_when_no_files_are_given(mp, monkeypatch):
     seen = {}
     monkeypatch.setattr(mp.affected_tests, "changed_files",
-                        lambda base: (seen.setdefault("base", base) and ["localm/tls.py"],
+                        lambda base: (seen.setdefault("base", base) and ["VERSION"],
                                       "deadbeef"))
-    monkeypatch.setattr(mp.run_affected_tests, "select",
-                        lambda depth, base, files: mp.run_affected_tests.Selection("selected",
-                                                                                   depth=depth))
     v = mp.evaluate(False, GREEN_UNLABELLED, "origin/master", None)
     assert seen["base"] == "origin/master"
-    assert not v.ok and "localm/tls.py" in v.reasons[0]
-    assert v.selection == "selected"
+    assert not v.ok and "VERSION" in v.reasons[0]
 
 
-def test_a_change_to_the_policy_itself_needs_the_matrix_and_selects_this_file(mp):
+def test_a_change_to_the_policy_itself_selects_this_file(mp):
     assert "CI workflows and gates" in mp.classify(["scripts/merge_policy.py"])
     proc = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "affected_tests.py"), "--why",
@@ -393,12 +372,12 @@ def _norm(expr):
 def test_the_merge_policy_job_cannot_be_skipped_green():
     ci = _load_workflow(_CI)
     job = ci["jobs"]["merge-policy"]
-    assert job["name"] == "merge-policy", "the check name branch protection requires"
+    assert job["name"] == "merge-policy", "the one check name to read"
     assert sorted(job["needs"]) == ["gui-tests", "lint", "python-pr-gate", "test"]
     cond = _norm(job["if"])
     assert "!cancelled()" in cond or "always()" in cond, (
         "without a status function success() is implied and a failed or skipped needed job "
-        "skips this one, which branch protection reads as a pass")
+        "skips this one, which reads as a pass")
     assert "github.event_name == 'pull_request'" in cond
     assert isinstance(job.get("timeout-minutes"), int)
     assert "strategy" not in job
@@ -425,8 +404,7 @@ def test_the_merge_policy_job_feeds_the_script_every_needed_result_and_the_label
         assert env[var] == "${{ needs.%s.result }}" % needed
         assert f'--result "{needed}=${var}"' in cmd
     assert '--full-ci "$FULL_CI"' in cmd
-    assert "--files" not in cmd and "--no-selector" not in cmd, (
-        "CI reads the change from git and runs the wide check")
+    assert "--files" not in cmd, "CI reads the change from git"
     assert "${{" not in step["run"], "expressions reach the shell through env, not inline"
 
 
