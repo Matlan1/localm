@@ -641,8 +641,7 @@ jobs:
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     steps:
       # fetch-depth: 0 is required: the policy diffs the change from
-      # `git merge-base origin/master HEAD` and runs the affected-test
-      # selector from the same baseline; a shallow checkout has no
+      # `git merge-base origin/master HEAD`; a shallow checkout has no
       # origin/master at all.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
