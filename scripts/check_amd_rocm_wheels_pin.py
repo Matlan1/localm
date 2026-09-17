@@ -272,24 +272,40 @@ def _report_package(pkg: str, pinned: "str | None", wheels: "list[dict] | None")
 
 
 def _report_python_abi(wheels_by_pkg: "dict[str, list[dict] | None]") -> None:
-    torch_stack_wheels = [
-        w for pkg in _TORCH_STACK for w in (wheels_by_pkg.get(pkg) or [])
-    ]
-    if not any(wheels_by_pkg.get(pkg) is not None for pkg in _TORCH_STACK):
-        print("Python ABI: could not determine the newest published win_amd64 cp-tag "
-              "(the torch/torchvision index was unreachable)")
+    """The BINDING ceiling is the LOWEST cp-tag among torch/torchvision's own
+    individually-computed ceilings, never a tag pooled across both wheel lists
+    combined - a bump is only as safe as whichever package lags furthest
+    behind. Requires a ceiling for EVERY package in _TORCH_STACK before making
+    any "safe to bump" claim at all: a claim built from partial data (one
+    package unreachable, or with no cp-tag wheel) would silently ignore the
+    package that could not be checked, which is exactly the false-safe result
+    this function exists to avoid."""
+    per_package_pytag: "dict[str, str]" = {}
+    missing = []
+    for pkg in _TORCH_STACK:
+        wheels = wheels_by_pkg.get(pkg)
+        tag = newest_win_amd64_pytag(wheels) if wheels is not None else None
+        if tag is None:
+            missing.append(pkg)
+        else:
+            per_package_pytag[pkg] = tag
+
+    if missing:
+        reached = (", ".join(f"{pkg} {tag}" for pkg, tag in per_package_pytag.items())
+                   or "none")
+        print(f"Python ABI: could not determine a full ceiling - no win_amd64 cp-tag "
+              f"data for {', '.join(missing)} (index unreachable, or no cp-tag wheel "
+              f"published). What was reached: {reached}.")
         return
 
-    newest_pytag = newest_win_amd64_pytag(torch_stack_wheels)
-    if newest_pytag is None:
-        print("Python ABI: torch/torchvision published no win_amd64 wheel with a "
-              "cpNNN tag at all - could not determine a ceiling")
-        return
+    limiting_pkg = min(per_package_pytag, key=lambda p: _cp3_tag_minor(per_package_pytag[p]))
+    newest_pytag = per_package_pytag[limiting_pkg]
+    per_pkg = ", ".join(f"{pkg} {tag}" for pkg, tag in per_package_pytag.items())
 
     floor = _requires_python_floor()
-    print(f"Python ABI: the AMD index's newest win_amd64 wheel for torch/torchvision "
-          f"is built for {newest_pytag}. rocm-sdk-core and "
-          "rocm-sdk-libraries-gfx103x-all ship py3-none wheels and impose no ceiling.")
+    print(f"Python ABI: newest win_amd64 wheel per package: {per_pkg}. rocm-sdk-core "
+          "and rocm-sdk-libraries-gfx103x-all ship py3-none wheels and impose no "
+          "ceiling.")
     print(f"pyproject.toml's requires-python floor is {floor!r}.")
 
     floor_minor = _floor_minor(floor) if floor else None
@@ -298,8 +314,9 @@ def _report_python_abi(wheels_by_pkg: "dict[str, list[dict] | None]") -> None:
         print("  could not read a >=3.Y floor from requires-python to compare against")
     elif newest_minor > floor_minor:
         print(f"  a Python bump beyond 3.{floor_minor} looks ROCm-safe TODAY, up to "
-              f"{newest_pytag} (torch/torchvision already publish a win_amd64 wheel "
-              "there). Report only - this script changes nothing.")
+              f"{newest_pytag} (the limiting package is {limiting_pkg} - every "
+              "package checked publishes at least that far). Report only - this "
+              "script changes nothing.")
     else:
         print(f"  no win_amd64 wheel exists beyond 3.{floor_minor} yet; a Python bump "
               "would NOT be ROCm-safe today.")

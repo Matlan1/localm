@@ -296,7 +296,7 @@ def main(argv=None) -> int:
                   f"{len(tags)} releases).")
             return 0
         print(f"BEHIND by {len(behind)} release(s): {', '.join(behind[:10])}"
-              f"{' ...' if len(behind) >= _PER_PAGE else ''}")
+              f"{' ...' if len(behind) > 10 else ''}")
         if len(behind) >= _PER_PAGE:
             print(f"(that is the whole {_PER_PAGE}-release page, so the real gap may "
                   "be larger)")

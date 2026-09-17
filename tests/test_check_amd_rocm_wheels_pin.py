@@ -295,6 +295,52 @@ def test_report_python_abi_never_reports_a_ceiling_from_py3_none_alone(capsys):
     assert "could not determine" in out or "no win_amd64 wheel" in out
 
 
+def test_report_python_abi_never_claims_safe_when_one_torch_stack_package_lags(
+        capsys, monkeypatch):
+    """THE BUG THIS PINS: torch publishing cp313 must NOT make the script claim
+    cp313 is safe when torchvision only publishes up to cp312 - the ceiling is
+    the MINIMUM across the whole torch stack, never a tag pooled across both
+    packages' wheel lists combined. A realistic case (the two packages'
+    release cadences are independent, so one publishing a new ABI ahead of the
+    other is ordinary, not a fixture artifact)."""
+    monkeypatch.setattr(checker, "_requires_python_floor", lambda: ">=3.12,<3.13")
+    wheels = {
+        "torch": [_wheel("2.11.0", "cp312"), _wheel("2.11.0", "cp313")],
+        "torchvision": [_wheel("0.26.0", "cp312")],  # no cp313 yet
+        "rocm-sdk-core": [_wheel("7.13.0", "py3")],
+        "rocm-sdk-libraries-gfx103x-all": [_wheel("7.13.0", "py3")],
+    }
+    checker._report_python_abi(wheels)
+    out = capsys.readouterr().out
+    assert "looks ROCm-safe" not in out, (
+        "torch's own cp313 must never be reported as THE safe ceiling when "
+        "torchvision has no cp313 wheel")
+    assert "would NOT be ROCm-safe today" in out
+    assert "torch cp313" in out and "torchvision cp312" in out, (
+        "each package's own ceiling must be shown, not a pooled/combined one")
+
+
+def test_report_python_abi_incomplete_when_one_package_is_unreachable(capsys):
+    """One package's fetch failing must not silently fall back to reporting a
+    ceiling based only on the package that succeeded - that is exactly as
+    unsafe as the pooled-max bug: the unreachable package's real ceiling is
+    unknown and could be lower."""
+    wheels = {
+        "torch": [_wheel("2.11.0", "cp313")],
+        "torchvision": None,  # fetch failed
+        "rocm-sdk-core": [_wheel("7.13.0", "py3")],
+        "rocm-sdk-libraries-gfx103x-all": [_wheel("7.13.0", "py3")],
+    }
+    checker._report_python_abi(wheels)
+    out = capsys.readouterr().out
+    assert "could not determine a full ceiling" in out
+    assert "torchvision" in out, "the package that could not be checked must be named"
+    assert "torch cp313" in out, "what WAS reached is still shown"
+    assert "looks ROCm-safe" not in out, (
+        "torch's own cp313 must not be reported as a verified-safe ceiling while "
+        "torchvision's real ceiling is unknown")
+
+
 # --------------------------------------------------------------------------- #
 #  main() end-to-end - only the true leaf (_fetch_index_http) is patched.    #
 # --------------------------------------------------------------------------- #
