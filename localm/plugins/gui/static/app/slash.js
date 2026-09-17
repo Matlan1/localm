@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { addMessageRow, chat, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
+import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { exportCoderSession, openFilesModal } from "./coder.js";
 import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
@@ -93,7 +93,7 @@ export async function runImagineInChat(promptText) {
  *  the server, only the per-chat web toggle is bypassed. */
 export async function runWebInChat(query) {
   if (!query) { toast(t("slash.usage.web"), true); return; }
-  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/web " + query });
@@ -106,7 +106,7 @@ export async function runWebInChat(query) {
   const ev = newToolEvent({ tool: "search", status: "running", query,
                             started_at: Date.now() });
   conv.messages.push(ev);
-  saveConversations(conv);
+  chat.webCall = ev;
   renderChat();
   try {
     Object.assign(ev, await requestWebTool({ name: "web_search", args: { query } }));
@@ -123,6 +123,8 @@ export async function runWebInChat(query) {
     toast(t("slash.webSearchFailed", { message: e.message }), true);
     ev.status = "failed";
     ev.error = e.message;
+  } finally {
+    chat.webCall = null;
   }
   ev.finished_at = Date.now();
   saveConversations(conv);

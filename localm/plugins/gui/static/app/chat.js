@@ -46,12 +46,12 @@ export function newToolEvent(fields) {
   return { kind: TOOL_EVENT_KIND, ...fields };
 }
 
-// Legacy web notes were pre-rendered text; the header names what they were.
+// Header patterns of a legacy web note, mapped to its tool, status and subject.
 const _LEGACY_WEB_NOTE_SHAPES = [
   [/^\[Results of web_search "([^"]*)"\]/, (q) => ({ tool: "search", status: "done", query: q })],
   [/^\[web_search results(?: for "([^"]*)")?\]/, (q) => ({ tool: "search", status: "done", query: q || "" })],
   [/^\[Content of (\S+)\]/, (u) => ({ tool: "fetch", status: "done", url: u })],
-  [/^\[Web (?:request|search) failed: ([^\]]*)\]/, (e) => ({ tool: "search", status: "failed", error: e })],
+  [/^\[Web (?:request|search) failed: /, () => ({ tool: "search", status: "failed" })],
   [/^\[duplicate web request\]/, () => ({ tool: "search", status: "duplicate" })],
   [/^\[web access denied\]/, () => ({ tool: "search", status: "denied" })],
   [/^\[tool-call format\]/, () => ({ tool: "note", status: "done", reason: "format" })],
@@ -82,8 +82,9 @@ export function legacyWebNoteToToolEvent(m) {
 
 /** Migrate *list* (an array of messages) in place: every legacy
  *  {role:"user", web:true} row becomes a tool event, a tool event still
- *  `running` from an interrupted page load becomes `failed`, and nested
- *  compaction archives are walked. Idempotent. Returns *list*. */
+ *  `running` (a page load interrupted the call; it carries no result) is
+ *  removed, and nested compaction archives are walked. Idempotent. Returns
+ *  *list*. */
 export function migrateToolEvents(list) {
   if (!Array.isArray(list)) return list;
   for (let i = 0; i < list.length; i++) {
@@ -91,9 +92,9 @@ export function migrateToolEvents(list) {
     if (!m || typeof m !== "object") continue;
     if (m.role === "user" && m.web === true) list[i] = legacyWebNoteToToolEvent(m);
     else if (isToolEvent(m) && m.status === "running") {
-      m.status = "failed";
-      m.error = "interrupted before a result arrived";
-      if (m.finished_at === undefined) m.finished_at = m.started_at;
+      list.splice(i, 1);
+      i--;
+      continue;
     }
     if (Array.isArray(list[i].compacted)) migrateToolEvents(list[i].compacted);
   }
@@ -125,6 +126,7 @@ export const chat = {
   conversations: migrateConversations(readStoredJSON("localm.conversations", [])),
   activeId: null,
   abort: null,
+  webCall: null,     // the running tool event while a web call is in flight, else null
   attachments: [],   // image attachments: {name, dataUri}
   docs: [],          // document attachments: {name, text, chars, truncated}
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
@@ -179,12 +181,8 @@ export const chat = {
   privacyWiped: false,
 };
 
-// Retrieved knowledge-base excerpts and attached documents are pushed with
-// role:"user" and a tag so the MODEL reads them as conversation context.
-// noteLabel() is the single source of truth for the human-facing label:
-// renderChat() below and exportConversation() (settings-perf.js) both call
-// it, so a tagged row or a tool event never reads as "You:" on screen or in
-// an exported transcript.
+// The human-facing label of a tagged row (kb/doc) or a tool event; used by
+// renderChat() below and by exportConversation() (settings-perf.js).
 const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
 
 export function noteLabel(m) {
@@ -1448,7 +1446,7 @@ export function addToolEventRow(container, ev, opts = {}) {
       t("chat.tool.page") + (ev.page.truncated ? " " + t("chat.tool.truncated") : ""),
       ev.page.text);
   }
-  if (ev.error) toolTextSection(body, t("chat.tool.error"), ev.error);
+  if (ev.error && typeof ev.text !== "string") toolTextSection(body, t("chat.tool.error"), ev.error);
   if (typeof ev.text === "string") toolTextSection(body, "", ev.text);
   if (ev.note) toolTextSection(body, t("chat.tool.instruction"), ev.note);
   card.appendChild(body);
@@ -1578,14 +1576,14 @@ export function renderChat() {
     }
     const tag = m.tag;
     const actions = [];
-    if (m.role === "user" && !tag && !chat.abort) {
+    if (m.role === "user" && !tag && !chatBusy()) {
       actions.push(["edit", () => editMessage(conv, i)]);
       actions.push(["revert", () => revertTo(conv, i)]);
     }
     if (m.role === "assistant" && !tag) {
       actions.push(["Speak this reply aloud", (btn) => speakToggle(btn, msgText(m)), "speak"]);
     }
-    if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
+    if (m.role === "assistant" && i === conv.messages.length - 1 && !chatBusy()) {
       actions.push(["regenerate", () => regenerate(conv)]);
     }
     const noteSuffix = m.failed
@@ -1715,11 +1713,17 @@ export function pruneBranches(conv) {
   return lost;
 }
 
+/** True while a reply is streaming or a web call is in flight: the
+ *  conversation must not be edited, forked or sent to until it settles. */
+export function chatBusy() {
+  return !!(chat.abort || chat.webCall);
+}
+
 export function editMessage(conv, index) {
   // Editing forks the branch tree (forkAt); doing that mid-stream parks the
   // messages before the streaming reply has landed, corrupting the branch
   // state. Bail while a reply streams, like switchBranch / regenerate do.
-  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   const m = conv.messages[index];
   $("chat-input").value = msgText(m);
   autoGrow($("chat-input"));
@@ -1732,7 +1736,7 @@ export function editMessage(conv, index) {
 }
 
 export function regenerate(conv) {
-  if (chat.abort) return;
+  if (chatBusy()) return;
   const last = conv.messages.length - 1;
   if (conv.messages[last]?.role !== "assistant") return;
   forkAt(conv, last);                // park the old reply as a sibling
@@ -1762,7 +1766,7 @@ export function branchesLostByRevert(conv, index) {
  *  SAME branch. Reverting past a fork point destroys the sibling branches in the
  *  removed region, so confirm first when that would happen (the safeguard). */
 export function revertTo(conv, index) {
-  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   if (index < 0 || index >= conv.messages.length) return;
   const text = msgText(conv.messages[index]);
   const lost = branchesLostByRevert(conv, index);

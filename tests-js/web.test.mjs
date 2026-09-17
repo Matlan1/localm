@@ -191,9 +191,7 @@ test("requestWebTool: a response with no untrusted_fields still fences the evide
   const { window: w } = loadApp({ fetchImpl: impl });
   const { content: note, untrusted_spans } = w.toolEventPrompt(
     await w.requestWebTool({ name: "web_search", args: { query: "x" } }));
-  // The evidence body is remote text by construction, so the span does not
-  // depend on the route declaring it.
-  assert.equal(untrusted_spans.length, 1);
+  assert.equal(untrusted_spans.length, 1, "the evidence body is always one untrusted span");
   const [a, b] = untrusted_spans[0];
   assert.match(note.slice(a, b), /^Grounding: [\s\S]*\[S1\] T - https:\/\/example\.com\//);
   assert.match(note, /<untrusted_content>[\s\S]*T[\s\S]*<\/untrusted_content>/);

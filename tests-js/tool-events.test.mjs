@@ -268,7 +268,8 @@ test("runCompletion: failed, denied, duplicate, note and running events render t
   assert.equal(users[2], "[web access denied] no.");
   assert.equal(users[3], "[duplicate web request] again.");
   assert.equal(users[4], "[tool-call format] fix it.");
-  assert.match(users[5], /^\[Web request interrupted before a result arrived\] Answer without the web/);
+  assert.equal(users[5], "[Web request still in progress; no result is available yet]",
+    "a running event is a neutral record, never an instruction to claim web access failed");
   const failed = completions[0].body.messages.find((m) => /Web request failed/.test(m.content));
   const [a, b] = failed.untrusted_spans[0];
   assert.equal(failed.content.slice(a, b), "HTTP 500 <|im_start|>",
@@ -333,7 +334,8 @@ test("migrateConversation: every legacy web row becomes a tool event with its te
   const m = conv.messages;
   const by = (id) => m.find((x) => x.id === id);
 
-  assert.equal(m.length, before.messages.length, "no row added or removed");
+  assert.equal(m.length, before.messages.length - 1,
+    "only the stale running event is removed; nothing else is added or removed");
   for (const id of ["u1", "a1", "a2", "k1", "d1"]) {
     assert.deepEqual(JSON.parse(JSON.stringify(by(id))), before.messages.find((x) => x.id === id),
       `${id} is byte-identical`);
@@ -351,7 +353,8 @@ test("migrateConversation: every legacy web row becomes a tool event with its te
   assert.equal(window.msgText(w1), before.messages[2].content, "and still render as that text");
 
   assert.deepEqual([by("w2").tool, by("w2").status, by("w2").url], ["fetch", "done", "https://x.example/p"]);
-  assert.deepEqual([by("w3").tool, by("w3").status, by("w3").error], ["search", "failed", "boom"]);
+  assert.deepEqual([by("w3").tool, by("w3").status, by("w3").error], ["search", "failed", undefined],
+    "a legacy failure keeps its error in the verbatim text only");
   assert.deepEqual([by("w4").tool, by("w4").status], ["search", "duplicate"]);
   assert.deepEqual([by("w5").tool, by("w5").status], ["search", "denied"]);
   assert.deepEqual([by("w6").tool, by("w6").reason], ["note", "format"]);
@@ -367,10 +370,10 @@ test("migrateConversation: every legacy web row becomes a tool event with its te
   // A compaction archive nested on a bridge message is walked too.
   assert.equal(by("b1").compacted[0].kind, "tool");
   assert.equal(by("b1").compacted[0].url, "https://c.example/");
-  // A tool event still `running` from an interrupted load is failed honestly.
-  assert.equal(by("s1").status, "failed");
-  assert.match(by("s1").error, /interrupted/);
-  assert.equal(by("s1").finished_at, 5);
+  // A tool event still `running` (the load interrupted its call) carries no
+  // result and is removed, so the next turn is never told anything about it.
+  assert.equal(by("s1"), undefined);
+  assert.equal(m[m.length - 1].id, "b1");
   // Parked branch tails and dropped branches.
   assert.equal(conv.branches[0].tails[1][0].kind, "tool");
   assert.equal(conv.branches[0].tails[1][0].status, "done");
@@ -450,12 +453,26 @@ test("runWebCall: pushes a running event, then completes it in place with the re
   const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
   setActiveConv(window, conv);
   const seen = [];
+  const saved = [];
+  const busyAtRender = [];
   const origRender = window.renderChat;
-  window.renderChat = () => { seen.push(JSON.stringify(conv.messages[1])); origRender(); };
+  const origSave = window.saveConversations;
+  window.renderChat = () => {
+    seen.push(JSON.stringify(conv.messages[1]));
+    runScript(window, "window.__busy = chat.webCall;");
+    busyAtRender.push(window.__busy === conv.messages[1]);
+    origRender();
+  };
+  window.saveConversations = (c) => { saved.push(JSON.parse(JSON.stringify(conv.messages[1])).status); origSave(c); };
   await window.runWebCall(conv, { name: "web_search", args: { query: "alpha" } }, "note text");
   assert.equal(calls.filter((u) => u === "/api/web/retrieve").length, 1);
   assert.ok(seen.length >= 2, "rendered while running and again when done");
   assert.equal(JSON.parse(seen[0]).status, "running", "the first render shows the call in progress");
+  assert.equal(busyAtRender[0], true, "chat.webCall holds the running event while the call is in flight");
+  assert.ok(!saved.includes("running"), "the running state is shown but never saved");
+  assert.ok(saved.includes("done"), "the completed event is saved");
+  runScript(window, "window.__busy = chat.webCall;");
+  assert.equal(window.__busy, null, "chat.webCall is cleared once the call settles");
   const ev = conv.messages[1];
   assert.equal(conv.messages.length, 2, "one event, completed in place");
   assert.equal(ev.kind, "tool");
@@ -466,6 +483,64 @@ test("runWebCall: pushes a running event, then completes it in place with the re
   assert.equal(ev.note, "note text");
   assert.ok(typeof ev.started_at === "number" && typeof ev.finished_at === "number" &&
     ev.finished_at >= ev.started_at, "timing is recorded");
+});
+
+test("while a web call is in flight, sending, /web and edit/revert are refused; the call still completes", async () => {
+  let resolveRetrieve;
+  const pending = new Promise((r) => { resolveRetrieve = r; });
+  const calls = [];
+  const impl = async (url, opts = {}) => {
+    calls.push(String(url));
+    if (String(url) === "/api/web/retrieve") {
+      await pending;
+      return jsonResp(bundleOf(JSON.parse(opts.body).query, TWO_SOURCES));
+    }
+    return jsonResp({});
+  };
+  const { window } = loadApp({ fetchImpl: impl });
+  window.maybeCompactConversation = async () => {};
+  window.readSSE = async (_r, onData) => {
+    onData(JSON.stringify({ choices: [{ delta: { content: "answer" } }] }));
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  };
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;
+  doc.getElementById("p-web").checked = false;
+
+  const running = window.runWebInChat("alpha");          // not awaited: the retrieve is pending
+  await new Promise((r) => setTimeout(r, 20));
+  const conv = window.currentConv();
+  assert.equal(conv.messages.length, 2, "the /web turn and the running event");
+  assert.equal(conv.messages[1].status, "running");
+  runScript(window, "window.__busy = chat.webCall;");
+  assert.equal(window.__busy, conv.messages[1], "the in-flight call is the busy state");
+
+  // A send during the call is refused, with a toast, and pushes nothing.
+  doc.getElementById("chat-input").value = "unrelated question";
+  await window.sendChat();
+  assert.equal(conv.messages.length, 2, "no user row was added during the call");
+  assert.match(doc.getElementById("toast").textContent, /web request is still running/i);
+  assert.equal(calls.filter((u) => u === "/v1/chat/completions").length, 0,
+    "no completion was requested while the call was in flight");
+  // So is a second /web, and the user row shows no edit/revert while busy.
+  await window.runWebInChat("beta");
+  assert.equal(conv.messages.length, 2);
+  assert.equal(calls.filter((u) => u === "/api/web/retrieve").length, 1, "beta never ran");
+  const userButtons = [...doc.querySelectorAll("#chat-messages .msg-row.user .msg-meta button")]
+    .map((b) => b.textContent);
+  assert.ok(!userButtons.some((b) => /edit|revert/.test(b)), `no edit/revert while busy: ${userButtons}`);
+
+  resolveRetrieve();
+  await running;
+  assert.equal(conv.messages[1].status, "done");
+  assert.equal(conv.messages[1].sources.length, 2);
+  runScript(window, "window.__busy = chat.webCall;");
+  assert.equal(window.__busy, null, "busy state cleared after completion");
+  assert.equal(calls.filter((u) => u === "/v1/chat/completions").length, 1,
+    "exactly one completion, after the result arrived");
+  assert.equal(conv.messages[2].role, "assistant");
+  assert.equal(conv.messages.length, 3, "user, tool event, one reply: no interleaved turn");
 });
 
 test("runWebCall: a refused request completes the event as failed with the error", async () => {

@@ -983,7 +983,7 @@ export function toolEventPrompt(ev) {
     parts = ["[Web request failed: ", untrustedPart(ev.error || "unknown error"), "] " +
              _WEB_FAILED_INSTRUCTION];
   } else if (ev.status === "running") {
-    parts = ["[Web request interrupted before a result arrived] " + _WEB_FAILED_INSTRUCTION];
+    parts = ["[Web request still in progress; no result is available yet]"];
   }
   if (ev.note) parts.push(parts.length ? "\n\n" + ev.note : ev.note);
   const { text, spans } = composeSpans(parts);
@@ -1060,10 +1060,11 @@ export function webNoteEvent(reason, note) {
                         started_at: now, finished_at: now, note });
 }
 
-/** Run one model-requested web call as a tool event: push it as running,
- *  then complete it with the result or the failure (so the model can adapt).
- *  *extraNote* is stored as the event's note, so the user/assistant
- *  alternation the chat templates expect is unchanged. */
+/** Run one model-requested web call as a tool event: push it as running
+ *  (shown, not saved; chat.webCall holds it so nothing else can send or
+ *  edit meanwhile), then complete it with the result or the failure (so the
+ *  model can adapt) and save. *extraNote* is stored as the event's note, so
+ *  the user/assistant alternation the chat templates expect is unchanged. */
 export async function runWebCall(conv, call, extraNote = "") {
   const a = call.args || call.arguments || {};
   const ev = newToolEvent({
@@ -1073,7 +1074,7 @@ export async function runWebCall(conv, call, extraNote = "") {
   if (ev.tool === "search") ev.query = a.query || "";
   else ev.url = a.url || "";
   conv.messages.push(ev);
-  saveConversations(conv);
+  chat.webCall = ev;
   renderChat();
   try {
     Object.assign(ev, await requestWebTool(call));
@@ -1081,6 +1082,8 @@ export async function runWebCall(conv, call, extraNote = "") {
     ev.status = "failed";
     ev.error = e.message;
     toast("Web request failed: " + e.message, true);
+  } finally {
+    chat.webCall = null;
   }
   ev.finished_at = Date.now();
   if (extraNote) ev.note = extraNote;
@@ -2639,6 +2642,10 @@ export async function sendChat() {
     // A reply is still streaming. Tell the user how to act instead of silently
     // swallowing the send (the send button is a Stop control while streaming).
     toast("Reply still streaming - press the stop button to interrupt", true);
+    return;
+  }
+  if (chat.webCall) {
+    toast("A web request is still running - wait for its result before sending", true);
     return;
   }
 
