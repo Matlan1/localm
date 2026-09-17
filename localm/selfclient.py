@@ -242,7 +242,8 @@ def resolve_self_url(app) -> Optional[str]:
 
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
                   timeout: float = 30, base_url: Optional[str] = None,
-                  instance_token: Optional[str] = None) -> requests.Response:
+                  instance_token: Optional[str] = None,
+                  allow_redirects: bool = True) -> requests.Response:
     """Call this server's own API: ``method`` *path* against *base_url*, with
     the auth/TLS handling every self-call needs.
 
@@ -266,6 +267,11 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     and an empty one raises ``ValueError``. Returns the raw
     ``requests.Response`` and never raises for a non-2xx status, leaving
     per-endpoint success/error handling to the caller.
+
+    *allow_redirects* defaults to True (``requests``' own default). A caller
+    that has independently confirmed *base_url* is an address this machine
+    holds and wants a single-hop request - never redirected to somewhere
+    else - passes False.
     """
     if not base_url:
         raise ValueError("self_request: base_url is required")
@@ -274,4 +280,5 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     from localm import tls as _tls
     url = f"{base_url}{path}"
     return requests.request(method, url, json=json, headers=headers,
-                            timeout=timeout, verify=_tls.requests_verify(url))
+                            timeout=timeout, verify=_tls.requests_verify(url),
+                            allow_redirects=allow_redirects)

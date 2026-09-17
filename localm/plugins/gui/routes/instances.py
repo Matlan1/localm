@@ -103,8 +103,9 @@ def register(app: FastAPI, ctx) -> None:
         import requests
 
         from localm import instances
-        from localm.bindhost import self_connect_host, url_host
+        from localm.bindhost import is_own_address, self_connect_host, url_host
         from localm.config import home_dir
+        from localm.debuglog import logger
         from localm.selfclient import self_request
 
         timeout = 10.0
@@ -138,29 +139,35 @@ def register(app: FastAPI, ctx) -> None:
         entry = matches[0]
         pid = entry.get("pid")
         scheme = entry.get("scheme", "http")
-        host = url_host(self_connect_host(entry.get("host")))
-        base_url = f"{scheme}://{host}:{entry.get('port')}/v1"
+        dial = self_connect_host(entry.get("host"))
+        base_url = f"{scheme}://{url_host(dial)}:{entry.get('port')}/v1"
 
         stopped = False
         graceful_denied = False
-        try:
-            resp = self_request("POST", "/server/shutdown", base_url=base_url,
-                                timeout=5, instance_token=entry.get("token"))
-            if resp.status_code in (401, 403):
-                # The target's open-mode management gate refuses an
-                # unauthenticated shutdown from a caller with no shell/API-key
-                # credential for THAT instance - the default case, not a
-                # misconfiguration. Falls back to a direct kill.
-                graceful_denied = True
-            elif resp.status_code == 200:
-                deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline and not stopped:
-                    if not instances.pid_alive(int(pid or -1)):
-                        stopped = True
-                    else:
-                        time.sleep(0.25)
-        except requests.RequestException:
-            pass  # target unreachable (hung / already gone) - fall through to a direct kill
+        if is_own_address(dial):
+            try:
+                resp = self_request("POST", "/server/shutdown", base_url=base_url,
+                                    timeout=5, instance_token=entry.get("token"),
+                                    allow_redirects=False)
+                if resp.status_code in (401, 403):
+                    # The target's open-mode management gate refuses an
+                    # unauthenticated shutdown from a caller with no shell/API-key
+                    # credential for THAT instance - the default case, not a
+                    # misconfiguration. Falls back to a direct kill.
+                    graceful_denied = True
+                elif resp.status_code == 200:
+                    deadline = time.monotonic() + timeout
+                    while time.monotonic() < deadline and not stopped:
+                        if not instances.pid_alive(int(pid or -1)):
+                            stopped = True
+                        else:
+                            time.sleep(0.25)
+            except requests.RequestException:
+                pass  # target unreachable (hung / already gone) - fall through to a direct kill
+        else:
+            logger.warning(
+                "instance stop: registry entry's host %r is not an address "
+                "this machine holds; not dialing it", entry.get("host"))
 
         if not stopped:
             stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
