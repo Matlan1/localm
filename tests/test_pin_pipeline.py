@@ -1,0 +1,794 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Tests for scripts/pin_pipeline.py.
+
+Three layers, matching how the script itself is built:
+  * pure functions (should_skip, changelog_bullet, insert_changelog_bullet,
+    append_fail_issue) - tested directly against real/synthetic text, no I/O
+    mocking needed.
+  * subprocess-boundary functions (run_confirm, run_bump, run_under_gpu_lease,
+    wait_for_ci) - subprocess.run is monkeypatched to a recording fake, so
+    what is asserted is the ACTUAL command/cwd/env constructed, never a
+    hand-waved "it was called".
+  * git-worktree functions (ensure_pipeline_worktree, prepare_bump_branch) -
+    exercised against a REAL throwaway git repo (never the real localm repo),
+    because a worktree-isolation safety check is exactly the kind of thing
+    that needs real git behaviour behind it, not a mock that assumes the
+    answer.
+
+No real network, no real GPU, no real localm import needed for any of this -
+pin_pipeline.py's own subprocess calls are the seam.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import importlib.util
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+_PATH = Path(__file__).resolve().parent.parent / "scripts" / "pin_pipeline.py"
+_spec = importlib.util.spec_from_file_location("pin_pipeline", _PATH)
+pipeline = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(pipeline)
+
+
+def _day(n: int) -> dt.datetime:
+    return dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=n)
+
+
+def _iso(d: dt.datetime) -> str:
+    return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# --------------------------------------------------------------------------- #
+#  should_skip - the never-retry-a-known-bad-candidate logic                 #
+# --------------------------------------------------------------------------- #
+
+def test_should_skip_none_when_no_state_at_all():
+    assert pipeline.should_skip({}, "b10999") is None
+
+
+def test_should_skip_none_when_state_is_for_a_different_older_candidate():
+    """A FAIL recorded against an OLDER candidate must never block a NEWER
+    one - only the exact same candidate is ever skipped."""
+    state = {"last_tag_tried": "b10900", "verdict": "FAIL", "timestamp": _iso(_day(0))}
+    assert pipeline.should_skip(state, "b10999") is None
+
+
+def test_should_skip_fail_is_never_retried_regardless_of_age():
+    state = {"last_tag_tried": "b10999", "verdict": "FAIL", "timestamp": _iso(_day(0))}
+    reason = pipeline.should_skip(state, "b10999", now=_day(9999))
+    assert reason is not None and "FAIL" in reason
+
+
+def test_should_skip_inconclusive_retried_after_cooldown_not_before():
+    state = {"last_tag_tried": "b10999", "verdict": "INCONCLUSIVE", "timestamp": _iso(_day(0))}
+    within = pipeline.should_skip(state, "b10999", now=_day(0) + dt.timedelta(hours=1))
+    assert within is not None and "cooldown" in within
+    after = pipeline.should_skip(
+        state, "b10999",
+        now=_day(0) + dt.timedelta(hours=pipeline.INCONCLUSIVE_COOLDOWN_HOURS + 1))
+    assert after is None
+
+
+def test_should_skip_pass_state_never_blocks_a_later_run():
+    """A PASS is historical fact (this candidate already merged); it must
+    never read as a reason to skip a check on the SAME tag run again later
+    (which will simply find nothing newer via newest_candidate() anyway)."""
+    state = {"last_tag_tried": "b10999", "verdict": "PASS", "timestamp": _iso(_day(0))}
+    assert pipeline.should_skip(state, "b10999") is None
+
+
+# --------------------------------------------------------------------------- #
+#  newest_candidate - imports check_llama_pin.py directly, no text-scraping  #
+# --------------------------------------------------------------------------- #
+
+def test_newest_candidate_none_when_already_current(tmp_path, monkeypatch):
+    check_llama_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_llama_pin.py", "check_llama_pin_for_test")
+    pin = check_llama_pin.pinned_tag()
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_llama_pin)
+    monkeypatch.setattr(check_llama_pin, "upstream_releases",
+                        lambda: ([{"tag": pin, "published_at": None}], ""))
+    assert pipeline.newest_candidate() is None
+
+
+def test_newest_candidate_returns_pair_when_upstream_is_ahead(monkeypatch):
+    check_llama_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_llama_pin.py", "check_llama_pin_for_test2")
+    pin = check_llama_pin.pinned_tag()
+    n = check_llama_pin._build_number(pin)
+    newest = f"b{n + 5}"
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_llama_pin)
+    monkeypatch.setattr(check_llama_pin, "upstream_releases",
+                        lambda: ([{"tag": newest, "published_at": None},
+                                  {"tag": pin, "published_at": None}], ""))
+    assert pipeline.newest_candidate() == (pin, newest)
+
+
+def test_newest_candidate_none_on_upstream_error(monkeypatch):
+    check_llama_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_llama_pin.py", "check_llama_pin_for_test3")
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_llama_pin)
+    monkeypatch.setattr(check_llama_pin, "upstream_releases", lambda: ([], "simulated failure"))
+    assert pipeline.newest_candidate() is None
+
+
+# --------------------------------------------------------------------------- #
+#  changelog                                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_changelog_bullet_names_both_tags_and_the_pickup_command():
+    bullet = pipeline.changelog_bullet("b10905", "b10999")
+    assert "b10905" in bullet and "b10999" in bullet
+    assert "localm setup-llama --force" in bullet
+
+
+def test_insert_changelog_bullet_creates_changed_section_when_absent():
+    text = "## [Unreleased]\n\n### Added\n- something\n\n## [0.1.0] - 2026-01-01\nold\n"
+    out = pipeline.insert_changelog_bullet(text, pipeline.changelog_bullet("a", "b"))
+    assert "### Changed\n- **The bundled llama.cpp runtime moved from a to b.**" in out
+    assert "## [0.1.0] - 2026-01-01\nold" in out, "the released section must be untouched"
+
+
+def test_insert_changelog_bullet_prepends_under_existing_changed_section():
+    text = ("## [Unreleased]\n\n### Changed\n- existing bullet\n\n"
+            "## [0.1.0] - 2026-01-01\nold\n")
+    out = pipeline.insert_changelog_bullet(text, pipeline.changelog_bullet("a", "b"))
+    changed_idx = out.index("### Changed\n")
+    new_bullet_idx = out.index("moved from a to b")
+    existing_idx = out.index("existing bullet")
+    assert changed_idx < new_bullet_idx < existing_idx, "new bullet goes first, existing stays"
+
+
+def test_insert_changelog_bullet_never_touches_a_released_section():
+    """FIRES: a naive non-anchored regex could match the FIRST '## [' heading
+    of a RELEASED section instead of [Unreleased] if the anchor were wrong -
+    prove the released section's own content is byte-identical after the
+    insert."""
+    text = ("## [Unreleased]\n\n### Added\n- x\n\n"
+            "## [0.2.0] - 2026-02-01\n\n### Changed\n- a released bullet, never move this\n")
+    out = pipeline.insert_changelog_bullet(text, pipeline.changelog_bullet("a", "b"))
+    assert "## [0.2.0] - 2026-02-01\n\n### Changed\n- a released bullet, never move this\n" in out
+
+
+def test_insert_changelog_bullet_refuses_when_no_unreleased_section():
+    with pytest.raises(pipeline.PipelineError):
+        pipeline.insert_changelog_bullet("# Changelog\nno unreleased section here\n",
+                                         pipeline.changelog_bullet("a", "b"))
+
+
+def test_insert_changelog_bullet_against_the_real_shipped_changelog():
+    """Bound to the real file, not only a synthetic fixture - proves the
+    anchor still matches the actual shipped CHANGELOG.md shape."""
+    real = (Path(pipeline.REPO) / "CHANGELOG.md").read_text(encoding="utf-8")
+    out = pipeline.insert_changelog_bullet(real, pipeline.changelog_bullet("bOLD", "bNEW"))
+    assert "moved from bOLD to bNEW" in out
+    assert out.count("## [Unreleased]") == 1
+
+
+# --------------------------------------------------------------------------- #
+#  issues.txt logging                                                        #
+# --------------------------------------------------------------------------- #
+
+_ISSUES_FIXTURE = (
+    "LocaLM - issue backlog\n======================\n\n"
+    "The OPEN work, grouped by STATE. Each section below is one state; an entry lives\n"
+    "in exactly one. Resolved items are DELETED once merged - their history lives in the\n"
+    "merged PR and in the dated verbatim backups in dev-notes/issues-backups/.\n\n"
+    "SOME-EXISTING-ENTRY [OPEN] category - unrelated\n"
+)
+
+
+def test_append_fail_issue_inserts_right_after_the_intro_anchor(tmp_path):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    pipeline.append_fail_issue("b10999", "simulated FAIL reason", Path("r.json"), issues_path=path)
+    out = path.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-LLAMA-B10999-CONFIRM-FAILED" in out
+    assert out.index("NEW-PIN-PIPELINE-LLAMA") < out.index("SOME-EXISTING-ENTRY"), (
+        "the new entry goes at the top, the existing entry must survive untouched")
+    assert "simulated FAIL reason" in out
+
+
+def test_append_fail_issue_is_idempotent_for_the_same_candidate(tmp_path):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    pipeline.append_fail_issue("b10999", "first reason", None, issues_path=path)
+    pipeline.append_fail_issue("b10999", "second reason", None, issues_path=path)
+    out = path.read_text(encoding="utf-8")
+    assert out.count("NEW-PIN-PIPELINE-LLAMA-B10999-CONFIRM-FAILED") == 1
+    assert "first reason" in out and "second reason" not in out
+
+
+def test_append_fail_issue_no_op_when_file_missing(tmp_path):
+    missing = tmp_path / "does-not-exist.txt"
+    pipeline.append_fail_issue("b10999", "reason", None, issues_path=missing)
+    assert not missing.exists()
+
+
+# --------------------------------------------------------------------------- #
+#  gpu_lease_script - configurable, verified to exist, never silently absent #
+# --------------------------------------------------------------------------- #
+
+def test_gpu_lease_script_uses_env_override_when_set(tmp_path, monkeypatch):
+    fake = tmp_path / "gpu_lease.py"
+    fake.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.setenv(pipeline._GPU_LEASE_ENV, str(fake))
+    assert pipeline.gpu_lease_script() == fake
+
+
+def test_gpu_lease_script_refuses_loudly_when_not_found(monkeypatch):
+    monkeypatch.setenv(pipeline._GPU_LEASE_ENV, "Z:/definitely/not/a/real/path/gpu_lease.py")
+    with pytest.raises(pipeline.PipelineError, match="GPU lease script not found"):
+        pipeline.gpu_lease_script()
+
+
+# --------------------------------------------------------------------------- #
+#  subprocess-boundary functions - assert the ACTUAL command constructed     #
+# --------------------------------------------------------------------------- #
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_run_under_gpu_lease_wraps_the_command_and_passes_purpose(monkeypatch, tmp_path):
+    fake_lease = tmp_path / "gpu_lease.py"
+    fake_lease.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.setenv(pipeline._GPU_LEASE_ENV, str(fake_lease))
+    captured = {}
+
+    def fake_run(cmd, cwd=None, **kwargs):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        return _FakeCompleted(returncode=0)
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    rc = pipeline.run_under_gpu_lease(["echo", "hi"], purpose="test purpose", cwd=tmp_path)
+    assert rc == 0
+    assert captured["cwd"] == tmp_path
+    cmd = captured["cmd"]
+    assert cmd[-3:] == ["--", "echo", "hi"]
+    assert "--purpose" in cmd and "test purpose" in cmd
+    assert str(fake_lease) in cmd
+
+
+def test_run_confirm_requests_cpu_and_vulkan_and_the_given_receipt(monkeypatch, tmp_path):
+    fake_lease = tmp_path / "gpu_lease.py"
+    fake_lease.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.setenv(pipeline._GPU_LEASE_ENV, str(fake_lease))
+    captured = {}
+
+    def fake_run(cmd, cwd=None, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompleted(returncode=0)
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    receipt = tmp_path / "r.json"
+    pipeline.run_confirm("b10999", receipt)
+    cmd = captured["cmd"]
+    assert "confirm_llama_runtime.py" in " ".join(cmd)
+    assert cmd.count("--backend") == 2
+    assert "cpu" in cmd and "vulkan" in cmd
+    assert "--tag" in cmd and "b10999" in cmd
+    assert str(receipt) in cmd
+
+
+def test_run_bump_uses_the_worktrees_own_copy_not_the_main_checkout(monkeypatch, tmp_path):
+    """FIRES: the whole point of this function is running the WORKTREE's
+    bump_llama_pin.py, never the main checkout's - prove the constructed
+    command path is rooted at the worktree argument, and that PYTHONPATH is
+    set to the worktree (the documented worktree-import gotcha)."""
+    worktree = tmp_path / "the-worktree"
+    worktree.mkdir()
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kwargs):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return _FakeCompleted(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    rc, _ = pipeline.run_bump(worktree, "b10999", tmp_path / "r.json", write=True)
+    assert rc == 0
+    cmd = captured["cmd"]
+    assert str(worktree / "scripts" / "bump_llama_pin.py") in cmd
+    assert "--write" in cmd
+    assert captured["cwd"] == worktree
+    assert captured["env"]["PYTHONPATH"] == str(worktree)
+
+
+def test_run_bump_without_write_omits_the_flag(monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    captured = {}
+    monkeypatch.setattr(pipeline.subprocess, "run",
+                        lambda cmd, **k: (captured.update(cmd=cmd), _FakeCompleted())[-1])
+    pipeline.run_bump(worktree, "b10999", tmp_path / "r.json", write=False)
+    assert "--write" not in captured["cmd"]
+
+
+def test_run_targeted_tests_runs_against_the_worktree_with_pythonpath_set(monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kwargs):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return _FakeCompleted(returncode=0)
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    passed, _ = pipeline.run_targeted_tests(worktree)
+    assert passed
+    assert captured["cwd"] == worktree
+    assert captured["env"]["PYTHONPATH"] == str(worktree)
+    assert "test_llama_pin_constant_and_currency.py" in " ".join(captured["cmd"])
+    assert "not integration" in " ".join(captured["cmd"])
+
+
+# --------------------------------------------------------------------------- #
+#  wait_for_ci - GREEN/RED/PENDING, never mergeable/mergeStateStatus         #
+# --------------------------------------------------------------------------- #
+
+def _checks_response(runs):
+    return _FakeCompleted(returncode=0, stdout=json.dumps({"check_runs": runs}))
+
+
+def test_wait_for_ci_green_when_everything_completed_and_succeeded(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="deadbeef\n"))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda cmd, **k: _checks_response(
+        [{"status": "completed", "conclusion": "success"},
+         {"status": "completed", "conclusion": "success"}]))
+    assert pipeline.wait_for_ci(tmp_path) == "GREEN"
+
+
+def test_wait_for_ci_red_on_any_failure_even_if_others_still_running(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="deadbeef\n"))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda cmd, **k: _checks_response(
+        [{"status": "completed", "conclusion": "failure"},
+         {"status": "in_progress", "conclusion": None}]))
+    assert pipeline.wait_for_ci(tmp_path) == "RED"
+
+
+def test_wait_for_ci_ignores_skipped_checks_for_the_green_verdict(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="deadbeef\n"))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda cmd, **k: _checks_response(
+        [{"status": "completed", "conclusion": "success"},
+         {"status": "completed", "conclusion": "skipped"}]))
+    assert pipeline.wait_for_ci(tmp_path) == "GREEN"
+
+
+def test_wait_for_ci_pending_on_timeout_never_green_never_red(monkeypatch, tmp_path):
+    """An empty/still-running check list must never be misread as GREEN -
+    same class of bug documented for wait_for_checks.py in this repo."""
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="deadbeef\n"))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda cmd, **k: _checks_response([]))
+    calls = {"n": 0}
+    real_monotonic = pipeline.time.monotonic
+    start = real_monotonic()
+
+    def fake_monotonic():
+        calls["n"] += 1
+        # advance past the deadline after a couple of polls
+        return start + (pipeline.CI_WAIT_TIMEOUT_SECONDS + 1 if calls["n"] > 2 else 0)
+    monkeypatch.setattr(pipeline.time, "monotonic", fake_monotonic)
+    assert pipeline.wait_for_ci(tmp_path) == "PENDING"
+
+
+# --------------------------------------------------------------------------- #
+#  git-worktree functions - real throwaway git repo, never the real localm   #
+# --------------------------------------------------------------------------- #
+
+def _init_scratch_repo(root: Path) -> Path:
+    """A tiny, real, throwaway git repo standing in for the localm main
+    checkout - never touches the real one."""
+    repo = root / "scratch-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "README.md").write_text("scratch\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    return repo
+
+
+def test_ensure_pipeline_worktree_refuses_when_not_on_master(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "not-master"], cwd=repo, check=True)
+    with pytest.raises(pipeline.PipelineError, match="not master"):
+        pipeline.ensure_pipeline_worktree(repo)
+
+
+def test_ensure_pipeline_worktree_refuses_when_run_from_a_linked_worktree(tmp_path):
+    """A linked worktree's OWN toplevel is itself, so the toplevel-consistency
+    check alone cannot tell it apart from the main checkout - what actually
+    catches it is that git refuses to let two worktrees hold the same branch
+    at once, so a linked worktree can never itself be `master` while the main
+    checkout holds it. Confirm the refusal fires anyway, via that mechanism."""
+    repo = _init_scratch_repo(tmp_path)
+    other = tmp_path / "some-other-worktree"
+    subprocess.run(["git", "worktree", "add", "-q", "--detach", str(other), "master"],
+                   cwd=repo, check=True)
+    with pytest.raises(pipeline.PipelineError, match="not master"):
+        pipeline.ensure_pipeline_worktree(other)
+
+
+def test_ensure_pipeline_worktree_creates_and_reuses_the_same_dedicated_worktree(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    # No real "origin" remote exists for this scratch repo; ensure_pipeline_worktree
+    # fetches origin (best-effort, check=False) then creates off origin/master,
+    # which does not exist here - so point it at "master" directly by pre-creating
+    # an origin/master-shaped ref is unnecessary: git worktree add falls back to
+    # the local branch when origin/master is unresolvable only if we ask it to;
+    # instead, add a same-named local remote pointing at itself so origin/master
+    # resolves for real, matching what a real clone looks like.
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+
+    first = pipeline.ensure_pipeline_worktree(repo)
+    assert first.exists()
+    assert first == repo.parent / f"{repo.name}-pin-pipeline-worktree"
+
+    second = pipeline.ensure_pipeline_worktree(repo)
+    assert second == first, "a second call must reuse the same worktree, not create another"
+
+
+def test_prepare_bump_branch_creates_a_fresh_branch_off_origin_master(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+
+    branch = pipeline.prepare_bump_branch(worktree, "b10999")
+    assert branch == "claude/pin-pipeline-llama-b10999"
+    current = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                             cwd=worktree, capture_output=True, text=True).stdout.strip()
+    assert current == branch
+
+
+def test_prepare_bump_branch_refuses_when_fetch_fails(tmp_path):
+    """A failed fetch must raise InfraError rather than silently falling
+    through to branch off whatever the worktree was already on."""
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    head_before = subprocess.run(["git", "rev-parse", "HEAD"],
+                                 cwd=worktree, capture_output=True, text=True).stdout.strip()
+
+    subprocess.run(["git", "remote", "set-url", "origin", str(tmp_path / "no-such-remote")],
+                   cwd=worktree, check=True)
+
+    with pytest.raises(pipeline.InfraError, match="fetch"):
+        pipeline.prepare_bump_branch(worktree, "b10999")
+
+    head_after = subprocess.run(["git", "rev-parse", "HEAD"],
+                                cwd=worktree, capture_output=True, text=True).stdout.strip()
+    assert head_after == head_before, "a failed fetch must leave the worktree untouched"
+
+
+def _patch_state_dir(monkeypatch, tmp_path):
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(pipeline, "STATE_DIR", state_dir)
+    return state_dir
+
+
+class _CallSpy:
+    """A stand-in for a step that must not run. Raising from a stub used
+    inside pipeline's try/except PipelineError block would be a risky
+    assertion (see diff-review-discipline item 13: an AssertionError raised
+    inside code under test can be swallowed by a broad except) - this
+    instead records calls and is asserted on from OUTSIDE the call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return None
+
+
+def _patch_every_write_path_step_as_spy(monkeypatch) -> dict:
+    """Spy EVERY function run_llama_pipeline can call past the confirm gate,
+    not only the first one. A fires-control run that deliberately disables a
+    gate proceeds past whichever functions are mocked - one real function
+    left in that chain (verified live: prepare_bump_branch, unmocked, ran a
+    real `git checkout -b` against this session's own worktree with cwd
+    defaulting to the process cwd, moving it off its branch) executes for
+    real. Every "must not proceed" test uses this instead of spying one
+    function at a time."""
+    names = ("ensure_pipeline_worktree", "prepare_bump_branch", "run_bump",
+             "run_targeted_tests", "commit_and_push", "open_pr", "wait_for_ci", "merge_pr")
+    spies = {}
+    for name in names:
+        spy = _CallSpy()
+        monkeypatch.setattr(pipeline, name, spy)
+        spies[name] = spy
+    return spies
+
+
+# --------------------------------------------------------------------------- #
+#  run_llama_pipeline - the full orchestration, mocked at each named seam.   #
+#  Fires-control for this section: see the manual break/restore recorded in  #
+#  the PR description - reverting the `if rc == 1: return 1` gate made      #
+#  test_run_llama_pipeline_fail_receipt_stops_before_any_write fail with     #
+#  ensure_pipeline_worktree called once, confirming the assertion is live.  #
+# --------------------------------------------------------------------------- #
+
+def test_run_llama_pipeline_fail_receipt_stops_before_any_write(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 1)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    spies = _patch_every_write_path_step_as_spy(monkeypatch)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not any(s.calls for s in spies.values()), (
+        "a FAIL receipt must never reach the worktree/bump/commit stage")
+    assert issue_spy.calls, "a genuine FAIL must be logged to issues.txt"
+
+
+def test_run_llama_pipeline_inconclusive_receipt_stops_before_any_write(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 2)
+    spies = _patch_every_write_path_step_as_spy(monkeypatch)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert not any(s.calls for s in spies.values()), (
+        "an INCONCLUSIVE receipt must never reach the worktree/bump/commit stage")
+
+
+def test_run_llama_pipeline_lease_busy_records_no_verdict(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm",
+                        lambda candidate, receipt_path: pipeline.LEASE_BUSY_EXIT)
+    spies = _patch_every_write_path_step_as_spy(monkeypatch)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert not any(s.calls for s in spies.values()), (
+        "a lease-busy run must never reach the worktree/bump/commit stage either")
+    assert not (state_dir / "llama-state.json").exists(), (
+        "a lease-busy run never measured the candidate and must not record a verdict for it")
+
+
+def test_run_llama_pipeline_dry_run_stops_before_worktree(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    spies = _patch_every_write_path_step_as_spy(monkeypatch)
+
+    rc = pipeline.run_llama_pipeline(dry_run=True)
+
+    assert rc == 0
+    assert not any(s.calls for s in spies.values()), "--dry-run must never create the pipeline worktree"
+
+
+def test_run_llama_pipeline_skips_a_recorded_fail_without_calling_confirm(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "llama-state.json").write_text(
+        json.dumps({"last_tag_tried": "b105", "verdict": "FAIL", "timestamp": _iso(_day(0))}),
+        encoding="utf-8")
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    confirm_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "run_confirm", confirm_spy)
+    spies = _patch_every_write_path_step_as_spy(monkeypatch)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 0
+    assert not confirm_spy.calls, "a recorded FAIL for the same candidate must never re-run confirm"
+    assert not any(s.calls for s in spies.values())
+
+
+def _fake_worktree_with_changelog(tmp_path) -> Path:
+    worktree = tmp_path / "fake-worktree"
+    worktree.mkdir()
+    (worktree / "CHANGELOG.md").write_text(
+        "## [Unreleased]\n\n### Added\n- x\n\n## [0.1.0] - 2026-01-01\nold\n", encoding="utf-8")
+    return worktree
+
+
+def test_run_llama_pipeline_full_pass_path_merges_on_green_ci(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch",
+                        lambda wt, candidate: "claude/pin-pipeline-llama-b105")
+    monkeypatch.setattr(pipeline, "run_bump",
+                        lambda wt, candidate, receipt_path, write: (0, "ok"))
+    monkeypatch.setattr(pipeline, "run_targeted_tests", lambda wt: (True, "ok"))
+    commit_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "commit_and_push", commit_spy)
+    monkeypatch.setattr(pipeline, "open_pr", lambda *a: 4242)
+    monkeypatch.setattr(pipeline, "wait_for_ci", lambda wt: "GREEN")
+    merge_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "merge_pr", merge_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 0
+    assert commit_spy.calls, "a PASS must commit the bump"
+    assert merge_spy.calls == [((4242, worktree, "claude/pin-pipeline-llama-b105", "b105", "b100"), {})]
+    changed = (worktree / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "moved from b100 to b105" in changed
+    state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "PASS"
+    assert state["merged_pr"] == 4242
+
+
+def test_run_llama_pipeline_red_ci_leaves_pr_open_never_merges(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", lambda wt, candidate: "branch")
+    monkeypatch.setattr(pipeline, "run_bump",
+                        lambda wt, candidate, receipt_path, write: (0, "ok"))
+    monkeypatch.setattr(pipeline, "run_targeted_tests", lambda wt: (True, "ok"))
+    monkeypatch.setattr(pipeline, "commit_and_push", _CallSpy())
+    monkeypatch.setattr(pipeline, "open_pr", lambda *a: 55)
+    monkeypatch.setattr(pipeline, "wait_for_ci", lambda wt: "RED")
+    merge_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "merge_pr", merge_spy)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not merge_spy.calls, "must never merge on a red CI result"
+    assert issue_spy.calls
+    state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "FAIL"
+    assert state["open_pr"] == 55
+
+
+def test_run_llama_pipeline_bump_refusal_stops_before_commit(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", lambda wt, candidate: "branch")
+    monkeypatch.setattr(pipeline, "run_bump",
+                        lambda wt, candidate, receipt_path, write: (1, "refused: measured set mismatch"))
+    commit_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "commit_and_push", commit_spy)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not commit_spy.calls, "a refused bump must never be committed"
+    assert issue_spy.calls
+
+
+def test_run_llama_pipeline_infra_error_during_commit_is_inconclusive_not_fail(monkeypatch, tmp_path):
+    """A push/gh-CLI hiccup is about THIS RUN's plumbing, not the confirmed
+    candidate build - it must retry after cooldown (INCONCLUSIVE), never
+    permanently block an otherwise-good candidate the way a FAIL would."""
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", lambda wt, candidate: "branch")
+    monkeypatch.setattr(pipeline, "run_bump",
+                        lambda wt, candidate, receipt_path, write: (0, "ok"))
+    monkeypatch.setattr(pipeline, "run_targeted_tests", lambda wt: (True, "ok"))
+
+    def _raise_infra(*a, **k):
+        raise pipeline.InfraError("push failed: simulated network blip")
+    monkeypatch.setattr(pipeline, "commit_and_push", _raise_infra)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert not issue_spy.calls, "an infra hiccup on a good build must not be logged as a FAIL"
+    state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "INCONCLUSIVE"
+    # should_skip must treat this as cooldown-retriable, never a permanent block
+    skip_reason = pipeline.should_skip(state, "b105")
+    assert skip_reason is not None and "cooldown" in skip_reason
+
+
+def test_run_llama_pipeline_failing_tests_after_bump_stop_before_commit(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", lambda wt, candidate: "branch")
+    monkeypatch.setattr(pipeline, "run_bump",
+                        lambda wt, candidate, receipt_path, write: (0, "ok"))
+    monkeypatch.setattr(pipeline, "run_targeted_tests", lambda wt: (False, "2 failed"))
+    commit_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "commit_and_push", commit_spy)
+    monkeypatch.setattr(pipeline, "append_fail_issue", _CallSpy())
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not commit_spy.calls, "a bump that fails its own targeted tests must never be committed"
+
+
+def test_prepare_bump_branch_is_idempotent_across_a_retried_candidate(tmp_path):
+    """FIRES: a second call for the SAME candidate (e.g. a prior attempt
+    crashed after branching but before pushing) must not fail trying to
+    create a branch that already exists."""
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+
+    pipeline.prepare_bump_branch(worktree, "b10999")
+    branch_again = pipeline.prepare_bump_branch(worktree, "b10999")
+    assert branch_again == "claude/pin-pipeline-llama-b10999"
+
+
+def test_merge_pr_detaches_and_deletes_local_branch_without_delete_branch_flag(tmp_path, monkeypatch):
+    """merge_pr must never pass --delete-branch to `gh pr merge` - that
+    flag's local cleanup tries to switch to the default branch, which fails
+    from a worktree since master lives in the main checkout - and must
+    detach off and delete the local branch itself afterward. `gh` is
+    stubbed (no real GitHub call); the git half is real."""
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    branch = pipeline.prepare_bump_branch(worktree, "b105")
+
+    real_run = pipeline.subprocess.run
+    gh_calls = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "gh":
+            gh_calls.append(cmd)
+            return _FakeCompleted(returncode=0, stdout="", stderr="")
+        return real_run(cmd, **kwargs)
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    pipeline.merge_pr(99, worktree, branch, "b105", "b100")
+
+    assert gh_calls and "--delete-branch" not in gh_calls[0]
+    current = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                             cwd=worktree, capture_output=True, text=True).stdout.strip()
+    assert current == "HEAD", "must have detached off the merged branch"
+    branches = subprocess.run(["git", "branch", "--list", branch],
+                              cwd=worktree, capture_output=True, text=True).stdout
+    assert branch not in branches, "the local branch must be deleted after merge"
