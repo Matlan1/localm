@@ -451,7 +451,9 @@ def test_a_change_to_the_wrapper_selects_this_file_in_the_real_tree():
         env={**os.environ, "GITHUB_STEP_SUMMARY": ""})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "tests/test_run_affected_tests.py  # names run_affected_tests.py" in proc.stdout
-    assert "`pytest tests/test_run_affected_tests.py -m 'not integration' -n auto`" in proc.stdout
+    cmd = [ln for ln in proc.stdout.splitlines() if ln.startswith("`pytest ")][-1]
+    assert " tests/test_run_affected_tests.py " in cmd
+    assert cmd.endswith("-m 'not integration' -n auto`")
 
 
 def _load_workflow(path):

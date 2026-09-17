@@ -12,7 +12,9 @@ on:
   #                  python-pr-gate runs on every pull_request WITHOUT that
   #                  label: lockfile check, hygiene, ruff, and the tests
   #                  scripts/affected_tests.py selects for the diff. A
-  #                  labelled PR gets the matrix instead.
+  #                  labelled PR gets the matrix instead. merge-policy runs
+  #                  on every pull_request after those jobs and sums them up
+  #                  into one check - see that job below.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
   #   workflow_dispatch / schedule   run the matrix unconditionally. The
@@ -619,3 +621,51 @@ jobs:
       - name: Compare bundled lemonade-sdk ROCm build pin against upstream latest release
         continue-on-error: true
         run: python scripts/check_llama_rocm_pin.py
+
+  # The one check that sums up the others (docs/architecture.md, "Merge
+  # policy"). Runs on every pull_request once the five jobs it needs have
+  # finished, whatever their results, and never on push, dispatch or
+  # schedule. scripts/merge_policy.py reads those results and the change:
+  # lint and gui-tests must have succeeded; without the `full-ci` label
+  # python-pr-gate must have succeeded and the change must not be a release
+  # (VERSION unchanged); with the label the test matrix must have succeeded;
+  # mutation-test must not have failed when it ran (skipped is neutral). A
+  # release PR without the label fails here with the label named; every
+  # other PR merges without the matrix. A skipped required job never passes.
+  merge-policy:
+    name: merge-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [python-pr-gate, lint, gui-tests, test, mutation-test]
+    # Runs after a needed job failed or was skipped. See
+    # test_the_merge_policy_job_cannot_be_skipped_green.
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    steps:
+      # fetch-depth: 0 is required: the policy diffs the change from
+      # `git merge-base origin/master HEAD`; a shallow checkout has no
+      # origin/master at all.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Stdlib only: no venv, no install.
+      - name: Merge policy
+        env:
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          RESULT_PYTHON_PR_GATE: ${{ needs.python-pr-gate.result }}
+          RESULT_LINT: ${{ needs.lint.result }}
+          RESULT_GUI_TESTS: ${{ needs.gui-tests.result }}
+          RESULT_TEST: ${{ needs.test.result }}
+          RESULT_MUTATION_TEST: ${{ needs.mutation-test.result }}
+        run: >-
+          python scripts/merge_policy.py --full-ci "$FULL_CI"
+          --result "python-pr-gate=$RESULT_PYTHON_PR_GATE"
+          --result "lint=$RESULT_LINT"
+          --result "gui-tests=$RESULT_GUI_TESTS"
+          --result "test=$RESULT_TEST"
+          --result "mutation-test=$RESULT_MUTATION_TEST"
