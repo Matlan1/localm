@@ -31,11 +31,6 @@ classifiers = [
 # the cp312-only AMD wheels make any other 3.x unsatisfiable, and claiming an
 # untested 3.13+ would just recreate the same drift. Bump deliberately if the
 # installer ever provisions a newer Python.
-#
-# Before considering a bump, run scripts/check_amd_rocm_wheels_pin.py for the
-# CURRENT cp-tag ceiling the AMD index publishes for torch/torchvision - the
-# "cp312-only" premise above is a point-in-time fact about that index, not a
-# permanent one.
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "click>=8.5.0",
