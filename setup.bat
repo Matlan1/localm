@@ -246,11 +246,82 @@ goto venv_retry
 
 :venv_show_failure
 type "%TEMP%\localm_uv_err.txt" 2>nul
+findstr /c:"os error 5" /c:"os error 32" "%TEMP%\localm_uv_err.txt" >nul 2>nul
+set "VENVLOCKISH=0"
+if not errorlevel 1 set "VENVLOCKISH=1"
 del "%TEMP%\localm_uv_err.txt" 2>nul
 echo.
+
+rem  "Access is denied"/"os error 5" (or "os error 32", a sharing violation)
+rem  almost always means something still has a file inside .venv open, or an
+rem  attribute is blocking the delete outright. We are localm; find and fix
+rem  what we can before ever telling the user to go hunt for it themselves.
+set "VENVREASON=generic"
+if "!VENVLOCKISH!"=="1" (
+    rem  A leftover read-only/hidden attribute (an interrupted previous
+    rem  install, or how some packages ship their dist-info) makes Windows
+    rem  refuse the delete with this exact error before anything is even
+    rem  running. Clear it and retry once before looking for a process.
+    attrib -R -H ".venv\*.*" /S /D >nul 2>nul
+    if not defined VENV_ATTRIB_RETRIED (
+        set "VENV_ATTRIB_RETRIED=1"
+        goto venv_retry
+    )
+
+    call :find_venv_lockers
+    if not "!LOCKERS!"=="" (
+        echo  One or more localm processes from this folder look like they are
+        echo  still running and holding .venv locked:
+        echo.
+        for /f "usebackq tokens=1,2 delims=|" %%a in ("%TEMP%\localm_lockers.txt") do echo    - PID %%a  %%b
+        echo.
+        call :flush
+        choice /c YN /n /m "  Stop them and retry now? [Y/n]: "
+        if not errorlevel 2 (
+            for /f "usebackq tokens=1,2 delims=|" %%a in ("%TEMP%\localm_lockers.txt") do taskkill /PID %%a /T /F >nul 2>nul
+            del "%TEMP%\localm_lockers.txt" 2>nul
+            timeout /t 2 /nobreak >nul 2>nul
+            goto venv_retry
+        )
+        del "%TEMP%\localm_lockers.txt" 2>nul
+        set "VENVREASON=lockers_declined"
+    ) else (
+        if not defined VENV_WAIT_RETRIED (
+            set "VENV_WAIT_RETRIED=1"
+            echo  [i] .venv looks locked but nothing obvious owns it - it may be
+            echo      a brief antivirus or search-indexer scan. Waiting a moment
+            echo      and retrying once more ...
+            timeout /t 3 /nobreak >nul 2>nul
+            goto venv_retry
+        )
+        set "VENVREASON=unknown_lock"
+    )
+)
+
 echo  [^^!] Could not create the environment.
-echo      If you see "Access is denied" or "os error 5", a localm process is still running.
-echo      Please close any open LocaLM launchers, chat windows, or server consoles.
+if "!VENVREASON!"=="lockers_declined" (
+    echo      A localm process from this folder was still running and holding
+    echo      .venv locked. Close it, then try again.
+) else (
+    if "!VENVREASON!"=="unknown_lock" (
+        call :onedrive_root
+        if defined ONEDRIVE_ROOT (
+            echo      This folder is inside a OneDrive-synced location
+            echo      ^(!ONEDRIVE_ROOT!^), which can briefly lock a file while it
+            echo      syncs. Pausing OneDrive syncing for this folder, or moving
+            echo      the clone outside it, usually fixes this.
+        ) else (
+            echo      Nothing obvious is holding .venv locked, so this is most
+            echo      likely antivirus or security software briefly scanning the
+            echo      folder, or a localm process this could not identify. Close
+            echo      any open LocaLM windows and check your antivirus is not
+            echo      scanning this folder.
+        )
+    ) else (
+        echo      If you see "Access is denied" or "os error 5", a localm process is still running.
+        echo      Please close any open LocaLM launchers, chat windows, or server consoles.
+    )
+)
 echo.
 call :flush
 choice /c YN /n /m "  Try again? [Y/n]: "
@@ -780,3 +851,39 @@ rem ===========================================================================
 echo    powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
 echo    winget install astral-sh.uv
 goto :eof
+
+rem ===========================================================================
+rem  :find_venv_lockers - after a failed venv create/clear, look for processes
+rem  running from THIS folder's .venv. Matched by executable PATH, never by
+rem  process name alone, so a same-named process belonging to a DIFFERENT
+rem  localm clone on this machine is never listed or touched. Sets LOCKERS to
+rem  a non-empty sentinel and writes "PID|Name" lines to
+rem  %TEMP%\localm_lockers.txt when it finds any. Best-effort: any
+rem  PowerShell/WMI failure leaves LOCKERS empty and the file absent/empty.
+rem ===========================================================================
+:find_venv_lockers
+set "LOCKERS="
+if exist "%TEMP%\localm_lockers.txt" del "%TEMP%\localm_lockers.txt"
+powershell -NoProfile -Command ^
+    "$root = ('%CD%\.venv\').ToLowerInvariant();" ^
+    "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($root) } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.Name }" ^
+    >"%TEMP%\localm_lockers.txt" 2>nul
+for %%s in ("%TEMP%\localm_lockers.txt") do if %%~zs GTR 0 set "LOCKERS=1"
+exit /b 0
+
+rem ===========================================================================
+rem  :onedrive_root - sets ONEDRIVE_ROOT when the current folder is inside a
+rem  known OneDrive-synced location (the OneDrive / OneDriveConsumer /
+rem  OneDriveCommercial environment variable Windows itself sets up), which
+rem  can transiently lock a file it is syncing. Left undefined when none of
+rem  those variables is set, the folder is not under any of them, or the
+rem  PowerShell probe itself fails.
+rem ===========================================================================
+:onedrive_root
+set "ONEDRIVE_ROOT="
+for /f "usebackq delims=" %%r in (`powershell -NoProfile -Command ^
+    "$cwd = ('%CD%\').ToLowerInvariant();" ^
+    "foreach ($n in 'OneDrive','OneDriveConsumer','OneDriveCommercial') { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { $p = ($v.TrimEnd('\') + '\').ToLowerInvariant(); if ($cwd.StartsWith($p)) { Write-Output $v; break } } }"`) do (
+    set "ONEDRIVE_ROOT=%%r"
+)
+exit /b 0
