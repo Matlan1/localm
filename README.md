@@ -2,7 +2,7 @@
   <img src=".github/images/logo.svg" width="300" alt="LocaLM">
 </p>
 
-<p align="center"><b>Run LLMs, an autonomous coding agent, and image/music/video generation entirely on your own machine.</b><br>No cloud, no API keys, nothing leaves your machine unless you allow it.</p>
+<p align="center"><b>Run LLMs, an autonomous coding agent, and image/music/video generation entirely on your own machine.</b><br>No cloud provider account required, nothing leaves your machine unless you allow it.</p>
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/Matlan1/localm?label=release" alt="Latest release">
