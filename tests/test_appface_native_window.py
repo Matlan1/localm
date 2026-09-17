@@ -44,10 +44,11 @@ def test_native_window_available_false_under_pytest_guard():
 
 
 def test_native_window_available_false_when_not_installed(monkeypatch):
-    """Real-path test, no import mocking: pywebview genuinely is not
-    installed in this venv - exercises the actual "not installed" branch."""
+    """Forces the not-installed branch via sys.modules regardless of whether
+    pywebview happens to be installed in this venv - the standard idiom for
+    making `import webview` raise ImportError without touching sys.path."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
-    assert "webview" not in sys.modules  # sanity: not accidentally present
+    monkeypatch.setitem(sys.modules, "webview", None)
     assert appface.native_window_available() is False
 
 
@@ -122,8 +123,12 @@ def test_run_native_window_returns_false_under_pytest_guard_even_if_webview_woul
 
 
 def test_run_native_window_returns_false_when_pywebview_not_installed(monkeypatch):
+    """Forces the not-installed branch via sys.modules regardless of whether
+    pywebview happens to be installed in this venv - without this, an
+    installed pywebview would make this open a REAL native window and block
+    inside webview.start() for the window's lifetime."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
-    assert "webview" not in sys.modules
+    monkeypatch.setitem(sys.modules, "webview", None)
     assert appface.run_native_window("http://127.0.0.1:8642/") is False
 
 
