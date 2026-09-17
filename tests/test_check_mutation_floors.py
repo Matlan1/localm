@@ -550,8 +550,11 @@ class TestCommittedBaseline:
         # committed baseline, never a file synthesized from the same run.
         assert "--out mutants/mutation_baseline.proposed.json" in ratchet[0]["run"]
         assert "--baseline" not in ratchet[0]["run"]
-        # A failed scope decision runs the shards instead of skipping them.
-        assert "needs.mutation-scope.result == 'failure'" in wf["jobs"]["mutation-run"]["if"]
+        # The shards never key on mutation-scope: a PR is never made to wait.
+        assert "mutation-scope" not in wf["jobs"]["mutation-run"]["if"]
+        scope_step = next(st for st in wf["jobs"]["mutation-scope"]["steps"]
+                          if "mutation_scope.py" in (st.get("run") or ""))
+        assert "--notice" in scope_step["run"] and "--github-output" not in scope_step["run"]
 
     def test_every_sec01_control_class_is_pinned_to_a_killed_mutant(self, baseline):
         """The four SEC-01 mutant classes that live inside the only_mutate

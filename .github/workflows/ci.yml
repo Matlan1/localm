@@ -9,22 +9,21 @@ on:
   #                  OPEN PR starts the run without needing a new push. The
   #                  mutation-run shards run the same way, gated on the
   #                  `mutation-test` label instead - see that job below.
+  #                  mutation-scope runs on every pull_request and only
+  #                  NOTICES when the diff touches a [tool.mutmut]
+  #                  only_mutate module; it never starts the shards.
   #                  python-pr-gate runs on every pull_request WITHOUT that
   #                  label: lockfile check, hygiene, ruff, and the tests
   #                  scripts/affected_tests.py selects for the diff. A
   #                  labelled PR gets the matrix instead. merge-policy runs
   #                  on every pull_request after those jobs and sums them up
   #                  into one check - see that job below.
-  #                  mutation-scope runs on every pull_request and decides
-  #                  whether the diff touches a [tool.mutmut] only_mutate
-  #                  module or the mutation gate; if so, the mutation-run
-  #                  shards and the mutation-test gate run without the
-  #                  `mutation-test` label - see those jobs below.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
   #   workflow_dispatch / schedule   run the matrix unconditionally. The
   #                  mutation-run shards (and so the mutation-test gate) run on
-  #                  workflow_dispatch too, but never on push or schedule.
+  #                  both as well, so the weekly run gates master; never on
+  #                  push.
   #
   # THE LABEL GATE IS THE WHOLE MECHANISM. Do not remove the `full-ci`
   # condition on the test job and do not widen the push paths filter; either
@@ -544,20 +543,20 @@ jobs:
         continue-on-error: true
         run: python scripts/check_comfyui_pin.py
 
-  # Cheap per-PR decision for the mutation-run shards below: does the diff from
-  # the merge base touch a [tool.mutmut] only_mutate module, the mutation
-  # baseline, or the gate scripts? scripts/mutation_scope.py answers with a
-  # single `touched` output and exits 1 (a red job, never a silent false)
-  # when it cannot compute the diff. Same shape as the abi-check push paths
-  # filter above, done per job because an `on.pull_request.paths` filter
-  # would gate the whole workflow.
+  # Cheap per-PR NOTICE, never a trigger: does the diff from the merge base
+  # touch a [tool.mutmut] only_mutate module, the mutation baseline, or the
+  # gate scripts? scripts/mutation_scope.py prints the touched paths and, on
+  # a hit, a ::notice annotation saying the mutation gate did not run on this
+  # PR and how to run it (the `mutation-test` label). It exits 1 (a red job,
+  # never a silent "not touched") when it cannot compute the diff. The
+  # shards below deliberately do NOT depend on this: a trust-boundary PR
+  # would otherwise wait about an hour for the auth shard, and the weekly
+  # schedule gates master instead.
   mutation-scope:
     name: mutation scope (trust-boundary module touched?)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: github.event_name == 'pull_request'
-    outputs:
-      touched: ${{ steps.scope.outputs.touched }}
     steps:
       # fetch-depth: 0 is required: the script diffs from
       # `git merge-base origin/master HEAD`, which a shallow checkout cannot
@@ -570,18 +569,18 @@ jobs:
         with:
           python-version: "3.12"
       - name: Did this change touch a mutation-tested module or the gate?
-        id: scope
-        run: python scripts/mutation_scope.py --github-output
+        run: python scripts/mutation_scope.py --notice
 
   # Mutation testing (mutmut) for the eight trust-boundary modules
   # scripts/check_coverage_floors.py tracks - see pyproject.toml
   # [tool.mutmut]. ubuntu-latest only, and there is no OS dimension on
   # this job at all, so it structurally cannot run on windows-latest: mutmut
   # has no native Windows support and refuses to run there ("please use the
-  # WSL"). Runs on a pull_request that touches an only_mutate module or the
-  # gate (mutation-scope above), on the `mutation-test` PR label (same
-  # mechanism as `full-ci` above) for any other PR, or on a manual dispatch;
-  # never on push or schedule.
+  # WSL"). Runs on the weekly schedule and on a manual dispatch (both against
+  # the ref the workflow runs on, so the weekly run gates master), and on a
+  # pull_request only under the `mutation-test` label (same mechanism as
+  # `full-ci` above). Never on push, and never automatically on a PR: the
+  # auth shard alone takes about an hour, and a PR must not wait on it.
   #
   # ONE SHARD PER MODULE. A mutant that hangs the tests is killed by mutmut's
   # wall-clock timeout, (clean test time + 1) x 15 seconds, and those few
@@ -596,19 +595,11 @@ jobs:
     name: mutation run (${{ matrix.module }})
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    needs: [mutation-scope]
-    # `!cancelled()` keeps this condition live when mutation-scope was skipped
-    # (workflow_dispatch, push, schedule): without a status function a job
-    # whose `needs` was skipped is skipped too, before its `if` is read. A
-    # FAILED mutation-scope (it could not compute the diff) runs the shards
-    # rather than skipping them: an unknown answer is never "not touched".
     if: >-
-      !cancelled() && (
-        github.event_name == 'workflow_dispatch' ||
-        (github.event_name == 'pull_request' &&
-         (contains(github.event.pull_request.labels.*.name, 'mutation-test') ||
-          needs.mutation-scope.outputs.touched == 'true' ||
-          needs.mutation-scope.result == 'failure')))
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'mutation-test'))
     strategy:
       # Every module's result is wanted even when one shard fails; the gate
       # below reports the missing one by name.
@@ -677,8 +668,8 @@ jobs:
   # reviewed and committed without a local (Linux-only) mutmut run.
   #
   # This is the one job id downstream policy reads for the mutation result:
-  # skipped means the change did not touch the trust boundary, failure means
-  # the gate is red.
+  # skipped means the shards did not run on this event, failure means the
+  # gate is red.
   mutation-test:
     name: mutation testing (mutmut, ubuntu-latest only)
     runs-on: ubuntu-latest

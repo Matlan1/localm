@@ -132,6 +132,18 @@ class TestMain:
         assert ms.main(["--base", "master", "--repo", str(repo)]) == 0
         assert not out_file.exists()
 
+    def test_notice_is_printed_only_on_a_hit(self, repo, capsys):
+        _commit(repo, "localm/auth.py", "def f():\n    return 2\n")
+        assert ms.main(["--base", "master", "--repo", str(repo), "--notice"]) == 0
+        out = capsys.readouterr().out
+        assert "::notice title=Mutation gate did not run::" in out and "localm/auth.py" in out
+        assert "mutation-test label" in out
+        _commit(repo, "README.md", "changed again\n")
+        _git(repo, "reset", "-q", "--hard", "master")
+        _commit(repo, "README.md", "docs only\n")
+        assert ms.main(["--base", "master", "--repo", str(repo), "--notice"]) == 0
+        assert "::notice" not in capsys.readouterr().out
+
     def test_unresolvable_base_exits_one_and_never_says_false(self, repo, capsys):
         """NEGATIVE: an unknown answer must not read as 'nothing touched'."""
         _commit(repo, "localm/scopes.py", "def f():\n    return 3\n")

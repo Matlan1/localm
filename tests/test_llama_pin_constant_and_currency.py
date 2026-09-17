@@ -478,18 +478,18 @@ def test_run_abi_input_gates_only_the_abi_check_job():
         (github.event_name != 'pull_request' ||
          contains(github.event.pull_request.labels.*.name, 'full-ci'))
         """)
-    # The mutation shards run on dispatch, on the `mutation-test` label, or
-    # when mutation-scope found a trust-boundary module in the diff; the
-    # mutation-test gate follows the shards whenever they ran.
+    # The mutation shards run on dispatch, on the weekly schedule, or on the
+    # `mutation-test` label - never automatically on a pull request, which
+    # would wait about an hour on the auth shard; the mutation-test gate
+    # follows the shards whenever they ran. mutation-scope only notices.
     assert _norm(ci["jobs"]["mutation-run"]["if"]) == _norm("""
-        !cancelled() && (
-          github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'pull_request' &&
-           (contains(github.event.pull_request.labels.*.name, 'mutation-test') ||
-            needs.mutation-scope.outputs.touched == 'true' ||
-            needs.mutation-scope.result == 'failure')))
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
+        (github.event_name == 'pull_request' &&
+         contains(github.event.pull_request.labels.*.name, 'mutation-test'))
         """)
-    assert ci["jobs"]["mutation-run"]["needs"] == ["mutation-scope"]
+    assert "needs" not in ci["jobs"]["mutation-run"]
+    assert "outputs" not in ci["jobs"]["mutation-scope"]
     assert _norm(ci["jobs"]["mutation-test"]["if"]) == _norm(
         "${{ !cancelled() && needs.mutation-run.result != 'skipped' }}")
     assert ci["jobs"]["mutation-test"]["needs"] == ["mutation-run"]
