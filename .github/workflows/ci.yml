@@ -15,6 +15,10 @@ on:
   #                  labelled PR gets the matrix instead. merge-policy runs
   #                  on every pull_request after those jobs and sums them up
   #                  into one check - see that job below.
+  #                  mutation-scope runs on every pull_request and decides
+  #                  whether the diff touches a [tool.mutmut] only_mutate
+  #                  module or the mutation gate; if so, mutation-test runs
+  #                  without the label - see both jobs below.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
   #   workflow_dispatch / schedule   run the matrix unconditionally. The
@@ -539,23 +543,67 @@ jobs:
         continue-on-error: true
         run: python scripts/check_comfyui_pin.py
 
+  # Cheap per-PR decision for the mutation-test job below: does the diff from
+  # the merge base touch a [tool.mutmut] only_mutate module, the mutation
+  # baseline, or the gate scripts? scripts/mutation_scope.py answers with a
+  # single `touched` output and exits 1 (a red job, never a silent false)
+  # when it cannot compute the diff. Same shape as the abi-check push paths
+  # filter above, done per job because an `on.pull_request.paths` filter
+  # would gate the whole workflow.
+  mutation-scope:
+    name: mutation scope (trust-boundary module touched?)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    outputs:
+      touched: ${{ steps.scope.outputs.touched }}
+    steps:
+      # fetch-depth: 0 is required: the script diffs from
+      # `git merge-base origin/master HEAD`, which a shallow checkout cannot
+      # resolve.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Did this change touch a mutation-tested module or the gate?
+        id: scope
+        run: python scripts/mutation_scope.py --github-output
+
   # Mutation testing (mutmut) for the eight trust-boundary modules
   # scripts/check_coverage_floors.py tracks - see pyproject.toml
   # [tool.mutmut]. ubuntu-latest only, and there is no matrix dimension on
   # this job at all, so it structurally cannot run on windows-latest: mutmut
   # has no native Windows support and refuses to run there ("please use the
-  # WSL"). Opt-in via the
-  # `mutation-test` PR label (same mechanism as `full-ci` above) or a manual
-  # dispatch; never runs on push or schedule. Read-only: it never fails the
-  # build on survivors.
+  # WSL"). Runs on a pull_request that touches an only_mutate module or the
+  # gate (mutation-scope above), on the `mutation-test` PR label (same
+  # mechanism as `full-ci` above) for any other PR, or on a manual dispatch;
+  # never on push or schedule.
+  #
+  # A GATE, not a report: scripts/check_mutation_floors.py fails the job when
+  # a module's mutation score drops below the floor in
+  # scripts/mutation_baseline.json, when a mutant recorded as killed now
+  # survives, when a mutant (new, or in a function whose source changed) has
+  # no disposition, or when one of the pinned control mutants is not killed.
+  # The proposed baseline it writes is uploaded as an artifact so a changed
+  # function's dispositions can be reviewed and committed without a local
+  # (Linux-only) mutmut run.
   mutation-test:
     name: mutation testing (mutmut, ubuntu-latest only)
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    needs: [mutation-scope]
+    # `!cancelled()` keeps this condition live when mutation-scope was skipped
+    # (workflow_dispatch, push, schedule): without a status function a job
+    # whose `needs` was skipped is skipped too, before its `if` is read.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'mutation-test'))
+      !cancelled() && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' &&
+         (contains(github.event.pull_request.labels.*.name, 'mutation-test') ||
+          needs.mutation-scope.outputs.touched == 'true')))
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -580,6 +628,8 @@ jobs:
       # several minutes, depending on how many tests map to the mutated
       # function - this bound lets the export/publish/check steps below
       # still run and report whatever real, partial results exist so far.
+      # continue-on-error so a cut-short run still reaches the two gating
+      # steps below, which fail on incomplete results themselves.
       - name: Mutation test the trust-boundary modules
         timeout-minutes: 170
         continue-on-error: true
@@ -595,11 +645,36 @@ jobs:
         continue-on-error: true
         run: python scripts/write_mutation_summary.py
 
-      # Fails if mutants were generated but none reached a real outcome
-      # (`mutmut run` exits 0 even then). Never gates on the mutation score.
+      # GATE 1 - completeness: fails if mutants were generated but none
+      # reached a real outcome (`mutmut run` exits 0 even then, e.g. when its
+      # own clean test run failed). Says nothing about the score.
       - name: Verify the run actually completed
         if: always()
         run: python scripts/write_mutation_summary.py --check
+
+      # GATE 2 - the ratchet: per-module score floors, per-mutant
+      # dispositions and the pinned control mutants, against
+      # scripts/mutation_baseline.json. Also writes the proposed baseline the
+      # step after uploads. always(), so an incomplete run is still checked
+      # (and fails) rather than silently skipping the ratchet.
+      - name: Mutation floors and dispositions (trust boundary)
+        if: always()
+        run: >-
+          python scripts/check_mutation_floors.py
+          --update --out mutants/mutation_baseline.proposed.json
+
+      # The proposed baseline (current outcomes, floors ratcheted up,
+      # equivalent classifications kept) for review when the gate above
+      # fails on a changed function: download, classify every new survivor,
+      # commit it as scripts/mutation_baseline.json.
+      - name: Upload the proposed mutation baseline
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mutation-baseline-proposed
+          path: mutants/mutation_baseline.proposed.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Maintenance signal for a third bundled-and-pinned dependency, same shape as
   # comfyui-pin-check above: one GitHub API call, no clone, no prebuilt

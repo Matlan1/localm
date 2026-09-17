@@ -35,6 +35,8 @@ htmlcov/
 .coverage.*
 coverage.xml
 coverage.json
+# mutmut output (mutants, per-file .meta results, cicd stats)
+mutants/
 
 # Secrets / local state
 *.env
