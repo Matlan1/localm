@@ -131,6 +131,24 @@ class TestCheckUrl:
         with pytest.raises(NetworkPolicyError, match="net_mode=off"):
             check_url("https://example.com")
 
+    def test_off_floor_exempts_only_an_explicit_download_caller(self, monkeypatch):
+        """net_allow_model_downloads lifts the off floor for a caller passing
+        allow_when_off=True and for nobody else: a model-initiated request
+        (the default) stays refused whatever the setting says."""
+        _with_config(monkeypatch, {"net_mode": "off", "net_allow_model_downloads": True,
+                                   "net_allow_private": True})
+        check_url("https://example.com/model.gguf", allow_when_off=True)
+        with pytest.raises(NetworkPolicyError, match="net_mode=off"):
+            check_url("https://example.com/model.gguf")
+        with pytest.raises(NetworkPolicyError, match="net_mode=off"):
+            check_url("https://example.com/model.gguf", allow_when_off=False)
+
+    def test_off_floor_holds_for_a_download_caller_unless_the_setting_is_on(self, monkeypatch):
+        for cfg in ({"net_mode": "off"}, {"net_mode": "off", "net_allow_model_downloads": False}):
+            _with_config(monkeypatch, cfg)
+            with pytest.raises(NetworkPolicyError, match="net_mode=off"):
+                check_url("https://example.com/model.gguf", allow_when_off=True)
+
     @pytest.mark.parametrize("url", [
         "file:///etc/passwd",
         "ftp://example.com/x",
@@ -235,13 +253,24 @@ class _FakeResponse:
 
 class _FakeSession:
     """Doubles netpolicy._session_for - the pinned-transport seam - so tests
-    exercise the real fetch/redirect logic without opening a live socket."""
+    exercise the real fetch/redirect logic without opening a live socket.
+
+    ``get`` follows redirects itself unless ``allow_redirects=False`` is
+    passed, like ``requests.Session.get``, so a fetch that lets the transport
+    follow a redirect skips netpolicy's per-hop re-validation exactly as it
+    would with the real library."""
 
     def __init__(self, responder):
         self._responder = responder      # (method, url, **kw) -> response
 
     def get(self, url, **kw):
-        return self._responder("GET", url, **kw)
+        resp = self._responder("GET", url, **kw)
+        hops = 0
+        while kw.get("allow_redirects", True) and resp.is_redirect and hops < 30:
+            url = urllib.parse.urljoin(url, resp.headers["Location"])
+            resp = self._responder("GET", url, **kw)
+            hops += 1
+        return resp
 
     def post(self, url, **kw):
         return self._responder("POST", url, **kw)
@@ -293,14 +322,28 @@ class TestSafeFetch:
             return [(2, 1, 6, "", (ip, 0))]
         monkeypatch.setattr("socket.getaddrinfo", dns)
 
+        seen = []
+
         def fake_get(url, **kw):
+            seen.append(url)
             if "example.com" in url:
                 return _FakeResponse(status=302,
                                      redirect="http://localhost:8642/v1/models")
             return _FakeResponse(body=b"secret")
         _patch_session(monkeypatch, get=fake_get)
-        with pytest.raises(NetworkPolicyError, match="non-public"):
-            safe_fetch("https://example.com/jump")
+        result = None
+        try:
+            result = safe_fetch("https://example.com/jump")
+        except NetworkPolicyError as e:
+            err = e
+        else:
+            err = None
+        # The private hop was never fetched: the transport must hand every
+        # redirect back to netpolicy (allow_redirects=False) so the target is
+        # re-validated before any request reaches it.
+        assert seen == ["https://example.com/jump"], seen
+        assert result is None
+        assert err is not None and "non-public" in str(err)
 
     def test_too_many_redirects(self, monkeypatch):
         _with_config(monkeypatch, {"net_mode": "allow"})

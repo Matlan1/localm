@@ -117,6 +117,35 @@ boundary (`auth`, `scopes`, `tls`, `bindhost`, `netlisten`, `portmux`,
 workflows and gates. None of those blocks a merge; the list lives in
 `scripts/merge_policy.py`.
 
+`mutation-test` is the mutation-testing gate for the trust boundary: the
+eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`). On the
+weekly schedule, on a dispatch, or on a pull request carrying the
+`mutation-test` label, one `mutation-run` shard per module runs mutmut
+(`scripts/mutmut_run.py run "localm.<module>.*"`) and uploads its result
+file; `mutation-test` merges the eight and runs
+`scripts/check_mutation_floors.py` against the committed baseline
+`scripts/mutation_baseline.json`. The baseline records every mutant's
+disposition - `killed`, `survived` (a known gap, counted against the score)
+or `{"equivalent": "<reason>"}` (excluded, never silently) - plus a per-module
+score floor and the `controls`: one concrete mutant per security-decision
+class (a weakened scope check, an authorization fallback flipped to allow,
+a skipped SSRF redirect re-validation, a widened net_mode=off exemption, a
+path-confinement bypass, a loopback classifier that accepts an unparseable
+host) that must stay killed. The gate fails on a score below its floor, a
+mutant recorded as killed that now survives, a mutant with no disposition
+(new, or in a function whose source hash changed), a control not killed, or
+an incomplete run. The job uploads a proposed baseline
+(`mutation-baseline-proposed`, floors ratcheted up, equivalents kept) so a
+changed function's new mutants can be classified and committed without a
+local run; mutmut itself runs on Linux only. The shards never run
+automatically on a pull request (the `auth` shard alone takes about an hour);
+`mutation-scope` (`scripts/mutation_scope.py`) instead annotates a pull
+request that touches a mutated module or the gate with a notice that the
+gate did not run on it. The two decision classes that
+live in `localm/inference/http_server.py` rather than a mutated module - an
+unsafe route exempted from the origin gate, and `bind_host` replaced by the
+peer address - are pinned by `tests/test_trust_boundary_controls.py`.
+
 So before removing or renaming a config key, a route, or a response field:
 search for the old name and for every field name the route derives from
 it, run the hygiene check, and run the affected selection.

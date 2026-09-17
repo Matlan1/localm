@@ -33,7 +33,6 @@ Stdlib only, apart from the pytest it launches.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shlex
 import subprocess
@@ -42,6 +41,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import ci_runner_files  # noqa: E402
+
 SELECTOR = REPO / "scripts" / "affected_tests.py"
 NOTHING_AFFECTED = "tests/NO_TEST_FILE_IS_AFFECTED"
 WIDE_EXIT = 3
@@ -191,10 +195,7 @@ def render_summary(selection: Selection, args: list[str] | None,
 
 def _publish(text: str) -> None:
     print(text)
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a", encoding="utf-8") as f:
-            f.write(text)
+    ci_runner_files.append(ci_runner_files.STEP_SUMMARY, text)
 
 
 def main(argv: list[str]) -> int:

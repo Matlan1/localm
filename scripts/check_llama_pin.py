@@ -54,6 +54,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import ci_runner_files  # noqa: E402
+
 _REPO = "ggml-org/llama.cpp"
 _SETUP_PATH = Path(__file__).resolve().parent.parent / "localm" / "setup_llama.py"
 _PIN_RE = re.compile(r'^_PINNED_TAG\s*=\s*"([^"]+)"', re.M)
@@ -217,14 +222,10 @@ def _annotate(level: str, message: str) -> None:
 
 
 def _summarise(lines: "list[str]") -> None:
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
     try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+        ci_runner_files.append(ci_runner_files.STEP_SUMMARY, "\n".join(lines) + "\n")
     except OSError as e:
-        print(f"(could not write the step summary to {path}: {e})")
+        print(f"(could not write the step summary: {e})")
 
 
 def _date_str(d) -> str:

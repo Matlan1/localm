@@ -7,8 +7,11 @@ on:
   #                  carries the `full-ci` label. Every other PR skips it.
   #                  `labeled` is in the types list so adding the label to an
   #                  OPEN PR starts the run without needing a new push. The
-  #                  mutation-test job runs the same way, gated on the
+  #                  mutation-run shards run the same way, gated on the
   #                  `mutation-test` label instead - see that job below.
+  #                  mutation-scope runs on every pull_request and only
+  #                  NOTICES when the diff touches a [tool.mutmut]
+  #                  only_mutate module; it never starts the shards.
   #                  python-pr-gate runs on every pull_request WITHOUT that
   #                  label: lockfile check, hygiene, ruff, and the tests
   #                  scripts/affected_tests.py selects for the diff. A
@@ -18,8 +21,9 @@ on:
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
   #   workflow_dispatch / schedule   run the matrix unconditionally. The
-  #                  mutation-test job runs on workflow_dispatch too, but never
-  #                  on push or schedule - see that job below.
+  #                  mutation-run shards (and so the mutation-test gate) run on
+  #                  both as well, so the weekly run gates master; never on
+  #                  push.
   #
   # THE LABEL GATE IS THE WHOLE MECHANISM. Do not remove the `full-ci`
   # condition on the test job and do not widen the push paths filter; either
@@ -70,7 +74,7 @@ on:
       run_abi:
         # OFF by default so a plain dispatch does not include the flaky
         # abi-check job. This input gates ONLY abi-check - it has no effect
-        # on test, gui-tests or mutation-test, which always run on
+        # on test, gui-tests or mutation-run, which always run on
         # workflow_dispatch regardless (see the top-of-file trigger
         # comment). Before this input existed, dispatch was the only
         # pre-merge signal (no pull_request trigger) and it always ran
@@ -539,23 +543,73 @@ jobs:
         continue-on-error: true
         run: python scripts/check_comfyui_pin.py
 
+  # Cheap per-PR NOTICE, never a trigger: does the diff from the merge base
+  # touch a [tool.mutmut] only_mutate module, the mutation baseline, or the
+  # gate scripts? scripts/mutation_scope.py prints the touched paths and, on
+  # a hit, a ::notice annotation saying the mutation gate did not run on this
+  # PR and how to run it (the `mutation-test` label). It exits 1 (a red job,
+  # never a silent "not touched") when it cannot compute the diff. The
+  # shards below deliberately do NOT depend on this: a trust-boundary PR
+  # would otherwise wait about an hour for the auth shard, and the weekly
+  # schedule gates master instead.
+  mutation-scope:
+    name: mutation scope (trust-boundary module touched?)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      # fetch-depth: 0 is required: the script diffs from
+      # `git merge-base origin/master HEAD`, which a shallow checkout cannot
+      # resolve.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Did this change touch a mutation-tested module or the gate?
+        run: python scripts/mutation_scope.py --notice
+
   # Mutation testing (mutmut) for the eight trust-boundary modules
   # scripts/check_coverage_floors.py tracks - see pyproject.toml
-  # [tool.mutmut]. ubuntu-latest only, and there is no matrix dimension on
+  # [tool.mutmut]. ubuntu-latest only, and there is no OS dimension on
   # this job at all, so it structurally cannot run on windows-latest: mutmut
   # has no native Windows support and refuses to run there ("please use the
-  # WSL"). Opt-in via the
-  # `mutation-test` PR label (same mechanism as `full-ci` above) or a manual
-  # dispatch; never runs on push or schedule. Read-only: it never fails the
-  # build on survivors.
-  mutation-test:
-    name: mutation testing (mutmut, ubuntu-latest only)
+  # WSL"). Runs on the weekly schedule and on a manual dispatch (both against
+  # the ref the workflow runs on, so the weekly run gates master), and on a
+  # pull_request only under the `mutation-test` label (same mechanism as
+  # `full-ci` above). Never on push, and never automatically on a PR: the
+  # auth shard alone takes about an hour, and a PR must not wait on it.
+  #
+  # ONE SHARD PER MODULE. A mutant that hangs the tests is killed by mutmut's
+  # wall-clock timeout, (clean test time + 1) x 15 seconds, and those few
+  # mutants dominate the run: measured, timeouts were 5% of the mutants and
+  # 82% of the worker time. One job for all eight modules never finished
+  # inside its 170 minutes on a 4-vCPU runner (six runs, six timeouts at
+  # ~2429/3056 mutants), so each module runs in its own job and the
+  # mutation-test job below merges the eight result files and gates on them.
+  # `mutmut run "localm.<module>.*"` generates every mutant, tests only the
+  # named module's, and writes its outcomes to mutants/localm/<module>.py.meta.
+  mutation-run:
+    name: mutation run (${{ matrix.module }})
     runs-on: ubuntu-latest
     timeout-minutes: 180
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       (github.event_name == 'pull_request' &&
        contains(github.event.pull_request.labels.*.name, 'mutation-test'))
+    strategy:
+      # Every module's result is wanted even when one shard fails; the gate
+      # below reports the missing one by name.
+      fail-fast: false
+      matrix:
+        # Keep in sync with [tool.mutmut] only_mutate in pyproject.toml
+        # (tests/test_check_mutation_floors.py pins the two lists together).
+        module: [bindhost, scopes, pathsafe, netpolicy, auth, config, tls, portmux]
+    env:
+      MUTATION_MODULE: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -578,28 +632,119 @@ jobs:
 
       # A per-mutant re-test can cost anywhere from a fraction of a second to
       # several minutes, depending on how many tests map to the mutated
-      # function - this bound lets the export/publish/check steps below
-      # still run and report whatever real, partial results exist so far.
-      - name: Mutation test the trust-boundary modules
+      # function. continue-on-error so a cut-short run still uploads whatever
+      # real, partial results exist; the gate below fails on the gap.
+      #
+      # --max-children 16 on a 4-vCPU runner: a hung mutant SLEEPS until its
+      # wall-clock timeout (it holds a lock or waits on a socket), so it costs
+      # memory, not CPU - roughly 0.2-0.5 GB each, forked from one parent.
+      # mutmut's default of one child per CPU lets four sleeping children
+      # idle the whole runner; measured, auth's 212 hanging mutants are 99% of
+      # its worker time (267 min at 4 children, ~70 at 16). The timeout
+      # multiplier itself stays at mutmut's default of 15: two genuine
+      # survivors run 3.4-4.4x slower than clean while still passing, and a
+      # smaller multiplier would count them as detected.
+      - name: Mutation test one trust-boundary module
         timeout-minutes: 170
         continue-on-error: true
-        run: python scripts/mutmut_run.py run
+        run: python scripts/mutmut_run.py run --max-children 16 "localm.${MUTATION_MODULE}.*"
+
+      - name: Upload this module's mutation results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mutation-meta-${{ matrix.module }}
+          path: mutants/localm/${{ matrix.module }}.py.meta
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The mutation GATE, not a report: merges the eight shards above and fails
+  # when scripts/check_mutation_floors.py finds a module's mutation score
+  # below the floor in scripts/mutation_baseline.json, a mutant recorded as
+  # killed that now survives, a mutant (new, or in a function whose source
+  # changed) with no disposition, one of the pinned control mutants not
+  # killed, or an incomplete run. The proposed baseline it writes is
+  # uploaded as an artifact so a changed function's dispositions can be
+  # reviewed and committed without a local (Linux-only) mutmut run.
+  #
+  # This is the one job id downstream policy reads for the mutation result:
+  # skipped means the shards did not run on this event, failure means the
+  # gate is red.
+  mutation-test:
+    name: mutation testing (mutmut, ubuntu-latest only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [mutation-run]
+    # Runs whenever the shards ran, whatever they concluded: a shard that
+    # failed or was cut short is reported here as missing or incomplete
+    # results, which is a red gate rather than a silently skipped one.
+    if: ${{ !cancelled() && needs.mutation-run.result != 'skipped' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Create the project venv
+        run: python -m venv .venv
+      - name: Put the venv on PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      # mutmut itself only for export-cicd-stats, which reads the merged
+      # .meta files and the [tool.mutmut] config; no localm install needed.
+      - name: Install mutmut
+        run: |
+          python -m pip install --upgrade pip
+          pip install mutmut==3.7.0
+
+      - name: Download every module's mutation results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: mutation-meta-*
+          merge-multiple: true
+          path: mutants/localm
 
       - name: Export mutation stats
-        if: always()
         continue-on-error: true
         run: mutmut export-cicd-stats
 
       - name: Publish mutation summary
-        if: always()
         continue-on-error: true
         run: python scripts/write_mutation_summary.py
 
-      # Fails if mutants were generated but none reached a real outcome
-      # (`mutmut run` exits 0 even then). Never gates on the mutation score.
+      # GATE 1 - completeness: fails if mutants were generated but none
+      # reached a real outcome (`mutmut run` exits 0 even then, e.g. when a
+      # shard's own clean test run failed). Says nothing about the score.
       - name: Verify the run actually completed
-        if: always()
         run: python scripts/write_mutation_summary.py --check
+
+      # GATE 2 - the ratchet: per-module score floors, per-mutant
+      # dispositions and the pinned control mutants, checked against the
+      # COMMITTED scripts/mutation_baseline.json (--out keeps the proposal it
+      # also writes out of the check; the step after uploads it). always(),
+      # so an incomplete run is still checked (and fails) rather than
+      # silently skipping the ratchet.
+      - name: Mutation floors and dispositions (trust boundary)
+        if: always()
+        run: >-
+          python scripts/check_mutation_floors.py
+          --update --out mutants/mutation_baseline.proposed.json
+
+      # The proposed baseline (current outcomes, floors ratcheted up,
+      # equivalent classifications kept) for review when the gate above
+      # fails on a changed function: download, classify every new survivor,
+      # commit it as scripts/mutation_baseline.json.
+      - name: Upload the proposed mutation baseline
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mutation-baseline-proposed
+          path: mutants/mutation_baseline.proposed.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Maintenance signal for a third bundled-and-pinned dependency, same shape as
   # comfyui-pin-check above: one GitHub API call, no clone, no prebuilt

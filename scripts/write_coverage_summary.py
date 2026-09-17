@@ -19,6 +19,10 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import ci_runner_files  # noqa: E402
 
 
 def render_summary(
@@ -79,11 +83,7 @@ def _read_module_rows(data: dict) -> list[tuple[str, float | None, int]] | None:
 
 
 def _publish(text: str) -> None:
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a", encoding="utf-8") as f:
-            f.write(text)
-    else:
+    if not ci_runner_files.append(ci_runner_files.STEP_SUMMARY, text):
         print(text)
 
 
