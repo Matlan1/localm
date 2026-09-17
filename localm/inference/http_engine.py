@@ -212,7 +212,10 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
         # one) - NOT data[0], which is the alphabetically-first REGISTERED model
         # and is almost never the loaded one, so reading it makes `localm run`
         # attach to, and force-load, the wrong model.
-        dicts = [m for m in data if isinstance(m, dict) and m.get("id")]
+        # Entries whose id is not a non-empty string are skipped. See
+        # test_remote_model_status_skips_an_entry_whose_id_is_not_a_string.
+        dicts = [m for m in data
+                 if isinstance(m, dict) and isinstance(m.get("id"), str) and m.get("id")]
         chosen = next((m for m in dicts if m.get("active")), None) \
             or next((m for m in dicts if m.get("loaded")), None)
         if chosen is None and dicts and not any(

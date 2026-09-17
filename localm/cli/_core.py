@@ -74,10 +74,21 @@ def _resolve_bind_host(cli_host: Optional[str]):
 
     A config value that is not even well-FORMED (possible only via a
     hand-edited config.json - PATCH /v1/config and `localm config` both
-    validate at write time) is treated as unset, with a warning. Syntax is all
-    this helper judges; whether the address is bindable RIGHT NOW is a runtime
-    question answered by _bind_preflight_error at the call site."""
+    validate at write time) is treated as unset, with a warning. An explicit
+    ``-H/--host`` that is not well-formed (``bindhost.is_valid_bind_host``: an
+    IP literal or ``localhost``, never a hostname) raises
+    ``click.BadParameter``, so the command exits in front of the operator who
+    typed it. Syntax is all this helper judges; whether the address is
+    bindable RIGHT NOW is a runtime question answered by
+    _bind_preflight_error at the call site."""
     if cli_host is not None:
+        from localm.bindhost import is_valid_bind_host
+        if not is_valid_bind_host(str(cli_host)):
+            raise click.BadParameter(
+                f"{cli_host!r} is not a bindable address; use an IP literal "
+                f"(127.0.0.1, 0.0.0.0 for every interface, ::1, or one of this "
+                f"machine's interface addresses) or localhost. A hostname is "
+                f"not accepted.", param_hint="'-H' / '--host'")
         return str(cli_host), False
     from localm.config import load_config
     cfg_host = str(load_config().get("bind_host") or "").strip()

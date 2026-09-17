@@ -15,6 +15,7 @@ fail-hard behavior (exit 2).
 
 import ssl
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -153,6 +154,24 @@ class TestResolveBindHost:
 
     def test_unset_config_means_loopback(self, cfg_home):
         assert _resolve_bind_host(None) == ("127.0.0.1", False)
+
+    @pytest.mark.parametrize("bad", ["attacker.example", "myhost", "fe80::1%eth0",
+                                     "0.0.0.0:8642", "not-an-address"])
+    def test_an_explicit_hostname_or_malformed_flag_is_a_usage_error(self, cfg_home, bad):
+        """-H is validated the same way the config key is: an IP literal or
+        localhost. A hostname bound by name is classified by no consumer of
+        the loopback/network split and is never recognised as this machine's
+        by the instance registry's identity probe."""
+        with pytest.raises(click.BadParameter) as info:
+            _resolve_bind_host(bad)
+        rendered = info.value.format_message()   # what click prints, hint included
+        assert repr(bad) in rendered
+        assert "'-H' / '--host'" in rendered
+
+    @pytest.mark.parametrize("good", ["127.0.0.1", "0.0.0.0", "::1", "::", "localhost",
+                                      "192.0.2.10"])
+    def test_a_well_formed_explicit_flag_is_returned_as_given(self, cfg_home, good):
+        assert _resolve_bind_host(good) == (good, False)
 
     def test_hand_edited_garbage_is_ignored_not_fatal(self, cfg_home):
         # Bypass save-time validation, so a hand-edited config.json reaches the
