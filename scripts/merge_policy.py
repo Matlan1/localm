@@ -32,7 +32,6 @@ Stdlib only; imports scripts/affected_tests.py and scripts/run_affected_tests.py
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -234,14 +233,6 @@ def render_summary(verdict: Verdict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _publish(text: str) -> None:
-    print(text)
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a", encoding="utf-8") as f:
-            f.write(text)
-
-
 def _parse_result(value: str) -> tuple[str, str]:
     job, sep, result = value.partition("=")
     if not sep or job not in JOBS:
@@ -264,7 +255,7 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     verdict = evaluate(args.full_ci == "true", dict(args.result), args.base, args.files,
                        run_selector=not args.no_selector)
-    _publish(render_summary(verdict))
+    run_affected_tests._publish(render_summary(verdict))
     return 0 if verdict.ok else 1
 
 
