@@ -268,7 +268,7 @@ def checklist(tag: str) -> str:
         "       must pass against the rewritten allowlist",
         f"  3. python scripts/check_pretokenizer_redos.py --ref {tag}",
         "       needs MSVC: run it on a Windows box with Build Tools, or dispatch",
-        "       .github/workflows/llama-pin-currency.yml with candidate_tag",
+        "       .github/workflows/pin-currency.yml with candidate_tag",
         "  4. _PIN_CONFIRMATION in setup_llama.py: re-read every entry against the receipt",
         "       (which backends generated, on what hardware); a backend not in the",
         "       receipt must still say 'NOT measured'",

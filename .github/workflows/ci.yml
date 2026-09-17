@@ -509,7 +509,7 @@ jobs:
       # always exit 0, exactly like comfyui-pin-check below. Runs even when a
       # step above failed: the three steps above track a MOVING upstream target
       # and fail exactly when drift is large, which is when this report matters
-      # most. The gating copy of this check is .github/workflows/llama-pin-currency.yml.
+      # most. The gating copy of this check is .github/workflows/pin-currency.yml.
       - name: Report how far the llama.cpp pin has fallen behind upstream
         if: always()
         continue-on-error: true

@@ -1,24 +1,31 @@
-name: llama.cpp pin currency
+name: pin currency
 
 # WHAT THIS FILE DOES
 #
-#   currency             compares setup_llama._PINNED_TAG against upstream's
-#                        newest release with assets and FAILS once the pin is
-#                        older than the tolerance in scripts/check_llama_pin.py.
-#                        Runs on every push to master, on its own weekly cron
-#                        (a different weekday from ci.yml's), and on dispatch.
-#                        Never on pull_request: a stale pin is never a PR's
-#                        failure. One API call, no clone of upstream, no
-#                        prebuilt download, no install; about twenty seconds.
-#   candidate-preflight  dispatch-only, given `candidate_tag`: runs the bump
-#                        pre-flight scripts against that tag on windows-latest,
-#                        which carries the MSVC toolchain the pre-tokenizer
-#                        check needs. Writes nothing to the repository.
+#   llama-currency       compares setup_llama._PINNED_TAG (ggml-org/llama.cpp)
+#                        against upstream's newest release with assets and FAILS
+#                        once the pin is older than the tolerance in
+#                        scripts/check_llama_pin.py.
+#   comfyui-currency     same gate shape for COMFYUI_PINNED_VERSION
+#                        (comfyanonymous/ComfyUI) via scripts/check_comfyui_pin.py
+#                        --gate.
+#   rocm-currency        same gate shape for _ROCM_TAG (lemonade-sdk/llamacpp-rocm)
+#                        via scripts/check_llama_rocm_pin.py --gate.
+#   candidate-preflight  dispatch-only, given `candidate_tag`: runs the llama.cpp
+#                        bump pre-flight scripts against that tag on
+#                        windows-latest, which carries the MSVC toolchain the
+#                        pre-tokenizer check needs. Writes nothing to the
+#                        repository.
 #
-# EXIT-CODE CONTRACT the currency step relies on (scripts/check_llama_pin.py
-# --gate): 0 current or within tolerance, 1 stale, 2 could not compare. 2 is
-# turned into a warning annotation and a green step, never into a pass claim
-# and never into a red.
+# All three currency jobs run on every push to master, on this file's own weekly
+# cron (a different weekday/slot from ci.yml's), and on workflow_dispatch. Never
+# on pull_request: a stale pin is never a PR's failure. Each is one GitHub API
+# call, no clone of upstream, no prebuilt download, no install; about twenty
+# seconds.
+#
+# EXIT-CODE CONTRACT each currency step relies on (--gate): 0 current or within
+# tolerance, 1 stale, 2 could not compare. 2 is turned into a warning annotation
+# and a green step, never into a pass claim and never into a red.
 #
 # A red run here reaches the merge actor through the workflow-failure
 # notification and the commit's red status on master. That is the whole
@@ -32,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate_tag:
-        description: "Also run the bump pre-flight against this upstream tag (bNNNNN). Writes nothing."
+        description: "Also run the llama.cpp bump pre-flight against this upstream tag (bNNNNN). Writes nothing."
         type: string
         default: ""
 
@@ -40,12 +47,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: llama-pin-currency-${{ github.event_name }}-${{ github.ref }}
+  group: pin-currency-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  currency:
-    name: pin currency gate
+  llama-currency:
+    name: llama.cpp pin currency gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -67,6 +74,56 @@ jobs:
           set -e
           if [ "$rc" = "2" ]; then
             echo "::warning::the llama.cpp pin could not be compared against upstream this run (see above); this is NOT 'current'"
+            exit 0
+          fi
+          exit "$rc"
+
+  comfyui-currency:
+    name: ComfyUI pin currency gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compare the pinned ComfyUI version against upstream
+        shell: bash
+        run: |
+          set +e
+          python scripts/check_comfyui_pin.py --gate
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "::warning::the ComfyUI pin could not be compared against upstream this run (see above); this is NOT 'current'"
+            exit 0
+          fi
+          exit "$rc"
+
+  rocm-currency:
+    name: llama.cpp ROCm pin currency gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compare the pinned lemonade-sdk ROCm build against upstream
+        shell: bash
+        run: |
+          set +e
+          python scripts/check_llama_rocm_pin.py --gate
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "::warning::the ROCm build pin could not be compared against upstream this run (see above); this is NOT 'current'"
             exit 0
           fi
           exit "$rc"

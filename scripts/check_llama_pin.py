@@ -15,8 +15,8 @@ TWO MODES:
     of upstream's newest release, 1 once it is older than that, 2 when nothing
     could be compared (API unreachable, rate-limited, malformed, or the pin's own
     release date unreadable). 2 is never reported as 0 and never as 1.
-    .github/workflows/llama-pin-currency.yml runs this mode on every push to
-    master and on its own schedule.
+    .github/workflows/pin-currency.yml runs this mode on every push to master
+    and on its own schedule.
 
 WHAT "BEHIND" MEASURES: the days between the pinned release's ``published_at`` and
 the newest asset-bearing release's ``published_at``, both read from the API. The

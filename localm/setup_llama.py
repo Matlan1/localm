@@ -177,6 +177,11 @@ _PIN_CONFIRMATION = {
            "also the control proving the GPU column below is not vacuous)",
     "vulkan": "load + generate, measured (Windows x64, AMD RX 6900 XT / gfx1030; "
               "the runtime registered a Vulkan0 GPU device)",
+    # TO CONFIRM cuda: on NVIDIA hardware, run
+    #     python scripts/confirm_llama_runtime.py --tag <_PINNED_TAG> --backend cuda --receipt <file>.json
+    # and on a PASS, change this entry to the same "load + generate, measured
+    # (<platform>, <card>)" shape as "cpu"/"vulkan" above, citing the receipt.
+    # Maintainer-run, occasional cadence; see RELEASE.md's pin-currency section.
     "cuda": "ABI only (shared llama library); generation NOT measured - no NVIDIA hardware",
     "sycl": "ABI only (shared llama library); generation NOT measured - no Intel GPU",
     "hip": "ABI only (shared llama library); generation NOT measured - needs a system ROCm toolkit",
