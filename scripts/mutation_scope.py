@@ -24,13 +24,16 @@ Run:  python scripts/mutation_scope.py [--base REF] [--github-output]
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import ci_runner_files  # noqa: E402
 
 GATE_FILES = (
     "scripts/mutation_baseline.json",
@@ -92,10 +95,8 @@ def main(argv: list[str]) -> int:
     print(f"touched={verdict}")
     for h in hits:
         print(f"  {h}")
-    out = os.environ.get("GITHUB_OUTPUT")
-    if args.github_output and out:
-        with open(out, "a", encoding="utf-8") as f:
-            f.write(f"touched={verdict}\n")
+    if args.github_output:
+        ci_runner_files.append(ci_runner_files.OUTPUT, f"touched={verdict}\n")
     return 0
 
 

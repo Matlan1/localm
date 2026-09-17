@@ -60,11 +60,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import ci_runner_files  # noqa: E402
 DEFAULT_BASELINE = REPO / "scripts" / "mutation_baseline.json"
 DEFAULT_MUTANTS_DIR = REPO / "mutants"
 SCHEMA_VERSION = 1
@@ -439,10 +442,7 @@ def render_summary(rows: list[dict], problems: list[str], warnings: list[str]) -
 
 
 def _publish(text: str) -> None:
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a", encoding="utf-8") as f:
-            f.write(text)
+    ci_runner_files.append(ci_runner_files.STEP_SUMMARY, text)
 
 
 def _read_json(path: Path, what: str) -> tuple[dict | None, str | None]:
