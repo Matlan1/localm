@@ -31,7 +31,7 @@ from localm import setup_llama as sl
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "scripts" / "check_llama_pin.py"
-_WORKFLOW = _ROOT / ".github" / "workflows" / "llama-pin-currency.yml"
+_WORKFLOW = _ROOT / ".github" / "workflows" / "pin-currency.yml"
 _CI = _ROOT / ".github" / "workflows" / "ci.yml"
 
 
@@ -404,11 +404,16 @@ def test_the_currency_workflow_runs_the_gate_where_a_red_reaches_someone():
             if uses and uses.startswith("actions/checkout@"):
                 assert with_.get("persist-credentials") is False
 
-    gate = wf["jobs"]["currency"]
-    runs = "\n".join(s.get("run", "") for s in gate["steps"])
-    assert "check_llama_pin.py --gate" in runs
-    assert 'if [ "$rc" = "2" ]' in runs, "could-not-check must not turn the job red"
-    assert 'exit "$rc"' in runs, "and stale must"
+    for job_name, script in (
+        ("llama-currency", "check_llama_pin.py"),
+        ("comfyui-currency", "check_comfyui_pin.py"),
+        ("rocm-currency", "check_llama_rocm_pin.py"),
+    ):
+        gate = wf["jobs"][job_name]
+        runs = "\n".join(s.get("run", "") for s in gate["steps"])
+        assert f"{script} --gate" in runs, job_name
+        assert 'if [ "$rc" = "2" ]' in runs, f"{job_name}: could-not-check must not turn the job red"
+        assert 'exit "$rc"' in runs, f"{job_name}: and stale must"
 
     preflight = wf["jobs"]["candidate-preflight"]
     assert "workflow_dispatch" in preflight["if"] and "candidate_tag" in preflight["if"]
