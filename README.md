@@ -2,15 +2,16 @@
   <img src=".github/images/logo.svg" width="300" alt="LocaLM">
 </p>
 
-**Offline local LLM inference and extension platform - GGUF and HuggingFace models, OpenAI-compatible server, agentic coding, media generation, RAG, and more through a plugin engine.**
+<p align="center"><b>Run LLMs, an autonomous coding agent, and image/music/video generation entirely on your own machine.</b><br>No cloud, no API keys, nothing leaves your machine unless you allow it.</p>
 
-![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue)
-![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
-![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
+<p align="center">
+  <img src="https://img.shields.io/github/v/release/Matlan1/localm?label=release" alt="Latest release">
+  <img src="https://img.shields.io/badge/license-AGPL%20v3-blue" alt="License: AGPL v3">
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey" alt="Platform: Windows | Linux">
+</p>
 
-LocaLM runs GGUF models through a pure-Python ctypes binding to `llama.dll` (no `llama-cpp-python`), runs HuggingFace Transformers models, and exposes both through an OpenAI-compatible HTTP server. At its core it is a **model loader plus a plugin engine**: the only always-present feature is **chat**, shipped as a protected, preinstalled plugin. Everything else - the coder agent, image/music/video generation, Knowledge (RAG), web access, durable memory, voice, text-to-speech, scheduled jobs, and MCP - is a plugin you install when you want it. One CLI, no cloud required.
-
-Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist only as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat reach it through a single policy choke point: `off` / `ask` / `allow` modes, domain allow/deny lists, and a private-address SSRF guard ([guide](docs/network.md)).
+At its core LocaLM is a **model loader plus a plugin engine**: GGUF and HuggingFace models through an OpenAI-compatible server, with chat always on and everything else - the coder agent, image/music/video generation, Knowledge (RAG), durable memory, voice, scheduled jobs, and MCP - a plugin you install when you want it. See [Offline first](#features) for exactly what does and does not touch the network.
 
 <p align="center">
   <a href=".github/images/chat.png"><img src=".github/images/chat.png" width="560" alt="LocaLM chat: a streaming reply with markdown and syntax-highlighted code"></a><br>
@@ -32,11 +33,16 @@ Everything that does not strictly need the internet works fully offline. Online 
 ## Quick start
 
 ```bash
+# Install (Linux/macOS) - or on Windows, clone and double-click setup.bat
+curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | bash
+
 localm pull owner/repo:model-Q4_K_M.gguf   # Download a GGUF from HuggingFace
 localm gui                                  # Chat + coder + plugins in your browser
 localm run mymodel --prompt "Explain RDNA2" # Offline terminal chat or single prompt
 localm serve mymodel                        # OpenAI-compatible API server
 ```
+
+Full install options (graphical installer, `pip install`, manual) are in [Install](#install) below.
 
 ## Contents
 
@@ -146,6 +152,9 @@ The pip package covers the CLI, the server, and every plugin. It does not includ
 
 ### Manual (any OS)
 
+<details>
+<summary>Expand for the direct <code>uv</code> commands (advanced/CI path)</summary>
+
 This path uses `uv` directly, so it assumes `uv` is installed (the `setup.bat` /
 `setup.sh` installers add it for you; standalone: `powershell -c "irm
 https://astral.sh/uv/install.ps1 | iex"` on Windows, or `curl -LsSf
@@ -193,7 +202,12 @@ Not every plugin needs an extra: the image/music/video plugins talk to an extern
 
 > **Avoid `uv tool install` for this project.** Tool installs are *global per package name*, so a second clone would silently replace the first one's `localm.exe`.
 
+</details>
+
 ### Verifying a downloaded release
+
+<details>
+<summary>Expand if you got a release zip some other way than <code>git clone</code></summary>
 
 Every [GitHub Release](https://github.com/Matlan1/localm/releases) publishes `localm-<version>.zip` alongside a `localm-<version>.zip.sig` signature, as Assets on that release. This matters if you obtained a release zip some other way than the `git clone` install above (a browser download, a mirror, a forwarded copy):
 
@@ -203,6 +217,8 @@ Every [GitHub Release](https://github.com/Matlan1/localm/releases) publishes `lo
 **This verifies the release *Asset*, not GitHub's own auto-generated "Source code (zip)" link on the same release page.** That auto-zipball is the raw tracked tree with no manifest filtering and no baked version file, so its bytes differ from the Asset and a release's signature will never match it.
 
 The recommended `git clone` install path above is unaffected by any of this: it never downloads a zip, so it keeps relying on git+HTTPS+GitHub's own trust model, the same as any other cloned project. One free check that needs no new tooling: if you cloned a specific tag, `git rev-parse HEAD` inside the clone should equal the commit SHA GitHub shows for that tag.
+
+</details>
 
 ### No models yet?
 
