@@ -177,8 +177,7 @@ def test_insert_changelog_bullet_against_the_real_shipped_changelog():
 _ISSUES_FIXTURE = (
     "LocaLM - issue backlog\n======================\n\n"
     "The OPEN work, grouped by STATE. Each section below is one state; an entry lives\n"
-    "in exactly one. Resolved items are DELETED once merged - their history lives in the\n"
-    "merged PR and in the dated verbatim backups in dev-notes/issues-backups/.\n\n"
+    "in exactly one. Resolved items are removed once merged.\n\n"
     "SOME-EXISTING-ENTRY [OPEN] category - unrelated\n"
 )
 
@@ -186,7 +185,9 @@ _ISSUES_FIXTURE = (
 def test_append_fail_issue_inserts_right_after_the_intro_anchor(tmp_path):
     path = tmp_path / "issues.txt"
     path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
-    pipeline.append_fail_issue("b10999", "simulated FAIL reason", Path("r.json"), issues_path=path)
+    wrote = pipeline.append_fail_issue("b10999", "simulated FAIL reason", Path("r.json"),
+                                       issues_path=path)
+    assert wrote is True
     out = path.read_text(encoding="utf-8")
     assert "NEW-PIN-PIPELINE-LLAMA-B10999-CONFIRM-FAILED" in out
     assert out.index("NEW-PIN-PIPELINE-LLAMA") < out.index("SOME-EXISTING-ENTRY"), (
@@ -197,8 +198,9 @@ def test_append_fail_issue_inserts_right_after_the_intro_anchor(tmp_path):
 def test_append_fail_issue_is_idempotent_for_the_same_candidate(tmp_path):
     path = tmp_path / "issues.txt"
     path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
-    pipeline.append_fail_issue("b10999", "first reason", None, issues_path=path)
-    pipeline.append_fail_issue("b10999", "second reason", None, issues_path=path)
+    first = pipeline.append_fail_issue("b10999", "first reason", None, issues_path=path)
+    second = pipeline.append_fail_issue("b10999", "second reason", None, issues_path=path)
+    assert first is True and second is True
     out = path.read_text(encoding="utf-8")
     assert out.count("NEW-PIN-PIPELINE-LLAMA-B10999-CONFIRM-FAILED") == 1
     assert "first reason" in out and "second reason" not in out
@@ -206,8 +208,45 @@ def test_append_fail_issue_is_idempotent_for_the_same_candidate(tmp_path):
 
 def test_append_fail_issue_no_op_when_file_missing(tmp_path):
     missing = tmp_path / "does-not-exist.txt"
-    pipeline.append_fail_issue("b10999", "reason", None, issues_path=missing)
+    wrote = pipeline.append_fail_issue("b10999", "reason", None, issues_path=missing)
+    assert wrote is False
     assert not missing.exists()
+
+
+def test_append_fail_issue_warns_and_returns_false_when_anchor_no_longer_matches(tmp_path, capsys):
+    path = tmp_path / "issues.txt"
+    path.write_text("LocaLM - issue backlog\n======================\n\nsomething else entirely\n",
+                    encoding="utf-8")
+    wrote = pipeline.append_fail_issue("b10999", "reason", None, issues_path=path)
+    assert wrote is False
+    assert path.read_text(encoding="utf-8") == (
+        "LocaLM - issue backlog\n======================\n\nsomething else entirely\n"), (
+        "a mismatched anchor must never touch the file's content")
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.out and "anchor" in captured.out
+
+
+def test_issues_intro_anchor_matches_the_real_shipped_file(tmp_path):
+    """Bound to the real issues/issues.txt, not only a synthetic fixture -
+    proves _ISSUES_INTRO_RE still matches the real file's actual current
+    shape, per diff-review-discipline item 19's remedy for fixture blindness."""
+    real = pipeline.REPO / "issues" / "issues.txt"
+    if not real.exists():
+        pytest.skip("the real local issue backlog file does not exist on this machine")
+    before = real.read_text(encoding="utf-8")
+    m = pipeline._ISSUES_INTRO_RE.search(before)
+    assert m is not None, "the anchor regex must match the real file's current intro paragraph"
+
+    path = tmp_path / "issues.txt"
+    path.write_text(before, encoding="utf-8")
+    wrote = pipeline.append_fail_issue("b10999-real-anchor-probe", "simulated", None,
+                                       issues_path=path)
+
+    assert wrote is True
+    after = path.read_text(encoding="utf-8")
+    assert after.startswith(before[:m.end()]), "everything before the anchor must survive untouched"
+    assert after.endswith(before[m.end():]), "everything after the anchor must survive untouched"
+    assert "NEW-PIN-PIPELINE-LLAMA-B10999-REAL-ANCHOR-PROBE-CONFIRM-FAILED" in after
 
 
 # --------------------------------------------------------------------------- #
@@ -447,11 +486,70 @@ def test_ensure_pipeline_worktree_creates_and_reuses_the_same_dedicated_worktree
     assert second == first, "a second call must reuse the same worktree, not create another"
 
 
-def test_prepare_bump_branch_creates_a_fresh_branch_off_origin_master(tmp_path):
+def test_sync_main_checkout_refuses_when_not_on_master(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "not-master"], cwd=repo, check=True)
+    with pytest.raises(pipeline.PipelineError, match="not master"):
+        pipeline.sync_main_checkout(repo)
+
+
+def test_sync_main_checkout_refuses_when_run_from_a_linked_worktree(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    other = tmp_path / "some-other-worktree"
+    subprocess.run(["git", "worktree", "add", "-q", "--detach", str(other), "master"],
+                   cwd=repo, check=True)
+    with pytest.raises(pipeline.PipelineError, match="not master"):
+        pipeline.sync_main_checkout(other)
+
+
+def test_sync_main_checkout_fast_forwards_to_a_newer_origin_master(tmp_path):
+    """The real bug this exists to fix: newest_candidate() reads the pin
+    straight off this checkout's working tree, and nothing else in the
+    pipeline ever refreshes it (a merge happens from the dedicated worktree
+    instead) - so after another commit lands on origin/master (e.g. a prior
+    successful merge by this same pipeline), the main checkout must catch up
+    or it would re-read a stale pin forever. Needs a genuinely separate
+    (bare) origin: pushing to a non-bare repo's own checked-out branch is
+    refused by git outright."""
+    repo = tmp_path / "clone"
+    bare = tmp_path / "bare-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(bare)], check=True)
+    subprocess.run(["git", "clone", "-q", str(bare), str(repo)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "README.md").write_text("scratch\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "master"], cwd=repo, check=True)
+
+    # Simulate another clone of the same remote landing a new commit.
+    other_clone = tmp_path / "other-clone"
+    subprocess.run(["git", "clone", "-q", str(bare), str(other_clone)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=other_clone, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=other_clone, check=True)
+    (other_clone / "NEW-FILE.md").write_text("new\n", encoding="utf-8")
+    subprocess.run(["git", "add", "NEW-FILE.md"], cwd=other_clone, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "advance"], cwd=other_clone, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "master"], cwd=other_clone, check=True)
+
+    before = subprocess.run(["git", "rev-parse", "HEAD"],
+                            cwd=repo, capture_output=True, text=True).stdout.strip()
+    assert not (repo / "NEW-FILE.md").exists(), "sanity: repo has not seen the new commit yet"
+
+    pipeline.sync_main_checkout(repo)
+
+    after = subprocess.run(["git", "rev-parse", "HEAD"],
+                           cwd=repo, capture_output=True, text=True).stdout.strip()
+    assert after != before, "the main checkout must have advanced"
+    assert (repo / "NEW-FILE.md").exists(), "the working tree content must reflect the new commit"
+
+
+def test_prepare_bump_branch_creates_a_fresh_branch_off_origin_master(tmp_path, monkeypatch):
     repo = _init_scratch_repo(tmp_path)
     subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
     worktree = pipeline.ensure_pipeline_worktree(repo)
+    monkeypatch.setattr(pipeline, "close_stale_pr", lambda branch, worktree: None)
 
     branch = pipeline.prepare_bump_branch(worktree, "b10999")
     assert branch == "claude/pin-pipeline-llama-b10999"
@@ -481,9 +579,122 @@ def test_prepare_bump_branch_refuses_when_fetch_fails(tmp_path):
     assert head_after == head_before, "a failed fetch must leave the worktree untouched"
 
 
+def _init_bare_origin_and_clone(tmp_path):
+    """A genuinely separate bare origin plus a real clone, mirroring an
+    actual GitHub remote - unlike _init_scratch_repo's `remote add origin
+    <self>` pattern, a linked worktree does NOT share refs with this origin,
+    so a push here exercises real non-fast-forward semantics rather than the
+    degenerate same-object-database case."""
+    bare = tmp_path / "bare-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(bare)], check=True)
+    repo = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(bare), str(repo)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "README.md").write_text("scratch\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "master"], cwd=repo, check=True)
+    return repo
+
+
+def test_close_stale_pr_no_op_when_none_open(tmp_path, monkeypatch):
+    """No open PR AND no remote branch (the common case: nothing to clean
+    up) must never attempt a close or a delete. gh is stubbed; the git
+    ls-remote existence check is real, against a branch that genuinely
+    does not exist on this origin."""
+    repo = _init_bare_origin_and_clone(tmp_path)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    real_run = pipeline.subprocess.run
+    gh_calls = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "gh":
+            gh_calls.append(cmd)
+            return _FakeCompleted(returncode=0, stdout="[]", stderr="")
+        return real_run(cmd, **kwargs)
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    pipeline.close_stale_pr("claude/pin-pipeline-llama-b105", worktree)
+
+    assert gh_calls == [["gh", "pr", "list", "--head", "claude/pin-pipeline-llama-b105",
+                         "--state", "open", "--json", "number"]]
+    assert "claude/pin-pipeline-llama-b105" not in subprocess.run(
+        ["git", "ls-remote", "--heads", "origin"], cwd=worktree,
+        capture_output=True, text=True).stdout, "sanity: no branch was created out of nothing"
+
+
+def test_close_stale_pr_closes_the_pr_and_deletes_the_real_remote_branch(tmp_path, monkeypatch):
+    """The real bug this exists to fix, reproduced for real: a prior run
+    pushed claude/pin-pipeline-llama-b105 and then crashed before merging.
+    close_stale_pr must delete that real remote branch so the NEXT push for
+    the same candidate is a clean fast-forward, not a rejection."""
+    repo = _init_bare_origin_and_clone(tmp_path)
+    branch = "claude/pin-pipeline-llama-b105"
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    # Simulate the prior (crashed) run: push a real branch to the real bare origin.
+    subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=worktree, check=True)
+    (worktree / "stale-attempt.md").write_text("stale\n", encoding="utf-8")
+    subprocess.run(["git", "add", "stale-attempt.md"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "stale attempt"], cwd=worktree, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", branch], cwd=worktree, check=True)
+    remote_before = subprocess.run(["git", "ls-remote", "--heads", "origin", branch],
+                                   cwd=worktree, capture_output=True, text=True).stdout
+    assert branch in remote_before, "sanity: the stale branch really is on the remote"
+
+    real_run = pipeline.subprocess.run
+    gh_close_calls = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return _FakeCompleted(returncode=0, stdout='[{"number": 42}]', stderr="")
+        if cmd[:3] == ["gh", "pr", "close"]:
+            gh_close_calls.append(cmd)
+            return _FakeCompleted(returncode=0, stdout="", stderr="")
+        return real_run(cmd, **kwargs)
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    pipeline.close_stale_pr(branch, worktree)
+
+    assert gh_close_calls == [["gh", "pr", "close", "42"]]
+    remote_after = subprocess.run(["git", "ls-remote", "--heads", "origin", branch],
+                                  cwd=worktree, capture_output=True, text=True).stdout
+    assert branch not in remote_after, "the stale remote branch must actually be gone"
+
+    # And the payoff: prepare_bump_branch for the SAME candidate now pushes cleanly
+    # (gh pr list is faked empty this time, since close_stale_pr already ran above;
+    # every git call in fake_run above and here falls through to the real subprocess.run).
+    def fake_run_second_attempt(cmd, **kwargs):
+        if cmd[0] == "gh":
+            return _FakeCompleted(returncode=0, stdout="[]", stderr="")
+        return real_run(cmd, **kwargs)
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run_second_attempt)
+    new_branch = pipeline.prepare_bump_branch(worktree, "b105")
+    assert new_branch == branch
+    (worktree / "fresh-attempt.md").write_text("fresh\n", encoding="utf-8")
+    subprocess.run(["git", "add", "fresh-attempt.md"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fresh attempt"], cwd=worktree, check=True)
+    push = subprocess.run(["git", "push", "-u", "origin", branch],
+                          cwd=worktree, capture_output=True, text=True)
+    assert push.returncode == 0, f"the retried push must succeed cleanly: {push.stderr}"
+
+
+def test_close_stale_pr_raises_infra_error_when_gh_pr_list_fails(tmp_path, monkeypatch):
+    repo = _init_bare_origin_and_clone(tmp_path)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    monkeypatch.setattr(pipeline.subprocess, "run",
+                        lambda cmd, **k: _FakeCompleted(returncode=1, stdout="", stderr="boom"))
+    with pytest.raises(pipeline.InfraError, match="gh pr list"):
+        pipeline.close_stale_pr("claude/pin-pipeline-llama-b105", worktree)
+
+
 def _patch_state_dir(monkeypatch, tmp_path):
+    """Also no-ops sync_main_checkout: every run_llama_pipeline orchestration
+    test calls this, and none of them are testing the main-checkout sync
+    itself (that has its own dedicated real-git tests below)."""
     state_dir = tmp_path / "state"
     monkeypatch.setattr(pipeline, "STATE_DIR", state_dir)
+    monkeypatch.setattr(pipeline, "sync_main_checkout", lambda repo=None: None)
     return state_dir
 
 
@@ -556,6 +767,54 @@ def test_run_llama_pipeline_inconclusive_receipt_stops_before_any_write(monkeypa
     assert rc == 2
     assert not any(s.calls for s in spies.values()), (
         "an INCONCLUSIVE receipt must never reach the worktree/bump/commit stage")
+
+
+def test_run_llama_pipeline_unexpected_confirm_exit_code_is_fail_not_silent_pass(monkeypatch, tmp_path):
+    """run_confirm's contract is 0/1/2/LEASE_BUSY_EXIT; falling through to
+    PASS on ANY other value (e.g. a native crash producing an OS exit code)
+    would silently proceed to bump/commit/merge on an unconfirmed build."""
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 3)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    spies = _patch_every_write_path_step_as_spy(monkeypatch)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not any(s.calls for s in spies.values()), (
+        "an unexpected exit code must never reach the worktree/bump/commit stage")
+    assert issue_spy.calls
+
+
+def test_run_llama_pipeline_sync_failure_stops_before_any_candidate_is_read(monkeypatch, tmp_path):
+    """sync_main_checkout runs before newest_candidate() even looks at the
+    pin - if it fails, nothing candidate-specific can be recorded, and
+    newest_candidate itself must never run."""
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "sync_main_checkout",
+                        lambda: (_ for _ in ()).throw(pipeline.PipelineError("not on master")))
+    candidate_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "newest_candidate", candidate_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not candidate_spy.calls
+
+
+def test_run_llama_pipeline_sync_infra_failure_is_inconclusive(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "sync_main_checkout",
+                        lambda: (_ for _ in ()).throw(pipeline.InfraError("fetch failed")))
+    candidate_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "newest_candidate", candidate_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert not candidate_spy.calls
 
 
 def test_run_llama_pipeline_lease_busy_records_no_verdict(monkeypatch, tmp_path):
@@ -672,6 +931,39 @@ def test_run_llama_pipeline_red_ci_leaves_pr_open_never_merges(monkeypatch, tmp_
     assert state["open_pr"] == 55
 
 
+def test_run_llama_pipeline_pending_ci_is_inconclusive_never_a_permanent_fail(monkeypatch, tmp_path):
+    """A CI wait that times out with checks still running is not evidence
+    the build is bad - it must retry after a cooldown like any other
+    INCONCLUSIVE, and (unlike a genuine FAIL) never gets logged to
+    issues.txt, since there is nothing wrong to report yet."""
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", lambda wt, candidate: "branch")
+    monkeypatch.setattr(pipeline, "run_bump",
+                        lambda wt, candidate, receipt_path, write: (0, "ok"))
+    monkeypatch.setattr(pipeline, "run_targeted_tests", lambda wt: (True, "ok"))
+    monkeypatch.setattr(pipeline, "commit_and_push", _CallSpy())
+    monkeypatch.setattr(pipeline, "open_pr", lambda *a: 77)
+    monkeypatch.setattr(pipeline, "wait_for_ci", lambda wt: "PENDING")
+    merge_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "merge_pr", merge_spy)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert not merge_spy.calls, "must never merge while CI is still pending"
+    assert not issue_spy.calls, "a pending CI wait is not a FAIL and must not be logged as one"
+    state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "INCONCLUSIVE"
+    assert state["open_pr"] == 77
+
+
 def test_run_llama_pipeline_bump_refusal_stops_before_commit(monkeypatch, tmp_path):
     _patch_state_dir(monkeypatch, tmp_path)
     worktree = _fake_worktree_with_changelog(tmp_path)
@@ -747,14 +1039,16 @@ def test_run_llama_pipeline_failing_tests_after_bump_stop_before_commit(monkeypa
     assert not commit_spy.calls, "a bump that fails its own targeted tests must never be committed"
 
 
-def test_prepare_bump_branch_is_idempotent_across_a_retried_candidate(tmp_path):
+def test_prepare_bump_branch_is_idempotent_across_a_retried_candidate(tmp_path, monkeypatch):
     """FIRES: a second call for the SAME candidate (e.g. a prior attempt
     crashed after branching but before pushing) must not fail trying to
-    create a branch that already exists."""
+    create a branch that already exists. Stale-PR cleanup has its own
+    dedicated tests below; this one is about the local branch mechanics."""
     repo = _init_scratch_repo(tmp_path)
     subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
     worktree = pipeline.ensure_pipeline_worktree(repo)
+    monkeypatch.setattr(pipeline, "close_stale_pr", lambda branch, worktree: None)
 
     pipeline.prepare_bump_branch(worktree, "b10999")
     branch_again = pipeline.prepare_bump_branch(worktree, "b10999")
@@ -771,6 +1065,7 @@ def test_merge_pr_detaches_and_deletes_local_branch_without_delete_branch_flag(t
     subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
     worktree = pipeline.ensure_pipeline_worktree(repo)
+    monkeypatch.setattr(pipeline, "close_stale_pr", lambda branch, worktree: None)
     branch = pipeline.prepare_bump_branch(worktree, "b105")
 
     real_run = pipeline.subprocess.run

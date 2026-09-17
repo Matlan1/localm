@@ -304,23 +304,35 @@ def insert_changelog_bullet(text: str, bullet: str) -> str:
 #  issues.txt - a genuine FAIL is logged where it will actually be seen       #
 # --------------------------------------------------------------------------- #
 
+# Matches the structural end of issues.txt's own intro paragraph (its first
+# blank line) without spelling out that paragraph's actual prose as a literal
+# string constant here - this file is tracked and public, and the prose
+# itself names a gitignored path (see test_no_gitignored_path_leak.py).
+_ISSUES_INTRO_RE = re.compile(r"an entry lives\nin exactly one\..*?\n\n", re.S)
+
+
 def append_fail_issue(candidate: str, reason: str, receipt_path: "Path | None",
-                      issues_path: Path = ISSUES_PATH) -> None:
+                      issues_path: Path = ISSUES_PATH) -> bool:
     """Append a new OPEN entry to issues/issues.txt for a genuine FAIL (never
     for INCONCLUSIVE - that is not evidence of anything). Anchored on the
     file's own intro paragraph, matching the file's title-text convention -
-    never a line number, which drifts as the file grows."""
+    never a line number, which drifts as the file grows. Returns True if the
+    entry was written or already present. Returns False, printing a warning,
+    if issues_path exists but the intro anchor no longer matches (NOT the
+    same as issues_path simply not existing, which is the expected, silent
+    case on CI or a fresh clone)."""
     if not issues_path.exists():
-        return
+        return False
     text = issues_path.read_text(encoding="utf-8")
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
     title = f"NEW-PIN-PIPELINE-LLAMA-{candidate.upper()}-CONFIRM-FAILED"
     if title in text:
-        return  # already logged for this exact candidate
-    anchor = ("in exactly one. Resolved items are DELETED once merged - their history lives in the\n"
-              "merged PR and in the dated verbatim backups in dev-notes/issues-backups/.\n\n")
-    if anchor not in text:
-        return
+        return True  # already logged for this exact candidate
+    m = _ISSUES_INTRO_RE.search(text)
+    if not m:
+        print(f"WARNING: issues.txt's intro anchor no longer matches; {title} was "
+              "NOT logged there (the FAIL above and the state file are still recorded)")
+        return False
     receipt_note = f" (receipt: {receipt_path})" if receipt_path else ""
     entry = (
         f"{title} [OPEN - filed {today}] bug/setup - the automated pin pipeline confirmed "
@@ -328,9 +340,10 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: "Path | None",
         f"    scripts/pin_pipeline.py ran scripts/confirm_llama_runtime.py against upstream's\n"
         f"    {candidate} for real (cpu + vulkan) and it did not pass: {reason}{receipt_note}.\n"
         "    The pin was NOT advanced. This candidate will not be retried automatically unless\n"
-        "    a newer upstream release appears - see dev-notes/pin-pipeline/llama-state.json.\n\n"
+        "    a newer upstream release appears.\n\n"
     )
-    issues_path.write_text(text.replace(anchor, anchor + entry, 1), encoding="utf-8")
+    issues_path.write_text(text[:m.end()] + entry + text[m.end():], encoding="utf-8")
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -341,10 +354,9 @@ def _run_git(args: "list[str]", cwd: Path, **kwargs) -> subprocess.CompletedProc
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, **kwargs)
 
 
-def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
-    """The dedicated worktree this script's own branch operations run from,
-    never the shared main checkout. Raises PipelineError unless *repo*
-    resolves as its own git toplevel and is currently on master."""
+def _verify_main_checkout(repo: Path) -> None:
+    """Raise PipelineError unless *repo* resolves as its own git toplevel
+    and is currently on master."""
     toplevel = _run_git(["rev-parse", "--show-toplevel"], cwd=repo).stdout.strip()
     if Path(toplevel).resolve() != repo.resolve():
         raise PipelineError(
@@ -355,6 +367,30 @@ def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
         raise PipelineError(f"main checkout is on {branch!r}, not master; refusing to "
                             "proceed until it is back on master")
 
+
+def sync_main_checkout(repo: Path = REPO) -> None:
+    """Verify *repo* is the real main checkout on master, then fast-forward
+    it to origin/master. newest_candidate() reads the pin straight off this
+    checkout's own working tree, and nothing else in this script ever
+    updates it (a merge happens from the dedicated worktree instead) - a
+    stale main checkout would keep reading the pin's value from before the
+    last successful merge, forever. See
+    test_run_llama_pipeline_resyncs_the_main_checkout_before_reading_the_pin."""
+    _verify_main_checkout(repo)
+    result = _run_git(["fetch", "origin"], cwd=repo)
+    if result.returncode != 0:
+        raise InfraError(f"git fetch origin failed: {result.stderr}")
+    result = _run_git(["merge", "--ff-only", "origin/master"], cwd=repo)
+    if result.returncode != 0:
+        raise InfraError(f"could not fast-forward the main checkout to origin/master: "
+                         f"{result.stderr}")
+
+
+def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
+    """The dedicated worktree this script's own branch operations run from,
+    never the shared main checkout. Raises PipelineError unless *repo*
+    resolves as its own git toplevel and is currently on master."""
+    _verify_main_checkout(repo)
     worktree_path = repo.parent / f"{repo.name}-pin-pipeline-worktree"
     existing = _run_git(["worktree", "list", "--porcelain"], cwd=repo).stdout
     if str(worktree_path) not in existing and str(worktree_path).replace("\\", "/") not in existing:
@@ -364,6 +400,36 @@ def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
         if result.returncode != 0:
             raise InfraError(f"could not create the pipeline worktree: {result.stderr}")
     return worktree_path
+
+
+def close_stale_pr(branch: str, worktree: Path) -> None:
+    """Close (never merge) any PR already open for *branch*, and delete its
+    remote ref - left behind by a prior run that crashed or timed out
+    between pushing and merging. Left alone, the next attempt's push would
+    be a non-fast-forward rejection against the stale remote branch, and
+    `gh pr create` would refuse a second PR for the same head - both read as
+    a fresh infra failure instead of the resumable situation this actually
+    is. The caller must already have the worktree detached from *branch*
+    before this runs. See test_prepare_bump_branch_closes_a_stale_pr_left_by_a_prior_run."""
+    result = subprocess.run(
+        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number"],
+        cwd=worktree, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise InfraError(f"gh pr list failed: {result.stderr}")
+    try:
+        prs = json.loads(result.stdout)
+    except ValueError:
+        raise InfraError(f"could not parse gh pr list output: {result.stdout!r}") from None
+    for pr in prs:
+        result = subprocess.run(
+            ["gh", "pr", "close", str(pr["number"])], cwd=worktree, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise InfraError(f"could not close stale PR #{pr['number']}: {result.stderr}")
+    result = _run_git(["ls-remote", "--exit-code", "--heads", "origin", branch], cwd=worktree)
+    if result.returncode == 0:
+        result = _run_git(["push", "origin", "--delete", branch], cwd=worktree)
+        if result.returncode != 0:
+            raise InfraError(f"could not delete stale remote branch {branch}: {result.stderr}")
 
 
 def prepare_bump_branch(worktree: Path, candidate: str) -> str:
@@ -378,7 +444,8 @@ def prepare_bump_branch(worktree: Path, candidate: str) -> str:
     result = _run_git(["checkout", "--detach", "origin/master"], cwd=worktree)
     if result.returncode != 0:
         raise InfraError(f"could not detach to origin/master: {result.stderr}")
-    _run_git(["branch", "-D", branch], cwd=worktree)  # stale from a prior attempt; ok if absent
+    close_stale_pr(branch, worktree)
+    _run_git(["branch", "-D", branch], cwd=worktree)  # stale local branch; ok if absent
     result = _run_git(["checkout", "-b", branch], cwd=worktree)
     if result.returncode != 0:
         raise InfraError(f"could not create branch {branch}: {result.stderr}")
@@ -472,6 +539,15 @@ def merge_pr(pr_number: int, worktree: Path, branch: str, candidate: str, old_ta
 # --------------------------------------------------------------------------- #
 
 def run_llama_pipeline(*, dry_run: bool) -> int:
+    try:
+        sync_main_checkout()
+    except InfraError as e:
+        print(f"INCONCLUSIVE (infra, before any candidate is known): {e}")
+        return 2
+    except PipelineError as e:
+        print(f"FAIL (before any candidate is known): {e}")
+        return 1
+
     candidate_pair = newest_candidate()
     if candidate_pair is None:
         return 0
@@ -504,6 +580,13 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
                    "receipt_path": str(receipt_path)})
         print("INCONCLUSIVE: could not measure this run; will retry after cooldown")
         return 2
+    if rc != 0:
+        reason = f"confirm_llama_runtime.py exited with unexpected code {rc}"
+        save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,
+                   "receipt_path": str(receipt_path), "reason": reason})
+        append_fail_issue(candidate, reason, receipt_path)
+        print(f"FAIL: {reason}")
+        return 1
     print(f"PASS: {candidate} confirmed on {', '.join(REQUIRE_BACKENDS)}")
 
     if dry_run:
@@ -537,11 +620,20 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
                        "receipt_path": str(receipt_path), "merged_pr": pr_number})
             print(f"merged PR #{pr_number}: {old_tag} -> {candidate}")
             return 0
-        reason = f"CI {outcome.lower()} on PR #{pr_number}; left open, not merged"
+        if outcome == "PENDING":
+            # Checks were still running when the wait window closed - not evidence
+            # the build is bad, so this retries after a cooldown like any other
+            # INCONCLUSIVE, and the next attempt's prepare_bump_branch() closes
+            # this PR and its branch before starting fresh.
+            save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
+                       "receipt_path": str(receipt_path), "open_pr": pr_number})
+            print(f"INCONCLUSIVE: CI still pending on PR #{pr_number} after the wait window; "
+                 "left open, will retry")
+            return 2
+        reason = f"CI red on PR #{pr_number}; left open, not merged"
         save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,
                    "receipt_path": str(receipt_path), "reason": reason, "open_pr": pr_number})
-        if outcome == "RED":
-            append_fail_issue(candidate, reason, receipt_path)
+        append_fail_issue(candidate, reason, receipt_path)
         print(reason)
         return 1
     except PipelineError as e:
