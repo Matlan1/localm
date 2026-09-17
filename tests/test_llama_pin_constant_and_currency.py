@@ -452,8 +452,9 @@ def test_run_abi_input_gates_only_the_abi_check_job():
     """`run_abi` (added by PR #856) exists solely to keep the flaky,
     moving-target abi-check job out of a plain dispatch's run-level
     conclusion - see the input's own comment in ci.yml. It has never gated
-    anything else: test, gui-tests and mutation-test all run unconditionally
-    on workflow_dispatch regardless of this input, per the top-of-file
+    anything else: test, gui-tests and the mutation-run shards (and so the
+    mutation-test gate) all run on workflow_dispatch regardless of this
+    input, per the top-of-file
     trigger comment and each job's own `if:`. Pin both halves so a future
     edit cannot silently tie run_abi to the wider matrix, or drop one of
     these jobs off workflow_dispatch, without this test catching it."""
@@ -465,7 +466,7 @@ def test_run_abi_input_gates_only_the_abi_check_job():
     assert "inputs.run_abi" in ci["jobs"]["abi-check"]["if"], (
         "abi-check must still opt in via run_abi")
 
-    for name in ("test", "gui-tests", "mutation-test"):
+    for name in ("test", "gui-tests", "mutation-run", "mutation-test"):
         job_if = ci["jobs"][name]["if"]
         assert "run_abi" not in job_if, (
             f"{name}: run_abi must not gate this job - a plain dispatch "
@@ -477,11 +478,20 @@ def test_run_abi_input_gates_only_the_abi_check_job():
         (github.event_name != 'pull_request' ||
          contains(github.event.pull_request.labels.*.name, 'full-ci'))
         """)
-    assert _norm(ci["jobs"]["mutation-test"]["if"]) == _norm("""
-        github.event_name == 'workflow_dispatch' ||
-        (github.event_name == 'pull_request' &&
-         contains(github.event.pull_request.labels.*.name, 'mutation-test'))
+    # The mutation shards run on dispatch, on the `mutation-test` label, or
+    # when mutation-scope found a trust-boundary module in the diff; the
+    # mutation-test gate follows the shards whenever they ran.
+    assert _norm(ci["jobs"]["mutation-run"]["if"]) == _norm("""
+        !cancelled() && (
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           (contains(github.event.pull_request.labels.*.name, 'mutation-test') ||
+            needs.mutation-scope.outputs.touched == 'true')))
         """)
+    assert ci["jobs"]["mutation-run"]["needs"] == ["mutation-scope"]
+    assert _norm(ci["jobs"]["mutation-test"]["if"]) == _norm(
+        "${{ !cancelled() && needs.mutation-run.result != 'skipped' }}")
+    assert ci["jobs"]["mutation-test"]["needs"] == ["mutation-run"]
 
 
 def test_confirm_llama_runtime_install_steps_provide_psutil():

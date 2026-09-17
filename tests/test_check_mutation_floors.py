@@ -510,11 +510,30 @@ class TestCommittedBaseline:
                 f"{module}: floor {floor} exceeds the score its own dispositions "
                 f"imply ({score:.2f}); the baseline cannot pass its own check")
 
+    def test_ci_shards_are_exactly_the_only_mutate_modules(self, modules):
+        """The mutation-run matrix in ci.yml is the only_mutate list by
+        basename: a module added to one and not the other is either never
+        mutation-tested or a shard that mutates nothing."""
+        import yaml
+        wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        shards = wf["jobs"]["mutation-run"]["strategy"]["matrix"]["module"]
+        assert sorted(shards) == sorted(Path(m).stem for m in modules)
+        run_step = next(st for st in wf["jobs"]["mutation-run"]["steps"]
+                        if st.get("name", "").startswith("Mutation test"))
+        assert 'run "localm.${MUTATION_MODULE}.*"' in run_step["run"]
+        gate = wf["jobs"]["mutation-test"]
+        assert gate["needs"] == ["mutation-run"]
+        assert any("check_mutation_floors.py" in (st.get("run") or "") for st in gate["steps"])
+
     def test_every_sec01_control_class_is_pinned_to_a_killed_mutant(self, baseline):
+        """The four SEC-01 mutant classes that live inside the only_mutate
+        modules. The other two (an unsafe route exempted from the origin gate,
+        bind_host replaced by the peer address) live in http_server.py and are
+        pinned by tests/test_trust_boundary_controls.py instead."""
         expected = {
-            "scope-check-weakened", "origin-gate-route-exempted",
-            "bind-host-replaced-by-peer", "ssrf-redirect-revalidation-skipped",
+            "scope-check-weakened", "ssrf-redirect-revalidation-skipped",
             "state-changing-fallback-deny-to-allow", "path-confinement-bypassed",
+            "bind-host-loopback-classifier-fallback",
         }
         controls = baseline["controls"]
         assert expected <= set(controls), expected - set(controls)
