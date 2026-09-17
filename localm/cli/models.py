@@ -13,7 +13,8 @@ from ..console import show_url
 from ._core import (console, main, _complete_model_name,
                     no_server_message, report_server_failure,
                     running_server, server_call)
-from ..bindhost import self_connect_host, url_host
+from ..bindhost import is_own_address, self_connect_host, url_host
+from ..debuglog import logger
 from ..selfclient import read_activity
 
 
@@ -1418,7 +1419,8 @@ def stop_cmd(instance_id, stop_all, timeout):
         root = entry.get("root_dir", "")
         pid = entry.get("pid")
         scheme = entry.get("scheme", "http")
-        url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
+        dial = self_connect_host(entry.get("host"))
+        url = f"{scheme}://{url_host(dial)}:{entry.get('port')}"
 
         # --all / an id prefix can span several instances, each with its OWN
         # attach token, so the open-mode fallback is resolved inside the loop.
@@ -1428,25 +1430,31 @@ def stop_cmd(instance_id, stop_all, timeout):
 
         stopped = False
         graceful_denied = False
-        try:
-            resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
-                                 timeout=5, verify=tls.requests_verify(url))
-            if resp.status_code in (401, 403):
-                # The open-mode management gate refuses an unauthenticated POST
-                # from a bare local client with no shell/API-key credential,
-                # which is the DEFAULT case for a plain `localm
-                # run`/`gui`/`serve` with no LOCALM_API_KEY configured. Fall
-                # back to a direct kill rather than hard-failing.
-                graceful_denied = True
-            elif resp.status_code == 200:
-                deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline and not stopped:
-                    if not instances.pid_alive(int(pid or -1)):
-                        stopped = True
-                    else:
-                        time.sleep(0.25)
-        except requests.RequestException:
-            pass  # server unreachable (hung / already gone) - fall through to a direct kill
+        if is_own_address(dial):
+            try:
+                resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
+                                     timeout=5, verify=tls.requests_verify(url),
+                                     allow_redirects=False)
+                if resp.status_code in (401, 403):
+                    # The open-mode management gate refuses an unauthenticated POST
+                    # from a bare local client with no shell/API-key credential,
+                    # which is the DEFAULT case for a plain `localm
+                    # run`/`gui`/`serve` with no LOCALM_API_KEY configured. Fall
+                    # back to a direct kill rather than hard-failing.
+                    graceful_denied = True
+                elif resp.status_code == 200:
+                    deadline = time.monotonic() + timeout
+                    while time.monotonic() < deadline and not stopped:
+                        if not instances.pid_alive(int(pid or -1)):
+                            stopped = True
+                        else:
+                            time.sleep(0.25)
+            except requests.RequestException:
+                pass  # server unreachable (hung / already gone) - fall through to a direct kill
+        else:
+            logger.warning(
+                "stop: registry entry's host %r is not an address this "
+                "machine holds; not dialing it", entry.get("host"))
 
         if not stopped:
             if graceful_denied:

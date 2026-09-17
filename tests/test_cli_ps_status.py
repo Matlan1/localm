@@ -174,7 +174,8 @@ def test_stop_by_id_graceful_shutdown_success(monkeypatch):
                              AssertionError("kill_pid must not run on the happy path")))
     captured = {}
 
-    def fake_post(url, headers=None, timeout=None, verify=None):
+    def fake_post(url, headers=None, timeout=None, verify=None,
+                 allow_redirects=None):
         captured["url"] = url
         captured["headers"] = headers
         return _resp(200)
