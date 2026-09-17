@@ -474,7 +474,6 @@ class TestChatCompletionsForwarding:
         monkeypatch.setattr("requests.post", boom)
         hs._engines.clear()
         hs._active_model_name = None
-        hs._default_model_name = None
         peer_routing.set_route(peer_routing.PeerRoute(
             model="flaky-model", instance_id="peer-flaky", host="127.0.0.1",
             port=8197, scheme="http", api_key="k"))

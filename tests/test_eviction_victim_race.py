@@ -104,7 +104,6 @@ def evicting(monkeypatch):
               hs._last_activity_per_model):
         d.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     # Also reset by unload_one_model/unload_all_models/_idle_unload_once
     # whenever they clear _active_model_name, so a name remembered by an earlier
     # test does not leak into this one.
@@ -217,7 +216,6 @@ def _install(monkeypatch, engines, *, total_gb=10):
               hs._last_activity_per_model):
         d.clear()
     hs._active_model_name = None
-    hs._default_model_name = None
     # Also reset by unload_one_model/unload_all_models/_idle_unload_once
     # whenever they clear _active_model_name, so a model unloaded by an EARLIER
     # test in this file cannot leak its remembered name into a later test that
