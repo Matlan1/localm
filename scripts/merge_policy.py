@@ -21,7 +21,9 @@ below: the trust boundary, the plugin engine, inference/workers/the native
 binding, packaging and installers, the CI workflows and gates) for the
 release run to know what it covers; none of them blocks a merge.
 
-    python scripts/merge_policy.py --full-ci false         --result python-pr-gate=success --result lint=success         --result gui-tests=success --result test=skipped [--files ...]
+    python scripts/merge_policy.py --full-ci false \
+        --result python-pr-gate=success --result lint=success \
+        --result gui-tests=success --result test=skipped [--files ...]
 
 The verdict, the results and the matched categories are printed, and appended
 to the file named by GITHUB_STEP_SUMMARY when that variable is set. Exit
