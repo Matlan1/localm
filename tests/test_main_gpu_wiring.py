@@ -57,7 +57,7 @@ class TestLlamaCppMainGpuWiring:
     def test_invalid_configured_index_falls_back_to_zero(self, monkeypatch, caplog):
         # Pin non-Vulkan so membership validation actually runs, whatever native
         # backend is provisioned in the ambient environment.
-        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 7})
         monkeypatch.setattr("localm.discover.list_gpus",
@@ -109,7 +109,7 @@ class TestGgufEmbedderMainGpuWiring:
     def test_invalid_configured_index_falls_back_to_zero(self, monkeypatch, caplog):
         # Pin non-Vulkan so membership validation actually runs, whatever native
         # backend is provisioned in the ambient environment.
-        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 7})
         monkeypatch.setattr("localm.discover.list_gpus",

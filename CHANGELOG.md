@@ -65,6 +65,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Selecting the SYCL llama.cpp backend on an Intel GPU now correctly applies
+  a configured Main GPU or GPU split.** The real device numbering on a Vulkan
+  or SYCL install lives in that backend's own registry, not in the generic
+  probe (torch/nvidia-smi) localm otherwise uses to validate a configured
+  device. Vulkan already accounted for this; SYCL did not, so choosing a
+  Main GPU or a multi-GPU split on a SYCL install could silently fall back to
+  device 0 or drop a valid split device instead of using the GPU you picked.
 - **Stopping or restarting the server no longer leaves the coder plugin's
   background shell commands and sub-agents running.** They already stopped
   when the GUI's own background jobs and any localm-launched ComfyUI

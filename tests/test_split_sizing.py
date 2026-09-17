@@ -93,14 +93,15 @@ def _implicit_box(monkeypatch, per_gpu, *, vulkan=False, status=GPU_PROBE_OK,
     """A box with NO gpu_split_indices, where llama.cpp's own default layer
     split spreads the load over the given [(free, total), ...] devices.
 
-    Pins _native_backend_has_vulkan explicitly rather than letting it read this
-    machine: the vulkan branch reads the ggml registry (native_gpu_devices) and
-    the other reads torch's view (list_gpus), so an unpinned value silently
-    decides WHICH double is consulted - and on a box where the other one is
-    live, a test can pass without its own fixture ever being read."""
+    Pins _native_gpu_index_space_is_opaque explicitly rather than letting it
+    read this machine: the opaque (vulkan/sycl) branch reads the ggml registry
+    (native_gpu_devices) and the other reads torch's view (list_gpus), so an
+    unpinned value silently decides WHICH double is consulted - and on a box
+    where the other one is live, a test can pass without its own fixture ever
+    being read."""
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
-    monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+    monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque",
                         lambda: vulkan)
     # type defaults to GGML_DEV_TYPE_GPU (discrete). It is carried even on the
     # list_gpus path, where it is ignored, so the two fixtures stay comparable
@@ -585,7 +586,7 @@ class TestImplicitSplitSizing:
                {"index": 1, "name": "B", "total": 24 * GB}]
         monkeypatch.setattr("localm.config.load_config", lambda: {})
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
-        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque",
                             lambda: False)
         monkeypatch.setattr("localm.discover.list_gpus", _gpus_double(box))
         b = _model(tmp_path, MODEL_45GB)

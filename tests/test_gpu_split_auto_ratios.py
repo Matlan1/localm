@@ -64,7 +64,7 @@ class TestResolveAutoSplitRatios:
     ]
 
     def _no_vulkan(self, monkeypatch):
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
 
     def test_proportional_from_free(self, monkeypatch):
         self._no_vulkan(monkeypatch)
@@ -239,7 +239,7 @@ class TestScopeTrust:
     an imprecise refusal, so it fails toward the safe equal-split fallback."""
 
     def _no_vulkan(self, monkeypatch):
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
 
     _GPUS_DEVICE = [
         {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB,
@@ -491,7 +491,7 @@ class TestShortfallAutoShares:
     ]
 
     def _no_vulkan(self, monkeypatch):
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
 
     def test_auto_shares_absorb_asymmetric_occupancy(self, monkeypatch):
         """THE headline case: 8 GB ask, devices at 2/14 GB free. The equal
@@ -555,7 +555,7 @@ class TestShortfallSharesAdaptiveFlag:
     ]
 
     def _no_vulkan(self, monkeypatch):
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
 
     def test_true_when_auto_shares_in_effect(self, monkeypatch):
         self._no_vulkan(monkeypatch)
@@ -621,7 +621,7 @@ class TestWaitForInflightForwarding:
     exactly the asymmetric box the feature targets."""
 
     def test_forwarded_to_a_production_signature_probe(self, monkeypatch):
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
         seen = {}
 
         def fake(*a, return_status=False, wait_for_inflight=False, **k):
@@ -643,7 +643,7 @@ class TestWaitForInflightForwarding:
         """A status-capable double lacking wait_for_inflight (and **kwargs)
         must not be handed a kwarg it never agreed to accept - same tolerance
         contract as _list_gpus_reading's return_status inspection."""
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
 
         def fake(*a, return_status=False):
             gpus = [{"index": 0, "free": 2 * GB, "total": 4 * GB,
@@ -821,7 +821,7 @@ class TestSwitchEngineAutoDefer:
                             lambda name: (str(model_file), "hint"))
         monkeypatch.setattr("localm.model_manager.get_model_mmproj",
                             lambda name: None)
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
 

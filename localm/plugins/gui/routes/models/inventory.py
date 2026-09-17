@@ -482,8 +482,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
         ``index_space`` (present only as ``"native"``) says the ``gpus``
         indices are the ones a MODEL LOAD consumes rather than list_gpus()'s
-        torch/nvidia-smi numbering - see the vulkan branch below; the client
-        labels the numbering accordingly. That is llama.cpp's own device list,
+        torch/nvidia-smi numbering - see the opaque-index-space branch below
+        (vulkan or sycl); the client labels the numbering accordingly. That
+        is llama.cpp's own device list,
         NOT the raw ggml registry order: integrated GPUs and accelerators are
         dropped and the rest renumbered before they get here
         (discover._llama_visible_devices). These numbers are written straight
@@ -498,15 +499,17 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         loop = asyncio.get_running_loop()
 
         def _read_devices():
-            # Native-first on the vulkan build: these selectors write indices the
-            # LOADER consumes, and on that build those live in ggml-vulkan's own index
-            # space, which list_gpus() (torch.cuda / nvidia-smi) can neither see nor
-            # order. The native registry is read via the crash-isolated probe daemon,
-            # and a completed read is a conclusive probe (GPU_PROBE_OK). Falls back to
-            # list_gpus(), with no index_space claim, when the daemon or registry
-            # cannot answer (None).
-            from localm.discover import _native_backend_has_vulkan, list_gpus, native_gpu_devices
-            if _native_backend_has_vulkan():
+            # Native-first on a build whose GPU index space is opaque to list_gpus()
+            # (vulkan or sycl - see discover._native_gpu_index_space_is_opaque): these
+            # selectors write indices the LOADER consumes, and on such a build those
+            # live in the native backend's own index space, which list_gpus()
+            # (torch.cuda / nvidia-smi) can neither see nor order. The native registry
+            # is read via the crash-isolated probe daemon, and a completed read is a
+            # conclusive probe (GPU_PROBE_OK). Falls back to list_gpus(), with no
+            # index_space claim, when the daemon or registry cannot answer (None).
+            from localm.discover import (
+                _native_gpu_index_space_is_opaque, list_gpus, native_gpu_devices)
+            if _native_gpu_index_space_is_opaque():
                 native = native_gpu_devices()
                 if native is not None:
                     return native, GPU_PROBE_OK, "native"

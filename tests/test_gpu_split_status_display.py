@@ -77,7 +77,7 @@ class TestBackendRecordsAppliedSplit:
             discover, "list_gpus",
             lambda **kw: ([{"index": 0}, {"index": 1}], "ok")
             if kw.get("return_status") else [{"index": 0}, {"index": 1}])
-        monkeypatch.setattr(discover, "_native_backend_has_vulkan",
+        monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque",
                             lambda: False)
 
     def test_auto_split_recorded_with_normalized_shares(

@@ -1370,7 +1370,7 @@ class TestGpusEndpointNativeIndexSpace:
         app, _ = gui_app
         torch_view = [{"index": 0, "name": "RTX 4090", "total": 24 * 1024 ** 3,
                        "free": 20 * 1024 ** 3}]
-        with patch("localm.discover._native_backend_has_vulkan",
+        with patch("localm.discover._native_gpu_index_space_is_opaque",
                    return_value=False), \
              patch("localm.discover.native_gpu_devices") as native, \
              patch("localm.discover.list_gpus", new=probe_double(torch_view)), \
