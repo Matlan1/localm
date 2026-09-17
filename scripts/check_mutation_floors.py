@@ -45,13 +45,14 @@ RUN. After ``mutmut run`` (Linux/WSL only; mutmut refuses to run on Windows):
 
     python scripts/check_mutation_floors.py [--mutants DIR] [--baseline FILE]
 
-``--update [--out FILE]`` writes a baseline from the current results: floors
-ratchet up, ``equivalent`` entries and their reasons are kept, every other
-mutant gets ``killed`` or ``survived`` from its outcome, and the mutants of a
-changed or removed function are pruned. The CI job writes that proposal as an artifact on every run so the
-baseline for a changed function can be reviewed and committed without a local
-mutmut run. ``--update`` still runs the check afterwards and exits with its
-result, so a proposal whose score is below the floor still fails.
+``--update`` writes a baseline from the current results: floors ratchet up,
+``equivalent`` entries and their reasons are kept, every other mutant gets
+``killed`` or ``survived`` from its outcome, and the mutants of a changed or
+removed function are pruned. Without ``--out`` it replaces the ``--baseline``
+file and the check then runs against the new file; with ``--out FILE`` the
+proposal goes to FILE and the check still runs against the committed
+baseline, so the CI job can publish the proposal as an artifact on every run
+without it ever standing in for the file under review.
 """
 
 from __future__ import annotations
@@ -457,6 +458,11 @@ def _read_json(path: Path, what: str) -> tuple[dict | None, str | None]:
 
 
 def main(argv: list[str]) -> int:
+    # Mutant ids carry mutmut's class separator (U+01C1); a console that
+    # cannot encode it prints a replacement character instead of failing.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--mutants", type=Path, default=DEFAULT_MUTANTS_DIR,
                     help="mutmut output directory (default: <repo>/mutants)")
@@ -500,12 +506,14 @@ def main(argv: list[str]) -> int:
             return 1
 
     if args.update:
-        baseline = propose_baseline(results, baseline, modules)
+        proposed = propose_baseline(results, baseline, modules)
         out = args.out or args.baseline
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(baseline, indent=2, ensure_ascii=False) + "\n",
+        out.write_text(json.dumps(proposed, indent=2, ensure_ascii=False) + "\n",
                        encoding="utf-8")
         print(f"Wrote {out}")
+        if out.resolve() == args.baseline.resolve():
+            baseline = proposed
 
     more, warnings, rows = check(results, baseline, modules)
     problems.extend(more)

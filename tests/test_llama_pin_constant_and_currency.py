@@ -486,7 +486,8 @@ def test_run_abi_input_gates_only_the_abi_check_job():
           github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'pull_request' &&
            (contains(github.event.pull_request.labels.*.name, 'mutation-test') ||
-            needs.mutation-scope.outputs.touched == 'true')))
+            needs.mutation-scope.outputs.touched == 'true' ||
+            needs.mutation-scope.result == 'failure')))
         """)
     assert ci["jobs"]["mutation-run"]["needs"] == ["mutation-scope"]
     assert _norm(ci["jobs"]["mutation-test"]["if"]) == _norm(

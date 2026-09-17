@@ -452,7 +452,27 @@ class TestMain:
         proposed = json.loads(out.read_text(encoding="utf-8"))
         assert proposed["modules"][MOD]["mutants"][M2] == "survived"
         assert proposed["modules"][MOD]["score_floor"] == 100.0
-        assert "BELOW its floor" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "BELOW its floor" in err and "recorded as killed are no longer detected" in err
+
+    def test_update_out_checks_the_committed_baseline_not_the_proposal(self, tmp_path, capsys):
+        """NEGATIVE, the CI invocation: a compensated regression (one kill lost,
+        one gained, score unchanged) and an edited function are invisible to a
+        check run against the proposal, which by construction matches every
+        current outcome. The gate must read the committed file."""
+        base = _baseline({M1: "killed", M2: "survived", M3: "killed"}, floor=66.66)
+        argv = self._setup(tmp_path, {M1: 0, M2: 1, M3: 1}, base)
+        out = tmp_path / "proposed.json"
+        assert cmf.main(argv + ["--update", "--out", str(out)]) == 1
+        err = capsys.readouterr().err
+        assert M1 in err and "recorded as killed are no longer detected" in err
+        assert "BELOW its floor" not in err
+        # An edited function: its mutants carry no valid disposition until the
+        # committed baseline is updated by hand.
+        _write_meta(tmp_path / "mutants", MOD, {M1: 1, M2: 0, M3: 1},
+                    hashes={"x_grants": "edited000000", "x_normalize": HASHES["x_normalize"]})
+        assert cmf.main(argv + ["--update", "--out", str(out)]) == 1
+        assert "no disposition" in capsys.readouterr().err
 
     def test_step_summary_is_appended_when_github_env_is_set(self, tmp_path, capsys, monkeypatch):
         summary = tmp_path / "summary.md"
@@ -524,7 +544,14 @@ class TestCommittedBaseline:
         assert "--max-children" in run_step["run"]
         gate = wf["jobs"]["mutation-test"]
         assert gate["needs"] == ["mutation-run"]
-        assert any("check_mutation_floors.py" in (st.get("run") or "") for st in gate["steps"])
+        ratchet = [st for st in gate["steps"] if "check_mutation_floors.py" in (st.get("run") or "")]
+        assert len(ratchet) == 1
+        # --out keeps the proposal out of the check: the gate reads the
+        # committed baseline, never a file synthesized from the same run.
+        assert "--out mutants/mutation_baseline.proposed.json" in ratchet[0]["run"]
+        assert "--baseline" not in ratchet[0]["run"]
+        # A failed scope decision runs the shards instead of skipping them.
+        assert "needs.mutation-scope.result == 'failure'" in wf["jobs"]["mutation-run"]["if"]
 
     def test_every_sec01_control_class_is_pinned_to_a_killed_mutant(self, baseline):
         """The four SEC-01 mutant classes that live inside the only_mutate

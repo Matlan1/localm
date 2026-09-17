@@ -599,13 +599,16 @@ jobs:
     needs: [mutation-scope]
     # `!cancelled()` keeps this condition live when mutation-scope was skipped
     # (workflow_dispatch, push, schedule): without a status function a job
-    # whose `needs` was skipped is skipped too, before its `if` is read.
+    # whose `needs` was skipped is skipped too, before its `if` is read. A
+    # FAILED mutation-scope (it could not compute the diff) runs the shards
+    # rather than skipping them: an unknown answer is never "not touched".
     if: >-
       !cancelled() && (
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'pull_request' &&
          (contains(github.event.pull_request.labels.*.name, 'mutation-test') ||
-          needs.mutation-scope.outputs.touched == 'true')))
+          needs.mutation-scope.outputs.touched == 'true' ||
+          needs.mutation-scope.result == 'failure')))
     strategy:
       # Every module's result is wanted even when one shard fails; the gate
       # below reports the missing one by name.
@@ -728,10 +731,11 @@ jobs:
         run: python scripts/write_mutation_summary.py --check
 
       # GATE 2 - the ratchet: per-module score floors, per-mutant
-      # dispositions and the pinned control mutants, against
-      # scripts/mutation_baseline.json. Also writes the proposed baseline the
-      # step after uploads. always(), so an incomplete run is still checked
-      # (and fails) rather than silently skipping the ratchet.
+      # dispositions and the pinned control mutants, checked against the
+      # COMMITTED scripts/mutation_baseline.json (--out keeps the proposal it
+      # also writes out of the check; the step after uploads it). always(),
+      # so an incomplete run is still checked (and fails) rather than
+      # silently skipping the ratchet.
       - name: Mutation floors and dispositions (trust boundary)
         if: always()
         run: >-
