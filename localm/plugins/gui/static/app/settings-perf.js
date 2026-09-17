@@ -27,33 +27,50 @@ export async function refreshPerfEstimate() {
   try {
     const q = new URLSearchParams({ n_ctx: ctx.value, n_gpu_layers: gl.value });
     const r = await fetch("/api/vram-estimate?" + q.toString(), { headers: authHeaders() });
-    if (!r.ok) { out.textContent = "estimate unavailable"; return; }
+    if (!r.ok) { out.textContent = t("settings.perf.estimateUnavailable"); return; }
     const d = await r.json();
-    const text = `~${_perfGiB(d.needed)} GB needed `
-      + `(weights ${_perfGiB(d.weights)} · context ${_perfGiB(d.kv_cache)} `
-      + `· overhead ${_perfGiB(d.overhead)})`;
+    const text = t("settings.perf.estimateSummary", {
+      needed: _perfGiB(d.needed), weights: _perfGiB(d.weights),
+      kv: _perfGiB(d.kv_cache), overhead: _perfGiB(d.overhead),
+    });
     out.replaceChildren();
     if (typeof d.free === "number") {
-      out.appendChild(document.createTextNode(text + ` · ${_perfGiB(d.free)} GB free - `));
+      out.appendChild(document.createTextNode(
+        text + t("settings.perf.estimateFreeKnownSuffix", { free: _perfGiB(d.free) })));
       out.appendChild(iconEl(d.fits ? "check" : "warning", "btn-ic"));
-      out.appendChild(document.createTextNode(d.fits ? "fits" : "may not fit"));
+      out.appendChild(document.createTextNode(
+        t(d.fits ? "settings.perf.estimateFits" : "settings.perf.estimateMayNotFit")));
     } else {
-      out.appendChild(document.createTextNode(text + " · free VRAM unknown"));
+      out.appendChild(document.createTextNode(text + t("settings.perf.estimateFreeUnknownSuffix")));
     }
     out.classList.toggle("perf-warn", d.fits === false);
   } catch {
-    out.textContent = "estimate unavailable";
+    out.textContent = t("settings.perf.estimateUnavailable");
   }
+}
+
+/** Rebuild #perf-ctx-help's sentence around the live #perf-ctx-val number.
+ *  Owns the whole div (text + span + text) rather than a data-i18n attribute:
+ *  setI18nText only safely retranslates a single leading text node, and this
+ *  sentence has a second one (the trailing ".") after the span. Exported so
+ *  the language-switch listener can re-render it without re-seeding the
+ *  slider from the server. */
+export function syncPerfCtxHelp() {
+  const ctx = $("perf-ctx"), help = $("perf-ctx-help");
+  if (!ctx || !help) return;
+  const val = el("span", "", ctx.value);
+  val.id = "perf-ctx-val";
+  help.replaceChildren(
+    document.createTextNode(t("settings.perf.ctxHelpPrefix")),
+    val,
+    document.createTextNode(t("settings.perf.ctxHelpSuffix")));
 }
 
 export function setupPerfCard() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
   if (!gl || !ctx) return;
-  const sync = () => {
-    $("perf-ctx-val").textContent = ctx.value;
-  };
   const onInput = () => {
-    sync();
+    syncPerfCtxHelp();
     clearTimeout(_perfEstTimer);
     _perfEstTimer = setTimeout(refreshPerfEstimate, 150);   // debounce while dragging
   };
@@ -63,7 +80,7 @@ export function setupPerfCard() {
   if (apply) apply.onclick = async () => {
     const glVal = Number(gl.value);
     if (!Number.isInteger(glVal) || glVal < 0 || glVal > 999) {
-      toast("GPU layers must be between 0 and 999", true);
+      toast(t("settings.perf.gpuLayersRangeToast"), true);
       return;
     }
     try {
@@ -72,8 +89,8 @@ export function setupPerfCard() {
         body: JSON.stringify({ n_gpu_layers: glVal, n_ctx: Number(ctx.value) }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast("Saved - applies on the next model load");
-    } catch (e) { toast("Could not save: " + e.message, true); }
+      toast(t("settings.perf.savedNextLoad"));
+    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
   };
   // Seed slider positions from the current config, then estimate.
   fetch("/v1/config", { headers: authHeaders() })
@@ -83,10 +100,10 @@ export function setupPerfCard() {
         gl.value = cfg.n_gpu_layers < 0 ? 999 : Math.min(999, cfg.n_gpu_layers);
       if (typeof cfg.n_ctx === "number")
         ctx.value = Math.min(Number(ctx.max), Math.max(Number(ctx.min), cfg.n_ctx));
-      sync();
+      syncPerfCtxHelp();
       refreshPerfEstimate();
     })
-    .catch(() => { sync(); refreshPerfEstimate(); });
+    .catch(() => { syncPerfCtxHelp(); refreshPerfEstimate(); });
   setupMainGpuSelector();
   setupGpuSplitCheckboxes();
   setupResidencyControls();
@@ -177,14 +194,14 @@ let _gpuIndexSpace = null;
  *  actually visible - otherwise hiding a row would strand the note under
  *  nothing. Call it on EVERY exit path of both refreshers, with the payload's
  *  index_space when there is one and no argument when there is not. */
-function syncIndexSpaceHint(indexSpace) {
+export function syncIndexSpaceHint(indexSpace) {
   if (indexSpace !== undefined) _gpuIndexSpace = indexSpace;
   const hint = $("perf-gpu-index-space-hint");
   if (!hint) return;
   const selRow = $("perf-gpu-select-row"), splitRow = $("perf-gpu-split-row");
   const anyVisible = (selRow && !selRow.hidden) || (splitRow && !splitRow.hidden);
   if (anyVisible && _gpuIndexSpace === "native") {
-    hint.textContent = "Device numbers are the Vulkan backend's own order (what a model load uses); other tools may number GPUs differently.";
+    hint.textContent = t("settings.perf.indexSpaceHint");
     hint.hidden = false;
   } else {
     hint.hidden = true;
@@ -245,8 +262,8 @@ export function setupMainGpuSelector() {
         body: JSON.stringify({ main_gpu_index: idx }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast("Saved - applies on the next model load");
-    } catch (e) { toast("Could not save: " + e.message, true); }
+      toast(t("settings.perf.savedNextLoad"));
+    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
   };
   refreshMainGpuSelector();
 }
@@ -396,8 +413,7 @@ async function _saveGpuSplit() {
     } else {
       // gpu_split_ratios stays OUT of this PATCH (see docstring); the rest of
       // the change (the checked indices) still saves normally below.
-      ratioWarning = "Saved, but a weight is missing for one GPU - enter one "
-        + "for every checked device, or clear them all for automatic sizing";
+      ratioWarning = t("settings.perf.splitPartialWarningToast");
     }
   }
   try {
@@ -407,10 +423,10 @@ async function _saveGpuSplit() {
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
     toast(ratioWarning ? ratioWarning
-        : value ? "Saved - applies on the next model load"
-                : "Split disabled - applies on the next model load",
+        : value ? t("settings.perf.savedNextLoad")
+                : t("settings.perf.splitDisabledToast"),
           !!ratioWarning);
-  } catch (e) { toast("Could not save: " + e.message, true); }
+  } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
 }
 
 /** A "Split across GPUs" checkbox changed: the checked SET changed, so the
@@ -454,7 +470,7 @@ export function setupResidencyControls() {
     if (raw !== "") {
       value = Number(raw);
       if (!Number.isInteger(value) || value < 1) {
-        toast("Max resident models must be blank or a whole number of 1 or more", true);
+        toast(t("settings.perf.maxResidentRangeToast"), true);
         return;
       }
     }
@@ -464,8 +480,8 @@ export function setupResidencyControls() {
         body: JSON.stringify({ max_resident_models: value }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast(value === null ? "Cap cleared" : "Saved - applies on the next model load");
-    } catch (e) { toast("Could not save: " + e.message, true); }
+      toast(value === null ? t("settings.perf.capClearedToast") : t("settings.perf.savedNextLoad"));
+    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
   };
   pinned.onchange = async () => {
     // Same CSV-splitting rule settings_schema._to_str_list applies server-side
@@ -478,8 +494,8 @@ export function setupResidencyControls() {
         body: JSON.stringify({ pinned_models: names.length ? names : null }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast(names.length ? "Saved - applies on the next model load" : "Pins cleared");
-    } catch (e) { toast("Could not save: " + e.message, true); }
+      toast(names.length ? t("settings.perf.savedNextLoad") : t("settings.perf.pinsClearedToast"));
+    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
   };
   fetch("/v1/config", { headers: authHeaders() })
     .then((r) => (r.ok ? r.json() : {}))

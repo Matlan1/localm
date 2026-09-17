@@ -1608,6 +1608,102 @@ export const I18N_EN = {
   "settings.lastUsed.hours": "used {hours}h ago",
   "settings.lastUsed.recently": "used recently",
 
+  // ---- Settings > Live tuning ----
+  "settings.perf.title": "Live tuning (apply now)",
+  "settings.perf.help":
+    "Adjust the running model without a reload: how much of it is on the GPU, and how large its context window is. Runtime & GPU holds the persisted next-load defaults; these apply right now. The VRAM figure is an estimate.",
+  "settings.perf.backendLabel": "Backend:",
+  "settings.perf.backendHint":
+    "An NVIDIA GPU was detected; the CUDA backend usually performs better than the currently installed Vulkan backend. localm never switches this for you - pick <strong>cuda</strong> under Settings > Updates > Inference runtime if you want to try it.",
+  "settings.perf.backendHintDismissButton": "Dismiss",
+  "settings.perf.gpuLayersLabel": "GPU layers (running model)",
+  "settings.perf.gpuLayersHelp": "How much of the model to offload to the GPU (0-999).",
+  "settings.perf.ctxLabel": "Context window (running model)",
+  "settings.perf.ctxHelpPrefix": "The most tokens the model can attend to (",
+  "settings.perf.ctxHelpSuffix": ").",
+  "settings.perf.estimateUnavailable": "estimate unavailable",
+  "settings.perf.estimateSummary": "~{needed} GB needed (weights {weights} · context {kv} · overhead {overhead})",
+  "settings.perf.estimateFreeKnownSuffix": " · {free} GB free - ",
+  "settings.perf.estimateFits": "fits",
+  "settings.perf.estimateMayNotFit": "may not fit",
+  "settings.perf.estimateFreeUnknownSuffix": " · free VRAM unknown",
+  "settings.perf.savedNextLoad": "Saved - applies on the next model load",
+  "settings.perf.saveFailedToast": "Could not save: {message}",
+  "settings.perf.gpuLayersRangeToast": "GPU layers must be between 0 and 999",
+  "settings.perf.mainGpuLabel": "Main GPU",
+  "settings.perf.mainGpuHelp": "Which device the model loads onto. Saves immediately; applies on the next model load.",
+  "settings.perf.splitLabel": "Split across GPUs",
+  "settings.perf.splitHelp":
+    "Spread a model too large for one card over several (check 2 or more, which overrides Main GPU). Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
+  "settings.perf.ratioHint":
+    "Optional relative weight per checked device (e.g. 3 and 1 gives the first card three times the second's share). Leave every weight blank to keep the automatic free-VRAM sizing above.",
+  "settings.perf.indexSpaceHint":
+    "Device numbers are the Vulkan backend's own order (what a model load uses); other tools may number GPUs differently.",
+  "settings.perf.splitPartialWarningToast":
+    "Saved, but a weight is missing for one GPU - enter one for every checked device, or clear them all for automatic sizing",
+  "settings.perf.splitDisabledToast": "Split disabled - applies on the next model load",
+  "settings.perf.maxResidentLabel": "Max resident models",
+  "settings.perf.maxResidentHelp":
+    "How many models may stay loaded at once. Blank lets free-VRAM arithmetic decide (a model loads alongside the others only when it provably fits); 1 forces strict single-resident. Saves immediately.",
+  "settings.perf.maxResidentRangeToast": "Max resident models must be blank or a whole number of 1 or more",
+  "settings.perf.maxResidentPlaceholder": "no cap",
+  "settings.perf.capClearedToast": "Cap cleared",
+  "settings.perf.pinnedLabel": "Pinned models",
+  "settings.perf.pinnedPlaceholder": "comma-separated model names (blank pins nothing)",
+  "settings.perf.pinnedHelp":
+    "Names that are never evicted to make room for another model. Protects an already-loaded model; it never loads one. Saves immediately.",
+  "settings.perf.pinsClearedToast": "Pins cleared",
+  "settings.perf.applyButton": "Apply",
+
+  // ---- Settings > Companion app ----
+  "settings.companion.title": "Companion app",
+  "settings.companion.help":
+    "This app talks only to the server that served it. To use LocaLM on your phone, open one of these addresses on the phone (on the same Wi-Fi, or over a private network like Tailscale), trust the certificate once, and install it from there.",
+  "settings.companion.pairingHelp":
+    "Pair a phone: open LocaLM on the phone, tap <b>Scan QR code</b> on the onboarding screen, and point it at this code to copy the API key over - no typing.",
+  "settings.companion.installButton": "Install as app",
+  "settings.companion.installHint": "Use your browser's <b>Install app</b> / <b>Add to Home screen</b> to pin LocaLM as an app.",
+  "settings.companion.iosTitle": "Add to Home Screen (iPhone / iPad):",
+  "settings.companion.iosStep1": "Open this page in <b>Safari</b>.",
+  "settings.companion.iosStep2": "Tap the <b>Share</b> button (the square with an up-arrow).",
+  "settings.companion.iosStep3": "Choose <b>Add to Home Screen</b>, then <b>Add</b>.",
+  "settings.companion.kindLan": "Wi-Fi / LAN",
+  "settings.companion.kindTailscale": "Tailscale",
+  "settings.companion.hintNoAddress":
+    "Could not detect this machine's network address - open its LAN or Tailscale address (with this port) on the phone.",
+  "settings.companion.hintLoopback":
+    "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server (or run: localm gui -H 0.0.0.0). See docs/phone.md.",
+
+  // ---- Settings > Your data ----
+  "settings.privacyData.title": "Your data",
+  "settings.privacyData.help": "Erase the conversations stored on this device. This cannot be undone.",
+
+  // ---- Settings > Diagnostics ----
+  "settings.diagnostics.title": "Diagnostics",
+  "settings.diagnostics.help":
+    "Run localm's active self-checks - the same ones <code>localm doctor</code> performs in a terminal. They try the things that silently break an install: loading the runtime, spawning the worker process every model load needs, and creating a nested venv. Nothing is installed or changed, and a run takes about half a minute.",
+  "settings.diagnostics.runButton": "Run diagnostics",
+  "settings.diagnostics.wordOk": "ok",
+  "settings.diagnostics.wordWarn": "warning",
+  "settings.diagnostics.wordFail": "failed",
+  "settings.diagnostics.wordError": "error",
+  "settings.diagnostics.wordSkipped": "not run",
+  "settings.diagnostics.runningPhase": "Running: {phase} ({done} of {total} done)",
+  "settings.diagnostics.runningGeneric": "Running the checks...",
+  "settings.diagnostics.notRunYet": "Not run yet. These checks take about half a minute.",
+  "settings.diagnostics.couldNotRun": "The checks could not be run: {error}",
+  "settings.diagnostics.noReasonReported": "no reason reported",
+  "settings.diagnostics.needAttention": "{bad} of {ran} active checks need attention.",
+  "settings.diagnostics.allPassed":
+    "All {ran} active checks passed. This covers the active probes only, not everything about your system.",
+  "settings.diagnostics.placeholderNotRunYet": "not run yet",
+  "settings.diagnostics.placeholderChecked": "checked - result when the run finishes",
+  "settings.diagnostics.placeholderChecking": "checking now...",
+  "settings.diagnostics.placeholderWaiting": "waiting...",
+  "settings.diagnostics.lostContact": "Lost contact with the server while the checks were running.",
+  "settings.diagnostics.startingChecks": "Starting the checks...",
+  "settings.diagnostics.couldNotStart": "Could not start the checks: {message}",
+
   // ---- Settings > Server controls ----
   "settings.server.title": "Server controls",
   "settings.server.help":

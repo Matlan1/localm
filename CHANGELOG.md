@@ -42,7 +42,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Before, a fresh install told the model it had no internet access until the
   toggle was switched on by hand. `off` still leaves the toggle off, and a
   choice you saved in the browser still wins.
-- **Settings translates more of itself into German.** Server controls, other
+- **Settings now translates fully into German.** Server controls, other
   running instances, Report a bug, Changelog, Updates (app update, roll back,
   the app launcher and the inference runtime), Issues, Logs and Upload files
   now show in German too, alongside the rest of the Settings page. Every
@@ -50,7 +50,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Privacy, Memory, Embeddings, Plugin, Update, Knowledge and Network setting's
   label and help text is now translated as well, along with their section
   headings. Owner key, Keys & devices (including scopes, presets and the QR
-  pairing flow) and Sign in on this device are now translated too.
+  pairing flow), Sign in on this device, Companion app, Diagnostics, Your
+  data and Live tuning (including the live VRAM estimate) are now translated
+  too, completing the page.
 
 ### Fixed
 - **`localm serve -H` / `localm gui -H` no longer accept a hostname.** The `bind_host`

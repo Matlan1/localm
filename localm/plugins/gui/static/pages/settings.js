@@ -8,7 +8,7 @@ import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDange
 import { t, tOr } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
-import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
+import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, syncIndexSpaceHint, syncPerfCtxHelp } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -573,8 +573,8 @@ export function companionView(info, loc) {
   const mk = (ip, kind) => ({ kind, url: proto + "//" + ip + port + "/" });
   const urls = [];
   if (info.network_bind) {
-    if (info.lan) urls.push(mk(info.lan, "Wi-Fi / LAN"));
-    if (info.tailscale) urls.push(mk(info.tailscale, "Tailscale"));
+    if (info.lan) urls.push(mk(info.lan, t("settings.companion.kindLan")));
+    if (info.tailscale) urls.push(mk(info.tailscale, t("settings.companion.kindTailscale")));
   }
   let hint = "";
   if (info.bind_fallback) {
@@ -585,8 +585,8 @@ export function companionView(info, loc) {
     hint = info.bind_fallback;
   } else if (!urls.length) {
     hint = info.network_bind
-      ? "Could not detect this machine's network address - open its LAN or Tailscale address (with this port) on the phone."
-      : "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server (or run: localm gui -H 0.0.0.0). See docs/phone.md.";
+      ? t("settings.companion.hintNoAddress")
+      : t("settings.companion.hintLoopback");
   }
   return { urls, hint };
 }
@@ -1308,6 +1308,14 @@ document.addEventListener("localm:language", () => {
   // more than once (see _settingsRenderToken above); it also re-runs
   // refreshKeysPanel/refreshOwnerKeyPanel/refreshCompanion at its own tail.
   refreshSettingsPage();
+  // The Live-tuning card's JS-rendered pieces: none of these re-fetch a value
+  // the user could have unsaved (the GPU-layers/context sliders themselves
+  // are untouched - only their text is redrawn), so re-running is safe.
+  syncPerfCtxHelp();
+  refreshPerfEstimate();
+  refreshBackendInfo();
+  syncIndexSpaceHint();
+  refreshDiagnosticsCard();
 });
 
 /** Which group the settings page should be SHOWING: the user's explicit choice if it
@@ -3093,8 +3101,12 @@ export async function saveMediaPlugin(name) {
 // fault, so painting it yellow would put a warning on every ordinary box.
 const _DOCTOR_PILL = { ok: "st-ok", warn: "st-warn", fail: "st-error",
                        error: "st-error", skipped: "" };
-const _DOCTOR_WORD = { ok: "ok", warn: "warning", fail: "failed",
-                       error: "error", skipped: "not run" };
+const _DOCTOR_WORD_KEY = { ok: "settings.diagnostics.wordOk", warn: "settings.diagnostics.wordWarn",
+                           fail: "settings.diagnostics.wordFail", error: "settings.diagnostics.wordError",
+                           skipped: "settings.diagnostics.wordSkipped" };
+function _doctorWord(status) {
+  return _DOCTOR_WORD_KEY[status] ? t(_DOCTOR_WORD_KEY[status]) : status;
+}
 
 // Set while a run is being polled, so entering Settings twice does not start a
 // second poll loop against the same job.
@@ -3107,7 +3119,7 @@ function renderDoctorCheck(check) {
   const head = el("div", "job-head");
   head.appendChild(el("span", "job-name", check.label));
   const pill = el("span", "job-state " + (_DOCTOR_PILL[check.status] || ""),
-                  _DOCTOR_WORD[check.status] || check.status);
+                  _doctorWord(check.status));
   head.appendChild(pill);
   box.appendChild(head);
   if (check.summary) box.appendChild(el("div", "sub", check.summary));
@@ -3142,21 +3154,22 @@ export function renderDoctorReport(body) {
       // "3 of 5" counts what has FINISHED and names what is running now, which
       // is what the server sends - never a percentage invented here.
       status.textContent = p.phase
-        ? `Running: ${p.phase} (${p.done || 0} of ${p.total || covers.length} done)`
-        : "Running the checks...";
+        ? t("settings.diagnostics.runningPhase",
+            { phase: p.phase, done: p.done || 0, total: p.total || covers.length })
+        : t("settings.diagnostics.runningGeneric");
     } else if (!report) {
-      status.textContent = "Not run yet. These checks take about half a minute.";
+      status.textContent = t("settings.diagnostics.notRunYet");
     } else if (report.verdict === "error") {
       // The run did not happen. This must never render as a clean result.
-      status.textContent = "The checks could not be run: " + (report.error || "no reason reported");
+      status.textContent = t("settings.diagnostics.couldNotRun",
+        { error: report.error || t("settings.diagnostics.noReasonReported") });
     } else {
       const checks = report.checks || [];
       const bad = checks.filter((c) => c.status === "fail" || c.status === "warn");
       const ran = checks.filter((c) => c.status !== "skipped").length;
       status.textContent = bad.length
-        ? `${bad.length} of ${ran} active checks need attention.`
-        : `All ${ran} active checks passed. This covers the active probes only, `
-          + "not everything about your system.";
+        ? t("settings.diagnostics.needAttention", { bad: bad.length, ran })
+        : t("settings.diagnostics.allPassed", { ran });
     }
   }
 
@@ -3171,9 +3184,9 @@ export function renderDoctorReport(body) {
   // result is coming, which is exactly what is true.
   const done = (body.progress || {}).done || 0;
   const placeholder = (i) => {
-    if (!body.running) return "not run yet";
-    if (i < done) return "checked - result when the run finishes";
-    return i === done ? "checking now..." : "waiting...";
+    if (!body.running) return t("settings.diagnostics.placeholderNotRunYet");
+    if (i < done) return t("settings.diagnostics.placeholderChecked");
+    return i === done ? t("settings.diagnostics.placeholderChecking") : t("settings.diagnostics.placeholderWaiting");
   };
   const rows = (report && report.checks && report.checks.length)
     ? report.checks
@@ -3212,7 +3225,7 @@ export async function pollDiagnostics() {
     // Say so rather than leaving the card frozen mid-run: a stalled poll and a
     // still-running check look identical from the outside.
     const status = $("doctor-status");
-    if (status) { status.hidden = false; status.textContent = "Lost contact with the server while the checks were running."; }
+    if (status) { status.hidden = false; status.textContent = t("settings.diagnostics.lostContact"); }
     const btn = $("doctor-run");
     if (btn) btn.disabled = false;
   } finally { _doctorPolling = false; }
@@ -3221,13 +3234,13 @@ export async function pollDiagnostics() {
 export async function runDiagnostics() {
   const btn = $("doctor-run"), status = $("doctor-status");
   if (btn) btn.disabled = true;
-  if (status) { status.hidden = false; status.textContent = "Starting the checks..."; }
+  if (status) { status.hidden = false; status.textContent = t("settings.diagnostics.startingChecks"); }
   try {
     const r = await fetch("/api/doctor/run", { method: "POST", headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
   } catch (e) {
-    if (status) status.textContent = "Could not start the checks: " + e.message;
+    if (status) status.textContent = t("settings.diagnostics.couldNotStart", { message: e.message });
     if (btn) btn.disabled = false;
     return;
   }
