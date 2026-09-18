@@ -65,6 +65,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`find_sibling_mmproj` no longer auto-attaches a lone vision projector to unrelated models sharing the folder.** Directory sibling detection now enforces stem matching for all candidate counts, preventing unrelated models from auto-attaching projectors or emitting misleading "looks like projector by filename" log messages.
+- **Grammar-constrained generation no longer floods the console with repetitive "Grammar still awaiting trigger" messages.** Generation wrapped with grammar or lazy-grammar sampling restores `_quiet_stderr` during inference so per-token trigger status lines from the llama.cpp sampler do not spam stderr.
 - **Selecting the SYCL llama.cpp backend on an Intel GPU now correctly applies
   a configured Main GPU or GPU split.** The real device numbering on a Vulkan
   or SYCL install lives in that backend's own registry, not in the generic
