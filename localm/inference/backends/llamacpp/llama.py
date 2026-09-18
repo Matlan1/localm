@@ -79,27 +79,16 @@ def _quiet_stderr():
             os.close(saved_fd)
 
 
-def _stderr_ctx_for_generate(verbose: bool):
-    """Which stderr-handling context manager _generate() wraps its (single,
-    contiguous) prefill + decode-loop scope in. A pure function, isolated from
-    grammar/grammar_lazy entirely, so the decision is directly unit-testable
-    without constructing a real LlamaCpp/native model.
+def _stderr_ctx_for_generate(verbose: bool, grammar_active: bool = False):
+    """Return the context manager used to wrap generation stderr.
 
-    verbose already lets native output straight through unfiltered, so there
-    is nothing here to suppress or group - nullcontext. Otherwise this is
-    always ``dedup_native_stderr`` (debuglog.py), for grammar-constrained
-    requests exactly the same as plain ones: the lazy grammar sampler logs
-    "Grammar still awaiting trigger after token N" for every token until the
-    trigger fires, and _LineGrouper's repeat-count collapsing (which also
-    tolerates a repeating multi-line CYCLE, not just one line) handles that
-    volume without hiding real grammar diagnostics.
-
-    Sharing dedup_native_stderr is safe here specifically because BOTH of
-    _generate()'s call sites for this context manager wrap one whole
-    prefill/decode-loop scope, never re-entered per token - the one
-    requirement dedup_native_stderr's own docstring imposes."""
+    Returns nullcontext when verbose is True, _quiet_stderr when grammar_active
+    is True, and dedup_native_stderr otherwise.
+    """
     if verbose:
         return contextlib.nullcontext
+    if grammar_active:
+        return _quiet_stderr
     from localm.debuglog import dedup_native_stderr
     return dedup_native_stderr
 
@@ -1562,10 +1551,9 @@ class LlamaCpp:
             # minimal reply cannot fit any more.
             max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
 
-            # grammar/grammar_lazy no longer pick a different stderr context here -
-            # see _stderr_ctx_for_generate's docstring for why the grammar path
-            # was folded into the same one as plain generation.
-            _ctx = _stderr_ctx_for_generate(self._verbose)
+            _ctx = _stderr_ctx_for_generate(
+                self._verbose, grammar_active=bool(grammar or grammar_lazy)
+            )
 
             # If unlimited (<= 0), allocate a modest chunk up front and grow later
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512

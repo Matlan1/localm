@@ -443,18 +443,15 @@ def get_model_info(name: str, *, allow_direct_path: bool = False,
 def _pick_mmproj_candidate(model_stem: str, names: List[str]) -> Optional[str]:
     """Disambiguate a single mmproj (vision projector) filename out of *names*
     (already filtered to mmproj-looking GGUF filenames) for a model named
-    *model_stem*. A lone candidate wins outright; with more than one, prefer a
-    name that shares the model's leading token, and give up (None) rather than
-    guess when that still doesn't narrow it to one - never silently attach the
-    wrong projector. Shared by find_sibling_mmproj (a directory glob) and
-    pull.py's HF-repo-listing lookup (same disambiguation, a different
-    candidate source)."""
+    *model_stem*. Requires the candidate name to share the model's leading stem
+    token. Returns the single match, or None when none match or the choice is
+    ambiguous (>1 matches) - never silently attach an unrelated projector."""
     if not names:
         return None
-    if len(names) == 1:
-        return names[0]
     stem = model_stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
-    matches = [n for n in names if stem and stem in n.lower()]
+    if not stem:
+        return None
+    matches = [n for n in names if stem in n.lower()]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -506,15 +503,8 @@ def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Opti
     if not picked:
         return None
     candidate_path = by_name[picked]
-    # A LONE candidate (the common case _pick_mmproj_candidate never has to
-    # disambiguate) is otherwise returned unconditionally regardless of fit -
-    # confirmed n_embd/projection_dim mismatch here is what
-    # mtmd_init_from_file's own native check catches ANYWAY, just after the
-    # load attempt instead of before it, and after already logging a
-    # confusing native error. gguf_n_embd() returns None on any read failure
-    # (a genuinely unreadable file, a future GGUF layout, ...) - that is
-    # "unknown", not "mismatch", so it still passes through here unchanged
-    # rather than losing a mmproj this exact same code accepted before.
+    # Rejects candidate when embedding widths are known and mismatched. None from
+    # gguf_n_embd() passes through unchanged.
     model_n_embd = gguf_n_embd(p)
     mmproj_n_embd = gguf_n_embd(candidate_path)
     if model_n_embd and mmproj_n_embd and model_n_embd != mmproj_n_embd:

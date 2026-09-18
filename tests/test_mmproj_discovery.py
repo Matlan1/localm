@@ -128,6 +128,51 @@ class TestFindSiblingMmproj:
         proj = _gguf(tmp_path / "mmproj-gemma-3-4b-it-f16.gguf")
         assert find_sibling_mmproj(model) == proj
 
+    def test_lone_sibling_without_stem_match_returns_none(self, tmp_path):
+        """A lone mmproj for an unrelated model family is not attached."""
+        model = _gguf(tmp_path / "Llama3.3-8B-Instruct-Thinking.gguf")
+        _gguf(tmp_path / "mmproj-Qwen3.8-27B-Uncensored-F16.gguf")
+        assert find_sibling_mmproj(model) is None
+
+    def test_lone_sibling_matching_width_differing_stem_not_attached(self, tmp_path):
+        """Identical embedding widths do not attach an unrelated model's projector."""
+        model = _real_text_model_gguf(
+            tmp_path / "Llama3-27B-Instruct.gguf", "llama", 5120)
+        _real_mmproj_gguf(
+            tmp_path / "mmproj-Qwen3.8-27B-Uncensored-F16.gguf", 5120)
+        assert find_sibling_mmproj(model) is None
+
+
+class TestPickMmprojCandidate:
+    def test_empty_candidate_list_returns_none(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        assert _pick_mmproj_candidate("gemma-3-4b", []) is None
+
+    def test_lone_candidate_matching_stem_returns_name(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        assert _pick_mmproj_candidate(
+            "gemma-3-4b-it", ["mmproj-gemma-3-4b-it-f16.gguf"]) == "mmproj-gemma-3-4b-it-f16.gguf"
+
+    def test_lone_candidate_differing_stem_returns_none(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        assert _pick_mmproj_candidate(
+            "Llama3.3-8B-Instruct", ["mmproj-Qwen3.8-27B-Uncensored-F16.gguf"]) is None
+
+    def test_multiple_candidates_single_stem_match(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        cands = ["mmproj-qwen-f16.gguf", "mmproj-gemma-f16.gguf", "mmproj-llava-f16.gguf"]
+        assert _pick_mmproj_candidate("gemma-3-4b", cands) == "mmproj-gemma-f16.gguf"
+
+    def test_multiple_candidates_no_stem_match(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        cands = ["mmproj-qwen-f16.gguf", "mmproj-llava-f16.gguf"]
+        assert _pick_mmproj_candidate("gemma-3-4b", cands) is None
+
+    def test_multiple_candidates_ambiguous_stem_matches_returns_none(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        cands = ["mmproj-gemma-f16.gguf", "mmproj-gemma-q4.gguf"]
+        assert _pick_mmproj_candidate("gemma-3-4b", cands) is None
+
 
 class TestGetModelMmproj:
     def test_registry_explicit_mmproj_wins(self, tmp_path, monkeypatch):
