@@ -15,7 +15,7 @@ abort only ever kills this process, never the server."""
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from ._sizing import VramSizingMixin
 
@@ -258,6 +258,7 @@ class GgufWorker(VramSizingMixin):
         grammar_lazy: bool = False,
         grammar_triggers: Optional[list] = None,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ):
         """Yield text tokens one at a time. The caller (the runner's dispatch
         loop) already filtered out an image the model cannot see and already
@@ -289,6 +290,7 @@ class GgufWorker(VramSizingMixin):
                 grammar_lazy=grammar_lazy,
                 grammar_triggers=grammar_triggers,
                 stream=True,
+                on_status=on_status,
             )
             if seed is not None:
                 kw["seed"] = seed

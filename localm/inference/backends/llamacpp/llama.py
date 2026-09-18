@@ -1527,6 +1527,7 @@ class LlamaCpp:
         grammar_lazy: bool = False,
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[int]:
         """
         Yield generated token ids one at a time.
@@ -1545,6 +1546,9 @@ class LlamaCpp:
             n_prompt = len(prompt_tokens)
             if n_prompt == 0:
                 return
+
+            if on_status:
+                on_status("Processing prompt...")
 
             # Dynamic window: shrink the generation budget to fit under the
             # ceiling rather than blowing past it; fail clearly when even a
@@ -1640,6 +1644,8 @@ class LlamaCpp:
                 self.last_finish_reason = "stop"
                 in_decode = True
                 logger.info("gguf generate: entering decode loop")
+                if on_status:
+                    on_status("Generating response...")
                 _decode_t0 = time.monotonic()
                 # ONE contiguous _ctx() scope for the whole streaming loop, not
                 # re-entered per native call: dedup_native_stderr() spins up a
@@ -1949,6 +1955,7 @@ class LlamaCpp:
         top_p: float,
         repeat_penalty: float,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s).
 
@@ -1976,6 +1983,8 @@ class LlamaCpp:
             # embeddings arrive in that same slot.
             self.mtp_active_this_call = False
             logger.info("gguf generate (vision): prefill starting")
+            if on_status:
+                on_status("Encoding image (GPU)..." if getattr(self._mtmd, "on_gpu", False) else "Encoding image (CPU)...")
             _t0 = time.monotonic()
             tokens_generated = 0
             in_decode = False
@@ -2027,6 +2036,8 @@ class LlamaCpp:
                             # not one per image.
                             if not self._mtmd.retry_on_cpu():
                                 raise
+                            if on_status:
+                                on_status("GPU vision encode failed; retrying on CPU (this may take longer)...")
                             self._reset_kv_for_image()
                             pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
                                                        add_special=add_special)
@@ -2034,6 +2045,8 @@ class LlamaCpp:
                 logger.info(
                     "gguf generate (vision): prefill complete in %.2fs, "
                     "%d image(s)", time.monotonic() - _t0, len(images))
+                if on_status:
+                    on_status("Generating response...")
 
                 sampler = _build_sampler(
                     vocab=self._tokenizer._vocab,
@@ -2522,6 +2535,7 @@ class LlamaCpp:
         grammar_lazy: bool = False,
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
         **_ignored,
     ):
         """
@@ -2574,6 +2588,7 @@ class LlamaCpp:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 seed=seed,
+                on_status=on_status,
             )
         else:
             gen = self._generate(
@@ -2587,6 +2602,7 @@ class LlamaCpp:
                 grammar_lazy=grammar_lazy,
                 grammar_triggers=grammar_triggers,
                 seed=seed,
+                on_status=on_status,
             )
 
         if stream:

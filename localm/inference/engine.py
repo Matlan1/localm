@@ -7,7 +7,7 @@ import json
 import re
 import threading
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from localm.config import load_config
 from localm.console import console
@@ -433,6 +433,7 @@ class Engine:
         grammar_lazy: bool = False,
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[str]:
         # Auto-reload if the model was unloaded. Holds the process-global load
         # lock so a reload cannot race another load onto the GPU, and
@@ -462,6 +463,7 @@ class Engine:
             grammar_lazy=grammar_lazy,
             grammar_triggers=grammar_triggers,
             seed=seed,
+            on_status=on_status,
         ))
 
     def __enter__(self) -> "Engine":

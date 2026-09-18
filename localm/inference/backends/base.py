@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 
 class UnsupportedInputError(ValueError):
@@ -346,6 +346,7 @@ class BaseBackend(ABC):
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[str]:
         """
         Yield text tokens one at a time.

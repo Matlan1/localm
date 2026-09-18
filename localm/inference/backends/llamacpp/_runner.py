@@ -98,7 +98,7 @@ import os
 import queue as _queue
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from localm.inference.backends.base import (
     ContextCapacityExceededError,
@@ -321,7 +321,9 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             stream_cancel_event.clear()   # a stale cancel from a PRIOR stream
                                            # on this same model must not fire early
             try:
-                gen = worker.chat_stream(**payload)
+                def _worker_status(s: str) -> None:
+                    resp_q.put(("status", s))
+                gen = worker.chat_stream(on_status=_worker_status, **payload)
                 for token in gen:
                     if stream_cancel_event.is_set():
                         gen.close()
@@ -769,7 +771,8 @@ class ModelRunner:
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the model-loading process: {result!r}")
 
-    def chat_stream(self, *, first_chunk_timeout: Optional[float] = None, **kwargs):
+    def chat_stream(self, *, first_chunk_timeout: Optional[float] = None,
+                    on_status: Optional[Callable[[str], None]] = None, **kwargs):
         """Yield text tokens. On the caller's ``GeneratorExit`` (a plain
         generator ``.close()``, which is how ``http_server.py`` cancels a
         stream), relays a ``cancel_stream`` signal to the child and drains for
@@ -878,6 +881,15 @@ class ModelRunner:
                                     "reload on the next request."
                                 )
                     kind = result[0]
+                    if kind == "status":
+                        status_text = result[1]
+                        logger.info("gguf worker: status: %s", status_text)
+                        if on_status:
+                            try:
+                                on_status(status_text)
+                            except Exception:
+                                logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
+                        continue
                     if awaiting_first:
                         logger.info(
                             "gguf worker: prefill complete, first response "

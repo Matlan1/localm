@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, newToolEvent, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages, updateStatusIndicator } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -2232,8 +2232,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     body.grammar_triggers = [TOOL_CALL_TRIGGER];
   }
 
+  // VIS-1: did this request carry a user-attached image? If a text-only model
+  // rejects it (400), we must drop the image so the chat is not wedged.
+  const sentImage = messages.some((m) => Array.isArray(m.content) &&
+    m.content.some((p) => p.type === "image_url"));
+
   const box = $("chat-messages");
   const { body: liveBody } = addMessageRow(box, "assistant", "");
+  mountStatusIndicator(liveBody, sentImage ? t("chat.status.encodingImage") : t("chat.status.processing"));
   chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
   box.scrollTop = box.scrollHeight;
 
@@ -2244,11 +2250,6 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   chat.abort = new AbortController();
   input.disabled = true;
   document.querySelectorAll(".message-actions button").forEach(b => b.disabled = true);
-
-  // VIS-1: did this request carry a user-attached image? If a text-only model
-  // rejects it (400), we must drop the image so the chat is not wedged.
-  const sentImage = messages.some((m) => Array.isArray(m.content) &&
-    m.content.some((p) => p.type === "image_url"));
 
   let full = "";
   let reasoning = "";   // H4: <think> reasoning now streams in delta.reasoning_content
@@ -2315,9 +2316,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       if (chunk.usage) usage = chunk.usage;
       if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const d = chunk.choices?.[0]?.delta || {};
+      if (d.status) {
+        updateStatusIndicator(liveBody, d.status);
+        if (chat.stick) box.scrollTop = box.scrollHeight;
+      }
       const cDelta = d.content || "";
       const rDelta = d.reasoning_content || "";   // H4: reasoning streamed apart
       if (cDelta || rDelta) {
+        removeStatusIndicator(liveBody);
         full += cDelta;
         reasoning += rDelta;
         // Rebuild <think> from the reasoning stream so splitThink renders the
@@ -2332,6 +2338,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       }
     });
   } catch (e) {
+    removeStatusIndicator(liveBody);
     if (e.name === "AbortError") {
       aborted = true;
     } else if (sentImage && e.status === 400 && !full.trim()) {
@@ -2351,6 +2358,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       toast("Chat request failed: " + e.message, true);
     }
   } finally {
+    removeStatusIndicator(liveBody);
     chat.abort = null;
     sendBtn.classList.remove("stop");
     sendBtn.replaceChildren(iconEl("send", "ic"));

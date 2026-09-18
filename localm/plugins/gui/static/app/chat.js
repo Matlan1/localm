@@ -2005,3 +2005,81 @@ document.addEventListener("localm:language", () => {
   renderConvList();
   renderChat();
 });
+
+/** Format elapsed seconds into "m:ss" (e.g. 0:01, 1:23). */
+export function formatStatusElapsed(sec) {
+  const s = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${rem < 10 ? "0" : ""}${rem}`;
+}
+
+/** Create a status pill element with a pulsing dot, status text and timer. */
+export function createStatusIndicator(text, isWarn = false) {
+  const el = document.createElement("div");
+  el.className = "msg-status-indicator" + (isWarn ? " st-warn" : "");
+  const pulse = document.createElement("span");
+  pulse.className = "status-pulse";
+  const label = document.createElement("span");
+  label.className = "status-text";
+  label.textContent = text || "";
+  const timer = document.createElement("span");
+  timer.className = "status-timer";
+  timer.textContent = "0:00";
+  el.appendChild(pulse);
+  el.appendChild(label);
+  el.appendChild(timer);
+  return el;
+}
+
+/** Mount a status indicator into a message body and start its 1s elapsed timer. */
+export function mountStatusIndicator(bodyEl, text, isWarn = false) {
+  if (!bodyEl) return null;
+  removeStatusIndicator(bodyEl);
+  const ind = createStatusIndicator(text, isWarn);
+  bodyEl.appendChild(ind);
+  const t0 = Date.now();
+  const timerEl = ind.querySelector(".status-timer");
+  const intervalId = setInterval(() => {
+    if (!ind.isConnected) {
+      clearInterval(intervalId);
+      return;
+    }
+    if (timerEl) {
+      const elapsedSec = (Date.now() - t0) / 1000;
+      timerEl.textContent = formatStatusElapsed(elapsedSec);
+    }
+  }, 1000);
+  bodyEl._statusTimer = intervalId;
+  return ind;
+}
+
+/** Update the text and warning state of an existing status indicator in bodyEl,
+ *  or mount a new one if not present. */
+export function updateStatusIndicator(bodyEl, text, isWarn = false) {
+  if (!bodyEl) return null;
+  const ind = bodyEl.querySelector(".msg-status-indicator");
+  if (!ind) {
+    return mountStatusIndicator(bodyEl, text, isWarn);
+  }
+  const label = ind.querySelector(".status-text");
+  if (label && text) label.textContent = text;
+  const shouldWarn = isWarn || (typeof text === "string" && (
+    text.toLowerCase().includes("failed") || text.toLowerCase().includes("retrying")
+  ));
+  if (shouldWarn) ind.classList.add("st-warn");
+  else ind.classList.remove("st-warn");
+  return ind;
+}
+
+/** Stop the timer and remove any status indicator from bodyEl. */
+export function removeStatusIndicator(bodyEl) {
+  if (!bodyEl) return;
+  if (bodyEl._statusTimer) {
+    clearInterval(bodyEl._statusTimer);
+    delete bodyEl._statusTimer;
+  }
+  const ind = bodyEl.querySelector(".msg-status-indicator");
+  if (ind) ind.remove();
+}
+

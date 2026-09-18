@@ -5134,10 +5134,19 @@ async def _stream_sse(
     )
     yield f"data: {role_chunk.model_dump_json()}\n\n"
 
+    from localm.inference.backends.base import messages_contain_image
+    initial_status = "Encoding image..." if messages_contain_image(messages) else "Processing prompt..."
+    status_chunk = ChatChunk.status_chunk(initial_status, model_id, chunk_id, ts)
+    yield f"data: {status_chunk.model_dump_json()}\n\n"
+
     # Run blocking generator in executor so we don't block the event loop
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue = asyncio.Queue()
     _DONE = object()
+
+    class _StatusSignal:
+        def __init__(self, text: str) -> None:
+            self.text = text
 
     # A mid-stream client disconnect makes Starlette throw GeneratorExit into this
     # async generator. Without a cancel path the producer thread below would keep
@@ -5161,8 +5170,13 @@ async def _stream_sse(
         # surfaces it and the finally still enqueues _DONE.
         _log_assembled_prompt(messages)
         gen = None
+        def _on_status(s: str) -> None:
+            loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
+
         try:
-            gen = engine.chat_stream(messages, **gen_kwargs)
+            gen_opts = dict(gen_kwargs)
+            gen_opts.pop("on_status", None)
+            gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
             for token in gen:
                 if cancel_event.is_set():
                     break
@@ -5217,6 +5231,10 @@ async def _stream_sse(
                     token = await token_queue.get()
                     if token is _DONE:
                         break
+                    if isinstance(token, _StatusSignal):
+                        chunk = ChatChunk.status_chunk(token.text, model_id, chunk_id, ts)
+                        yield f"data: {chunk.model_dump_json()}\n\n"
+                        continue
                     if isinstance(token, Exception):
                         gen_error = token
                         continue
@@ -5329,14 +5347,23 @@ async def _stream_sse_completion(
     cancel_event = threading.Event()
     residency.register_cancel(engine.display_name, cancel_event)
 
+    class _StatusSignal:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
         # returning the generator, so an eager raise must not escape the try and
         # orphan the consumer (see the fuller note in _stream_sse).
         _log_assembled_prompt(messages)
         gen = None
+        def _on_status(s: str) -> None:
+            loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
+
         try:
-            gen = engine.chat_stream(messages, **gen_kwargs)
+            gen_opts = dict(gen_kwargs)
+            gen_opts.pop("on_status", None)
+            gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
             for token in gen:
                 if cancel_event.is_set():
                     break
@@ -5381,6 +5408,14 @@ async def _stream_sse_completion(
                     token = await token_queue.get()
                     if token is None:
                         break
+                    if isinstance(token, _StatusSignal):
+                        chunk = {
+                            "id": chunk_id, "object": "text_completion.chunk",
+                            "created": ts, "model": model_id,
+                            "choices": [{"text": "", "index": 0, "finish_reason": None, "status": token.text}],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                        continue
                     if isinstance(token, Exception):
                         gen_error = token
                         continue
