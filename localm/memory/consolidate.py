@@ -342,9 +342,13 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
               "proposed": 0}
     if not writes_allowed(surface):
         return {**counts, "status": "skipped", "reason": "privacy"}
+    from localm.debuglog import logger
     now = time.time() if now is None else now
+    logger.info("memory consolidation: extracting candidate facts from session history (%d chars)...", len(session_text))
     candidates = extract(complete, session_text, max_candidates=max_candidates)
+    logger.info("memory consolidation: extracted %d candidate fact(s)", len(candidates))
     if not candidates:
+        logger.info("memory consolidation: no candidate facts found, pruning store")
         # No new facts, but STILL prune: decay-based forgetting and the size cap
         # must not depend on a fact-producing run, or a store that keeps extracting
         # nothing never forgets anything. Prune is a no-op when nothing is decayed,
@@ -394,6 +398,10 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
             live_ids = {r.id for r in store.all()}
             survivors = [p for p in proposals if p.target_id in live_ids]
             counts["proposed"] = store.propose_corrections(survivors)
+        logger.info(
+            "memory consolidation: fact pass finished (added=%d, updated=%d, deleted=%d, noop=%d, proposed=%d)",
+            counts["added"], counts["updated"], counts["deleted"], counts["noop"], counts["proposed"],
+        )
         return _with_eviction_note(counts, store)
 
 
@@ -412,12 +420,17 @@ def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
     supersession proposals. The caller MERGES these deltas onto a fresh reload under
     the lock (see _merge_changeset), so a concurrent write during the lock-free
     decide window is not lost."""
+    from localm.debuglog import logger, debug_content_enabled
     working = list(snapshot)
     processed: set = set()
     updated_ids: set = set()
     proposals: list[PendingCorrection] = []
-    for cand in candidates:
+    for i, cand in enumerate(candidates):
         text, conf = cand["text"], cand["confidence"]
+        if debug_content_enabled():
+            logger.debug("memory consolidation: evaluating candidate [%d/%d]: %r", i + 1, len(candidates), text)
+        else:
+            logger.debug("memory consolidation: evaluating candidate [%d/%d]", i + 1, len(candidates))
         key = text.lower()
         if key in processed:
             continue                              # idempotency within a run
@@ -462,6 +475,10 @@ def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
             elif decision == "DELETE" and conf2 < UPDATE_MIN_CONF:
                 decision = "NO_OP"
 
+        if debug_content_enabled():
+            logger.debug("memory consolidation: decision for %r -> %s", text, decision)
+        else:
+            logger.debug("memory consolidation: candidate [%d/%d] -> %s", i + 1, len(candidates), decision)
         if decision == "ADD":
             working.append(MemoryRecord(
                 text=text, kind="semantic", source="synth",

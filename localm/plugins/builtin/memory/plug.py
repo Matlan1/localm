@@ -606,8 +606,14 @@ async def memory_consolidate(request: Request = None):
         def complete(prompt: str) -> str:
             # strip_think: memory must never ingest the reasoning channel.
             from localm.textnorm import strip_think
-            return strip_think("".join(eng.chat_stream(
+            from localm.debuglog import debug_content_enabled, logger
+            if debug_content_enabled():
+                logger.debug("memory consolidate prompt:\n%s", prompt)
+            out = strip_think("".join(eng.chat_stream(
                 [{"role": "user", "content": prompt}]))).strip()
+            if debug_content_enabled():
+                logger.debug("memory consolidate response:\n%s", out)
+            return out
 
         # driving_engine pins the engine busy and touches its activity clock for the
         # WHOLE synthesis pass, not per-completion, so idle-unload cannot evict the
@@ -694,11 +700,15 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     ``{"status": "skipped", "reason": "privacy", "added": 0}`` and NEVER calls the
     model. Returns ``{status, added, updated, deleted, facts}``, the shape the jobs
     "memory" runner consumes."""
+    from localm.debuglog import logger
     if not _persist_enabled():
+        logger.debug("memory synthesis skipped: privacy mode active")
         return {"status": "skipped", "reason": "privacy", "added": 0}
     sessions = _recent_sessions_text(max_chars=max_chars)
     if not sessions.strip():
+        logger.debug("memory synthesis skipped: no session history found")
         return {"status": "skipped", "reason": "no_sessions", "added": 0}
+    logger.info("memory synthesis: analyzing session history (%d chars)...", len(sessions))
     from localm.memory import run_consolidation
     store = _chat_store(principal)
     _migrate_legacy(store)
@@ -877,6 +887,8 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
             key=lambda p: (p.stat().st_mtime, p.stem))
         if not new_files:
             return 0
+        from localm.debuglog import logger
+        logger.info("memory consolidation: checking %d session file(s) for episodic capture", len(new_files))
         stored = 0
         gens = 0                                   # real model generations this run (bounded)
         newest = watermark
@@ -920,6 +932,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
             # and the cursor for the next run.
             if gens >= EPISODIC_MAX_PER_RUN:
                 break
+            logger.info("memory consolidation: summarizing session %s (%d chars)...", f.stem, len(text))
             summ = summarize_session(complete, text)
             gens += 1
             _advance(mt, f.stem)                    # a real attempt was made -> advance past it
@@ -963,6 +976,8 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
                       embed_fn=ef)
             stored += 1
         _write_episodic_watermark(store, newest, newest_stems)
+        if stored > 0:
+            logger.info("memory consolidation: stored %d episodic summary record(s)", stored)
         return stored
     except Exception as e:
         from localm.debuglog import logger
@@ -1010,18 +1025,24 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
     stashed engine. Never raises (a daemon thread); clears the in-progress flag and
     stamps the marker when done."""
     global _auto_running
-    from localm.debuglog import logger
+    from localm.debuglog import logger, debug_content_enabled
     try:
         # Resolved once here, at thread start, and reused for the whole pass, so the
         # engine cannot swap out from under consolidation while it is mid-run.
         eng = _live_engine()
         if eng is None or not getattr(eng, "loaded", False):
             return
+        logger.info("memory auto-consolidate: starting background memory synthesis pass")
         from localm.textnorm import strip_think
 
         def complete(prompt: str) -> str:
-            return strip_think("".join(
+            if debug_content_enabled():
+                logger.debug("memory auto-consolidate prompt:\n%s", prompt)
+            out = strip_think("".join(
                 eng.chat_stream([{"role": "user", "content": prompt}]))).strip()
+            if debug_content_enabled():
+                logger.debug("memory auto-consolidate response:\n%s", out)
+            return out
 
         # Pin for the whole pass, not per-completion, so a gap between candidates
         # cannot be evicted into.
@@ -1029,8 +1050,15 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         with driving_engine(eng):
             res = synthesize_memory(complete, principal=principal)
         added = res.get("added", 0)
-        if added:
-            logger.info("memory auto-consolidate: added %d fact(s)", added)
+        updated = res.get("updated", 0)
+        deleted = res.get("deleted", 0)
+        proposed = res.get("proposed", 0)
+        episodic = res.get("episodic", 0)
+        status = res.get("status", "ok")
+        logger.info(
+            "memory auto-consolidate: pass complete (status=%s, added=%d, updated=%d, deleted=%d, proposed=%d, episodic=%d)",
+            status, added, updated, deleted, proposed, episodic,
+        )
     except Exception as e:
         logger.warning("memory auto-consolidate failed: %s", e)
     finally:

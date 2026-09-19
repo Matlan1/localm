@@ -85,6 +85,8 @@ class TestPrivacyModeDoesNotLeakTheHistory:
         blob = _captured_blob(blob_src)
         assert SECRET_TURN not in blob, f"leaked chat history: {blob}"
         assert "assembled chat prompt" not in blob
+        assert "chat completion reply" not in blob
+        assert "hi there" not in blob
 
     def test_chat_completions_nonstreaming(self, monkeypatch, caplog):
         self._not_allowed(monkeypatch)
@@ -99,6 +101,8 @@ class TestPrivacyModeDoesNotLeakTheHistory:
         blob = _captured_blob(blob_src)
         assert SECRET_TURN not in blob, f"leaked chat history: {blob}"
         assert "assembled chat prompt" not in blob
+        assert "chat completion reply" not in blob
+        assert "hi there" not in blob
 
     def test_raw_completions_streaming(self, monkeypatch, caplog):
         self._not_allowed(monkeypatch)
@@ -113,6 +117,8 @@ class TestPrivacyModeDoesNotLeakTheHistory:
         blob = _captured_blob(blob_src)
         assert SECRET_TURN not in blob, f"leaked chat history: {blob}"
         assert "assembled chat prompt" not in blob
+        assert "chat completion reply" not in blob
+        assert "hi there" not in blob
 
 
 class TestNonPrivacyModeCapturesTheHistory:
@@ -135,6 +141,8 @@ class TestNonPrivacyModeCapturesTheHistory:
         blob = _captured_blob(blob_src)
         assert SECRET_TURN in blob, f"capture missing from: {blob}"
         assert "[1] user:" in blob
+        assert "chat completion reply" in blob
+        assert "hi there" in blob
 
     def test_chat_completions_nonstreaming(self, monkeypatch, caplog):
         self._allowed(monkeypatch)
@@ -148,6 +156,8 @@ class TestNonPrivacyModeCapturesTheHistory:
             })
         blob = _captured_blob(blob_src)
         assert SECRET_TURN in blob, f"capture missing from: {blob}"
+        assert "chat completion reply" in blob
+        assert "hi there" in blob
 
     def test_raw_completions_streaming(self, monkeypatch, caplog):
         self._allowed(monkeypatch)
@@ -161,6 +171,23 @@ class TestNonPrivacyModeCapturesTheHistory:
             })
         blob = _captured_blob(blob_src)
         assert SECRET_TURN in blob, f"capture missing from: {blob}"
+        assert "chat completion reply" in blob
+        assert "hi there" in blob
+
+    def test_raw_completions_nonstreaming(self, monkeypatch, caplog):
+        self._allowed(monkeypatch)
+        blob_src = _debug_log(monkeypatch, caplog)
+        engine = _yielding_engine()
+        with TestClient(create_app(engine)) as client:
+            client.post("/v1/completions", json={
+                "model": "test-model",
+                "prompt": SECRET_TURN,
+                "stream": False,
+            })
+        blob = _captured_blob(blob_src)
+        assert SECRET_TURN in blob, f"capture missing from: {blob}"
+        assert "chat completion reply" in blob
+        assert "hi there" in blob
 
 def test_debug_prompt_dump_names_non_text_parts_without_embedding_them():
     # A multimodal content block can carry megabytes of base64 - the dump
@@ -191,6 +218,38 @@ class TestLogDigestRecognizesTheNewMarker:
                       f"[1] user: {SECRET_TURN}"],
         })
 
+    def test_is_content_record_chat_reply(self):
+        assert ld.is_content_record({
+            "level": "DEBUG", "logger": "localm",
+            "lines": ["2026-08-26 10:00:00,000 DEBUG   localm: "
+                      "chat completion reply (finish_reason=stop):",
+                      f"Secret reply: {SECRET_TURN}"],
+        })
+
+    def test_is_content_record_memory_consolidation(self):
+        assert ld.is_content_record({
+            "level": "DEBUG", "logger": "localm",
+            "lines": ["2026-08-26 10:00:00,000 DEBUG   localm: "
+                      "memory auto-consolidate prompt:",
+                      f"Prompt with secret: {SECRET_TURN}"],
+        })
+        assert ld.is_content_record({
+            "level": "DEBUG", "logger": "localm",
+            "lines": ["2026-08-26 10:00:00,000 DEBUG   localm: "
+                      "memory auto-consolidate response:",
+                      f"Response with secret: {SECRET_TURN}"],
+        })
+
+    def test_is_content_record_memory_candidate_eval(self):
+        assert ld.is_content_record({
+            "level": "DEBUG", "logger": "localm",
+            "lines": [f"2026-08-26 10:00:00,000 DEBUG   localm: memory consolidation: evaluating candidate [1/2]: '{SECRET_TURN}'"],
+        })
+        assert ld.is_content_record({
+            "level": "DEBUG", "logger": "localm",
+            "lines": [f"2026-08-26 10:00:00,000 DEBUG   localm: memory consolidation: decision for '{SECRET_TURN}' -> ADD"],
+        })
+
     def test_bare_operational_line_is_not_a_content_record(self):
         assert not ld.is_content_record({
             "level": "DEBUG", "logger": "localm",
@@ -203,6 +262,9 @@ class TestLogDigestRecognizesTheNewMarker:
             "2026-08-26 10:00:00,000 DEBUG   localm: assembled chat prompt "
             "(2 message(s)):\n"
             f"[1] user: {SECRET_TURN}\n"
+            "2026-08-26 10:00:00,500 DEBUG   localm: chat completion reply "
+            "(finish_reason=stop):\n"
+            f"Assistant: {SECRET_TURN}\n"
             "2026-08-26 10:00:01,000 INFO    localm: request served\n"
         )
         digest = ld.build_digest(text)

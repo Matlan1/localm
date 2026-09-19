@@ -134,14 +134,21 @@ async def web_retrieve_endpoint(req: WebRetrieveRequest):
     field defanged and declared in ``untrusted_fields``. A provider failure
     is reported inside the bundle (``search_status``, ``grounding``
     ``failed``); a policy refusal is 403."""
+    from localm.debuglog import logger
     from localm.web_retrieval import retrieve
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
+    logger.info("web retrieve: query=%r", req.query)
     loop = asyncio.get_running_loop()
     # The retrieval and the defanging of its text both run in the executor.
-    return await loop.run_in_executor(
+    bundle_dict = await loop.run_in_executor(
         get_plugin_executor(),
         lambda: _neutralise_bundle(retrieve(req.query)))
+    logger.info("web retrieve: status=%s, sources=%d, chunks=%d",
+                bundle_dict.get("search_status"),
+                len(bundle_dict.get("sources", [])),
+                len(bundle_dict.get("chunks", [])))
+    return bundle_dict
 
 
 @_router.post("/api/web/search")
@@ -150,9 +157,11 @@ async def web_retrieve_endpoint(req: WebRetrieveRequest):
     Exception: lambda e: (502, f"Search failed: {e}"),
 })
 async def web_search_endpoint(req: WebSearchRequest):
+    from localm.debuglog import logger
     from localm.netpolicy import web_search
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
+    logger.info("web search: query=%r (max_results=%d)", req.query, req.max_results)
     loop = asyncio.get_running_loop()
     # Defanging runs INSIDE the executor with the search itself: it is unbounded
     # CPU over remote-controlled text and must not run on the event loop.
@@ -160,6 +169,7 @@ async def web_search_endpoint(req: WebSearchRequest):
         get_plugin_executor(),
         lambda: _neutralise_results(
             web_search(req.query, max_results=req.max_results)))
+    logger.info("web search: returned %d result(s)", len(results))
     return {"query": req.query, "results": results}
 
 
@@ -169,8 +179,10 @@ async def web_search_endpoint(req: WebSearchRequest):
     Exception: lambda e: (502, f"Fetch failed: {e}"),
 })
 async def web_fetch_endpoint(req: WebFetchRequest):
+    from localm.debuglog import logger
     from localm.netpolicy import fetch_text
     max_chars = max(500, min(req.max_chars, 60_000))
+    logger.info("web fetch: url=%r (max_chars=%d)", req.url, max_chars)
 
     def _fetch_and_defang():
         # neutralise() runs in the SAME executor call as the fetch: both the URL
@@ -182,6 +194,7 @@ async def web_fetch_endpoint(req: WebFetchRequest):
     loop = asyncio.get_running_loop()
     final_url, text, truncated = await loop.run_in_executor(
         get_plugin_executor(), _fetch_and_defang)
+    logger.info("web fetch: retrieved %d chars (truncated=%s)", len(text), truncated)
     return {"url": final_url, "text": text, "truncated": truncated,
             "untrusted_fields": list(_UNTRUSTED_FETCH_FIELDS)}
 
