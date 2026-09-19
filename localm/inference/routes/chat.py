@@ -605,6 +605,7 @@ def register(app: FastAPI, ctx) -> None:
             if gen_error is None and pipeline is not None and ctx is not None and pipeline.has("outlet"):
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_audit, _transcript, messages, text, outcome=outcome)
+            _hs._log_chat_reply(text, finish_reason="error" if gen_error is not None else "stop")
 
             completion_tokens = await loop.run_in_executor(
                 None, count_tokens_or_estimate, engine.count_tokens, text,

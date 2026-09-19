@@ -94,6 +94,12 @@ _CONTENT_MARKER_RES = (
     # message(s)):\n%s" - the count is on the header line, the messages ride
     # in as continuation lines below it.
     re.compile(r"assembled chat prompt \(\d+ message\(s\)\):\s*$"),
+    # http_server.py's _log_chat_reply(): "chat completion reply (finish_reason=%s):\n%s".
+    re.compile(r"chat completion reply \(finish_reason=\S+\):\s*$"),
+    # memory/plug.py's consolidation prompt and response logs.
+    re.compile(r"\bmemory (?:auto-)?consolidate (?:prompt|response):\s*$"),
+    # memory/consolidate.py's candidate evaluation and decision debug logs.
+    re.compile(r"\bmemory consolidation: (?:evaluating candidate \[\d+/\d+\]: |decision for )"),
     # rag/plug.py's _log_progress(): the content-bearing branch logs
     # "rag index: <line>" with the indexed document's name or path; the
     # WARNING degrade lines use the prefix "rag index degrade: ", which this

@@ -4930,6 +4930,15 @@ def _log_assembled_prompt(messages: list) -> None:
                     len(messages), _debug_prompt_dump(messages))
 
 
+def _log_chat_reply(reply: str, finish_reason: str = "stop") -> None:
+    """Debug-log the model's chat completion reply, content-gated on
+    debug_content_enabled(). See test_assembled_prompt_debug_capture.py."""
+    from localm.debuglog import debug_content_enabled, logger as _dbg
+    if debug_content_enabled():
+        _dbg.debug("chat completion reply (finish_reason=%s):\n%s",
+                   finish_reason, reply)
+
+
 def _turn_outcome(gen_error, finish_reason: str) -> str:
     """The ChatHookContext outcome for a finished generation: "error" when the
     backend raised, "length" when the token budget ran out, else "success"."""
@@ -5298,6 +5307,7 @@ async def _stream_sse(
         reply = await pipeline.run_outlet(streamed, messages, ctx)
 
     _audit_exchange(audit, transcript, messages, reply, outcome=outcome)
+    _log_chat_reply(reply, finish_reason=finish_reason)
 
     # Count tokens on the streamed text - what the client actually received
     completion_tokens = await _count_streamed_tokens(engine, streamed)
@@ -5467,6 +5477,7 @@ async def _stream_sse_completion(
             and pipeline.has("outlet")):
         reply = await pipeline.run_outlet(streamed, messages, ctx)
     _audit_exchange(audit, transcript, messages, reply, outcome=outcome)
+    _log_chat_reply(reply, finish_reason=("error" if gen_error is not None else "stop"))
 
     completion_tokens = await _count_streamed_tokens(engine, streamed)
     # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
@@ -5846,6 +5857,7 @@ async def _complete(
         text = await pipeline.run_outlet(text, messages, ctx)
 
     _audit_exchange(audit, transcript, messages, text, outcome=outcome)
+    _log_chat_reply(text, finish_reason=finish_reason)
 
     # Split the model's <think> reasoning out of the visible answer into a
     # separate field, so API clients get clean content (token count stays on

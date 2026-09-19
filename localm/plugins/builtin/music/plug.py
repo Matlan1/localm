@@ -74,6 +74,8 @@ def _music_path(name: str) -> Path:
 async def music(req: MusicRequest, request: Request):
     if not req.tags.strip():
         raise HTTPException(400, "Empty style tags")
+    from localm.debuglog import logger
+    logger.info("music: tags=%r (duration=%ds)", req.tags, req.duration_seconds)
     if req.duration_seconds <= 0 or req.duration_seconds > 3600:
         raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
     if req.steps is not None and not (1 <= req.steps <= 200):

@@ -73,6 +73,8 @@ def _video_path(name: str) -> Path:
 async def video(req: VideoRequest, request: Request):
     if not req.prompt.strip():
         raise HTTPException(400, "Empty prompt")
+    from localm.debuglog import logger
+    logger.info("video: prompt=%r (seconds=%ds)", req.prompt, req.seconds)
     if req.seconds <= 0 or req.seconds > 20:
         raise HTTPException(400, "Duration must be between 1 and 20 seconds")
     if req.fps <= 0 or req.fps > 60:
