@@ -52,6 +52,12 @@ def _dispatch(ctrl_type: int, cleanup) -> bool:
             cleanup()
         except Exception:
             logger.warning("winconsole: console-close cleanup raised", exc_info=True)
+    elif ctrl_type in (CTRL_C_EVENT, CTRL_BREAK_EVENT):
+        try:
+            from localm import bugreport
+            bugreport.disarm_crash_guard(instance_id=bugreport.armed_instance_id())
+        except Exception:
+            pass
     return False
 
 

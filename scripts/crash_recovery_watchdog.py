@@ -286,10 +286,58 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
         f"watching pid {pid} (instance {instance_id!r}) on "
         f"{scheme}://{host}:{port}")
 
-    watch_started = time.monotonic()
-    while pid_alive(pid):
-        time.sleep(poll_interval)
-    watched_for = time.monotonic() - watch_started
+    proc_handle = None
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            proc_handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        except Exception:
+            pass
+
+    try:
+        watch_started = time.monotonic()
+        while pid_alive(pid):
+            time.sleep(poll_interval)
+        watched_for = time.monotonic() - watch_started
+
+        exit_code = None
+        if proc_handle:
+            try:
+                import ctypes
+                import ctypes.wintypes
+                code = ctypes.wintypes.DWORD()
+                if ctypes.windll.kernel32.GetExitCodeProcess(proc_handle, ctypes.byref(code)):
+                    exit_code = code.value
+            except Exception:
+                pass
+    finally:
+        if proc_handle:
+            try:
+                import ctypes
+                ctypes.windll.kernel32.CloseHandle(proc_handle)
+            except Exception:
+                pass
+
+    marker = marker_path(crash_dir, instance_id)
+    if not marker.exists():
+        _log(log_path,
+            f"pid {pid} is gone and {marker.name} is gone - this was "
+            "a clean, intentional shutdown. Nothing to recover.")
+        return EXIT_OK
+
+    # STATUS_CONTROL_C_EXIT (0xC000013A) or DBG_CONTROL_C (0x40010004) /
+    # DBG_CONTROL_BREAK (0x40010008): intentional Ctrl+C or console window close.
+    if exit_code in (0xC000013A, 0x40010004, 0x40010008):
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        _log(log_path,
+            f"pid {pid} exited with console interrupt/close code 0x{exit_code:08X} - "
+            "intentional stop. Nothing to recover.")
+        return EXIT_OK
 
     _log(log_path, f"pid {pid} is gone - waiting up to {grace_s}s for a "
                    "replacement to come up on its own")
@@ -304,7 +352,6 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
             "up with its own watchdog - nothing more for this one to do")
         return EXIT_OK
 
-    marker = marker_path(crash_dir, instance_id)
     if not marker.exists():
         _log(log_path,
             f"no replacement appeared and {marker.name} is gone - this was "

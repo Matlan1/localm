@@ -173,6 +173,58 @@ class TestRunCleanShutdown:
             server.shutdown()
             thread.join(timeout=5)
 
+    def test_clean_exit_returns_fast_without_grace_delay(self, tmp_path):
+        wd = _load_wd()
+        holder = [None]
+        server, thread, port = _whoami_server(holder)
+        try:
+            proc = _spawn_sleeper(0.05)
+            sentinel = tmp_path / "relaunched.txt"
+            relaunch_argv = [sys.executable, "-c",
+                             f"open(r'{sentinel}', 'w').write('x')"]
+            started = time.monotonic()
+            code = wd.run(pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
+                          instance_id="fast-clean", crash_dir=tmp_path,
+                          relaunch_argv=relaunch_argv, restart_history=[],
+                          poll_interval=0.02, grace_s=5.0, request_timeout=1.0,
+                          log_path=None)
+            elapsed = time.monotonic() - started
+            proc.wait(timeout=5)
+            assert code == wd.EXIT_OK
+            assert not sentinel.exists()
+            assert elapsed < 2.0, (
+                f"took {elapsed:.2f}s; clean shutdown should not wait for 5s grace period")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows STATUS_CONTROL_C_EXIT check")
+    def test_ctrlc_exit_code_is_treated_as_clean_stop(self, tmp_path):
+        wd = _load_wd()
+        wd._MIN_UPTIME_TO_RELAUNCH_S = 0.0
+        holder = [None]
+        server, thread, port = _whoami_server(holder)
+        try:
+            proc = subprocess.Popen([
+                sys.executable, "-c",
+                "import ctypes; ctypes.windll.kernel32.ExitProcess(0xC000013A)"])
+            marker = _write_marker(tmp_path, "ctrlc-inst", proc.pid)
+            sentinel = tmp_path / "relaunched.txt"
+            relaunch_argv = [sys.executable, "-c",
+                             f"open(r'{sentinel}', 'w').write('x')"]
+            code = wd.run(pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
+                          instance_id="ctrlc-inst", crash_dir=tmp_path,
+                          relaunch_argv=relaunch_argv, restart_history=[],
+                          poll_interval=0.02, grace_s=0.5, request_timeout=0.5,
+                          log_path=None)
+            proc.wait(timeout=5)
+            assert code == wd.EXIT_OK
+            assert not marker.exists(), "watchdog should have unlinked the marker"
+            assert not sentinel.exists(), "Ctrl+C exit code must not be relaunched"
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
     def test_a_replacement_already_up_is_not_relaunched_either(self, tmp_path):
         """An ordinary restart/update already in flight: something else
         answers /whoami with a new instance_id before the marker check even
