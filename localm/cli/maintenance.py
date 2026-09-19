@@ -130,7 +130,7 @@ def setup_embeddings(model, yes=False):
             # (POST /api/rag/embedding) and PATCH /v1/config. Like those two, it
             # warns what the switch is about to invalidate BEFORE it happens.
             from ..rag import collection_provenance_note, collection_provenance_report
-            affected = collection_provenance_report()
+            affected = collection_provenance_report(candidate_model=model)
             if affected:
                 console.print(
                     f"[yellow]{escape(collection_provenance_note(model, affected))}[/yellow]")

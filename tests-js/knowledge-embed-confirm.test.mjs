@@ -209,3 +209,17 @@ test("confirmEmbeddingModelSwitch: an x/backdrop dismissal resolves false", asyn
   assert.equal(await settles(p), false,
     "__PENDING__ means the promise never settled: the caller is stuck forever");
 });
+
+test("applyEmbeddingModel refreshes collections table after a successful switch", async () => {
+  const { window, calls } = setup({
+    dryRun: { needs_confirm: true, model: "new-model", collections: [],
+              note: "nothing to invalidate" },
+  });
+  runScript(window, `applyEmbeddingModel("new-model");`);
+  await tick(); await tick(); await tick(); await tick(); await tick();
+
+  const collectionsCalls = calls.filter((c) => c.url.includes("/api/rag/collections")
+    && (!c.opts.method || c.opts.method === "GET"));
+  assert.ok(collectionsCalls.length >= 1, "refreshKnowledgePage re-fetched collections after switch");
+});
+

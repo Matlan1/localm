@@ -188,7 +188,7 @@ def register(app: FastAPI, ctx) -> None:
             current_model = str(load_config().get("embedding_model") or "")
             if new_model and new_model != current_model:
                 from localm.rag import collection_provenance_note, collection_provenance_report
-                affected = collection_provenance_report()
+                affected = collection_provenance_report(candidate_model=new_model)
                 if affected:
                     return {"needs_confirm": True, "model": new_model,
                             "collections": affected,

@@ -290,6 +290,7 @@ async function applyEmbeddingModel(model) {
     if (failed && model !== INTERNAL_DEFAULT) offerInternalFallback();
     else clearInternalFallback();
     refreshEmbeddingPanel();
+    refreshKnowledgePage();
   } catch (e) {
     log.textContent += t("knowledge.failedPrefix", { message: e.message }) + "\n";
     toast(t("knowledge.embed.setupFailedMsg", { message: e.message }), true);
@@ -390,6 +391,7 @@ async function downloadEmbeddingModel() {
       log.textContent += t("knowledge.embed.alreadyInstalled");
     }
     refreshEmbeddingPanel();
+    refreshKnowledgePage();
   } catch (e) {
     log.textContent += t("knowledge.failedPrefix", { message: e.message }) + "\n";
     toast(t("knowledge.embed.downloadFailedMsg", { message: e.message }), true);

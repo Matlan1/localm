@@ -619,8 +619,11 @@ async def rag_detail(name: str, request: Request):
 
 @_router.delete("/api/rag/collections/{name}")
 async def rag_delete(name: str, request: Request):
-    from localm.rag import delete_collection
-    _get_collection(name)
+    from localm.rag import check_collection_name, delete_collection
+    try:
+        check_collection_name(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     _require_rag_confinement(name, request)
     try:
         if not await _write_off_loop(lambda: delete_collection(name)):
@@ -829,19 +832,26 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
 
 @_router.post("/api/rag/collections/{name}/query")
 async def rag_query(name: str, req: RagQueryRequest, request: Request):
-    coll = _get_collection(name)
+    from localm.rag import check_collection_name
+    try:
+        check_collection_name(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     _require_rag_confinement(name, request)
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     k = max(1, min(req.k, 20))
     self_embed, _, _ = _self_services(request)
     loop = asyncio.get_running_loop()
+
+    def _execute():
+        coll = _get_collection(name)
+        return _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed))
+
     # Defang control/frame tokens in the untrusted chunk text before it can be
-    # spliced into a chat prompt. Runs inside the executor, with the query, so
-    # unbounded CPU over hostile text does not stall the event loop.
-    hits = await loop.run_in_executor(
-        get_plugin_executor(),
-        lambda: _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed)))
+    # spliced into a chat prompt. Runs inside the executor, with the query and
+    # collection load, so unbounded CPU does not stall the event loop.
+    hits = await loop.run_in_executor(get_plugin_executor(), _execute)
     return {"collection": name, "query": req.query, "hits": hits}
 
 
@@ -1203,8 +1213,10 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
             "The rag scope alone is not enough.")
 
     if not req.confirm:
+        from localm.config import load_config
+        current_model = str(load_config().get("embedding_model") or "")
         from localm.rag import collection_provenance_note, collection_provenance_report
-        affected = collection_provenance_report()
+        affected = [] if model == current_model else collection_provenance_report(candidate_model=model)
         note = collection_provenance_note(model, affected)
         return {"needs_confirm": True, "model": model,
                 "collections": affected, "note": note}
