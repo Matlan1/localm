@@ -22,6 +22,9 @@ GPU: uses torch.cuda (which maps to ROCm on AMD systems with PyTorch+ROCm).
 
 from __future__ import annotations
 
+import contextlib
+import io
+import sys
 import threading
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -66,9 +69,79 @@ def _trust_remote_code_enabled() -> bool:
         return False
 
 
+def _silence_upstream_docstring_leak(tr) -> None:
+    # Wrap transformers.utils.auto_docstring to intercept stdout print() leaks. See test_silence_upstream_docstring_leak_intercepts_print.
+    try:
+        orig = getattr(getattr(tr, "utils", None), "auto_docstring", None)
+        if orig is None or getattr(orig, "_silent_wrapped", False):
+            return
+
+        def _silent_auto_docstring(*args, **kwargs):
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                return orig(*args, **kwargs)
+            finally:
+                sys.stdout = old_stdout
+
+        _silent_auto_docstring._silent_wrapped = True
+        tr.utils.auto_docstring = _silent_auto_docstring
+    except Exception:
+        pass
+
+
+class _DocstringLeakFilter:
+    # Filter out upstream transformers @auto_docstring print() leak lines. See test_filter_docstring_leak_drops_upstream_errors.
+
+    def __init__(self, target):
+        self._target = target
+
+    def write(self, s: str) -> int:
+        if "is part of" in s and "but not documented" in s:
+            return len(s)
+        return self._target.write(s)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def fileno(self):
+        return getattr(self._target, "fileno", lambda: 1)()
+
+
+@contextlib.contextmanager
+def _filter_docstring_leak():
+    # Temporarily filter stdout writes matching the @auto_docstring lint error. See test_filter_docstring_leak_drops_upstream_errors.
+    old = sys.stdout
+    sys.stdout = _DocstringLeakFilter(old)
+    try:
+        yield
+    finally:
+        sys.stdout = old
+
+
+def _build_load_kwargs(tr, device_map_kwargs: dict, dtype, trust_remote_code: bool) -> dict:
+    """Build kwargs for from_pretrained with version-appropriate dtype and offload_buffers."""
+    kwargs = {
+        **device_map_kwargs,
+        "trust_remote_code": trust_remote_code,
+        "offload_buffers": True,
+    }
+    try:
+        from packaging.version import Version
+        use_dtype = Version(tr.__version__) >= Version("4.49.0")
+    except Exception:
+        use_dtype = hasattr(tr, "__version__") and int(tr.__version__.split(".")[0]) >= 5
+    if use_dtype:
+        kwargs["dtype"] = dtype
+    else:
+        kwargs["torch_dtype"] = dtype
+    return kwargs
+
+
 def _require_transformers():
     try:
         import transformers
+        _silence_upstream_docstring_leak(transformers)
         from localm.inference.backends.awq import register_native_awq_quantizer
         register_native_awq_quantizer()
         return transformers
@@ -654,9 +727,10 @@ class HFWorker:
         # --- Processor / tokenizer ---
         logger.debug("hf load: loading processor")
         try:
-            self._processor = tr.AutoProcessor.from_pretrained(
-                self.model_path, trust_remote_code=trust_remote_code
-            )
+            with _filter_docstring_leak():
+                self._processor = tr.AutoProcessor.from_pretrained(
+                    self.model_path, trust_remote_code=trust_remote_code
+                )
             # A processor that wraps only a tokenizer is not "multimodal"
             has_image = hasattr(self._processor, "image_processor")
             has_audio = hasattr(self._processor, "feature_extractor") or hasattr(
@@ -676,17 +750,19 @@ class HFWorker:
                 type(e).__name__, e,
             )
             self._processor = None
-            self._tokenizer = tr.AutoTokenizer.from_pretrained(
-                self.model_path, trust_remote_code=trust_remote_code
-            )
+            with _filter_docstring_leak():
+                self._tokenizer = tr.AutoTokenizer.from_pretrained(
+                    self.model_path, trust_remote_code=trust_remote_code
+                )
 
         # --- Model ---
         logger.debug("hf load: loading weights")
-        load_kwargs = {
-            **device_map_kwargs,
-            "torch_dtype": dtype,
-            "trust_remote_code": trust_remote_code,
-        }
+        load_kwargs = _build_load_kwargs(
+            tr,
+            device_map_kwargs=device_map_kwargs,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
 
         # Try Auto classes in order: multimodal (vision/audio + text), then
         # encoder-decoder, then causal LM (text-only), then generic fallback.

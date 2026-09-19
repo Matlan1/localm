@@ -69,6 +69,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **HuggingFace backend loading no longer emits docstring lint errors, `torch_dtype` deprecation warnings, or offloaded buffer warnings.** `_hf_worker` dynamically passes `dtype` on modern Transformers, sets `offload_buffers=True` to offload layer buffers to CPU alongside parameters during partial offloading (preventing GPU VRAM contention on AWQ models), and filters upstream `@auto_docstring` stdout leaks.
 - **Restarting the server from Settings while running in standalone app-window mode
   (`localm[desktop]`) no longer opens a browser tab.** The native window is now
   correctly reopened after the restart; previously the restart flag that suppresses
