@@ -357,6 +357,36 @@ class TestEmbeddingSetConfirmGate:
 
         assert r.json()["collections"] == []
 
+    def test_unconfirmed_with_candidate_matching_collection_provenance_reports_nothing_to_invalidate(
+            self, embedding_route_app, rag_home):
+        c = _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
+        c._meta["embedding_model"] = "matching-model"
+        c._save()
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as client:
+            r = client.post("/api/rag/embedding", json={"model": "matching-model"})
+
+        data = r.json()
+        assert data["collections"] == []
+        assert "nothing to invalidate" in data["note"]
+
+    def test_unconfirmed_with_same_active_model_reports_nothing_to_invalidate(
+            self, embedding_route_app, rag_home):
+        c = _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
+        c._meta["embedding_model"] = "different-model"
+        c._save()
+        from localm.config import update_config
+        update_config(lambda cfg: cfg.__setitem__("embedding_model", "current-model"))
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as client:
+            r = client.post("/api/rag/embedding", json={"model": "current-model"})
+
+        data = r.json()
+        assert data["collections"] == []
+        assert "nothing to invalidate" in data["note"]
+
     def test_unconfirmed_names_an_unreadable_collection_without_leaking_the_exception(
             self, embedding_route_app, rag_home, caplog):
         """A construction failure must still be NAMED in the response, not
@@ -547,6 +577,48 @@ class TestPatchConfigEmbeddingConfirmGate:
         assert r.status_code == 200, r.text
         from localm.config import load_config
         assert "confirm" not in load_config()
+
+    def test_switching_to_model_matching_collection_provenance_writes_directly(
+            self, config_app, rag_home):
+        c = _collection(rag_home, "docs", ["alpha"], dim=768)
+        c._meta["embedding_model"] = "matching-model"
+        c._save()
+
+        from fastapi.testclient import TestClient
+        with TestClient(config_app) as client:
+            r = client.patch("/v1/config", headers=_owner_headers(),
+                             json={"embedding_model": "matching-model"})
+
+        assert r.status_code == 200, r.text
+        assert "needs_confirm" not in r.json()
+        from localm.config import load_config
+        assert load_config().get("embedding_model") == "matching-model"
+
+
+class TestCollectionProvenanceReport:
+    def test_excludes_collection_built_with_candidate_model(self, rag_home):
+        from localm.rag.store import collection_provenance_report
+        c1 = _collection(rag_home, "c1", ["a"], dim=768)
+        c1._meta["embedding_model"] = "model-a"
+        c1._save()
+        c2 = _collection(rag_home, "c2", ["b"], dim=384)
+        c2._meta["embedding_model"] = "model-b"
+        c2._save()
+
+        rep = collection_provenance_report(candidate_model="model-a")
+        names = [x["name"] for x in rep]
+        assert "c1" not in names
+        assert "c2" in names
+
+    def test_reports_all_with_vectors_when_candidate_model_is_none(self, rag_home):
+        from localm.rag.store import collection_provenance_report
+        c = _collection(rag_home, "c1", ["a"], dim=768)
+        c._meta["embedding_model"] = "model-a"
+        c._save()
+
+        rep = collection_provenance_report()
+        names = [x["name"] for x in rep]
+        assert "c1" in names
 
 
 # --------------------------------------------------------------------------- #

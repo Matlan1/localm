@@ -2178,7 +2178,7 @@ class Collection:
             return cls(checked_name, base)       # busy: full load, no cache write
 
 
-def collection_provenance_report() -> list:
+def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
     """Every collection that currently has vectors, with its recorded 'built
     with' model (``Collection.embedding_model()``, None if never recorded)
     and chunk count - the pre-switch, new-model-dimension-free report used by
@@ -2186,6 +2186,10 @@ def collection_provenance_report() -> list:
     ``POST /api/rag/embedding``, ``PATCH /v1/config``, and
     ``localm setup-embeddings``) to warn what an embedding-model switch is
     about to invalidate, before it happens.
+
+    If *candidate_model* is provided, collections already built with that
+    exact model are excluded: switching to the model they were built with
+    will not invalidate their semantic search.
 
     Does NOT assert whether a given collection's dimension will actually
     change: that would need the CANDIDATE model's own dimension, which means
@@ -2200,6 +2204,18 @@ def collection_provenance_report() -> list:
     out: list = []
     for name in collection_names():
         try:
+            peeked = Collection.peek_stats(name)
+            if peeked is not None:
+                if not peeked.get("has_vectors"):
+                    continue
+                found = Collection._peek_meta(name)
+                raw_model = found[2].get("embedding_model") if found else None
+                built_with = str(raw_model) if raw_model else None
+                if candidate_model and built_with == candidate_model:
+                    continue
+                out.append({"name": name, "built_with": built_with,
+                            "n_chunks": peeked.get("n_chunks")})
+                continue
             coll = Collection(name)
             stats = coll.stats()
         except Exception as e:
@@ -2210,7 +2226,10 @@ def collection_provenance_report() -> list:
             continue
         if not stats.get("has_vectors"):
             continue
-        out.append({"name": name, "built_with": coll.embedding_model(),
+        built_with = coll.embedding_model()
+        if candidate_model and built_with == candidate_model:
+            continue
+        out.append({"name": name, "built_with": built_with,
                     "n_chunks": stats["n_chunks"]})
     return out
 
