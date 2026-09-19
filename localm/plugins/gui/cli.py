@@ -149,6 +149,24 @@ def _should_auto_open_browser(no_browser: bool) -> bool:
     return (not no_browser) and (not is_restart)
 
 
+def _resolve_gui_launch_mode(no_browser: bool) -> tuple[bool, bool]:
+    """Resolve (want_native, should_open_browser) for this process startup.
+
+    want_native: whether to run the native OS app window on the main thread.
+    True when not in headless mode (no_browser=False) and pywebview is available
+    and permitted by config. Survives server restarts because the old window
+    was terminated by os.execv.
+
+    should_open_browser: whether to spawn the background thread opening a browser
+    tab. False when want_native is True, when headless, or when restarting in
+    browser mode (the existing browser tab reconnects in place). Consumes
+    LOCALM_RESTART_IN_PROGRESS from the environment."""
+    from localm import appface
+    want_native = (not no_browser) and appface.native_window_available()
+    auto_open_browser = _should_auto_open_browser(no_browser)
+    return want_native, (not want_native and auto_open_browser)
+
+
 def _tray_callbacks(app, hs):
     """Build the (on_restart, on_stop) callables for the tray control surface
     (appface.start_app_face).
@@ -1082,9 +1100,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # and moving the server to a background one - see the branch after the
     # tray/status-window setup. Decided once, up front, so every "who opens
     # what, on which thread" choice below stays consistent.
-    want_native = _should_auto_open_browser(no_browser) and appface.native_window_available()
-
-    if _should_auto_open_browser(no_browser) and not want_native:
+    want_native, should_open_browser = _resolve_gui_launch_mode(no_browser)
+    if should_open_browser:
         threading.Thread(target=_open_when_ready, args=(open_url, chosen_port),
                          daemon=True, name="open-browser").start()
 

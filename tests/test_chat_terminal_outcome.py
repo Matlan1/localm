@@ -121,9 +121,10 @@ def test_chat_stream_client_abort_marks_ctx_abort_and_skips_outlet():
         gen = _stream_sse(engine, [{"role": "user", "content": "hi"}], "m",
                           asyncio.Semaphore(1), pipeline=pipeline, ctx=ctx,
                           prompt_tokens=1)
-        # Consume the role chunk and one content chunk, then disconnect.
-        await gen.__anext__()
-        await gen.__anext__()
+        # Consume the role chunk, the status chunk, then one content chunk, then disconnect.
+        await gen.__anext__()   # role chunk
+        await gen.__anext__()   # status chunk ("Processing prompt...")
+        await gen.__anext__()   # first content chunk
         await gen.aclose()
 
     asyncio.run(_drive())

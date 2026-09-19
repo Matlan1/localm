@@ -16,8 +16,8 @@ _should_auto_open_browser is the consumer on the re-exec'd side."""
 import os
 
 from localm.plugins.gui.cli import (
-    _RESTART_PORT_GRACE_WINDOW_S, _restart_port_grace_window,
-    _should_auto_open_browser,
+    _RESTART_PORT_GRACE_WINDOW_S, _resolve_gui_launch_mode,
+    _restart_port_grace_window, _should_auto_open_browser,
 )
 
 
@@ -76,3 +76,60 @@ def test_port_grace_window_read_does_not_consume_the_flag():
         assert _should_auto_open_browser(no_browser=False) is False
     finally:
         os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+
+
+def test_resolve_gui_launch_mode_restart_with_native_window(monkeypatch):
+    """When restarting and pywebview is available, the standalone window must
+    reopen on the main thread (want_native=True) and not open a browser tab."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: True)
+    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
+    try:
+        want_native, should_open_browser = _resolve_gui_launch_mode(no_browser=False)
+        assert want_native is True
+        assert should_open_browser is False
+        assert "LOCALM_RESTART_IN_PROGRESS" not in os.environ
+    finally:
+        os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+
+
+def test_resolve_gui_launch_mode_restart_browser_mode(monkeypatch):
+    """When restarting in browser mode, no duplicate browser tab is opened;
+    the existing browser tab reconnects in place."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: False)
+    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
+    try:
+        want_native, should_open_browser = _resolve_gui_launch_mode(no_browser=False)
+        assert want_native is False
+        assert should_open_browser is False
+        assert "LOCALM_RESTART_IN_PROGRESS" not in os.environ
+    finally:
+        os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+
+
+def test_resolve_gui_launch_mode_cold_start_with_native_window(monkeypatch):
+    """On cold start with pywebview available, the standalone window opens
+    and browser auto-opening is suppressed."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: True)
+    os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+    want_native, should_open_browser = _resolve_gui_launch_mode(no_browser=False)
+    assert want_native is True
+    assert should_open_browser is False
+
+
+def test_resolve_gui_launch_mode_cold_start_browser_mode(monkeypatch):
+    """On cold start in browser mode, the browser tab is auto-opened."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: False)
+    os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+    want_native, should_open_browser = _resolve_gui_launch_mode(no_browser=False)
+    assert want_native is False
+    assert should_open_browser is True
+
+
+def test_resolve_gui_launch_mode_explicit_no_browser(monkeypatch):
+    """When --no-browser is passed, neither the native window nor the browser
+    is opened, even if pywebview is available."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: True)
+    os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+    want_native, should_open_browser = _resolve_gui_launch_mode(no_browser=True)
+    assert want_native is False
+    assert should_open_browser is False

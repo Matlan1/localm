@@ -22,7 +22,7 @@ without paying a process-spawn cost.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from localm.console import console
 
@@ -646,6 +646,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         grammar_lazy: bool = False,
         grammar_triggers: Optional[list] = None,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[str]:
         # Image input: with an mmproj loaded it flows through to
         # create_chat_completion's image path. A text-only model refuses the image
@@ -688,7 +689,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_finish_reason = "stop"
         try:
             yield from self._runner.chat_stream(
-                first_chunk_timeout=self._first_token_timeout_seconds(), **kwargs)
+                first_chunk_timeout=self._first_token_timeout_seconds(),
+                on_status=on_status,
+                **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled and the model is gone. Drop it
             # so the next request triggers a clean reload.

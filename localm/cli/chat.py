@@ -479,8 +479,14 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     printer = _ThinkPrinter()
     t0 = _time.monotonic()
     first_at: Optional[float] = None
+    stream_kwargs = dict(kwargs)
+    if "on_status" not in stream_kwargs:
+        def _cli_status(s: str) -> None:
+            if "GPU vision encode failed" in s:
+                console.print(f"\n[yellow]{escape(s)}[/yellow]")
+        stream_kwargs["on_status"] = _cli_status
     try:
-        for token in engine.chat_stream(messages, **kwargs):
+        for token in engine.chat_stream(messages, **stream_kwargs):
             if first_at is None:
                 first_at = _time.monotonic()
             parts.append(token)
@@ -600,8 +606,14 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         import time as _time
         t0 = _time.monotonic()
         first_at: Optional[float] = None
+        interactive_opts = dict(gen_opts)
+        if "on_status" not in interactive_opts:
+            def _cli_interactive_status(s: str) -> None:
+                if "GPU vision encode failed" in s:
+                    console.print(f"\n[yellow]{escape(s)}[/yellow]")
+            interactive_opts["on_status"] = _cli_interactive_status
         try:
-            for token in engine.chat_stream(messages, **gen_opts):
+            for token in engine.chat_stream(messages, **interactive_opts):
                 if first_at is None:
                     first_at = _time.monotonic()
                 parts.append(token)

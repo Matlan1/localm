@@ -19,7 +19,7 @@ whole ``BaseBackend`` public contract is preserved.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from localm.console import console
 from localm.debuglog import logger
@@ -460,6 +460,7 @@ class HFBackend(BaseBackend):
         grammar_lazy: bool = False,
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[str]:
         # Checked before the loaded-state gate below and before touching
         # self._runner, so any caller gets a clean UnsupportedInputError for an

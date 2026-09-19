@@ -725,6 +725,46 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 }
 .msg-body table { border-collapse: collapse; margin: 8px 0; }
 .msg-body th, .msg-body td { border: 1px solid var(--border); padding: 5px 10px; }
+
+/* Live inference status indicator inside a streaming assistant turn. Follows
+   docs/gui-design.md rule 6 (pill shape, 999px radius, st-warn theme mix). */
+.msg-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  user-select: none;
+}
+.msg-status-indicator.st-warn {
+  color: var(--yellow);
+  border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+}
+.msg-status-indicator .status-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  animation: mic-pulse 1.2s infinite;
+}
+.msg-status-indicator.st-warn .status-pulse {
+  background: var(--yellow);
+}
+.msg-status-indicator .status-text {
+  font-weight: 500;
+}
+.msg-status-indicator .status-timer {
+  font-family: var(--mono);
+  font-size: 11px;
+  opacity: 0.85;
+}
+
 .msg-meta {
   margin-top: 6px;
   font-size: 11.5px;

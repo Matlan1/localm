@@ -21,7 +21,7 @@ it), so load/unload are no-ops.
 from __future__ import annotations
 
 import json
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from localm.inference.backends.base import UnsupportedInputError
 
@@ -115,7 +115,8 @@ class HttpEngine:
                     top_k: Optional[int] = None,
                     repeat_penalty: Optional[float] = None,
                     grammar: Optional[str] = None,
-                    seed: Optional[int] = None) -> Iterator[str]:
+                    seed: Optional[int] = None,
+                    on_status: Optional[Callable[[str], None]] = None) -> Iterator[str]:
         """Stream assistant tokens from the server's ``/v1/chat/completions``.
 
         Raises :class:`UnsupportedInputError` when the server refuses image input on
@@ -168,6 +169,12 @@ class HttpEngine:
                 continue
             choices = chunk.get("choices") or [{}]
             delta = (choices[0] or {}).get("delta") or {}
+            status = delta.get("status")
+            if status and on_status:
+                try:
+                    on_status(status)
+                except Exception:
+                    pass
             # The server already splits <think> reasoning out of `content` into its
             # own `reasoning_content` field. Re-wrap it in the same inline
             # <think>...</think> markers the in-process Engine's raw stream carries,

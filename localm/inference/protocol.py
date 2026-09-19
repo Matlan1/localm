@@ -199,6 +199,7 @@ class ChoiceDelta(BaseModel):
     # Streamed reasoning tokens, routed out of `content`. A delta carries one
     # or the other; clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
+    status: Optional[str] = None
 
 
 class StreamChoice(BaseModel):
@@ -232,6 +233,15 @@ class ChatChunk(BaseModel):
             created=ts,
             model=model,
             choices=[StreamChoice(delta=ChoiceDelta(content=token))],
+        )
+
+    @classmethod
+    def status_chunk(cls, text: str, model: str, chunk_id: str, ts: int) -> "ChatChunk":
+        return cls(
+            id=chunk_id,
+            created=ts,
+            model=model,
+            choices=[StreamChoice(delta=ChoiceDelta(status=text))],
         )
 
     @classmethod
