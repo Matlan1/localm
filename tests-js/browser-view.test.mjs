@@ -528,3 +528,95 @@ test("the stylesheet bounds the frame so it cannot overflow its container", asyn
     "the screencast is up to 1280px wide, so without a max width it overflows "
     + "the tab instead of scaling into it");
 });
+
+test("the stylesheet hides [hidden] browser frame to prevent broken image placeholder", async () => {
+  const css = await readFile(BROWSER_CSS, "utf8");
+  const rule = css.match(/\.browser-frame\[hidden\]\s*\{[^}]*\}/);
+  assert.ok(rule, "no .browser-frame[hidden] rule");
+  assert.match(rule[0], /display:\s*none\s*!important/,
+    "unpainted or idle frame must be display: none");
+});
+
+test("frameCoords maps coordinates and letterboxing correctly", async () => {
+  const mod = await load();
+  const fakeImg = {
+    naturalWidth: 1280,
+    naturalHeight: 800,
+    getBoundingClientRect() {
+      // 2:1 aspect ratio element with 16:10 image -> letterboxed left and right
+      // element: 800 x 400. Rendered image: 640 x 400. ox = 80, oy = 0.
+      return { left: 100, top: 50, width: 800, height: 400 };
+    },
+  };
+  // Click on left letterbox area (clientX = 140, left + 40 < left + 80)
+  assert.equal(mod.frameCoords(fakeImg, 140, 200), null);
+  // Click on top-left of rendered image (clientX = 180, clientY = 50)
+  assert.deepEqual(mod.frameCoords(fakeImg, 180, 50), { x: 0, y: 0 });
+  // Click on center (clientX = 500, clientY = 250)
+  assert.deepEqual(mod.frameCoords(fakeImg, 500, 250), { x: 640, y: 400 });
+});
+
+test("clicking the live frame in own mode posts coordinates to /click", async () => {
+  const { win, calls } = makeEnv();
+  const mod = await load();
+  mod.register({ toast() {}, authHeaders: () => ({ Authorization: "Bearer token" }) });
+
+  const shot = win.document.querySelector("img.browser-frame");
+  Object.defineProperty(shot, "naturalWidth", { value: 1280, configurable: true });
+  Object.defineProperty(shot, "naturalHeight", { value: 800, configurable: true });
+  shot.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1280, height: 800 });
+
+  // In idle mode, clicks are ignored
+  shot.dispatchEvent(new win.MouseEvent("click", { clientX: 640, clientY: 400 }));
+  assert.equal(calls.filter((c) => c.url.endsWith("/click")).length, 0);
+
+  // Switch to own mode by opening a session
+  const go = win.document.querySelector("button.btn-primary");
+  await go.onclick();
+
+  shot.dispatchEvent(new win.MouseEvent("click", { clientX: 640, clientY: 400 }));
+  const clickCalls = calls.filter((c) => c.url.endsWith("/click"));
+  assert.equal(clickCalls.length, 1);
+});
+
+test("wheel events on the live frame in own mode post to /scroll", async () => {
+  const { win, calls } = makeEnv();
+  const mod = await load();
+  mod.register({ toast() {}, authHeaders: () => ({ Authorization: "Bearer token" }) });
+
+  const go = win.document.querySelector("button.btn-primary");
+  await go.onclick();
+
+  const shot = win.document.querySelector("img.browser-frame");
+  const wheelEv = new win.Event("wheel");
+  wheelEv.deltaX = 0;
+  wheelEv.deltaY = 120;
+  wheelEv.preventDefault = () => {};
+  shot.dispatchEvent(wheelEv);
+
+  // Wait for 40ms flush
+  await new Promise((r) => setTimeout(r, 60));
+  const scrollCalls = calls.filter((c) => c.url.endsWith("/scroll"));
+  assert.equal(scrollCalls.length, 1);
+});
+
+test("keydown on the live frame in own mode posts to /key and /type", async () => {
+  const { win, calls } = makeEnv();
+  const mod = await load();
+  mod.register({ toast() {}, authHeaders: () => ({ Authorization: "Bearer token" }) });
+
+  const go = win.document.querySelector("button.btn-primary");
+  await go.onclick();
+
+  const shot = win.document.querySelector("img.browser-frame");
+  const enterEv = new win.KeyboardEvent("keydown", { key: "Enter" });
+  enterEv.preventDefault = () => {};
+  shot.dispatchEvent(enterEv);
+
+  const charEv = new win.KeyboardEvent("keydown", { key: "a" });
+  charEv.preventDefault = () => {};
+  shot.dispatchEvent(charEv);
+
+  assert.equal(calls.filter((c) => c.url.endsWith("/key")).length, 1);
+  assert.equal(calls.filter((c) => c.url.endsWith("/type")).length, 1);
+});
