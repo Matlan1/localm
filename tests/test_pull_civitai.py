@@ -296,6 +296,102 @@ class TestPullCivitaiFileSSRF:
         assert not dest_dir.exists() or list(dest_dir.iterdir()) == []
         assert store == {}
 
+    def test_resume_appends_from_part_file(self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest_dir.mkdir(parents=True)
+        part_file = dest_dir / "add-detail-xl.safetensors.part"
+        part_file.write_bytes(b"fake-")  # 5 bytes already downloaded
+
+        resolved = _resolved()
+        captured = {}
+
+        def _pinned_req(method, url, **kw):
+            captured["headers"] = dict(kw.get("headers") or {})
+            return _FakeStreamResponse(b"lora-bytes", status_code=206,
+                                       headers={"content-length": "10"})
+
+        monkeypatch.setattr(
+            "localm.model_manager.sources.CivitAISource.resolve_download",
+            lambda self, ref, file, **kw: resolved)
+        monkeypatch.setattr(
+            "localm.media.managed_comfy.comfy_models_dest_dir",
+            lambda subfolder, cfg=None, plugin=None: dest_dir)
+        monkeypatch.setattr(
+            "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _pinned_req)
+
+        ok = _pull_civitai_file("135867", None)
+        assert ok is True
+        assert captured["headers"].get("Range") == "bytes=5-"
+        dest = dest_dir / "add-detail-xl.safetensors"
+        assert dest.read_bytes() == b"fake-lora-bytes"
+        assert not part_file.exists()
+
+    def test_server_ignoring_range_restarts_clean(self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest_dir.mkdir(parents=True)
+        part_file = dest_dir / "add-detail-xl.safetensors.part"
+        part_file.write_bytes(b"GARBAGE")
+
+        resolved = _resolved()
+        captured = {}
+
+        def _pinned_req(method, url, **kw):
+            captured["headers"] = dict(kw.get("headers") or {})
+            return _FakeStreamResponse(b"fake-lora-bytes", status_code=200,
+                                       headers={"content-length": str(len(b"fake-lora-bytes"))})
+
+        monkeypatch.setattr(
+            "localm.model_manager.sources.CivitAISource.resolve_download",
+            lambda self, ref, file, **kw: resolved)
+        monkeypatch.setattr(
+            "localm.media.managed_comfy.comfy_models_dest_dir",
+            lambda subfolder, cfg=None, plugin=None: dest_dir)
+        monkeypatch.setattr(
+            "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _pinned_req)
+
+        ok = _pull_civitai_file("135867", None)
+        assert ok is True
+        assert captured["headers"].get("Range") == "bytes=7-"
+        dest = dest_dir / "add-detail-xl.safetensors"
+        assert dest.read_bytes() == b"fake-lora-bytes"
+
+    def test_range_not_satisfiable_resets_and_retries(self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest_dir.mkdir(parents=True)
+        part_file = dest_dir / "add-detail-xl.safetensors.part"
+        part_file.write_bytes(b"TOO_MANY_BYTES_THAT_EXCEED_REMOTE")
+
+        resolved = _resolved()
+        calls = []
+
+        def _pinned_req(method, url, **kw):
+            calls.append(dict(kw.get("headers") or {}))
+            if len(calls) == 1:
+                return _FakeStreamResponse(b"", status_code=416)
+            return _FakeStreamResponse(b"fake-lora-bytes", status_code=200,
+                                       headers={"content-length": str(len(b"fake-lora-bytes"))})
+
+        monkeypatch.setattr(
+            "localm.model_manager.sources.CivitAISource.resolve_download",
+            lambda self, ref, file, **kw: resolved)
+        monkeypatch.setattr(
+            "localm.media.managed_comfy.comfy_models_dest_dir",
+            lambda subfolder, cfg=None, plugin=None: dest_dir)
+        monkeypatch.setattr(
+            "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _pinned_req)
+
+        ok = _pull_civitai_file("135867", None)
+        assert ok is True
+        assert len(calls) == 2
+        assert "Range" in calls[0]
+        assert "Range" not in calls[1]
+        dest = dest_dir / "add-detail-xl.safetensors"
+        assert dest.read_bytes() == b"fake-lora-bytes"
+
 
 class TestPullModelCivitaiDispatch:
     def test_parses_version_and_file_id(self, monkeypatch):
