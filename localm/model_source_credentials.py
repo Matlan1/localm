@@ -78,6 +78,25 @@ def get_credential(key: str) -> Optional[str]:
     return None
 
 
+def get_credential_source(key: str) -> Optional[str]:
+    """Return 'stored' if *key* is persisted in the credentials file, 'env' if
+    sourced from an environment variable fallback, else None."""
+    stored = _read_all().get(key)
+    if isinstance(stored, str) and stored.strip():
+        return "stored"
+    env_name = _ENV_FALLBACK.get(key)
+    if env_name:
+        env_val = os.environ.get(env_name)
+        if env_val and env_val.strip():
+            return "env"
+    return None
+
+
+def is_credential_set(key: str) -> bool:
+    """True when *key* has a non-empty value, either stored or from environment."""
+    return get_credential(key) is not None
+
+
 def get_hf_token() -> Optional[str]:
     return get_credential("hf_token")
 
