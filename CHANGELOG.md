@@ -69,6 +69,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Restarting the server from Settings while running in standalone app-window mode
+  (`localm[desktop]`) no longer opens a browser tab.** The native window is now
+  correctly reopened after the restart; previously the restart flag that suppresses
+  duplicate browser tabs was inadvertently also suppressing the native window, and
+  then a second read of the same flag (which had already been consumed) opened a
+  browser tab regardless.
 - **`find_sibling_mmproj` no longer auto-attaches a lone vision projector to unrelated models sharing the folder.** Directory sibling detection now enforces stem matching for all candidate counts, preventing unrelated models from auto-attaching projectors or emitting misleading "looks like projector by filename" log messages.
 - **Grammar-constrained generation no longer floods the console with repetitive "Grammar still awaiting trigger" messages.** Generation wrapped with grammar or lazy-grammar sampling restores `_quiet_stderr` during inference so per-token trigger status lines from the llama.cpp sampler do not spam stderr.
 - **Selecting the SYCL llama.cpp backend on an Intel GPU now correctly applies
