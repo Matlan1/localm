@@ -69,6 +69,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **HuggingFace backend loading no longer emits docstring lint errors, `torch_dtype` deprecation warnings, or offloaded buffer warnings.** `_hf_worker` dynamically passes `dtype` on modern Transformers, sets `offload_buffers=True` to offload layer buffers to CPU alongside parameters during partial offloading (preventing GPU VRAM contention on AWQ models), and filters upstream `@auto_docstring` stdout leaks.
 - **Ctrl+C and closing the console window no longer trigger automatic watchdog restarts on Windows.** Disarms the crash guard immediately on `CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, and `CTRL_CLOSE_EVENT` before teardown waits or OS process termination, and hardens `crash_recovery_watchdog.py` to recognize `STATUS_CONTROL_C_EXIT` (`0xC000013A`) and fast-exit on clean stops without waiting for the grace period.
 - **Restarting the server from Settings while running in standalone app-window mode
   (`localm[desktop]`) no longer opens a browser tab.** The native window is now
