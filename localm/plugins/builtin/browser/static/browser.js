@@ -29,6 +29,41 @@ export function frameSrc(data) {
   return "data:image/jpeg;base64," + data;
 }
 
+/** Map client click coordinates to page coordinates on an image with
+ *  object-fit: contain, or null when outside the rendered content. */
+export function frameCoords(img, clientX, clientY) {
+  const nw = img.naturalWidth;
+  const nh = img.naturalHeight;
+  if (!nw || !nh) return null;
+  const rect = img.getBoundingClientRect ? img.getBoundingClientRect() : null;
+  if (!rect || !rect.width || !rect.height) return null;
+
+  const imgRatio = nw / nh;
+  const elemRatio = rect.width / rect.height;
+
+  let rw, rh, ox, oy;
+  if (elemRatio > imgRatio) {
+    rh = rect.height;
+    rw = rh * imgRatio;
+    ox = (rect.width - rw) / 2;
+    oy = 0;
+  } else {
+    rw = rect.width;
+    rh = rw / imgRatio;
+    ox = 0;
+    oy = (rect.height - rh) / 2;
+  }
+
+  const cx = clientX - rect.left - ox;
+  const cy = clientY - rect.top - oy;
+  if (cx < 0 || cx > rw || cy < 0 || cy > rh) return null;
+
+  return {
+    x: Math.round(cx * (nw / rw)),
+    y: Math.round(cy * (nh / rh)),
+  };
+}
+
 /** Read one job's SSE stream and dispatch each event. Exported so a second
  *  caller (the coder session's opt-in inline mirror) reuses the exact same
  *  parsing rather than a second copy of it - a job's own replay history never
@@ -140,6 +175,7 @@ export function register(ctx) {
   const shot = el("img", "browser-frame");
   shot.alt = "Live view of the automated browser";
   shot.hidden = true;
+  shot.tabIndex = 0;
   const status = el("div", "browser-status", "No browser open.");
   const refused = el("ul", "browser-refused");
 
@@ -155,6 +191,10 @@ export function register(ctx) {
   // True while a request is in flight, so a second click cannot open a second
   // browser or navigate one that has not finished opening.
   let busy = false;
+
+  let wheelTimer = null;
+  let pendingDx = 0;
+  let pendingDy = 0;
 
   function applyControls() {
     const idle = mode === "idle";
@@ -174,7 +214,13 @@ export function register(ctx) {
     // Clearing here rather than at each call site: every path back to idle
     // runs through this, and a frame left behind shows the last screenshot of
     // a browser that is no longer open.
-    if (next === "idle") { shot.hidden = true; shot.removeAttribute("src"); }
+    if (next === "idle") {
+      shot.hidden = true;
+      shot.removeAttribute("src");
+      if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
+      pendingDx = 0;
+      pendingDy = 0;
+    }
     applyControls();
   }
   function setBusy(on) { busy = on; applyControls(); }
@@ -358,6 +404,72 @@ export function register(ctx) {
       status.textContent = "Could not attach to the agent browser.";
     }
   }
+
+  function flushWheel() {
+    if (!pendingDx && !pendingDy) return;
+    const dx = pendingDx;
+    const dy = pendingDy;
+    pendingDx = 0;
+    pendingDy = 0;
+    fetch(API + "/scroll", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ delta_x: dx, delta_y: dy }),
+    }).catch(() => {});
+  }
+
+  shot.onclick = async (e) => {
+    if (mode !== "own") return;
+    if (typeof shot.focus === "function") shot.focus();
+    const coords = frameCoords(shot, e.clientX, e.clientY);
+    if (!coords) return;
+    try {
+      await fetch(API + "/click", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ x: coords.x, y: coords.y, button: "left" }),
+      });
+    } catch (err) { /* quiet on interaction drop */ }
+  };
+
+  shot.addEventListener("wheel", (e) => {
+    if (mode !== "own") return;
+    e.preventDefault();
+    pendingDx += e.deltaX;
+    pendingDy += e.deltaY;
+    if (!wheelTimer) {
+      wheelTimer = setTimeout(() => {
+        wheelTimer = null;
+        flushWheel();
+      }, 40);
+    }
+  }, { passive: false });
+
+  shot.onkeydown = async (e) => {
+    if (mode !== "own") return;
+    const navKeys = [
+      "Backspace", "Enter", "Tab", "Escape",
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+      "PageUp", "PageDown", "Home", "End", "Delete",
+    ];
+    if (navKeys.includes(e.key)) {
+      e.preventDefault();
+      try {
+        await fetch(API + "/key", {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ key: e.key }),
+        });
+      } catch (err) { /* quiet on interaction drop */ }
+      return;
+    }
+    if (!e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.length === 1) {
+      e.preventDefault();
+      try {
+        await fetch(API + "/type", {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ text: e.key }),
+        });
+      } catch (err) { /* quiet on interaction drop */ }
+    }
+  };
 
   go.onclick = submit;
   stop.onclick = close;

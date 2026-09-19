@@ -45,6 +45,25 @@ class NavigateRequest(BaseModel):
     url: str
 
 
+class ClickRequest(BaseModel):
+    x: float
+    y: float
+    button: str = "left"
+
+
+class ScrollRequest(BaseModel):
+    delta_x: float = 0.0
+    delta_y: float = 0.0
+
+
+class KeyRequest(BaseModel):
+    key: str
+
+
+class TypeRequest(BaseModel):
+    text: str
+
+
 class WatchAgentRequest(BaseModel):
     # None (the default, and an empty or absent POST body) watches whichever
     # agent-driven browser this caller may see first. An explicit id narrows
@@ -244,6 +263,62 @@ async def navigate(req: NavigateRequest, request: Request):
     # navigate() blocks on the browser's own loop, so it never runs on this one.
     return await loop.run_in_executor(get_plugin_executor(),
                                       lambda: live.navigate(req.url))
+
+
+@_router.post("/api/browser/click")
+async def click_coords(req: ClickRequest, request: Request):
+    _require_enabled()
+    live = bsession.get(_gui_session_id(request))
+    if live is None:
+        raise HTTPException(404, "No browser is open. Open one first.")
+    from localm.executor import get_plugin_executor
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: live.click_coords(req.x, req.y, button=req.button))
+
+
+@_router.post("/api/browser/scroll")
+async def scroll(req: ScrollRequest, request: Request):
+    _require_enabled()
+    live = bsession.get(_gui_session_id(request))
+    if live is None:
+        raise HTTPException(404, "No browser is open. Open one first.")
+    from localm.executor import get_plugin_executor
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: live.scroll(req.delta_x, req.delta_y))
+
+
+@_router.post("/api/browser/key")
+async def press_key(req: KeyRequest, request: Request):
+    _require_enabled()
+    live = bsession.get(_gui_session_id(request))
+    if live is None:
+        raise HTTPException(404, "No browser is open. Open one first.")
+    from localm.executor import get_plugin_executor
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: live.press_key(req.key))
+
+
+@_router.post("/api/browser/type")
+async def type_text(req: TypeRequest, request: Request):
+    _require_enabled()
+    live = bsession.get(_gui_session_id(request))
+    if live is None:
+        raise HTTPException(404, "No browser is open. Open one first.")
+    from localm.executor import get_plugin_executor
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: live.type_text(req.text))
 
 
 @_router.post("/api/browser/stop")

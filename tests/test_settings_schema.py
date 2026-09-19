@@ -598,3 +598,45 @@ def test_user_name_accepts_up_to_the_cap():
 def test_user_name_rejects_a_too_long_value():
     with pytest.raises(ValueError):
         ss.validate_update({"user_name": "a" * (ss._USER_NAME_MAX_LEN + 1)})
+
+
+# --------------------------------------------------------------------------- #
+#  Secret fields in schema_json                                               #
+# --------------------------------------------------------------------------- #
+
+def test_secret_fields_carry_is_set_and_env_set(tmp_path, monkeypatch):
+    import localm.config as cfg
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+
+    fields = {f["key"]: f for f in ss.schema_json()}
+    assert "hf_token" in fields
+    assert fields["hf_token"]["is_set"] is False
+    assert fields["hf_token"]["env_set"] is False
+    assert "default" not in fields["hf_token"]
+    assert "shipped_default" not in fields["hf_token"]
+
+    from localm.model_source_credentials import set_credentials
+    set_credentials({"hf_token": "hf_test_val"})
+    fields = {f["key"]: f for f in ss.schema_json()}
+    assert fields["hf_token"]["is_set"] is True
+    assert fields["hf_token"]["env_set"] is False
+    assert "default" not in fields["hf_token"]
+
+    set_credentials({"hf_token": ""})
+    monkeypatch.setenv("HF_TOKEN", "from_env_val")
+    fields = {f["key"]: f for f in ss.schema_json()}
+    assert fields["hf_token"]["is_set"] is True
+    assert fields["hf_token"]["env_set"] is True
+    assert "default" not in fields["hf_token"]
+
+
+def test_secret_fields_values_override_sets_is_set():
+    fields = {f["key"]: f for f in ss.schema_json(values={"hf_token": "hf_custom"})}
+    assert fields["hf_token"]["is_set"] is True
+    assert fields["hf_token"]["env_set"] is False
+    assert "default" not in fields["hf_token"]

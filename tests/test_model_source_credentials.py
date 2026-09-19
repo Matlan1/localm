@@ -417,3 +417,27 @@ def test_cli_config_ordinary_key_unaffected(isolated_home):
     from localm.config import load_config
     config_cmd.callback(key="temperature", value="0.9")
     assert load_config()["temperature"] == 0.9
+
+
+def test_get_credential_source_and_is_set(isolated_home, monkeypatch):
+    from localm.model_source_credentials import (get_credential_source,
+                                                  is_credential_set,
+                                                  set_credentials)
+    assert get_credential_source("hf_token") is None
+    assert is_credential_set("hf_token") is False
+
+    set_credentials({"hf_token": "hf_stored_1"})
+    assert get_credential_source("hf_token") == "stored"
+    assert is_credential_set("hf_token") is True
+
+    monkeypatch.setenv("HF_TOKEN", "hf_env_1")
+    assert get_credential_source("hf_token") == "stored"
+    assert is_credential_set("hf_token") is True
+
+    set_credentials({"hf_token": ""})
+    assert get_credential_source("hf_token") == "env"
+    assert is_credential_set("hf_token") is True
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert get_credential_source("hf_token") is None
+    assert is_credential_set("hf_token") is False

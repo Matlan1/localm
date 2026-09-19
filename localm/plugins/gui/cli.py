@@ -224,6 +224,12 @@ def _console_close_cleanup() -> None:
     Passed to winconsole.register_console_handler, whose contract requires
     the callable to be quick and never raise.
     """
+    try:
+        from localm import bugreport
+        bugreport.disarm_crash_guard(instance_id=bugreport.armed_instance_id())
+    except Exception:
+        pass
+
     done = threading.Event()
 
     def _work() -> None:
@@ -238,11 +244,6 @@ def _console_close_cleanup() -> None:
     threading.Thread(target=_work, daemon=True,
                      name="localm-console-close-cleanup").start()
     done.wait(_CONSOLE_CLOSE_CLEANUP_BUDGET_S)
-    try:
-        from localm import bugreport
-        bugreport.disarm_crash_guard(instance_id=bugreport.armed_instance_id())
-    except Exception:
-        pass
 
 
 def _gui_bind_warning(host: str):

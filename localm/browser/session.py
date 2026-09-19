@@ -447,6 +447,42 @@ class BrowserSession:
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "selector": selector, "error": str(exc)}
 
+    def click_coords(self, x: float, y: float, button: str = "left") -> dict:
+        async def do():
+            await self._page.mouse.click(x, y, button=button)
+            return {"ok": True, "x": x, "y": y, "url": self._page.url}
+        try:
+            return self._call(do)
+        except Exception as exc:                     # noqa: BLE001
+            return {"ok": False, "x": x, "y": y, "error": str(exc)}
+
+    def scroll(self, delta_x: float, delta_y: float) -> dict:
+        async def do():
+            await self._page.mouse.wheel(delta_x, delta_y)
+            return {"ok": True}
+        try:
+            return self._call(do)
+        except Exception as exc:                     # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def type_text(self, text: str) -> dict:
+        async def do():
+            await self._page.keyboard.type(text)
+            return {"ok": True}
+        try:
+            return self._call(do)
+        except Exception as exc:                     # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def press_key(self, key: str) -> dict:
+        async def do():
+            await self._page.keyboard.press(key)
+            return {"ok": True}
+        try:
+            return self._call(do)
+        except Exception as exc:                     # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
     def console_messages(self) -> list:
         return list(self.state.console)
 
