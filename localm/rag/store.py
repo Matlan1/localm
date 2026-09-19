@@ -600,6 +600,20 @@ _COLLECTION_CACHE_LOCK = threading.Lock()
 _MAX_CACHED_COLLECTIONS = 8
 
 
+def _collection_cache_fingerprint(coll_dir: Path) -> dict:
+    def _stat(name: str) -> "list[int] | None":
+        try:
+            st = (coll_dir / name).stat()
+        except OSError:
+            return None
+        return [st.st_mtime_ns, st.st_size]
+    return {
+        "meta": _stat("meta.json"),
+        "chunks": _stat("chunks.jsonl"),
+        "vectors": _stat("vectors.json"),
+    }
+
+
 def _get_cached_collection_data(coll_dir: Path) -> Optional[dict]:
     try:
         key = str(coll_dir.resolve())
@@ -609,7 +623,7 @@ def _get_cached_collection_data(coll_dir: Path) -> Optional[dict]:
         entry = _COLLECTION_CACHE.get(key)
     if not entry:
         return None
-    if not Collection._fingerprint_matches(coll_dir, entry.get("fingerprint")):
+    if entry.get("fingerprint") != _collection_cache_fingerprint(coll_dir):
         with _COLLECTION_CACHE_LOCK:
             _COLLECTION_CACHE.pop(key, None)
         return None
@@ -865,7 +879,7 @@ class Collection:
                 self._norm_matrix = None
 
         _set_cached_collection_data(self.dir, {
-            "fingerprint": self._file_fingerprint(),
+            "fingerprint": _collection_cache_fingerprint(self.dir),
             "meta": dict(self._meta),
             "chunks": self._chunks,
             "vectors": self._vectors,
@@ -1086,6 +1100,7 @@ class Collection:
         stays valid too."""
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+        _invalidate_collection_cache(self.dir)
 
     def _atomic_write(self, filename: str, content: str) -> None:
         # storekit.atomic_write: unique temp name plus a Windows PermissionError

@@ -74,7 +74,11 @@ class TestVectorMatrixAcceleration:
 
         # Re-load to trigger _load and cached norm matrix computation
         loaded = Collection("accel_test", base=base)
-        assert loaded._norm_matrix is not None
+        import localm.rag.store as rag_store
+        if rag_store._numpy is not None:
+            assert loaded._norm_matrix is not None
+        else:
+            assert loaded._norm_matrix is None
         assert loaded._vectors is not None
         assert len(loaded._vectors) == len(loaded._chunks)
 
