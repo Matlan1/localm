@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for curated MODEL_SHORTCUTS and _SHORTCUT_SIZES in model_manager."""
 
-import pytest
 from localm.model_manager.registry import (
     MODEL_SHORTCUTS,
     _SHORTCUT_SIZES,
