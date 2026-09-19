@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages, updateStatusIndicator } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages, updateStatusIndicator } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -2244,11 +2244,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   box.scrollTop = box.scrollHeight;
 
   const sendBtn = $("chat-send");
-  const input = $("chat-input");
   sendBtn.classList.add("stop");
   sendBtn.replaceChildren(iconEl("stop", "ic"));
   chat.abort = new AbortController();
-  input.disabled = true;
   document.querySelectorAll(".message-actions button").forEach(b => b.disabled = true);
 
   let full = "";
@@ -2362,7 +2360,6 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     chat.abort = null;
     sendBtn.classList.remove("stop");
     sendBtn.replaceChildren(iconEl("send", "ic"));
-    input.disabled = false;
     document.querySelectorAll(".message-actions button").forEach(b => b.disabled = false);
   }
 
@@ -2587,15 +2584,17 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
 }
 
 /** Query the selected knowledge collection and inject cited excerpts. */
-export async function retrieveKnowledge(conv, query) {
-  const kb = $("p-kb").value;
+export async function retrieveKnowledge(conv, query, opts = {}) {
+  const kb = $("p-kb")?.value;
   if (!kb || !query) return;
   try {
+    const fetchOpts = {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ query, k: 4 }),
+    };
+    if (opts.signal) fetchOpts.signal = opts.signal;
     const r = await fetch(
-      `/api/rag/collections/${encodeURIComponent(kb)}/query`, {
-        method: "POST", headers: authHeaders(),
-        body: JSON.stringify({ query, k: 4 }),
-      });
+      `/api/rag/collections/${encodeURIComponent(kb)}/query`, fetchOpts);
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (!data.hits.length) return;
@@ -2607,13 +2606,14 @@ export async function retrieveKnowledge(conv, query) {
       content:
         `[Excerpts from the "${kb}" collection relevant to: ` +
         `${query.slice(0, 120)}]\n\n` + lines.join("\n\n") +
-        "\n\nUse these excerpts where relevant and cite them as [1], [2]… " +
+        "\n\nUse these excerpts where relevant and cite them as [1], [2]... " +
         "If they don't answer the question, say so before answering from " +
         "general knowledge.",
     });
     saveConversations(conv);
     renderChat();
   } catch (e) {
+    if (e.name === "AbortError") return;
     toast("Knowledge retrieval failed: " + e.message, true);
   }
 }
@@ -2642,44 +2642,144 @@ export async function refreshKbSelect() {
   } catch { /* server unreachable - selector stays as-is */ }
 }
 
+export function renderQueuedIndicator() {
+  const existing = document.querySelectorAll(".msg-row.queued");
+  existing.forEach((el) => el.remove());
+  const box = $("chat-messages");
+  if (!box || !chat.queue.length) return;
+  const conv = currentConv();
+  for (let i = 0; i < chat.queue.length; i++) {
+    const item = chat.queue[i];
+    if (item.convId && conv && item.convId !== conv.id) continue;
+    const { row } = addMessageRow(box, "user", item.text, {
+      cls: "user queued",
+      label: (chat.userName || "You") + " (" + t("chat.queuedBadge") + ")",
+      actions: [
+        [t("chat.cancel") || "Cancel", () => {
+          const at = chat.queue.indexOf(item);
+          if (at !== -1) chat.queue.splice(at, 1);
+          renderQueuedIndicator();
+        }, "close"],
+      ],
+    });
+    row.dataset.queuedIndex = String(i);
+  }
+  if (chat.stick) box.scrollTop = box.scrollHeight;
+}
+
+export async function processChatQueue() {
+  renderQueuedIndicator();
+  if (!chat.queue.length) return;
+  if (chatBusy()) return;
+  const conv = currentConv();
+  if (!conv) return;
+  const idx = chat.queue.findIndex((item) => !item.convId || item.convId === conv.id);
+  if (idx === -1) return;
+  const [item] = chat.queue.splice(idx, 1);
+  renderQueuedIndicator();
+  await dispatchChatTurn(conv, item.text, item.attachments, item.docs);
+}
+
+export async function dispatchChatTurn(conv, text, attachments = [], docs = []) {
+  const isFirstMessage = conv.messages.length === 0;
+
+  for (const doc of docs || []) {
+    conv.messages.push({
+      role: "user", tag: "doc",
+      content: `[Attached document: ${doc.name}` +
+        (doc.truncated ? " (truncated)" : "") + `]\n${doc.text}`,
+    });
+  }
+
+  let content;
+  if (attachments && attachments.length) {
+    content = [{ type: "text", text }];
+    for (const att of attachments) {
+      content.push({ type: "image_url", image_url: { url: att.dataUri } });
+    }
+  } else {
+    content = text || "Please read the attached document(s).";
+  }
+  conv.messages.push({ role: "user", content });
+
+  if (isFirstMessage) {
+    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") || "Document chat";
+    renderConvList();
+  }
+  saveConversations(conv);
+  renderChat();
+
+  chat.busy = true;
+  chat.abort = new AbortController();
+  const sendBtn = $("chat-send");
+  if (sendBtn) {
+    sendBtn.classList.add("stop");
+    sendBtn.replaceChildren(iconEl("stop", "ic"));
+  }
+  document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
+
+  const kb = $("p-kb") ? $("p-kb").value : "";
+  let kbAborted = false;
+  if (kb && text) {
+    const box = $("chat-messages");
+    const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
+    mountStatusIndicator(liveBody, t("chat.status.searchingKnowledge"));
+    chat.stick = true;
+    if (box) box.scrollTop = box.scrollHeight;
+    try {
+      await retrieveKnowledge(conv, text, { signal: chat.abort.signal });
+    } finally {
+      removeStatusIndicator(liveBody);
+      liveRow.remove();
+    }
+    if (chat.abort.signal.aborted) {
+      kbAborted = true;
+    }
+  }
+
+  try {
+    if (!kbAborted) {
+      await runCompletion(conv);
+    }
+  } finally {
+    chat.busy = false;
+    chat.abort = null;
+    if (sendBtn) {
+      sendBtn.classList.remove("stop");
+      sendBtn.replaceChildren(iconEl("send", "ic"));
+    }
+    document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
+    if (!kbAborted) {
+      processChatQueue();
+    }
+  }
+}
+
 export async function sendChat() {
   const input = $("chat-input");
-  const text = input.value.trim();
-  if (!text && chat.attachments.length === 0 && chat.docs.length === 0) return;
-  if (chat.abort) {
-    // A reply is still streaming. Tell the user how to act instead of silently
-    // swallowing the send (the send button is a Stop control while streaming).
-    toast("Reply still streaming - press the stop button to interrupt", true);
+  const text = input ? input.value.trim() : "";
+  if (!text && chat.attachments.length === 0 && chat.docs.length === 0) {
+    if (chat.queue.length > 0 && !chatBusy()) {
+      await processChatQueue();
+    }
     return;
   }
+
   if (chat.webCall) {
     toast("A web request is still running - wait for its result before sending", true);
     return;
   }
 
   if (text.startsWith("/")) {
-    input.value = "";
-    autoGrow(input);
+    if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
+    if (input) {
+      input.value = "";
+      autoGrow(input);
+    }
     handleSlashSubmit(text, execChatCommand);
     return;
   }
 
-  // No model loaded: do not emit a chat request the server can only answer with
-  // a 503 "No model loaded". modelCache.active is "" until a model is loaded, so
-  // this is the client-side gate the empty-model design discussion agreed on -
-  // an empty-model request is a client bug, caught here instead of round-tripped
-  // (AUDIT). Slash commands (handled above) still work with no model.
-  // `resumable` is the model an unnamed request reloads and is served by, which
-  // is the state an idle-unload or the sidebar's Unload button leaves behind -
-  // both of which tell the user, in the log line and in the button's tooltip
-  // respectively, that it "reloads on the next chat request". Refusing here
-  // made that promise false and left chat looking permanently broken, since
-  // nothing recovers `active` until a model is picked by hand.
-  //
-  // The guard itself stays: an empty-model request with nothing to resolve to
-  // IS a client bug and is still caught here rather than round-tripped for a
-  // 503. The two states just needed telling apart - one is a dead end, the
-  // other is one keystroke from working.
   if (!modelCache.active && !modelCache.resumable) {
     toast("No model loaded - load a model on the sidebar before chatting.", true);
     return;
@@ -2687,41 +2787,37 @@ export async function sendChat() {
 
   if (!currentConv()) newConversation();
   const conv = currentConv();
-  const isFirstMessage = conv.messages.length === 0;
 
-  // Attached documents come first so the model reads them before the question
-  for (const doc of chat.docs) {
-    conv.messages.push({
-      role: "user", tag: "doc",
-      content: `[Attached document: ${doc.name}` +
-        (doc.truncated ? " (truncated)" : "") + `]\n${doc.text}`,
+  if (chatBusy()) {
+    chat.queue.push({
+      text,
+      attachments: [...chat.attachments],
+      docs: [...chat.docs],
+      convId: conv.id,
     });
-  }
-  chat.docs = [];
-
-  let content;
-  if (chat.attachments.length) {
-    content = [{ type: "text", text }];
-    for (const att of chat.attachments) {
-      content.push({ type: "image_url", image_url: { url: att.dataUri } });
+    chat.attachments = [];
+    chat.docs = [];
+    renderAttachChips();
+    if (input) {
+      input.value = "";
+      autoGrow(input);
     }
-  } else {
-    content = text || "Please read the attached document(s).";
+    toast(t("chat.queuedToast"));
+    renderQueuedIndicator();
+    return;
   }
-  conv.messages.push({ role: "user", content });
-  chat.attachments = [];
-  renderAttachChips();
 
-  if (isFirstMessage) {
-    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") || "Document chat";
-    renderConvList();
+  const attachments = [...chat.attachments];
+  const docs = [...chat.docs];
+  chat.attachments = [];
+  chat.docs = [];
+  renderAttachChips();
+  if (input) {
+    input.value = "";
+    autoGrow(input);
   }
-  saveConversations(conv);   // user message persists even if the reply dies
-  input.value = "";
-  autoGrow(input);
-  renderChat();
-  await retrieveKnowledge(conv, text);
-  await runCompletion(conv);
+
+  await dispatchChatTurn(conv, text, attachments, docs);
 }
 
 /** The exported-transcript label for message *m*: noteLabel's override
@@ -2811,11 +2907,6 @@ export function composerEnterToSend(e, send) {
   if (e.shiftKey) return;   // newline - the textarea's default behaviour
   const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");
   if (menu && menu.style.display !== "none") return;
-  // U1: block the form-submit path while streaming (not just visually).
-  // preventDefault here means the Enter never becomes a newline and the send
-  // function is never called - the chat.abort check in sendChat() is the
-  // second line of defence, but preventing dispatch is the correct first one.
-  if (chat.abort) { e.preventDefault(); return; }
   e.preventDefault();
   send();
 }
