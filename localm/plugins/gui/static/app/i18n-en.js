@@ -175,6 +175,7 @@ export const I18N_EN = {
   "chat.status.searchingKnowledge": "Searching knowledge base…",
   "chat.queuedToast": "Message queued - will send after the current reply",
   "chat.queuedBadge": "Queued",
+  "chat.cancel": "Cancel",
   "chat.switchedTo": "switched to {model}",
   "chat.systemPrompt": "System prompt",
   "chat.systemPrompt.hint": "(blank = your Settings › Chat default)",

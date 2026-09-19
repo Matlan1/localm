@@ -90,7 +90,7 @@ test("updateStatusIndicator updates text and adds st-warn on retry messages", ()
 });
 
 test("runCompletion mounts status indicator and removes it when tokens stream", async () => {
-  const fetchImpl = async (url, opts) => {
+  const fetchImpl = async (url, _opts) => {
     if (String(url) === "/v1/chat/completions") {
       return {
         ok: true,

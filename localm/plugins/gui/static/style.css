@@ -1143,6 +1143,9 @@ pre:hover .canvas-btn { opacity: 1; }
   border: 1px solid var(--border);
   border-radius: 12px;
 }
+.inline-browser-frame[hidden] {
+  display: none !important;
+}
 .inline-browser-status {
   font-family: var(--mono);
   font-size: 12px;

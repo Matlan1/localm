@@ -75,6 +75,7 @@
   "chat.status.searchingKnowledge": "Wissensdatenbank wird durchsucht…",
   "chat.queuedToast": "Nachricht eingereiht - wird nach der aktuellen Antwort gesendet",
   "chat.queuedBadge": "Eingereiht",
+  "chat.cancel": "Abbrechen",
   "chat.switchedTo": "gewechselt zu {model}",
   "chat.systemPrompt": "System-Prompt",
   "chat.systemPrompt.hint": "(leer = Ihre Vorgabe aus Einstellungen › Chat)",

@@ -31,9 +31,10 @@ import math
 import os
 import re
 import stat as _stat
+import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines, split_jsonl
@@ -545,6 +546,7 @@ def delete_collection(name: str, base: Optional[Path] = None,
             if not (path / "meta.json").is_file():
                 return False      # someone else deleted it while we waited
             shutil.rmtree(path)
+            _invalidate_collection_cache(path)
     finally:
         local.release()
     return True
@@ -593,6 +595,61 @@ _WARNED_DEGRADES: set = set()
 #: is simply "no cache yet".
 _STATS_CACHE_KEY = "_stats_cache"
 
+_COLLECTION_CACHE: dict[str, dict] = {}
+_COLLECTION_CACHE_LOCK = threading.Lock()
+_MAX_CACHED_COLLECTIONS = 8
+
+
+def _collection_cache_fingerprint(coll_dir: Path) -> dict:
+    def _stat(name: str) -> "list[int] | None":
+        try:
+            st = (coll_dir / name).stat()
+        except OSError:
+            return None
+        return [st.st_mtime_ns, st.st_size]
+    return {
+        "meta": _stat("meta.json"),
+        "chunks": _stat("chunks.jsonl"),
+        "vectors": _stat("vectors.json"),
+    }
+
+
+def _get_cached_collection_data(coll_dir: Path) -> Optional[dict]:
+    try:
+        key = str(coll_dir.resolve())
+    except Exception:
+        key = str(coll_dir)
+    with _COLLECTION_CACHE_LOCK:
+        entry = _COLLECTION_CACHE.get(key)
+    if not entry:
+        return None
+    if entry.get("fingerprint") != _collection_cache_fingerprint(coll_dir):
+        with _COLLECTION_CACHE_LOCK:
+            _COLLECTION_CACHE.pop(key, None)
+        return None
+    return entry
+
+
+def _set_cached_collection_data(coll_dir: Path, data: dict) -> None:
+    try:
+        key = str(coll_dir.resolve())
+    except Exception:
+        key = str(coll_dir)
+    with _COLLECTION_CACHE_LOCK:
+        if len(_COLLECTION_CACHE) >= _MAX_CACHED_COLLECTIONS:
+            first_key = next(iter(_COLLECTION_CACHE))
+            _COLLECTION_CACHE.pop(first_key, None)
+        _COLLECTION_CACHE[key] = data
+
+
+def _invalidate_collection_cache(coll_dir: Path) -> None:
+    try:
+        key = str(coll_dir.resolve())
+    except Exception:
+        key = str(coll_dir)
+    with _COLLECTION_CACHE_LOCK:
+        _COLLECTION_CACHE.pop(key, None)
+
 
 class Collection:
     def __init__(self, name: str, base: Optional[Path] = None) -> None:
@@ -603,6 +660,7 @@ class Collection:
         self._vectors: Optional[list] = None     # aligned with _chunks, or None
         self._vec_dim: Optional[int] = None       # dimensionality of stored vectors
         self._bm25: Optional[BM25] = None
+        self._norm_matrix: Any = None
         self.corrupt: bool = False
         # How many lines of chunks.jsonl _load() had to skip as unparseable or
         # wrong-shape; 0 whenever the file is clean or absent. Exposed via
@@ -663,6 +721,19 @@ class Collection:
         return self
 
     def _load(self) -> None:
+        cached = _get_cached_collection_data(self.dir)
+        if cached is not None:
+            self.corrupt = cached["corrupt"]
+            self.chunks_bad_lines = cached["bad_lines"]
+            self._meta = dict(cached.get("meta", {}))
+            self._chunks = list(cached["chunks"])
+            self._vectors = cached["vectors"]
+            self._vec_dim = cached["vec_dim"]
+            self.vector_degrade_reason = cached["degrade"]
+            self._vectors_file_rejected = cached.get("rejected", False)
+            self._norm_matrix = cached.get("norm_matrix")
+            self._bm25 = cached.get("bm25")
+            return
         # A corrupt meta.json is flagged, not fatal, and does not discard the
         # INDEPENDENT chunks.jsonl / vectors.json files. Execution falls through
         # to load the chunks and then rebuild a minimal docs map from their
@@ -791,6 +862,36 @@ class Collection:
                     entry["uploaded"] = True
             self._meta["docs"] = rebuilt
 
+        self._norm_matrix = None
+        if self._vectors and self._vec_dim and _numpy is not None:
+            try:
+                np = _numpy
+                if all((not v) or len(v) == self._vec_dim for v in self._vectors):
+                    mat = np.zeros((len(self._vectors), self._vec_dim), dtype="float32")
+                    for idx, vec in enumerate(self._vectors):
+                        if vec:
+                            mat[idx] = vec
+                    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+                    norms = np.where(norms == 0, 1.0, norms)
+                    normalized = mat / norms
+                    self._norm_matrix = np.where(np.isfinite(normalized), normalized, 0.0)
+            except Exception:
+                self._norm_matrix = None
+
+        _set_cached_collection_data(self.dir, {
+            "fingerprint": _collection_cache_fingerprint(self.dir),
+            "meta": dict(self._meta),
+            "chunks": self._chunks,
+            "vectors": self._vectors,
+            "vec_dim": self._vec_dim,
+            "bm25": self._bm25,
+            "norm_matrix": self._norm_matrix,
+            "degrade": self.vector_degrade_reason,
+            "bad_lines": self.chunks_bad_lines,
+            "corrupt": self.corrupt,
+            "rejected": self._vectors_file_rejected,
+        })
+
     def _save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
@@ -856,6 +957,7 @@ class Collection:
         # method happens BEFORE vector_degrade_reason is finalised above.
         self._meta[_STATS_CACHE_KEY] = self._stats_cache_block()
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+        _invalidate_collection_cache(self.dir)
 
     def _stats_cache_block(self) -> dict:
         """The ``_stats_cache`` block for meta.json, computed from THIS
@@ -998,6 +1100,7 @@ class Collection:
         stays valid too."""
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+        _invalidate_collection_cache(self.dir)
 
     def _atomic_write(self, filename: str, content: str) -> None:
         # storekit.atomic_write: unique temp name plus a Windows PermissionError
@@ -1803,6 +1906,9 @@ class Collection:
             # chunk that overlap ONLY on a stopword cannot win the BM25 half.
             self._bm25 = BM25([c["text"] for c in self._chunks],
                               stop_words=ENGLISH_STOP_WORDS)
+            cached = _get_cached_collection_data(self.dir)
+            if cached is not None:
+                cached["bm25"] = self._bm25
         scores = self._bm25.scores(text)
         top = max(scores) if scores else 0.0
         if top > 0:
@@ -1892,6 +1998,31 @@ class Collection:
             return None
         # Vectors are usable: clear any stale query-time degrade note.
         self.vector_degrade_reason = None
+        if _numpy is not None:
+            try:
+                np = _numpy
+                if self._norm_matrix is None or len(self._norm_matrix) != len(self._vectors):
+                    mat = np.zeros((len(self._vectors), stored_dim), dtype="float32")
+                    for idx, vec in enumerate(self._vectors):
+                        if vec and len(vec) == stored_dim:
+                            mat[idx] = vec
+                    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+                    norms = np.where(norms == 0, 1.0, norms)
+                    normalized = mat / norms
+                    self._norm_matrix = np.where(np.isfinite(normalized), normalized, 0.0)
+
+                qv = np.asarray(qvec, dtype="float32")
+                qnorm = float(np.linalg.norm(qv))
+                if qnorm > 0:
+                    qv = qv / qnorm
+                    sims = np.dot(self._norm_matrix, qv)
+                    sims = np.where(np.isfinite(sims), sims, 0.0)
+                    top = float(np.max(sims)) if len(sims) > 0 else 0.0
+                    return [float(s / top) for s in sims] if top > 0 else [float(s) for s in sims]
+                else:
+                    return [0.0] * len(self._vectors)
+            except Exception:
+                pass
         out = []
         for v in self._vectors:
             out.append(_cosine(qvec, v) if v else 0.0)

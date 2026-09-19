@@ -100,12 +100,17 @@ class BM25:
         self._stop_words = stop_words
         self._tfs: list[Counter] = []
         self._lengths: list[int] = []
+        self._postings: dict[str, list[tuple[int, int]]] = {}
         df: Counter = Counter()
-        for text in texts:
+        for i, text in enumerate(texts):
             tokens = tokenize(text, stop_words)
             tf = Counter(tokens)
             self._tfs.append(tf)
             self._lengths.append(len(tokens))
+            for term, count in tf.items():
+                if term not in self._postings:
+                    self._postings[term] = []
+                self._postings[term].append((i, count))
             df.update(tf.keys())
         self._n = len(texts)
         self._avg_len = (sum(self._lengths) / self._n) if self._n else 0.0
@@ -125,10 +130,10 @@ class BM25:
             idf = self._idf.get(term)
             if idf is None:
                 continue
-            for i, tf in enumerate(self._tfs):
-                f = tf.get(term)
-                if not f:
-                    continue
+            postings = self._postings.get(term)
+            if not postings:
+                continue
+            for i, f in postings:
                 denom = f + _K1 * (1 - _B + _B * self._lengths[i] / self._avg_len)
                 out[i] += idf * (f * (_K1 + 1)) / denom
         return out

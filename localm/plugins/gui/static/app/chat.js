@@ -10,7 +10,7 @@ import { $, applyChatBackground, authHeaders, autoGrow, confirmDanger, el, fetch
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
-import { openMemoryModal, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
+import { openMemoryModal, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
 import { showView } from "./tabs.js";
 import { applyCoderRailSide } from "./coder.js";
 
@@ -126,6 +126,8 @@ export const chat = {
   conversations: migrateConversations(readStoredJSON("localm.conversations", [])),
   activeId: null,
   abort: null,
+  busy: false,
+  queue: [],
   webCall: null,     // the running tool event while a web call is in flight, else null
   attachments: [],   // image attachments: {name, dataUri}
   docs: [],          // document attachments: {name, text, chars, truncated}
@@ -1618,6 +1620,7 @@ export function renderChat() {
   // and a completed turn's stats must survive a reload instead of vanishing.
   const lastMsg = conv.messages[conv.messages.length - 1];
   updateUsageDisplay(lastMsg && lastMsg.role === "assistant" ? lastMsg.usage : null);
+  if (typeof renderQueuedIndicator === "function") renderQueuedIndicator();
 }
 
 /* ---- message branching ----
@@ -1716,7 +1719,7 @@ export function pruneBranches(conv) {
 /** True while a reply is streaming or a web call is in flight: the
  *  conversation must not be edited, forked or sent to until it settles. */
 export function chatBusy() {
-  return !!(chat.abort || chat.webCall);
+  return !!(chat.abort || chat.webCall || chat.busy);
 }
 
 export function editMessage(conv, index) {
