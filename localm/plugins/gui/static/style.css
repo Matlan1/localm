@@ -614,6 +614,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
    its line breaks and wrap long unbroken strings (pasted URLs/code) instead of
    collapsing whitespace the way rendered markdown would. */
 .msg-body.msg-literal { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-row.user.queued { opacity: 0.75; }
+.msg-row.user.queued .msg-role { display: block; font-size: 11px; margin-bottom: 4px; color: var(--text-dim); }
+.msg-row.user.queued .msg-body { border-style: dashed; }
 
 /* injected knowledge-base / document notes - visible but visually secondary */
 .msg-row.web-note { opacity: 0.7; }
@@ -1139,9 +1142,6 @@ pre:hover .canvas-btn { opacity: 1; }
   max-width: 100%;
   border: 1px solid var(--border);
   border-radius: 12px;
-}
-.inline-browser-frame[hidden] {
-  display: none !important;
 }
 .inline-browser-status {
   font-family: var(--mono);
@@ -2391,6 +2391,19 @@ div:has(> .data-table) { overflow-x: auto; }
 .dir-picker-row { display: flex; gap: 6px; align-items: stretch; }
 .dir-picker-row input { flex: 1 1 auto; }
 .dir-picker-btn { flex: 0 0 auto; white-space: nowrap; }
+.secret-clear-btn { flex: 0 0 auto; white-space: nowrap; }
+.secret-status-tag {
+  margin-left: 8px;
+  font-size: 11.5px;
+  font-weight: normal;
+  color: var(--text-dim);
+}
+.secret-status-tag.is-set {
+  color: var(--accent, #5aa2fb);
+}
+.secret-status-tag.is-clearing {
+  color: var(--warn, #f59e0b);
+}
 /* Settings PATHLIST field: a stack of folder rows + an "Add folder" button. */
 .pathlist { display: flex; flex-direction: column; gap: 6px; }
 .pathlist-rm { flex: 0 0 auto; padding: 0 9px; display: inline-flex; align-items: center; }

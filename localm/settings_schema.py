@@ -1680,17 +1680,35 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
         d = f.to_json()
         if f.group == "Media":
             d["media_per_plugin"] = f.key in media_mapped
-        if not f.secret and f.key in base:
-            d["default"] = base[f.key]
-        # The SHIPPED default, independent of `base` above: `base` is the CURRENT
-        # value (load_config(), which after a save is the user's own override), so
-        # `default` alone cannot tell the GUI "is this still factory-fresh" from
-        # "the user set it to this exact number". Always sourced from
-        # DEFAULT_CONFIG regardless of *values*, so the GUI can grey a field that
-        # still matches what shipped rather than rendering every value - default
-        # or override alike - as solid, indistinguishable text.
-        if not f.secret and f.key in DEFAULT_CONFIG:
-            d["shipped_default"] = DEFAULT_CONFIG[f.key]
+        if f.secret:
+            from localm.model_source_credentials import (CREDENTIAL_KEYS,
+                                                         get_credential_source)
+            if values is not None and f.key in values:
+                val = values[f.key]
+                d["is_set"] = bool(val)
+                d["env_set"] = False
+            elif f.key in CREDENTIAL_KEYS:
+                src = get_credential_source(f.key)
+                d["is_set"] = src is not None
+                d["env_set"] = (src == "env")
+            elif f.key in base:
+                d["is_set"] = bool(base[f.key])
+                d["env_set"] = False
+            else:
+                d["is_set"] = False
+                d["env_set"] = False
+        else:
+            if f.key in base:
+                d["default"] = base[f.key]
+            # The SHIPPED default, independent of `base` above: `base` is the CURRENT
+            # value (load_config(), which after a save is the user's own override), so
+            # `default` alone cannot tell the GUI "is this still factory-fresh" from
+            # "the user set it to this exact number". Always sourced from
+            # DEFAULT_CONFIG regardless of *values*, so the GUI can grey a field that
+            # still matches what shipped rather than rendering every value - default
+            # or override alike - as solid, indistinguishable text.
+            if f.key in DEFAULT_CONFIG:
+                d["shipped_default"] = DEFAULT_CONFIG[f.key]
         if f.key == "binary_dir":
             try:
                 from localm.config import find_binary_dir
@@ -2244,7 +2262,7 @@ def plugin_settings_schema_json(fields, block: Optional[dict], *,
         own = block.get(f.key)
         has_own = own not in (None, "")
         d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
-             "is_override": has_own, "admin_only": f.admin_only}
+             "is_override": has_own, "is_set": has_own, "admin_only": f.admin_only}
         if f.widget != Widget.SECRET:
             d["value"] = own if has_own else f.default
             d["default"] = f.default
