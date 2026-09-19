@@ -196,6 +196,46 @@ def test_a_dead_holders_lock_is_reclaimed(home):
         "the lock was not actually re-taken by this process")
 
 
+def test_a_pre_boot_lock_is_reclaimed(home, monkeypatch):
+    """A lock whose start timestamp precedes OS boot is reclaimed even if the PID is reused."""
+    import psutil
+    d = _part_lock_dir("m.gguf")
+    d.mkdir(parents=True)
+    (d / "owner.json").write_text(
+        json.dumps({"pid": os.getpid() + 99999, "filename": "m.gguf",
+                    "started": 1000.0}), encoding="utf-8")
+    monkeypatch.setattr(psutil, "boot_time", lambda: 2000.0)
+
+    with _part_lock("m.gguf"):
+        rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
+    assert rec["pid"] == os.getpid()
+
+
+def test_a_reused_pid_with_newer_create_time_is_reclaimed(home, monkeypatch):
+    """A lock held by a PID that was recycled after the download started is reclaimed."""
+    import psutil
+    d = _part_lock_dir("m.gguf")
+    d.mkdir(parents=True)
+    (d / "owner.json").write_text(
+        json.dumps({"pid": 12345, "filename": "m.gguf",
+                    "started": 1000.0}), encoding="utf-8")
+    monkeypatch.setattr(psutil, "boot_time", lambda: 500.0)
+    monkeypatch.setattr("localm.instances.pid_alive", lambda pid: True)
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def create_time(self):
+            return 1500.0
+
+    monkeypatch.setattr(psutil, "Process", FakeProcess)
+
+    with _part_lock("m.gguf"):
+        rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
+    assert rec["pid"] == os.getpid()
+
+
 @pytest.mark.parametrize("body", [
     None,                     # no owner record at all
     "{not json",              # unreadable

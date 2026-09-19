@@ -112,6 +112,31 @@ class TestUrlPull:
         assert dest.read_bytes() == b"FULLCONTENT"           # NOT b"STALEFULL..."
         assert cap["headers"].get("Range") == "bytes=5-"     # we did request resume
 
+    def test_range_not_satisfiable_resets_and_retries(self, url_env, monkeypatch):
+        models, _ = url_env
+        (models / "model.gguf.part").write_bytes(b"TOO_MANY_BYTES")
+        calls = []
+
+        def fake_pinned_request(method, url, **kwargs):
+            if method == "HEAD":
+                h = MagicMock()
+                h.status_code = 200
+                h.headers = {"content-length": "10"}
+                return h
+            calls.append(dict(kwargs.get("headers") or {}))
+            if len(calls) == 1:
+                return _resp(416, b"")
+            return _resp(200, b"0123456789")
+
+        monkeypatch.setattr("localm.netpolicy.pinned_request", fake_pinned_request)
+        assert mm._pull_url("http://example.com/model.gguf", "mymodel") is True
+        assert len(calls) == 2
+        assert "Range" in calls[0]
+        assert "Range" not in calls[1]
+        dest = models / "model.gguf"
+        assert dest.read_bytes() == b"0123456789"
+        assert not (models / "model.gguf.part").exists()
+
     def test_already_downloaded_skips_network(self, url_env, monkeypatch):
         models, _ = url_env
         (models / "model.gguf").write_bytes(b"already here")

@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 from typing import List
 from typing import Optional
 from rich.progress import BarColumn
@@ -35,6 +36,118 @@ from .registry import find_aliases_by_path
 # explicitly at every huggingface_hub call site below so a stray env var in
 # the user's shell can never silently redirect a model pull elsewhere.
 _HF_ENDPOINT = "https://huggingface.co"
+
+
+def _resumable_download_to_tmp_and_move(
+    incomplete_path: Path,
+    destination_path: Path,
+    url_to_download: str,
+    headers: dict,
+    expected_size: Optional[int],
+    filename: str,
+    force_download: bool,
+    etag: Optional[str],
+    xet_file_data: Any,
+    tqdm_class: Any = None,
+) -> None:
+    """Download content with range-resumption support from existing partial files."""
+    import huggingface_hub.file_download as fd
+
+    if destination_path.exists() and not force_download:
+        return
+
+    target_path = Path(incomplete_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if force_download:
+        try:
+            target_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if not target_path.exists():
+        try:
+            candidates = list(target_path.parent.glob(f"{target_path.stem}.*.incomplete"))
+            if candidates:
+                largest = max(candidates, key=lambda p: p.stat().st_size)
+                if largest.stat().st_size > 0:
+                    largest.rename(target_path)
+                for c in candidates:
+                    if c != largest and c.exists():
+                        try:
+                            c.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+    resume_size = 0
+    if target_path.exists():
+        try:
+            current_size = target_path.stat().st_size
+            if expected_size is not None and current_size > expected_size:
+                target_path.unlink(missing_ok=True)
+            else:
+                resume_size = current_size
+        except OSError:
+            resume_size = 0
+
+    needed = max(0, (expected_size or 0) - resume_size)
+    if needed > 0:
+        fd._check_disk_space(needed, target_path.parent)
+        fd._check_disk_space(needed, destination_path.parent)
+
+    if xet_file_data is not None and fd.is_xet_available():
+        fd.xet_get(
+            incomplete_path=target_path,
+            xet_file_data=xet_file_data,
+            headers=headers,
+            expected_size=expected_size,
+            displayed_filename=filename,
+            tqdm_class=tqdm_class,
+        )
+    else:
+        if xet_file_data is not None and not getattr(fd.constants, "HF_HUB_DISABLE_XET", False):
+            logger.warning(
+                "Xet Storage is enabled for this repo, but the 'hf_xet' package is not installed. "
+                "Falling back to regular HTTP download."
+            )
+        mode = "a+b" if resume_size > 0 else "wb"
+        try:
+            with target_path.open(mode) as f:
+                if resume_size > 0:
+                    f.seek(resume_size)
+                fd.http_get(
+                    url_to_download,
+                    f,
+                    resume_size=resume_size,
+                    headers=headers,
+                    expected_size=expected_size,
+                    displayed_filename=filename,
+                    tqdm_class=tqdm_class,
+                )
+        except OSError as e:
+            if "Consistency check failed" in str(e):
+                target_path.unlink(missing_ok=True)
+            raise
+
+    fd._chmod_and_move(target_path, destination_path)
+
+
+def _ensure_hf_resumable_download() -> None:
+    """Wire _resumable_download_to_tmp_and_move into huggingface_hub.file_download."""
+    try:
+        import huggingface_hub.file_download as fd
+        if getattr(fd, "_localm_resumable_patched", False):
+            return
+        fd._orig_download_to_tmp_and_move = fd._download_to_tmp_and_move
+        fd._download_to_tmp_and_move = _resumable_download_to_tmp_and_move
+        fd._localm_resumable_patched = True
+    except (ImportError, AttributeError):
+        pass
+
+
+_ensure_hf_resumable_download()
 
 
 
@@ -956,6 +1069,8 @@ def _pull_gguf_file(
     else:
         _mm.ensure_dirs()
 
+    _ensure_hf_resumable_download()
+
     # Disk space pre-flight - HEAD each missing part's CDN URL for Content-Length
     try:
         import requests as _req
@@ -967,13 +1082,34 @@ def _pull_gguf_file(
     except Exception:
         total_size = 0
 
-    if not _mm._check_disk_space(base_dir, total_size):
+    already_have = 0
+    cache_root = Path(base_dir) / ".cache"
+    prefixes = _incomplete_prefixes(base_dir, list(missing))
+    if cache_root.is_dir():
+        try:
+            for f in cache_root.rglob("*.incomplete"):
+                if prefixes is not None and f.name.split(".")[0] not in prefixes:
+                    continue
+                try:
+                    already_have += f.stat().st_size
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    if not _mm._check_disk_space(base_dir, max(0, total_size - already_have)):
         return False
 
     # TAG-INJECTION site: repo_id/filename sit directly inside OPEN
     # [bold cyan]/[bold] tags, so they are escaped. len(all_parts)/len(missing)
     # are ints.
-    if len(all_parts) > 1:
+    if already_have > 0:
+        console.print(
+            f"Resuming [bold cyan]{escape(repo_id)}[/bold cyan] / "
+            f"[bold]{escape(filename)}[/bold] "
+            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
+        )
+    elif len(all_parts) > 1:
         console.print(
             f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan] / "
             f"[bold]{escape(filename)}[/bold] "
@@ -1338,6 +1474,7 @@ def _pull_hf_snapshot(
     console.print("[dim]This may take a while for large models...[/dim]")
 
     try:
+        _ensure_hf_resumable_download()
         with _snapshot_progress(_disk_bytes, total_size) as _prog:
             snapshot_download(
                 repo_id=repo_id,
@@ -1466,8 +1603,20 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
         pid = int(rec.get("pid", -1))
     except (TypeError, ValueError):
         return False
-    # Our OWN pid is alive by definition, so a lock recording it is held, not
-    # stale, including when the holder is another thread of this process.
+    if pid == os.getpid():
+        return False
+    try:
+        import psutil
+        boot = psutil.boot_time()
+        started = float(rec.get("started", 0))
+        if started > 0 and started < boot:
+            return True
+        if instances.pid_alive(pid):
+            p = psutil.Process(pid)
+            if p.create_time() > started > 0:
+                return True
+    except Exception:
+        pass
     return not instances.pid_alive(pid)
 
 
@@ -1707,6 +1856,15 @@ def _pull_url_locked(
         netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                      timeout=30, allow_redirects=False)
+        if already_have and r.status_code == 416:
+            already_have = 0
+            headers.pop("Range", None)
+            try:
+                part_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
+                                         timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from "
                           f"{escape(dl_url)}")
@@ -1932,7 +2090,10 @@ def _pull_civitai_file(
     from ..config import _mkdir_or_explain
     _mkdir_or_explain(dest_dir, is_home=False)
 
-    if not _mm._check_disk_space(dest_dir, resolved.size_bytes or 0):
+    part_file = dest_dir / (filename + ".part")
+    already_have = part_file.stat().st_size if part_file.exists() else 0
+    remaining = max(0, (resolved.size_bytes or 0) - already_have)
+    if not _mm._check_disk_space(dest_dir, remaining):
         return False
 
     try:
@@ -1941,17 +2102,34 @@ def _pull_civitai_file(
         console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
         return False
 
-    console.print(f"Pulling [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
-                  f"[bold]{escape(filename)}[/bold]")
+    headers: dict = {}
+    if already_have:
+        headers["Range"] = f"bytes={already_have}-"
+        console.print(
+            f"Resuming [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
+            f"[bold]{escape(filename)}[/bold] "
+            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
+        )
+    else:
+        console.print(f"Pulling [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
+                      f"[bold]{escape(filename)}[/bold]")
 
-    part_file = dest_dir / (filename + ".part")
     try:
         with _part_lock(filename):
             import requests
             try:
                 netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
-                r = netpolicy.pinned_request("GET", dl_url, stream=True, timeout=30,
-                                             allow_redirects=False)
+                r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
+                                             timeout=30, allow_redirects=False)
+                if already_have and r.status_code == 416:
+                    already_have = 0
+                    headers.pop("Range", None)
+                    try:
+                        part_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
+                                                 timeout=30, allow_redirects=False)
                 if r.status_code in (301, 302, 303, 307, 308):
                     console.print(f"[red]Refused:[/red] unexpected redirect from "
                                   f"{escape(dl_url)}")
@@ -1970,7 +2148,11 @@ def _pull_civitai_file(
                               f"{escape(str(e))}")
                 return False
 
-            content_length = int(r.headers.get("content-length", 0)) or resolved.size_bytes or 0
+            if already_have and r.status_code == 200:
+                already_have = 0
+
+            content_length = int(r.headers.get("content-length", 0))
+            total_display = (already_have + content_length) if content_length else resolved.size_bytes or 0
 
             def _part_bytes() -> int:
                 try:
@@ -1978,9 +2160,10 @@ def _pull_civitai_file(
                 except OSError:
                     return 0
 
-            with _snapshot_progress(_part_bytes, content_length) as _prog:
+            mode = "ab" if already_have else "wb"
+            with _snapshot_progress(_part_bytes, total_display) as _prog:
                 try:
-                    with open(part_file, "wb") as f:
+                    with open(part_file, mode) as f:
                         for chunk in r.iter_content(65536):
                             f.write(chunk)
                 except Exception as e:
