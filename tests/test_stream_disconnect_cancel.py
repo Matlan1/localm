@@ -129,7 +129,8 @@ def test_chat_stream_disconnect_releases_inference_lock():
         agen = _stream_sse(eng, _MSG, "lock-model", sem)
         role = await agen.__anext__()        # role announcement chunk
         assert "assistant" in role
-        first = await agen.__anext__()        # first real token -> worker running
+        await agen.__anext__()               # status chunk ("Processing prompt...")
+        first = await agen.__anext__()       # first real token -> worker running
         assert "t0" in first
         assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0), \
             "producer should hold the inference lock while generating"
@@ -146,6 +147,7 @@ def test_chat_stream_disconnect_releases_inference_lock():
         # stream promptly, instead of blocking behind the orphan.
         agen2 = _stream_sse(eng, _MSG, "lock-model", sem)
         await agen2.__anext__()               # role
+        await agen2.__anext__()               # status chunk
         tok = await asyncio.wait_for(agen2.__anext__(), timeout=3.0)
         assert "t0" in tok
         await agen2.aclose()
@@ -250,6 +252,7 @@ def test_disconnect_through_pin_engine_releases_lock():
 
         wrapped = _pin_engine(eng, _stream_sse(eng, _MSG, "lock-model", sem))
         await wrapped.__anext__()             # role
+        await wrapped.__anext__()             # status chunk ("Processing prompt...")
         await wrapped.__anext__()             # first token -> worker running
         assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
 
@@ -745,6 +748,7 @@ def test_cancel_all_stops_stream_sse_without_a_disconnect():
 
         agen = _stream_sse(eng, _MSG, "lock-model", sem)
         await agen.__anext__()          # role chunk
+        await agen.__anext__()          # status chunk ("Processing prompt...")
         await agen.__anext__()          # first real token -> worker running
         assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
 
