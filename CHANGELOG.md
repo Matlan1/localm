@@ -69,6 +69,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Ctrl+C and closing the console window no longer trigger automatic watchdog restarts on Windows.** Disarms the crash guard immediately on `CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, and `CTRL_CLOSE_EVENT` before teardown waits or OS process termination, and hardens `crash_recovery_watchdog.py` to recognize `STATUS_CONTROL_C_EXIT` (`0xC000013A`) and fast-exit on clean stops without waiting for the grace period.
 - **Restarting the server from Settings while running in standalone app-window mode
   (`localm[desktop]`) no longer opens a browser tab.** The native window is now
   correctly reopened after the restart; previously the restart flag that suppresses

@@ -30,6 +30,28 @@ def test_dispatch_runs_cleanup_only_on_terminating_events():
     assert len(calls) == 1  # unchanged - Ctrl+C did not run cleanup
 
 
+def test_dispatch_ctrl_c_and_break_disarm_crash_guard(monkeypatch):
+    from localm import bugreport
+    disarmed = []
+    monkeypatch.setattr(bugreport, "armed_instance_id", lambda: "ctrl-c-inst")
+    monkeypatch.setattr(
+        bugreport, "disarm_crash_guard",
+        lambda instance_id=None: disarmed.append(instance_id))
+
+    calls = []
+
+    def cleanup():
+        calls.append(1)
+
+    assert winconsole._dispatch(winconsole.CTRL_C_EVENT, cleanup) is False
+    assert disarmed == ["ctrl-c-inst"]
+    assert calls == []
+
+    assert winconsole._dispatch(winconsole.CTRL_BREAK_EVENT, cleanup) is False
+    assert disarmed == ["ctrl-c-inst", "ctrl-c-inst"]
+    assert calls == []
+
+
 def test_dispatch_swallows_cleanup_errors(caplog):
     def _boom():
         raise RuntimeError("cleanup blew up")
