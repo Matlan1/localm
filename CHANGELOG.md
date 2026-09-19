@@ -24,6 +24,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   coder session driving it, in addition to the dedicated Browser tab.** Off by
   default; turn on "Show the agent's browser inline in the coder session" in
   Settings > Network.
+- **Accelerated RAG vector queries, BM25 inverted index, and collection caching.**
+  Vector search uses a normalized NumPy matrix dot product for fast vectorized
+  cosine similarity, BM25 uses an inverted postings index for term lookups, and
+  collections maintain an in-memory cache validated against file fingerprints.
 
 ### Changed
 - **Web activity in the chat is its own collapsed card, not a user turn.** A
