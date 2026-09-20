@@ -1042,6 +1042,7 @@ export async function switchModel(model) {
   // that load was abandoned, so claiming it would publish a model that is not
   // loaded.
   modelCache.active = data.model || model;
+  window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model: data.model || model } }));
   return data;
 }
 

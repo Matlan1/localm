@@ -290,6 +290,14 @@ export function activateSession(id) {
     $("coder-usage").textContent = s.info.total_tokens
       ? t("coder.usage.tokTurn", { tokens: s.info.total_tokens, turn: s.info.turns }) : "";
     if (s.inlineBrowser) startInlineBrowserStream(s);
+    const modelBtn = $("coder-model");
+    if (modelBtn) {
+      modelBtn.textContent = s.info.model || "";
+      modelBtn.style.display = s.info.model ? "" : "none";
+    }
+  } else {
+    const modelBtn = $("coder-model");
+    if (modelBtn) modelBtn.style.display = "none";
   }
   // "patch" only exists for a patch-mode session: in any other session the
   // writes went to disk, so the button would download an empty file and read
@@ -748,6 +756,11 @@ export function handleCoderEvent(s, ev) {
       feedAppend(s, el("div", "feed-info", label));
       break;
     }
+    case "info": {
+      flushAssistantBlock(s);
+      feedAppend(s, el("div", "feed-info", ev.text || ""));
+      break;
+    }
     case "estimate": {
       // A plan that was never executed (the CLI's --estimate). Rendered as an
       // assistant row because it is multi-paragraph prose, but labelled, so it
@@ -914,6 +927,16 @@ export async function startCoderSession(opts = {}) {
     const already = _liveSessionForCwd(cwd);
     if (already) {
       if (_sameCheckpoint(already, opts.checkpointId)) {
+        const wantedModel = opts.model || $("setup-model").value.trim() || null;
+        if (wantedModel && already.info.model && already.info.model !== wantedModel) {
+          postSessionModel(already.info.id, wantedModel).then((updated) => {
+            already.info = updated;
+            const mb = $("coder-model");
+            if (mb) { mb.textContent = updated.model || wantedModel; mb.style.display = ""; }
+          }).catch((e) => {
+            toast(t("coder.controls.modelSwitchFailed") + e.message, true);
+          });
+        }
         activateSession(already.info.id);
         toast(t("coder.session.alreadyOpenSwitched"));
         return;
@@ -953,7 +976,7 @@ export async function startCoderSession(opts = {}) {
     // of leaving it the single source of truth (NEW-DEFAULT-VALUE-PLACEHOLDER).
     const maxTurns = $("setup-max-turns").value.trim();
     if (maxTurns !== "") body.max_turns = Number(maxTurns);
-    const model = $("setup-model").value;
+    const model = opts.model || $("setup-model").value;
     if (model) body.model = model;
     const temp = $("setup-temperature").value.trim();
     if (temp !== "") body.temperature = Number(temp);
@@ -1154,7 +1177,7 @@ export async function sendCoderTask() {
   if (text.startsWith("/")) {
     input.value = "";
     autoGrow(input);
-    handleSlashSubmit(text, (c) => execCoderCommand(c));
+    handleSlashSubmit(text, (c, a) => execCoderCommand(c, a));
     return;
   }
 
@@ -1856,6 +1879,51 @@ export async function postSessionSettings(body) {
   return data;
 }
 
+/** POST a model switch for a session and return the updated session info. */
+export async function postSessionModel(sessionId, model) {
+  const r = await fetch(`/api/coder/sessions/${sessionId}/model`, {
+    method: "POST", headers: authHeaders(), body: JSON.stringify({ model }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+/** Switch the active session's model, updating bar and indicators. */
+export async function switchActiveSessionModel(model) {
+  const s = activeSession();
+  if (!s) { toast(t("coder.session.none"), true); return; }
+  if (s.busy) {
+    toast(t("coder.controls.busyError"), true);
+    return;
+  }
+  try {
+    const updated = await postSessionModel(s.info.id, model);
+    s.info = updated;
+    const modelBtn = $("coder-model");
+    if (modelBtn) {
+      modelBtn.textContent = updated.model || model;
+      modelBtn.style.display = updated.model ? "" : "none";
+    }
+    const bi = updated.backend_info;
+    const remote = $("coder-remote");
+    if (remote) {
+      if (bi && bi.leaves_machine) {
+        let where = bi.target;
+        try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
+        remote.textContent = t("coder.remote.badge", { host: where });
+        remote.title = t("coder.remote.tooltip", { target: bi.target });
+        remote.style.display = "";
+      } else {
+        remote.style.display = "none";
+      }
+    }
+    toast(t("coder.controls.modelSwitched", { model: updated.model || model }));
+  } catch (e) {
+    toast(t("coder.controls.modelSwitchFailed") + e.message, true);
+  }
+}
+
 /** The running session's behaviour knobs. Reads back what the server actually
  *  applied rather than assuming the request took - a re-detect that found no
  *  check must not look like a check was set. */
@@ -1866,6 +1934,58 @@ export function openSessionControls() {
     const info = s.info || {};
 
     body.appendChild(el("p", "sub", t("coder.controls.intro")));
+
+    /* --- model (switch running session model) --- */
+    const modelCard = el("div", "card");
+    modelCard.appendChild(el("label", "", t("coder.controls.modelLabel")));
+    const modelRow = el("div", "row");
+    const isRemote = info.backend_info && info.backend_info.leaves_machine;
+    let modelInput;
+    if (isRemote) {
+      modelInput = document.createElement("input");
+      modelInput.type = "text";
+      modelInput.id = "ctl-model";
+      modelInput.value = info.model || "";
+      modelInput.spellcheck = false;
+    } else {
+      modelInput = document.createElement("select");
+      modelInput.id = "ctl-model";
+      const curModel = info.model || "";
+      let foundCur = false;
+      for (const m of (modelCache.models || [])) {
+        const opt = document.createElement("option");
+        opt.value = m.name;
+        opt.textContent = m.name + (m.active ? " (active)" : "");
+        if (m.name === curModel) {
+          opt.selected = true;
+          foundCur = true;
+        }
+        modelInput.appendChild(opt);
+      }
+      if (curModel && !foundCur) {
+        const opt = document.createElement("option");
+        opt.value = curModel;
+        opt.textContent = curModel;
+        opt.selected = true;
+        modelInput.appendChild(opt);
+      }
+    }
+    const modelBtn = el("button", "btn-secondary", t("coder.controls.switchModelBtn"));
+    modelBtn.onclick = async () => {
+      const chosen = modelInput.value.trim();
+      if (!chosen || chosen === info.model) return;
+      modelBtn.disabled = true;
+      try {
+        await switchActiveSessionModel(chosen);
+      } finally {
+        modelBtn.disabled = false;
+      }
+    };
+    modelRow.appendChild(modelInput);
+    modelRow.appendChild(modelBtn);
+    modelCard.appendChild(modelRow);
+    modelCard.appendChild(el("div", "sub", t("coder.controls.modelHint")));
+    body.appendChild(modelCard);
 
     /* --- auto-approve (the REPL's /approve) --- */
     const appRow = el("div", "card");
@@ -2182,5 +2302,19 @@ export async function openBackgroundModal() {
 $("coder-controls").onclick = openSessionControls;
 $("coder-memory").onclick = openCoderMemoryModal;
 $("coder-bg").onclick = openBackgroundModal;
+const coderModelBtn = $("coder-model");
+if (coderModelBtn) coderModelBtn.onclick = openSessionControls;
+
+window.addEventListener("localm:model-switched", (e) => {
+  const model = e.detail && e.detail.model;
+  if (!model) return;
+  const s = activeSession();
+  if (s && (!s.info.backend_info || !s.info.backend_info.leaves_machine)) {
+    if (s.info.model !== model) {
+      switchActiveSessionModel(model);
+    }
+  }
+});
+
 
 

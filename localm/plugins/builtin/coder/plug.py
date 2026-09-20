@@ -595,6 +595,22 @@ async def create_session(req: CreateSessionRequest, request: Request):
         if existing is not None and existing.opened_via_resume:
             wanted = req.resume_checkpoint_id
             if wanted is None or wanted == existing.checkpoint_id:
+                if req.model and req.model != existing.model:
+                    if existing.busy:
+                        raise HTTPException(409, "Session is busy; cannot switch models mid-task")
+                    is_local = not (existing.backend_info and existing.backend_info.get("backend") != "local")
+                    if is_local and req.model != active_model():
+                        from localm.config import load_registry
+                        if req.model not in load_registry():
+                            raise HTTPException(404, f"Model not registered: {req.model}")
+                        switch_model = getattr(request.app.state, "switch_model", None)
+                        if switch_model is None:
+                            raise HTTPException(503, "Model switching needs the localm GUI server.")
+                        try:
+                            await switch_model(req.model)
+                        except Exception as e:
+                            raise HTTPException(500, f"Failed to load {req.model}: {e}")
+                    existing.set_model(req.model)
                 return {**existing.info(), "resumed": False,
                         "notes": ["Already open - joined the session already "
                                   "running for this folder instead of starting "
@@ -653,7 +669,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
     backend, backend_info, notes = await loop.run_in_executor(
         get_plugin_executor(),
         lambda: _resolve_backend(req, self_url=self_url,
-                                 model_name=active_model(),
+                                 model_name=req.model or active_model(),
                                  restricted=restricted,
                                  session_mode=session_mode))
     # The request is wired to the backend for real; whether the SERVER honours
@@ -1020,33 +1036,39 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
     held = _caller_scopes(request) or set()
     restricted = not (is_owner or _S.CODER_FULL in held)
 
-    if req.model != active_model():
-        if restricted:
-            raise HTTPException(
-                403, "Switching models needs the owner key; a scoped key uses the "
-                "active model.")
-        from localm.config import load_registry
-        if req.model not in load_registry():
-            raise HTTPException(404, f"Model not registered: {req.model}")
-        switch_model = getattr(request.app.state, "switch_model", None)
-        if switch_model is None:
-            raise HTTPException(503, "Model switching needs the localm GUI server.")
-        try:
-            res = await switch_model(req.model)
-        except Exception as e:
-            raise HTTPException(500, f"Failed to load {req.model}: {e}")
-        # switch_model preempts an in-flight load of a DIFFERENT model (single-
-        # slot, http_server.switch_engine's preempt=True default) - a newer
-        # switch elsewhere can abandon THIS one mid-load, and it reports that
-        # by returning {"status": "superseded"} rather than raising. Reporting
-        # 200 here would tell the caller its switch happened when it did not
-        # (get_engine() itself guards the identical case at http_server.py).
-        if isinstance(res, dict) and res.get("status") == "superseded":
-            raise HTTPException(
-                503, f"Model load was superseded by a newer request: {res.get('by')}")
-        if isinstance(res, dict) and res.get("status") == "cancelled":
-            raise HTTPException(
-                503, f"Model load was cancelled: {res.get('reason')}")
+    is_local = not (session.backend_info and session.backend_info.get("backend") != "local")
+    if is_local:
+        if req.model != active_model():
+            if restricted:
+                raise HTTPException(
+                    403, "Switching models needs the owner key; a scoped key uses the "
+                    "active model.")
+            from localm.config import load_registry
+            if req.model not in load_registry():
+                raise HTTPException(404, f"Model not registered: {req.model}")
+            switch_model = getattr(request.app.state, "switch_model", None)
+            if switch_model is None:
+                raise HTTPException(503, "Model switching needs the localm GUI server.")
+            try:
+                res = await switch_model(req.model)
+            except Exception as e:
+                raise HTTPException(500, f"Failed to load {req.model}: {e}")
+            # switch_model preempts an in-flight load of a DIFFERENT model (single-
+            # slot, http_server.switch_engine's preempt=True default) - a newer
+            # switch elsewhere can abandon THIS one mid-load, and it reports that
+            # by returning {"status": "superseded"} rather than raising. Reporting
+            # 200 here would tell the caller its switch happened when it did not
+            # (get_engine() itself guards the identical case at http_server.py).
+            if isinstance(res, dict) and res.get("status") == "superseded":
+                raise HTTPException(
+                    503, f"Model load was superseded by a newer request: {res.get('by')}")
+            if isinstance(res, dict) and res.get("status") == "cancelled":
+                raise HTTPException(
+                    503, f"Model load was cancelled: {res.get('reason')}")
+    elif restricted:
+        raise HTTPException(
+            403, "Switching models needs the owner key; a scoped key uses the "
+            "active model.")
 
     if not session.set_model(req.model):
         raise HTTPException(409, "Session is busy; cannot switch models mid-task")

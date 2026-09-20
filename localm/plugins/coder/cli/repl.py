@@ -77,6 +77,13 @@ def _setup_readline(agent: Agent) -> None:
         buf = readline.get_line_buffer()
         if buf.startswith("/") and " " not in buf:
             options = [c + " " for c in _SLASH_COMMANDS if c.startswith(buf)]
+        elif buf.startswith("/model "):
+            try:
+                from localm.model_manager import load_registry
+                models = list(load_registry())
+                options = [m for m in models if m.startswith(text)]
+            except Exception:
+                options = []
         else:
             # Complete the current token as a path relative to the project
             import glob as _g
@@ -201,7 +208,15 @@ def _handle_command(raw: str, agent: Agent) -> bool:
         print_info("Conversation cleared.")
 
     elif cmd == "model":
-        print_info(f"Model: {agent.backend.model_id}")
+        if not arg:
+            print_info(f"Model: {agent.backend.model_id}")
+        else:
+            new_model = arg.strip()
+            try:
+                agent.set_model(new_model)
+                print_success(f"Model switched to {new_model}.")
+            except Exception as e:
+                print_error(f"Failed to switch model: {e}")
 
     elif cmd == "cwd":
         print_info(f"Working directory: {agent.cwd}")

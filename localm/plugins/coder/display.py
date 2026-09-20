@@ -329,7 +329,7 @@ HELP_TEXT = """\
   [bold]/help[/bold]                 this message
   [bold]/exit[/bold]                 quit (also: exit, quit, q)
   [bold]/clear[/bold]                clear conversation history
-  [bold]/model[/bold]                show current model
+  [bold]/model \\[name][/bold]         show or switch model
   [bold]/mode[/bold]                 show session persistence mode (privacy/log/full)
   [bold]/cwd[/bold]                  show working directory
   [bold]/cd <path>[/bold]            change working directory
