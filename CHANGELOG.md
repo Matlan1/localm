@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Switch models in running coder sessions and resume any session with any model.**
+  You can now change the model powering an active coder session in place without
+  starting a new session or losing history. In the GUI, click the session model
+  badge in the session bar or use the Model section in session controls; switching
+  the active model in the sidebar also updates local coder sessions automatically.
+  In the CLI, switch models in the REPL with `/model <name>` (or inspect with
+  `/model`), and resume any past session with a specified model via `localm coder
+  --resume [id] --model <name>`.
 - **`localm setup-browser`** downloads the Chromium build the automated browser
   needs. Previously this required a separate, undocumented-in-app
   `python -m playwright install chromium` step after installing the browser

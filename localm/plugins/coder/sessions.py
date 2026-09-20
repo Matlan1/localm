@@ -741,16 +741,21 @@ class CoderSession:
         with self._lock:
             if self.busy:
                 return False
-        set_model_fn = getattr(self.agent.backend, "set_model", None)
-        if set_model_fn is None:
-            return False
-        set_model_fn(model)
-        # Record the switch so an exported/read-back session does not
-        # misattribute the turns after it to the OLD model.
-        self.agent._audit.notice(
-            "model_switch", f"switched model {self.model} -> {model} "
-            f"at turn {self.agent.turns}")
+        agent_set_model = getattr(self.agent, "set_model", None)
+        if agent_set_model is not None:
+            agent_set_model(model)
+        else:
+            set_model_fn = getattr(self.agent.backend, "set_model", None)
+            if set_model_fn is None:
+                return False
+            set_model_fn(model)
+            self.agent._audit.notice(
+                "model_switch", f"switched model {self.model} -> {model} "
+                f"at turn {self.agent.turns}")
+        if self.backend_info and isinstance(self.backend_info, dict):
+            self.backend_info["model"] = model
         self.model = model          # keep info() truthful - see its docstring
+        self._push({"type": "info", "text": f"Model switched to {model}"})
         return True
 
     def audit_log_path(self) -> Optional[Path]:

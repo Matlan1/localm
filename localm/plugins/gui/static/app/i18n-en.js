@@ -250,6 +250,7 @@ export const I18N_EN = {
   "coder.bar.logTitle": "View the audit log",
   "coder.bar.memoryBtn": "memory",
   "coder.bar.memoryTitle": "This project's LOCALCODER.md memory, which the agent reads every turn",
+  "coder.bar.modelTitle": "Session model (click to switch)",
   "coder.bar.patchBtn": "patch",
   "coder.bar.patchTitle":
     "Download the diff this patch-mode session captured instead of writing",
@@ -318,6 +319,12 @@ export const I18N_EN = {
   "coder.controls.intro":
     "Changes apply to this running session immediately - including while a task is in flight, which is the point of the auto-approve switch.",
   "coder.controls.modalTitle": "Session controls - {label}",
+  "coder.controls.busyError": "Cannot switch model while coder session is busy.",
+  "coder.controls.modelHint":
+    "Repoint this session at a different model in place. Conversation history and agent state are untouched.",
+  "coder.controls.modelLabel": "Model",
+  "coder.controls.modelSwitchFailed": "Could not switch model: ",
+  "coder.controls.modelSwitched": "Model switched to {model}",
   "coder.controls.moveBtn": "move",
   "coder.controls.noCheckFound": "No obvious check found in this project - verification is off",
   "coder.controls.pickDirectoryTitle": "Move this session to",
@@ -338,6 +345,7 @@ export const I18N_EN = {
   "coder.controls.verifyRestrictedWarn":
     "A shared-key session runs no commands, so it has no verification check to set.",
   "coder.controls.verifySetFailed": "Could not set verification: ",
+  "coder.controls.switchModelBtn": "switch",
   "coder.episodes.consolidateBtn": "consolidate",
   "coder.episodes.consolidateFailed": "Consolidate failed: ",
   "coder.episodes.consolidateTitle":
@@ -634,6 +642,9 @@ export const I18N_EN = {
   "slash.coderCmd.files.hint": "files changed this session, with diffs",
   "slash.coderCmd.help.hint": "list available commands",
   "slash.coderCmd.log.hint": "open the audit log",
+  "slash.coderCmd.model.args": "[name]",
+  "slash.coderCmd.model.hint": "show or switch the current model (/model [name])",
+  "slash.coderCmd.currentModel": "Current session model: {model}",
   "slash.coderCmd.stop.hint": "interrupt the current task",
   "slash.coderCmd.undo.hint": "revert the last file write",
   "slash.coderCommandsHint": "Anything not starting with / is sent to the agent as a task.",

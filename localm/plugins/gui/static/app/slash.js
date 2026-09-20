@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
-import { exportCoderSession, openFilesModal } from "./coder.js";
+import { activeSession, exportCoderSession, openFilesModal, switchActiveSessionModel } from "./coder.js";
 import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
@@ -35,6 +35,7 @@ export const CHAT_COMMANDS = [
 export const CODER_COMMANDS = [
   { cmd: "undo", hint: "slash.coderCmd.undo.hint" },
   { cmd: "files", hint: "slash.coderCmd.files.hint" },
+  { cmd: "model", hint: "slash.coderCmd.model.hint", args: "slash.coderCmd.model.args" },
   { cmd: "compact", hint: "slash.coderCmd.compact.hint" },
   { cmd: "export", hint: "slash.coderCmd.export.hint" },
   { cmd: "log", hint: "slash.coderCmd.log.hint" },
@@ -281,10 +282,20 @@ export function execChatCommand(cmd, arg) {
   return false;
 }
 
-export function execCoderCommand(cmd) {
+export function execCoderCommand(cmd, arg = "") {
   switch (cmd) {
     case "undo": $("coder-undo").onclick(); return true;
     case "files": openFilesModal(); return true;
+    case "model": {
+      const s = activeSession();
+      if (!s) { toast(t("coder.session.startFirst"), true); return true; }
+      if (!arg) {
+        toast(t("coder.controls.modelLabel") + ": " + (s.info.model || "none"));
+      } else {
+        switchActiveSessionModel(arg);
+      }
+      return true;
+    }
     case "compact": $("coder-compact").onclick(); return true;
     case "export": exportCoderSession(); return true;
     case "log": $("coder-log").onclick(); return true;
@@ -382,5 +393,5 @@ export function handleSlashSubmit(text, execute) {
 }
 
 attachSlashMenu($("chat-input"), CHAT_COMMANDS, execChatCommand);
-attachSlashMenu($("coder-input"), CODER_COMMANDS, (c) => execCoderCommand(c));
+attachSlashMenu($("coder-input"), CODER_COMMANDS, (c, a) => execCoderCommand(c, a));
 

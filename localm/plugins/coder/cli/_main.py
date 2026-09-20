@@ -54,6 +54,7 @@ from ..display import (
     print_banner,
     print_error,
     print_info,
+    print_success,
     print_warning,
 )
 from .goal import _run_goal_loop
@@ -210,6 +211,8 @@ def _complete_model(ctx, param, incomplete):
 @click.option("--no-verify", "no_verify", is_flag=True,
               help="Do not run any exit-code check before an interactive turn "
                    "finishes, even if the project has an obvious one.")
+@click.option("--resume", "-r", "resume", default=None, is_flag=False, flag_value="",
+              help="Resume the last saved session (or specify checkpoint ID) with the chosen model.")
 def main(
     task, model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens, seed,
@@ -217,7 +220,7 @@ def main(
     native_tools, provider, mode, scope, system_instructions,
     show_episodes, forget_episodes, forget_episode_id, show_archive,
     restore_episode_id, consolidate_episodes,
-    until_cmd, goal_max_iters, verify_cmd, no_verify,
+    until_cmd, goal_max_iters, verify_cmd, no_verify, resume,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -345,7 +348,23 @@ def main(
                 print_error("--estimate requires a TASK to estimate.")
                 sys.exit(2 if ci else 1)
             _run_estimate(agent, task, output_format)
-            return
+        if resume is not None:
+            ckpt_id = resume.strip() or None
+            ckpt = agent.load_checkpoint(ckpt_id)
+            if ckpt is None:
+                if ckpt_id:
+                    print_warning(f"No saved session with id '{ckpt_id}'.")
+                else:
+                    print_warning("No interrupted session found to resume.")
+            else:
+                agent.resume_checkpoint(ckpt)
+                agent.clear_checkpoint()
+                ts = ckpt.get("interrupted_at", "unknown time")
+                turns = ckpt.get("turns", "?")
+                title = ckpt.get("title")
+                label = f' "{title}"' if title else ""
+                print_success(
+                    f"Resumed session{label} ({turns} turns, interrupted {ts}) on {backend.model_id}.")
 
         if task:
             # Non-interactive single-task mode (optionally a verify-until-pass loop)
@@ -391,18 +410,19 @@ def main(
             # exists.
             from ..agent.checkpoint import checkpoint_info
             info = checkpoint_info(work_dir)
-            if info and info.get("unreadable"):
-                print_warning(
-                    "A saved session was found for this project but could not "
-                    "be read; it will not appear in /sessions."
-                )
-            elif info:
-                ts = info.get("interrupted_at", "unknown time")
-                turns = info.get("turns", "?")
-                print_warning(
-                    f"Interrupted session found ({turns} turns, {ts}). "
-                    "Type /resume to continue, or /sessions to see all of them."
-                )
+            if resume is None:
+                if info and info.get("unreadable"):
+                    print_warning(
+                        "A saved session was found for this project but could not "
+                        "be read; it will not appear in /sessions."
+                    )
+                elif info:
+                    ts = info.get("interrupted_at", "unknown time")
+                    turns = info.get("turns", "?")
+                    print_warning(
+                        f"Interrupted session found ({turns} turns, {ts}). "
+                        "Type /resume to continue, or /sessions to see all of them."
+                    )
             _repl(agent)
     except CoderAuthError as e:
         print_error(str(e))

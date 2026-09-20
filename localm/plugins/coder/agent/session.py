@@ -103,6 +103,33 @@ class _SessionMixin:
             mission=preset.mission,
         )
 
+    def set_model(self, model: str) -> None:
+        """Repoint this agent at a different model, in place.
+
+        Updates the backend, updates the agent's model name, family id
+        (for family-specific prompt tuning), harness overrides, and rebuilds
+        the system prompt so family-specific instructions are applied.
+        """
+        set_model_backend = getattr(self.backend, "set_model", None)
+        if set_model_backend is not None:
+            set_model_backend(model)
+        old_model = self._model_name
+        self._model_name = model
+        self._family_id = model
+        try:
+            from localm.model_manager import load_registry
+            entry = load_registry().get(model) or {}
+            src = entry.get("source", "") if isinstance(entry, dict) else ""
+            if isinstance(src, str) and src.strip():
+                self._family_id = f"{model} {src}"
+        except Exception:
+            pass
+        from ..harness_profiles import agent_gen_overrides
+        self.gen_kwargs = {**agent_gen_overrides(model), **self.gen_kwargs}
+        self._rebuild_system_prompt()
+        self._audit.notice(
+            "model_switch", f"switched model {old_model} -> {model} at turn {self.turns}")
+
     def set_cwd(self, cwd: Path) -> None:
         """Point this session at another project directory (the REPL's /cd, and
         the GUI's cwd route).

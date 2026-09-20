@@ -998,3 +998,157 @@ def test_the_repl_cd_refuses_the_same_move(tmp_path, monkeypatch):
     ordinary.mkdir()
     _repl._handle_command(f"/cd {ordinary}", agent)
     assert agent.moved_to == ordinary
+
+
+# --------------------------------------------------------------------------- #
+#  /model and model switching on running / resumed coder sessions             #
+# --------------------------------------------------------------------------- #
+
+def test_session_set_model_route_updates_session_and_backend(tmp_path, monkeypatch):
+    """POST /api/coder/sessions/{id}/model repoints the active coder session."""
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"model-initial": {}, "model-switched": {}})
+    switched = []
+
+    async def _fake_switch(m):
+        switched.append(m)
+
+    app.state.switch_model = _fake_switch
+
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj, model="model-initial")
+        sess = _stub(app, sid)
+        assert sess.model == "model-initial"
+
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "model-switched"})
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["model"] == "model-switched"
+        assert sess.model == "model-switched"
+        assert sess.backend_info["model"] == "model-switched"
+        assert sess.agent._model_name == "model-switched"
+        assert switched == ["model-initial", "model-switched"]
+
+
+def test_session_set_model_rejected_while_busy(tmp_path, monkeypatch):
+    """A running turn must not have its model swapped mid-flight."""
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj)
+        sess = _stub(app, sid)
+        sess.busy = True
+
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "another-model"})
+        assert r.status_code == 409
+        assert "busy" in r.json()["detail"]
+
+
+def test_session_set_model_unknown_local_model_404(tmp_path, monkeypatch):
+    """Switching to an unregistered local model raises 404."""
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"known-model": {}})
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj, model="known-model")
+        _stub(app, sid)
+
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "unknown-model"})
+        assert r.status_code == 404
+        assert "not registered" in r.json()["detail"]
+
+
+def test_session_set_model_remote_backend(tmp_path, monkeypatch):
+    """Off-machine sessions switch model without checking local registry."""
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj, backend="openai", backend_model="gpt-4o",
+                     backend_api_key="sk-fake-key", mode="full")
+        sess = _stub(app, sid)
+        assert sess.backend_info.get("leaves_machine") is True
+
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "gpt-4o-mini"})
+        assert r.status_code == 200, r.text
+        assert r.json()["model"] == "gpt-4o-mini"
+        assert sess.model == "gpt-4o-mini"
+        assert sess.agent._model_name == "gpt-4o-mini"
+
+
+def test_session_set_model_pushes_sse_info_event(tmp_path, monkeypatch):
+    """Switching a model emits an info event into the session's stream."""
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj)
+        sess = _stub(app, sid)
+        sess.set_model("new-test-model")
+
+        info_events = []
+        while not sess.events.empty():
+            ev = sess.events.get_nowait()
+            if ev.get("type") == "info":
+                info_events.append(ev)
+        assert any("Model switched to new-test-model" in e.get("text", "") for e in info_events)
+
+
+def test_resuming_session_with_different_model_switches_model(tmp_path, monkeypatch):
+    """Rejoining an existing active session with a different model switches it."""
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"first-model": {}, "second-model": {}})
+    switched = []
+
+    async def _fake_switch(m):
+        switched.append(m)
+
+    app.state.switch_model = _fake_switch
+
+    with TestClient(app) as client:
+        sid1 = _start(client, owner, proj, model="first-model", resume=True)
+        sess1 = _stub(app, sid1)
+        assert sess1.model == "first-model"
+
+        # Resume same session but ask for second-model
+        r = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "resume": True, "model": "second-model"})
+        assert r.status_code == 200
+        assert r.json()["id"] == sid1
+        assert sess1.model == "second-model"
+        assert sess1.backend_info["model"] == "second-model"
+        assert switched == ["first-model", "second-model"]
+
+
+def test_repl_model_command_shows_and_switches(tmp_path, monkeypatch):
+    """The REPL /model command displays the model or switches it."""
+    from localm.plugins.coder.cli import repl as _repl
+
+    class _FakeAgent:
+        def __init__(self):
+            self._model_name = "initial-model"
+            self.backend = type("Backend", (), {"model_id": "initial-model"})()
+            self.switched_to = None
+
+        def set_model(self, m):
+            self.switched_to = m
+            self._model_name = m
+            self.backend.model_id = m
+
+    agent = _FakeAgent()
+    printed_info = []
+    printed_success = []
+    monkeypatch.setattr(_repl, "print_info", lambda m: printed_info.append(m))
+    monkeypatch.setattr(_repl, "print_success", lambda m: printed_success.append(m))
+    monkeypatch.setattr(_repl, "print_warning", lambda m: None)
+
+    # Show current model
+    _repl._handle_command("/model", agent)
+    assert any("initial-model" in p for p in printed_info)
+
+    # Switch to new model
+    _repl._handle_command("/model target-model", agent)
+    assert agent.switched_to == "target-model"
+    assert any("target-model" in p for p in printed_success)
+
