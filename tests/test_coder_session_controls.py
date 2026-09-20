@@ -1053,7 +1053,7 @@ def test_session_set_model_unknown_local_model_404(tmp_path, monkeypatch):
     save_registry({"known-model": {}})
     with TestClient(app) as client:
         sid = _start(client, owner, proj, model="known-model")
-        sess = _stub(app, sid)
+        _stub(app, sid)
 
         r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
                         json={"model": "unknown-model"})
