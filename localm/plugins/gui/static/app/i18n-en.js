@@ -250,7 +250,7 @@ export const I18N_EN = {
   "coder.bar.logTitle": "View the audit log",
   "coder.bar.memoryBtn": "memory",
   "coder.bar.memoryTitle": "This project's LOCALCODER.md memory, which the agent reads every turn",
-  "coder.bar.modelTitle": "Current model: {model} (click to switch)",
+  "coder.bar.modelTitle": "Session model (click to switch)",
   "coder.bar.patchBtn": "patch",
   "coder.bar.patchTitle":
     "Download the diff this patch-mode session captured instead of writing",
