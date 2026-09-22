@@ -354,6 +354,17 @@ _TORCH_INDEX = {
     "cpu": "https://download.pytorch.org/whl/cpu",
 }
 
+# uv's `--torch-backend` values for the same variants. See
+# test_torch_backend_avoids_the_setuptools_conflict_index_url_hits.
+_TORCH_BACKEND = {
+    "cuda": "cu126",
+    "cuda-blackwell": "cu130",
+    "xpu": "xpu",
+    "rocm-linux": "rocm6.2",
+    "rocm-win": "rocm6.4",
+    "cpu": "cpu",
+}
+
 # Mirrors setup_llama._BLACKWELL_MIN_CAP. Data-center Blackwell is compute
 # capability 10.x and consumer/workstation Blackwell is 12.x, so (10, 0) is the
 # lower bound covering both.
@@ -380,6 +391,14 @@ def _cuda_compute_capabilities() -> list:
     return caps
 
 
+def _cuda_is_blackwell() -> bool:
+    """Whether any installed NVIDIA GPU needs the Blackwell-and-newer wheel
+    line. Shared by pytorch_index_url and torch_pip_args so ComfyUI's torch
+    install and the HF backend's always agree."""
+    caps = _cuda_compute_capabilities()
+    return any(cap >= _CUDA_BLACKWELL_MIN_CAP for cap in caps)
+
+
 def pytorch_index_url(variant: str) -> "str | None":
     """The PyTorch wheel index URL for a torch *variant* key ("cuda" | "xpu" |
     "rocm-linux" | "rocm-win" | "cpu"), or None if unknown. Public accessor, so
@@ -388,14 +407,10 @@ def pytorch_index_url(variant: str) -> "str | None":
 
     For "cuda" specifically, this ALSO detects whether any installed NVIDIA GPU
     needs the Blackwell-and-newer wheel line and returns that instead of the
-    cu126 default. Self-contained here rather than requiring every caller to pass
-    compute-capability info through, so ComfyUI's torch install and the HF
-    backend's get the same line; a flat cu126 on Blackwell loads but has no
-    matching kernels and runs CPU-only."""
-    if variant == "cuda":
-        caps = _cuda_compute_capabilities()
-        if any(cap >= _CUDA_BLACKWELL_MIN_CAP for cap in caps):
-            return _TORCH_INDEX["cuda-blackwell"]
+    cu126 default; a flat cu126 on Blackwell loads but has no matching kernels
+    and runs CPU-only."""
+    if variant == "cuda" and _cuda_is_blackwell():
+        return _TORCH_INDEX["cuda-blackwell"]
     return _TORCH_INDEX.get(variant)
 
 
@@ -422,19 +437,18 @@ def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
     """
     variant = recommended_torch_variant(backend, det)
     if variant == "cuda":
-        # Routes through pytorch_index_url so the Blackwell detection lives in
-        # one place.
-        return f"torch torchvision --index-url {pytorch_index_url('cuda')}"
+        key = "cuda-blackwell" if _cuda_is_blackwell() else "cuda"
+        return f"torch torchvision --torch-backend={_TORCH_BACKEND[key]}"
     if variant == "xpu":
-        return f"torch torchvision --index-url {_TORCH_INDEX['xpu']}"
+        return f"torch torchvision --torch-backend={_TORCH_BACKEND['xpu']}"
     if variant == "rocm":
         if sys.platform != "win32":
-            return f"torch torchvision --index-url {_TORCH_INDEX['rocm-linux']}"
+            return f"torch torchvision --torch-backend={_TORCH_BACKEND['rocm-linux']}"
         fam = amd_gfx_family((det or detect()).gpu_names)
         if fam == "gfx103x":
             return "-e .[gpu]"          # bundled gfx1030 self-contained build
         if fam in ("gfx110x", "gfx120x"):
-            return f"torch torchvision --index-url {_TORCH_INDEX['rocm-win']}"
+            return f"torch torchvision --torch-backend={_TORCH_BACKEND['rocm-win']}"
         return ""                        # unknown AMD on Windows: no verified prebuilt
     return ""
 

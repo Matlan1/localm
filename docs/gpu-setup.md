@@ -282,11 +282,16 @@ GGUF inference needs no PyTorch - this section is only for HF-format models. The
 installer auto-detects your GPU and installs the matching torch wheels. To do it
 by hand, use the line for your hardware - if you are not sure which NVIDIA line
 applies, ask localm's own detector rather than guessing. The commands below use
-`.venv` because that is what the self-contained installers create; if you
-installed with `pip install localm` there is no `.venv` to point at - drop
-`-p .venv` (or `uv pip install -p .venv`'s `-p .venv`) and run the plain `python
--m localm.hwdetect torch-args cuda` / `pip install torch torchvision --index-url
-...` in whatever environment `localm` is already installed into.
+`.venv` because that is what the self-contained installers create and use `uv`
+specifically (not plain `pip`) because `--torch-backend` is a `uv`-only feature
+that routes only the PyTorch-family packages to that wheel index, leaving every
+other dependency (including `setuptools`) on the normal PyPI index - `pip
+install --index-url ...` would replace PyPI outright and can fail to resolve a
+plain dependency the vendor index does not carry. If you installed with `pip
+install localm` there is no `.venv` to point at - drop `-p .venv` and run the
+same `uv pip install torch torchvision --torch-backend=...` in whatever
+environment `localm` is already installed into (`uv` itself is a separate,
+optional tool - `pip install uv` first if you do not already have it).
 
 `.venv/bin/python -m localm.hwdetect torch-args cuda` (Windows:
 `.venv\Scripts\python -m localm.hwdetect torch-args cuda`) prints the exact
@@ -294,18 +299,18 @@ installed with `pip install localm` there is no `.venv` to point at - drop
 
 ```bash
 # NVIDIA (CUDA), pre-Blackwell (most cards shipped before 2026), any OS:
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126
+uv pip install -p .venv torch torchvision --torch-backend=cu126
 
 # NVIDIA (CUDA), Blackwell and newer (RTX 50-series, RTX PRO Blackwell,
 # B100/B200) - the cu126 wheels above carry no kernels for these and PyTorch
 # would silently run CPU-only:
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu130
+uv pip install -p .venv torch torchvision --torch-backend=cu130
 
 # Intel (Arc / Xe), any OS - the wheels carry the oneAPI runtime:
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/xpu
+uv pip install -p .venv torch torchvision --torch-backend=xpu
 
 # AMD on Linux - upstream ROCm wheels (broad gfx support):
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+uv pip install -p .venv torch torchvision --torch-backend=rocm6.2
 
 # AMD on Windows, RX 6000 / RDNA2 (gfx103X) - localm's bundled self-contained build.
 # `-e ".[gpu]"` is an editable install and needs a source checkout to point at;
@@ -314,10 +319,10 @@ uv pip install -p .venv torch torchvision --index-url https://download.pytorch.o
 uv pip install -p .venv -e ".[gpu]"
 
 # AMD on Windows, RX 7000 / 9000 (RDNA3 / RDNA4) - AMD's Windows ROCm wheels (public preview):
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
+uv pip install -p .venv torch torchvision --torch-backend=rocm6.4
 
 # CPU (any machine):
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu
+uv pip install -p .venv torch torchvision --torch-backend=cpu
 ```
 
 The `[gpu]` extra is the gfx103X (RX 6000) self-contained build (Windows, Python

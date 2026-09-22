@@ -625,7 +625,7 @@ if [ -n "$TORCHSPEC" ]; then
   # already shows live per-package byte progress (which is exactly what a
   # gigabyte-plus torch download needs), and a second writer would corrupt that
   # in-place redraw rather than reassure anyone.
-  # TORCHSPEC is a multi-token pip arg list (e.g. "torch torchvision --index-url ...");
+  # TORCHSPEC is a multi-token pip arg list (e.g. "torch torchvision --torch-backend=...");
   # it is intentionally left unquoted so the words split into separate arguments.
   # shellcheck disable=SC2086
   uv pip install -p .venv $TORCHSPEC \
@@ -636,15 +636,15 @@ else
   say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."
   say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
   say "  For HuggingFace transformers models, add PyTorch later (see docs/gpu-setup.md):"
-  say "    CPU (any machine): uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu"
+  say "    CPU (any machine): uv pip install -p .venv torch torchvision --torch-backend=cpu"
   # NVIDIA CUDA's wheel line depends on GPU generation (Blackwell and newer need
   # a different index than older cards - see hwdetect.pytorch_index_url), so ask
   # localm's own detector for THIS machine's actual line instead of hardcoding
   # one that would silently install kernel-less torch on a Blackwell card.
   cudaspec="$(.venv/bin/python -m localm.hwdetect torch-args cuda 2>/dev/null)"
-  say "    NVIDIA CUDA:       uv pip install -p .venv ${cudaspec:-torch torchvision --index-url https://download.pytorch.org/whl/cu126}"
-  say "    AMD ROCm (Linux):  uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
-  say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/xpu"
+  say "    NVIDIA CUDA:       uv pip install -p .venv ${cudaspec:-torch torchvision --torch-backend=cu126}"
+  say "    AMD ROCm (Linux):  uv pip install -p .venv torch torchvision --torch-backend=rocm6.2"
+  say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --torch-backend=xpu"
 fi
 
 # ---- data directory ---------------------------------------------------------

@@ -469,6 +469,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Fetching a web page that declared a non-UTF-8 encoding (common on older or non-English
   sites) could show garbled text instead of the page's actual content.** The page's declared
   encoding is now used to decode it, falling back to UTF-8 only when none is declared.
+- **Installing the PyTorch/HuggingFace stack for a specific vendor (Intel XPU, NVIDIA CUDA, or
+  AMD ROCm) from a source checkout could fail outright with an unsatisfiable dependency error
+  naming `setuptools`.** The install command routed every dependency, including ordinary ones
+  like `setuptools`, through PyTorch's vendor-specific wheel index, which does not mirror a
+  recent enough `setuptools` to satisfy this project's own requirement. It now routes only the
+  PyTorch packages through that index and leaves the rest on the normal package index.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
