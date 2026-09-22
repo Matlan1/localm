@@ -1300,21 +1300,35 @@ def _torch_gpu_probe_known_doomed() -> bool:
     A SECOND, LESS CERTAIN COMBINATION (:func:`native_sycl_runtime_resident`
     + :func:`_intel_sycl_rt_installed`): the bundled Windows SYCL llama.cpp
     build ships Intel's own oneAPI DPC++/SYCL runtime DLLs (sycl8.dll, the
-    oneMKL/oneTBB/Unified-Runtime libraries), and torch's ``+xpu`` wheels
-    depend on ``intel-sycl-rt``, a pip package shipping that same runtime
-    family under the same names, for the same underlying toolchain - both
-    confirmed real (a real, version-pinned pip dependency; matching DLL
-    basenames named against this project's own verified SYCL bundle listing).
+    oneMKL/oneTBB/Unified-Runtime libraries), and a torch ``+xpu`` install
+    pulls in the same runtime family under the same DLL names - across
+    ``intel-sycl-rt`` and ten sibling oneAPI packages (``mkl``,
+    ``onemkl-sycl-blas``, ``tbb``, ``intel-openmp``, ``tcmlib``, ``umf``,
+    ``intel-cmplr-lib-rt``/``-ur`` among them) that a real ``+xpu`` wheel's
+    own metadata names as direct dependencies. 16 of the bundle's 18
+    DLL/EXE basenames match, each independently downloaded and
+    sha256-verified against its package's own published digest. Torch's own
+    ``_load_dll_libraries`` (``torch/__init__.py``, read directly from the
+    matching release tag) separately confirms it adds
+    ``sys.exec_prefix/Library/bin`` - exactly where those packages
+    install - to the process DLL search path before loading its own bundled
+    DLLs: the same class of mechanism as the proven HIP case.
+    ``_intel_sycl_rt_installed`` checks only ``intel-sycl-rt`` (which alone
+    ships just one of the 16 matched names, ``sycl8.dll``) because it is a
+    confirmed unconditional direct dependency of every ``+xpu`` build, so it
+    stands in reliably for the whole set without needing to be the package
+    that ships the overlap itself.
     UNLIKE THE HIP COMBINATION ABOVE, THIS ONE HAS NOT BEEN ROOT-CAUSED ON
     REAL HARDWARE: no Intel GPU was available to reproduce an actual
-    collision, so this is inferred by mechanism analogy (a bare ``import
-    torch`` bulk-preloads every dependency DLL before any device-specific
-    code runs, on both toolchains alike) plus named-DLL evidence, not proof.
-    It is still wired in because the cost of being wrong is asymmetric and
-    small: no SYCL/XPU torch enumeration exists anywhere in this codebase
-    today, so skipping changes nothing this probe currently returns, while
-    catching it if the analogy holds avoids the HIP case's exact symptoms
-    (a crash-prone import, a repeating stderr trace).
+    collision, and no PE import table was inspected to confirm torch's own
+    compiled code references any of these DLLs by name - the basename
+    overlap and the directory-visibility mechanism are both confirmed real;
+    the collision itself is not. It is still wired in because the cost of
+    being wrong is asymmetric and small: no SYCL/XPU torch enumeration
+    exists anywhere in this codebase today, so skipping changes nothing
+    this probe currently returns, while catching it if the collision is
+    real avoids the HIP case's exact symptoms (a crash-prone import, a
+    repeating stderr trace).
 
     Fails OPEN: if either detector pair errors, the probe proceeds with its
     normal torch attempt (which catches its own failures) - detection must
