@@ -647,6 +647,22 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
         append_fail_issue(candidate, str(e), receipt_path)
         print(f"FAIL: {e}")
         return 1
+    except Exception as e:
+        # Anything past this point that is NOT a PipelineError is about this
+        # run's own tooling (a subprocess whose executable could not be
+        # resolved, an environment problem) rather than the candidate build's
+        # quality, which already passed real hardware confirm before this
+        # block runs - so INCONCLUSIVE (cooldown retry), never a permanent
+        # FAIL. Unlike an ordinary INCONCLUSIVE this is always logged: an
+        # uncaught exception is always worth a human's attention, whatever
+        # the retry eventually does. See
+        # test_run_llama_pipeline_unexpected_exception_is_inconclusive_and_logged.
+        reason = f"unexpected error after a PASS confirm: {type(e).__name__}: {e}"
+        save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
+                   "receipt_path": str(receipt_path), "reason": reason})
+        append_fail_issue(candidate, reason, receipt_path)
+        print(f"INCONCLUSIVE (unexpected error): {reason}")
+        return 2
 
 
 def main(argv=None) -> int:

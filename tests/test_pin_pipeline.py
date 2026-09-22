@@ -986,6 +986,40 @@ def test_run_llama_pipeline_bump_refusal_stops_before_commit(monkeypatch, tmp_pa
     assert issue_spy.calls
 
 
+def test_run_llama_pipeline_unexpected_exception_is_inconclusive_and_logged(monkeypatch, tmp_path):
+    """Found by a real live run: a raw FileNotFoundError (gh not resolvable
+    via this process's PATH) escaped prepare_bump_branch() uncaught, crashed
+    the whole script, and recorded no state at all - so a retry would have
+    blindly redone the entire download+confirm instead of recognizing this
+    was a tooling problem, not evidence about the (already-confirmed-good)
+    candidate. Unlike an ordinary InfraError-driven INCONCLUSIVE, this one
+    must ALSO be logged: an uncaught exception is always worth a human's
+    attention, whatever a retry eventually does."""
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 0)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+
+    def _raise_unexpected(wt, candidate):
+        raise FileNotFoundError("[WinError 2] The system cannot find the file specified")
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", _raise_unexpected)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert issue_spy.calls, "an uncaught exception must still be logged, unlike an ordinary INCONCLUSIVE"
+    state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "INCONCLUSIVE"
+    assert "FileNotFoundError" in state["reason"]
+    skip_reason = pipeline.should_skip(state, "b105")
+    assert skip_reason is not None and "cooldown" in skip_reason, (
+        "must retry after a cooldown, never be permanently blocked")
+
+
 def test_run_llama_pipeline_infra_error_during_commit_is_inconclusive_not_fail(monkeypatch, tmp_path):
     """A push/gh-CLI hiccup is about THIS RUN's plumbing, not the confirmed
     candidate build - it must retry after cooldown (INCONCLUSIVE), never
