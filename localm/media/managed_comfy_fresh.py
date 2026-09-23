@@ -90,13 +90,17 @@ _AMD_GFX103X_ROCM_SDK = ("rocm", "rocm-sdk-core", "rocm-sdk-libraries-gfx103x-al
 class ComfyTorchSpec:
     """The PyTorch install spec for a fresh ComfyUI venv on THIS hardware.
     ``packages`` are pip requirement strings; ``index_url`` is the primary wheel
-    index (None = PyPI); ``extra_index_url`` an additional index (the AMD ROCm repo,
-    so torch resolves there and everything else from PyPI). ``note`` carries an
-    honest reason when the pick is a degraded fallback."""
+    index (None = PyPI); ``extra_index_url`` an additional PEP 503 index (the AMD
+    gfx103X ROCm repo, so torch resolves there and everything else from PyPI);
+    ``find_links`` a flat (non-PEP-503) wheel listing pip can only reach via
+    --find-links, never --index-url/--extra-index-url (AMD's official Windows
+    ROCm preview repo - see hwdetect.amd_rocm_win_find_links). ``note`` carries
+    an honest reason when the pick is a degraded fallback."""
     variant: str
     packages: tuple
     index_url: Optional[str] = None
     extra_index_url: Optional[str] = None
+    find_links: Optional[str] = None
     note: str = ""
 
 
@@ -139,8 +143,9 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
                 "rocm", _AMD_GFX103X_TORCH + _AMD_GFX103X_ROCM_SDK,
                 extra_index_url=_AMD_GFX103X_ROCM_INDEX)
         if fam in ("gfx110x", "gfx120x"):
-            return ComfyTorchSpec("rocm", ("torch", "torchvision"),
-                                  index_url=hwdetect.pytorch_index_url("rocm-win"))
+            torch, torchvision, torchaudio = hwdetect.amd_rocm_win_torch_packages()
+            return ComfyTorchSpec("rocm", (torch, torchvision, torchaudio),
+                                  find_links=hwdetect.amd_rocm_win_find_links())
         return _cpu_spec(
             note=("no verified ROCm torch wheel for this AMD GPU on Windows; using "
                   "CPU torch so ComfyUI still runs (on CPU) - add a GPU torch by hand "
@@ -165,12 +170,14 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
 
 def comfy_torch_install_args(spec: ComfyTorchSpec) -> list:
     """The pip arguments (after ``pip install``) for *spec*: the package specs, then
-    --index-url / --extra-index-url as set."""
+    --index-url / --extra-index-url / --find-links as set."""
     args = list(spec.packages)
     if spec.index_url:
         args += ["--index-url", spec.index_url]
     if spec.extra_index_url:
         args += ["--extra-index-url", spec.extra_index_url]
+    if spec.find_links:
+        args += ["--find-links", spec.find_links]
     return args
 
 
