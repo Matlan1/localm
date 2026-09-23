@@ -19,7 +19,7 @@ always present; several are conditional (marked below).
 
 | Tool | What it does | Annotation |
 |---|---|---|
-| `chat` | Generate with a local model. Per-call `model`, `system`, `seed`, `temperature`, `max_tokens` | |
+| `chat` | Generate with a local model. Per-call `model`, `system`, `images` (local image files or `data:image/...` URIs), `seed`, `temperature`, `max_tokens` | |
 | `server_activity` | What any running localm server (GUI/HTTP) on this machine is doing right now - downloads, indexing, media generation - so a client can check before starting a long operation of its own | read-only |
 | `list_models` | Your registry with sizes and sources | read-only |
 | `system_stats` | Live CPU/RAM/VRAM/GPU load, for judging model/quant fit | read-only |
@@ -70,9 +70,28 @@ localm mcp --no-images       # do not expose generate_image
 localm mcp --no-coder        # do not expose run_coder_task
 localm mcp --no-memory       # do not expose memory_recall even if the memory plugin is active
 localm mcp --memory-write    # also expose memory_append (needs --no-memory to be absent)
+localm mcp --share-loaded-models  # use a model another localm instance already has loaded
 ```
 
 The model loads on the first tool call, so client startup stays instant. All logging goes to stderr; stdout carries only protocol frames.
+
+### Which model answers
+
+A `chat` or `run_coder_task` call that names a `model` is always answered by
+that model. Without one, the default model answers, unless the call needs
+something it does not provide: images it cannot read, structured tool calls
+(every `run_coder_task` needs them), or a longer conversation than it was
+trained for. Then an installed model that has it answers instead, and the
+result ends with a note naming that model and the reason. A `model` in the
+project's `.localcoder/config.toml` counts as named.
+
+With `--share-loaded-models`, a model another localm instance on this machine
+(a `localm gui` or `localm serve`) already has loaded is used through that
+instance instead of loading a second copy into VRAM. The match is by model
+file, not by name. An instance of the same install is reached with this
+install's own credential; an instance of another install only when it has no
+API key set. If that instance stops answering, the model is loaded here
+instead.
 
 ## Quick start: expose localm to Claude Desktop
 

@@ -126,7 +126,8 @@ class EngineCache:
     """
 
     def __init__(self, default_model: Optional[str] = None,
-                 engine_factory: Optional[Callable] = None) -> None:
+                 engine_factory: Optional[Callable] = None,
+                 share_loaded: bool = False) -> None:
         self.default_model = default_model
         # Display name -> engine, plus usage order (least-recently-used FIRST,
         # MRU last).
@@ -134,6 +135,11 @@ class EngineCache:
         self._lru: list = []
         # Injection point for tests - real factory builds a localm Engine
         self._factory = engine_factory or self._build_engine
+        # When True, get_chat() answers with a model another localm instance on
+        # this machine already has loaded instead of loading a second copy.
+        self.share_loaded = bool(share_loaded)
+        # Display name -> a client for another instance's loaded copy.
+        self._peers: Dict[str, Any] = {}
 
     # ---- back-compat views over the multi-resident state -------------------
     # _engine and _loaded_name read the most-recently-used resident.
@@ -211,7 +217,10 @@ class EngineCache:
             raise ValueError(f"Model not found: {model_name!r}. "
                              f"Run 'localm list' to see registered models.")
         path, _hint = info
-        return Engine(str(path), display_name=model_name)
+        from localm.model_manager import get_model_mmproj
+        return Engine(str(path), display_name=model_name,
+                      mmproj_path=get_model_mmproj(model_name,
+                                                   allow_direct_path=trusted))
 
     def resolve_model(self, requested: Optional[str]) -> str:
         # A client-supplied name must be a registered one; the operator's own
@@ -237,6 +246,98 @@ class EngineCache:
                 "No chat model registered (all registered models are type 'unknown'). "
                 "Name one explicitly, or set a model's type with 'localm set-type'.")
         return name
+
+    def route(self, requested: Optional[str], messages: list, *,
+              required: tuple = (), pinned: Optional[bool] = None):
+        """The capability-routing decision for a request with *messages*,
+        without loading anything: which model should answer it.
+
+        A model the client named is pinned unless *pinned* says otherwise;
+        the server's default model is not. A request that needs something the
+        model it would use lacks (an image, structured tool calls, a longer
+        conversation than it was trained for) resolves to an installed model
+        that has it. Raises ValueError for a name that is not registered."""
+        from localm.inference import capability_routing as cr
+        from localm.model_manager import capabilities as caps
+        current = self.resolve_model(requested)
+        pinned = bool(requested) if pinned is None else bool(pinned)
+        needs = cr.request_needs(messages or [], required=required)
+        known = {}
+        eng = self._engines.get(current)
+        if (eng is not None and getattr(eng, "loaded", False)
+                and getattr(eng, "supports_images", False) is True):
+            known[caps.VISION] = True
+        return cr.plan_route(current, needs, pinned=pinned,
+                             resident=list(self._lru) + list(self._peers),
+                             current_known=known)
+
+    def get_chat(self, name: str):
+        """The engine to answer a chat with model *name*: another localm
+        instance's already-loaded copy when ``share_loaded`` and one is
+        available, else this server's own (see get)."""
+        if self.share_loaded:
+            peer = self._peers.get(name) or self._peer_engine(name)
+            if peer is not None:
+                return peer
+        return self.get(name)
+
+    def is_peer(self, engine) -> bool:
+        """True when *engine* is another instance's copy, not one loaded here."""
+        return any(e is engine for e in self._peers.values())
+
+    def drop_peer(self, name: str) -> None:
+        """Stop using another instance's copy of *name*, e.g. after it stopped
+        answering; the next get_chat() looks again or loads it here."""
+        self._peers.pop(name, None)
+
+    def _peer_engine(self, name: str):
+        """A client for another localm instance on this machine that has
+        *name* loaded (matched by model file), or None.
+
+        An instance of this same install is authenticated with this install's
+        own credential; any other instance only when it needs none (open
+        mode). Best-effort: a failed lookup is logged and answers None."""
+        try:
+            from localm import instances, peer_routing
+            from localm.auth import resolve_bearer_token
+            from localm.config import home_dir, load_registry
+            from localm.inference.http_engine import HttpEngine
+            reg = load_registry()
+            canonical, aliases = peer_routing.registry_name_and_aliases(reg, name)
+            peer = peer_routing.find_offer(
+                canonical, aliases,
+                identity=peer_routing.local_identity(reg, canonical))
+            if peer is None:
+                return None
+            own = {str(e.get("instance_id")): e for e in instances.list_entries(home_dir())}
+            same_install = own.get(str(peer.get("instance_id")))
+            token = None
+            if same_install is not None:
+                token = resolve_bearer_token(same_install.get("token"))
+            try:
+                peer_routing.verify_peer_credential(peer, token)
+            except Exception as e:
+                _log(f"not using {name} loaded by the localm instance on port "
+                     f"{peer.get('port')}: {e}")
+                return None
+            route = peer_routing.PeerRoute(
+                model=name, instance_id=str(peer.get("instance_id")),
+                host=peer.get("host"), port=int(peer.get("port")),
+                scheme=peer.get("scheme") or "http", api_key=token or "")
+            base = peer_routing._peer_url(route, "/v1")
+            eng = HttpEngine(base, token=token,
+                             model=peer.get("matched_model") or name,
+                             display_name=name, pin_model=True)
+            eng.active_requests = 0
+            eng.unloading = False
+            self._peers[name] = eng
+            _log(f"using {name} already loaded by the localm instance on port "
+                 f"{peer.get('port')} (no second copy loaded)")
+            return eng
+        except Exception as e:
+            _log(f"warning: looking for another instance with {name} loaded "
+                 f"failed: {e}")
+            return None
 
     def get(self, requested: Optional[str]):
         name = self.resolve_model(requested)
@@ -755,10 +856,11 @@ class MCPStdioServer:
 
 def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
                  enable_coder: bool = True, enable_memory: bool = True,
-                 enable_memory_write: bool = False) -> None:
+                 enable_memory_write: bool = False,
+                 share_loaded: bool = False) -> None:
     """Entry point used by the CLI: build everything and block on stdio."""
     _redirect_consoles_to_stderr()
-    engines = EngineCache(default_model=model)
+    engines = EngineCache(default_model=model, share_loaded=share_loaded)
     server = MCPStdioServer(build_tools(
         engines, enable_images=enable_images, enable_coder=enable_coder,
         enable_memory=enable_memory,

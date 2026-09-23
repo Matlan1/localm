@@ -161,16 +161,45 @@ def build(engines: EngineCache) -> Dict[str, dict]:
 
         # A model name from the client or the project config is registry-gated
         # by resolve_model; the operator's own --model default is the only path
-        # allowed through.
+        # allowed through. A named model is used as named; without one, a
+        # default model that cannot emit structured tool calls gives way to an
+        # installed model that can.
         try:
-            with _quiet_stdout():
-                model_name = engines.resolve_model(cfg.model)
-                engine = engines.get(model_name)
+            decision = engines.route(cfg.model, [], required=("tool_use",),
+                                     pinned=bool(cfg.model))
         except ValueError as e:
             return _text_result(str(e), is_error=True)
-        backend = SharedEngineBackend(
-            engine, model_name, lock=engines.generation_lock(engine),
-            still_resident=lambda: engines.is_resident(model_name, engine))
+        names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
+        names.append(decision.current)
+        engine = model_name = None
+        load_errors = []
+        for name in names:
+            try:
+                with _quiet_stdout():
+                    engine = engines.get_chat(name)
+                model_name = name
+                break
+            except ValueError as e:
+                return _text_result(str(e), is_error=True)
+            except Exception as e:
+                if name == decision.current:
+                    return _text_result(f"coder task failed to start: {e}",
+                                        is_error=True)
+                load_errors.append(f"{name}: {e}")
+                _srv._log(f"warning: could not load {name} for a coder task: {e}")
+        if model_name != decision.resolved:
+            decision = decision.without_route(load_errors)
+        if engines.is_peer(engine):
+            # Another localm instance's loaded copy, reached over its own API.
+            from localm.plugins.coder.backends.http import HTTPBackend
+            backend = HTTPBackend(
+                getattr(engine, "_base"), model=getattr(engine, "_model", None) or model_name,
+                api_key=getattr(engine, "_token", None) or "localm",
+                localm_server=True)
+        else:
+            backend = SharedEngineBackend(
+                engine, model_name, lock=engines.generation_lock(engine),
+                still_resident=lambda: engines.is_resident(model_name, engine))
 
         # Default OFF, matching the CLI's own fail-closed default: without
         # `yes` file writes still happen but run_shell is denied, since there
@@ -215,6 +244,10 @@ def build(engines: EngineCache) -> Dict[str, dict]:
         denied = coder_runner.describe_denied(result.denied)
         meta = (f"\n\n[turns={result.turns} tokens={result.total_tokens} "
                 f"success={result.success} denied={len(result.denied)}]")
+        from .chat import routing_note
+        note = routing_note(decision)
+        if note:
+            meta += "\n" + note
         text = result.response + ("\n\n[denied] " + denied if denied else "") + meta
         return _text_result(text, is_error=not result.success)
 
