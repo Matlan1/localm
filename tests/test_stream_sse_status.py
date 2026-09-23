@@ -111,3 +111,50 @@ def test_stream_sse_image_initial_status():
         "Encoding image...",
         "GPU vision encode failed; retrying on CPU...",
     ]
+
+
+def test_stream_sse_status_chunks_carry_a_stable_code():
+    engine = _make_status_mock_engine(
+        statuses=[
+            "Encoding image (GPU)...",
+            "GPU vision encode failed; retrying on CPU (this may take longer)...",
+            "Generating response...",
+        ],
+        supports_images=True,
+    )
+    app = create_app(engine)
+    client = TestClient(app)
+
+    payload = {
+        "model": "test-model",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this:"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ],
+        }],
+        "stream": True,
+    }
+
+    codes_by_status = {}
+    with client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+        assert resp.status_code == 200
+        for raw in resp.iter_lines():
+            line = raw.strip() if isinstance(raw, str) else raw.decode("utf-8").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            body = line[len("data:"):].strip()
+            if body == "[DONE]":
+                break
+            chunk = json.loads(body)
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            if delta.get("status"):
+                codes_by_status[delta["status"]] = delta.get("status_code")
+
+    assert codes_by_status == {
+        "Encoding image...": "encoding_image",
+        "Encoding image (GPU)...": "encoding_image_gpu",
+        "GPU vision encode failed; retrying on CPU (this may take longer)...": "vision_cpu_retry",
+        "Generating response...": "generating",
+    }

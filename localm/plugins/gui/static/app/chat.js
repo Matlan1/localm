@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, applyChatBackground, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
-import { t, tn } from "./i18n.js";
+import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
@@ -2057,19 +2057,34 @@ export function mountStatusIndicator(bodyEl, text, isWarn = false) {
   return ind;
 }
 
+// Status codes (delta.status_code) that call for the warning style, independent
+// of which language the accompanying text is in.
+const WARN_STATUS_CODES = new Set(["vision_cpu_retry"]);
+
+/** The chat.status.* catalog key for a snake_case server status code. */
+function statusIndicatorI18nKey(code) {
+  return "chat.status." + code.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+}
+
 /** Update the text and warning state of an existing status indicator in bodyEl,
- *  or mount a new one if not present. */
-export function updateStatusIndicator(bodyEl, text, isWarn = false) {
+ *  or mount a new one if not present. `code` is the server's delta.status_code;
+ *  when it resolves to a catalog entry the indicator shows that localized text
+ *  and picks the warning style from the code, otherwise `text` (the server's
+ *  English status) and the substring-matched style are used as before. */
+export function updateStatusIndicator(bodyEl, text, code = null) {
   if (!bodyEl) return null;
+  const label = code ? tOr(statusIndicatorI18nKey(code), text) : text;
+  const shouldWarn = code
+    ? WARN_STATUS_CODES.has(code)
+    : (typeof text === "string" && (
+        text.toLowerCase().includes("failed") || text.toLowerCase().includes("retrying")
+      ));
   const ind = bodyEl.querySelector(".msg-status-indicator");
   if (!ind) {
-    return mountStatusIndicator(bodyEl, text, isWarn);
+    return mountStatusIndicator(bodyEl, label, shouldWarn);
   }
-  const label = ind.querySelector(".status-text");
-  if (label && text) label.textContent = text;
-  const shouldWarn = isWarn || (typeof text === "string" && (
-    text.toLowerCase().includes("failed") || text.toLowerCase().includes("retrying")
-  ));
+  const labelEl = ind.querySelector(".status-text");
+  if (labelEl && label) labelEl.textContent = label;
   if (shouldWarn) ind.classList.add("st-warn");
   else ind.classList.remove("st-warn");
   return ind;

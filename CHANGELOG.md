@@ -476,6 +476,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   like `setuptools`, through PyTorch's vendor-specific wheel index, which does not mirror a
   recent enough `setuptools` to satisfy this project's own requirement. It now routes only the
   PyTorch packages through that index and leaves the rest on the normal package index.
+- **The chat status pill (Processing prompt, Encoding image, Generating response,
+  and the GPU-to-CPU vision fallback warning) now follows the interface
+  language for the whole reply instead of only until the server's first
+  update.** The server now sends a stable status code alongside its English
+  status text, and the GUI localizes from that code, so a non-English
+  interface no longer flips back to English status text partway through
+  a turn.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
