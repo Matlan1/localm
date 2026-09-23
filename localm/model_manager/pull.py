@@ -38,6 +38,188 @@ from .registry import find_aliases_by_path
 _HF_ENDPOINT = "https://huggingface.co"
 
 
+_PARTIAL_OWNER_SUFFIX = ".owner"
+_INFLIGHT_PARTIALS: "set[str]" = set()
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def _partial_owner_path(partial: Path) -> Path:
+    """The sidecar file recording which process owns *partial*."""
+    return partial.with_name(partial.name + _PARTIAL_OWNER_SUFFIX)
+
+
+def _own_create_time() -> "float | None":
+    """This process's psutil create_time, or None when it cannot be read."""
+    try:
+        import psutil
+        return float(psutil.Process(os.getpid()).create_time())
+    except Exception:
+        return None
+
+
+def _write_partial_owner(partial: Path) -> None:
+    """Record this process (pid and create_time) as the owner of *partial*."""
+    rec = {"pid": os.getpid(), "created": _own_create_time()}
+    _partial_owner_path(partial).write_text(json.dumps(rec), encoding="utf-8")
+
+
+def _read_partial_owner(partial: Path) -> "dict | None":
+    """The owner record of *partial*, or None when absent or unreadable."""
+    try:
+        rec = json.loads(_partial_owner_path(partial).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _unlink_quiet(p: Path) -> None:
+    """Remove *p* if present; a failure to remove is not an error here."""
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _partial_in_flight(partial: Path) -> bool:
+    """True while a download in this process holds *partial* open."""
+    with _INFLIGHT_LOCK:
+        return str(partial) in _INFLIGHT_PARTIALS
+
+
+def _partial_owner_is_gone(partial: Path) -> bool:
+    """True only when the recorded owner of *partial* is PROVEN dead.
+
+    Returns False for a missing or unreadable sidecar, an unparsable pid, a
+    live pid whose create_time matches the record, and any probe failure. A
+    pid that is this process's own is gone when no download in this process
+    currently holds the file.
+    """
+    from localm import instances
+    rec = _read_partial_owner(partial)
+    if rec is None:
+        return False
+    try:
+        pid = int(rec.get("pid", -1))
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return not _partial_in_flight(partial)
+    if not instances.pid_alive(pid):
+        return True
+    created = rec.get("created")
+    try:
+        if created is not None:
+            import psutil
+            if abs(float(psutil.Process(pid).create_time()) - float(created)) > 1.0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _partial_candidates(incomplete_path: Path) -> "list[Path]":
+    """Every temp file for the blob *incomplete_path* names: the per-process
+    ``<stem>.<id>.incomplete`` files and a plain ``<stem>.incomplete``."""
+    stem = incomplete_path.stem
+    out = []
+    try:
+        for p in incomplete_path.parent.iterdir():
+            n = p.name
+            if not n.endswith(".incomplete"):
+                continue
+            if (n == incomplete_path.name or n.startswith(stem + ".")) and p.is_file():
+                out.append(p)
+    except OSError:
+        pass
+    return out
+
+
+def _partial_size(p: Path) -> int:
+    """Size of *p* in bytes, or -1 when it cannot be read."""
+    try:
+        return p.stat().st_size
+    except OSError:
+        return -1
+
+
+def _reusable_partial_bytes(incomplete_path: Path,
+                            expected_size: "int | None" = None) -> int:
+    """Bytes a download of this blob would resume from: the size of the largest
+    candidate that this process holds or whose owner is proven gone. Candidates
+    larger than a known *expected_size* are not counted."""
+    best = 0
+    for c in _partial_candidates(incomplete_path):
+        if not (_partial_in_flight(c) or _partial_owner_is_gone(c)):
+            continue
+        n = _partial_size(c)
+        if n < 0:
+            continue
+        if expected_size is not None and expected_size > 0 and n > expected_size:
+            continue
+        best = max(best, n)
+    return best
+
+
+def _adopt_partial(incomplete_path: Path, tmp_path: Path,
+                   expected_size: "int | None") -> int:
+    """Rename the largest usable proven-orphan candidate for this blob onto
+    *tmp_path* and delete every other proven-orphan candidate. Candidates whose
+    owner is not proven gone are left untouched. Returns the adopted size, 0
+    when nothing was adopted."""
+    adoptable = []
+    for c in _partial_candidates(incomplete_path):
+        if c == tmp_path or not _partial_owner_is_gone(c):
+            continue
+        n = _partial_size(c)
+        if n >= 0:
+            adoptable.append((n, c))
+    adoptable.sort(key=lambda t: t[0], reverse=True)
+    adopted = 0
+    for n, c in adoptable:
+        usable = n > 0 and (expected_size is None or expected_size <= 0
+                            or n <= expected_size)
+        if adopted == 0 and usable:
+            try:
+                c.rename(tmp_path)
+            except OSError:
+                continue
+            adopted = n
+        else:
+            try:
+                c.unlink()
+            except OSError:
+                continue
+        _unlink_quiet(_partial_owner_path(c))
+    return adopted
+
+
+def _reap_stale_etag_partials(incomplete_path: Path) -> None:
+    """Delete proven-orphan temp files of the same destination file but a
+    different etag. Files whose owner is not proven gone are left alone."""
+    name = incomplete_path.name
+    short = name.split(".")[0]
+    stem = incomplete_path.stem
+    try:
+        entries = list(incomplete_path.parent.iterdir())
+    except OSError:
+        return
+    for p in entries:
+        n = p.name
+        if not n.endswith(".incomplete") or not n.startswith(short + "."):
+            continue
+        if n == name or n.startswith(stem + "."):
+            continue
+        if not _partial_owner_is_gone(p):
+            continue
+        try:
+            p.unlink()
+        except OSError:
+            continue
+        _unlink_quiet(_partial_owner_path(p))
+
+
 def _resumable_download_to_tmp_and_move(
     incomplete_path: Path,
     destination_path: Path,
@@ -50,92 +232,91 @@ def _resumable_download_to_tmp_and_move(
     xet_file_data: Any,
     tqdm_class: Any = None,
 ) -> None:
-    """Download content with range-resumption support from existing partial files."""
+    """Download into a process-owned temp file, resuming from a partial whose
+    owner is proven gone, then move the result into place.
+
+    The temp file is ``<stem>.<id>.incomplete`` beside *incomplete_path* with
+    a ``.owner`` sidecar naming this process. A partial whose owner is not
+    proven gone (live, unknown, or no sidecar) is never read, renamed or
+    deleted. A resume always transfers over HTTP with a Range request; Xet is
+    used only for a transfer that starts from byte 0. On a failed transfer the
+    temp file and its sidecar are kept for the next attempt; a failed size
+    check deletes them. See test_xet_partial_is_resumed_over_http_range.
+    """
     import huggingface_hub.file_download as fd
+    import uuid
 
     if destination_path.exists() and not force_download:
         return
 
-    target_path = Path(incomplete_path)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
+    incomplete_path = Path(incomplete_path)
+    incomplete_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = incomplete_path.with_name(
+        f"{incomplete_path.stem}.{uuid.uuid4().hex[:8]}.incomplete")
 
-    if force_download:
-        try:
-            target_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    _write_partial_owner(tmp_path)
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_PARTIALS.add(str(tmp_path))
+    try:
+        resume_size = 0
+        if not force_download:
+            resume_size = _adopt_partial(incomplete_path, tmp_path, expected_size)
+        _reap_stale_etag_partials(incomplete_path)
 
-    if not target_path.exists():
-        try:
-            candidates = list(target_path.parent.glob(f"{target_path.stem}.*.incomplete"))
-            if candidates:
-                largest = max(candidates, key=lambda p: p.stat().st_size)
-                if largest.stat().st_size > 0:
-                    largest.rename(target_path)
-                for c in candidates:
-                    if c != largest and c.exists():
-                        try:
-                            c.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-        except OSError:
-            pass
+        needed = max(0, (expected_size or 0) - resume_size)
+        if needed > 0:
+            fd._check_disk_space(needed, tmp_path.parent)
+            fd._check_disk_space(needed, destination_path.parent)
 
-    resume_size = 0
-    if target_path.exists():
-        try:
-            current_size = target_path.stat().st_size
-            if expected_size is not None and current_size > expected_size:
-                target_path.unlink(missing_ok=True)
-            else:
-                resume_size = current_size
-        except OSError:
-            resume_size = 0
-
-    needed = max(0, (expected_size or 0) - resume_size)
-    if needed > 0:
-        fd._check_disk_space(needed, target_path.parent)
-        fd._check_disk_space(needed, destination_path.parent)
-
-    if xet_file_data is not None and fd.is_xet_available():
-        fd.xet_get(
-            incomplete_path=target_path,
-            xet_file_data=xet_file_data,
-            headers=headers,
-            expected_size=expected_size,
-            displayed_filename=filename,
-            tqdm_class=tqdm_class,
-        )
-    else:
-        if xet_file_data is not None and not getattr(fd.constants, "HF_HUB_DISABLE_XET", False):
-            logger.warning(
-                "Xet Storage is enabled for this repo, but the 'hf_xet' package is not installed. "
-                "Falling back to regular HTTP download."
+        if resume_size == 0 and xet_file_data is not None and fd.is_xet_available():
+            fd.xet_get(
+                incomplete_path=tmp_path,
+                xet_file_data=xet_file_data,
+                headers=headers,
+                expected_size=expected_size,
+                displayed_filename=filename,
+                tqdm_class=tqdm_class,
             )
-        mode = "a+b" if resume_size > 0 else "wb"
-        try:
-            with target_path.open(mode) as f:
-                if resume_size > 0:
-                    f.seek(resume_size)
-                fd.http_get(
-                    url_to_download,
-                    f,
-                    resume_size=resume_size,
-                    headers=headers,
-                    expected_size=expected_size,
-                    displayed_filename=filename,
-                    tqdm_class=tqdm_class,
+        else:
+            if (resume_size == 0 and xet_file_data is not None
+                    and not getattr(fd.constants, "HF_HUB_DISABLE_XET", False)):
+                logger.warning(
+                    "Xet Storage is enabled for this repo, but the 'hf_xet' package "
+                    "is not installed. Falling back to regular HTTP download."
                 )
-        except OSError as e:
-            if "Consistency check failed" in str(e):
-                target_path.unlink(missing_ok=True)
-            raise
+            mode = "r+b" if resume_size > 0 else "wb"
+            try:
+                with tmp_path.open(mode) as f:
+                    if resume_size > 0:
+                        f.seek(resume_size)
+                    fd.http_get(
+                        url_to_download,
+                        f,
+                        resume_size=resume_size,
+                        headers=headers,
+                        expected_size=expected_size,
+                        displayed_filename=filename,
+                        tqdm_class=tqdm_class,
+                    )
+            except OSError as e:
+                if "Consistency check failed" in str(e):
+                    _unlink_quiet(tmp_path)
+                    _unlink_quiet(_partial_owner_path(tmp_path))
+                raise
 
-    fd._chmod_and_move(target_path, destination_path)
+        fd._chmod_and_move(tmp_path, destination_path)
+        _unlink_quiet(_partial_owner_path(tmp_path))
+    finally:
+        with _INFLIGHT_LOCK:
+            _INFLIGHT_PARTIALS.discard(str(tmp_path))
 
 
 def _ensure_hf_resumable_download() -> None:
-    """Wire _resumable_download_to_tmp_and_move into huggingface_hub.file_download."""
+    """Wire _resumable_download_to_tmp_and_move into huggingface_hub.file_download.
+
+    Called from the pull entry points, never at import, so a process that
+    never pulls keeps huggingface_hub's own download behaviour.
+    """
     try:
         import huggingface_hub.file_download as fd
         if getattr(fd, "_localm_resumable_patched", False):
@@ -147,7 +328,29 @@ def _ensure_hf_resumable_download() -> None:
         pass
 
 
-_ensure_hf_resumable_download()
+def _hf_incomplete_path(base_dir: Path, rel: str, etag: str) -> "Path | None":
+    """The temp-file path huggingface_hub uses for *rel* under *base_dir* at
+    *etag*, or None when that layout cannot be computed."""
+    try:
+        from huggingface_hub._local_folder import get_local_download_paths
+        return get_local_download_paths(Path(base_dir), rel).incomplete_path(etag)
+    except Exception as e:
+        logger.debug("cannot compute the .incomplete path for %s: %s", rel, e)
+        return None
+
+
+def _etag_from_head(resp: Any) -> "str | None":
+    """The etag huggingface_hub will name a download by, read from the first
+    response of a redirect-following HEAD (X-Linked-Etag, then ETag)."""
+    try:
+        import huggingface_hub.file_download as fd
+        history = list(getattr(resp, "history", None) or [])
+        first = history[0] if history else resp
+        h = getattr(first, "headers", None) or {}
+        raw = h.get("X-Linked-Etag") or h.get("ETag")
+        return fd._normalize_etag(raw) if raw else None
+    except Exception:
+        return None
 
 
 
@@ -185,14 +388,17 @@ class _ProgressOutcome:
         self.succeeded = True
 
 
-def _incomplete_prefixes(base_dir: Path, rel_parts: List[str]) -> "set[str] | None":
-    """Filename prefixes of the ``.incomplete`` temp files for *rel_parts*.
+def _incomplete_prefixes(base_dir: Path, rel_parts: List[str],
+                         etags: "dict[str, str | None] | None" = None,
+                         ) -> "dict[str, str | None] | None":
+    """Filename prefixes of the ``.incomplete`` temp files for *rel_parts*,
+    mapped to the etag each part is expected at (None when unknown).
 
     huggingface_hub names a local-dir temp file
-    ``<short_hash(<name>.metadata)>.<etag>.incomplete`` under
-    ``<local_dir>/.cache/huggingface/download/<subpath>/``. The etag is not
-    knowable in advance, but the hash prefix is, and it is what separates OUR
-    parts from a concurrent pull's.
+    ``<short_hash(<name>.metadata)>.<etag>.<id>.incomplete`` under
+    ``<local_dir>/.cache/huggingface/download/<subpath>/``. The hash prefix is
+    what separates OUR parts from a concurrent pull's; the etag, when *etags*
+    supplies it, separates the current upload from a stale one.
 
     Returns None when the layout cannot be computed - this reaches into
     huggingface_hub internals, so a version that moves them must degrade rather
@@ -202,10 +408,10 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: List[str]) -> "set[str] | No
     try:
         from huggingface_hub._local_folder import _short_hash
         from huggingface_hub._local_folder import get_local_download_paths
-        out = set()
+        out: "dict[str, str | None]" = {}
         for rel in rel_parts:
             paths = get_local_download_paths(Path(base_dir), rel)
-            out.add(_short_hash(paths.metadata_path.name))
+            out[_short_hash(paths.metadata_path.name)] = (etags or {}).get(rel)
         return out or None
     except Exception as e:
         # Not fatal and not silenced: progress simply gets coarser, and the
@@ -218,13 +424,19 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: List[str]) -> "set[str] | No
 @contextlib.contextmanager
 def _download_progress(target_parts: List[Path], total_size: int, *,
                        base_dir: "Path | None" = None,
-                       rel_parts: "List[str] | None" = None):
+                       rel_parts: "List[str] | None" = None,
+                       etags: "dict[str, str | None] | None" = None):
     """Stream JSON download progress while files land under *base_dir*.
 
     Active in GUI mode (LOCALM_PROGRESS_JSON=1). A total of 0 means the size
     could not be determined: progress still streams with ``pct: null`` so the
     GUI shows a busy bar with a running byte count, matching
     _snapshot_progress.
+
+    In-flight bytes are counted from the ``.incomplete`` temp files of THIS
+    job's parts (and, when *etags* names them, of the current etag only) that
+    this process holds or whose owner is proven gone: the largest such file
+    per part, which is the one a resume reuses.
 
     Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
     event reports the measured partial instead of 100%.
@@ -236,7 +448,7 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
 
     stop = threading.Event()
     cache_root = (Path(base_dir) if base_dir is not None else _mm.MODELS_DIR) / ".cache"
-    prefixes = _incomplete_prefixes(Path(base_dir), rel_parts) \
+    prefixes = _incomplete_prefixes(Path(base_dir), rel_parts, etags) \
         if base_dir is not None and rel_parts else None
 
     def _downloaded_bytes() -> int:
@@ -246,20 +458,29 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
                 done += p.stat().st_size
             except OSError:
                 pass  # not finished yet
-        active = 0
+        largest: "dict[str, int]" = {}
         if cache_root.is_dir():
             try:
                 for f in cache_root.rglob("*.incomplete"):
                     # Scoped to THIS job, so a concurrent pull's temp file is
                     # never added to this job's numerator.
-                    if prefixes is not None and f.name.split(".")[0] not in prefixes:
+                    segs = f.name.split(".")
+                    if prefixes is not None:
+                        if segs[0] not in prefixes:
+                            continue
+                        want = prefixes[segs[0]]
+                        if want is not None and (len(segs) < 2 or segs[1] != want):
+                            continue
+                    if not (_partial_in_flight(f) or _partial_owner_is_gone(f)):
                         continue
-                    try:
-                        active += f.stat().st_size
-                    except OSError:
-                        pass
+                    n = _partial_size(f)
+                    if n < 0:
+                        continue
+                    key = ".".join(segs[:2])
+                    largest[key] = max(largest.get(key, 0), n)
             except OSError:
                 pass
+        active = sum(largest.values())
         total_now = done + active
         # Only clamp against a total that is actually known: min(x, 0) is 0,
         # which would pin an indeterminate download's byte count at zero.
@@ -763,6 +984,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
         console.print(f"Pulling vision projector: {escape(candidate)}")
         try:
             from huggingface_hub import hf_hub_download
+            _ensure_hf_resumable_download()
             local = hf_hub_download(repo_id=repo_id, filename=candidate,
                                      local_dir=str(base_dir), endpoint=_HF_ENDPOINT)
             if Path(local) != dest:
@@ -877,6 +1099,7 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
         console.print(f"Pulling mmproj: {escape(mmproj_spec)}")
         try:
             from huggingface_hub import hf_hub_download
+            _ensure_hf_resumable_download()
             local = hf_hub_download(repo_id=m_repo, filename=safe, local_dir=str(base_dir),
                                      endpoint=_HF_ENDPOINT)
             if Path(local) != dest:
@@ -960,6 +1183,7 @@ def _pull_gguf_file(
     except ImportError:
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
         return False
+    _ensure_hf_resumable_download()
 
     base_dir = dest_dir if dest_dir is not None else _mm.MODELS_DIR
 
@@ -1069,33 +1293,34 @@ def _pull_gguf_file(
     else:
         _mm.ensure_dirs()
 
-    _ensure_hf_resumable_download()
-
-    # Disk space pre-flight - HEAD each missing part's CDN URL for Content-Length
+    # Disk space pre-flight - HEAD each missing part's CDN URL for its
+    # Content-Length and the etag huggingface_hub will name its temp file by.
+    part_sizes: "dict[str, int]" = {}
+    etags: "dict[str, str | None]" = {}
     try:
         import requests as _req
         total_size = 0
         for part in missing:
             cdn_url = hf_hub_url(repo_id, part, endpoint=_HF_ENDPOINT)
             head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
-            total_size += int(head.headers.get("content-length", 0))
+            size = int(head.headers.get("content-length", 0))
+            part_sizes[part] = size
+            etags[part] = _etag_from_head(head)
+            total_size += size
     except Exception:
         total_size = 0
 
+    # Only bytes a resume will actually reuse count: a partial of the current
+    # etag whose owner is proven gone. An unknown etag counts nothing.
     already_have = 0
-    cache_root = Path(base_dir) / ".cache"
-    prefixes = _incomplete_prefixes(base_dir, list(missing))
-    if cache_root.is_dir():
-        try:
-            for f in cache_root.rglob("*.incomplete"):
-                if prefixes is not None and f.name.split(".")[0] not in prefixes:
-                    continue
-                try:
-                    already_have += f.stat().st_size
-                except OSError:
-                    pass
-        except OSError:
-            pass
+    for part in missing:
+        etag = etags.get(part)
+        if not etag:
+            continue
+        inc = _hf_incomplete_path(base_dir, part, etag)
+        if inc is None:
+            continue
+        already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
 
     if not _mm._check_disk_space(base_dir, max(0, total_size - already_have)):
         return False
@@ -1121,7 +1346,8 @@ def _pull_gguf_file(
                       f"[bold]{escape(filename)}[/bold]")
 
     with _download_progress([base_dir / p for p in missing], total_size,
-                            base_dir=base_dir, rel_parts=list(missing)) as _prog:
+                            base_dir=base_dir, rel_parts=list(missing),
+                            etags=etags) as _prog:
         for part in missing:
             try:
                 local = hf_hub_download(
@@ -1142,14 +1368,15 @@ def _pull_gguf_file(
                 return False
         _prog.ok()
 
-    # Verify the downloaded first part against the user's --sha256. HF metadata
-    # is already trusted, so only a user assertion needs confirming against the
-    # real bytes. On mismatch, delete the part(s) and fail.
-    if want:
+    # Verify the downloaded first part against the digest we will register it
+    # under: HF's LFS metadata when known, else the user's --sha256. On
+    # mismatch, delete the part(s) and fail.
+    if verify_digest:
         actual = _verify_digest(dest).lower()
-        if actual != want:
+        if actual != verify_digest.lower():
             console.print(
-                f"[red]SHA256 mismatch![/red] Expected {escape(want[:16])}…, got "
+                f"[red]SHA256 mismatch![/red] Expected "
+                f"{escape(verify_digest[:16])}…, got "
                 f"{escape(actual[:16])}… - deleting downloaded file(s)"
             )
             for part in all_parts:
