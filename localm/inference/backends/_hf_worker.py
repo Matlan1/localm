@@ -27,7 +27,7 @@ import io
 import sys
 import threading
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Callable, Iterator, List, Optional, Tuple
 
 from localm.debuglog import logger
 
@@ -1079,6 +1079,7 @@ class HFWorker:
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
         cancel_event: Optional[threading.Event] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[str]:
         # xgrammar has no trigger/lazy mode, and a lazy request must not silently
         # become a STRICT constraint either (a strict grammar stalls thinking
@@ -1165,6 +1166,11 @@ class HFWorker:
                 audio_kwargs, audio_rate_verified = _build_audio_process_kwargs(
                     self._processor, audios)
                 process_kwargs.update(audio_kwargs)
+            if images and on_status:
+                try:
+                    on_status("Encoding image...")
+                except Exception:
+                    logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
             try:
                 inputs = self._processor(**process_kwargs).to(model.device)
             except ValueError as e:
@@ -1270,10 +1276,24 @@ class HFWorker:
                 # end() call. Safe to call more than once.
                 streamer.end()
 
+        if on_status:
+            try:
+                on_status("Processing prompt...")
+            except Exception:
+                logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
+
         thread = threading.Thread(target=_run_generate, daemon=True)
         thread.start()
 
+        first_token = True
         for token_text in streamer:
+            if first_token:
+                first_token = False
+                if on_status:
+                    try:
+                        on_status("Generating response...")
+                    except Exception:
+                        logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
             yield token_text
 
         thread.join()
