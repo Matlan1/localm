@@ -237,8 +237,10 @@ def test_console_close_leaves_the_trace_armed_when_the_shutdown_overruns(
     gui_cli._console_close_cleanup()
 
     assert not marker.exists()
-    assert trace.exists()
-    assert faulthandler.is_enabled()
+    assert trace.exists(), (
+        "the trace was released while the coder shutdown was still running")
+    assert faulthandler.is_enabled(), (
+        "faulthandler was detached while the coder shutdown was still running")
     assert bugreport._crash_trace_instance_id == "cc-overrun"
     never.set()
 

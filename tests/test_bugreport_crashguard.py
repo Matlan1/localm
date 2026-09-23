@@ -583,10 +583,11 @@ def test_a_trace_without_a_marker_whose_instance_is_still_running_is_left_alone(
         json.dumps({"instance_id": "still-running", "pid": os.getpid()}),
         encoding="utf-8")
 
-    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+    result = bugreport.check_and_report_prior_crash(home=str(tmp_path))
 
     assert trace.exists(), "a live instance's trace file was deleted"
-    assert calls == []
+    assert calls == [], "a live instance's trace was reported as a crash"
+    assert result is None
 
 
 def test_a_trace_with_its_marker_present_is_not_treated_as_left_over(
@@ -635,10 +636,11 @@ def test_a_leftover_trace_held_open_by_another_process_is_left_alone(
     try:
         assert holder.stdout.readline().strip() == "held"
 
-        assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+        result = bugreport.check_and_report_prior_crash(home=str(tmp_path))
 
         assert trace.exists(), "a trace file still held open by a live process was deleted"
-        assert calls == []
+        assert calls == [], "a live process's trace was reported as a crash"
+        assert result is None
     finally:
         holder.kill()
         holder.wait(timeout=30)
