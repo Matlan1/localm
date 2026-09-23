@@ -170,14 +170,23 @@ def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
         env=_child_env(home), cwd=str(tmp_path), stdout=log,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     rc = None
+    window_open = False
     try:
         marker = _wait_until_serving(proc, home, port, timeout=180)
+        log_path = Path(log.name)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and proc.poll() is None:
+            if "native window open" in log_path.read_text(encoding="utf-8",
+                                                          errors="replace"):
+                window_open = True
+                break
+            time.sleep(0.1)
         os.kill(proc.pid, getattr(signal, signame))
         rc = proc.wait(timeout=90)
     finally:
         output = _stop(proc, log)
 
-    assert "native window open" in output, output
+    assert window_open, f"the window loop never took the main thread:\n{output}"
     assert not marker.exists(), (
         f"{signame} left {marker.name} behind in app-window mode, so the "
         f"crash-recovery watchdog would relaunch it (exit {rc}):\n{output}")
