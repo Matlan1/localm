@@ -289,20 +289,20 @@ def test_api_landing_root_redirects_to_the_docs():
     assert TestClient(create_app(None)).get("/").status_code == 404
 
 
-# One route per gate label, each with a handler that touches nothing outside
-# the test's own LOCALM_HOME.
+# One route per gate label, as (method, template, JSON body). Each request is
+# one its handler only reads from or refuses before writing anything.
 _GATE_PROBES = {
-    "auth": ("POST", "/v1/embeddings"),
-    "fs_host": ("GET", "/debug/stacks"),
-    "scope:admin": ("POST", "/api/auth/key/rotate"),
-    "scope:chat": ("GET", "/api/conversations"),
-    "scope:config:read": ("GET", "/v1/config"),
-    "scope:config:write": ("PATCH", "/v1/config"),
-    "scope:keys:admin": ("GET", "/v1/keys"),
-    "scope:models:read": ("GET", "/v1/models"),
-    "scope:models:write": ("DELETE", "/v1/models/{model_id}/peer-route"),
-    "scope:plugins:admin": ("POST", "/api/plugins/{name}/enable"),
-    "scope:plugins:read": ("GET", "/api/plugins"),
+    "auth": ("POST", "/v1/embeddings", {}),
+    "fs_host": ("GET", "/debug/stacks", None),
+    "scope:admin": ("POST", "/api/auth/key/rotate", {"key": 0}),
+    "scope:chat": ("GET", "/api/conversations", None),
+    "scope:config:read": ("GET", "/v1/config", None),
+    "scope:config:write": ("PATCH", "/v1/config", []),
+    "scope:keys:admin": ("GET", "/v1/keys", None),
+    "scope:models:read": ("GET", "/v1/models", None),
+    "scope:models:write": ("DELETE", "/v1/models/{model_id}/peer-route", None),
+    "scope:plugins:admin": ("POST", "/api/plugins/{name}/enable", None),
+    "scope:plugins:read": ("GET", "/api/plugins", None),
 }
 
 
@@ -318,17 +318,17 @@ def test_every_gate_label_is_enforced_with_its_scope():
         f"_GATE_PROBES: in use {sorted(gate_labels)}")
 
     client = TestClient(app)
-    for label, (method, template) in sorted(_GATE_PROBES.items()):
+    for label, (method, template, body) in sorted(_GATE_PROBES.items()):
         assert table[("api", method, template)][:1] == (label,), (
             f"{method} {template} no longer starts with the {label} gate")
         url = _concrete(template)
-        anonymous = client.request(method, url)
+        anonymous = client.request(method, url, json=body)
         assert (anonymous.status_code, anonymous.json()) == (
             401, {"detail": "Invalid or missing API key"}), f"{label}: {method} {url}"
         if label == "auth":
             continue
         refused = client.request(
-            method, url, headers={"Authorization": f"Bearer {no_scope_key}"})
+            method, url, json=body, headers={"Authorization": f"Bearer {no_scope_key}"})
         detail = ("This key does not have host filesystem access" if label == "fs_host"
                   else f"Key lacks required scope: {label[len('scope:'):]}")
         assert (refused.status_code, refused.json()) == (
