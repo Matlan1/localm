@@ -57,24 +57,27 @@ def _dependency_labels(dependant) -> tuple:
     return tuple(labels)
 
 
+def _expand_context(ctx) -> list:
+    """Rows for one effective route of an included router; its dependant
+    carries the include-level dependencies."""
+    if ctx.starlette_route is not None:
+        return _expand(ctx.starlette_route)
+    if isinstance(ctx.original_route, APIRoute):
+        return [("api", method, ctx.path, ctx.dependant) for method in sorted(ctx.methods)]
+    raise AssertionError(
+        f"unclassified included route {type(ctx.original_route).__name__}")
+
+
 def _expand(route) -> list:
-    """``(kind, method, path, dependant)`` for each endpoint *route* serves.
-    Descends into lazily included routers (``include_router``), whose effective
-    dependencies carry the include-level ones. Raises on a route type it cannot
-    classify."""
+    """``(kind, method, path, dependant)`` for each endpoint *route* serves,
+    descending into lazily included routers (``include_router``). A Starlette
+    route without a method list serves every method and yields method ``*``.
+    Raises on a route type it cannot classify."""
+    if hasattr(route, "original_route") and hasattr(route, "starlette_route"):
+        return _expand_context(route)
     contexts = getattr(route, "effective_route_contexts", None)
     if callable(contexts):
-        out = []
-        for ctx in contexts():
-            if ctx.starlette_route is not None:
-                out.extend(_expand(ctx.starlette_route))
-            elif isinstance(ctx.original_route, APIRoute):
-                out.extend(("api", method, ctx.path, ctx.dependant)
-                           for method in sorted(ctx.methods))
-            else:
-                raise AssertionError(
-                    f"unclassified included route {type(ctx.original_route).__name__}")
-        return out
+        return [row for ctx in contexts() for row in _expand_context(ctx)]
     if isinstance(route, APIRoute):
         return [("api", method, route.path, route.dependant)
                 for method in sorted(route.methods)]
@@ -83,8 +86,9 @@ def _expand(route) -> list:
     if isinstance(route, WebSocketRoute):
         return [("websocket", "WS", route.path, None)]
     if isinstance(route, Route):
-        return [("route", method, route.path, None)
-                for method in sorted(route.methods or ())]
+        if route.methods is None:
+            return [("route", "*", route.path, None)]
+        return [("route", method, route.path, None) for method in sorted(route.methods)]
     if isinstance(route, Mount):
         return [("mount", "*", route.path, None)]
     raise AssertionError(f"unclassified route type {type(route).__name__}")
@@ -92,9 +96,15 @@ def _expand(route) -> list:
 
 def _route_table(app) -> dict:
     """``{(kind, method, path): dependency labels}`` for everything *app*
-    serves. Raises when two routes serve the same method and path."""
+    serves, low-priority routes (FastAPI's ``frontend()`` group, including
+    those of included routers) as well. Raises when two routes serve the same
+    method and path."""
+    candidates = list(app.router.routes)
+    low_priority = getattr(app.router, "_iter_low_priority_routes", None)
+    if callable(low_priority):
+        candidates.extend(low_priority())
     table = {}
-    for route in app.router.routes:
+    for route in candidates:
         for kind, method, path, dependant in _expand(route):
             key = (kind, method, path)
             assert key not in table, f"{method} {path} is served by two routes"
@@ -102,10 +112,21 @@ def _route_table(app) -> dict:
     return table
 
 
+def _is_param(segment: str) -> bool:
+    return segment.startswith("{") and segment.endswith("}")
+
+
 def _concrete(template: str) -> str:
     """A request path for a route template: every ``{param}`` becomes ``x``."""
-    return "/".join("x" if seg.startswith("{") and seg.endswith("}") else seg
-                    for seg in template.split("/"))
+    return "/".join("x" if _is_param(seg) else seg for seg in template.split("/"))
+
+
+def _templates_overlap(a: str, b: str) -> bool:
+    """True when some request path matches both templates. Each ``{param}``
+    matches exactly one path segment."""
+    sa, sb = a.split("/"), b.split("/")
+    return len(sa) == len(sb) and all(
+        x == y or _is_param(x) or _is_param(y) for x, y in zip(sa, sb))
 
 
 def _describe(keys) -> str:
@@ -253,8 +274,25 @@ def test_route_dependencies(api_landing):
         + "\nUpdate the expected tables in this file if the change is intended.")
 
 
-def test_route_walk_reaches_every_documented_operation():
-    app = create_app(None, api_landing=True)
+# Served, but left out of the OpenAPI schema (``include_in_schema=False``).
+_HIDDEN_FROM_SCHEMA = {
+    ("GET", "/api/session"),
+    ("GET", "/debug/stacks"),
+    ("GET", "/localm-ca.crt"),
+    ("GET", "/v1/models/{model_id}/hold"),
+    ("GET", "/whoami"),
+    ("POST", "/api/auth/key/clear"),
+    ("POST", "/api/auth/key/rotate"),
+    ("POST", "/api/session"),
+    ("POST", "/api/session/logout"),
+    ("POST", "/v1/instances/cooperate-unload"),
+    ("POST", "/v1/surfaces/gui"),
+}
+
+
+@_SHAPES
+def test_schema_documents_every_walked_route_except_the_hidden_ones(api_landing):
+    app = create_app(None, api_landing=api_landing)
     documented = {
         (method.upper(), path)
         for path, operations in app.openapi()["paths"].items()
@@ -262,10 +300,15 @@ def test_route_walk_reaches_every_documented_operation():
         if method.upper() in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
     }
     walked = {(method, path) for kind, method, path in _route_table(app) if kind == "api"}
+    hidden = _HIDDEN_FROM_SCHEMA | ({("GET", "/")} if api_landing else set())
     assert ("GET", "/api/conversations") in documented
     assert documented <= walked, (
         "the route walk misses operations the OpenAPI schema documents:\n"
         + _describe(documented - walked))
+    assert walked - documented == hidden, (
+        "routes hidden from the OpenAPI schema changed.\n  expected hidden, now documented:\n"
+        + _describe(hidden - (walked - documented)) + "\n  newly hidden:\n"
+        + _describe((walked - documented) - hidden))
 
 
 @_SHAPES
@@ -273,14 +316,19 @@ def test_no_two_routes_serving_one_method_match_the_same_path(api_landing):
     routes = [(method, path) for kind, method, path in
               _route_table(create_app(None, api_landing=api_landing))
               if kind in ("api", "route")]
-    patterns = {path: compile_path(path)[0] for _, path in routes}
+    unsupported = sorted({path for _, path in routes for seg in path.split("/")
+                          if "{" in seg and (not _is_param(seg) or ":" in seg)})
+    assert not unsupported, (
+        f"templates with a partial or converter segment {unsupported}; extend "
+        "_templates_overlap to cover them")
+    for _, path in routes:
+        assert compile_path(path)[0].match(_concrete(path)), path
     overlaps = sorted(
-        f"    {method} {path} is also matched by {other}"
+        f"    {method} {path} and {other}"
         for method, path in routes
         for other_method, other in routes
-        if method == other_method and path != other
-        and patterns[other].match(_concrete(path)))
-    assert not overlaps, "\n".join(overlaps)
+        if method == other_method and path < other and _templates_overlap(path, other))
+    assert not overlaps, "routes that match a common path:\n" + "\n".join(overlaps)
 
 
 def test_api_landing_root_redirects_to_the_docs():
@@ -549,15 +597,14 @@ def test_validation_error_renders_a_non_finite_input():
     assert response.json()["errors"][0]["input"] == "nan"
 
 
-def test_validation_error_elides_deeply_nested_input():
+def test_validation_error_prunes_input_nested_past_the_recursion_limit():
     app = _app_with_probe_routes()
-    nested = 1
-    for _ in range(40):
-        nested = [nested]
+    depth = 1500
     response = TestClient(app).post(
-        "/characterize/validate", json={"count": nested, "flag": True},
-        headers=_shell_auth(app))
+        "/characterize/validate", content=("[" * depth + "]" * depth).encode(),
+        headers={**_shell_auth(app), "Content-Type": "application/json"})
     assert response.status_code == 422
+    assert response.json()["errors"]
     assert "...[nested value elided]" in response.text
 
 
@@ -656,12 +703,16 @@ class _StubEngine:
     loaded = True
 
 
-def test_create_app_publishes_its_engine_and_a_later_call_resets_it():
+def test_create_app_publishes_its_engine_and_a_later_call_resets_it(monkeypatch):
     from localm.inference import http_server as hs
 
+    monkeypatch.setattr(hs, "_embedder_sem", object())
+    monkeypatch.setattr(hs, "_last_active_model_name", "characterization-previous")
     engine = _StubEngine()
     try:
         app = create_app(engine)
+        assert hs._embedder_sem is None
+        assert hs._last_active_model_name is None
         assert hs._engine is engine
         assert hs._engines == {"characterization-model": engine}
         assert hs._engines_lru == ["characterization-model"]
@@ -711,7 +762,8 @@ def test_plugin_attach_failure_keeps_the_kernel_serving(monkeypatch, caplog, bre
     assert set(app.state._state) == {
         "chat_pipeline", "csrf_secret", "shell_token", "plugin_engine_error"}
     logged = [(r.levelno, r.getMessage(), r.exc_info[0] if r.exc_info else None)
-              for r in caplog.records if r.name == "localm"]
+              for r in caplog.records
+              if r.name == "localm" or r.name.startswith("localm.")]
     assert (logging.WARNING, f"plugins unavailable: {error}", None) in logged
     assert (logging.ERROR, "plugin engine attach failed", error_type) in logged
     assert _route_table(app).keys() == _KERNEL_ROUTES.keys()
