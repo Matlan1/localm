@@ -612,7 +612,8 @@ def test_a_trace_with_its_marker_present_is_not_treated_as_left_over(
 def test_a_leftover_trace_held_open_by_another_process_is_left_alone(
         tmp_path, monkeypatch):
     """A live instance with no registry entry (--isolated) still holds its trace
-    open with faulthandler attached; the next start must not remove it."""
+    open with faulthandler attached; the next start must neither remove it nor
+    report what it holds, even a fault line it logged and survived."""
     _pin_mode(monkeypatch, "log")
     calls = []
     monkeypatch.setattr(bugreport, "report_failure",
@@ -624,10 +625,12 @@ def test_a_leftover_trace_held_open_by_another_process_is_left_alone(
         [sys.executable, "-c",
          "import faulthandler, sys, time\n"
          "fh = open(sys.argv[1], 'w', encoding='utf-8')\n"
+         "fh.write(sys.argv[2])\n"
+         "fh.flush()\n"
          "faulthandler.enable(file=fh, all_threads=True)\n"
          "print('held', flush=True)\n"
          "time.sleep(60)\n",
-         str(trace)],
+         str(trace), _FATAL_TRACE],
         stdout=subprocess.PIPE, text=True)
     try:
         assert holder.stdout.readline().strip() == "held"
