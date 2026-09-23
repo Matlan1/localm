@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from fastapi import FastAPI
@@ -2397,6 +2397,204 @@ class TestSessionExtras:
         assert "the model was unloaded while it was still loading" in detail
         assert "superseded" not in detail
         assert "None" not in detail
+
+    @staticmethod
+    def _coder_app_with(tmp_path, switch_model):
+        """A coder app whose active model is model-a and whose switch_model is
+        the given double."""
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").install("coder")
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                   switch_model=switch_model, active_model=lambda: "model-a")
+        return app
+
+    @pytest.mark.parametrize("result, code", [
+        ({"status": "confirm_required", "detail": "loading needs to free model-a"}, 409),
+        ({"status": "superseded", "by": "model-c"}, 503),
+        ({"status": "cancelled", "reason": "unloaded while it was loading"}, 503),
+        ({"status": "queued"}, 503),
+    ])
+    def test_create_session_does_not_pin_a_model_that_did_not_load(
+            self, tmp_path, result, code):
+        """create_session builds no session when the model load reports
+        confirm_required, superseded, cancelled or an unknown status."""
+        switch_model = AsyncMock(return_value={"model": "model-b", **result})
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                r = client.post("/api/coder/sessions",
+                                json={"cwd": str(tmp_path), "model": "model-b"})
+                listed = client.get("/api/coder/sessions").json()["sessions"]
+        assert listed == []
+        switch_model.assert_awaited_once_with("model-b")
+        assert r.status_code == code, r.text
+
+    def test_create_session_confirm_required_retries_with_force(self, tmp_path):
+        """confirm_required comes back as a 409 the GUI can ask about, and the
+        retry with force passes force to the switch and pins the model."""
+        switch_model = AsyncMock(side_effect=[
+            {"status": "confirm_required", "model": "model-b",
+             "detail": "loading needs to free model-a"},
+            {"status": "loaded", "model": "model-b"},
+        ])
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                first = client.post("/api/coder/sessions",
+                                    json={"cwd": str(tmp_path), "model": "model-b"})
+                after_first = client.get("/api/coder/sessions").json()["sessions"]
+                second = client.post("/api/coder/sessions",
+                                     json={"cwd": str(tmp_path), "model": "model-b",
+                                           "force": True})
+                after_second = client.get("/api/coder/sessions").json()["sessions"]
+                client.delete(f"/api/coder/sessions/{second.json()['id']}")
+        assert after_first == []
+        assert [s["model"] for s in after_second] == ["model-b"]
+        assert switch_model.await_args_list == [call("model-b"),
+                                                call("model-b", force=True)]
+        assert first.status_code == 409
+        assert first.json()["detail"] == {
+            "status": "confirm_required", "model": "model-b",
+            "detail": "loading needs to free model-a"}
+        assert second.status_code == 200, second.text
+
+    def test_create_session_keeps_the_status_of_a_refusal_the_switch_raises(
+            self, tmp_path):
+        """An HTTPException from the switch (a VRAM refusal) keeps its own
+        status and text instead of turning into a 500."""
+        from fastapi import HTTPException
+        switch_model = AsyncMock(side_effect=HTTPException(
+            503, "Not enough VRAM on the configured split device(s)"))
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                r = client.post("/api/coder/sessions",
+                                json={"cwd": str(tmp_path), "model": "model-b"})
+                listed = client.get("/api/coder/sessions").json()["sessions"]
+        assert listed == []
+        assert r.status_code == 503
+        assert r.json()["detail"] == "Not enough VRAM on the configured split device(s)"
+
+    def test_resume_join_is_409_when_the_session_goes_busy_during_the_switch(
+            self, tmp_path):
+        """Joining a running session with another model must not answer 200
+        'joined' when the session could not be repointed. Here a message lands
+        on it while the new model loads."""
+        sessions = {}
+
+        async def _loads_while_a_message_starts(name):
+            sessions["joined"].busy = True
+            return {"status": "loaded", "model": name}
+
+        switch_model = AsyncMock(side_effect=_loads_while_a_message_starts)
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path), "resume": True}).json()["id"]
+                sess = sessions["joined"] = app.state.coder_sessions.get(sid)
+                r = client.post("/api/coder/sessions",
+                                json={"cwd": str(tmp_path), "resume": True,
+                                      "model": "model-b"})
+                listed = client.get("/api/coder/sessions").json()["sessions"]
+                sess.busy = False
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert sess.model == "model-a"
+        assert [s["id"] for s in listed] == [sid]
+        switch_model.assert_awaited_once_with("model-b")
+        assert r.status_code == 409, r.text
+        assert "busy" in r.json()["detail"]
+
+    @pytest.mark.parametrize("result, code", [
+        ({"status": "confirm_required", "detail": "loading needs to free model-a"}, 409),
+        ({"status": "superseded", "by": "model-c"}, 503),
+    ])
+    def test_resume_join_does_not_repoint_to_a_model_that_did_not_load(
+            self, tmp_path, result, code):
+        """A join that asks for another model keeps the session on its model
+        when that model's load did not happen."""
+        switch_model = AsyncMock(return_value={"model": "model-b", **result})
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path), "resume": True}).json()["id"]
+                sess = app.state.coder_sessions.get(sid)
+                r = client.post("/api/coder/sessions",
+                                json={"cwd": str(tmp_path), "resume": True,
+                                      "model": "model-b"})
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert sess.model == "model-a"
+        assert sess.agent.backend.model_id == "model-a"
+        switch_model.assert_awaited_once_with("model-b")
+        assert r.status_code == code, r.text
+
+    def test_resume_join_confirm_required_retries_with_force(self, tmp_path):
+        """A join whose model load needs confirmation passes force on the
+        retry and then repoints the running session."""
+        switch_model = AsyncMock(side_effect=[
+            {"status": "confirm_required", "model": "model-b",
+             "detail": "loading needs to free model-a"},
+            {"status": "loaded", "model": "model-b"},
+        ])
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path), "resume": True}).json()["id"]
+                sess = app.state.coder_sessions.get(sid)
+                first = client.post("/api/coder/sessions",
+                                    json={"cwd": str(tmp_path), "resume": True,
+                                          "model": "model-b"})
+                model_after_first = sess.model
+                second = client.post("/api/coder/sessions",
+                                     json={"cwd": str(tmp_path), "resume": True,
+                                           "model": "model-b", "force": True})
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert model_after_first == "model-a"
+        assert sess.model == "model-b"
+        assert sess.agent.backend.model_id == "model-b"
+        assert switch_model.await_args_list == [call("model-b"),
+                                                call("model-b", force=True)]
+        assert first.status_code == 409
+        assert first.json()["detail"]["status"] == "confirm_required"
+        assert second.status_code == 200, second.text
+        assert second.json()["id"] == sid
+
+    def test_set_model_confirm_required_asks_instead_of_repointing(
+            self, tmp_path, monkeypatch):
+        """The /model route treats confirm_required like the create route: 409,
+        the session is not repointed, and a forced retry completes it."""
+        switch_model = AsyncMock(side_effect=[
+            {"status": "confirm_required", "model": "model-b",
+             "detail": "loading needs to free model-a"},
+            {"status": "loaded", "model": "model-b"},
+        ])
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path)}).json()["id"]
+                sess = app.state.coder_sessions.get(sid)
+                set_model = MagicMock(wraps=sess.set_model)
+                monkeypatch.setattr(sess, "set_model", set_model)
+                first = client.post(f"/api/coder/sessions/{sid}/model",
+                                    json={"model": "model-b"})
+                calls_after_first = set_model.call_count
+                model_after_first = sess.model
+                second = client.post(f"/api/coder/sessions/{sid}/model",
+                                     json={"model": "model-b", "force": True})
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert calls_after_first == 0
+        assert model_after_first == "model-a"
+        set_model.assert_called_once_with("model-b")
+        assert sess.model == "model-b"
+        assert switch_model.await_args_list == [call("model-b"),
+                                                call("model-b", force=True)]
+        assert first.status_code == 409
+        assert first.json()["detail"]["status"] == "confirm_required"
+        assert second.status_code == 200, second.text
 
     def test_replay_rebuilds_history(self, coder_app, tmp_path):
         app, _ = coder_app

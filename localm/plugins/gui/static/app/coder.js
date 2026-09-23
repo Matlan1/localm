@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, lsSetScoped } from "./chat.js";
-import { $, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
@@ -915,6 +915,26 @@ function _offerCheckpointSwap(live, opts) {
 // second session started slightly later.
 const _cwdResumeInFlight = new Set();
 
+// True for a 409 whose detail is {status: "confirm_required"}: the model load
+// the request needs is waiting for the user's go-ahead.
+function _needsModelConfirm(r, data) {
+  const d = data && data.detail;
+  return r.status === 409 && !!d && typeof d === "object" && d.status === "confirm_required";
+}
+
+// Asks with the same dialog the sidebar model picker uses. Resolves true to go ahead.
+function _confirmModelLoad(detail) {
+  return confirmDangerAsync(
+    t("models.switch.confirmTitle"), detail.detail || "", t("models.switch.confirmLabel"));
+}
+
+// The server's error text, whether detail is a string or a {detail} object.
+function _detailText(data) {
+  const d = data && data.detail;
+  if (typeof d === "string") return d;
+  return d && typeof d.detail === "string" ? d.detail : "";
+}
+
 export async function startCoderSession(opts = {}) {
   const resume = !!opts.resume;
   // A rail row names its OWN project, which is usually not the one in the form -
@@ -930,6 +950,7 @@ export async function startCoderSession(opts = {}) {
         const wantedModel = opts.model || $("setup-model").value.trim() || null;
         if (wantedModel && already.info.model && already.info.model !== wantedModel) {
           postSessionModel(already.info.id, wantedModel).then((updated) => {
+            if (!updated) return;
             already.info = updated;
             const mb = $("coder-model");
             if (mb) { mb.textContent = updated.model || wantedModel; mb.style.display = ""; }
@@ -1013,11 +1034,21 @@ export async function startCoderSession(opts = {}) {
     const verifyRetries = $("setup-verify-retries").value.trim();
     if (verifyRetries !== "") body.verify_max_retries = Number(verifyRetries);
 
-    const r = await fetch("/api/coder/sessions", {
+    const post = () => fetch("/api/coder/sessions", {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify(body),
     });
+    let r = await post();
+    let data = await r.json().catch(() => ({}));
+    // Loading the chosen model needs the user's go-ahead: ask, then re-post
+    // with force. Declining leaves no session and no model change.
+    if (_needsModelConfirm(r, data)) {
+      if (!(await _confirmModelLoad(data.detail))) return;
+      body.force = true;
+      r = await post();
+      data = await r.json().catch(() => ({}));
+    }
     // The server refuses a resume naming a checkpoint other than the one this
     // folder already has open. Reached when this tab holds the live session but
     // its rail is out of date: a stale tab, or a second window.
@@ -1025,8 +1056,8 @@ export async function startCoderSession(opts = {}) {
       const live = _liveSessionForCwd(cwd);
       if (live) { _offerCheckpointSwap(live, opts); return; }
     }
-    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-    const info = await r.json();
+    if (!r.ok) throw new Error(_detailText(data) || r.statusText);
+    const info = data;
     // The key has done its one job. Drop it out of the DOM rather than leaving
     // it sitting in a field for the rest of the page's life, where a later
     // screenshot, a shared screen or a stray autofill can pick it up.
@@ -1879,13 +1910,20 @@ export async function postSessionSettings(body) {
   return data;
 }
 
-/** POST a model switch for a session and return the updated session info. */
+/** POST a model switch for a session and return the updated session info, or
+ *  null when loading the model needed confirmation and the user declined. */
 export async function postSessionModel(sessionId, model) {
-  const r = await fetch(`/api/coder/sessions/${sessionId}/model`, {
-    method: "POST", headers: authHeaders(), body: JSON.stringify({ model }),
+  const post = (body) => fetch(`/api/coder/sessions/${sessionId}/model`, {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(body),
   });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || r.statusText);
+  let r = await post({ model });
+  let data = await r.json().catch(() => ({}));
+  if (_needsModelConfirm(r, data)) {
+    if (!(await _confirmModelLoad(data.detail))) return null;
+    r = await post({ model, force: true });
+    data = await r.json().catch(() => ({}));
+  }
+  if (!r.ok) throw new Error(_detailText(data) || r.statusText);
   return data;
 }
 
@@ -1899,6 +1937,7 @@ export async function switchActiveSessionModel(model) {
   }
   try {
     const updated = await postSessionModel(s.info.id, model);
+    if (!updated) return;
     s.info = updated;
     const modelBtn = $("coder-model");
     if (modelBtn) {
