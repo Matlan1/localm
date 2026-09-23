@@ -2801,11 +2801,19 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
     return out
 
 
-def collection_provenance_note(model: str, affected: list) -> str:
+def collection_provenance_note(model: str, affected: list, *,
+                                unchanged: bool = False) -> str:
     """The human-readable note accompanying a ``collection_provenance_report()``
     result, shared by every writer of ``embedding_model`` (the RAG picker,
     ``PATCH /v1/config``, ``localm setup-embeddings``) so the wording a user
-    sees does not drift between which surface they switched from."""
+    sees does not drift between which surface they switched from.
+
+    *unchanged* is True when the caller already knows *model* is the
+    currently active embedding_model, so it never ran the report at all (its
+    own short-circuit: switching to what is already active cannot invalidate
+    anything). Passing an empty *affected* here would otherwise be
+    indistinguishable from "nothing has embeddings" - which is not what is
+    known in this case, only that nothing is CHANGING."""
     if affected:
         return (
             f"Switching to '{model}' may invalidate the semantic search of "
@@ -2813,8 +2821,14 @@ def collection_provenance_note(model: str, affected: list) -> str:
             "re-embedded. The exact impact cannot be confirmed until the "
             "new model is loaded and tested - re-embed after switching if "
             "any of them drop to BM25/lexical-only.")
-    return (f"No existing collection currently has embeddings, so "
-            f"switching to '{model}' has nothing to invalidate.")
+    if unchanged:
+        return (f"'{model}' is already the active embedding model, so there "
+                "is nothing to invalidate.")
+    # See TestEmbeddingSetConfirmGate
+    # .test_unconfirmed_with_candidate_matching_collection_provenance_reports_nothing_to_invalidate
+    # and ..._with_same_active_model_reports_nothing_to_invalidate.
+    return (f"Switching to '{model}' has nothing to invalidate: no existing "
+            f"collection's semantic search would change.")
 
 
 def _cosine(a: list, b: list) -> float:

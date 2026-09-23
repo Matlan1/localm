@@ -603,6 +603,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm setup-llama --backend sycl` but was never listed in either setup wizard's menu. Both
   the console and graphical installers now offer it as an explicit choice. Vulkan remains the
   default recommendation on Intel, matching every comparable local-LLM tool.
+- **`localm setup-embeddings --model` and the RAG embedding-switch dry-run preview no longer
+  make false claims about existing collections' embeddings.** The CLI always ended with a
+  reminder to re-embed collections stuck on BM25, even when the switch it just ran found
+  nothing affected; the dry-run preview (used by the RAG picker and the Settings embedding
+  field) said "no existing collection currently has embeddings" even when collections had
+  embeddings that already matched the model being switched to. Both now reflect what the
+  switch actually found.
+- **Querying or deleting a RAG collection that does not exist, with an API key confined to
+  specific folders, now returns 404 like it does for every other caller**, instead of a 403
+  that implied the collection exists but is off-limits.
 
 ## [0.2.0] - 2026-09-04
 
