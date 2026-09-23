@@ -1042,7 +1042,6 @@ def test_session_set_model_route_updates_session_and_backend(tmp_path, monkeypat
         assert sess.backend_info["model"] == "model-switched"
         assert sess.agent._model_name == "model-switched"
         assert switched == ["model-initial", "model-switched"]
-        # The backend is what names the model on every request.
         assert sess.agent.backend.set_model_calls == ["model-switched"]
         assert sess.agent.backend.model_id == "model-switched"
 
@@ -1096,8 +1095,8 @@ def test_session_set_model_remote_backend(tmp_path, monkeypatch):
 
 
 def test_set_model_with_backend_that_cannot_switch_returns_409(tmp_path, monkeypatch):
-    """A backend without set_model keeps sending its original model name, so
-    the switch is refused and the session keeps its model everywhere."""
+    """A switch on a backend without set_model answers 409 and leaves the
+    session's model unchanged everywhere."""
     from localm.config import save_registry
     app, proj, owner = _owner(tmp_path, monkeypatch)
     save_registry({"model-initial": {}, "model-switched": {}})

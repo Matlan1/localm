@@ -2417,9 +2417,8 @@ class TestSessionExtras:
     ])
     def test_create_session_does_not_pin_a_model_that_did_not_load(
             self, tmp_path, result, code):
-        """A session built on a model whose load did not happen would load it on
-        its first request, through a path that skips the confirmation and
-        evicts whatever model is resident."""
+        """create_session builds no session when the model load reports
+        confirm_required, superseded, cancelled or an unknown status."""
         switch_model = AsyncMock(return_value={"model": "model-b", **result})
         app = self._coder_app_with(tmp_path, switch_model)
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
