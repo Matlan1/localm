@@ -488,6 +488,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Stopping the server with Ctrl+Break or by closing its console window on Windows could leave
   an orphaned crash trace file behind.** The crash-recovery watchdog already removed the crash
   marker on an intentional console stop; it now also removes the paired native-fault trace file.
+- **Pulling a model whose repo ships both an f16 and a bf16 vision projector (such as the
+  curated `gemma3-4b` and `gemma3-12b` shortcuts) could silently auto-attach the bf16 build
+  instead of f16.** The tie-break between same-repo projector variants matched "f16" as a
+  substring, which "bf16" also contains, so a listing ordered bf16-before-f16 picked the
+  wrong one. It now matches the precision as a whole token.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role

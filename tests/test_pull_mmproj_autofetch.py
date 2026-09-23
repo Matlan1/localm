@@ -220,6 +220,31 @@ class TestAmbiguousMultipleCandidates:
         assert ok is True
         assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
 
+    def test_bartowski_gemma3_triple_picks_f16_not_bf16(self, fake_registry, monkeypatch):
+        """bf16 contains 'f16' as a substring, so a plain 'in' filter over the
+        real bartowski gemma-3 listing (bf16, f16, f32, in that listing order)
+        would match bf16 first and return it - the wrong precision, since the
+        whole point of this fallback is picking the f16 build specifically."""
+        store, models_dir = fake_registry
+        _wire_repo_listing(monkeypatch, [
+            "google_gemma-3-4b-it-Q4_K_M.gguf",
+            "mmproj-google_gemma-3-4b-it-bf16.gguf",
+            "mmproj-google_gemma-3-4b-it-f16.gguf",
+            "mmproj-google_gemma-3-4b-it-f32.gguf",
+        ])
+        _wire_download(monkeypatch, {
+            "mmproj-google_gemma-3-4b-it-bf16.gguf": _CLIP_BYTES,
+            "mmproj-google_gemma-3-4b-it-f16.gguf": _CLIP_BYTES,
+            "mmproj-google_gemma-3-4b-it-f32.gguf": _CLIP_BYTES,
+        })
+
+        ok = mm._pull_gguf_file(
+            "bartowski/google_gemma-3-4b-it-GGUF:google_gemma-3-4b-it-Q4_K_M.gguf", None)
+
+        assert ok is True
+        assert store["google_gemma-3-4b-it-Q4_K_M"]["mmproj"] == str(
+            (models_dir / "mmproj-google_gemma-3-4b-it-f16.gguf").resolve())
+
 
 class TestTraversalGuardOnRepoListing:
     """The repo file listing is REMOTE, untrusted input (a malicious or
