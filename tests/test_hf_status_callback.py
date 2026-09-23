@@ -6,7 +6,7 @@ it to HFRunner.chat_stream, so a client of an HF (transformers) model never
 saw a status update advance past the initial guess - see gguf.py's chat_stream
 for the working GGUF twin these tests mirror.
 
-Four layers, each catching a different way this regresses:
+Five layers, each catching a different way this regresses:
   - HFBackend.chat_stream forwards on_status to self._runner.chat_stream (the
     exact line that was missing).
   - HFRunner.chat_stream (parent side) relays a "status" envelope from the
@@ -16,6 +16,9 @@ Four layers, each catching a different way this regresses:
   - A contract test enumerating every concrete BaseBackend subclass in
     localm.inference.backends, so a future backend that forgets to wire
     on_status through fails here instead of shipping silently.
+  - A real end-to-end round trip through an actual isolated worker process
+    (no mocks), proving the dispatch-loop closure that glues the two mocked
+    halves above together actually works.
 """
 
 from __future__ import annotations
@@ -423,8 +426,9 @@ class TestEveryBackendInvokesOnStatus:
         # A canary for the walk itself: if this ever drops below the two
         # backends known to exist, the parametrized test below would pass by
         # finding nothing to check, silently losing its own coverage.
-        names = {c.__name__ for c in _concrete_production_backend_classes()}
-        assert {"GgufBackend", "HFBackend"} <= names, names
+        classes = _concrete_production_backend_classes()
+        assert GgufBackend in classes
+        assert HFBackend in classes
 
     @pytest.mark.parametrize("cls", _concrete_production_backend_classes(),
                              ids=lambda c: c.__name__)
@@ -439,3 +443,57 @@ class TestEveryBackendInvokesOnStatus:
             f"{cls.__name__}.chat_stream never invoked on_status during a "
             "stubbed generation - wire it through to the runner, or add "
             f"{cls.__name__} to _ON_STATUS_EXEMPT with a reason")
+
+
+# --------------------------------------------------------------------------- #
+# 5. Real end-to-end round trip: an actual isolated worker process, no mocks.
+#    Proves the dispatch-loop closure connecting HFWorker's on_status calls to
+#    HFRunner's status-envelope relay (layers 2 and 3 above, each mocked
+#    separately) actually works together. Marked @integration so the default
+#    `pytest -m "not integration"` skips it (loads a real, tiny model).
+# --------------------------------------------------------------------------- #
+
+_TINY_MODEL = "sshleifer/tiny-gpt2"
+_TINY_CHAT_TEMPLATE = "{% for m in messages %}{{ m['content'] }}\n{% endfor %}"
+
+
+@pytest.mark.integration
+class TestRealWorkerRelaysStatusEndToEnd:
+    @pytest.fixture(scope="class")
+    def hf_backend(self, tmp_path_factory):
+        pytest.importorskip("torch", exc_type=ImportError)
+        pytest.importorskip("transformers", exc_type=ImportError)
+        import json
+        import shutil
+
+        from huggingface_hub import snapshot_download
+
+        try:
+            local_dir = snapshot_download(_TINY_MODEL)
+        except Exception as e:
+            pytest.skip(f"could not fetch {_TINY_MODEL}: {e}")
+
+        model_dir = tmp_path_factory.mktemp("tiny_gpt2_status")
+        shutil.copytree(local_dir, model_dir, dirs_exist_ok=True)
+        config_path = model_dir / "tokenizer_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["chat_template"] = _TINY_CHAT_TEMPLATE
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+
+        be = HFBackend(str(model_dir), device="cpu")
+        be.load()
+        yield be
+        be.unload()
+
+    def test_on_status_receives_real_stage_updates_before_the_first_token(self, hf_backend):
+        received: List[str] = []
+        gen = hf_backend.chat_stream(
+            [{"role": "user", "content": "Say hi."}],
+            max_tokens=8, temperature=0.0,
+            on_status=received.append,
+        )
+        first = next(gen)
+        list(gen)   # drain the rest
+
+        assert isinstance(first, str)
+        assert received == ["Processing prompt...", "Generating response..."], received
