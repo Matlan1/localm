@@ -109,6 +109,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   device. Vulkan already accounted for this; SYCL did not, so choosing a
   Main GPU or a multi-GPU split on a SYCL install could silently fall back to
   device 0 or drop a valid split device instead of using the GPU you picked.
+- **The Main GPU / Split across GPUs numbering hint no longer names Vulkan on
+  a SYCL install.** Settings > Live tuning explained the device numbers as
+  "the Vulkan backend's own order" even when the installed backend was SYCL,
+  since both share the same native numbering path. The hint now names no
+  specific backend.
 - **Stopping or restarting the server no longer leaves the coder plugin's
   background shell commands and sub-agents running.** They already stopped
   when the GUI's own background jobs and any localm-launched ComfyUI

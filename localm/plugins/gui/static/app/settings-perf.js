@@ -183,7 +183,7 @@ let _gpuIndexSpace = null;
 
 /** Show (or hide) the ONE native index-space note that covers both GPU rows:
  *  when /api/gpus says index_space "native", the device numbers are the
- *  active native (Vulkan) backend's own load-time order - the numbering
+ *  active native GPU backend's own load-time order - the numbering
  *  gpu_split_indices / main_gpu_index actually mean - which can differ from
  *  other tools' GPU numbering, so say so.
  *

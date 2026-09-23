@@ -1695,7 +1695,7 @@ export const I18N_EN = {
   "settings.perf.ratioHint":
     "Optional relative weight per checked device (e.g. 3 and 1 gives the first card three times the second's share). Leave every weight blank to keep the automatic free-VRAM sizing above.",
   "settings.perf.indexSpaceHint":
-    "Device numbers are the Vulkan backend's own order (what a model load uses); other tools may number GPUs differently.",
+    "Device numbers are the installed GPU backend's own order (what a model load uses); other tools may number GPUs differently.",
   "settings.perf.splitPartialWarningToast":
     "Saved, but a weight is missing for one GPU - enter one for every checked device, or clear them all for automatic sizing",
   "settings.perf.splitDisabledToast": "Split disabled - applies on the next model load",

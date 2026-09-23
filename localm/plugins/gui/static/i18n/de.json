@@ -1584,7 +1584,7 @@
   "settings.perf.gpuLayersLabel": "GPU-Schichten (laufendes Modell)",
   "settings.perf.gpuLayersRangeToast": "GPU-Schichten müssen zwischen 0 und 999 liegen",
   "settings.perf.help": "Passen Sie das laufende Modell ohne Neuladen an: wie viel davon auf der GPU liegt und wie groß sein Kontextfenster ist. Laufzeit & GPU enthält die gespeicherten Standardwerte für den nächsten Ladevorgang; diese hier wirken sofort. Der VRAM-Wert ist eine Schätzung.",
-  "settings.perf.indexSpaceHint": "Die Gerätenummern entsprechen der eigenen Reihenfolge des Vulkan-Backends (die beim Laden eines Modells verwendet wird); andere Tools nummerieren GPUs unter Umständen anders.",
+  "settings.perf.indexSpaceHint": "Die Gerätenummern entsprechen der eigenen Reihenfolge des installierten GPU-Backends (die beim Laden eines Modells verwendet wird); andere Tools nummerieren GPUs unter Umständen anders.",
   "settings.perf.mainGpuHelp": "Auf welches Gerät das Modell geladen wird. Speichert sofort; wirkt beim nächsten Laden des Modells.",
   "settings.perf.mainGpuLabel": "Haupt-GPU",
   "settings.perf.maxResidentHelp": "Wie viele Modelle gleichzeitig geladen bleiben dürfen. Leer lässt die Berechnung nach freiem VRAM entscheiden (ein Modell lädt nur neben den anderen, wenn es nachweislich passt); 1 erzwingt strikt ein einzelnes Modell. Speichert sofort.",
