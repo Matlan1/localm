@@ -881,6 +881,8 @@ def _pick_best_of_same_repo_mmprojs(cands: List[str]) -> str:
     projector rather than projectors for different models. Prefers the
     conventional highest-precision f16 build; falls back to a sorted-first pick
     for determinism."""
+    # Matches f16 as a whole token, not a bf16 substring. See
+    # test_bartowski_gemma3_triple_picks_f16_not_bf16.
     f16 = [c for c in cands
            if re.search(r"(?<![a-z0-9])f16(?![a-z0-9])", c.lower())]
     return f16[0] if f16 else sorted(cands)[0]
