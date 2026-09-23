@@ -8,6 +8,8 @@ from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
+from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+
 
 # ------------------------------------------------------------------ #
 #  Request content parts                                               #
@@ -200,6 +202,23 @@ class ChoiceDelta(BaseModel):
     # or the other; clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
     status: Optional[str] = None
+    # Stable id for `status` (see STATUS_CODE_BY_TEXT), for a client that
+    # localizes the status text instead of displaying it verbatim. None when
+    # `status` is not one of the known strings.
+    status_code: Optional[str] = None
+
+
+# Stable ids for the status strings backends pass to on_status(), keyed by the
+# exact English text. `status` always carries the English text for CLI, MCP,
+# and any other client that does not know the code.
+STATUS_CODE_BY_TEXT: dict[str, str] = {
+    "Processing prompt...": "processing",
+    "Generating response...": "generating",
+    "Encoding image...": "encoding_image",
+    "Encoding image (GPU)...": "encoding_image_gpu",
+    "Encoding image (CPU)...": "encoding_image_cpu",
+    VISION_CPU_FALLBACK_STATUS: "vision_cpu_retry",
+}
 
 
 class StreamChoice(BaseModel):
@@ -241,7 +260,8 @@ class ChatChunk(BaseModel):
             id=chunk_id,
             created=ts,
             model=model,
-            choices=[StreamChoice(delta=ChoiceDelta(status=text))],
+            choices=[StreamChoice(delta=ChoiceDelta(
+                status=text, status_code=STATUS_CODE_BY_TEXT.get(text)))],
         )
 
     @classmethod

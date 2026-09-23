@@ -171,8 +171,12 @@ export const I18N_EN = {
   "chat.speak.title":
     "Reads each finished reply aloud. Install the tts plugin for neural Kokoro voices; otherwise the browser's built-in offline voice is used. Every assistant message also has a speaker button.",
   "chat.status.encodingImage": "Encoding image…",
+  "chat.status.encodingImageCpu": "Encoding image (CPU)…",
+  "chat.status.encodingImageGpu": "Encoding image (GPU)…",
+  "chat.status.generating": "Generating response…",
   "chat.status.processing": "Processing prompt…",
   "chat.status.searchingKnowledge": "Searching knowledge base…",
+  "chat.status.visionCpuRetry": "GPU vision encode failed; retrying on CPU (this may take longer)…",
   "chat.queuedToast": "Message queued - will send after the current reply",
   "chat.queuedBadge": "Queued",
   "chat.cancel": "Cancel",

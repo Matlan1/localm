@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.inference.protocol - UsageInfo and ChatChunk/ChatResponse."""
 
+import json
 import unittest
 
 from localm.inference.protocol import (
-    UsageInfo, ChatChunk, ChatResponse, FullChoice, Message, make_chunk_id,
+    UsageInfo, ChatChunk, ChatResponse, FullChoice, Message, STATUS_CODE_BY_TEXT,
+    make_chunk_id,
 )
 
 
@@ -50,6 +52,29 @@ class TestChatChunkDone(unittest.TestCase):
     def test_token_chunk_no_usage(self):
         chunk = ChatChunk.token("hello", "localm", "id123", 0)
         self.assertIsNone(chunk.usage)
+
+
+class TestStatusChunk(unittest.TestCase):
+    def test_known_status_text_carries_its_code(self):
+        for text, code in STATUS_CODE_BY_TEXT.items():
+            chunk = ChatChunk.status_chunk(text, "localm", "id123", 0)
+            self.assertEqual(chunk.choices[0].delta.status, text)
+            self.assertEqual(chunk.choices[0].delta.status_code, code)
+
+    def test_unknown_status_text_has_no_code(self):
+        chunk = ChatChunk.status_chunk("Doing something new...", "localm", "id123", 0)
+        self.assertEqual(chunk.choices[0].delta.status, "Doing something new...")
+        self.assertIsNone(chunk.choices[0].delta.status_code)
+
+    def test_serialises_status_code_additively(self):
+        chunk = ChatChunk.status_chunk("Processing prompt...", "localm", "id123", 0)
+        delta = json.loads(chunk.model_dump_json())["choices"][0]["delta"]
+        self.assertEqual(delta["status"], "Processing prompt...")
+        self.assertEqual(delta["status_code"], "processing")
+
+    def test_token_chunk_has_no_status_code(self):
+        chunk = ChatChunk.token("hello", "localm", "id123", 0)
+        self.assertIsNone(chunk.choices[0].delta.status_code)
 
 
 class TestChatResponse(unittest.TestCase):

@@ -620,6 +620,66 @@ class TestCollectionProvenanceReport:
         names = [x["name"] for x in rep]
         assert "c1" in names
 
+    def test_same_dim_reindex_under_a_different_model_marks_mixed_provenance(
+            self, rag_home, tmp_path):
+        """A collection built with model-A, then force-reindexed with model-B
+        at the same dimension, must not be reported as safe for EITHER
+        candidate - its vectors are no longer all from one model - until a
+        full reembed() makes it single-model again."""
+        from localm.rag.store import collection_provenance_report
+
+        def _vec(x, y):
+            def embed(texts):
+                return [[x, y, 0.0, 0.0] for _ in texts]
+            return embed
+
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha beta gamma", encoding="utf-8")
+
+        c = Collection("mixed", base=rag_home).create()
+        c.add_paths([docs], embed_fn=_vec(1.0, 0.0), model_name="model-A")
+        c.add_paths([docs], force=True, embed_fn=_vec(0.0, 1.0), model_name="model-B")
+
+        names_a = [x["name"] for x in
+                   collection_provenance_report(candidate_model="model-A")]
+        names_b = [x["name"] for x in
+                   collection_provenance_report(candidate_model="model-B")]
+        assert "mixed" in names_a
+        assert "mixed" in names_b
+
+        c.reembed(embed_fn=_vec(1.0, 0.0), model_name="model-A")
+        names_after_reembed = [x["name"] for x in
+                               collection_provenance_report(candidate_model="model-A")]
+        assert "mixed" not in names_after_reembed
+
+    def test_mixed_provenance_also_excludes_via_the_non_peeked_fallback(
+            self, rag_home, tmp_path, monkeypatch):
+        """The same exclusion predicate applies whether the report answers
+        from the cached peek_stats() or falls back to a full Collection()
+        load - forced here by making peek_stats() always miss."""
+        from localm.rag.store import collection_provenance_report
+
+        def _vec(x, y):
+            def embed(texts):
+                return [[x, y, 0.0, 0.0] for _ in texts]
+            return embed
+
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha beta gamma", encoding="utf-8")
+
+        c = Collection("mixed", base=rag_home).create()
+        c.add_paths([docs], embed_fn=_vec(1.0, 0.0), model_name="model-A")
+        c.add_paths([docs], force=True, embed_fn=_vec(0.0, 1.0), model_name="model-B")
+
+        monkeypatch.setattr(Collection, "peek_stats",
+                             classmethod(lambda cls, name, base=None: None))
+
+        names_a = [x["name"] for x in
+                   collection_provenance_report(candidate_model="model-A")]
+        assert "mixed" in names_a
+
 
 # --------------------------------------------------------------------------- #
 #  The one-shot job-log warning above loads and test-embeds the NEW model, so  #

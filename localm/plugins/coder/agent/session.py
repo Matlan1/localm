@@ -10,6 +10,7 @@ from pathlib import Path
 
 import localm.plugins.coder.agent as _agent
 from localm.textguard import compose_join
+from ..backends.base import ModelSwitchUnsupported
 from ..display import print_info
 from ..memory import cap_user_instructions, forget, remember
 from ..parser import strip_tool_calls
@@ -106,6 +107,9 @@ class _SessionMixin:
     def set_model(self, model: str) -> None:
         """Repoint this agent at a different model, in place.
 
+        Raises ModelSwitchUnsupported, with nothing changed, when the backend
+        has no set_model to repoint.
+
         Updates the backend, updates the agent's model name, family id
         (for family-specific prompt tuning), harness overrides, and rebuilds
         the system prompt so family-specific instructions are applied.
@@ -120,8 +124,11 @@ class _SessionMixin:
         the backend that was loaded before this switch.
         """
         set_model_backend = getattr(self.backend, "set_model", None)
-        if set_model_backend is not None:
-            set_model_backend(model)
+        if set_model_backend is None:
+            raise ModelSwitchUnsupported(
+                "This session's model server cannot switch models in place. "
+                "Start a new session with the model you want.")
+        set_model_backend(model)
         old_model = self._model_name
         self._model_name = model
         self._family_id = model

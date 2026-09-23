@@ -7,6 +7,11 @@ from abc import ABC, abstractmethod
 from typing import Callable, Iterator, Optional
 
 
+class ModelSwitchUnsupported(RuntimeError):
+    """The backend has no set_model, so it cannot be repointed at another
+    model in place."""
+
+
 class BaseLLMBackend(ABC):
     """
     Minimal interface that all backends must satisfy.
