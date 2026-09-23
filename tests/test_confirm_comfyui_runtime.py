@@ -154,14 +154,60 @@ def test_torch_variant_ok_matches_an_exact_pin(confirm):
 #  The GPU-roundtrip output verifier: a REAL PNG, not a mock                 #
 # --------------------------------------------------------------------------- #
 
-def _make_solid_png(path: Path, rgb: tuple, size: int = 64) -> None:
-    """A real, minimal, uncompressed-filter-0 truecolor PNG of a solid color -
-    exactly the shape _verify_probe_output must be able to decode without
-    Pillow."""
+def _paeth(a, b, c):
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
+
+
+def _filter_row(cur: bytes, prev: bytes, ftype: int, bpp: int) -> bytes:
+    """The real PNG spec's per-row FORWARD filter (encoder side) - the exact
+    inverse of the decoder's reconstruction, so a round-trip through this and
+    _unfilter_png_rows proves the decoder handles what a real encoder emits,
+    not just a filter this test author decoded correctly by luck."""
+    out = bytearray(len(cur))
+    for i in range(len(cur)):
+        a = cur[i - bpp] if i >= bpp else 0
+        b = prev[i] if prev else 0
+        c = prev[i - bpp] if (prev and i >= bpp) else 0
+        if ftype == 0:
+            out[i] = cur[i]
+        elif ftype == 1:
+            out[i] = (cur[i] - a) & 0xFF
+        elif ftype == 2:
+            out[i] = (cur[i] - b) & 0xFF
+        elif ftype == 3:
+            out[i] = (cur[i] - ((a + b) // 2)) & 0xFF
+        elif ftype == 4:
+            out[i] = (cur[i] - _paeth(a, b, c)) & 0xFF
+        else:
+            raise ValueError(ftype)
+    return bytes(out)
+
+
+def _make_solid_png(path: Path, rgb: tuple, size: int = 64, *, filter_type: int = 0,
+                    per_row_filters: "list[int] | None" = None) -> None:
+    """A real truecolor PNG of a solid color, filtered with *filter_type* (or
+    a distinct filter PER ROW, matching how a real adaptive encoder like
+    ComfyUI's own PIL-based writer behaves) - exactly the shape
+    _verify_probe_output must be able to decode without Pillow."""
     width = height = size
-    row = bytes([0]) + bytes(rgb) * width  # filter type 0 (None) + RGB pixels
-    raw = row * height
-    idat = zlib.compress(raw, 9)
+    channels = 3
+    true_row = bytes(rgb) * width
+    filters = per_row_filters or [filter_type] * height
+    assert len(filters) == height
+    raw = bytearray()
+    prev = None
+    for ftype in filters:
+        filtered = _filter_row(true_row, prev, ftype, channels)
+        raw.append(ftype)
+        raw += filtered
+        prev = true_row  # the RECONSTRUCTED row, i.e. the true pixels here
+    idat = zlib.compress(bytes(raw), 9)
 
     def chunk(ctype: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + ctype + data
@@ -178,6 +224,32 @@ def test_verify_probe_output_accepts_the_expected_blurred_color(confirm, tmp_pat
     _make_solid_png(path, confirm._PROBE_RGB)
     ok, why = confirm._verify_probe_output(path)
     assert ok is True and "real GPU kernel ran" in why
+
+
+@pytest.mark.parametrize("ftype", [0, 1, 2, 3, 4], ids=["none", "sub", "up", "average", "paeth"])
+def test_verify_probe_output_decodes_every_png_filter_type(confirm, tmp_path, ftype):
+    """The real bug this fixes: the first live run against a real ComfyUI
+    produced a filter-type-2 (Up) PNG and the decoder only handled type 0,
+    reporting a FALSE FAIL on a candidate that had actually passed. Every
+    filter type the PNG spec defines must round-trip correctly, not just the
+    one this test author happened to try first."""
+    path = tmp_path / "out.png"
+    _make_solid_png(path, confirm._PROBE_RGB, filter_type=ftype)
+    ok, why = confirm._verify_probe_output(path)
+    assert ok is True, why
+
+
+def test_verify_probe_output_decodes_a_realistic_adaptive_per_row_filter_mix(confirm, tmp_path):
+    """A real encoder (ComfyUI's own PIL-based PNG writer, matching the
+    filter-2 output actually observed) picks a filter PER ROW, not one for
+    the whole image - Up/Average/Paeth on any row before the target depend on
+    the row above's RECONSTRUCTED bytes, so this is the case that would have
+    caught the original bug even without knowing "filter 2" in advance."""
+    path = tmp_path / "out.png"
+    filters = [(y % 5) for y in range(64)]  # every filter type appears, in rotation
+    _make_solid_png(path, confirm._PROBE_RGB, per_row_filters=filters)
+    ok, why = confirm._verify_probe_output(path)
+    assert ok is True, why
 
 
 def test_verify_probe_output_accepts_one_off_rounding(confirm, tmp_path):

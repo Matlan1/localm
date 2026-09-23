@@ -637,8 +637,14 @@ def _verify_probe_output(path: Path) -> "tuple[bool, str]":
     center pixel must still be the input color, within +-1 for float->byte
     truncation. Reads raw PNG bytes - no Pillow dependency in THIS process
     (the scratch venv's own Pillow was used to check dimensions elsewhere if
-    ever needed; here we only need one pixel, which a tiny manual PNG decode
-    can get for an uncompressed-enough 64x64 solid image via zlib+unfilter)."""
+    ever needed; here we only need one pixel).
+
+    Fully unfilters the image (all 5 PNG filter types - None/Sub/Up/Average/
+    Paeth), not just the target row: Up/Average/Paeth reference the PREVIOUS
+    row's already-RECONSTRUCTED bytes, so a real encoder's adaptive per-row
+    filter choice (ComfyUI's own PNG writer used filter type 2/Up on the very
+    first real run this was tried against) cannot be decoded by reading one
+    row in isolation."""
     import struct
     import zlib
     try:
@@ -665,15 +671,12 @@ def _verify_probe_output(path: Path) -> "tuple[bool, str]":
         if bit_depth != 8 or color_type not in (2, 6):
             return False, f"unexpected PNG shape (bit_depth={bit_depth}, color_type={color_type})"
         channels = 4 if color_type == 6 else 3
-        raw = zlib.decompress(idat)
-        stride = 1 + width * channels
+        pixels = _unfilter_png_rows(zlib.decompress(idat), width, height, channels,
+                                    up_to_row=height // 2)
         cy = height // 2
-        row_start = cy * stride
-        filter_type = raw[row_start]
-        if filter_type != 0:
-            return False, f"cannot verify a filtered PNG row (filter type {filter_type})"
-        px_start = row_start + 1 + (width // 2) * channels
-        r, g, b = raw[px_start], raw[px_start + 1], raw[px_start + 2]
+        cx = width // 2
+        px = pixels[cy]
+        r, g, b = px[cx * channels], px[cx * channels + 1], px[cx * channels + 2]
         want = _PROBE_RGB
         if all(abs(a - w) <= 1 for a, w in zip((r, g, b), want)):
             return True, (f"the blurred output's center pixel is {(r, g, b)}, matching the "
@@ -681,6 +684,58 @@ def _verify_probe_output(path: Path) -> "tuple[bool, str]":
         return False, f"center pixel is {(r, g, b)}, expected {want} (+-1)"
     except Exception as e:
         return False, f"could not verify the output image: {e}"
+
+
+def _unfilter_png_rows(raw: bytes, width: int, height: int, channels: int,
+                       *, up_to_row: int) -> "list[bytearray]":
+    """Reconstruct scanlines 0..up_to_row (inclusive) of a bit-depth-8 PNG's
+    decompressed IDAT stream, applying the PNG spec's per-row filter
+    (0 None, 1 Sub, 2 Up, 3 Average, 4 Paeth). Every row up to the target must
+    be reconstructed even though only one is read, because Up/Average/Paeth
+    reference the row above's ALREADY-RECONSTRUCTED bytes."""
+    bpp = channels
+    stride = 1 + width * channels
+    recon: list[bytearray] = []
+    prev = bytearray(width * channels)
+    for y in range(up_to_row + 1):
+        row_start = y * stride
+        ftype = raw[row_start]
+        cur = bytearray(raw[row_start + 1:row_start + 1 + width * channels])
+        if ftype == 0:
+            pass
+        elif ftype == 1:  # Sub
+            for i in range(len(cur)):
+                a = cur[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + a) & 0xFF
+        elif ftype == 2:  # Up
+            for i in range(len(cur)):
+                cur[i] = (cur[i] + prev[i]) & 0xFF
+        elif ftype == 3:  # Average
+            for i in range(len(cur)):
+                a = cur[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                cur[i] = (cur[i] + ((a + b) // 2)) & 0xFF
+        elif ftype == 4:  # Paeth
+            for i in range(len(cur)):
+                a = cur[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + _paeth_predictor(a, b, c)) & 0xFF
+        else:
+            raise ValueError(f"unknown PNG filter type {ftype} on row {y}")
+        recon.append(cur)
+        prev = cur
+    return recon
+
+
+def _paeth_predictor(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
 
 
 # --------------------------------------------------------------------------- #
