@@ -2504,6 +2504,38 @@ class TestSessionExtras:
         switch_model.assert_awaited_once_with("model-b")
         assert r.status_code == code, r.text
 
+    def test_resume_join_confirm_required_retries_with_force(self, tmp_path):
+        """A join whose model load needs confirmation passes force on the
+        retry and then repoints the running session."""
+        switch_model = AsyncMock(side_effect=[
+            {"status": "confirm_required", "model": "model-b",
+             "detail": "loading needs to free model-a"},
+            {"status": "loaded", "model": "model-b"},
+        ])
+        app = self._coder_app_with(tmp_path, switch_model)
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path), "resume": True}).json()["id"]
+                sess = app.state.coder_sessions.get(sid)
+                first = client.post("/api/coder/sessions",
+                                    json={"cwd": str(tmp_path), "resume": True,
+                                          "model": "model-b"})
+                model_after_first = sess.model
+                second = client.post("/api/coder/sessions",
+                                     json={"cwd": str(tmp_path), "resume": True,
+                                           "model": "model-b", "force": True})
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert model_after_first == "model-a"
+        assert sess.model == "model-b"
+        assert sess.agent.backend.model_id == "model-b"
+        assert switch_model.await_args_list == [call("model-b"),
+                                                call("model-b", force=True)]
+        assert first.status_code == 409
+        assert first.json()["detail"]["status"] == "confirm_required"
+        assert second.status_code == 200, second.text
+        assert second.json()["id"] == sid
+
     def test_set_model_confirm_required_asks_instead_of_repointing(
             self, tmp_path, monkeypatch):
         """The /model route treats confirm_required like the create route: 409,

@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAppWithPages } from "./harness.mjs";
+import { loadAppWithPages, runScript } from "./harness.mjs";
 
 const CONFIRM_409 = [409, {
   detail: { status: "confirm_required", model: "model-b",
@@ -106,6 +106,56 @@ test("model switch: declining the confirm returns null and posts nothing more", 
 
   assert.equal(updated, null);
   assert.equal(calls.length, 1);
+});
+
+// A running session s1 for /p/alpha on model-a, made the active one.
+function seedSession(win) {
+  runScript(win, `
+    coder.sessions.set("s1", { info: { id: "s1", cwd: "/p/alpha", model: "model-a",
+                                       total_tokens: 0, turns: 0, patch_mode: false,
+                                       backend_info: { backend: "local" } },
+                               busy: false, feedEl: document.createElement("div") });
+    activateSession("s1");
+  `);
+}
+
+function sessionInfo(win) {
+  runScript(win, `window.__s1info = coder.sessions.get("s1").info;`);
+  return win.__s1info;
+}
+
+test("session controls: declining the confirm keeps the session as it was, with no error", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { model: [CONFIRM_409] }) });
+  seedSession(win);
+  win.confirmDangerAsync = async () => false;
+
+  await win.switchActiveSessionModel("model-b");
+  await tick();
+
+  const info = sessionInfo(win);
+  assert.ok(info, "the session keeps its info");
+  assert.equal(info.model, "model-a");
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(win.document.getElementById("toast").textContent,
+    /Could not switch model|Model switched/);
+});
+
+test("resume onto an open session: declining the model confirm keeps it as it was, with no error", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { model: [CONFIRM_409] }) });
+  seedSession(win);
+  win.confirmDangerAsync = async () => false;
+  win.document.getElementById("setup-cwd").value = "/p/alpha";
+
+  await win.startCoderSession({ resume: true, model: "model-b" });
+  for (let i = 0; i < 5; i++) await tick();
+
+  const info = sessionInfo(win);
+  assert.ok(info, "the session keeps its info");
+  assert.equal(info.model, "model-a");
+  assert.deepEqual(calls.map((c) => c.body), [{ model: "model-b" }]);
+  assert.doesNotMatch(win.document.getElementById("toast").textContent, /Could not switch model/);
 });
 
 test("model switch: a busy 409 rejects with the server's text", async () => {

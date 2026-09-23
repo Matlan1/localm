@@ -1114,7 +1114,9 @@ def test_set_model_with_backend_that_cannot_switch_returns_409(tmp_path, monkeyp
         assert sess.agent._model_name == "model-initial"
         assert backend.model_id == "stub-model"
         assert r.status_code == 409, r.text
-        assert "cannot switch models" in r.json()["detail"]
+        detail = r.json()["detail"]
+        assert "in place" in detail, detail
+        assert "busy" not in detail, detail
 
 
 def test_repl_model_command_reports_a_backend_that_cannot_switch(tmp_path, monkeypatch):
