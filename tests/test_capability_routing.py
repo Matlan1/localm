@@ -627,6 +627,46 @@ class TestRoutingDoesNotChangeTheLoadedModel:
         assert engines["tooly"].answered == 2
 
 
+class TestTheRegistryEntryShowsARoutedModel:
+    """The machine-wide coordination entry names a model and its VRAM while a
+    model is loaded here, including one loaded for a routed request that is
+    not the active model, so a sibling that needs the VRAM asks this instance."""
+
+    def _written(self, monkeypatch, engines, active, sizes):
+        written = {}
+        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me", "token": "t", "port": 1})
+        monkeypatch.setattr(hs, "_engines", engines)
+        monkeypatch.setattr(hs, "_active_model_name", active)
+        monkeypatch.setattr(hs, "_model_file_size", lambda n: sizes.get(n))
+        monkeypatch.setattr(hs, "_loaded_model_identities", lambda: [])
+        monkeypatch.setattr(hs, "_current_gpu_index", lambda: 0)
+        monkeypatch.setattr("localm.gpu_registry.registry_dir", lambda: "unused")
+        monkeypatch.setattr("localm.gpu_registry.write_entry",
+                            lambda d, **kw: written.update(kw))
+        hs._gpu_registry_sync()
+        return written
+
+    def test_a_routed_model_with_no_active_model_is_advertised(self, monkeypatch):
+        w = self._written(monkeypatch, {"routed": _Loaded()}, None, {"routed": 1000})
+        assert w["model"] == "routed"
+        assert w["vram_estimate_bytes"] == 1200
+
+    def test_every_loaded_model_counts_toward_the_estimate(self, monkeypatch):
+        w = self._written(monkeypatch, {"main": _Loaded(), "routed": _Loaded()},
+                          "main", {"main": 1000, "routed": 500})
+        assert w["model"] == "main"
+        assert w["vram_estimate_bytes"] == 1800
+
+    def test_nothing_loaded_is_nothing_advertised(self, monkeypatch):
+        w = self._written(monkeypatch, {"gone": _Loaded(False)}, None, {"gone": 1000})
+        assert w["model"] is None and w["vram_estimate_bytes"] is None
+
+
+class _Loaded:
+    def __init__(self, loaded=True):
+        self.loaded = loaded
+
+
 class TestAFailedRoutedLoadFallsBack:
     @pytest.fixture
     def flaky(self, monkeypatch):

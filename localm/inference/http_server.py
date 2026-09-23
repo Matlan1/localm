@@ -344,12 +344,13 @@ def _gpu_registry_sync() -> None:
     try:
         import os as _os
         from localm import gpu_registry
-        model = _active_model_name
+        loaded = [n for n, e in list(_engines.items()) if getattr(e, "loaded", False)]
+        # ``model`` names a loaded model whenever one is, active or not.
+        model = _active_model_name or (loaded[0] if loaded else None)
         vram_bytes = None
-        if model:
-            size = _model_file_size(model)
-            if size is not None:
-                vram_bytes = int(size * 1.2)
+        sizes = [_model_file_size(n) for n in (loaded or ([model] if model else []))]
+        if sizes and all(sz is not None for sz in sizes):
+            vram_bytes = int(sum(sizes) * 1.2)
         gpu_registry.write_entry(
             gpu_registry.registry_dir(),
             instance_id=_gpu_coord["instance_id"],
