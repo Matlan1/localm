@@ -213,7 +213,7 @@ class TestPartialOwnership:
             self, cache, tmp_path, monkeypatch, dead_pid, live_child):
         inc_path = cache / "file.etag.incomplete"
         orphan = cache / "file.etag.aaaa1111.incomplete"
-        orphan.write_bytes(b"OLD_PARTIAL")
+        orphan.write_bytes(b"OLD")
         _owner(orphan, *dead_pid)
         live = cache / "file.etag.bbbb2222.incomplete"
         live.write_bytes(b"LIVE")
