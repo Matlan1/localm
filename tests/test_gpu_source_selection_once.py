@@ -12,6 +12,7 @@ latched the log lines would satisfy the announcement assertions while still
 running the directory glob and the ``sys.path`` walk on every probe.
 """
 
+import importlib.metadata
 import importlib.util
 import sys
 from types import SimpleNamespace
@@ -25,14 +26,23 @@ SKIP_MESSAGE = "skipping the torch GPU probe"
 
 
 def _arm_doomed(monkeypatch, tmp_path, *, native_loaded=True, hip_dll=True,
-                rocm_sdk_installed=True, torch_resident=False):
+                rocm_sdk_installed=True, torch_resident=False,
+                sycl=False, intel_sycl_rt_installed=True):
     """Arrange the known-doomed combination and return counters recording how
     many times each expensive input was actually evaluated.
 
     The runtime glob runs for real over a real directory: only the DLL name is
     faked, so the detection logic itself is exercised rather than replaced.
+
+    ``sycl=True`` disarms the HIP pair (``native_hip_runtime_resident`` forced
+    False, so the doomed check reaches the SYCL pair instead of the HIP one)
+    and arms the SYCL pair: the runtime directory ships only a sycl backend,
+    and ``intel-sycl-rt``'s distribution metadata is faked the same way
+    ``rocm_sdk``'s ``find_spec`` is faked below. ``hip_dll``/``rocm_sdk_installed``
+    are ignored in that mode.
     """
-    counts = {"runtime_dir": 0, "rocm_sdk": 0}
+    counts = {"runtime_dir": 0, "rocm_sdk": 0, "sycl_runtime_dir": 0,
+              "intel_sycl_rt": 0}
 
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(
@@ -41,11 +51,21 @@ def _arm_doomed(monkeypatch, tmp_path, *, native_loaded=True, hip_dll=True,
 
     rt = tmp_path / "native-runtime"
     rt.mkdir()
-    (rt / ("ggml-hip.dll" if hip_dll else "ggml-vulkan.dll")).write_bytes(b"")
 
-    def _runtime_binary_dir():
-        counts["runtime_dir"] += 1
-        return rt
+    if sycl:
+        monkeypatch.setattr("localm.discover.native_hip_runtime_resident",
+                            lambda: False)
+        (rt / "ggml-sycl.dll").write_bytes(b"")
+
+        def _runtime_binary_dir():
+            counts["sycl_runtime_dir"] += 1
+            return rt
+    else:
+        (rt / ("ggml-hip.dll" if hip_dll else "ggml-vulkan.dll")).write_bytes(b"")
+
+        def _runtime_binary_dir():
+            counts["runtime_dir"] += 1
+            return rt
 
     monkeypatch.setattr(
         "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
@@ -60,6 +80,18 @@ def _arm_doomed(monkeypatch, tmp_path, *, native_loaded=True, hip_dll=True,
         return real_find_spec(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
+
+    real_distribution = importlib.metadata.distribution
+
+    def _fake_distribution(name, *args, **kwargs):
+        if name == "intel-sycl-rt":
+            counts["intel_sycl_rt"] += 1
+            if intel_sycl_rt_installed:
+                return object()
+            raise importlib.metadata.PackageNotFoundError(name)
+        return real_distribution(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", _fake_distribution)
 
     if torch_resident:
         monkeypatch.setitem(
@@ -130,6 +162,36 @@ class TestSourceSelectionResolvedOnce:
         for _ in range(10):
             assert discover.native_hip_runtime_resident() is False
         assert counts["runtime_dir"] == 0
+
+    def test_doomed_answer_is_still_true_every_call_sycl(self, monkeypatch,
+                                                          tmp_path):
+        """The SYCL pair's counterpart to the HIP latch above: the same
+        stable-answer guarantee, driven by the sycl combination instead."""
+        _arm_doomed(monkeypatch, tmp_path, sycl=True)
+        assert [discover._torch_gpu_probe_known_doomed() for _ in range(5)] == \
+            [True] * 5
+
+    def test_sycl_runtime_glob_runs_once_across_many_probes(self, monkeypatch,
+                                                             tmp_path):
+        counts = _arm_doomed(monkeypatch, tmp_path, sycl=True)
+        for _ in range(10):
+            discover._torch_gpu_probe_known_doomed()
+        assert counts["sycl_runtime_dir"] == 1
+
+    def test_intel_sycl_rt_lookup_runs_once_across_many_probes(self, monkeypatch,
+                                                                tmp_path):
+        counts = _arm_doomed(monkeypatch, tmp_path, sycl=True)
+        for _ in range(10):
+            discover._torch_gpu_probe_known_doomed()
+        assert counts["intel_sycl_rt"] == 1
+
+    def test_reset_re_arms_the_sycl_expensive_inputs(self, monkeypatch, tmp_path):
+        counts = _arm_doomed(monkeypatch, tmp_path, sycl=True)
+        discover._torch_gpu_probe_known_doomed()
+        discover._reset_gpu_probe_cache()
+        discover._torch_gpu_probe_known_doomed()
+        assert counts["sycl_runtime_dir"] == 2
+        assert counts["intel_sycl_rt"] == 2
 
 
 class TestSkipAnnouncedOnce:
@@ -217,6 +279,20 @@ class TestGpuUsageNoticesOncePerProcess:
                 assert gpu_usage.raw_reading_is_process_scoped() is True
         said = [r for r in caplog.records
                 if "are process-scoped" in r.getMessage()]
+        assert len(said) == 1
+
+    def test_sycl_doomed_no_hip_resident_notice_fires_once(self, monkeypatch,
+                                                           tmp_path, caplog):
+        """A torch skip decided for the SYCL reason, with no HIP runtime
+        resident, must still leave a trace: _known_blind_without_torch must
+        not stay silent just because the HIP-specific condition it checks is
+        False."""
+        _arm_doomed(monkeypatch, tmp_path, sycl=True)
+        with caplog.at_level("DEBUG", logger="localm"):
+            for _ in range(10):
+                assert gpu_usage.raw_reading_is_process_scoped() is False
+        said = [r for r in caplog.records
+                if "not treated as process-scoped" in r.getMessage()]
         assert len(said) == 1
 
     def test_missing_pci_bus_notice_fires_once_per_device(self, monkeypatch,

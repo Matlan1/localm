@@ -1343,6 +1343,13 @@ class Collection:
                                 # key reembed() writes.
                                 if model_name:
                                     self._meta["embedding_model"] = str(model_name)
+                            elif (new_dim is not None and model_name
+                                    and model_name != self._meta.get("embedding_model")):
+                                # Same dimension as before but a different named
+                                # model: the recorded label above still names
+                                # only the first model, so mark the vectors as
+                                # spanning more than one.
+                                self._meta["embedding_model_mixed"] = True
 
             # Replace any previous chunks (and vectors) for this document
             if known:
@@ -1757,6 +1764,12 @@ class Collection:
                                 # index, the same key reembed() writes.
                                 if model_name:
                                     self._meta["embedding_model"] = str(model_name)
+                            elif (new_dim is not None and model_name
+                                    and model_name != self._meta.get("embedding_model")):
+                                # See add_paths: same dimension, different named
+                                # model - mark the vectors as spanning more than
+                                # one model.
+                                self._meta["embedding_model_mixed"] = True
 
             if known:
                 keep = [i for i, c in enumerate(self._chunks)
@@ -1853,6 +1866,9 @@ class Collection:
             # can say which model built this index.
             if model_name:
                 self._meta["embedding_model"] = str(model_name)
+            # Every vector just came from this one embed_fn call, so the
+            # collection is no longer mixed regardless of the label above.
+            self._meta.pop("embedding_model_mixed", None)
             self._meta["embedding_dim"] = self._vec_dim
             # A rebuilt full-coverage index clears the degrade state and makes any
             # set-aside sidecar moot.
@@ -1869,6 +1885,12 @@ class Collection:
         """The model NAME this collection's vectors were built with, if recorded."""
         v = self._meta.get("embedding_model")
         return str(v) if v else None
+
+    def embedding_model_mixed(self) -> bool:
+        """True when an add/upload/repair embedded into this collection under a
+        model different from ``embedding_model()``, so that label no longer
+        describes every stored vector. Cleared by ``reembed()``."""
+        return bool(self._meta.get("embedding_model_mixed"))
 
     def documents(self) -> list:
         """The source paths currently indexed in this collection (for repair)."""
@@ -2309,6 +2331,15 @@ class Collection:
             return cls(checked_name, base)       # busy: full load, no cache write
 
 
+def _provenance_excludable(built_with: Optional[str], mixed: bool,
+                            candidate_model: Optional[str]) -> bool:
+    """True when a collection's provenance is a single known model equal to
+    *candidate_model*, so switching to it will not invalidate this
+    collection: false for a mixed-provenance or unlabelled collection, which
+    always stays in the report."""
+    return bool(candidate_model) and not mixed and built_with == candidate_model
+
+
 def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
     """Every collection that currently has vectors, with its recorded 'built
     with' model (``Collection.embedding_model()``, None if never recorded)
@@ -2320,7 +2351,10 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
 
     If *candidate_model* is provided, collections already built with that
     exact model are excluded: switching to the model they were built with
-    will not invalidate their semantic search.
+    will not invalidate their semantic search. A collection an add/upload/
+    repair has since embedded under a SECOND model at the same dimension
+    (``Collection.embedding_model_mixed()``) is never excluded this way, even
+    when its recorded label happens to equal *candidate_model*.
 
     Does NOT assert whether a given collection's dimension will actually
     change: that would need the CANDIDATE model's own dimension, which means
@@ -2342,7 +2376,8 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
                 found = Collection._peek_meta(name)
                 raw_model = found[2].get("embedding_model") if found else None
                 built_with = str(raw_model) if raw_model else None
-                if candidate_model and built_with == candidate_model:
+                mixed = bool(found[2].get("embedding_model_mixed")) if found else False
+                if _provenance_excludable(built_with, mixed, candidate_model):
                     continue
                 out.append({"name": name, "built_with": built_with,
                             "n_chunks": peeked.get("n_chunks")})
@@ -2358,7 +2393,8 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
         if not stats.get("has_vectors"):
             continue
         built_with = coll.embedding_model()
-        if candidate_model and built_with == candidate_model:
+        if _provenance_excludable(built_with, coll.embedding_model_mixed(),
+                                   candidate_model):
             continue
         out.append({"name": name, "built_with": built_with,
                     "n_chunks": stats["n_chunks"]})
