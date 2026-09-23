@@ -258,3 +258,50 @@ class TestScheduledChatJobs:
         monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: False)
         res = self._run()
         assert res["answered_by"] == "plain"
+
+
+# --------------------------------------------------------------------------- #
+#  Checking a key for another instance's loaded model                          #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def keyed_home(tmp_path, monkeypatch):
+    """This process's localm home, isolated, so keys minted here reach only
+    the server started by the test."""
+    from pathlib import Path
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    return home
+
+
+class TestPeerKeyCheck:
+    def _peer(self, base):
+        port = int(base.rsplit(":", 1)[1].split("/")[0])
+        return {"host": "127.0.0.1", "port": port, "scheme": "http", "instance_id": "x"}
+
+    def test_a_key_that_may_chat_is_accepted(self, keyed_home, live):
+        from localm import auth, peer_routing
+        from localm import scopes as S
+        base, _, _ = live
+        chat_only = auth.create_key("chat-only", [S.CHAT])["key"]
+        peer_routing.verify_peer_credential(self._peer(base), chat_only)
+
+    def test_a_wrong_key_and_a_missing_key_are_refused(self, keyed_home, live):
+        from localm import auth, peer_routing
+        from localm import scopes as S
+        base, _, _ = live
+        auth.create_key("someone", [S.CHAT])
+        for key in ("not-a-real-key", ""):
+            with pytest.raises(peer_routing.PeerCredentialError):
+                peer_routing.verify_peer_credential(self._peer(base), key)
+
+    def test_an_open_mode_peer_needs_no_key(self, keyed_home, live):
+        from localm import peer_routing
+        base, _, _ = live
+        peer_routing.verify_peer_credential(self._peer(base), "")
+

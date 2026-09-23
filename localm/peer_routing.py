@@ -335,12 +335,15 @@ class PeerCredentialError(Exception):
 
 def verify_peer_credential(peer: dict, api_key: Optional[str], *,
                            timeout: float = 5.0) -> None:
-    """Check *api_key* (empty for none) against *peer* with an authenticated
-    ``GET /v1/models``, before any route using it is stored.
+    """Check *api_key* (empty for none) against *peer* before any route using
+    it is stored: the peer's ``GET /api/session`` must report the key valid, or
+    no key required. A key with any scope passes, as it does for the peer's
+    chat endpoint. A peer that does not answer ``/api/session`` is checked
+    with an authenticated ``GET /v1/models`` instead.
 
-    Raises :class:`PeerCredentialError` when the peer answers 401 or 403, and
-    ``requests.RequestException`` when it cannot be reached. Refuses, without
-    sending anything, a peer whose endpoint fails
+    Raises :class:`PeerCredentialError` when the key is refused, and
+    ``requests.RequestException`` when the peer cannot be reached. Refuses,
+    without sending anything, a peer whose endpoint fails
     :func:`is_routable_peer_endpoint`."""
     scheme = peer.get("scheme") or "http"
     if not is_routable_peer_endpoint(peer.get("host"), scheme):
@@ -357,6 +360,18 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
         verify = requests_verify(url)
     except FileNotFoundError:
         verify = False
+    resp = requests.get(_peer_url(probe, "/api/session"), headers=_auth_headers(api_key),
+                        timeout=timeout, verify=verify)
+    try:
+        state = resp.json() if resp.status_code == 200 else None
+    except ValueError:
+        state = None
+    if isinstance(state, dict) and "authed" in state and "required" in state:
+        if state["required"] and not state["authed"]:
+            raise PeerCredentialError(
+                "the peer requires its own API key" if not api_key
+                else "the peer rejected that API key")
+        return
     resp = requests.get(url, headers=_auth_headers(api_key), timeout=timeout,
                         verify=verify)
     if resp.status_code in (401, 403):
