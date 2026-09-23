@@ -493,6 +493,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead of f16.** The tie-break between same-repo projector variants matched "f16" as a
   substring, which "bf16" also contains, so a listing ordered bf16-before-f16 picked the
   wrong one. It now matches the precision as a whole token.
+- **Re-indexing, uploading to, or repairing a knowledge collection under a different embedding
+  model of the same vector size no longer keeps reporting a model switch as safe.** Only the
+  model that first embedded a collection was ever recorded; adding to it later under a
+  different same-size model changed its stored vectors but left that recorded model unchanged,
+  so switching back to the original model could claim nothing needed re-embedding even though
+  the collection now held vectors from two different models. Such a collection is now flagged
+  and stays listed until it is fully re-embedded.
 - **Installing the PyTorch/HuggingFace stack on Windows with an AMD Radeon RX 7000 or RX 9000
   GPU always failed outright, reporting no compatible PyTorch wheel could be found.** AMD moved
   its official Windows ROCm preview wheels to a new location; the install command now resolves
