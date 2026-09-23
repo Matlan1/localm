@@ -2315,7 +2315,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const d = chunk.choices?.[0]?.delta || {};
       if (d.status) {
-        updateStatusIndicator(liveBody, d.status);
+        updateStatusIndicator(liveBody, d.status, d.status_code);
         if (chat.stick) box.scrollTop = box.scrollHeight;
       }
       const cDelta = d.content || "";

@@ -177,6 +177,48 @@ def test_broken_llama_runtime_warns(monkeypatch):
         "an installed-but-broken localm_llama_runtime must warn, not silently fall back"
 
 
+def test_broken_llama_runtime_warning_latched_not_repeated(monkeypatch):
+    """The broken-install warning must fire at WARNING once per distinct
+    message, not on every _candidate_dirs() call - the config read and the
+    directory glob happen on every resolution, but the warning about a
+    condition that has not changed must not."""
+    from localm.inference.backends.llamacpp import _loader
+
+    # A prior test in this module (or a prior run of this one) may have
+    # already warned about the exact same broken-runtime message and left the
+    # latch set, which would make even this test's FIRST call read as a
+    # repeat. Start from a clean latch, same as _reset_runtime_warning_state
+    # does for the sibling LLAMA_CPP_LIB latch below.
+    monkeypatch.setattr(_loader, "_last_warned_broken_runtime", None, raising=False)
+    monkeypatch.setattr(_loader, "_last_broken_runtime_warning", None, raising=False)
+
+    fake = types.ModuleType("localm_llama_runtime")   # no lib_dir() attribute
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", fake)
+    monkeypatch.delenv("LLAMA_CPP_LIB", raising=False)
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    h = _Capture()
+    _loader.logger.addHandler(h)
+    try:
+        _loader._candidate_dirs()
+        _loader._candidate_dirs()
+    finally:
+        _loader.logger.removeHandler(h)
+
+    warnings = [r for r in records
+               if r.levelno == logging.WARNING and "broken" in r.getMessage()]
+    assert len(warnings) == 1, \
+        f"the broken-runtime warning must fire once per distinct message, got {len(warnings)}"
+    assert _loader._last_broken_runtime_warning is not None, \
+        "the warning text must stay available to last_runtime_resolution_warning() " \
+        "even once the WARNING log line itself is no longer repeated"
+
+
 def test_missing_llama_runtime_stays_silent(monkeypatch):
     from localm.inference.backends.llamacpp import _loader
 

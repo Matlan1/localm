@@ -5,8 +5,29 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import { loadApp, runScript } from "./harness.mjs";
+
+const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..",
+  "localm", "plugins", "gui", "static");
+const DE = JSON.parse(readFileSync(join(STATIC, "i18n", "de.json"), "utf-8"));
+
+/** A window with German loaded from the real catalog. */
+async function loadGerman() {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes("/i18n/de.json")) return { ok: true, status: 200, json: async () => DE };
+    if (u.includes("/i18n/")) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl });
+  runScript(window, 'window.__p = applyLanguage("de");');
+  await window.__p;
+  return window;
+}
 
 test("formatStatusElapsed formats seconds into m:ss correctly", () => {
   const { window } = loadApp();
@@ -160,4 +181,67 @@ test("runCompletion mounts status indicator and removes it when tokens stream", 
   finishStream();
   await runPromise;
 });
+
+test("updateStatusIndicator localizes the pill from status_code when German is active", async () => {
+  const window = await loadGerman();
+  const doc = window.document;
+  const body = doc.createElement("div");
+  body.className = "msg-body";
+  doc.body.appendChild(body);
+
+  window.updateStatusIndicator(body, "Encoding image (GPU)...", "encoding_image_gpu");
+  const ind = body.querySelector(".msg-status-indicator");
+  const label = () => ind.querySelector(".status-text").textContent;
+  assert.equal(label(), "Bild wird kodiert (GPU)…");
+  assert.ok(!label().includes("Encoding"), `expected no English leftover, got ${label()}`);
+
+  window.removeStatusIndicator(body);
+  body.remove();
+});
+
+test("updateStatusIndicator picks the warning style from status_code, not from the localized text",
+  async () => {
+    const window = await loadGerman();
+    const doc = window.document;
+    const body = doc.createElement("div");
+    body.className = "msg-body";
+    doc.body.appendChild(body);
+
+    window.updateStatusIndicator(body, "Encoding image (GPU)...", "encoding_image_gpu");
+    const ind = body.querySelector(".msg-status-indicator");
+    assert.ok(!ind.classList.contains("st-warn"));
+
+    window.updateStatusIndicator(
+      body,
+      "GPU vision encode failed; retrying on CPU (this may take longer)...",
+      "vision_cpu_retry",
+    );
+    assert.ok(ind.classList.contains("st-warn"),
+      "vision_cpu_retry must apply the warning style even though the German text carries none of the English warning words");
+    const label = ind.querySelector(".status-text").textContent;
+    assert.ok(!label.includes("failed") && !label.includes("retrying"),
+      `expected the German label with no English warning words, got ${label}`);
+
+    window.updateStatusIndicator(body, "Generating response...", "generating");
+    assert.ok(!ind.classList.contains("st-warn"), "the warning style must clear once the code is no longer vision_cpu_retry");
+
+    window.removeStatusIndicator(body);
+    body.remove();
+  });
+
+test("updateStatusIndicator falls back to the raw English text for an unrecognized status_code",
+  () => {
+    const { window } = loadApp();
+    const doc = window.document;
+    const body = doc.createElement("div");
+    body.className = "msg-body";
+    doc.body.appendChild(body);
+
+    window.updateStatusIndicator(body, "Doing something new...", "some_future_stage");
+    const ind = body.querySelector(".msg-status-indicator");
+    assert.equal(ind.querySelector(".status-text").textContent, "Doing something new...");
+
+    window.removeStatusIndicator(body);
+    body.remove();
+  });
 
