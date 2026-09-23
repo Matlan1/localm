@@ -370,6 +370,10 @@ class TestEmbeddingSetConfirmGate:
         data = r.json()
         assert data["collections"] == []
         assert "nothing to invalidate" in data["note"]
+        # "docs" DOES have embeddings (built with the candidate model itself) -
+        # the report is empty because nothing would CHANGE, not because
+        # nothing is embedded. The old wording claimed the latter.
+        assert "No existing collection currently has embeddings" not in data["note"]
 
     def test_unconfirmed_with_same_active_model_reports_nothing_to_invalidate(
             self, embedding_route_app, rag_home):
@@ -386,6 +390,10 @@ class TestEmbeddingSetConfirmGate:
         data = r.json()
         assert data["collections"] == []
         assert "nothing to invalidate" in data["note"]
+        # "docs" DOES have embeddings (built with "different-model") - the
+        # short-circuit on model == current_model never even ran the report,
+        # so it cannot honestly claim no collection has embeddings.
+        assert "No existing collection currently has embeddings" not in data["note"]
 
     def test_unconfirmed_names_an_unreadable_collection_without_leaking_the_exception(
             self, embedding_route_app, rag_home, caplog):
@@ -652,6 +660,29 @@ class TestCollectionProvenanceReport:
         names_after_reembed = [x["name"] for x in
                                collection_provenance_report(candidate_model="model-A")]
         assert "mixed" not in names_after_reembed
+
+    def test_candidate_exclusion_applies_via_the_non_peeked_fallback(
+            self, rag_home, monkeypatch):
+        """The candidate_model exclusion applies whether the report answers
+        from peek_stats() or falls back to a full Collection() load (no
+        _stats_cache yet) - forced here by making peek_stats() always miss,
+        same technique as test_mixed_provenance_also_excludes_via_the_non_
+        peeked_fallback below but for a plain, single-model collection."""
+        from localm.rag.store import collection_provenance_report
+        c = _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
+        c._meta["embedding_model"] = "model-a"
+        c._save()
+
+        monkeypatch.setattr(Collection, "peek_stats",
+                            classmethod(lambda cls, name, base=None: None))
+
+        excluded = [x["name"] for x in
+                   collection_provenance_report(candidate_model="model-a")]
+        assert "docs" not in excluded
+
+        included = [x["name"] for x in
+                   collection_provenance_report(candidate_model="other-model")]
+        assert "docs" in included
 
     def test_mixed_provenance_also_excludes_via_the_non_peeked_fallback(
             self, rag_home, tmp_path, monkeypatch):

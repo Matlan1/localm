@@ -123,6 +123,13 @@ def setup_embeddings(model, yes=False):
     from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
                                       KNOWN_EMBEDDING_MODELS,
                                       resolve_embedding_model_path)
+    # Whether the ready banner below still needs its generic "existing
+    # collections stay lexical" reminder. Left True by default (no --model, or
+    # --model equal to the current config, never resolve this either way), and
+    # set to False only when a real switch was attempted AND its OWN
+    # collection_provenance_report() already proved nothing is affected - so
+    # the reminder is not printed on top of a report that just said otherwise.
+    reembed_hint = True
     if model:
         current = str(load_config().get("embedding_model") or "")
         if model != current:
@@ -154,6 +161,8 @@ def setup_embeddings(model, yes=False):
                         proceed = True
                     if not proceed:
                         raise click.Abort()
+            else:
+                reembed_hint = False
         update_config(lambda c: c.update({"embedding_model": model}))
     name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
     console.print(f"Installing embedding model: [bold cyan]{escape(name)}[/bold cyan]")
@@ -229,12 +238,15 @@ def setup_embeddings(model, yes=False):
         mem_note = ("\nMemory: stored items could not be embedded just now, so "
                     "recall stays lexical for them until this succeeds.")
 
+    reembed_note = (
+        "\nExisting RAG collections stay lexical (BM25) until re-embedded: run "
+        "`localm rag reembed <name>` for each (works from the chunk text already "
+        "stored, no original files needed), or click 're-embed' on the Knowledge "
+        "page.") if reembed_hint else ""
     console.print(
         f"[green]Embedding model ready:[/green] {escape(str(path))}{synced_note}{mem_note}\n"
-        "New memory items are embedded as they are written. Existing RAG "
-        "collections stay lexical (BM25) until re-embedded: run `localm rag reembed "
-        "<name>` for each (works from the chunk text already stored, no original "
-        "files needed), or click 're-embed' on the Knowledge page.")
+        "New memory items are embedded as they are written."
+        f"{reembed_note}")
 
 
 @main.command("make-launcher")

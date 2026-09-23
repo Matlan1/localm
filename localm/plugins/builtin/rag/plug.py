@@ -623,10 +623,18 @@ async def rag_detail(name: str, request: Request):
 @_router.delete("/api/rag/collections/{name}")
 async def rag_delete(name: str, request: Request):
     from localm.rag import check_collection_name, delete_collection
+    from localm.rag.store import rag_dir
     try:
-        check_collection_name(name)
+        checked_name = check_collection_name(name)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # Existence (404) before confinement (403), same order rag_detail uses: a
+    # cheap meta.json-presence check, matching delete_collection's own, never
+    # a full Collection() load. See TestRagDeleteRouteKeyScopedRoots
+    # .test_delete_missing_collection_gets_404_not_403 (test_rag_confinement.py)
+    # and test_rag_delete_does_not_load_collection (test_rag_vector_acceleration.py).
+    if not (rag_dir() / checked_name / "meta.json").is_file():
+        raise HTTPException(404, f"No such collection: {name}")
     _require_rag_confinement(name, request)
     try:
         if not await _write_off_loop(lambda: delete_collection(name)):
@@ -840,7 +848,11 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         check_collection_name(name)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    key_roots = _require_rag_confinement(name, request)
+    # Resolved here (never raises) so a missing collection can be reported as
+    # 404 before any 403 - the raising confinement check is the in-executor
+    # recheck below, which runs AFTER _get_collection() has proved existence.
+    from localm.inference.http_server import effective_rag_roots
+    key_roots = effective_rag_roots(request)
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     k = max(1, min(req.k, 20))
@@ -848,6 +860,9 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     loop = asyncio.get_running_loop()
 
     def _execute():
+        # Existence (404) before confinement (403), same order rag_detail
+        # uses. See TestRagQueryRouteKeyScopedRoots
+        # .test_query_missing_collection_gets_404_not_403.
         coll = _get_collection(name)
         # Re-checks confinement on the loaded instance. See
         # test_confinement_is_decided_on_the_chunks_that_would_be_served.
@@ -1223,8 +1238,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
         from localm.config import load_config
         current_model = str(load_config().get("embedding_model") or "")
         from localm.rag import collection_provenance_note, collection_provenance_report
-        affected = [] if model == current_model else collection_provenance_report(candidate_model=model)
-        note = collection_provenance_note(model, affected)
+        unchanged = model == current_model
+        affected = [] if unchanged else collection_provenance_report(candidate_model=model)
+        note = collection_provenance_note(model, affected, unchanged=unchanged)
         return {"needs_confirm": True, "model": model,
                 "collections": affected, "note": note}
 

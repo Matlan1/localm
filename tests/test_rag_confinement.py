@@ -1345,6 +1345,20 @@ class TestRagQueryRouteKeyScopedRoots:
             assert r.status_code == 200, r.text
             assert r.json()["hits"]
 
+    def test_query_missing_collection_gets_404_not_403(
+            self, tmp_path, monkeypatch):
+        # A confined key querying a collection that does not exist sees the
+        # same 404 an unconfined caller would - never a 403, which would
+        # imply the collection is real but off-limits.
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                      rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            r = client.post("/api/rag/collections/nosuch/query",
+                            json={"query": "anything", "k": 5}, headers=hdr)
+            assert r.status_code == 404, r.text
+
 
 class TestRagListRouteKeyScopedRoots:
     def test_list_omits_collection_with_content_outside_granted_root(
@@ -1464,6 +1478,19 @@ class TestRagDeleteRouteKeyScopedRoots:
             _index_via(client, app, hdr, "kb", granted)
             r = client.delete("/api/rag/collections/kb", headers=hdr)
             assert r.status_code == 200, r.text
+
+    def test_delete_missing_collection_gets_404_not_403(
+            self, tmp_path, monkeypatch):
+        # Same as the query route: a confined key deleting a collection that
+        # does not exist sees 404, never a 403 implying it exists but is
+        # off-limits.
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                      rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            r = client.delete("/api/rag/collections/nosuch", headers=hdr)
+            assert r.status_code == 404, r.text
 
 
 class TestRagRemoveDocRouteKeyScopedRoots:
