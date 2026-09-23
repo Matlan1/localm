@@ -151,3 +151,21 @@ class TestMain:
         captured = capsys.readouterr()
         assert "touched=false" not in captured.out
         assert "could not diff" in captured.err
+
+    def test_missing_mutmut_table_exits_one_and_never_says_false(self, repo, capsys):
+        """NEGATIVE: no [tool.mutmut] table means the scope is unknown, not empty."""
+        _commit(repo, "pyproject.toml", "[tool.other]\nx = 1\n")
+        _commit(repo, "localm/auth.py", "def f():\n    return 2\n")
+        assert ms.main(["--base", "master", "--repo", str(repo)]) == 1
+        captured = capsys.readouterr()
+        assert "touched=false" not in captured.out
+        assert "only_mutate" in captured.err
+
+    def test_empty_only_mutate_exits_one_and_never_says_false(self, repo, capsys):
+        """NEGATIVE: an explicitly empty only_mutate list is also unknown scope."""
+        _commit(repo, "pyproject.toml", "[tool.mutmut]\nonly_mutate = []\n[tool.other]\nx = 1\n")
+        _commit(repo, "localm/auth.py", "def f():\n    return 2\n")
+        assert ms.main(["--base", "master", "--repo", str(repo)]) == 1
+        captured = capsys.readouterr()
+        assert "touched=false" not in captured.out
+        assert "only_mutate" in captured.err
