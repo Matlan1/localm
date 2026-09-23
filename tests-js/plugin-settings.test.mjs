@@ -112,6 +112,25 @@ test("a HIDDEN field never renders a control", async () => {
   assert.equal(ctrl(sec, "secret_state"), null);
 });
 
+test("a configured secret field shows the configured tag and a Clear button", async () => {
+  const payload = pluginsPayload({ plugins: [
+    { plugin: "myplug", label: "My Plugin", fields: [
+      pluginField("api_key", { widget: "secret", is_set: true, is_override: true }),
+    ] },
+  ] });
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ plugins: payload }) });
+  await render(win);
+  const sec = section(win, "myplug");
+  const wrap = ctrl(sec, "api_key");
+  assert.ok(wrap, "api_key control rendered");
+  const tag = wrap.querySelector(".secret-status-tag");
+  const clearBtn = wrap.querySelector(".secret-clear-btn");
+  assert.ok(tag, "status tag exists");
+  assert.equal(tag.textContent, "(configured)");
+  assert.ok(tag.classList.contains("is-set"), "configured has is-set class");
+  assert.ok(clearBtn, "Clear button is rendered for a configured plugin secret");
+});
+
 test("a failed fetch SHOWS the failure instead of silently dropping the section", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ plugsFail: true }) });
   await render(win);

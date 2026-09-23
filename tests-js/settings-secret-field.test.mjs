@@ -7,13 +7,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
+// A plain field in hf_token's OWN group (Models), so a save of hf_token's own
+// section has something else to send - real schema shape, mirrors
+// import_max_depth in settings_schema.py. Left at its shipped default so it
+// renders blank and is omitted unless a test explicitly edits it.
+const MODELS_COMPANION_FIELD = { key: "import_max_depth", widget: "number",
+  label: "Folder import depth", help: "", group: "Models", owner: "core",
+  default: 3, shipped_default: 3, min: 1, max: 10, step: 1 };
+
 const SCHEMA_UNSET = {
   fields: [
     { key: "hf_token", widget: "secret", label: "Hugging Face API token",
       help: "Optional: raises rate limits.", group: "Models", owner: "core",
       applies: "live", secret: true, is_set: false, env_set: false },
-    { key: "mdns_name", widget: "text", label: "Network name (mDNS)", help: "",
-      group: "Server", owner: "core", default: "localm", shipped_default: "localm" },
+    MODELS_COMPANION_FIELD,
   ],
 };
 
@@ -22,6 +29,7 @@ const SCHEMA_CONFIGURED = {
     { key: "hf_token", widget: "secret", label: "Hugging Face API token",
       help: "Optional: raises rate limits.", group: "Models", owner: "core",
       applies: "live", secret: true, is_set: true, env_set: false },
+    MODELS_COMPANION_FIELD,
   ],
 };
 
@@ -29,7 +37,7 @@ const SCHEMA_ENV = {
   fields: [
     { key: "hf_token", widget: "secret", label: "Hugging Face API token",
       help: "Optional: raises rate limits.", group: "Models", owner: "core",
-      applies: "live", secret: true, is_set: false, env_set: true },
+      applies: "live", secret: true, is_set: true, env_set: true },
   ],
 };
 
@@ -52,6 +60,15 @@ function makeFetch(schema, patches = []) {
 async function render(win) {
   runScript(win, "refreshSettingsPage();");
   await new Promise((r) => setTimeout(r, 0));
+}
+
+// Gives a save of hf_token's own (Models) section something else to send, so
+// the save is never a no-op and the section that is actually PATCHed is the
+// one hf_token itself lives in.
+function touchCompanionField(win) {
+  const depth = win.document.querySelector('input[data-key="import_max_depth"]');
+  depth.value = "5";
+  depth.dispatchEvent(new win.Event("input"));
 }
 
 test("secret field when not set displays (not set) tag and optional placeholder with no Clear button", async () => {
@@ -148,6 +165,7 @@ test("secret field when set via environment displays (from environment) and no C
 
   assert.ok(tag, "status tag exists");
   assert.equal(tag.textContent, "(from environment)");
+  assert.ok(tag.classList.contains("is-set"), "env-configured has is-set class");
   assert.equal(input.placeholder, "set via environment variable");
   assert.equal(clearBtn, null, "no Clear button for env credentials");
 });
@@ -156,16 +174,71 @@ test("untouched secret field is omitted on save", async () => {
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_UNSET, patches) });
   await render(win);
-  const mdns = win.document.querySelector('input[data-key="mdns_name"]');
-  mdns.value = "custom-box";
-  mdns.dispatchEvent(new win.Event("input"));
+  touchCompanionField(win);
+  const input = win.document.querySelector('input[data-key="hf_token"]');
 
-  const secId = mdns.closest(".settings-section").dataset.sec;
+  const secId = input.closest(".settings-section").dataset.sec;
   runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
   await new Promise((r) => setTimeout(r, 0));
 
   assert.equal(patches.length, 1);
   assert.ok(!("hf_token" in patches[0]), "untouched secret is omitted from patch");
+});
+
+test("secret field typed then cleared back to empty is omitted on save", async () => {
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_UNSET, patches) });
+  await render(win);
+  touchCompanionField(win);
+  const input = win.document.querySelector('input[data-key="hf_token"]');
+  input.value = "hf_typed_then_removed";
+  input.dispatchEvent(new win.Event("input"));
+  input.value = "";
+  input.dispatchEvent(new win.Event("input"));
+
+  const secId = input.closest(".settings-section").dataset.sec;
+  runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(patches.length, 1);
+  assert.ok(!("hf_token" in patches[0]), "typed-then-cleared secret is omitted from patch");
+});
+
+test("secret field with only whitespace typed is omitted on save", async () => {
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_UNSET, patches) });
+  await render(win);
+  touchCompanionField(win);
+  const input = win.document.querySelector('input[data-key="hf_token"]');
+  input.value = "   ";
+  input.dispatchEvent(new win.Event("input"));
+
+  const secId = input.closest(".settings-section").dataset.sec;
+  runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(patches.length, 1);
+  assert.ok(!("hf_token" in patches[0]), "whitespace-only secret is omitted from patch");
+});
+
+test("secret field Clear then Undo leaves it omitted on save", async () => {
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_CONFIGURED, patches) });
+  await render(win);
+  touchCompanionField(win);
+  const input = win.document.querySelector('input[data-key="hf_token"]');
+  const wrap = input.closest("[data-field-key]");
+  const clearBtn = wrap.querySelector(".secret-clear-btn");
+
+  clearBtn.click();          // willClear -> true
+  clearBtn.click();          // Undo -> willClear -> false
+
+  const secId = input.closest(".settings-section").dataset.sec;
+  runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(patches.length, 1);
+  assert.ok(!("hf_token" in patches[0]), "Clear-then-Undo secret is omitted from patch");
 });
 
 test("typing a new secret into a configured field updates status and sends new value on save", async () => {

@@ -2262,6 +2262,7 @@ export async function buildTtsSection(form) {
     const ctrl = buildSettingControl({
       key: f.key, widget, label: f.label, help: f.help,
       default: f.value, options, min: f.min, max: f.max, step: f.step,
+      is_set: f.is_set, is_override: f.is_override, env_set: f.env_set,
     });
     if (!ctrl) return null;
     // Show the friendly voice names ("Heart (en-us, Female, A)") the chat picker
@@ -2484,6 +2485,7 @@ export async function buildPluginSettingsSections(form) {
       const ctrl = buildSettingControl({
         key: f.key, widget, label: f.label, help: f.help,
         default: f.value, options, min: f.min, max: f.max, step: f.step,
+        is_set: f.is_set, is_override: f.is_override, env_set: f.env_set,
       });
       if (!ctrl) continue;             // HIDDEN
       ctrl.orig = f.value;
@@ -3077,6 +3079,7 @@ export function renderMediaSubsection(name) {
     const ctrl = buildSettingControl({
       key: f.key, widget: f.widget, label: f.label, help: f.help,
       default: f.value, options: f.options,
+      is_set: f.is_set, is_override: f.is_override, env_set: f.env_set,
     });
     if (!ctrl) continue;
     ctrl.orig = f.value;
