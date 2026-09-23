@@ -801,6 +801,12 @@ export async function refreshModels() {
     modelCache = (data && Array.isArray(data.models))
       ? data
       : { models: [], active: (data && data.active) || "" };
+    // A model answered through an accepted peer route stays the selection
+    // while the server still holds that route; a cleared route drops it.
+    const peerRoute = _peerSelected && data && data.peer_routes
+      ? data.peer_routes[_peerSelected] : null;
+    if (!peerRoute) _peerSelected = null;
+    else modelCache.active = _peerSelected;
     // Don't rebuild the select while the user has it open
     if (document.activeElement !== modelSelect) {
       modelSelect.innerHTML = "";
@@ -844,7 +850,8 @@ export async function refreshModels() {
         opt.value = m.name;
         const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
         opt.textContent = m.name + size;
-        if (m.active || (!modelCache.active && m.name === willServe)) opt.selected = true;
+        if (peerRoute ? m.name === _peerSelected
+            : (m.active || (!modelCache.active && m.name === willServe))) opt.selected = true;
         modelSelect.appendChild(opt);
       }
     }
@@ -854,11 +861,19 @@ export async function refreshModels() {
     // "no model" only when nothing will serve the next message either - a
     // resumable model reloads on it, so reporting "no model" would contradict
     // both the dropdown above and what the server actually does.
-    if (!_statusBusy) setStatus("ok", data.active || data.resumable || t("sidebar.status.noModel"));
+    if (!_statusBusy) {
+      if (peerRoute) {
+        setStatus("ok", t("sidebar.peerRoute.routedStatus", {
+          model: _peerSelected, host: peerRoute.host, port: peerRoute.port,
+        }));
+      } else {
+        setStatus("ok", data.active || data.resumable || t("sidebar.status.noModel"));
+      }
+    }
     // Present only when there is something to unload - not merely a courtesy,
     // the model this targets (modelCache.active) is the ONLY thing that makes
     // its click handler well-defined.
-    if (sidebarUnloadBtn) sidebarUnloadBtn.hidden = !modelCache.active;
+    if (sidebarUnloadBtn) sidebarUnloadBtn.hidden = !modelCache.active || !!peerRoute;
     renderModelSplitLine(data.active_gpu_split);
     // The active model can change from OUTSIDE this tab too - another tab,
     // another device, the CLI, an MCP client - while Settings is already open. A
@@ -906,12 +921,13 @@ export function renderModelSplitLine(split) {
 }
 
 // Ask a live sibling instance to be routed to instead of loading a local
-// copy: shows a password-input modal naming the peer and, on submit,
-// resolves the entered API key. Resolves null on Cancel/Escape/backdrop
-// dismiss. Modeled on promptText() in helpers.js, with a password-type
-// input for the credential and its own message/title instead of a bare
-// text prompt.
+// copy: shows a modal naming the peer and resolves what the user chose.
+// A peer that needs its own API key gets a password input and resolves the
+// entered key; a peer in open mode needs none, so the modal only asks, and
+// resolves "" when accepted. Resolves null on Cancel/Escape/backdrop
+// dismiss. Modeled on promptText() in helpers.js.
 function _offerPeerRoute(model, peer) {
+  const needsKey = peer.requires_key !== false;
   return new Promise((resolve) => {
     let settled = false;
     let watch = null;
@@ -924,27 +940,34 @@ function _offerPeerRoute(model, peer) {
       resolve(value);
     };
     openModal(t("sidebar.peerRoute.title"), (body) => {
-      body.appendChild(el("p", "", t("sidebar.peerRoute.message", {
-        model, host: peer.host, port: peer.port,
-      })));
-      input = el("input");
-      input.type = "password";
-      input.placeholder = t("sidebar.peerRoute.keyPlaceholder");
-      body.appendChild(input);
+      body.appendChild(el("p", "", t(
+        needsKey ? "sidebar.peerRoute.message" : "sidebar.peerRoute.messageOpen", {
+          model, host: peer.host, port: peer.port,
+        })));
+      const accept = () => finish(needsKey ? (input.value.trim() || null) : "");
+      if (needsKey) {
+        input = el("input");
+        input.type = "password";
+        input.placeholder = t("sidebar.peerRoute.keyPlaceholder");
+        body.appendChild(input);
+      }
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
       cancel.onclick = () => finish(null);
-      const ok = el("button", "btn-secondary", t("sidebar.peerRoute.routeButton"));
-      ok.onclick = () => finish(input.value.trim() || null);
+      const ok = el("button", "btn-secondary",
+        t(needsKey ? "sidebar.peerRoute.routeButton" : "sidebar.peerRoute.useButton"));
+      ok.onclick = accept;
       row.appendChild(cancel);
       row.appendChild(ok);
       body.appendChild(row);
-      input.onkeydown = (e) => {
-        if (e.key === "Enter") { e.preventDefault(); finish(input.value.trim() || null); }
+      const onKey = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); accept(); }
         else if (e.key === "Escape") { e.preventDefault(); finish(null); }
       };
+      if (input) input.onkeydown = onKey;
+      else ok.onkeydown = onKey;
     });
-    input.focus();
+    (input || document.querySelector("#modal .actions button:last-child"))?.focus();
     // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
     // poll for it and treat as cancel - same pattern promptText() uses.
     watch = setInterval(() => {
@@ -971,7 +994,7 @@ async function _maybeRoutePeer(model) {
   }
   if (!offer || !offer.available || !offer.peer) return null;
   const apiKey = await _offerPeerRoute(model, offer.peer);
-  if (!apiKey) return null;
+  if (apiKey === null) return null;
   const r2 = await fetch(`/v1/models/${encodeURIComponent(model)}/peer-route`, {
     method: "POST",
     headers: authHeaders(),
@@ -986,10 +1009,18 @@ async function _maybeRoutePeer(model) {
   setStatus("ok", t("sidebar.peerRoute.routedStatus", {
     model, host: offer.peer.host, port: offer.peer.port,
   }));
+  _peerSelected = model;
   modelCache.active = model;
   toast(t("sidebar.peerRoute.routedToast", { model }));
+  window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model } }));
   return data;
 }
+
+// The model the user chose to answer through a peer instance (its route was
+// accepted in this tab), or null. /api/models reports the LOCAL active model,
+// so refreshModels keeps this selected for as long as the server still holds
+// its route (data.peer_routes).
+let _peerSelected = null;
 
 async function _postLoad(model, force) {
   const r = await fetch("/api/models/load", {
@@ -1021,6 +1052,7 @@ async function _postLoad(model, force) {
 export async function switchModel(model) {
   const routed = await _maybeRoutePeer(model);
   if (routed) return routed;
+  _peerSelected = null;
   setStatus("busy", t("sidebar.status.loading", { model }));
   let data = await _postLoad(model, false);
   if (data.status === "confirm_required") {

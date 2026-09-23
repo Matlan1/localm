@@ -40,6 +40,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager import _entry_path
         from localm.model_manager import has_recorded_model_type as _has_recorded_model_type
         from localm.model_manager import model_vision_capability as _mvc
+        from localm.model_manager import capabilities as _caps
         registry = load_registry()
         current = active_model()
         # Fetched once, off the event loop, before the row loop below: loaded_path()
@@ -78,6 +79,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # Keyed by NAME, not by path: two aliases can share one path, but
             # model_vision_capability() is looked up per registered name.
             vision: dict = {}
+            # Trained context window and tool-call support per NAME, as the
+            # routing capability readers report them (None = not inspected).
+            context_len: dict = {}
+            tool_use: dict = {}
             # One projector listing per FOLDER for this request, not per row. Scoped
             # to this call, so a projector added to a folder shows up on the next
             # refresh.
@@ -98,6 +103,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 # recorded, present projector answers True even when the model file
                 # itself is unreachable.
                 vision[_n] = _mvc(_n, reg=registry, dir_cache=vision_dirs)
+                context_len[_n] = _caps.model_context_length(_n, reg=registry)
+                tool_use[_n] = _caps.model_tool_use_capability(_n, reg=registry)
                 # ONE stat() for both size and mtime. mtime is recorded for a
                 # directory too (an HF model dir); size stays None for a directory.
                 try:
@@ -115,10 +122,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     resolved[ep] = p.resolve()
                 except (OSError, ValueError):
                     resolved[ep] = None
-            return sizes, mtimes, missing, resolved, emb_resolved, vision
+            return (sizes, mtimes, missing, resolved, emb_resolved, vision,
+                    context_len, tool_use)
 
-        sizes, mtimes, missing_flags, resolved_paths, emb_resolved, vision_caps = \
-            await loop.run_in_executor(get_plugin_executor(), _probe_rows)
+        (sizes, mtimes, missing_flags, resolved_paths, emb_resolved, vision_caps,
+         context_lens, tool_caps) = await loop.run_in_executor(
+            get_plugin_executor(), _probe_rows)
 
         models = []
         for name, entry, mtype, epath in rows:
@@ -156,6 +165,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             _vis = vision_caps.get(name)
             if _vis is not None:
                 row_out["vision"] = _vis
+            # Same true / false / KEY ABSENT shape for the other two routing
+            # capabilities: the trained context window and tool-call support.
+            if context_lens.get(name) is not None:
+                row_out["context_length"] = context_lens[name]
+            if tool_caps.get(name) is not None:
+                row_out["tool_use"] = tool_caps[name]
             # "model_type" above defaults a missing key to "llm" so a legacy entry
             # that predates the field stays selectable for the ?type=llm chat picker.
             # This flag marks that default as a guess rather than a recorded fact,
@@ -169,6 +184,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 row_out["last_path"] = epath
             models.append(row_out)
         out = {"models": models, "active": current}
+        # Models this instance answers through a peer instance on the same
+        # machine, keyed by name (see localm.peer_routing).
+        from localm import peer_routing
+        routes = peer_routing.list_routes()
+        if routes:
+            out["peer_routes"] = routes
         # The model an UNNAMED request would resolve to when none is currently
         # active: after an idle-unload the Engine stays in _engines for lazy reload
         # and _last_active_model_name records its name, so the next chat message

@@ -325,11 +325,38 @@ export async function compactConversation(conv) {
   return true;
 }
 
+/** The trained context window a longer conversation needs, when the model
+ *  that would answer it cannot hold it and an installed one can: returns
+ *  { minContext } for the request's `min_context`, so the server answers with
+ *  that roomier model instead of the conversation being compacted. Null when
+ *  the chat is pinned, when the answering model's window is unknown or big
+ *  enough, or when no installed model has a bigger one. */
+export function contextRoutingNeed(conv, est) {
+  if (!conv || conv.pinnedModel) return null;
+  const current = modelSelect.value || modelCache.active;
+  const models = (modelCache && modelCache.models) || [];
+  const cur = models.find((m) => m.name === current);
+  const trained = cur && cur.context_length;
+  if (!trained) return null;
+  if (est < COMPACT_RATIO * trained) return null;
+  const need = Math.ceil(est / COMPACT_RATIO);
+  const roomier = models.some((m) => m.name !== current && !m.missing &&
+    (m.model_type || "llm") === "llm" && (m.context_length || 0) >= need);
+  return roomier ? { minContext: need } : null;
+}
+
+/** Compacts *conv* when it has grown past COMPACT_RATIO of the context
+ *  window, unless an installed model can hold it (see contextRoutingNeed).
+ *  Returns that routing need, or null. */
 export async function maybeCompactConversation(conv) {
-  if (!chat.ctxMax || chat.ctxMax <= 0) return;
-  if (estimateConvTokens(conv) >= COMPACT_RATIO * chat.ctxMax) {
+  const est = estimateConvTokens(conv);
+  const routing = contextRoutingNeed(conv, est);
+  if (routing) return routing;
+  if (!chat.ctxMax || chat.ctxMax <= 0) return null;
+  if (est >= COMPACT_RATIO * chat.ctxMax) {
     await compactConversation(conv);
   }
+  return null;
 }
 
 let _instanceUnknownWarned = false;   // one warning per breakage, re-armed on success
@@ -660,6 +687,7 @@ export function pushConversation(conv) {
                                updated_at: conv.updated_at,
                                pinned: !!conv.pinned,
                                folder: conv.folder || null,
+                               pinned_model: conv.pinnedModel || null,
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
@@ -721,6 +749,8 @@ export async function hydrateConversation(conv) {
     if (data.title != null) conv.title = data.title;
     conv.pinned = !!data.pinned;
     conv.folder = data.folder || null;
+    if (data.pinned_model) conv.pinnedModel = data.pinned_model;
+    else delete conv.pinnedModel;
     migrateConversation(conv);
     delete conv._meta;
     saveConversations();   // cache the now-full conversation locally
@@ -810,6 +840,32 @@ export async function initServerConversations() {
 export function currentConv() {
   return chat.conversations.find((c) => c.id === chat.activeId) || null;
 }
+
+/** Reflects *conv*'s pinned model in the drawer's pin checkbox and its label:
+ *  checked and naming the pinned model when there is one, otherwise unchecked
+ *  and naming the model selected in the sidebar. */
+export function syncPinModelToggle(conv) {
+  const box = $("p-pin-model");
+  const label = $("p-pin-model-name");
+  if (!box) return;
+  const pinned = conv && conv.pinnedModel;
+  box.checked = !!pinned;
+  if (label) label.textContent = pinned || modelSelect.value || modelCache.active || "";
+}
+
+/** Pins the conversation on screen to the model selected in the sidebar, or
+ *  unpins it. A pinned conversation is always answered by that model, even
+ *  when a request needs something it lacks. */
+export function setConversationPin(on) {
+  const conv = currentConv();
+  if (!conv) return;
+  const model = modelSelect.value || modelCache.active;
+  if (on && model) conv.pinnedModel = model;
+  else delete conv.pinnedModel;
+  saveConversations(conv);
+  syncPinModelToggle(conv);
+}
+window.setConversationPin = setConversationPin;
 
 export function newConversation() {
   const conv = { id: Date.now().toString(36), title: "New chat", messages: [] };
@@ -1110,6 +1166,19 @@ const MEMORY_DEGRADE_LABELS = {
   query_embed_failed: "keyword match only - could not embed this message",
 };
 
+/** A chip on an assistant turn that was answered by a different model than
+ *  the one selected, because the selected one lacked something the request
+ *  needed. *routed* is { from, gaps: [capability, ...] }. */
+export function buildRoutedChip(routed) {
+  const chip = el("span", "routed-chip");
+  chip.appendChild(iconEl("models", "btn-ic"));
+  const gaps = (routed.gaps || []).map((g) => t("chat.routed.cap." + g));
+  chip.appendChild(document.createTextNode(t("chat.routed.chip", { from: routed.from || "?" })));
+  chip.title = t("chat.routed.title", {
+    from: routed.from || "?", needs: gaps.join(", ") || "?" });
+  return chip;
+}
+
 /** F11: build the memory-icon "N" chip for an assistant turn - how many
  *  remembered facts the server injected into that reply. Click opens the memory
  *  modal so a wrong or stale fact steering an answer is correctable in place.
@@ -1338,6 +1407,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     meta.appendChild(btn);
   }
   if (opts.memory && opts.memory.n > 0) meta.appendChild(buildMemoryChip(opts.memory));
+  if (opts.routed) meta.appendChild(buildRoutedChip(opts.routed));
   row.appendChild(meta);
   container.appendChild(row);
   return { row, body, meta };
@@ -1533,6 +1603,7 @@ export function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
   const conv = currentConv();
+  syncPinModelToggle(conv);
   // R40: a not-yet-loaded conversation (server index row) hydrates its body on
   // first render, then re-renders. Try once per row (a failed/offline load sets
   // _hydrateFailed so we never spin).
@@ -1603,6 +1674,7 @@ export function renderChat() {
       variant,
       model: m.model,
       memory: m.memory,           // F11: "used N memories" chip (assistant turns)
+      routed: m.routed,
       cls: tag ? "web-note" : "",
       label: noteLabel(m) || undefined,
       // A settled turn from history: let renderMarkdown surface a "(no reply
