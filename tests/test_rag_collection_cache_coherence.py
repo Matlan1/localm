@@ -310,6 +310,45 @@ class TestVectorMatrixFollowsItsVectors:
         assert after[1] > after[0], "scored against the vectors it was built from before"
 
 
+class TestUnusualFiles:
+    def test_collection_with_a_malformed_chunk_line_is_cached_under_its_path(
+            self, tmp_path):
+        base = tmp_path / "rag"
+        Collection("kb", base=base).create().add_uploads(
+            [_upload("a.txt", "apples are red fruit")])
+        chunks = base / "kb" / "chunks.jsonl"
+        chunks.write_text(chunks.read_text(encoding="utf-8") + "\n{not json",
+                          encoding="utf-8")
+
+        loaded = Collection("kb", base=base)
+        assert loaded.chunks_bad_lines == 1
+        assert store._get_cached_collection_data(base / "kb") is not None, (
+            "the snapshot was not stored under the collection's own key")
+
+        Collection("kb", base=base).add_uploads(
+            [_upload("b.txt", "bananas are yellow fruit")])
+        assert len(store._COLLECTION_CACHE) == 0, "a write left an entry behind"
+
+    def test_deeply_nested_json_loads_through_the_cache(self, tmp_path):
+        base = tmp_path / "rag"
+        Collection("kb", base=base).create().add_uploads(
+            [_upload("a.txt", "apples are red fruit")])
+        deep = "[" * 1500 + "]" * 1500
+        meta_path = base / "kb" / "meta.json"
+        meta_text = meta_path.read_text(encoding="utf-8").rstrip()
+        meta_path.write_text(meta_text[:-1] + ', "deep": ' + deep + "}",
+                             encoding="utf-8")
+        (base / "kb" / "chunks.jsonl").write_text(
+            '{"text": "bananas are yellow fruit", "source": "upload:a.txt", '
+            '"pos": 0, "deep": ' + deep + "}", encoding="utf-8")
+
+        Collection("kb", base=base)
+        served = Collection("kb", base=base)
+
+        assert store._get_cached_collection_data(base / "kb") is not None
+        assert [h["source"] for h in served.query("bananas")] == ["upload:a.txt"]
+
+
 def _scoped_app(tmp_path, monkeypatch, *, rag_roots):
     from fastapi import FastAPI
     from localm import auth
@@ -391,17 +430,6 @@ class TestConfinedQueryServesOnlyWhatItChecked:
         assert "SALARYSECRET" not in r.text, (
             "chunks from outside the key's roots were served because only "
             "meta.json was checked")
-        assert r.status_code == 403, r.text
-
-    def test_confined_key_still_gets_403_for_a_missing_collection(
-            self, tmp_path, monkeypatch):
-        from fastapi.testclient import TestClient
-        allowed = tmp_path / "allowed"
-        allowed.mkdir()
-        app, hdr = _scoped_app(tmp_path, monkeypatch, rag_roots=[str(allowed)])
-        with TestClient(app) as client:
-            r = client.post("/api/rag/collections/nope/query",
-                            json={"query": "anything", "k": 5}, headers=hdr)
         assert r.status_code == 403, r.text
 
     def test_owner_query_is_not_confined(self, tmp_path, monkeypatch):

@@ -682,33 +682,37 @@ def _cache_key(coll_dir: Path) -> str:
 
 def _copy_json(value):
     """A copy of a JSON-shaped value with every dict and list copied at every
-    level; scalars are shared."""
-    kind = type(value)
-    if kind is dict:
-        out = dict(value)
-        for k, v in out.items():
+    level; scalars are shared. Iterative, so nesting depth is unbounded."""
+    if type(value) not in _JSON_CONTAINERS:
+        return value
+    root = dict(value) if type(value) is dict else list(value)
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        entries = node.items() if type(node) is dict else enumerate(node)
+        for k, v in entries:
             if type(v) in _JSON_CONTAINERS:
-                out[k] = _copy_json(v)
-        return out
-    if kind is list:
-        out = list(value)
-        for i, v in enumerate(out):
-            if type(v) in _JSON_CONTAINERS:
-                out[i] = _copy_json(v)
-        return out
-    return value
+                child = dict(v) if type(v) is dict else list(v)
+                node[k] = child
+                pending.append(child)
+    return root
 
 
 def _json_nbytes(value) -> int:
-    """Estimated memory held by a JSON-shaped value, containers and contents."""
-    size = sys.getsizeof(value)
-    kind = type(value)
-    if kind is dict:
-        for k, v in value.items():
-            size += sys.getsizeof(k) + _json_nbytes(v)
-    elif kind is list:
-        for v in value:
-            size += _json_nbytes(v)
+    """Estimated memory held by a JSON-shaped value, containers and contents.
+    Iterative, so nesting depth is unbounded."""
+    size = 0
+    pending = [value]
+    while pending:
+        node = pending.pop()
+        size += sys.getsizeof(node)
+        kind = type(node)
+        if kind is dict:
+            for k, v in node.items():
+                size += sys.getsizeof(k)
+                pending.append(v)
+        elif kind is list:
+            pending.extend(node)
     return size
 
 
@@ -1071,10 +1075,10 @@ class Collection:
         after it and no write ran in between (see ``_SnapshotCache``)."""
         use_cache = self._use_cache if use_cache is None else use_cache
         self._snapshot_ref = None
-        key = token = before = None
+        cache_key = token = before = None
         if use_cache:
-            key = _cache_key(self.dir)
-            cached = _COLLECTION_CACHE.get(key, self.dir)
+            cache_key = _cache_key(self.dir)
+            cached = _COLLECTION_CACHE.get(cache_key, self.dir)
             if cached is not None:
                 self._serve_snapshot(cached)
                 return
@@ -1231,7 +1235,8 @@ class Collection:
         if (before is not None and _COLLECTION_CACHE.token_current(token)
                 and self._min_cached_nbytes() <= _COLLECTION_CACHE_MAX_BYTES
                 and _collection_cache_fingerprint(self.dir) == before):
-            cached = _COLLECTION_CACHE.put(_freeze_snapshot(self, key, before), token)
+            cached = _COLLECTION_CACHE.put(
+                _freeze_snapshot(self, cache_key, before), token)
             if cached is not None:
                 self._serve_snapshot(cached)
 
