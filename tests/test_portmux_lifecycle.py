@@ -621,11 +621,17 @@ def test_run_server_tls_falls_back_to_uvicorn_run_on_unexpected_error(monkeypatc
 
 @pytest.fixture
 def _stop_state(monkeypatch):
-    """Fresh portmux stop state for one test, restored afterwards."""
+    """Fresh portmux stop state for one test, restored afterwards. A signal
+    re-delivered through the default-disposition path is recorded instead of
+    raised, so a wrongly taken default path fails an assertion rather than
+    ending the test process. Yields that record."""
     monkeypatch.setattr(portmux, "_active_runs", 0)
     monkeypatch.setattr(portmux, "_stop_requested", False)
     monkeypatch.setattr(portmux, "_stopping", False)
     monkeypatch.setattr(portmux, "_stop_hooks", [])
+    raised = []
+    monkeypatch.setattr(portmux.signal, "raise_signal", raised.append)
+    yield raised
 
 
 @pytest.fixture
@@ -693,6 +699,7 @@ def test_stop_signal_during_run_server_ends_serving_through_the_hooks(
 
     portmux._on_stop_signal(signal.SIGTERM, None)   # must not raise or exit
 
+    assert _stop_state == [], "a stop signal during run_server() was re-delivered"
     assert hits == ["a", "b"]
     assert portmux._stop_requested is True
 
@@ -795,6 +802,44 @@ def test_run_server_routes_stop_signals_only_while_it_runs(
     assert seen == {"handler": portmux._on_stop_signal, "active": 1, "stopping": False}
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
     assert portmux._active_runs == 0
+    assert calls[-1] == ("disarmed", None)
+
+
+def test_run_server_resets_a_stop_request_left_from_an_earlier_run(
+        _stop_state, _sigterm_default, monkeypatch):
+    calls = _patch_bugreport(monkeypatch)
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+    monkeypatch.setattr(portmux, "_stopping", True)
+    seen = {}
+
+    async def fake_serve(app, host, port, log_level):
+        seen["requested"] = portmux._stop_requested
+        seen["stopping"] = portmux._stopping
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+
+    portmux.run_server(_bare_app, "127.0.0.1", 8008)
+
+    assert seen == {"requested": False, "stopping": False}, (
+        "a stop left over from an earlier run_server() call reached this one")
+    assert calls[-1] == ("disarmed", None)
+
+
+def test_run_server_counts_itself_on_top_of_a_run_already_active(
+        _stop_state, _sigterm_default, monkeypatch):
+    """App-window mode can have the main thread routing signals while the
+    server thread's run_server() is active; each call adds itself."""
+    calls = _patch_bugreport(monkeypatch)
+    monkeypatch.setattr(portmux, "_active_runs", 1)
+    seen = {}
+
+    async def fake_serve(app, host, port, log_level):
+        seen["active"] = portmux._active_runs
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+
+    portmux.run_server(_bare_app, "127.0.0.1", 8009)
+
+    assert seen == {"active": 2}
+    assert portmux._active_runs == 1
     assert calls[-1] == ("disarmed", None)
 
 
