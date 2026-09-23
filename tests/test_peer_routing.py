@@ -1174,6 +1174,14 @@ class TestFileIdentityMatching:
                                             "shared-name")
         assert peer_routing.find_offer("shared-name", frozenset(), identity=ident) is None
 
+    def test_a_registry_path_the_registry_refuses_has_no_identity(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"GGUF")
+        ident = peer_routing.local_identity(
+            {"m": {"path": str(tmp_path / "a" / ".." / "m.gguf"), "sha256": "AB"}}, "m")
+        assert ident == {"path": None, "size": None, "sha256": "ab"}
+
     def test_a_copy_with_the_same_digest_is_offered(self, _isolated_state, monkeypatch):
         _write_peer_models(_isolated_state, "peer-id3", 9603, [
             {"name": "copy", "path": "Q:/elsewhere/m.gguf", "size": 5, "sha256": "ABC"}])

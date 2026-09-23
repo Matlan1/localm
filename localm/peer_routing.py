@@ -165,16 +165,17 @@ def local_identity(registry: dict, model_name: str) -> dict:
         return ident
     if isinstance(entry.get("sha256"), str) and entry["sha256"]:
         ident["sha256"] = entry["sha256"].lower()
-    raw = entry.get("path")
-    if isinstance(raw, str) and raw:
-        try:
-            p = Path(raw).resolve()
+    try:
+        from localm.model_manager.registry import get_model_info
+        info = get_model_info(model_name, reg=registry)
+        if info is not None and info[0]:
+            p = Path(info[0]).resolve()
             ident["path"] = str(p)
             if p.is_file():
-                ident["size"] = os.stat(p).st_size
-        except (OSError, ValueError) as e:
-            logger.debug("peer_routing: could not resolve %s for its identity: %s",
-                         model_name, e)
+                ident["size"] = p.stat().st_size
+    except (OSError, ValueError) as e:
+        logger.debug("peer_routing: could not resolve %s for its identity: %s",
+                     model_name, e)
     return ident
 
 

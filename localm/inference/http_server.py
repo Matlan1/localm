@@ -299,34 +299,16 @@ def _loaded_model_identities() -> list:
     directory, ``size`` its byte size when it is a file, ``sha256`` the
     registry-recorded digest; each is None when unknown. Best-effort: an entry
     that cannot be resolved is listed by name alone."""
-    from pathlib import Path as _Path
-    out = []
+    from localm import peer_routing
     try:
         from localm.config import load_registry
         reg = load_registry()
-    except Exception:
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("gpu-registry: registry unreadable for model identities: %s", e)
         reg = {}
-    for name, eng in list(_engines.items()):
-        if not getattr(eng, "loaded", False):
-            continue
-        ident = {"name": name, "path": None, "size": None, "sha256": None}
-        entry = reg.get(name) if isinstance(reg, dict) else None
-        if isinstance(entry, dict) and isinstance(entry.get("sha256"), str):
-            ident["sha256"] = entry["sha256"].lower()
-        try:
-            from localm.model_manager import get_model_info
-            info = get_model_info(name)
-            if info is not None and info[0]:
-                p = _Path(info[0]).resolve()
-                ident["path"] = str(p)
-                if p.is_file():
-                    ident["size"] = p.stat().st_size
-        except Exception as e:
-            from localm.debuglog import logger as _dbg
-            _dbg.debug("gpu-registry: could not resolve %s for its identity: %s",
-                       name, e)
-        out.append(ident)
-    return out
+    return [{"name": name, **peer_routing.local_identity(reg, name)}
+            for name, eng in list(_engines.items()) if getattr(eng, "loaded", False)]
 
 
 def _gpu_registry_sync() -> None:
