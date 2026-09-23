@@ -25,6 +25,9 @@ class _StubBackend:
     def __init__(self, model_id: str):
         self.model_id = model_id
 
+    def set_model(self, model: str) -> None:
+        self.model_id = model
+
     def chat_stream(self, messages, on_reasoning=None, **kwargs):
         yield "done"
 
