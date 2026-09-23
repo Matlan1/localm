@@ -25,14 +25,21 @@ max-normalised BM25 and cosine similarity.
 
 from __future__ import annotations
 
+import array
+import contextlib
 import json
 import hashlib
 import math
+import operator
 import os
 import re
 import stat as _stat
+import sys
 import threading
 import time
+import types
+import weakref
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -545,11 +552,52 @@ def delete_collection(name: str, base: Optional[Path] = None,
                                    op="a delete", on_wait=on_wait):
             if not (path / "meta.json").is_file():
                 return False      # someone else deleted it while we waited
-            shutil.rmtree(path)
-            _invalidate_collection_cache(path)
+            with _files_changing(path):
+                shutil.rmtree(path)
     finally:
         local.release()
     return True
+
+
+def relabel_embedding_model(old_name: str, new_name: str,
+                            base: Optional[Path] = None) -> "tuple[list, list]":
+    """Rewrite the recorded embedding-model label *old_name* to *new_name* in
+    every collection that carries it.
+
+    Only meta.json is read and rewritten, under the same two locks every
+    writer takes, each waited on for at most ``wait_budget()``. A collection
+    whose meta.json cannot be parsed has no readable label and is left alone.
+    Returns ``(relabelled, busy)``: the collection names rewritten, and the ones
+    skipped because another write held them past the wait budget."""
+    base = base or rag_dir()
+    relabelled: list = []
+    busy: list = []
+    for name in collection_names(base):
+        found = Collection._peek_meta(name, base)
+        if found is None or found[2].get("embedding_model") != old_name:
+            continue
+        coll_dir = found[1]
+        local = _collection_lock(name)
+        if not local.acquire(timeout=wait_budget()):
+            busy.append(name)
+            continue
+        try:
+            with collection_write_lock(lock_path_for(coll_dir), collection=name,
+                                       op="a model rename"):
+                found = Collection._peek_meta(name, base)
+                if found is None or found[2].get("embedding_model") != old_name:
+                    continue
+                meta = found[2]
+                meta["embedding_model"] = new_name
+                with _files_changing(coll_dir):
+                    _storekit_atomic_write(coll_dir / "meta.json",
+                                           json.dumps(meta, indent=2))
+                relabelled.append(name)
+        except CollectionLockedError:
+            busy.append(name)
+        finally:
+            local.release()
+    return relabelled, busy
 
 
 # Per-collection-NAME locks: concurrent writes to one collection serialise
@@ -595,18 +643,28 @@ _WARNED_DEGRADES: set = set()
 #: is simply "no cache yet".
 _STATS_CACHE_KEY = "_stats_cache"
 
-_COLLECTION_CACHE: dict[str, dict] = {}
-_COLLECTION_CACHE_LOCK = threading.Lock()
+#: Ceiling, in estimated bytes, on everything the collection cache holds.
+_COLLECTION_CACHE_MAX_BYTES = 256 * 1024 * 1024
+#: Ceiling on how many collections the cache holds at once.
 _MAX_CACHED_COLLECTIONS = 8
+
+_FLOAT_BYTES = sys.getsizeof(0.5)
+_INT_BYTES = sys.getsizeof(1000)
+_POSTING_BYTES = sys.getsizeof((1, 2))
+_PROXY_BYTES = sys.getsizeof(types.MappingProxyType({}))
+_JSON_CONTAINERS = (dict, list)
 
 
 def _collection_cache_fingerprint(coll_dir: Path) -> dict:
-    def _stat(name: str) -> "list[int] | None":
+    """(file id, mtime_ns, size) for meta.json, chunks.jsonl and vectors.json,
+    None for a file that does not exist. Every atomic replace gives the file a
+    new id."""
+    def _stat(name: str) -> "tuple[int, int, int] | None":
         try:
-            st = (coll_dir / name).stat()
+            st = os.stat(coll_dir / name)
         except OSError:
             return None
-        return [st.st_mtime_ns, st.st_size]
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
     return {
         "meta": _stat("meta.json"),
         "chunks": _stat("chunks.jsonl"),
@@ -614,53 +672,323 @@ def _collection_cache_fingerprint(coll_dir: Path) -> dict:
     }
 
 
-def _get_cached_collection_data(coll_dir: Path) -> Optional[dict]:
+def _cache_key(coll_dir: Path) -> str:
     try:
-        key = str(coll_dir.resolve())
-    except Exception:
-        key = str(coll_dir)
-    with _COLLECTION_CACHE_LOCK:
-        entry = _COLLECTION_CACHE.get(key)
-    if not entry:
-        return None
-    if entry.get("fingerprint") != _collection_cache_fingerprint(coll_dir):
-        with _COLLECTION_CACHE_LOCK:
-            _COLLECTION_CACHE.pop(key, None)
-        return None
-    return entry
+        path = coll_dir.resolve()
+    except (OSError, RuntimeError, ValueError):
+        path = coll_dir
+    return os.path.normcase(str(path))
 
 
-def _set_cached_collection_data(coll_dir: Path, data: dict) -> None:
-    try:
-        key = str(coll_dir.resolve())
-    except Exception:
-        key = str(coll_dir)
-    with _COLLECTION_CACHE_LOCK:
-        if len(_COLLECTION_CACHE) >= _MAX_CACHED_COLLECTIONS:
-            first_key = next(iter(_COLLECTION_CACHE))
-            _COLLECTION_CACHE.pop(first_key, None)
-        _COLLECTION_CACHE[key] = data
+def _copy_json(value):
+    """A copy of a JSON-shaped value with every dict and list copied at every
+    level; scalars are shared. Iterative, so nesting depth is unbounded."""
+    if type(value) not in _JSON_CONTAINERS:
+        return value
+    root = dict(value) if type(value) is dict else list(value)
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        entries = node.items() if type(node) is dict else enumerate(node)
+        for k, v in entries:
+            if type(v) in _JSON_CONTAINERS:
+                child = dict(v) if type(v) is dict else list(v)
+                node[k] = child
+                pending.append(child)
+    return root
+
+
+def _json_nbytes(value) -> int:
+    """Estimated memory held by a JSON-shaped value, containers and contents.
+    Iterative, so nesting depth is unbounded."""
+    size = 0
+    pending = [value]
+    while pending:
+        node = pending.pop()
+        size += sys.getsizeof(node)
+        kind = type(node)
+        if kind is dict:
+            for k, v in node.items():
+                size += sys.getsizeof(k)
+                pending.append(v)
+        elif kind is list:
+            pending.extend(node)
+    return size
+
+
+def _bm25_nbytes(index: BM25) -> int:
+    """Estimated memory held by a BM25 index: its postings and their term
+    strings, the idf table, and per chunk its length and its posting index."""
+    size = sys.getsizeof(index) + sys.getsizeof(vars(index))
+    postings = getattr(index, "_postings", {})
+    size += sys.getsizeof(postings)
+    for term, plist in postings.items():
+        size += (sys.getsizeof(term) + sys.getsizeof(plist)
+                 + len(plist) * _POSTING_BYTES)
+    idf = getattr(index, "_idf", {})
+    size += sys.getsizeof(idf) + len(idf) * _FLOAT_BYTES
+    lengths = getattr(index, "_lengths", ())
+    size += sys.getsizeof(lengths) + len(lengths) * 2 * _INT_BYTES
+    return size
+
+
+def _freeze_rows(vectors: Optional[list], compact: bool):
+    """(read-only rows, estimated bytes) for a vectors list. *compact* stores
+    each row as a read-only float64 buffer; otherwise each row is a tuple."""
+    if vectors is None:
+        return None, 0
+    rows: list = []
+    nbytes = 0
+    for v in vectors:
+        if v is None:
+            rows.append(None)
+        elif compact:
+            try:
+                buf = array.array("d", v)
+            except (TypeError, ValueError, OverflowError):
+                return _freeze_rows(vectors, compact=False)
+            view = memoryview(buf).toreadonly()
+            rows.append(view)
+            nbytes += sys.getsizeof(buf) + sys.getsizeof(view)
+        else:
+            row = tuple(v)
+            rows.append(row)
+            nbytes += sys.getsizeof(row) + len(row) * _FLOAT_BYTES
+    frozen = tuple(rows)
+    return frozen, nbytes + sys.getsizeof(frozen)
+
+
+def _plain_chunks(chunks: list) -> list:
+    """*chunks* with every chunk as a plain dict, for serialising."""
+    return [c if type(c) is dict else dict(c) for c in chunks]
+
+
+def _plain_rows(vectors: list) -> list:
+    """*vectors* with every row as a list or tuple, for serialising."""
+    return [v if v is None or type(v) in (list, tuple) else list(v)
+            for v in vectors]
+
+
+class _Snapshot:
+    """One collection's loaded state, frozen: read-only chunks, vector rows and
+    norm matrix, plus a private copy of meta.json, all from one read of the
+    files ``fingerprint`` describes. ``bm25`` is built from ``chunks`` alone."""
+
+    __slots__ = ("key", "fingerprint", "meta", "chunks", "vectors", "vec_dim",
+                 "norm_matrix", "degrade", "bad_lines", "corrupt",
+                 "meta_unreadable", "rejected", "bm25", "bm25_lock", "nbytes",
+                 "__weakref__")
+
+
+def _freeze_snapshot(coll: "Collection", key: str, fingerprint: dict) -> _Snapshot:
+    """A snapshot of *coll*'s just-loaded state. Wraps *coll*'s chunk dicts and
+    marks its norm matrix read-only, so *coll* must be re-served from the
+    snapshot (``_serve_snapshot``) once it is cached."""
+    snap = _Snapshot()
+    snap.key = key
+    snap.fingerprint = fingerprint
+    snap.meta = _copy_json(coll._meta)
+    nbytes = _json_nbytes(snap.meta)
+    chunks = []
+    for c in coll._chunks:
+        chunks.append(types.MappingProxyType(c))
+        nbytes += _json_nbytes(c) + _PROXY_BYTES
+    snap.chunks = tuple(chunks)
+    nbytes += sys.getsizeof(snap.chunks)
+    matrix = coll._norm_matrix
+    snap.vectors, rows_nbytes = _freeze_rows(coll._vectors, compact=matrix is not None)
+    nbytes += rows_nbytes
+    if matrix is not None:
+        matrix.setflags(write=False)
+        nbytes += max(sys.getsizeof(matrix), matrix.nbytes)
+    snap.norm_matrix = matrix
+    snap.vec_dim = coll._vec_dim
+    snap.degrade = coll.vector_degrade_reason
+    snap.bad_lines = coll.chunks_bad_lines
+    snap.corrupt = coll.corrupt
+    snap.meta_unreadable = coll._meta_unreadable
+    snap.rejected = coll._vectors_file_rejected
+    snap.bm25 = None
+    snap.bm25_lock = threading.Lock()
+    snap.nbytes = nbytes
+    return snap
+
+
+class _SnapshotCache:
+    """Process-wide LRU of collection snapshots, bounded by estimated bytes
+    (``_COLLECTION_CACHE_MAX_BYTES``) and by entry count
+    (``_MAX_CACHED_COLLECTIONS``).
+
+    Every write to a collection's files runs inside ``begin_write`` /
+    ``end_write``; both drop that collection's entry and advance an epoch. A
+    reader takes ``read_token`` before reading and ``put`` stores its snapshot
+    only when no write was in progress then and the epoch has not moved since.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[str, _Snapshot]" = OrderedDict()
+        self._bytes = 0
+        self._epoch = 0
+        self._writing = 0
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def total_bytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._bytes = 0
+
+    def get(self, key: str, coll_dir: Path) -> Optional[_Snapshot]:
+        """The cached snapshot for *key*, or None. An entry whose fingerprint
+        no longer matches the files in *coll_dir* is dropped."""
+        with self._lock:
+            snap = self._entries.get(key)
+        if snap is None:
+            return None
+        current = _collection_cache_fingerprint(coll_dir)
+        with self._lock:
+            if self._entries.get(key) is not snap:
+                return None
+            if snap.fingerprint != current:
+                self._discard_locked(key)
+                return None
+            self._entries.move_to_end(key)
+            return snap
+
+    def read_token(self) -> Optional[int]:
+        """The current epoch, or None while any write is in progress."""
+        with self._lock:
+            return None if self._writing else self._epoch
+
+    def token_current(self, token: Optional[int]) -> bool:
+        with self._lock:
+            return token is not None and not self._writing and token == self._epoch
+
+    def put(self, snap: _Snapshot, token: Optional[int]) -> Optional[_Snapshot]:
+        """Cache *snap* and return the snapshot now cached for its key, which is
+        an existing one with the same fingerprint when there is one. None when
+        nothing was stored: a write started or finished since *token* was
+        taken, or *snap* alone exceeds the byte budget."""
+        with self._lock:
+            # Stores only when no write started or finished since the token was
+            # taken. See test_in_process_write_blocks_the_store_even_when_stats_cannot_show_it.
+            if token is None or self._writing or token != self._epoch:
+                return None
+            if snap.nbytes > _COLLECTION_CACHE_MAX_BYTES:
+                return None
+            current = self._entries.get(snap.key)
+            if current is not None and current.fingerprint == snap.fingerprint:
+                self._entries.move_to_end(snap.key)
+                return current
+            self._discard_locked(snap.key)
+            self._entries[snap.key] = snap
+            self._bytes += snap.nbytes
+            self._evict_locked()
+            return snap if self._entries.get(snap.key) is snap else None
+
+    def lexical_index(self, snap: _Snapshot) -> BM25:
+        """*snap*'s BM25 index, built once from *snap*'s own chunks. It is kept
+        on *snap*, and counted against the budget, only while *snap* is the
+        cached entry for its key and the total still fits."""
+        with snap.bm25_lock:
+            index = snap.bm25
+            if index is not None:
+                return index
+            index = BM25([c["text"] for c in snap.chunks],
+                         stop_words=ENGLISH_STOP_WORDS)
+            extra = _bm25_nbytes(index)
+            with self._lock:
+                if (self._entries.get(snap.key) is snap
+                        and snap.nbytes + extra <= _COLLECTION_CACHE_MAX_BYTES):
+                    snap.bm25 = index
+                    snap.nbytes += extra
+                    self._bytes += extra
+                    self._entries.move_to_end(snap.key)
+                    self._evict_locked()
+            return index
+
+    def invalidate(self, key: str) -> None:
+        with self._lock:
+            self._discard_locked(key)
+
+    def begin_write(self, key: str) -> None:
+        with self._lock:
+            self._writing += 1
+            self._epoch += 1
+            self._discard_locked(key)
+
+    def end_write(self, key: str) -> None:
+        with self._lock:
+            self._writing -= 1
+            self._epoch += 1
+            self._discard_locked(key)
+
+    def _discard_locked(self, key: str) -> None:
+        snap = self._entries.pop(key, None)
+        if snap is not None:
+            self._bytes -= snap.nbytes
+
+    def _evict_locked(self) -> None:
+        """Drop least recently used entries until both ceilings hold."""
+        while self._entries and (self._bytes > _COLLECTION_CACHE_MAX_BYTES
+                                 or len(self._entries) > _MAX_CACHED_COLLECTIONS):
+            _key, snap = self._entries.popitem(last=False)
+            self._bytes -= snap.nbytes
+
+
+_COLLECTION_CACHE = _SnapshotCache()
+
+
+def _get_cached_collection_data(coll_dir: Path) -> Optional[_Snapshot]:
+    return _COLLECTION_CACHE.get(_cache_key(coll_dir), coll_dir)
 
 
 def _invalidate_collection_cache(coll_dir: Path) -> None:
+    _COLLECTION_CACHE.invalidate(_cache_key(coll_dir))
+
+
+@contextlib.contextmanager
+def _files_changing(coll_dir: Path):
+    """Wrap a change to a collection's files: its cache entry is dropped on
+    entry and on exit, and no reader stores a snapshot while it runs."""
+    key = _cache_key(coll_dir)
+    _COLLECTION_CACHE.begin_write(key)
     try:
-        key = str(coll_dir.resolve())
-    except Exception:
-        key = str(coll_dir)
-    with _COLLECTION_CACHE_LOCK:
-        _COLLECTION_CACHE.pop(key, None)
+        yield
+    finally:
+        _COLLECTION_CACHE.end_write(key)
 
 
 class Collection:
-    def __init__(self, name: str, base: Optional[Path] = None) -> None:
+    def __init__(self, name: str, base: Optional[Path] = None, *,
+                 cache: bool = True) -> None:
+        """*cache* False loads straight from disk and never stores the result
+        in the process-wide collection cache."""
         self.name = _check_name(name)
         self.dir = (base or rag_dir()) / self.name
+        self._use_cache = cache
         self._meta: dict = {}
         self._chunks: list[dict] = []
         self._vectors: Optional[list] = None     # aligned with _chunks, or None
         self._vec_dim: Optional[int] = None       # dimensionality of stored vectors
         self._bm25: Optional[BM25] = None
+        # The chunks list self._bm25 was built from, and its length then.
+        self._bm25_source: Optional[list] = None
+        self._bm25_size = 0
         self._norm_matrix: Any = None
+        # The vectors list self._norm_matrix was built from.
+        self._norm_source: Optional[list] = None
+        # Weak reference to the cached snapshot this instance was served from.
+        self._snapshot_ref: Optional[weakref.ref] = None
+        # True when _load() could not read or parse meta.json.
+        self._meta_unreadable: bool = False
         self.corrupt: bool = False
         # How many lines of chunks.jsonl _load() had to skip as unparseable or
         # wrong-shape; 0 whenever the file is clean or absent. Exposed via
@@ -720,20 +1048,43 @@ class Collection:
             self._save()
         return self
 
-    def _load(self) -> None:
-        cached = _get_cached_collection_data(self.dir)
-        if cached is not None:
-            self.corrupt = cached["corrupt"]
-            self.chunks_bad_lines = cached["bad_lines"]
-            self._meta = dict(cached.get("meta", {}))
-            self._chunks = list(cached["chunks"])
-            self._vectors = cached["vectors"]
-            self._vec_dim = cached["vec_dim"]
-            self.vector_degrade_reason = cached["degrade"]
-            self._vectors_file_rejected = cached.get("rejected", False)
-            self._norm_matrix = cached.get("norm_matrix")
-            self._bm25 = cached.get("bm25")
-            return
+    def _serve_snapshot(self, snap: _Snapshot) -> None:
+        """Adopt *snap*'s state: fresh containers over its read-only chunks and
+        rows, and a private copy of its meta."""
+        self.corrupt = snap.corrupt
+        self.chunks_bad_lines = snap.bad_lines
+        self._meta_unreadable = snap.meta_unreadable
+        self._meta = _copy_json(snap.meta)
+        self._chunks = list(snap.chunks)
+        self._vectors = None if snap.vectors is None else list(snap.vectors)
+        self._vec_dim = snap.vec_dim
+        self.vector_degrade_reason = snap.degrade
+        self._vectors_file_rejected = snap.rejected
+        self._norm_matrix = snap.norm_matrix
+        self._norm_source = self._vectors
+        self._bm25 = None
+        self._bm25_source = None
+        self._snapshot_ref = weakref.ref(snap)
+
+    def _load(self, *, use_cache: Optional[bool] = None) -> None:
+        """Read this collection from disk, or adopt its cached snapshot.
+
+        *use_cache* False reads the files and neither consults nor fills the
+        cache; None follows the instance's ``cache`` setting. A read is stored
+        only when the file fingerprint taken before it matches the one taken
+        after it and no write ran in between (see ``_SnapshotCache``)."""
+        use_cache = self._use_cache if use_cache is None else use_cache
+        self._snapshot_ref = None
+        cache_key = token = before = None
+        if use_cache:
+            cache_key = _cache_key(self.dir)
+            cached = _COLLECTION_CACHE.get(cache_key, self.dir)
+            if cached is not None:
+                self._serve_snapshot(cached)
+                return
+            token = _COLLECTION_CACHE.read_token()
+            if token is not None:
+                before = _collection_cache_fingerprint(self.dir)
         # A corrupt meta.json is flagged, not fatal, and does not discard the
         # INDEPENDENT chunks.jsonl / vectors.json files. Execution falls through
         # to load the chunks and then rebuild a minimal docs map from their
@@ -877,34 +1228,47 @@ class Collection:
                     self._norm_matrix = np.where(np.isfinite(normalized), normalized, 0.0)
             except Exception:
                 self._norm_matrix = None
+        self._norm_source = self._vectors
+        self._bm25_source = None
+        self._meta_unreadable = meta_corrupt
 
-        _set_cached_collection_data(self.dir, {
-            "fingerprint": _collection_cache_fingerprint(self.dir),
-            "meta": dict(self._meta),
-            "chunks": self._chunks,
-            "vectors": self._vectors,
-            "vec_dim": self._vec_dim,
-            "bm25": self._bm25,
-            "norm_matrix": self._norm_matrix,
-            "degrade": self.vector_degrade_reason,
-            "bad_lines": self.chunks_bad_lines,
-            "corrupt": self.corrupt,
-            "rejected": self._vectors_file_rejected,
-        })
+        if (before is not None and _COLLECTION_CACHE.token_current(token)
+                and self._min_cached_nbytes() <= _COLLECTION_CACHE_MAX_BYTES
+                and _collection_cache_fingerprint(self.dir) == before):
+            cached = _COLLECTION_CACHE.put(
+                _freeze_snapshot(self, cache_key, before), token)
+            if cached is not None:
+                self._serve_snapshot(cached)
+
+    def _min_cached_nbytes(self) -> int:
+        """A lower bound on this instance's cached size: chunk text plus 8
+        bytes per stored vector component."""
+        size = sum(len(c.get("text") or "") for c in self._chunks)
+        if self._vectors is not None and self._vec_dim:
+            size += len(self._vectors) * self._vec_dim * 8
+        return size
 
     def _save(self) -> None:
+        """Write meta.json, chunks.jsonl and vectors.json from this instance's
+        state, as one change to the collection's files (``_files_changing``)."""
+        with _files_changing(self.dir):
+            self._write_files()
+        self._snapshot_ref = None
+
+    def _write_files(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
         # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
         # would otherwise emit raw (U+0085/U+2028/U+2029), so a record cannot be
         # split in half by a line-oriented reader.
-        self._atomic_write("chunks.jsonl", dumps_lines(self._chunks))
+        self._atomic_write("chunks.jsonl", dumps_lines(_plain_chunks(self._chunks)))
         # meta.json and chunks.jsonl were just rewritten from this instance's own
         # in-memory state, which _load() only ever fills with well-formed
         # records, so both corruption flags are cleared here as well as in
         # _load().
         self.corrupt = False
         self.chunks_bad_lines = 0
+        self._meta_unreadable = False
         # The fate of a REJECTED vectors.json is decided FIRST, before anything
         # below writes or unlinks that filename.
         if self._vectors_file_rejected:
@@ -917,7 +1281,7 @@ class Collection:
         if self._vectors is not None and any(v for v in self._vectors):
             self._vec_dim = _first_dim(self._vectors)
             self._atomic_write("vectors.json", json.dumps(
-                {"dim": self._vec_dim, "vectors": self._vectors}))
+                {"dim": self._vec_dim, "vectors": _plain_rows(self._vectors)}))
         else:
             # Nothing usable to write. A REJECTED file was already moved out of
             # the way above.
@@ -942,6 +1306,7 @@ class Collection:
         else:
             self.vector_degrade_reason = None
         self._bm25 = None
+        self._bm25_source = None
         # Cache the LISTING-relevant fields that are NOT otherwise persisted -
         # vector_degrade_reason and the vector-coverage math above - so a listing
         # can answer from meta.json alone, without reconstructing this Collection
@@ -957,7 +1322,6 @@ class Collection:
         # method happens BEFORE vector_degrade_reason is finalised above.
         self._meta[_STATS_CACHE_KEY] = self._stats_cache_block()
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
-        _invalidate_collection_cache(self.dir)
 
     def _stats_cache_block(self) -> dict:
         """The ``_stats_cache`` block for meta.json, computed from THIS
@@ -1099,8 +1463,9 @@ class Collection:
         missing/restored flag). Chunks are untouched, so the cached BM25 index
         stays valid too."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
-        _invalidate_collection_cache(self.dir)
+        with _files_changing(self.dir):
+            self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+        self._snapshot_ref = None
 
     def _atomic_write(self, filename: str, content: str) -> None:
         # storekit.atomic_write: unique temp name plus a Windows PermissionError
@@ -1225,7 +1590,7 @@ class Collection:
         # latest committed state under the lock. The _load() must happen INSIDE
         # both locks.
         with _collection_lock(self.name), self._write_lock("an index", on_progress):
-            self._load()
+            self._load(use_cache=False)
             return self._add_paths_locked(
                 paths, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn,
@@ -1431,7 +1796,7 @@ class Collection:
         None when it is fine).
         """
         with _collection_lock(self.name), self._write_lock("a re-sync", on_progress):
-            self._load()
+            self._load(use_cache=False)
             return self._resync_locked(
                 embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn, on_progress=on_progress,
@@ -1676,7 +2041,7 @@ class Collection:
         the first time this collection is actually embedded.
         """
         with _collection_lock(self.name), self._write_lock("an upload", on_progress):
-            self._load()
+            self._load(use_cache=False)
             return self._add_uploads_locked(
                 uploads, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn,
@@ -1828,7 +2193,7 @@ class Collection:
         vector set is held in memory during the run.
         """
         with _collection_lock(self.name), self._write_lock("reembed", on_progress):
-            self._load()
+            self._load(use_cache=False)
             if not self._chunks:
                 return {"chunks": 0, "dim": None, "model": model_name,
                         "note": "collection has no chunks; nothing to re-embed"}
@@ -1876,9 +2241,10 @@ class Collection:
             self.vector_degrade_reason = None
             self.corrupt = False
             self._save()
-            self._discard_rejected_vectors(
-                f"re-embedded to {self._vec_dim} dimensions"
-                + (f" with {model_name}" if model_name else ""))
+            with _files_changing(self.dir):
+                self._discard_rejected_vectors(
+                    f"re-embedded to {self._vec_dim} dimensions"
+                    + (f" with {model_name}" if model_name else ""))
             return {"chunks": total, "dim": self._vec_dim, "model": model_name}
 
     def embedding_model(self) -> Optional[str]:
@@ -1900,7 +2266,7 @@ class Collection:
         # Same per-collection lock and re-load as add_paths, and the same
         # cross-process lock.
         with _collection_lock(self.name), self._write_lock("a document removal"):
-            self._load()
+            self._load(use_cache=False)
             if source not in self._meta.get("docs", {}):
                 return False
             keep = [i for i, c in enumerate(self._chunks)
@@ -1923,15 +2289,7 @@ class Collection:
         embedded."""
         if not text.strip() or not self._chunks:
             return []
-        if self._bm25 is None:
-            # Filter English stopwords from the lexical index, so a query and a
-            # chunk that overlap ONLY on a stopword cannot win the BM25 half.
-            self._bm25 = BM25([c["text"] for c in self._chunks],
-                              stop_words=ENGLISH_STOP_WORDS)
-            cached = _get_cached_collection_data(self.dir)
-            if cached is not None:
-                cached["bm25"] = self._bm25
-        scores = self._bm25.scores(text)
+        scores = self._lexical_index().scores(text)
         top = max(scores) if scores else 0.0
         if top > 0:
             scores = [s / top for s in scores]
@@ -1947,6 +2305,25 @@ class Collection:
             {**self._chunks[i], "score": round(scores[i], 4)}
             for i in order if scores[i] > 0
         ]
+
+    def _lexical_index(self) -> BM25:
+        """The BM25 index over this instance's current chunks, built once per
+        chunks list. An instance whose chunks are exactly its cached snapshot's
+        shares that snapshot's index."""
+        chunks = self._chunks
+        if (self._bm25 is not None and self._bm25_source is chunks
+                and self._bm25_size == len(chunks)):
+            return self._bm25
+        snap = self._snapshot_ref() if self._snapshot_ref is not None else None
+        if (snap is not None and len(chunks) == len(snap.chunks)
+                and all(map(operator.is_, chunks, snap.chunks))):
+            index = _COLLECTION_CACHE.lexical_index(snap)
+        else:
+            # Filter English stopwords from the lexical index, so a query and a
+            # chunk that overlap ONLY on a stopword cannot win the BM25 half.
+            index = BM25([c["text"] for c in chunks], stop_words=ENGLISH_STOP_WORDS)
+        self._bm25, self._bm25_source, self._bm25_size = index, chunks, len(chunks)
+        return index
 
     def _note_vector_degrade(self, reason: str, *, warn: bool) -> None:
         """Record WHY semantic (vector) scoring is unavailable and surface it once.
@@ -2023,7 +2400,8 @@ class Collection:
         if _numpy is not None:
             try:
                 np = _numpy
-                if self._norm_matrix is None or len(self._norm_matrix) != len(self._vectors):
+                if (self._norm_matrix is None or self._norm_source is not self._vectors
+                        or len(self._norm_matrix) != len(self._vectors)):
                     mat = np.zeros((len(self._vectors), stored_dim), dtype="float32")
                     for idx, vec in enumerate(self._vectors):
                         if vec and len(vec) == stored_dim:
@@ -2032,6 +2410,7 @@ class Collection:
                     norms = np.where(norms == 0, 1.0, norms)
                     normalized = mat / norms
                     self._norm_matrix = np.where(np.isfinite(normalized), normalized, 0.0)
+                    self._norm_source = self._vectors
 
                 qv = np.asarray(qvec, dtype="float32")
                 qnorm = float(np.linalg.norm(qv))
@@ -2292,14 +2671,32 @@ class Collection:
             return None
         return cls._docs_within_roots(docs.keys(), key_roots)
 
+    def is_confined_to(self, key_roots: list) -> bool:
+        """Whether every host-filesystem document THIS loaded instance can
+        serve resolves under one of *key_roots*: every key of its docs map and
+        the source of every chunk it holds, so the answer describes exactly
+        what ``query()`` returns from this instance.
+
+        An empty *key_roots* returns True. False when this instance's meta.json
+        could not be read or its "docs" field is not an object, the cases
+        ``confined_to`` answers None."""
+        if not key_roots:
+            return True
+        docs = self._meta.get("docs", {})
+        if self._meta_unreadable or not isinstance(docs, dict):
+            return False
+        sources = set(docs)
+        sources.update(str(c["source"]) for c in self._chunks if c.get("source"))
+        return self._docs_within_roots(sources, key_roots)
+
     @classmethod
     def load_and_maybe_backfill(cls, name: str, base: Optional[Path] = None
                                 ) -> "Collection":
         """The COLD-fallback path for ``peek_stats()``/``peek_detail()``: a
-        full, authoritative load of *name* (identical to plain ``Collection(
-        name, base)``), with an opportunistic attempt to backfill its
-        ``_stats_cache`` so future listings of this SAME collection stop
-        paying the full-load cost.
+        full, authoritative load of *name* straight from disk (``Collection(
+        name, base, cache=False)``, so it never fills the collection cache),
+        with an opportunistic attempt to backfill its ``_stats_cache`` so
+        future listings of this SAME collection stop paying the full-load cost.
 
         ORDERING: the write lock is acquired FIRST and the load happens INSIDE
         it - never load-then-lock. Nothing else can write to this collection
@@ -2322,13 +2719,16 @@ class Collection:
             with collection_write_lock(
                     lock_path_for(coll_dir), collection=checked_name,
                     op="a stats-cache backfill", timeout=0):
-                coll = cls(checked_name, base)   # _load() runs INSIDE the lock
+                # _load() runs INSIDE the lock, from disk.
+                coll = cls(checked_name, base, cache=False)
                 if coll.exists():
                     coll._meta[_STATS_CACHE_KEY] = coll._stats_cache_block()
-                    coll._atomic_write("meta.json", json.dumps(coll._meta, indent=2))
+                    with _files_changing(coll.dir):
+                        coll._atomic_write("meta.json", json.dumps(coll._meta, indent=2))
                 return coll
         except CollectionLockedError:
-            return cls(checked_name, base)       # busy: full load, no cache write
+            # Busy: full load from disk, no stats-cache write.
+            return cls(checked_name, base, cache=False)
 
 
 def _provenance_excludable(built_with: Optional[str], mixed: bool,
@@ -2382,7 +2782,7 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
                 out.append({"name": name, "built_with": built_with,
                             "n_chunks": peeked.get("n_chunks")})
                 continue
-            coll = Collection(name)
+            coll = Collection(name, cache=False)
             stats = coll.stats()
         except Exception as e:
             _log.warning("rag: %r could not be read for the embedding-switch "

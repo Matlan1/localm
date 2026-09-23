@@ -228,8 +228,11 @@ policy as an interactive add. Full details in
 - Chunks are capped (4 × ~1200 chars injected per question) to fit small
   context windows; the dynamic context growth and auto-compaction handle the
   rest.
-- Each query loads the collection from disk and scores every chunk (there is no
-  query-time index cache), so retrieval is brute force by design: fast at home
+- A recently queried collection stays in memory, so the next query skips
+  re-reading its files and rebuilding its index. That cache holds at most
+  256 MiB across all collections (the least recently used one is dropped
+  first), and a collection is read again whenever its files change. Scoring
+  still visits every chunk, so retrieval is brute force by design: fast at home
   scale (thousands of chunks), but query latency grows with collection size and
   it is not built for millions of chunks.
 - **One writer per collection at a time, enforced.** Writes to a collection are

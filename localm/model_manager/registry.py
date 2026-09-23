@@ -1382,23 +1382,15 @@ def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
         notes.append(f"Could not update scheduled jobs: {e}")
 
     try:
-        from localm.rag.store import Collection, collection_names
-        migrated = 0
-        for cname in collection_names():
-            try:
-                coll = Collection(cname)
-            except Exception:
-                continue
-            # No public label-only setter exists (reembed() would trigger a
-            # full re-index just to relabel a display string), so this goes
-            # through the same private _meta + _save_meta() reembed() itself
-            # uses to persist that one field.
-            if coll._meta.get("embedding_model") == old_name:
-                coll._meta["embedding_model"] = new_name
-                coll._save_meta()
-                migrated += 1
+        from localm.rag.store import relabel_embedding_model
+        migrated, busy = relabel_embedding_model(old_name, new_name)
         if migrated:
-            notes.append(f"Updated {migrated} RAG collection metadata record(s)")
+            notes.append(f"Updated {len(migrated)} RAG collection metadata record(s)")
+        if busy:
+            notes.append(
+                "Could not update the RAG collection metadata of "
+                f"{', '.join(busy)}: another write held it past the wait limit, "
+                f"so it still records '{old_name}' as its embedding model")
     except Exception as e:
         logger.debug("rename_model: RAG collection migration failed for %s -> %s: %s",
                      old_name, new_name, e)

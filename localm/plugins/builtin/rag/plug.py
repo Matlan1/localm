@@ -276,19 +276,22 @@ def _get_collection(name: str):
     return coll
 
 
-def _require_rag_confinement(name: str, request: Request) -> None:
+_CONFINED_DETAIL = ("This key's RAG access is confined to specific folders, "
+                    "and this collection includes documents from outside them.")
+
+
+def _require_rag_confinement(name: str, request: Request) -> list:
     """Raise 403 when the caller's key carries a per-key rag_roots allowlist
     and collection *name* holds any host-filesystem document indexed from
     outside those roots (``Collection.confined_to``). A no-op for a caller
     with no rag_roots allowlist (the owner, open mode, or a key that never
-    had one set)."""
+    had one set). Returns that allowlist, empty when there is none."""
     from localm.rag import Collection
     from localm.inference.http_server import effective_rag_roots
     key_roots = effective_rag_roots(request)
     if key_roots and not Collection.confined_to(name, key_roots):
-        raise HTTPException(
-            403, "This key's RAG access is confined to specific folders, "
-            "and this collection includes documents from outside them.")
+        raise HTTPException(403, _CONFINED_DETAIL)
+    return key_roots
 
 
 def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
@@ -342,7 +345,7 @@ def _collection_dim_report(target_dim: int) -> dict:
     unaffected = 0
     for name in collection_names():
         try:
-            coll = Collection(name)
+            coll = Collection(name, cache=False)
             stats = coll.stats()
             if not stats["has_vectors"]:
                 continue
@@ -837,7 +840,7 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         check_collection_name(name)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    _require_rag_confinement(name, request)
+    key_roots = _require_rag_confinement(name, request)
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     k = max(1, min(req.k, 20))
@@ -846,6 +849,10 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
 
     def _execute():
         coll = _get_collection(name)
+        # Re-checks confinement on the loaded instance. See
+        # test_confinement_is_decided_on_the_chunks_that_would_be_served.
+        if key_roots and not coll.is_confined_to(key_roots):
+            raise HTTPException(403, _CONFINED_DETAIL)
         return _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed))
 
     # Defang control/frame tokens in the untrusted chunk text before it can be

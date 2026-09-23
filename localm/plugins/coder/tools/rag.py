@@ -30,7 +30,7 @@ def tool_rag_list_collections(cwd: Path) -> ToolResult:
         )
     lines = []
     for name in names:
-        stats = Collection(name).stats()
+        stats = Collection(name, cache=False).stats()
         mode = "hybrid" if stats["has_vectors"] else "BM25"
         missing = f", {stats['n_missing']} missing" if stats["n_missing"] else ""
         lines.append(

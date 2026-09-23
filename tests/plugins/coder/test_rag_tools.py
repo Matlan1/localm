@@ -41,7 +41,7 @@ def test_list_collections_formats_stats():
     with patch("localm.rag.store.collection_names", return_value=["manuals"]), \
          patch("localm.rag.store.Collection", return_value=fake_coll) as MockColl:
         r = tool_rag_list_collections(Path("."))
-    MockColl.assert_called_once_with("manuals")
+    MockColl.assert_called_once_with("manuals", cache=False)
     assert r.ok
     assert "manuals" in r.output
     assert "3 docs" in r.output
