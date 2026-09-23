@@ -92,7 +92,7 @@ class TestOriginGateExemption:
         offenders = []
         with TestClient(app) as c:
             for method, path in unsafe:
-                if path.startswith(_REVIEWED_CROSS_ORIGIN_OK):
+                if path in _REVIEWED_CROSS_ORIGIN_OK:
                     continue
                 r = c.request(method, _concrete(path), headers=_CROSS_ORIGIN)
                 detail = r.json().get("detail", "") if r.headers.get("content-type", "").startswith("application/json") else r.text
