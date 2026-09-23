@@ -67,6 +67,20 @@ def _wait_until_serving(proc, home: Path, port: int, timeout: float) -> Path:
     raise AssertionError(f"server never armed its crash guard and served on {port}")
 
 
+# Serve through the normal bind, or through uvicorn's own bind (the last resort
+# when the peek layer and the listening socket both fail).
+_BINDS = pytest.mark.parametrize("last_resort", [False, True],
+                                 ids=["normal-bind", "last-resort-bind"])
+
+
+def _bind_args(last_resort: bool) -> list:
+    return ["--last-resort-bind"] if last_resort else []
+
+
+def _assert_bind(output: str, last_resort: bool) -> None:
+    assert ("listening socket refused" in output) == last_resort, output
+
+
 def _stop(proc, log) -> str:
     if proc.poll() is None:
         proc.kill()
@@ -77,13 +91,15 @@ def _stop(proc, log) -> str:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 @pytest.mark.parametrize("signame", ["SIGHUP", "SIGTERM"])
-def test_a_posix_stop_signal_during_serving_disarms_the_crash_guard(tmp_path, signame):
+@_BINDS
+def test_a_posix_stop_signal_during_serving_disarms_the_crash_guard(
+        tmp_path, signame, last_resort):
     home = tmp_path / "home"
     home.mkdir()
     port = _free_port()
     log = open(tmp_path / "server.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, str(SERVER), str(port), "posix-stop"],
+        [sys.executable, str(SERVER), str(port), "posix-stop", *_bind_args(last_resort)],
         env=_child_env(home), stdout=log, stderr=subprocess.STDOUT,
         start_new_session=True)
     rc = None
@@ -99,10 +115,12 @@ def test_a_posix_stop_signal_during_serving_disarms_the_crash_guard(tmp_path, si
         f"would relaunch a server that was stopped on purpose (exit {rc}):\n{output}")
     assert rc == 0, output
     assert "run_server returned" in output
+    _assert_bind(output, last_resort)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Ctrl+Break is Windows-only")
-def test_ctrl_break_during_serving_disarms_the_crash_guard(tmp_path):
+@_BINDS
+def test_ctrl_break_during_serving_disarms_the_crash_guard(tmp_path, last_resort):
     """uvicorn stops gracefully on SIGBREAK and then re-raises it; at the default
     disposition that exits the process with code 3 before run_server() disarms."""
     home = tmp_path / "home"
@@ -111,7 +129,8 @@ def test_ctrl_break_during_serving_disarms_the_crash_guard(tmp_path):
     marker = home / "run" / "server-crash.ctrl-break.marker"
     log = open(tmp_path / "server.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, str(SERVER), str(port), "ctrl-break", "SIGBREAK"],
+        [sys.executable, str(SERVER), str(port), "ctrl-break", "SIGBREAK",
+         *_bind_args(last_resort)],
         env=_child_env(home), stdout=log, stderr=subprocess.STDOUT, **_NO_CONSOLE)
     rc = None
     try:
@@ -125,6 +144,7 @@ def test_ctrl_break_during_serving_disarms_the_crash_guard(tmp_path):
         f"would relaunch a server that was stopped on purpose (exit {rc}):\n{output}")
     assert rc == 0, output
     assert "run_server returned" in output
+    _assert_bind(output, last_resort)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
@@ -159,8 +179,9 @@ def test_localm_gui_stopped_by_a_posix_signal_disarms_its_crash_guard(tmp_path, 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 @pytest.mark.parametrize("signame", ["SIGHUP", "SIGTERM"])
+@_BINDS
 def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
-        tmp_path, signame):
+        tmp_path, signame, last_resort):
     """App-window mode serves from a background thread while the window loop
     holds the main thread in native code with the signal blocked there: the
     server still stops cleanly and the window closes."""
@@ -169,7 +190,7 @@ def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
     port = _free_port()
     log = open(tmp_path / "gui-native.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, str(GUI), str(port), "--app-window"],
+        [sys.executable, str(GUI), str(port), "--app-window", *_bind_args(last_resort)],
         env=_child_env(home), cwd=str(tmp_path), stdout=log,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     rc = None
@@ -198,10 +219,12 @@ def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
     assert "server_stopped set before close: True" in output, output
     assert rc == 0, output
     assert "real UI requested" not in output, output
+    _assert_bind(output, last_resort)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Ctrl+Break is Windows-only")
-def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
+@_BINDS
+def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path, last_resort):
     """App-window mode on Windows: Ctrl+Break (SIGBREAK) arrives while the
     window loop holds the main thread in native code, and still stops the
     server cleanly."""
@@ -210,7 +233,8 @@ def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
     port = _free_port()
     log = open(tmp_path / "gui-native.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, str(GUI), str(port), "--app-window", "--raise", "SIGBREAK"],
+        [sys.executable, str(GUI), str(port), "--app-window", "--raise", "SIGBREAK",
+         *_bind_args(last_resort)],
         env=_child_env(home), cwd=str(tmp_path), stdout=log,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **_NO_CONSOLE)
     rc = None
@@ -228,3 +252,4 @@ def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
     assert "server_stopped set before close: True" in output, output
     assert rc == 0, output
     assert "real UI requested" not in output, output
+    _assert_bind(output, last_resort)

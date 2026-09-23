@@ -396,13 +396,10 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
     degraded path as on the normal one.
 
     If even the socket cannot be built, this falls back to uvicorn's own binding
-    and logs a warning naming the failure.
+    (see _run_uvicorn_own_bind) and logs a warning naming the failure.
 
-    Either server is stoppable by _request_stop while it serves. uvicorn.run()
-    exposes no server object, so its stop hook raises KeyboardInterrupt when it
-    runs on the thread serving uvicorn.run(), which catches it and returns; on
-    any other thread that hook does nothing. Nothing is served when a stop was
-    already requested in the current run_server() call."""
+    Either server is stoppable by _request_stop, from any thread, while it
+    serves."""
     config_kwargs = dict(app=app, log_level=log_level,
                          timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
     if ssl_certfile:
@@ -413,15 +410,7 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
         _log.warning("portmux: could not build the listening socket for %s:%s "
                      "(%s); falling back to uvicorn's own bind, which serves "
                      "IPv6 only for a :: host", host, port, e)
-        if _stop_requested and _active_runs > 0:
-            return
-        serving_thread = threading.get_ident()
-
-        def interrupt():
-            if threading.get_ident() == serving_thread:
-                raise KeyboardInterrupt
-        with _stop_hook(interrupt):
-            uvicorn.run(host=host, port=port, **config_kwargs)
+        _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs)
         return
     server = uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs))
 
@@ -431,6 +420,29 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
         if _stop_requested and _active_runs > 0:
             hook()
         server.run(sockets=[sock])
+
+
+def _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs) -> None:
+    """Serve through uvicorn's own bind, as uvicorn.run(host=..., port=...) does
+    for one worker without reload: a Ctrl+C (KeyboardInterrupt) ends it
+    normally, and a server that never started (its lifespan startup failed, or
+    the bind failed) exits with uvicorn's startup-failure code. The server is
+    stoppable by _request_stop from any thread while it serves, and nothing is
+    served when a stop was already requested in the current run_server() call."""
+    from uvicorn.main import STARTUP_FAILURE
+    server = uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs))
+
+    def hook():
+        server.should_exit = True
+    with _stop_hook(hook):
+        if _stop_requested and _active_runs > 0:
+            return
+        try:
+            server.run()
+        except KeyboardInterrupt:
+            pass
+    if not server.started:
+        sys.exit(STARTUP_FAILURE)
 
 
 def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
