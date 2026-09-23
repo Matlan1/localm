@@ -18,8 +18,8 @@ paths. ``--github-output`` appends the ``touched=`` line to the file
 ``$GITHUB_OUTPUT`` names; ``--notice`` emits a ``::notice`` annotation on a hit
 saying the mutation gate did not run on this pull request and that the
 ``mutation-test`` label runs it. Exits 1 when the diff cannot be computed (no
-merge base, git failure): an unknown answer is never reported as
-``touched=false``.
+merge base, git failure) or when ``[tool.mutmut] only_mutate`` is empty or
+missing: an unknown answer is never reported as ``touched=false``.
 
 Run:  python scripts/mutation_scope.py [--base REF] [--github-output] [--notice]
 """
@@ -95,6 +95,10 @@ def main(argv: list[str]) -> int:
         return 1
 
     modules = [str(m) for m in mutmut_section(head_pyproject).get("only_mutate", [])]
+    if not modules:
+        print("mutation scope: could not resolve scope: [tool.mutmut] only_mutate "
+              "is empty or missing", file=sys.stderr)
+        return 1
     config_changed = mutmut_section(head_pyproject) != mutmut_section(base_pyproject)
     hits = touched(changed, modules, config_changed)
     verdict = "true" if hits else "false"
