@@ -77,6 +77,11 @@ class Agent(
         file writes but still gate shell execution.
     parent:
         Parent Agent when this instance is a sub-agent.
+    max_tokens_explicit:
+        None: max_tokens in gen_kwargs (if any) is left untouched by set_model.
+        False: max_tokens was filled from harness_profiles.cli_max_tokens and
+        set_model recomputes it for the new model. True: max_tokens was an
+        explicit caller/project-config value and set_model leaves it alone.
     gen_kwargs:
         Extra kwargs forwarded to every LLM call (temperature, max_tokens, …).
     """
@@ -108,6 +113,7 @@ class Agent(
         on_event=None,
         confirm_handler=None,
         custom_instructions: Optional[str] = None,
+        max_tokens_explicit: Optional[bool] = None,
         **gen_kwargs,
     ) -> None:
         # Live-attribute access, so a patched agent.load_memory /
@@ -377,6 +383,11 @@ class Agent(
                 self._family_id = f"{self._model_name} {_src}"
         except Exception:
             pass
+        # Caller-supplied gen kwargs, excluding max_tokens (tracked separately
+        # below), kept for set_model to reapply across a later switch.
+        self._explicit_gen_kwargs: frozenset = frozenset(
+            k for k in self.gen_kwargs if k != "max_tokens")
+        self._max_tokens_explicit: Optional[bool] = max_tokens_explicit
         # Per-model harness profile: fill gen-kwarg defaults the caller did not set
         # (e.g. a steadier temperature for a small model); explicit caller values win.
         # max_tokens is handled in the CLI, not here (see harness_profiles).

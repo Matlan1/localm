@@ -476,6 +476,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   like `setuptools`, through PyTorch's vendor-specific wheel index, which does not mirror a
   recent enough `setuptools` to satisfy this project's own requirement. It now routes only the
   PyTorch packages through that index and leaves the rest on the normal package index.
+- **Switching the coder plugin's model mid-session (the REPL's `/model`, or the GUI's model
+  switcher) no longer leaves the previous model's temperature, token limit, or tool-call-grammar
+  support stuck on the new one.** A small model's steadier temperature, or a reasoning model's
+  larger token limit, used to carry over onto an unrelated model after a switch instead of
+  applying the new model's own settings; an explicit temperature or token-limit choice still
+  survives a switch as before, and a model that had been refused constrained tool-call sampling
+  is given a fresh chance to use it after switching away.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role

@@ -188,7 +188,8 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                     auto_approve=cfg.auto_approve,
                     always_confirm=cfg.always_confirm,
                     session_mode=cfg.session_mode, gen_kw=cfg.gen_kw,
-                    browser_enabled=coder_runner.browser_enabled())
+                    browser_enabled=coder_runner.browser_enabled(),
+                    max_tokens_explicit=cfg.max_tokens_explicit)
         except Exception as e:
             engines.unpin(engine)
             return _text_result(f"coder task failed to start: {e}", is_error=True)

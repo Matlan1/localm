@@ -113,6 +113,7 @@ class TestResolveTaskConfig:
         assert isinstance(cfg.session_mode, SessionMode)
         assert "max_tokens" in cfg.gen_kw
         assert "seed" not in cfg.gen_kw
+        assert cfg.max_tokens_explicit is False
 
     def test_cli_helper_passes_the_runners_values_through_unchanged(self, home, project):
         """The CLI wrapper delegates to resolve_task_config; this pins that it
@@ -129,14 +130,17 @@ class TestResolveTaskConfig:
                                       False, False, None, False, None)
         cfg = runner.resolve_task_config(project)
         assert (cfg.model, cfg.max_turns, cfg.auto_approve, set(cfg.always_confirm),
-                cfg.session_mode, cfg.gen_kw) == (
-            cli[0], cli[1], cli[2], set(cli[3]), cli[4], cli[5])
+                cfg.session_mode, cfg.gen_kw, cfg.max_tokens_explicit) == (
+            cli[0], cli[1], cli[2], set(cli[3]), cli[4], cli[5], cli[6])
         assert cfg.model == "cfg-model"
         assert cfg.max_turns == 7
         assert cfg.auto_approve is True
         assert cfg.always_confirm == frozenset({"write_file"})
         assert cfg.session_mode == SessionMode.LOG
         assert cfg.gen_kw == {"temperature": 0.3, "max_tokens": 321, "seed": 11}
+        # max_tokens came from the project config, not the CLI's own family
+        # default, so a later set_model must not recompute it.
+        assert cfg.max_tokens_explicit is True
 
     def test_explicit_arguments_win_over_the_project_config(self, home, project):
         (project / ".localcoder").mkdir()
@@ -148,6 +152,11 @@ class TestResolveTaskConfig:
         assert cfg.max_turns == 2
         assert cfg.session_mode == SessionMode.FULL
         assert set(_SHELL_EXEC_TOOLS) <= set(cfg.always_confirm)
+
+    def test_explicit_max_tokens_argument_is_marked_explicit(self, home, project):
+        cfg = runner.resolve_task_config(project, max_tokens=999)
+        assert cfg.gen_kw["max_tokens"] == 999
+        assert cfg.max_tokens_explicit is True
 
     def test_bad_mode_raises_a_typed_error(self, home, project):
         with pytest.raises(runner.InvalidSessionMode):
