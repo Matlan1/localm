@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -208,25 +209,35 @@ _CONSOLE_CLOSE_CLEANUP_BUDGET_S = 3.0
 
 
 def _console_close_cleanup() -> None:
-    """Kill any running coder background OS subprocess (see
-    localm.plugins.coder.background.JobRegistry.shutdown_all), and disarm
-    this instance's own crash guard so CTRL_CLOSE_EVENT/logoff/shutdown - a
-    deliberate close of the console window - is treated the same as any
-    other clean stop (Ctrl+C, the GUI Stop button) rather than as a crash.
-    Without this, the crash-recovery watchdog cannot tell "the user closed
-    the window" from "the process died", and relaunches every time.
+    """Clear this instance's crash marker, then kill any running coder
+    background OS subprocess (see
+    localm.plugins.coder.background.JobRegistry.shutdown_all), so
+    CTRL_CLOSE_EVENT/logoff/shutdown reads to the crash-recovery watchdog as a
+    clean stop, the same as Ctrl+C or the GUI Stop button.
 
-    Runs the kill on a separate daemon thread and returns after at most
-    _CONSOLE_CLOSE_CLEANUP_BUDGET_S seconds regardless of that thread's
-    state. Model workers (GGUF/embedder/STT/HF) are not touched here; see
+    Only the marker is cleared up front (bugreport.clear_crash_marker): the
+    native-fault trace and faulthandler stay attached through the kill and are
+    released (bugreport.release_crash_trace) only if the kill finishes within
+    the budget. A trace left behind is handled by the next start's
+    check_and_report_prior_crash(). The crash guard is left alone when no
+    instance has armed one in this process (armed_instance_id() is None).
+
+    Runs the kill on a separate daemon thread and returns within
+    _CONSOLE_CLOSE_CLEANUP_BUDGET_S seconds of being called, marker removal
+    included, regardless of that thread's state. Model workers
+    (GGUF/embedder/STT/HF) are not touched here; see
     localm._mp_spawn.install_parent_death_watchdog.
 
     Passed to winconsole.register_console_handler, whose contract requires
     the callable to be quick and never raise.
     """
+    deadline = time.monotonic() + _CONSOLE_CLOSE_CLEANUP_BUDGET_S
+    instance_id = None
     try:
         from localm import bugreport
-        bugreport.disarm_crash_guard(instance_id=bugreport.armed_instance_id())
+        instance_id = bugreport.armed_instance_id()
+        if instance_id:
+            bugreport.clear_crash_marker(instance_id=instance_id)
     except Exception:
         pass
 
@@ -243,7 +254,12 @@ def _console_close_cleanup() -> None:
 
     threading.Thread(target=_work, daemon=True,
                      name="localm-console-close-cleanup").start()
-    done.wait(_CONSOLE_CLOSE_CLEANUP_BUDGET_S)
+    if done.wait(max(0.0, deadline - time.monotonic())) and instance_id:
+        try:
+            from localm import bugreport
+            bugreport.release_crash_trace(instance_id=instance_id)
+        except Exception:
+            pass
 
 
 def _gui_bind_warning(host: str):
@@ -1169,6 +1185,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             lambda text: app_face.set_error(f"Server problem: {text}"),
             app_face.set_ready)
 
+    server_stopped = threading.Event()
+
     def _serve():
         # The advertise + run_server tail is identical to http_server.serve()'s
         # and is shared via run_advertised. The app object itself is built above
@@ -1199,6 +1217,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             # blocking webview.start() call returns and the process can
             # exit, now that the server it was fronting has genuinely
             # stopped.
+            server_stopped.set()
             appface.close_native_window()
 
     if want_native:
@@ -1208,35 +1227,41 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         # or the tray Stop button is still how you actually stop it) and
         # hand the process's real main thread to the window instead, since
         # that is the one thread pywebview will accept.
-        server_thread = threading.Thread(target=_serve, name="localm-server",
-                                        daemon=False)
-        server_thread.start()
-        import socket as _socket
-        import time as _time3
-        _deadline = _time3.monotonic() + 20.0
-        while _time3.monotonic() < _deadline:
-            try:
-                with _socket.create_connection((_self_host, chosen_port), 0.5):
-                    break
-            except OSError:
-                _time3.sleep(0.25)
-        # on_quit=on_stop: the SAME callable the tray's Stop button already
-        # uses (_tray_callbacks above) - when the "quit when the app window
-        # is closed" setting is on, closing the window stops the server
-        # exactly like clicking Stop would, instead of just hiding it.
-        if not appface.run_native_window(open_url, on_quit=on_stop):
-            webbrowser.open(open_url)
-        # MUST join here, not just rely on server_thread being non-daemon:
-        # concurrent.futures.thread registers its shutdown via CPython's
-        # internal threading._register_atexit(), which fires as soon as THIS
-        # (main) thread's top-level code finishes - BEFORE Python waits for
-        # non-daemon threads to join. Without this join, main() returning the
-        # instant the window closed flips the shared plugin executor's global
-        # shutdown flag while the server thread is still alive, and every
-        # in-flight request relying on get_plugin_executor() (e.g. GET
-        # /api/models) raises "cannot schedule new futures after shutdown" for
-        # as long as the server keeps running. Joining keeps this thread's own
-        # top-level code running for exactly as long as the server is.
-        server_thread.join()
+        # SIGHUP/SIGTERM/SIGBREAK stop the server thread's run_server()
+        # gracefully while the window owns this main thread
+        # (portmux.route_stop_signals).
+        from localm import portmux
+        with portmux.route_stop_signals(serving_elsewhere=True):
+            server_thread = threading.Thread(target=_serve, name="localm-server",
+                                            daemon=False)
+            server_thread.start()
+            import socket as _socket
+            import time as _time3
+            _deadline = _time3.monotonic() + 20.0
+            while _time3.monotonic() < _deadline and not server_stopped.is_set():
+                try:
+                    with _socket.create_connection((_self_host, chosen_port), 0.5):
+                        break
+                except OSError:
+                    _time3.sleep(0.25)
+            # on_quit=on_stop: the SAME callable the tray's Stop button already
+            # uses (_tray_callbacks above) - when the "quit when the app window
+            # is closed" setting is on, closing the window stops the server
+            # exactly like clicking Stop would, instead of just hiding it.
+            if not appface.run_native_window(open_url, on_quit=on_stop,
+                                             server_stopped=server_stopped):
+                webbrowser.open(open_url)
+            # MUST join here, not just rely on server_thread being non-daemon:
+            # concurrent.futures.thread registers its shutdown via CPython's
+            # internal threading._register_atexit(), which fires as soon as THIS
+            # (main) thread's top-level code finishes - BEFORE Python waits for
+            # non-daemon threads to join. Without this join, main() returning the
+            # instant the window closed flips the shared plugin executor's global
+            # shutdown flag while the server thread is still alive, and every
+            # in-flight request relying on get_plugin_executor() (e.g. GET
+            # /api/models) raises "cannot schedule new futures after shutdown" for
+            # as long as the server keeps running. Joining keeps this thread's own
+            # top-level code running for exactly as long as the server is.
+            server_thread.join()
     else:
         _serve()

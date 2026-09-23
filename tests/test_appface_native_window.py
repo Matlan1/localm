@@ -424,3 +424,121 @@ def test_gui_attach_no_browser_flag_skips_both(running, monkeypatch):
     assert result.exit_code == 0, result.output
     assert not calls["native"]
     assert not calls["browser"]
+
+
+def _native_window_ready(monkeypatch):
+    """Lift the pytest guard and the preference check, with a fake webview."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake = MagicMock()
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(appface, "_native_window_allowed_by_preference", lambda: True)
+    return fake
+
+
+def test_a_server_that_stopped_before_the_window_opens_gets_no_window(monkeypatch):
+    fake = _native_window_ready(monkeypatch)
+    stopped = threading.Event()
+    stopped.set()
+
+    assert appface.run_native_window("http://127.0.0.1:8642/",
+                                     server_stopped=stopped) is True
+
+    fake.create_window.assert_not_called()
+    fake.start.assert_not_called()
+    assert appface._native_window is None
+
+
+def test_a_stop_during_window_creation_opens_no_window(monkeypatch):
+    """The server thread can finish between the first check and the window
+    becoming findable by close_native_window(); the window loop must then not
+    start, or nothing would ever close it."""
+    fake = _native_window_ready(monkeypatch)
+    stopped = threading.Event()
+
+    def create_window(*a, **k):
+        stopped.set()
+        appface.close_native_window()
+        return MagicMock()
+    fake.create_window.side_effect = create_window
+
+    assert appface.run_native_window("http://127.0.0.1:8642/",
+                                     server_stopped=stopped) is True
+
+    fake.start.assert_not_called()
+    assert appface._native_window is None
+
+
+def test_a_running_server_still_gets_its_window(monkeypatch):
+    fake = _native_window_ready(monkeypatch)
+    window = MagicMock()
+    fake.create_window.return_value = window
+    window.events.loaded.wait.return_value = False
+
+    appface.run_native_window("http://127.0.0.1:8642/",
+                              server_stopped=threading.Event())
+
+    fake.start.assert_called_once()
+    assert appface._native_window is None
+
+
+class _ShownWaitingWindow:
+    """A stand-in window whose destroy() waits for the window loop to show it,
+    as pywebview's Window.destroy does, and fails when it never is."""
+
+    def __init__(self):
+        self.events = MagicMock()
+        self.events.shown = threading.Event()
+        self.events.loaded.wait.return_value = False
+
+    def destroy(self):
+        if not self.events.shown.wait(2.0):
+            raise RuntimeError("Main window failed to start")
+
+
+class _StopOnSecondCheck(threading.Event):
+    """A server_stopped event that, on its second is_set() check, lets a racing
+    server thread signal the stop and close the window before answering."""
+
+    def __init__(self):
+        super().__init__()
+        self.checks = 0
+        self.close_took = None
+        self._stop_signalled = threading.Event()
+        self._racer = None
+
+    def _race(self):
+        self.set()
+        self._stop_signalled.set()
+        started = time.monotonic()
+        appface.close_native_window()
+        self.close_took = time.monotonic() - started
+
+    def is_set(self):
+        self.checks += 1
+        if self.checks == 2:
+            self._racer = threading.Thread(target=self._race)
+            self._racer.start()
+            self._stop_signalled.wait(5)
+        return super().is_set()
+
+
+def test_a_stop_racing_the_window_publish_neither_hangs_nor_stalls(monkeypatch):
+    """The server thread signals the stop and calls close_native_window() while
+    the main thread is between creating the window and starting its loop. The
+    window must not open, and the close must not sit in destroy() waiting for a
+    window that will never be shown."""
+    fake = _native_window_ready(monkeypatch)
+    window = _ShownWaitingWindow()
+    fake.create_window.return_value = window
+    stopped = _StopOnSecondCheck()
+
+    result = appface.run_native_window("http://127.0.0.1:8642/",
+                                       server_stopped=stopped)
+    stopped._racer.join(10)
+
+    assert stopped.close_took is not None and stopped.close_took < 1.0, (
+        f"close_native_window() blocked {stopped.close_took}s on a window whose "
+        "loop never started")
+    assert result is True
+    fake.start.assert_not_called()
+    assert appface._native_window is None

@@ -102,6 +102,9 @@ def native_window_available() -> bool:
 # supports only one window loop per process.
 _native_window = None
 _native_window_may_really_close = threading.Event()
+# Held while run_native_window() checks server_stopped and publishes
+# _native_window, and while close_native_window() reads it.
+_native_window_lock = threading.Lock()
 
 _COINIT_APARTMENTTHREADED = 0x2
 
@@ -185,7 +188,8 @@ def _enable_clipboard_bindings(win) -> str:
 
 def run_native_window(url: str, name: str = "LocaLM", *,
                       hide_on_close: bool = True,
-                      on_quit: Optional[Callable] = None) -> bool:
+                      on_quit: Optional[Callable] = None,
+                      server_stopped: Optional[threading.Event] = None) -> bool:
     """Open *url* in a native OS webview window, BLOCKING the calling thread
     for the lifetime of the app.
 
@@ -215,6 +219,12 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     genuinely stopped), the user's own close with the quit preference on, or
     hide_on_close=False's plain close - or the window fails to load at all.
 
+    *server_stopped*, when given, is set by the caller once the server the
+    window fronts has stopped, before it calls close_native_window(). When it
+    is already set before the window's loop starts, no window is shown and
+    True is returned at once, so the caller opens no browser tab for a stopped
+    server either.
+
     Returns True only once the window actually LOADED the page, via pywebview's
     ``window.events.loaded`` (a plain threading.Event with .wait(timeout)),
     watched from a short-lived helper thread since the calling thread is busy
@@ -235,6 +245,8 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     except ImportError:
         # Extra not installed - the expected, common case, not a failure.
         return False
+    if server_stopped is not None and server_stopped.is_set():
+        return True
     try:
         window = webview.create_window(name, url, width=1280, height=860,
                                        min_size=(760, 500), text_select=True)
@@ -294,7 +306,14 @@ def run_native_window(url: str, name: str = "LocaLM", *,
 
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
-    _native_window = window
+    # One step under the lock close_native_window() reads under: either the
+    # stop is seen here and no window is published, or the window is published
+    # and a later close_native_window() destroys it. See
+    # test_a_stop_racing_the_window_publish_neither_hangs_nor_stalls.
+    with _native_window_lock:
+        if server_stopped is not None and server_stopped.is_set():
+            return True
+        _native_window = window
     try:
         # private_mode=False keeps the login cookie across restarts, like the
         # browser tab this replaces. Blocks until the window is destroyed.
@@ -336,7 +355,8 @@ def close_native_window() -> None:
     returns and the process can exit. Call this once the server has
     genuinely stopped - never merely because the window was hidden. A no-op
     when no native window is active. NEVER raises."""
-    window = _native_window
+    with _native_window_lock:
+        window = _native_window
     if window is None:
         return
     _native_window_may_really_close.set()
