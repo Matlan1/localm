@@ -192,3 +192,30 @@ def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
         f"crash-recovery watchdog would relaunch it (exit {rc}):\n{output}")
     assert "native window closed" in output, output
     assert rc == 0, output
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Ctrl+Break is Windows-only")
+def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
+    """App-window mode on Windows: Ctrl+Break (SIGBREAK) lands on the main
+    thread held by the window loop and still stops the server cleanly."""
+    home = tmp_path / "home"
+    home.mkdir()
+    port = _free_port()
+    log = open(tmp_path / "gui-native.log", "w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, str(HERE / "_gui_native_stop_signal.py"), str(port),
+         "SIGBREAK"],
+        env=_child_env(home), cwd=str(tmp_path), stdout=log,
+        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    rc = None
+    try:
+        rc = proc.wait(timeout=180)
+    finally:
+        output = _stop(proc, log)
+
+    assert "native window open" in output, output
+    assert _markers(home) == [], (
+        f"Ctrl+Break left a crash marker behind in app-window mode, so the "
+        f"next start reports a crash that never happened (exit {rc}):\n{output}")
+    assert "native window closed" in output, output
+    assert rc == 0, output

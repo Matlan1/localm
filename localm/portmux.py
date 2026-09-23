@@ -70,12 +70,9 @@ _PATH_RE = re.compile(r"^/[!-~]*$")
 
 _READ_CHUNK = 65536
 
-# Signals run_server() turns into a graceful stop while it serves on the main
-# thread. Names this platform does not define are skipped.
-SERVE_STOP_SIGNALS = ("SIGHUP", "SIGTERM", "SIGBREAK")
-# Signals a caller hosting run_server() on another thread routes the same way
-# from the main thread (see gui/cli.py's app-window branch).
-HOSTED_STOP_SIGNALS = ("SIGHUP", "SIGTERM")
+# Signals routed to a graceful stop of run_server() (see route_stop_signals).
+# Names this platform does not define are skipped.
+STOP_SIGNALS = ("SIGHUP", "SIGTERM", "SIGBREAK")
 
 # run_server() calls in progress in this process, across threads.
 _active_runs = 0
@@ -105,9 +102,9 @@ def _stop_hook(hook):
 
 
 def _track_server(server, serve_task) -> None:
-    """Make uvicorn *server* stoppable by _on_stop_signal until *serve_task*
-    (its serve() task) is done. A stop requested before this call is applied
-    at once."""
+    """Make uvicorn *server* stoppable by _request_stop until *serve_task*
+    (its serve() task) is done. A stop requested earlier in the current
+    run_server() call is applied at once."""
     def hook():
         server.should_exit = True
     _stop_hooks.append(hook)
@@ -116,42 +113,98 @@ def _track_server(server, serve_task) -> None:
         hook()
 
 
-def _interrupt_serving() -> None:
-    raise KeyboardInterrupt
+def _request_stop() -> bool:
+    """Record a stop request and end every registered server's serve through
+    its stop hook; once the active run_server() call is disarming, only record
+    it. Returns False, doing nothing, when no run_server() call is active."""
+    global _stop_requested
+    if _active_runs <= 0:
+        return False
+    _stop_requested = True
+    if not _stopping:
+        for hook in list(_stop_hooks):
+            hook()
+    return True
 
 
 def _on_stop_signal(signum, frame) -> None:
-    """Handler installed by route_stop_signals().
+    """Handler installed by route_stop_signals(). Requests a stop (see
+    _request_stop) while a run_server() call is active. With none active it
+    does nothing when a stop was already requested (a repeated signal while
+    the process winds down); otherwise it restores the default disposition and
+    re-delivers *signum*, so the signal has its default effect."""
+    if _request_stop() or _stop_requested:
+        return
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (OSError, ValueError, RuntimeError):
+        return
+    signal.raise_signal(signum)
 
-    While a run_server() call is active it records the stop request and ends
-    every registered server's serve through its stop hook, so serving winds
-    down and run_server() disarms the crash guard itself; once that call is
-    disarming it only records the request. With no run_server() call active it
-    restores the default disposition and re-delivers *signum*, so the signal
-    has its default effect."""
-    global _stop_requested
-    if _active_runs <= 0:
+
+def _deliver_woken_stops(sock, routed) -> None:
+    """Read signal numbers from the wakeup socket until it closes, requesting a
+    stop for each one in *routed*."""
+    while True:
         try:
-            signal.signal(signum, signal.SIG_DFL)
-        except (OSError, ValueError, RuntimeError):
+            data = sock.recv(64)
+        except OSError:
             return
-        signal.raise_signal(signum)
-        return
-    _stop_requested = True
-    if _stopping:
-        return
-    for hook in list(_stop_hooks):
-        hook()
+        if not data:
+            return
+        if any(number in routed for number in data):
+            _request_stop()
+
+
+def _start_stop_waker(routed):
+    """Point signal.set_wakeup_fd at a socket pair and run _deliver_woken_stops
+    on its other end in a daemon thread, so a routed signal requests the stop
+    without waiting for the main thread to run Python code. Returns a callable
+    that restores the previous wakeup fd and ends the thread, or None (logged)
+    when the wakeup fd cannot be set."""
+    import socket
+    try:
+        reader, writer = socket.socketpair()
+    except OSError as e:
+        _log.warning("portmux: stop signals will wait for the main thread: %s", e)
+        return None
+    try:
+        writer.setblocking(False)
+        previous = signal.set_wakeup_fd(writer.fileno(), warn_on_full_buffer=False)
+    except (OSError, ValueError, RuntimeError) as e:
+        reader.close()
+        writer.close()
+        _log.warning("portmux: stop signals will wait for the main thread: %s", e)
+        return None
+    thread = threading.Thread(target=_deliver_woken_stops,
+                              args=(reader, {int(sig) for sig in routed}),
+                              name="localm-stop-signals", daemon=True)
+    thread.start()
+
+    def stop():
+        try:
+            signal.set_wakeup_fd(previous)
+        except (OSError, ValueError, RuntimeError):
+            pass
+        writer.close()
+        thread.join(timeout=5)
+        reader.close()
+    return stop
 
 
 @contextlib.contextmanager
-def route_stop_signals(names=SERVE_STOP_SIGNALS):
+def route_stop_signals(names=STOP_SIGNALS, *, serving_elsewhere: bool = False):
     """On the main thread, point every signal named in *names* that is at its
     default disposition (SIG_DFL) at _on_stop_signal for the duration of the
     block, then put SIG_DFL back on each one still pointing there. Ignored or
     otherwise handled signals are left alone, and so is every signal when this
     runs off the main thread. Names this platform does not define are skipped.
-    Yields the list of signals it routed."""
+
+    With *serving_elsewhere* (run_server() runs on another thread while this
+    thread may sit in native code that does not return to Python, such as a
+    webview loop), the routed signals also reach a helper thread through
+    signal.set_wakeup_fd (see _start_stop_waker); the previous wakeup fd is
+    restored on exit. Yields the list of signals it routed."""
     routed = []
     if threading.current_thread() is threading.main_thread():
         for name in names:
@@ -164,9 +217,12 @@ def route_stop_signals(names=SERVE_STOP_SIGNALS):
                     routed.append(sig)
             except (OSError, ValueError, RuntimeError):
                 pass
+    stop_waker = _start_stop_waker(routed) if routed and serving_elsewhere else None
     try:
         yield routed
     finally:
+        if stop_waker is not None:
+            stop_waker()
         for sig in routed:
             try:
                 if signal.getsignal(sig) is _on_stop_signal:
@@ -342,9 +398,10 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
     If even the socket cannot be built, this falls back to uvicorn's own binding
     and logs a warning naming the failure.
 
-    Either server is stoppable by _on_stop_signal while it serves. uvicorn.run()
-    exposes no server object, so its stop hook raises KeyboardInterrupt, which
-    uvicorn.run() catches and returns from. Nothing is served when a stop was
+    Either server is stoppable by _request_stop while it serves. uvicorn.run()
+    exposes no server object, so its stop hook raises KeyboardInterrupt when it
+    runs on the thread serving uvicorn.run(), which catches it and returns; on
+    any other thread that hook does nothing. Nothing is served when a stop was
     already requested in the current run_server() call."""
     config_kwargs = dict(app=app, log_level=log_level,
                          timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
@@ -358,7 +415,12 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
                      "IPv6 only for a :: host", host, port, e)
         if _stop_requested and _active_runs > 0:
             return
-        with _stop_hook(_interrupt_serving):
+        serving_thread = threading.get_ident()
+
+        def interrupt():
+            if threading.get_ident() == serving_thread:
+                raise KeyboardInterrupt
+        with _stop_hook(interrupt):
             uvicorn.run(host=host, port=port, **config_kwargs)
         return
     server = uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs))
@@ -399,6 +461,15 @@ async def _cancel_inflight_conns(inflight: "set[asyncio.Task]") -> None:
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+def _internal_port(server) -> Optional[int]:
+    """The port a started internal uvicorn *server* listens on, or None when it
+    has already closed its sockets (it was stopped during its startup)."""
+    for listener in server.servers:
+        for sock in listener.sockets:
+            return sock.getsockname()[1]
+    return None
+
+
 async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) -> None:
     import uvicorn
 
@@ -419,7 +490,10 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
     if serve_task.done():
         serve_task.result()   # re-raise uvicorn's startup error
         return
-    internal_port = server.servers[0].sockets[0].getsockname()[1]
+    internal_port = _internal_port(server)
+    if internal_port is None:
+        await serve_task
+        return
     _harden_uvicorn_logging()
 
     inflight: "set[asyncio.Task]" = set()
@@ -481,7 +555,10 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
     if serve_task.done():
         serve_task.result()   # re-raise uvicorn's startup error
         return
-    internal_port = server.servers[0].sockets[0].getsockname()[1]
+    internal_port = _internal_port(server)
+    if internal_port is None:
+        await serve_task
+        return
     _harden_uvicorn_logging()
 
     state = {"warned": False, "count": 0}

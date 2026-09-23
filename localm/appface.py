@@ -185,7 +185,8 @@ def _enable_clipboard_bindings(win) -> str:
 
 def run_native_window(url: str, name: str = "LocaLM", *,
                       hide_on_close: bool = True,
-                      on_quit: Optional[Callable] = None) -> bool:
+                      on_quit: Optional[Callable] = None,
+                      server_stopped: Optional[threading.Event] = None) -> bool:
     """Open *url* in a native OS webview window, BLOCKING the calling thread
     for the lifetime of the app.
 
@@ -215,6 +216,12 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     genuinely stopped), the user's own close with the quit preference on, or
     hide_on_close=False's plain close - or the window fails to load at all.
 
+    *server_stopped*, when given, is set by the caller once the server the
+    window fronts has stopped, before it calls close_native_window(). When it
+    is already set before the window's loop starts, no window is shown and
+    True is returned at once, so the caller opens no browser tab for a stopped
+    server either.
+
     Returns True only once the window actually LOADED the page, via pywebview's
     ``window.events.loaded`` (a plain threading.Event with .wait(timeout)),
     watched from a short-lived helper thread since the calling thread is busy
@@ -235,6 +242,8 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     except ImportError:
         # Extra not installed - the expected, common case, not a failure.
         return False
+    if server_stopped is not None and server_stopped.is_set():
+        return True
     try:
         window = webview.create_window(name, url, width=1280, height=860,
                                        min_size=(760, 500), text_select=True)
@@ -295,6 +304,11 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
     _native_window = window
+    # Checked after _native_window is set: a stop signalled before this point
+    # is seen here, and a later close_native_window() finds the window.
+    if server_stopped is not None and server_stopped.is_set():
+        _native_window = None
+        return True
     try:
         # private_mode=False keeps the login cookie across restarts, like the
         # browser tab this replaces. Blocks until the window is destroyed.

@@ -8,7 +8,6 @@ import faulthandler
 import json
 import logging
 import os
-import subprocess
 import sys
 
 import pytest
@@ -447,8 +446,9 @@ def test_disarm_of_a_sibling_does_not_release_this_instances_faulthandler(
 
 
 # --------------------------------------------------------------------------- #
-#  The marker and the trace are released separately; a trace left without its  #
-#  marker is handled by the next start.                                        #
+#  The marker and the trace are released separately. Clearing the marker      #
+#  leaves a stopping record; a run that ends before releasing its trace is     #
+#  handled from that record by the next start.                                 #
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
@@ -461,16 +461,21 @@ def _restore_faulthandler():
         faulthandler.enable(file=sys.__stderr__, all_threads=True)
 
 
-def test_clear_crash_marker_leaves_the_trace_and_faulthandler_attached(
+def test_clear_crash_marker_leaves_the_trace_attached_and_a_stopping_record(
         tmp_path, monkeypatch, _restore_faulthandler):
     _pin_mode(monkeypatch, "log")
     home = str(tmp_path)
-    marker, trace = _crash_files(tmp_path / "run", "inst-split")
+    run = tmp_path / "run"
+    marker, trace = _crash_files(run, "inst-split")
+    record = run / "server-crash.inst-split.stopping"
     assert bugreport.arm_crash_guard(home=home, instance_id="inst-split") is True
+    armed = json.loads(marker.read_text(encoding="utf-8"))
 
     bugreport.clear_crash_marker(home=home, instance_id="inst-split")
 
     assert not marker.exists()
+    assert json.loads(record.read_text(encoding="utf-8")) == armed, (
+        "the stopping record must carry the marker's own content (its pid)")
     assert trace.exists(), "clearing the marker must not delete the trace file"
     assert faulthandler.is_enabled(), "clearing the marker must not detach faulthandler"
     assert bugreport._crash_trace_instance_id == "inst-split"
@@ -479,6 +484,7 @@ def test_clear_crash_marker_leaves_the_trace_and_faulthandler_attached(
     bugreport.release_crash_trace(home=home, instance_id="inst-split")
 
     assert not trace.exists()
+    assert not record.exists()
     assert not faulthandler.is_enabled()
     assert bugreport._crash_trace_fh is None
 
@@ -506,144 +512,128 @@ _FATAL_TRACE = ("Windows fatal exception: access violation\n\n"
 _FIRST_CHANCE_TRACE = "Windows fatal exception: code 0x8001010d\n"
 
 
-def _write_trace(run, instance_id, text):
+def _write_stopping(run, instance_id, pid, trace_text, diagnostics=True):
     run.mkdir(parents=True, exist_ok=True)
-    trace = run / (f"server-crash-trace.{instance_id}.txt" if instance_id
-                   else "server-crash-trace.txt")
-    trace.write_text(text, encoding="utf-8")
-    return trace
+    record = run / f"server-crash.{instance_id}.stopping"
+    record.write_text(json.dumps({"pid": pid, "context": {"port": 1},
+                                  "diagnostics": diagnostics}), encoding="utf-8")
+    trace = run / f"server-crash-trace.{instance_id}.txt"
+    trace.write_text(trace_text, encoding="utf-8")
+    return record, trace
 
 
-def test_a_trace_left_without_its_marker_naming_a_fatal_fault_is_reported(
-        tmp_path, monkeypatch):
-    """A run that cleared its marker for a clean stop and then faulted while
-    stopping leaves only the trace: that crash is reported, then the file goes."""
-    _pin_mode(monkeypatch, "log")
+def _record_reports(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(bugreport, "report_failure",
                         lambda **k: calls.append(k) or str(tmp_path / "r.md"))
-    trace = _write_trace(tmp_path / "run", "stopped-then-faulted", _FATAL_TRACE)
+    return calls
+
+
+def test_a_fault_after_a_clean_stop_began_is_reported_once(tmp_path, monkeypatch):
+    """The run cleared its marker for a clean stop, then faulted before it
+    released its trace: reported once, then both files are gone."""
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    calls = _record_reports(monkeypatch, tmp_path)
+    record, trace = _write_stopping(tmp_path / "run", "stopped-then-faulted",
+                                    424242, _FATAL_TRACE)
 
     result = bugreport.check_and_report_prior_crash(home=str(tmp_path))
 
+    assert not record.exists() and not trace.exists()
     assert len(calls) == 1, "a fault captured after the marker was cleared was not reported"
     assert result is not None
     assert "while stopping" in calls[0]["summary"]
     assert "access violation" in calls[0]["summary"]
     assert "access violation" in calls[0]["context"]["native_trace"]
-    assert not trace.exists()
+    assert calls[0]["context"]["prior_run"]["pid"] == 424242
     assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
-    assert len(calls) == 1, "the same leftover trace was reported twice"
+    assert len(calls) == 1, "the same stop was reported twice"
 
 
 @pytest.mark.parametrize("text", ["", _FIRST_CHANCE_TRACE])
-def test_a_trace_left_without_its_marker_and_no_fatal_fault_is_only_deleted(
+def test_a_clean_stop_that_ended_before_releasing_its_trace_is_only_cleaned_up(
         tmp_path, monkeypatch, text):
     _pin_mode(monkeypatch, "log")
-    calls = []
-    monkeypatch.setattr(bugreport, "report_failure",
-                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
-    trace = _write_trace(tmp_path / "run", "clean-stop", text)
-    legacy = _write_trace(tmp_path / "run", None, text)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    calls = _record_reports(monkeypatch, tmp_path)
+    record, trace = _write_stopping(tmp_path / "run", "clean-stop", 424242, text)
 
     assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
 
-    assert calls == []
+    assert not record.exists(), "a leftover stopping record was never cleaned up"
     assert not trace.exists(), "a leftover trace file was never cleaned up"
-    assert not legacy.exists(), "a leftover legacy trace file was never cleaned up"
+    assert calls == []
 
 
-def test_a_leftover_fatal_trace_in_privacy_mode_is_deleted_not_reported(
-        tmp_path, monkeypatch):
-    _pin_mode(monkeypatch, "privacy")
-    calls = []
-    monkeypatch.setattr(bugreport, "report_failure",
-                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
-    trace = _write_trace(tmp_path / "run", "private-run", _FATAL_TRACE)
+@pytest.mark.parametrize("mode, armed_diagnostics", [("privacy", True), ("log", False)])
+def test_a_fault_after_a_clean_stop_in_privacy_mode_is_cleaned_up_not_reported(
+        tmp_path, monkeypatch, mode, armed_diagnostics):
+    _pin_mode(monkeypatch, mode)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    calls = _record_reports(monkeypatch, tmp_path)
+    record, trace = _write_stopping(tmp_path / "run", "private-run", 424242,
+                                    _FATAL_TRACE, diagnostics=armed_diagnostics)
 
     assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
 
+    assert not record.exists() and not trace.exists()
     assert calls == []
-    assert not trace.exists()
 
 
-def test_a_trace_without_a_marker_whose_instance_is_still_running_is_left_alone(
-        tmp_path, monkeypatch):
-    """An instance can be between clearing its marker and releasing its trace
-    (stopping, or starting up) while another one starts in the same
-    LOCALM_HOME. Its registry entry names a live pid, so its trace is not
-    touched even when it already names a fault."""
+def test_a_stopping_record_of_a_live_instance_is_left_alone(tmp_path, monkeypatch):
+    """Another instance in the same LOCALM_HOME can be between clearing its
+    marker and releasing its trace while this one starts: its recorded pid is
+    alive, so neither file is touched even when the trace already names a
+    fault."""
     _pin_mode(monkeypatch, "log")
-    calls = []
-    monkeypatch.setattr(bugreport, "report_failure",
-                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
-    run = tmp_path / "run"
-    trace = _write_trace(run, "still-running", _FATAL_TRACE)
-    (run / "still-running.json").write_text(
-        json.dumps({"instance_id": "still-running", "pid": os.getpid()}),
-        encoding="utf-8")
+    calls = _record_reports(monkeypatch, tmp_path)
+    record, trace = _write_stopping(tmp_path / "run", "still-stopping",
+                                    os.getpid(), _FATAL_TRACE)
 
     result = bugreport.check_and_report_prior_crash(home=str(tmp_path))
 
-    assert trace.exists(), "a live instance's trace file was deleted"
-    assert calls == [], "a live instance's trace was reported as a crash"
+    assert record.exists() and trace.exists(), "a live instance's stopping files were deleted"
+    assert calls == [], "a live instance's stop was reported as a crash"
     assert result is None
 
 
-def test_a_trace_with_its_marker_present_is_not_treated_as_left_over(
+def test_a_crash_whose_trace_could_not_be_deleted_is_not_reported_again(
         tmp_path, monkeypatch):
+    """A hard crash (marker still armed) is reported from its marker. When its
+    trace file then cannot be deleted, the leftover trace is never reported a
+    second time, as a stop or otherwise."""
     _pin_mode(monkeypatch, "log")
-    monkeypatch.setattr(instances, "pid_alive", lambda pid: True)
-    calls = []
-    monkeypatch.setattr(bugreport, "report_failure",
-                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    calls = _record_reports(monkeypatch, tmp_path)
     run = tmp_path / "run"
-    _write_marker(run, "armed", 4242)
-    trace = _write_trace(run, "armed", _FATAL_TRACE)
+    _write_marker(run, "hard-crash", 424242)
+    trace = run / "server-crash-trace.hard-crash.txt"
+    trace.write_text(_FATAL_TRACE, encoding="utf-8")
+    real_unlink = type(trace).unlink
+    failed = []
 
-    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+    def unlink(self, *a, **k):
+        if self.name == trace.name and not failed:
+            failed.append(self.name)
+            raise PermissionError("briefly held open elsewhere")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(type(trace), "unlink", unlink)
 
-    assert trace.exists()
-    assert (run / "server-crash.armed.marker").exists()
-    assert calls == []
+    bugreport.check_and_report_prior_crash(home=str(tmp_path))
+    bugreport.check_and_report_prior_crash(home=str(tmp_path))
+
+    assert failed, "fixture bug: the trace deletion never failed"
+    assert len(calls) == 1, [c["summary"] for c in calls]
+    assert "while stopping" not in calls[0]["summary"]
 
 
-@pytest.mark.skipif(sys.platform != "win32",
-                    reason="only Windows refuses to delete a file another process holds open")
-def test_a_leftover_trace_held_open_by_another_process_is_left_alone(
-        tmp_path, monkeypatch):
-    """A live instance with no registry entry (--isolated) still holds its trace
-    open with faulthandler attached; the next start must neither remove it nor
-    report what it holds, even a fault line it logged and survived."""
+def test_disarm_leaves_neither_a_stopping_record_nor_a_trace(tmp_path, monkeypatch):
     _pin_mode(monkeypatch, "log")
-    calls = []
-    monkeypatch.setattr(bugreport, "report_failure",
-                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
     run = tmp_path / "run"
-    run.mkdir()
-    trace = run / "server-crash-trace.isolated.txt"
-    holder = subprocess.Popen(
-        [sys.executable, "-c",
-         "import faulthandler, sys, time\n"
-         "fh = open(sys.argv[1], 'w', encoding='utf-8')\n"
-         "fh.write(sys.argv[2])\n"
-         "fh.flush()\n"
-         "faulthandler.enable(file=fh, all_threads=True)\n"
-         "print('held', flush=True)\n"
-         "time.sleep(60)\n",
-         str(trace), _FATAL_TRACE],
-        stdout=subprocess.PIPE, text=True)
-    try:
-        assert holder.stdout.readline().strip() == "held"
-
-        result = bugreport.check_and_report_prior_crash(home=str(tmp_path))
-
-        assert trace.exists(), "a trace file still held open by a live process was deleted"
-        assert calls == [], "a live process's trace was reported as a crash"
-        assert result is None
-    finally:
-        holder.kill()
-        holder.wait(timeout=30)
+    assert bugreport.arm_crash_guard(home=str(tmp_path), instance_id="full") is True
+    bugreport.disarm_crash_guard(home=str(tmp_path), instance_id="full")
+    assert sorted(p.name for p in run.glob("server-crash*")) == []
 
 
 def test_asyncio_handler_reports_task_exception(monkeypatch):

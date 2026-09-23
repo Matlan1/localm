@@ -5,8 +5,12 @@ window loop) with the native window replaced by a plain wait that ends when the
 server closes it. NOT a test module (underscore prefix -> pytest does not
 collect it).
 
-Usage: python _gui_native_stop_signal.py <port>
+Usage: python _gui_native_stop_signal.py <port> [<signal name>]
+
+With a signal name, the process raises that signal on itself once the window
+is open.
 """
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -19,9 +23,13 @@ if __name__ == "__main__":
     from localm.cli import main
 
     _closed = threading.Event()
+    _self_signal = sys.argv[2] if len(sys.argv) > 2 else None
 
     def _run_native_window(url, on_quit=None, **kwargs):
         print("native window open", flush=True)
+        if _self_signal:
+            threading.Timer(0.5, signal.raise_signal,
+                            (getattr(signal, _self_signal),)).start()
         while not _closed.wait(0.1):
             pass
         print("native window closed", flush=True)

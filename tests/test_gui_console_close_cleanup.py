@@ -218,6 +218,7 @@ def test_console_close_keeps_native_fault_capture_through_coder_shutdown(
     assert seen["marker"] is False, "the marker must be cleared before the shutdown"
     assert not marker.exists()
     assert not trace.exists(), "a shutdown that finished in budget releases the trace"
+    assert not (_diag_home / "run" / "server-crash.cc-trace.stopping").exists()
     assert bugreport._crash_trace_fh is None
 
 
@@ -237,6 +238,8 @@ def test_console_close_leaves_the_trace_armed_when_the_shutdown_overruns(
     gui_cli._console_close_cleanup()
 
     assert not marker.exists()
+    assert (_diag_home / "run" / "server-crash.cc-overrun.stopping").exists(), (
+        "no stopping record was left for the next start to pair with the trace")
     assert trace.exists(), (
         "the trace was released while the coder shutdown was still running")
     assert faulthandler.is_enabled(), (

@@ -1185,6 +1185,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             lambda text: app_face.set_error(f"Server problem: {text}"),
             app_face.set_ready)
 
+    server_stopped = threading.Event()
+
     def _serve():
         # The advertise + run_server tail is identical to http_server.serve()'s
         # and is shared via run_advertised. The app object itself is built above
@@ -1215,6 +1217,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             # blocking webview.start() call returns and the process can
             # exit, now that the server it was fronting has genuinely
             # stopped.
+            server_stopped.set()
             appface.close_native_window()
 
     if want_native:
@@ -1224,17 +1227,18 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         # or the tray Stop button is still how you actually stop it) and
         # hand the process's real main thread to the window instead, since
         # that is the one thread pywebview will accept.
-        # SIGHUP/SIGTERM stop the server thread's run_server() gracefully
-        # while the window owns this main thread (portmux.route_stop_signals).
+        # SIGHUP/SIGTERM/SIGBREAK stop the server thread's run_server()
+        # gracefully while the window owns this main thread
+        # (portmux.route_stop_signals).
         from localm import portmux
-        with portmux.route_stop_signals(portmux.HOSTED_STOP_SIGNALS):
+        with portmux.route_stop_signals(serving_elsewhere=True):
             server_thread = threading.Thread(target=_serve, name="localm-server",
                                             daemon=False)
             server_thread.start()
             import socket as _socket
             import time as _time3
             _deadline = _time3.monotonic() + 20.0
-            while _time3.monotonic() < _deadline:
+            while _time3.monotonic() < _deadline and not server_stopped.is_set():
                 try:
                     with _socket.create_connection((_self_host, chosen_port), 0.5):
                         break
@@ -1244,7 +1248,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             # uses (_tray_callbacks above) - when the "quit when the app window
             # is closed" setting is on, closing the window stops the server
             # exactly like clicking Stop would, instead of just hiding it.
-            if not appface.run_native_window(open_url, on_quit=on_stop):
+            if not appface.run_native_window(open_url, on_quit=on_stop,
+                                             server_stopped=server_stopped):
                 webbrowser.open(open_url)
             # MUST join here, not just rely on server_thread being non-daemon:
             # concurrent.futures.thread registers its shutdown via CPython's

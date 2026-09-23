@@ -424,3 +424,58 @@ def test_gui_attach_no_browser_flag_skips_both(running, monkeypatch):
     assert result.exit_code == 0, result.output
     assert not calls["native"]
     assert not calls["browser"]
+
+
+def _native_window_ready(monkeypatch):
+    """Lift the pytest guard and the preference check, with a fake webview."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake = MagicMock()
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(appface, "_native_window_allowed_by_preference", lambda: True)
+    return fake
+
+
+def test_a_server_that_stopped_before_the_window_opens_gets_no_window(monkeypatch):
+    fake = _native_window_ready(monkeypatch)
+    stopped = threading.Event()
+    stopped.set()
+
+    assert appface.run_native_window("http://127.0.0.1:8642/",
+                                     server_stopped=stopped) is True
+
+    fake.create_window.assert_not_called()
+    fake.start.assert_not_called()
+    assert appface._native_window is None
+
+
+def test_a_stop_during_window_creation_opens_no_window(monkeypatch):
+    """The server thread can finish between the first check and the window
+    becoming findable by close_native_window(); the window loop must then not
+    start, or nothing would ever close it."""
+    fake = _native_window_ready(monkeypatch)
+    stopped = threading.Event()
+
+    def create_window(*a, **k):
+        stopped.set()
+        appface.close_native_window()
+        return MagicMock()
+    fake.create_window.side_effect = create_window
+
+    assert appface.run_native_window("http://127.0.0.1:8642/",
+                                     server_stopped=stopped) is True
+
+    fake.start.assert_not_called()
+    assert appface._native_window is None
+
+
+def test_a_running_server_still_gets_its_window(monkeypatch):
+    fake = _native_window_ready(monkeypatch)
+    window = MagicMock()
+    fake.create_window.return_value = window
+    window.events.loaded.wait.return_value = False
+
+    appface.run_native_window("http://127.0.0.1:8642/",
+                              server_stopped=threading.Event())
+
+    fake.start.assert_called_once()
+    assert appface._native_window is None
