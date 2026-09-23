@@ -51,6 +51,61 @@ def _make_live(monkeypatch):
                         lambda scheme, port, iid, timeout: True)
 
 
+class _FakePeerServer:
+    """A real HTTP server on an ephemeral loopback port standing in for a peer
+    localm instance: ``GET /v1/models`` and ``POST /v1/chat/completions``
+    answer 200 when *key* is None (open mode) or the request carries
+    ``Bearer <key>``, and 401 otherwise. Every Authorization header and every
+    chat body it receives is recorded. Stopped at interpreter exit."""
+
+    def __init__(self, key=None):
+        import http.server
+        import json as _json
+        import threading
+
+        outer = self
+        self.key = key
+        self.auth_seen = []
+        self.bodies = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _authorized(self):
+                auth = self.headers.get("Authorization")
+                outer.auth_seen.append(auth)
+                return outer.key is None or auth == f"Bearer {outer.key}"
+
+            def _send(self, code, obj):
+                data = _json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if not self._authorized():
+                    return self._send(401, {"detail": "Invalid or missing API key"})
+                self._send(200, {"object": "list", "data": []})
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n)
+                if not self._authorized():
+                    return self._send(401, {"detail": "Invalid or missing API key"})
+                body = _json.loads(raw)
+                outer.bodies.append(body)
+                self._send(200, {"model": body.get("model"), "choices": [
+                    {"message": {"content": f"peer answered {body.get('model')}"}}]})
+
+        self._srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._srv.server_address[1]
+        t = threading.Thread(target=self._srv.serve_forever, daemon=True)
+        t.start()
+
+
 # ------------------------------------------------------------------ #
 #  registry_name_and_aliases                                         #
 # ------------------------------------------------------------------ #
@@ -204,9 +259,13 @@ class _FakePeerResponse:
         self.status_code = status_code
         self._chunks = list(chunks)
         self.headers = {"content-type": content_type}
+        self.closed = False
 
     def iter_content(self, chunk_size=None):
         return iter(self._chunks)
+
+    def close(self):
+        self.closed = True
 
 
 class TestForward:
@@ -335,7 +394,8 @@ class TestAcceptPeerRouteEndpoint:
     def test_accept_stores_the_route(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
         monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
-        _write_peer(d, "peer-acc", 9301, model="shared-model")
+        peer = _FakePeerServer(key="peer-key-123")
+        _write_peer(d, "peer-acc", peer.port, model="shared-model")
         _make_live(monkeypatch)
         client = self._client()
         r = client.post("/v1/models/shared-model/peer-route",
@@ -384,10 +444,15 @@ class TestAcceptPeerRouteEndpoint:
         # Presenting the (unrelated) coordination_token field name in the body
         # is simply an unknown field to this endpoint's schema - it does not
         # authenticate anything and api_key is still required.
+        peer = _FakePeerServer(key="the-peers-real-key")
+        _write_peer(d, "peer-tok2", peer.port, model="shared-model")
         r = client.post("/v1/models/shared-model/peer-route",
                         headers=self._write_hdr(client),
-                        json={"instance_id": "peer-tok", "coordination_token": "tok-peer-tok"})
-        assert r.status_code == 422
+                        json={"instance_id": "peer-tok2",
+                              "coordination_token": "tok-peer-tok2"})
+        assert peer_routing.get_route("shared-model") is None
+        assert r.status_code == 403
+        assert all("tok-peer-tok2" not in (h or "") for h in peer.auth_seen)
 
 
 class TestClearPeerRouteEndpoint:
@@ -674,7 +739,8 @@ class TestPeerLookupIsOffloaded:
             self, _isolated_state, monkeypatch):
         seen = []
         self._record_thread(monkeypatch, seen)
-        _write_peer(_isolated_state, "peer-acc2", 9502, model="shared-model")
+        peer = _FakePeerServer(key="k")
+        _write_peer(_isolated_state, "peer-acc2", peer.port, model="shared-model")
         _make_live(monkeypatch)
         client = TestClient(create_app(None))
         r = client.post(
@@ -939,3 +1005,211 @@ class TestTimedOutAcceptInstallsNothing:
         assert late is None, (
             "a request the client was told had FAILED installed a route "
             f"carrying the user's key: {late}")
+
+
+# ------------------------------------------------------------------ #
+#  Open-mode peers, credential checks, file identity                 #
+# ------------------------------------------------------------------ #
+
+def _shell_hdr(client):
+    return {"Authorization": f"Bearer {client.app.state.shell_token}"}
+
+
+class TestAcceptTargetsTheNamedPeer:
+    def test_a_second_peer_with_the_same_model_can_be_accepted(
+            self, _isolated_state, monkeypatch):
+        first = _FakePeerServer(key=None)
+        second = _FakePeerServer(key=None)
+        _write_peer(_isolated_state, "peer-a", first.port, model="shared-model")
+        _write_peer(_isolated_state, "peer-b", second.port, model="shared-model")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        r = client.post("/v1/models/shared-model/peer-route", headers=_shell_hdr(client),
+                        json={"instance_id": "peer-b"})
+        assert r.status_code == 200, r.text
+        assert peer_routing.get_route("shared-model").instance_id == "peer-b"
+
+
+class TestOpenModePeerNeedsNoKey:
+    """A peer with no API key configured (the default loopback install) has
+    no key to type in. Before this, accepting its offer demanded one."""
+
+    def test_offer_says_an_open_peer_needs_no_key(self, _isolated_state, monkeypatch):
+        peer = _FakePeerServer(key=None)
+        _write_peer(_isolated_state, "open-peer", peer.port, model="shared-model")
+        _make_live(monkeypatch)
+        r = TestClient(create_app(None)).get("/v1/models/shared-model/peer-offer")
+        assert r.status_code == 200
+        assert r.json()["peer"]["requires_key"] is False
+
+    def test_offer_says_a_keyed_peer_needs_its_key(self, _isolated_state, monkeypatch):
+        peer = _FakePeerServer(key="k")
+        _write_peer(_isolated_state, "keyed-peer", peer.port, model="shared-model")
+        _make_live(monkeypatch)
+        r = TestClient(create_app(None)).get("/v1/models/shared-model/peer-offer")
+        assert r.json()["peer"]["requires_key"] is True
+
+    def test_accepting_an_open_peer_with_no_key_routes_and_forwards(
+            self, _isolated_state, monkeypatch):
+        peer = _FakePeerServer(key=None)
+        _write_peer(_isolated_state, "open-peer2", peer.port, model="shared-model")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        r = client.post("/v1/models/shared-model/peer-route", headers=_shell_hdr(client),
+                        json={"instance_id": "open-peer2"})
+        assert r.status_code == 200, r.text
+        chat = client.post("/v1/chat/completions", json={
+            "model": "shared-model",
+            "messages": [{"role": "user", "content": "hi"}]})
+        assert peer.bodies and peer.bodies[-1]["model"] == "shared-model"
+        assert chat.status_code == 200, chat.text
+        assert peer.auth_seen[-1] is None
+
+    def test_a_wrong_key_is_refused_before_any_route_is_stored(
+            self, _isolated_state, monkeypatch):
+        peer = _FakePeerServer(key="right")
+        _write_peer(_isolated_state, "keyed-peer2", peer.port, model="shared-model")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        r = client.post("/v1/models/shared-model/peer-route", headers=_shell_hdr(client),
+                        json={"instance_id": "keyed-peer2", "api_key": "wrong"})
+        assert peer_routing.get_route("shared-model") is None
+        assert r.status_code == 403
+        assert "rejected" in r.json()["detail"]
+
+    def test_the_right_key_is_accepted(self, _isolated_state, monkeypatch):
+        peer = _FakePeerServer(key="right")
+        _write_peer(_isolated_state, "keyed-peer3", peer.port, model="shared-model")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        r = client.post("/v1/models/shared-model/peer-route", headers=_shell_hdr(client),
+                        json={"instance_id": "keyed-peer3", "api_key": "right"})
+        assert r.status_code == 200, r.text
+        assert peer_routing.get_route("shared-model").api_key == "right"
+
+
+class TestAKeyThePeerStopsAcceptingClearsTheRoute:
+    def test_a_401_from_the_peer_clears_the_route_and_says_why(self, monkeypatch):
+        peer = _FakePeerServer(key="rotated-away")
+        route = peer_routing.PeerRoute(
+            model="m", instance_id="p", host="127.0.0.1", port=peer.port,
+            scheme="http", api_key="old-key")
+        peer_routing.set_route(route)
+        from fastapi import HTTPException
+
+        async def scenario():
+            return await peer_routing.forward(
+                route, _FakeRequest(b'{"model": "m", "messages": []}'),
+                "/v1/chat/completions")
+
+        raised = None
+        try:
+            asyncio.run(scenario())
+        except HTTPException as e:
+            raised = e
+        assert peer_routing.get_route("m") is None
+        assert raised is not None and raised.status_code == 502
+        assert "refused" in raised.detail
+
+
+class TestForwardBody:
+    def test_names_the_model_the_way_the_peer_does_and_pins_it(self):
+        route = peer_routing.PeerRoute(
+            model="local-name", instance_id="p", host="127.0.0.1", port=1,
+            scheme="http", api_key="", peer_model="peer-name")
+        import json as _json
+        out = _json.loads(peer_routing.forward_body(
+            route, b'{"model": "localm", "messages": [], "pin_model": false}'))
+        assert out["model"] == "peer-name"
+        assert out["pin_model"] is True
+        assert out["messages"] == []
+
+    def test_same_name_when_the_peer_uses_ours(self):
+        route = peer_routing.PeerRoute(
+            model="same", instance_id="p", host="127.0.0.1", port=1,
+            scheme="http", api_key="")
+        import json as _json
+        assert _json.loads(peer_routing.forward_body(route, b'{}'))["model"] == "same"
+
+    def test_a_body_that_is_not_a_json_object_is_left_alone(self):
+        route = peer_routing.PeerRoute(
+            model="m", instance_id="p", host="127.0.0.1", port=1,
+            scheme="http", api_key="")
+        assert peer_routing.forward_body(route, b"[1, 2]") == b"[1, 2]"
+        assert peer_routing.forward_body(route, b"not json") == b"not json"
+
+
+def _write_peer_models(d, iid, port, models):
+    return gpu_registry.write_entry(
+        d, instance_id=iid, pid=os.getpid() + 1, port=port, host="127.0.0.1",
+        scheme="http", model=models[0]["name"] if models else None,
+        vram_estimate_bytes=None, gpu_index=0,
+        coordination_token=f"tok-{iid}", models=models)
+
+
+class TestFileIdentityMatching:
+    def test_the_same_file_under_a_different_name_is_offered(
+            self, _isolated_state, monkeypatch, tmp_path):
+        f = tmp_path / "shared.gguf"
+        f.write_bytes(b"GGUF" + b"x" * 64)
+        _write_peer_models(_isolated_state, "peer-id1", 9601, [
+            {"name": "their-name", "path": str(f.resolve()), "size": 68, "sha256": None}])
+        _make_live(monkeypatch)
+        ident = peer_routing.local_identity(
+            {"our-name": {"path": str(f)}}, "our-name")
+        peer = peer_routing.find_offer("our-name", frozenset(), identity=ident)
+        assert peer is not None
+        assert peer["matched_model"] == "their-name"
+
+    def test_the_same_name_on_a_different_file_is_not_offered(
+            self, _isolated_state, monkeypatch, tmp_path):
+        ours = tmp_path / "a" / "model.gguf"
+        ours.parent.mkdir()
+        ours.write_bytes(b"GGUF" + b"a" * 10)
+        _write_peer_models(_isolated_state, "peer-id2", 9602, [
+            {"name": "shared-name", "path": str(tmp_path / "b" / "other.gguf"),
+             "size": 999, "sha256": None}])
+        _make_live(monkeypatch)
+        ident = peer_routing.local_identity({"shared-name": {"path": str(ours)}},
+                                            "shared-name")
+        assert peer_routing.find_offer("shared-name", frozenset(), identity=ident) is None
+
+    def test_a_copy_with_the_same_digest_is_offered(self, _isolated_state, monkeypatch):
+        _write_peer_models(_isolated_state, "peer-id3", 9603, [
+            {"name": "copy", "path": "Q:/elsewhere/m.gguf", "size": 5, "sha256": "ABC"}])
+        _make_live(monkeypatch)
+        ident = {"path": "Z:/mine/m2.gguf", "size": 7, "sha256": "abc"}
+        peer = peer_routing.find_offer("mine", frozenset(), identity=ident)
+        assert peer is not None and peer["matched_model"] == "copy"
+
+    def test_a_loaded_model_that_is_not_the_peers_active_one_is_offered(
+            self, _isolated_state, monkeypatch):
+        _write_peer_models(_isolated_state, "peer-id4", 9604, [
+            {"name": "active-one"}, {"name": "second-loaded"}])
+        _make_live(monkeypatch)
+        peer = peer_routing.find_offer("second-loaded", frozenset())
+        assert peer is not None and peer["matched_model"] == "second-loaded"
+
+    def test_an_entry_advertising_only_its_active_model_still_name_matches(
+            self, _isolated_state, monkeypatch):
+        _write_peer(_isolated_state, "peer-old", 9605, model="legacy")
+        _make_live(monkeypatch)
+        ident = {"path": "Z:/m/legacy.gguf", "size": 3, "sha256": None}
+        peer = peer_routing.find_offer("legacy", frozenset(), identity=ident)
+        assert peer is not None and peer["matched_model"] == "legacy"
+
+
+class TestRoutedModelIsForwardedUnderThePeersName:
+    def test_the_forwarded_body_names_the_peers_model(self, monkeypatch):
+        peer = _FakePeerServer(key=None)
+        hs._engines.clear()
+        peer_routing.set_route(peer_routing.PeerRoute(
+            model="ours", instance_id="p", host="127.0.0.1", port=peer.port,
+            scheme="http", api_key="", peer_model="theirs"))
+        client = TestClient(create_app(None))
+        r = client.post("/v1/chat/completions", json={
+            "model": "ours", "messages": [{"role": "user", "content": "hi"}]})
+        assert peer.bodies[-1]["model"] == "theirs"
+        assert peer.bodies[-1]["pin_model"] is True
+        assert r.status_code == 200, r.text
+        assert "ours" not in hs._engines

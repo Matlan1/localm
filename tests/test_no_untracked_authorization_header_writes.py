@@ -95,12 +95,18 @@ latter would flag these two as violations:
                                  sent through the same host-pinned
                                  safe_fetch_bytes.
 
-  localm/peer_routing.py, forward()
-                                 forwards a chat/completion request to a
-                                 SIBLING instance on this machine, using THAT
-                                 peer's own real API key, which the user typed
-                                 into POST /v1/models/{id}/peer-route (scope
+  localm/peer_routing.py, _auth_headers()
+                                 the header for forward(), which forwards a
+                                 chat/completion request to a SIBLING instance
+                                 on this machine, and for
+                                 verify_peer_credential(), which checks that
+                                 key once before a route is stored. Both use
+                                 THAT peer's own real API key (none for a peer
+                                 in open mode), which the user typed into
+                                 POST /v1/models/{id}/peer-route (scope
                                  MODELS_WRITE) when they accepted the offer.
+                                 Both check is_routable_peer_endpoint before
+                                 building the header.
                                  The same classification as gui/cli.py's
                                  _mount_remote_gui above: this process's own
                                  get_api_key() is not the right credential for
@@ -165,7 +171,7 @@ _REVIEWED_SITES = {
     ("localm/plugins/gui/cli.py", "_mount_remote_gui", "f'Bearer {token}'"),
     ("localm/discover.py", "_hf_auth_headers", "f'Bearer {token}'"),
     ("localm/model_manager/sources.py", "_civitai_get", "f'Bearer {api_key}'"),
-    ("localm/peer_routing.py", "forward", "f'Bearer {route.api_key}'"),
+    ("localm/peer_routing.py", "_auth_headers", "f'Bearer {api_key}'"),
 }
 
 

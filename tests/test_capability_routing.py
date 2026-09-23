@@ -513,3 +513,203 @@ class TestNoCurrentModel:
                           reg=TOOLS_ONLY)
         assert d.resolved is None
         assert d.routed is False
+
+
+# --------------------------------------------------------------------------- #
+#  Only loadable chat models are routing targets                               #
+# --------------------------------------------------------------------------- #
+
+class TestOnlyChatModelsAreTargets:
+    def test_an_embedding_model_is_never_a_target_however_roomy(self):
+        reg = _reg(
+            small={"tool_use": True, "context_length": 4096},
+            embedder={"tool_use": True, "context_length": 131072,
+                      "model_type": "embedding"},
+        )
+        d = cr.plan_route("small", cr.CapabilityNeeds(min_context=20000),
+                          pinned=False, reg=reg)
+        assert d.routed is False
+        assert d.unmet == ("context_length",)
+
+    def test_component_types_are_never_targets(self):
+        reg = _reg(plain={"tool_use": False})
+        for mtype in ("mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
+                      "unknown"):
+            reg[f"x-{mtype}"] = {"path": f"Z:/m/{mtype}.gguf", "source": "local",
+                                 "model_type": mtype, "tool_use": True}
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=False, reg=reg)
+        assert d.routed is False
+
+    def test_a_model_whose_file_is_missing_is_never_a_target(self):
+        reg = _reg(plain={"tool_use": False},
+                   gone={"tool_use": True, "missing": True},
+                   here={"tool_use": True})
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=False, reg=reg)
+        assert d.resolved == "here"
+        assert d.candidates == ("here",)
+
+    def test_a_legacy_entry_with_no_type_is_a_chat_model(self):
+        reg = _reg(plain={"tool_use": False}, legacy={"tool_use": True})
+        del reg["legacy"]["model_type"]
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=False, reg=reg)
+        assert d.resolved == "legacy"
+
+    def test_a_live_capability_the_registry_does_not_record_is_no_gap(self):
+        reg = _reg(plain={}, seer={})
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("vision",)),
+                          pinned=False, reg=reg, current_known={"vision": True})
+        assert d.has_gap is False
+        assert d.resolved == "plain"
+
+
+# --------------------------------------------------------------------------- #
+#  pin_model / min_context, and what a routed request leaves behind            #
+# --------------------------------------------------------------------------- #
+
+class TestPreferredModelIsNotAPin:
+    def test_a_named_model_with_pin_model_false_is_routed(self, server):
+        client, engines = server
+        r = _ask(client, model="plain", pin_model=False,
+                 required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+        assert r.json()["model"] == "tooly"
+
+    def test_pin_model_true_keeps_an_unnamed_request_where_it_is(self, server):
+        client, engines = server
+        r = _ask(client, pin_model=True, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert r.status_code == 200
+        assert json.loads(r.headers["X-Localm-Model-Routing"])["pinned"] is True
+
+    def test_a_named_pin_is_still_honored_by_default(self, server):
+        client, engines = server
+        r = _ask(client, model="plain", required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert r.json()["model"] == "plain"
+
+    def test_min_context_routes_to_a_roomier_model(self, server):
+        client, engines = server
+        r = _ask(client, min_context=20000)
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+        assert json.loads(r.headers["X-Localm-Model-Routing"])["gaps"] == {
+            "context_length": "absent"}
+
+    def test_a_long_conversation_routes_on_its_own(self, server):
+        client, engines = server
+        long_text = "word " * 9000
+        r = _ask(client, messages=[{"role": "user", "content": long_text}])
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+
+
+class TestRoutingDoesNotChangeTheLoadedModel:
+    def test_the_next_unnamed_request_is_answered_by_the_loaded_model(self, server):
+        client, engines = server
+        routed = _ask(client, required_capabilities=["tool_use"])
+        assert routed.json()["model"] == "tooly"
+        assert hs._resolve_unnamed_model_name() == "plain"
+        engines["tooly"].answered = 0
+        plain = _ask(client)
+        assert engines["plain"].answered == 1
+        assert engines["tooly"].answered == 0
+        assert plain.json()["model"] == "plain"
+
+    def test_the_routed_model_stays_resident_for_the_next_routed_request(self, server):
+        client, engines = server
+        _ask(client, required_capabilities=["tool_use"])
+        assert engines["tooly"].loaded is True
+        _ask(client, required_capabilities=["tool_use"])
+        assert engines["tooly"].answered == 2
+
+
+class TestAFailedRoutedLoadFallsBack:
+    @pytest.fixture
+    def flaky(self, monkeypatch):
+        registry = _reg(
+            plain={"tool_use": False, "context_length": 8192},
+            broken={"tool_use": True, "context_length": 65536},
+            tooly={"tool_use": True, "context_length": 32768},
+        )
+        engines: dict = {}
+
+        class Broken(FakeEngine):
+            def load(self):
+                raise RuntimeError("out of VRAM")
+
+        def factory(name):
+            if name not in engines:
+                engines[name] = (Broken if name == "broken" else FakeEngine)(name)
+            return engines[name]
+
+        monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+        monkeypatch.setattr("localm.model_manager.load_registry", lambda: registry)
+        monkeypatch.setattr("localm.model_manager.get_model_info",
+                            lambda name: (f"Z:/models/{name}.gguf", "hint"))
+        monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+        monkeypatch.setattr(hs, "_engine_factory", factory)
+        hs._engines.clear()
+        hs._engines_lru.clear()
+        hs._inference_sems.clear()
+        hs._last_activity_per_model.clear()
+        hs._active_model_name = None
+        hs._engine = None
+        hs._inference_sem = None
+        startup = factory("plain")
+        startup.load()
+        with TestClient(hs.create_app(startup)) as client:
+            yield client, engines, registry
+
+    def test_the_next_capable_model_answers(self, flaky):
+        client, engines, _ = flaky
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+        assert json.loads(r.headers["X-Localm-Model-Routing"])["resolved"] == "tooly"
+
+    def test_with_no_loadable_candidate_the_loaded_model_answers_and_says_why(
+            self, flaky):
+        client, engines, registry = flaky
+        registry.pop("tooly")
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert r.status_code == 200
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["routed"] is False
+        assert blob["unmet"] == ["tool_use"]
+        assert "out of VRAM" in blob["load_errors"][0]
+
+
+class TestAPeerRoutedModelIsARoutingTarget:
+    def test_an_unnamed_request_needing_it_is_forwarded(self, server, monkeypatch):
+        from localm import peer_routing
+        client, engines = server
+        sent = []
+
+        class Resp:
+            status_code = 200
+            headers = {"content-type": "application/json"}
+
+            def iter_content(self, chunk_size=None):
+                return iter([b'{"model": "tooly", "choices": []}'])
+
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None,
+                      verify=None):
+            sent.append(json.loads(data))
+            return Resp()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        peer_routing.set_route(peer_routing.PeerRoute(
+            model="tooly", instance_id="p", host="127.0.0.1", port=1,
+            scheme="http", api_key=""))
+        try:
+            r = _ask(client, required_capabilities=["tool_use"])
+        finally:
+            peer_routing._ROUTES.clear()
+        assert sent and sent[0]["model"] == "tooly"
+        assert r.status_code == 200
+        assert _answering_model(engines) == []

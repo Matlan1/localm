@@ -17,6 +17,8 @@ register(), before any handler body shadows ``ctx``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import functools
 import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -56,42 +58,73 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
-        # A model name already routed to a peer instance is forwarded there
-        # raw, bypassing local engine resolution entirely.
         from localm import peer_routing
-        _routed_name = (req.model or "").strip()
-        if not _routed_name or _routed_name == "localm":
-            _routed_name = _hs._resolve_unnamed_model_name() or ""
-        _route = peer_routing.get_route(_routed_name) if _routed_name else None
-        if _route is not None:
-            return await peer_routing.forward(_route, request, "/v1/chat/completions")
-
-        # An empty model means "no preference" and resolves the same way the None
-        # default does. Still a 400 when there is nothing to resolve to.
-        if not req.model and not (_hs._active_model_name or _hs._default_model_name):
-            raise HTTPException(400, "Model parameter is required and cannot be empty")
 
         # Plain-dict messages for the backend. Hoisted above engine resolution
         # because capability routing reads them to decide which model answers.
         messages = _protocol_messages_to_dicts(req.messages)
 
         # Capability routing. Blocking (a registry read plus a probe per
-        # candidate), so it runs in an executor. Its target replaces req.model
-        # ONLY when the request pinned no model - plan_capability_route decides
-        # that with the same test get_engine uses, and never moves a pinned one.
+        # candidate), so it runs in an executor. It may replace the model only
+        # when the request is not pinned; plan_capability_route decides that
+        # and never moves a pinned one.
         _loop = asyncio.get_running_loop()
         route = await _loop.run_in_executor(
-            None, _hs.plan_capability_route, req.model, messages,
-            req.required_capabilities)
+            None, functools.partial(
+                _hs.plan_capability_route, req.model, messages,
+                req.required_capabilities, pin_model=req.pin_model,
+                min_context=req.min_context))
+
+        # An empty model means "no preference" and resolves the same way the None
+        # default does. Still a 400 when there is nothing to resolve to.
+        if not req.model and route.resolved is None:
+            raise HTTPException(400, "Model parameter is required and cannot be empty")
+
+        # A model with an accepted peer route is answered by that peer, raw,
+        # bypassing local engine resolution entirely.
+        _peer = peer_routing.get_route(route.resolved) if route.resolved else None
+        if _peer is not None:
+            if route.has_gap:
+                from localm.debuglog import logger as _dbg
+                _dbg.info("capability routing: %s (answered by peer %s)",
+                          route.describe(), _peer.instance_id)
+            return await peer_routing.forward(
+                _peer, request, "/v1/chat/completions",
+                body=peer_routing.forward_body(_peer, await request.body()))
+
+        engine = None
+        if route.routed:
+            load_errors = []
+            for _cand in route.candidates or (route.resolved,):
+                try:
+                    # activate=False: answering one request with the routed
+                    # model does not make it the model every later unnamed
+                    # request resolves to.
+                    engine = await _hs.get_engine(_cand, activate=False)
+                except HTTPException as e:
+                    load_errors.append(f"{_cand}: {e.detail}")
+                    from localm.debuglog import logger as _dbg
+                    _dbg.warning("capability routing: could not load %s for a "
+                                 "request %s lacks (%s): %s", _cand, route.current,
+                                 ", ".join(sorted(route.gaps)), e.detail)
+                    continue
+                if _cand != route.resolved:
+                    route = dataclasses.replace(route, resolved=_cand)
+                break
+            if engine is None:
+                route = route.without_route(load_errors)
         if route.has_gap:
             from localm.debuglog import logger as _dbg
             _dbg.info("capability routing: %s", route.describe())
 
-        engine = await _hs.get_engine(route.resolved if route.routed else req.model)
-        # Report the model that actually answered when the request named none.
-        # Both an omitted field (None) and an explicit "" are falsy and fall through
-        # to engine.display_name; an explicit "localm" echoes back unchanged.
-        reported_model = req.model or engine.display_name
+        if engine is None:
+            engine = await _hs.get_engine(req.model)
+        # Report the model that actually answered when the request named none
+        # or was routed. Both an omitted field (None) and an explicit "" are
+        # falsy and fall through to engine.display_name; an explicit "localm"
+        # that was not routed echoes back unchanged.
+        reported_model = (engine.display_name if route.routed
+                          else (req.model or engine.display_name))
         # Pin the engine synchronously, before the inlet or any other await, so a
         # concurrent model load cannot evict it mid-request. Released in the finally
         # below, or by _pin_engine at stream end for a streaming response.
@@ -140,9 +173,14 @@ def register(app: FastAPI, ctx) -> None:
                     backend = getattr(engine, "_backend", None)
                     mmproj_failed = bool(getattr(backend, "mmproj_path", None))
                     active_model_path = getattr(backend, "model_path", None)
-                    raise HTTPException(400, vision_input_guidance(
+                    detail = vision_input_guidance(
                         mmproj_failed=mmproj_failed,
-                        active_model_path=active_model_path))
+                        active_model_path=active_model_path)
+                    if route.load_errors:
+                        detail += (" An installed model that can read images "
+                                   "could not be loaded: "
+                                   + "; ".join(route.load_errors))
+                    raise HTTPException(400, detail)
 
             gen_kwargs = dict(
                 max_tokens=req.max_tokens,
@@ -446,7 +484,9 @@ def register(app: FastAPI, ctx) -> None:
             _routed_name = _hs._resolve_unnamed_model_name() or ""
         _route = peer_routing.get_route(_routed_name) if _routed_name else None
         if _route is not None:
-            return await peer_routing.forward(_route, request, "/v1/completions")
+            return await peer_routing.forward(
+                _route, request, "/v1/completions",
+                body=peer_routing.forward_body(_route, await request.body()))
 
         # Same resolution as /v1/chat/completions: an empty model is "no preference",
         # refused only when there is nothing to fall back to.

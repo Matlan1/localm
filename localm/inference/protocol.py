@@ -170,6 +170,14 @@ class ChatRequest(BaseModel):
     # context length need no entry here - both are derived from the request
     # itself (an image part, the prompt's size).
     required_capabilities: Optional[List[str]] = None
+    # Whether `model` is a pin. Unset: a named model is pinned and an absent,
+    # empty or "localm" one is not. False: `model` names the preferred model,
+    # which routing may replace when it lacks something this request needs.
+    # True: whatever answers is never replaced, named or not.
+    pin_model: Optional[bool] = None
+    # Tokens the answering model's trained context window must hold. Combined
+    # with the window the prompt's own size implies; the larger one applies.
+    min_context: Optional[int] = Field(None, ge=1)
 
     @field_validator("required_capabilities")
     @classmethod

@@ -293,6 +293,42 @@ def _current_gpu_index() -> int:
         return 0
 
 
+def _loaded_model_identities() -> list:
+    """Every loaded chat model as ``{"name", "path", "size", "sha256"}`` for the
+    cross-install coordination registry. ``path`` is the resolved model file or
+    directory, ``size`` its byte size when it is a file, ``sha256`` the
+    registry-recorded digest; each is None when unknown. Best-effort: an entry
+    that cannot be resolved is listed by name alone."""
+    from pathlib import Path as _Path
+    out = []
+    try:
+        from localm.config import load_registry
+        reg = load_registry()
+    except Exception:
+        reg = {}
+    for name, eng in list(_engines.items()):
+        if not getattr(eng, "loaded", False):
+            continue
+        ident = {"name": name, "path": None, "size": None, "sha256": None}
+        entry = reg.get(name) if isinstance(reg, dict) else None
+        if isinstance(entry, dict) and isinstance(entry.get("sha256"), str):
+            ident["sha256"] = entry["sha256"].lower()
+        try:
+            from localm.model_manager import get_model_info
+            info = get_model_info(name)
+            if info is not None and info[0]:
+                p = _Path(info[0]).resolve()
+                ident["path"] = str(p)
+                if p.is_file():
+                    ident["size"] = p.stat().st_size
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("gpu-registry: could not resolve %s for its identity: %s",
+                       name, e)
+        out.append(ident)
+    return out
+
+
 def _gpu_registry_sync() -> None:
     """Best-effort: write this instance's current model/VRAM state to the
     cross-install GPU coordination registry (called on every successful model
@@ -325,6 +361,7 @@ def _gpu_registry_sync() -> None:
             vram_estimate_bytes=vram_bytes,
             gpu_index=_current_gpu_index(),
             coordination_token=_gpu_coord["token"],
+            models=_loaded_model_identities(),
         )
     except Exception as e:
         from localm.debuglog import logger as _dbg
@@ -484,7 +521,7 @@ _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 
 
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
-                        force: bool = False) -> dict:
+                        force: bool = False, activate: bool = True) -> dict:
     global _engines, _engines_lru, _active_model_name, _last_active_model_name, _engine_factory, _last_activity_per_model
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
 
@@ -512,14 +549,15 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             if name in _engines_lru:
                 _engines_lru.remove(name)
             _engines_lru.append(name)
-            _active_model_name = name
-            # A real active model again, so any name remembered from a past
-            # eviction is cleared.
-            _last_active_model_name = None
-            _engine = _engines[name]
-            _inference_sem = sem
-            if on_active is not None:
-                on_active(name)
+            if activate:
+                _active_model_name = name
+                # A real active model again, so any name remembered from a past
+                # eviction is cleared.
+                _last_active_model_name = None
+                _engine = _engines[name]
+                _inference_sem = sem
+                if on_active is not None:
+                    on_active(name)
             return {"status": "already_active", "model": name,
                     **_gpu_placement_fields(_engines[name])}
 
@@ -1061,6 +1099,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # at the end (or leaves them cleared if the load fails - correct, the
                 # old active model is gone). The other unload paths already do this.
                 if _active_model_name == evict_name:
+                    if not activate:
+                        # The victim stays the model an unnamed request
+                        # resolves to, reloaded on demand.
+                        _last_active_model_name = evict_name
                     _active_model_name = None
                 if _engine is evict_engine:
                     _engine = None
@@ -1159,14 +1201,17 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         # eviction.
         _last_activity_per_model[name] = time.monotonic()
         _engines_lru.append(name)
-        _active_model_name = name
-        # See the already-active fast path above: a real active model again,
-        # so any name remembered from a past eviction is stale now.
-        _last_active_model_name = None
-        _engine = new_engine
-        _inference_sem = sem
-        if on_active is not None:
-            on_active(name)
+        # A non-activating load still becomes the active model when nothing
+        # else would answer an unnamed request.
+        if activate or _resolve_unnamed_model_name() is None:
+            _active_model_name = name
+            # See the already-active fast path above: a real active model again,
+            # so any name remembered from a past eviction is stale now.
+            _last_active_model_name = None
+            _engine = new_engine
+            _inference_sem = sem
+            if on_active is not None:
+                on_active(name)
         # Cross-install GPU coordination: reflect the newly-active model so a
         # sibling's next VRAM/eviction check sees fresh state. No-op when not
         # registered (see _gpu_registry_sync). Offloaded for the same reason as
@@ -1208,21 +1253,29 @@ def _model_is_pinned(model_name: str | None) -> bool:
 
 
 def plan_capability_route(model_name: str | None, messages: list,
-                          required_capabilities=None):
+                          required_capabilities=None, *, pin_model=None,
+                          min_context=None):
     """The capability-routing decision for one request, without applying it.
 
     Blocking (registry read plus per-candidate capability probes), so an async
     caller must run it in an executor.
 
     Returns a ``RoutingDecision``. Its ``resolved`` differs from ``current``
-    only when the request pinned NO model: ``_model_is_pinned`` above decides
-    that, and ``plan_route`` refuses to move a pinned one, so a pinned request
-    gets a decision that reports the gap and changes nothing.
+    only when the request is not pinned: *pin_model* decides that when set,
+    otherwise ``_model_is_pinned`` does, and ``plan_route`` refuses to move a
+    pinned one, so a pinned request gets a decision that reports the gap and
+    changes nothing. With ``pin_model=False`` a named *model_name* is the
+    request's preferred model and is ``current``.
 
     Needs are derived from the request wherever the request already states them
     - an image part means vision, the prompt's estimated size means a context
-    window - and from *required_capabilities* for the two that nothing in an
-    OpenAI-shaped request can express."""
+    window - plus *required_capabilities* and *min_context* for what nothing in
+    an OpenAI-shaped request can express. A loaded engine confirmed to accept
+    images does not count vision as a gap, whatever the registry records.
+
+    Models with an accepted peer route count as resident, since answering with
+    one loads nothing here."""
+    from localm import peer_routing
     from localm.inference import capability_routing as _cr
     from localm.inference.backends.base import messages_contain_image
     from localm.model_manager import capabilities as _caps
@@ -1230,20 +1283,33 @@ def plan_capability_route(model_name: str | None, messages: list,
     wanted = list(required_capabilities or ())
     if messages_contain_image(messages) and _caps.VISION not in wanted:
         wanted.append(_caps.VISION)
+    derived_ctx = _cr.context_need(messages) if messages else None
+    ctx_candidates = [c for c in (derived_ctx, min_context) if isinstance(c, int) and c > 0]
     needs = _cr.CapabilityNeeds(
         capabilities=tuple(wanted),
-        min_context=_cr.context_need(messages) if messages else None,
+        min_context=max(ctx_candidates) if ctx_candidates else None,
     )
-    pinned = _model_is_pinned(model_name)
-    current = (model_name or "").strip() if pinned else _resolve_unnamed_model_name()
+    named = (model_name or "").strip()
+    if named == "localm":
+        named = ""
+    pinned = bool(pin_model) if pin_model is not None else _model_is_pinned(model_name)
+    current = named or _resolve_unnamed_model_name()
     # list() first: this runs in an executor thread while the event loop can
     # be adding or evicting engines, and iterating the live dict would raise.
-    resident = [n for n, e in list(_engines.items())
-                if getattr(e, "loaded", False)]
-    return _cr.plan_route(current, needs, pinned=pinned, resident=resident)
+    live = list(_engines.items())
+    resident = [n for n, e in live if getattr(e, "loaded", False)]
+    resident += [n for n in peer_routing.list_routes() if n not in resident]
+    known = {}
+    cur_engine = dict(live).get(current) if current else None
+    if (cur_engine is not None and getattr(cur_engine, "loaded", False)
+            and getattr(cur_engine, "supports_images", False) is True):
+        known[_caps.VISION] = True
+    return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
+                          current_known=known)
 
 
-async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
+async def get_engine(model_name: str | None, *, load: bool = True,
+                     activate: bool = True) -> Engine:
     """Resolve the engine for *model_name*, loading it if necessary.
 
     With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
@@ -1251,6 +1317,10 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
     at all (a GGUF backend embeds via the dedicated embedder). The
     caller decides whether to load. Registration/resolution (and its 404) still
     apply.
+
+    With ``activate=False`` the engine serves this one request without becoming
+    the model an unnamed request resolves to: the active/default model is left
+    as it was (see ``switch_engine``). Capability routing uses this.
     """
     global _engines, _engines_lru, _active_model_name, _default_model_name, _last_active_model_name, _inference_sems, _engine, _inference_sem
 
@@ -1308,9 +1378,10 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
         if name in _engines_lru:
             _engines_lru.remove(name)
         _engines_lru.append(name)
-        _active_model_name = name
-        _engine = _engines[name]
-        _inference_sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+        if activate:
+            _active_model_name = name
+            _engine = _engines[name]
+            _inference_sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
         return _engines[name]
 
     if not load:
@@ -1319,7 +1390,8 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
         # through switch_engine, so no model is loaded and nothing is evicted.
         return _engines.get(name) or _engine_factory(name)
 
-    res = await switch_engine(name, _engine_factory, preempt=False)
+    res = await switch_engine(name, _engine_factory, preempt=False,
+                              activate=activate)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
     if res.get("status") == "cancelled":
@@ -5624,7 +5696,8 @@ def _capability_route_header(route) -> dict:
     must be able to tell them apart, so they are not flattened into one flag.
     Compact ASCII JSON, header-safe:
     ``{"resolved","requested","routed","pinned","gaps":{cap:"absent"|"unknown"},
-    "unmet":[...]}``."""
+    "unmet":[...]}``, plus ``"load_errors":[...]`` (each cut to 200
+    characters) when every capable model failed to load."""
     if route is None or not getattr(route, "has_gap", False):
         return {}
     payload = {
@@ -5636,6 +5709,9 @@ def _capability_route_header(route) -> dict:
                  for c, s in route.gaps.items()},
         "unmet": list(route.unmet),
     }
+    load_errors = getattr(route, "load_errors", ())
+    if load_errors:
+        payload["load_errors"] = [str(e)[:200] for e in load_errors]
     try:
         blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):

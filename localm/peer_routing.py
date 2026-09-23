@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
+import os
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger
@@ -46,6 +49,9 @@ class PeerRoute:
     port: int
     scheme: str
     api_key: str
+    # The peer's own name for the model; forwarded requests name it this way.
+    # None means the same name as *model*.
+    peer_model: Optional[str] = None
 
     def safe_dict(self) -> dict:
         """The subset of this route safe to hand back to a client - never
@@ -56,6 +62,7 @@ class PeerRoute:
             "port": self.port,
             "scheme": self.scheme,
             "model": self.model,
+            "peer_model": self.peer_model or self.model,
         }
 
 
@@ -148,14 +155,80 @@ def is_routable_peer_endpoint(host: Optional[str], scheme: Optional[str]) -> boo
     return scheme in _ROUTABLE_SCHEMES and is_routable_peer_host(host)
 
 
-def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] = None) -> Optional[dict]:
-    """A live, identity-verified peer (via ``gpu_registry.list_gpu_peers``)
-    whose advertised ``model`` matches *canonical_name* or any of *aliases* -
-    exact match first, then casefolded - or None.
+def local_identity(registry: dict, model_name: str) -> dict:
+    """*model_name*'s file identity in this instance's *registry*:
+    ``{"path", "size", "sha256"}``, each None when unknown. Same shape the
+    coordination registry advertises for a peer's loaded models."""
+    ident = {"path": None, "size": None, "sha256": None}
+    entry = registry.get(model_name) if isinstance(registry, dict) else None
+    if not isinstance(entry, dict):
+        return ident
+    if isinstance(entry.get("sha256"), str) and entry["sha256"]:
+        ident["sha256"] = entry["sha256"].lower()
+    raw = entry.get("path")
+    if isinstance(raw, str) and raw:
+        try:
+            p = Path(raw).resolve()
+            ident["path"] = str(p)
+            if p.is_file():
+                ident["size"] = os.stat(p).st_size
+        except (OSError, ValueError) as e:
+            logger.debug("peer_routing: could not resolve %s for its identity: %s",
+                         model_name, e)
+    return ident
 
-    Matches by NAME only: it does not verify the underlying model files are
-    identical, only that the peer's own chosen name for what it has loaded
-    equals one this instance also uses for the same registry entry.
+
+def _same_file(a: dict, b: dict) -> Optional[bool]:
+    """Whether identities *a* and *b* name the same model file: True, False, or
+    None when either carries nothing to compare.
+
+    Equal paths, or equal sha256 digests, are the same file. Two files with
+    the same base name and the same byte size are treated as the same file.
+    Anything else that can be compared is a different file."""
+    pa, pb = a.get("path"), b.get("path")
+    if pa and pb and os.path.normcase(pa) == os.path.normcase(pb):
+        return True
+    ha, hb = a.get("sha256"), b.get("sha256")
+    if ha and hb:
+        return ha.lower() == hb.lower()
+    sa, sb = a.get("size"), b.get("size")
+    if pa and pb and isinstance(sa, int) and isinstance(sb, int):
+        return (os.path.basename(os.path.normcase(pa))
+                == os.path.basename(os.path.normcase(pb)) and sa == sb)
+    if pa and pb:
+        return False
+    return None
+
+
+def _peer_loaded_models(peer: dict) -> list:
+    """The peer entry's loaded models as ``{"name", "path", "size", "sha256"}``
+    dicts. An entry that advertises only its active ``model`` yields that one
+    name with no identity."""
+    out = []
+    listed = peer.get("models")
+    if isinstance(listed, list):
+        for m in listed:
+            if isinstance(m, dict) and isinstance(m.get("name"), str) and m["name"]:
+                out.append(m)
+    if not out and isinstance(peer.get("model"), str) and peer["model"]:
+        out.append({"name": peer["model"]})
+    return out
+
+
+def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] = None,
+               identity: Optional[dict] = None,
+               instance_id: Optional[str] = None) -> Optional[dict]:
+    """A live, identity-verified peer (via ``gpu_registry.list_gpu_peers``)
+    with a loaded model that is the same model as *canonical_name*, or None.
+    The returned dict is the peer's registry entry plus ``"matched_model"``,
+    the peer's own name for that model.
+
+    With *identity* (see :func:`local_identity`) a peer model is matched by
+    FILE: the same path, the same sha256, or the same base name and byte size.
+    When the two sides cannot be compared (either identity is empty) the match
+    falls back to NAME: the peer's name equals *canonical_name* or any of
+    *aliases*, exact first, then casefolded. A name match whose files differ
+    is never a match. With *instance_id*, only that peer is considered.
 
     A peer whose registered ``host``/``scheme`` fails
     :func:`is_routable_peer_endpoint` is skipped and logged at WARNING,
@@ -167,6 +240,7 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
         return None
     names = {canonical_name, *aliases}
     folded = {n.casefold() for n in names}
+    ident = identity or {}
     try:
         from localm import gpu_registry
         peers = gpu_registry.list_gpu_peers(exclude_self_id=exclude_self_id)
@@ -174,11 +248,20 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
         logger.debug("peer_routing: peer lookup failed: %s", e)
         return None
     for peer in peers:
-        model = peer.get("model")
-        if not model:
+        if instance_id is not None and peer.get("instance_id") != instance_id:
             continue
-        if model not in names and model.casefold() not in folded:
+        matched = None
+        for m in _peer_loaded_models(peer):
+            same = _same_file(ident, m)
+            if same is True:
+                matched = m["name"]
+                break
+            if same is None and (m["name"] in names or m["name"].casefold() in folded):
+                matched = m["name"]
+                break
+        if matched is None:
             continue
+        model = matched
         if not is_routable_peer_endpoint(peer.get("host"), peer.get("scheme") or "http"):
             logger.warning(
                 "peer_routing: peer %r advertises %r at unroutable endpoint "
@@ -187,7 +270,7 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
                 "identity-verified",
                 peer.get("instance_id"), model, peer.get("scheme"), peer.get("host"))
             continue
-        return peer
+        return {**peer, "matched_model": matched}
     return None
 
 
@@ -223,10 +306,77 @@ def _peer_url(route: PeerRoute, path: str) -> str:
     return f"{route.scheme}://{host}:{int(route.port)}{path}"
 
 
-async def forward(route: PeerRoute, request, path: str):
+def _auth_headers(api_key: Optional[str]) -> dict:
+    """The Authorization header for *api_key*, or none for an empty key (a peer
+    in open mode needs no credential)."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def forward_body(route: PeerRoute, raw: bytes) -> bytes:
+    """*raw*, a JSON request body, rewritten for *route*'s peer: ``model`` names
+    the model the way the peer does, and ``pin_model`` is true so the peer
+    answers with exactly that model. A body that is not a JSON object is
+    returned unchanged."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return raw
+    if not isinstance(data, dict):
+        return raw
+    data["model"] = route.peer_model or route.model
+    data["pin_model"] = True
+    return json.dumps(data).encode("utf-8")
+
+
+class PeerCredentialError(Exception):
+    """The peer refused the credential offered for a route."""
+
+
+def verify_peer_credential(peer: dict, api_key: Optional[str], *,
+                           timeout: float = 5.0) -> None:
+    """Check *api_key* (empty for none) against *peer* with an authenticated
+    ``GET /v1/models``, before any route using it is stored.
+
+    Raises :class:`PeerCredentialError` when the peer answers 401 or 403, and
+    ``requests.RequestException`` when it cannot be reached. Refuses, without
+    sending anything, a peer whose endpoint fails
+    :func:`is_routable_peer_endpoint`."""
+    scheme = peer.get("scheme") or "http"
+    if not is_routable_peer_endpoint(peer.get("host"), scheme):
+        raise PeerCredentialError(
+            f"peer endpoint {scheme!r}://{peer.get('host')!r} is not a "
+            "verified loopback address")
+    probe = PeerRoute(model="", instance_id=str(peer.get("instance_id") or ""),
+                      host=peer.get("host"), port=int(peer.get("port")),
+                      scheme=scheme, api_key=api_key or "")
+    url = _peer_url(probe, "/v1/models")
+    import requests
+    try:
+        from localm.tls import requests_verify
+        verify = requests_verify(url)
+    except FileNotFoundError:
+        verify = False
+    resp = requests.get(url, headers=_auth_headers(api_key), timeout=timeout,
+                        verify=verify)
+    if resp.status_code in (401, 403):
+        raise PeerCredentialError(
+            "the peer requires its own API key" if not api_key
+            else f"the peer rejected that API key (HTTP {resp.status_code})")
+    if resp.status_code >= 400:
+        raise PeerCredentialError(f"the peer answered HTTP {resp.status_code}")
+
+
+async def forward(route: PeerRoute, request, path: str, *,
+                  body: Optional[bytes] = None):
     """Forward *request* to *route*'s peer at the fixed literal *path*
     (never a path taken from *request* itself) and stream the response back
-    unchanged. Returns a ``fastapi.responses.StreamingResponse``.
+    unchanged. Returns a ``fastapi.responses.StreamingResponse``. *body*, when
+    given, is sent instead of the request's own body (see
+    :func:`forward_body`).
+
+    A 401 or 403 from the peer means the credential behind the route no longer
+    works (the peer's key was changed or removed): the route is CLEARED and
+    ``HTTPException(502, ...)`` is raised saying so.
 
     On a network failure reaching the peer (connection refused, timeout, DNS/
     TLS error), the route is CLEARED and ``HTTPException(502, ...)`` is
@@ -258,8 +408,9 @@ async def forward(route: PeerRoute, request, path: str):
             "identity-verify; the route has been cleared. Retry to load a "
             "local copy.")
 
-    body = await request.body()
-    fwd_headers = {"Authorization": f"Bearer {route.api_key}"}
+    if body is None:
+        body = await request.body()
+    fwd_headers = _auth_headers(route.api_key)
     content_type = request.headers.get("content-type")
     if content_type:
         fwd_headers["Content-Type"] = content_type
@@ -290,6 +441,19 @@ async def forward(route: PeerRoute, request, path: str):
             502, f"Peer instance at {route.host}:{route.port} became "
             f"unavailable while routing '{route.model}'; the route has been "
             "cleared. Retry to load a local copy, or re-offer routing.")
+
+    if resp.status_code in (401, 403):
+        resp.close()
+        clear_route(route.model)
+        logger.warning("peer_routing: peer %s (%s:%s) refused the credential for "
+                       "'%s' (HTTP %s), clearing the route",
+                       route.instance_id, route.host, route.port, route.model,
+                       resp.status_code)
+        raise HTTPException(
+            502, f"Peer instance at {route.host}:{route.port} refused the API key "
+            f"used for '{route.model}' (HTTP {resp.status_code}); the route has "
+            "been cleared. Retry to load a local copy, or re-offer routing with "
+            "that instance's current key.")
 
     def _iter_sync():
         return resp.iter_content(chunk_size=None)

@@ -23,10 +23,11 @@ A pinned request therefore still gets a decision describing what it lacks, and
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, Optional, Sequence, Tuple
 
 from localm.model_manager import capabilities as caps
+from localm.model_manager.registry import is_llm
 
 # Divisor for the tokenizer-free prompt estimate. Routing has to size a prompt
 # BEFORE it knows which model will answer, and a tokenizer belongs to a model, so
@@ -88,6 +89,14 @@ class RoutingDecision:
     gaps: Dict[str, Optional[bool]] = field(default_factory=dict)
     unmet: Tuple[str, ...] = ()
     candidates: Tuple[str, ...] = ()
+    load_errors: Tuple[str, ...] = ()
+
+    def without_route(self, load_errors: Sequence[str] = ()) -> "RoutingDecision":
+        """This decision with the route withdrawn: *current* answers, every gap
+        is unmet, and *load_errors* records why each candidate could not be
+        used."""
+        return replace(self, resolved=self.current, unmet=tuple(sorted(self.gaps)),
+                       load_errors=tuple(load_errors))
 
     @property
     def routed(self) -> bool:
@@ -114,6 +123,9 @@ class RoutingDecision:
             return f"routed {self.current} -> {self.resolved} ({gap_text})"
         if self.pinned:
             return f"kept pinned {self.current} ({gap_text})"
+        if self.load_errors:
+            return (f"kept {self.current} ({gap_text}); no capable model could "
+                    f"be loaded: {'; '.join(self.load_errors)}")
         if self.unmet:
             return (f"kept {self.current} ({gap_text}); "
                     f"no installed model provides {', '.join(self.unmet)}")
@@ -157,12 +169,20 @@ def estimate_prompt_tokens(messages: Sequence[dict]) -> int:
     return max(1, total // _CHARS_PER_TOKEN_ESTIMATE)
 
 
+def _is_routing_target(entry) -> bool:
+    """Whether a registry *entry* is a chat model that can be loaded to answer:
+    a text-generation LLM whose file is not recorded as missing."""
+    return is_llm(entry) and not entry.get("missing")
+
+
 def _model_satisfies(name: str, needs: CapabilityNeeds, reg: dict,
                      dir_cache: dict) -> bool:
     """Whether *name* is CONFIRMED to meet every need.
 
     Positive membership only: an unknown capability does not qualify a model,
     because routing must not send a request somewhere nobody has inspected."""
+    if not _is_routing_target(reg.get(name)):
+        return False
     for cap in needs.capabilities:
         if caps.model_capability(name, cap, reg=reg, dir_cache=dir_cache) is not True:
             return False
@@ -174,7 +194,8 @@ def _model_satisfies(name: str, needs: CapabilityNeeds, reg: dict,
 
 
 def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
-                  dir_cache: dict) -> Dict[str, Optional[bool]]:
+                  dir_cache: dict,
+                  known: Optional[Dict[str, bool]] = None) -> Dict[str, Optional[bool]]:
     """The needs *name* does not confirm, each with the tri-state as measured.
 
     A capability is a gap when it is not confirmed True, so an UNKNOWN counts.
@@ -182,9 +203,12 @@ def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
     ``None`` is what keeps the two distinguishable everywhere downstream: a
     caller must never render "this model cannot do X" from a None."""
     gaps: Dict[str, Optional[bool]] = {}
+    known = known or {}
     if name is None:
         return {c: None for c in needs.capabilities}
     for cap in needs.capabilities:
+        if known.get(cap) is True:
+            continue
         state = caps.model_capability(name, cap, reg=reg, dir_cache=dir_cache)
         if state is not True:
             gaps[cap] = state
@@ -205,7 +229,8 @@ def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
 
 def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
                pinned: bool, resident: Sequence[str] = (),
-               reg: Optional[dict] = None) -> RoutingDecision:
+               reg: Optional[dict] = None,
+               current_known: Optional[Dict[str, bool]] = None) -> RoutingDecision:
     """Decide which model should answer a request needing *needs*.
 
     *current* is the model that would answer if nothing changed. *pinned* says
@@ -215,6 +240,13 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     *resident* is the models already loaded, preferred among equally qualified
     candidates so routing does not evict a perfectly good model to load an
     equivalent one.
+
+    *current_known* maps a capability to True when the live engine behind
+    *current* is confirmed to have it (for example a loaded model accepting
+    images through a projector the registry does not record), so that need is
+    not a gap.
+
+    Only chat LLMs whose file is not recorded missing are candidates.
 
     Ranking among qualified candidates: already resident first, then the largest
     confirmed context window, then name, so the result is deterministic and a
@@ -230,7 +262,7 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         reg = {}
     dir_cache: dict = {}
 
-    gaps = _current_gaps(current, needs, reg, dir_cache)
+    gaps = _current_gaps(current, needs, reg, dir_cache, current_known)
     if not gaps:
         return RoutingDecision(current=current, resolved=current, pinned=pinned,
                                needs=needs)
