@@ -109,9 +109,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   or set it on a scheduled job. A scheduled chat job now runs on its own model even
   while a different one is loaded, where it used to run on whichever was loaded.
 - **`localm run`: an image the model could not read no longer makes every later
-  message fail.** The image is removed from the conversation with an explanation,
-  and a message that failed for another reason is withdrawn instead of being sent
-  again ahead of the next one.
+  message fail.** That message is withdrawn from the conversation with an
+  explanation, as is a message that failed for another reason, instead of being
+  sent again ahead of the next one.
 - **The message for an image a model cannot read no longer calls any text model
   downloaded from HuggingFace "a vision-capable model" missing its projector.** It
   says the model has no projector recorded, and names a model in your library that

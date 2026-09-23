@@ -97,19 +97,23 @@ class _TurnRouter:
     def engine_for(self, messages: list):
         """The engine to answer a turn with *messages*: MODEL's, or in this
         process the routed model's, loaded in its place. A routed model that
-        fails to load is skipped for the next capable one, then MODEL."""
+        fails to load is skipped for the next capable one, then MODEL. Raises
+        what MODEL's own load raised when that fails too."""
         decision = self.plan(messages)
         if not self.in_process:
             return self.primary
         names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
-        for name in names + [self.model_name]:
+        for name in names:
             try:
                 return self._use(name)
             except Exception as e:
                 from rich.markup import escape
                 console.print(f"[yellow]Could not load {escape(name)}: "
-                              f"{escape(str(e))}[/yellow]")
-        return self._engines[self.current]
+                              f"{escape(str(e))}; answering with "
+                              f"{escape(self.model_name)}.[/yellow]")
+        # MODEL answers, so its own context window applies.
+        self.min_context = None
+        return self._use(self.model_name)
 
     def _use(self, name: str):
         if name == self.current:
@@ -117,7 +121,9 @@ class _TurnRouter:
             if not getattr(eng, "loaded", True):
                 eng.load()
             return eng
-        self._engines[self.current].unload()
+        prev = self._engines[self.current]
+        if getattr(prev, "loaded", True):
+            prev.unload()
         eng = self._engines.get(name) or self._build(name)
         self._engines[name] = eng
         self.current = name
@@ -495,21 +501,11 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if system:
             _first.append({"role": "system", "content": system})
         _first.append(_build_user_message(prompt, list(images)))
-        _decision = router.plan(_first)
-        if _decision.routed:
-            is_registered = False
-            try:
-                routed_engine = _build_cli_engine(
-                    _decision.resolved, n_gpu_layers=gpu_layers, device=device)
-                router.primary = routed_engine
-                router._engines = {_decision.resolved: routed_engine}
-                router.current = _decision.resolved
-                engine = routed_engine
-                _routed_note = router.note(engine)
-            except Exception as e:
-                console.print(f"[yellow]Could not use {escape(_decision.resolved)}: "
-                              f"{escape(str(e))}; answering with {escape(model)}.[/yellow]")
-                _routed_note = None
+        if router.plan(_first).routed:
+            engine = router.engine_for(_first)
+            if router.current != model:
+                is_registered = False
+            _routed_note = router.note(engine)
         else:
             _routed_note = None
     else:
@@ -551,18 +547,12 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
 
 
 
-def _strip_images(message: dict) -> int:
-    """Remove the image parts from *message* in place, keeping its text.
-    Returns how many were removed."""
-    content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, list):
-        return 0
-    kept = [p for p in content if not (isinstance(p, dict) and p.get("type") == "image_url")]
-    removed = len(content) - len(kept)
-    if removed:
-        texts = [p.get("text", "") for p in kept if isinstance(p, dict) and p.get("type") == "text"]
-        message["content"] = "\n".join(t for t in texts if t) if len(kept) == len(texts) else kept
-    return removed
+def _withdraw(messages: list, msg: dict) -> None:
+    """Remove the unanswered turn *msg* from the end of *messages* and say so."""
+    if messages and messages[-1] is msg:
+        messages.pop()
+        console.print("[dim](that message was withdrawn from the conversation; "
+                      "you can keep chatting)[/dim]")
 
 
 def _build_user_message(text: str, image_paths: list) -> dict:
@@ -787,9 +777,16 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             audit.user(user_input)
 
         # The engine that answers this turn: MODEL's, or one that has what the
-        # turn needs (see _TurnRouter). A context route skips compaction, since
-        # the answering model can hold the whole conversation.
-        engine = router.engine_for(messages)
+        # turn needs (see _TurnRouter). A turn answered by a model routed for
+        # context is not compacted.
+        try:
+            engine = router.engine_for(messages)
+        except Exception as e:
+            console.print(f"\n[red]Could not load {escape(router.model_name)}: "
+                          f"{escape(str(e))}[/red]")
+            if messages and messages[-1] is msg:
+                messages.pop()
+            continue
 
         # Seamless compaction: summarise older turns before the history
         # collides with the context ceiling. Never fails - falls back to a
@@ -844,23 +841,20 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             console.print("\n[dim](interrupted)[/dim]")
         except ImageDecodeUnavailable as e:
             # The model can read images but this environment cannot decode
-            # them. The image is dropped so later turns are not refused for it.
+            # them. The message is withdrawn from the conversation.
             console.print(f"\n[red]{escape(str(e))}[/red]")
-            _strip_images(messages[-1])
+            _withdraw(messages, msg)
             continue
         except UnsupportedInputError:
-            # The answering model cannot read the attached image. It is dropped
-            # from the conversation so later turns are not refused for it too.
+            # The answering model cannot read the attached image. The message is
+            # withdrawn from the conversation.
             from localm.model_manager import vision_input_guidance
             backend = getattr(engine, "_backend", None)
             console.print("\n[yellow]" + escape(vision_input_guidance(
                 mmproj_failed=bool(getattr(backend, "mmproj_path", None)),
                 active_model_path=getattr(backend, "model_path", None)))
                 + "[/yellow]")
-            removed = _strip_images(messages[-1])
-            if removed:
-                console.print(f"[dim](removed {removed} image(s) from the "
-                              "conversation; you can keep chatting)[/dim]")
+            _withdraw(messages, msg)
             continue
         except Exception as e:
             console.print(f"\n[red]Inference error: {escape(str(e))}[/red]")

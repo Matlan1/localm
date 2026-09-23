@@ -367,12 +367,13 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
 
 
 async def forward(route: PeerRoute, request, path: str, *,
-                  body: Optional[bytes] = None):
+                  body: Optional[bytes] = None, headers: Optional[dict] = None):
     """Forward *request* to *route*'s peer at the fixed literal *path*
     (never a path taken from *request* itself) and stream the response back
     unchanged. Returns a ``fastapi.responses.StreamingResponse``. *body*, when
     given, is sent instead of the request's own body (see
-    :func:`forward_body`).
+    :func:`forward_body`). *headers* are added to the response returned to
+    the client.
 
     A 401 or 403 from the peer means the credential behind the route no longer
     works (the peer's key was changed or removed): the route is CLEARED and
@@ -471,4 +472,5 @@ async def forward(route: PeerRoute, request, path: str, *,
 
     media_type = resp.headers.get("content-type", "application/json")
     return StreamingResponse(
-        _body_iter(), status_code=resp.status_code, media_type=media_type)
+        _body_iter(), status_code=resp.status_code, media_type=media_type,
+        headers=dict(headers or {}))

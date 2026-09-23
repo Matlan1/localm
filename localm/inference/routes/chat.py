@@ -90,7 +90,8 @@ def register(app: FastAPI, ctx) -> None:
                           route.describe(), _peer.instance_id)
             return await peer_routing.forward(
                 _peer, request, "/v1/chat/completions",
-                body=peer_routing.forward_body(_peer, await request.body()))
+                body=peer_routing.forward_body(_peer, await request.body()),
+                headers=_capability_route_header(route))
 
         engine = None
         if route.routed:

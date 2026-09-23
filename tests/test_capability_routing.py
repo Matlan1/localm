@@ -713,6 +713,8 @@ class TestAPeerRoutedModelIsARoutingTarget:
         assert sent and sent[0]["model"] == "tooly"
         assert r.status_code == 200
         assert _answering_model(engines) == []
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["routed"] is True and blob["resolved"] == "tooly"
 
 
 class TestCoderRoutingNote:

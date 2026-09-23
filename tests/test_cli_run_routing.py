@@ -138,6 +138,19 @@ class TestInProcessRouting:
         assert engines["plain"].loaded
 
 
+class TestFallbackKeepsCompaction:
+    def test_a_roomier_model_that_fails_to_load_leaves_compaction_on(self, reg):
+        router, engines, _ = _router()
+        broken = _Engine("roomy")
+        broken.load = lambda: (_ for _ in ()).throw(RuntimeError("no VRAM"))
+        engines["roomy"] = broken
+        long = [{"role": "user", "content": "word " * 12000}]
+        assert router.plan(long).candidates == ("roomy",)
+        eng = router.engine_for(long)
+        assert eng is engines["plain"]
+        assert router.min_context is None,             "the small model answers, so the conversation must still be compacted"
+
+
 def _drive(monkeypatch, inputs, engine, router):
     it = iter(inputs)
 
@@ -170,7 +183,38 @@ class TestInteractive:
                engines["plain"], router)
         plain = engines["plain"]
         assert plain.answered == 1, "the second turn is answered"
-        last = plain.seen[-1]
-        assert all(isinstance(m.get("content"), str) for m in last), \
-            "no image part remains in the conversation"
-        assert last[0]["content"] == "what is this?", "the text of the refused turn is kept"
+        assert plain.seen[-1] == [{"role": "user", "content": "and now text only"}], \
+            "the refused turn is withdrawn, so no image and no unanswered turn remain"
+
+
+class TestLoadFailures:
+    def test_a_single_prompt_falls_back_when_the_routed_model_fails_to_load(
+            self, reg, monkeypatch):
+        from click.testing import CliRunner
+        log = []
+        plain = _Engine("plain", log=log)
+        monkeypatch.setattr("localm.inference.engine.Engine", lambda *a, **k: plain)
+
+        def build(name, **_):
+            eng = _Engine(name, log=log)
+            eng.load = lambda: (_ for _ in ()).throw(RuntimeError("no VRAM"))
+            return eng
+        monkeypatch.setattr(chat_mod, "_build_cli_engine", build)
+        monkeypatch.setattr(chat_mod, "_maybe_persist_cli_mmproj", lambda *a, **k: None)
+        result = CliRunner().invoke(
+            chat_mod.run, ["plain", "--no-server", "-p", "word " * 12000])
+        assert result.exception is None, result.output
+        assert result.exit_code == 0
+        assert plain.answered == 1, "the loaded model answers the prompt"
+        assert "Could not load roomy" in result.output
+
+    def test_a_model_that_fails_to_load_mid_chat_does_not_end_the_session(
+            self, reg, monkeypatch):
+        router, engines, _ = _router()
+        plain = engines["plain"]
+        plain.unload()
+        plain.load = lambda: (_ for _ in ()).throw(RuntimeError("no VRAM"))
+        _drive(monkeypatch, ["hi", "again", KeyboardInterrupt()], plain, router)
+        assert plain.answered == 0
+        assert plain.seen == []
+
