@@ -213,7 +213,10 @@ def _make_self_classify(self_url: str, active_model):
 
 
 def _make_self_describe_image(self_url: str, active_model):
-    """Describe image via this server's own /chat/completions (vision support)."""
+    """Describe image via this server's own /chat/completions (vision support).
+
+    The active model is only preferred: when it cannot read images the server
+    answers with an installed model that can."""
     def _self_describe_image(image_bytes: bytes, mime_type: str) -> Optional[str]:
         from localm.selfclient import self_request
         b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -222,6 +225,7 @@ def _make_self_describe_image(self_url: str, active_model):
         r = self_request("POST", "/chat/completions",
                          json={
                              "model": active_model() or "localm",
+                             "pin_model": False,
                              "messages": [{
                                  "role": "user",
                                  "content": [
@@ -259,8 +263,9 @@ def _make_self_describe_image(self_url: str, active_model):
                 or "UnsupportedInputError" in err_detail
                 or "vision" in err_detail):
             raise RuntimeError(
-                "Active model does not support vision (load a vision "
-                "model/projector to index images).")
+                "Active model does not support vision and no installed model "
+                "that can read images was available (pull a vision model, or "
+                "give a model its projector, to index images).")
         raise RuntimeError(err_detail or f"HTTP {r.status_code}")
     return _self_describe_image
 

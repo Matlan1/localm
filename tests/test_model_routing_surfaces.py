@@ -208,3 +208,53 @@ class TestTerminalChatAttached:
         eng = self._engine(base, pinned=False)
         "".join(eng.chat_stream([{"role": "user", "content": "hi"}], min_context=20000))
         assert _answering(engines) == ["tooly"]
+
+
+# --------------------------------------------------------------------------- #
+#  Knowledge: describing an indexed image                                      #
+# --------------------------------------------------------------------------- #
+
+class TestKnowledgeImageDescription:
+    def test_an_image_is_described_by_the_vision_model_not_the_loaded_one(
+            self, live, monkeypatch):
+        import localm.selfclient as selfclient
+        from localm.plugins.builtin.rag import plug as ragplug
+        base, engines, _ = live
+        monkeypatch.setattr(selfclient, "get_api_key", lambda: None, raising=False)
+        describe = ragplug._make_self_describe_image(base, lambda: "plain")
+        text = describe(b"\x89PNG\r\n\x1a\n" + b"0" * 16, "image/png")
+        assert text == "answered-by-seer"
+        assert _answering(engines) == ["seer"]
+
+
+# --------------------------------------------------------------------------- #
+#  Scheduled chat jobs run by the server                                       #
+# --------------------------------------------------------------------------- #
+
+class TestScheduledChatJobs:
+    def _run(self, **job_kw):
+        from localm.plugins.builtin.jobs import runner
+        from localm.plugins.builtin.jobs.store import Job
+        return runner.run_job(Job(name="j", task_kind="chat", prompt="hello", **job_kw),
+                              engine=hs._engine)
+
+    def test_a_jobs_own_model_is_used_even_with_another_loaded(self, live, monkeypatch):
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: False)
+        base, engines, _ = live
+        res = self._run(model="seer")
+        assert res["status"] == "ok", res
+        assert res["output"] == "answered-by-seer"
+        assert res["answered_by"] == "seer"
+        assert hs._resolve_unnamed_model_name() == "plain"
+
+    def test_with_web_access_a_job_without_a_model_gets_tool_calls(self, live, monkeypatch):
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
+        base, engines, _ = live
+        res = self._run()
+        assert res["status"] == "ok", res
+        assert res["answered_by"] == "tooly"
+
+    def test_without_web_access_the_loaded_model_runs_it(self, live, monkeypatch):
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: False)
+        res = self._run()
+        assert res["answered_by"] == "plain"

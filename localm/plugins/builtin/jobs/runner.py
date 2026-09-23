@@ -64,6 +64,10 @@ def run_job(job: Job, *, engine=None) -> dict:
     owned_engine = None
     try:
         eng = engine
+        if job.task_kind in ("chat", "memory"):
+            served = _served_engine(job, engine)
+            if served is not None:
+                eng = served
         if job.task_kind in ("chat", "memory") and eng is None:
             # _load_engine reports whether it REUSED the live server's shared engine
             # (http_server._engine) or loaded a FRESH one. Only a fresh engine is
@@ -83,7 +87,7 @@ def run_job(job: Job, *, engine=None) -> dict:
             output = _run_rag(job)
         else:
             raise ValueError(f"unknown task_kind: {job.task_kind!r}")
-        return {
+        record = {
             "status": "ok",
             "output": output,
             "error": None,
@@ -93,6 +97,9 @@ def run_job(job: Job, *, engine=None) -> dict:
             "started": started,
             "finished": time.time(),
         }
+        if job.task_kind in ("chat", "memory") and eng is not None:
+            record["answered_by"] = getattr(eng, "display_name", None)
+        return record
     except Exception as e:
         return {
             "status": "error",
@@ -194,6 +201,64 @@ def _run_chat(job: Job, *, engine=None) -> str:
     from localm.inference.http_server import driving_engine
     with driving_engine(eng):
         return webtool.run_chat_with_web(eng, job.prompt)
+
+
+# Longest a job waits for the server to load the model it runs on.
+_SERVED_LOAD_TIMEOUT_S = 1800.0
+
+
+def _served_engine(job: Job, live):
+    """The running server's engine a chat or memory job runs on, or None when
+    this process runs no server (a headless ``localm job run``).
+
+    A job's own ``model`` is always the one used. Without one, the server's
+    loaded model (*live*) runs it, unless a chat job needs structured tool calls
+    (web access on) or a longer window than that model was trained for, and an
+    installed model has them: then that one does. Either load goes through the
+    server's own model management (``get_engine``) without changing the model
+    other requests use."""
+    import asyncio
+    from localm.inference import http_server as hs
+    loop = hs._server_loop
+    if loop is None or not loop.is_running():
+        return None
+    if job.model:
+        from localm.model_manager import unregistered_model_error
+        bad = unregistered_model_error(job.model)
+        if bad:
+            raise RuntimeError(bad)
+    required = []
+    if job.task_kind == "chat":
+        from localm.plugins.builtin.jobs.webtool import web_enabled
+        if web_enabled():
+            required.append("tool_use")
+    messages = [{"role": "user", "content": job.prompt or ""}]
+    decision = hs.plan_capability_route(job.model or None, messages, required,
+                                        pin_model=bool(job.model))
+    target = decision.resolved
+    if not target:
+        return live
+    if (live is not None and getattr(live, "loaded", False)
+            and getattr(live, "display_name", None) == target):
+        return live
+    names = [target] + [n for n in (decision.candidates or ()) if n != target]
+    if decision.routed and decision.current:
+        names.append(decision.current)
+    last_error = None
+    for name in names:
+        fut = asyncio.run_coroutine_threadsafe(
+            hs.get_engine(name, activate=False), loop)
+        try:
+            return fut.result(timeout=_SERVED_LOAD_TIMEOUT_S)
+        except Exception as e:
+            detail = getattr(e, "detail", None) or str(e)
+            last_error = RuntimeError(f"could not load {name}: {detail}")
+            if job.model:
+                raise last_error
+            logger.warning("jobs: %s", last_error)
+    if live is not None:
+        return live
+    raise last_error or RuntimeError("no model could be loaded for this job")
 
 
 def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
