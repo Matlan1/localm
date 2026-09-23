@@ -318,15 +318,19 @@ uv pip install -p .venv torch torchvision --torch-backend=rocm6.2
 #   pip install --upgrade "localm[gpu]"
 uv pip install -p .venv -e ".[gpu]"
 
-# AMD on Windows, RX 7000 / 9000 (RDNA3 / RDNA4) - AMD's Windows ROCm wheels (public preview):
-uv pip install -p .venv torch torchvision --torch-backend=rocm6.4
+# AMD on Windows, RX 7000 / 9000 (RDNA3 / RDNA4) - AMD's Windows ROCm wheels
+# (public preview). This repo is a flat wheel listing rather than a pip/uv
+# package index, so it needs --find-links with exact pinned versions, never
+# --torch-backend/--index-url:
+uv pip install -p .venv torch==2.9.1+rocm7.2.1 torchvision==0.24.1+rocm7.2.1 \
+    --find-links https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/
 
 # CPU (any machine):
 uv pip install -p .venv torch torchvision --torch-backend=cpu
 ```
 
 The `[gpu]` extra is the gfx103X (RX 6000) self-contained build (Windows, Python
-3.12) - on other AMD Windows cards use the ROCm 6.4 preview wheels above, and on
+3.12) - on other AMD Windows cards use the ROCm preview wheels above, and on
 Linux use the upstream ROCm index. AMD ROCm on Windows is a recent **public
 preview**, so expect rough edges there. GPU is selected automatically; override
 with `--device cuda` / `--device xpu` / `--device cpu`.
