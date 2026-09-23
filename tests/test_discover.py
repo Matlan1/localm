@@ -2388,6 +2388,40 @@ class TestNativeGpuIndexSpaceIsOpaque:
         monkeypatch.setattr("localm.discover._native_backend_has_sycl", _boom)
         assert _native_gpu_index_space_is_opaque() is True
 
+    def test_runtime_dir_resolved_only_once(self, monkeypatch, tmp_path):
+        # Single-resolution contract for a REAL (unmocked) check of both
+        # leaves: whether the answer comes from the vulkan name, the sycl
+        # name, or neither, the directory glob behind both checks must run
+        # exactly once per call, not once per leaf.
+        (tmp_path / _ggml_lib_name("cuda")).write_bytes(b"")
+        calls = {"n": 0}
+
+        def _counting_runtime_binary_dir():
+            calls["n"] += 1
+            return tmp_path
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _counting_runtime_binary_dir)
+        assert _native_gpu_index_space_is_opaque() is False
+        assert calls["n"] == 1
+
+
+class TestNativeGpuIndexSpaceNeverIncludesHip:
+    """Pins the opaque set to exactly {vulkan, sycl}: gpu_usage's own module
+    docstring documents ggml's free-VRAM query as cross-process blind on a
+    HIP build (see resolve_auto_split_ratios's TRUSTWORTHINESS section), so a
+    HIP-only runtime must keep going through the FREE_SCOPE_DEVICE gate
+    rather than joining vulkan/sycl's ungated native-registry branch."""
+
+    def test_hip_only_runtime_is_not_opaque(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: tmp_path)
+        (tmp_path / _ggml_lib_name("base")).write_bytes(b"")
+        (tmp_path / _ggml_lib_name("hip")).write_bytes(b"")
+        assert _native_gpu_index_space_is_opaque() is False
+
 
 class TestSyclBackendIndexPassthrough:
     """The sycl side of TestVulkanBackendIndexPassthrough's pass-through
@@ -2399,6 +2433,12 @@ class TestSyclBackendIndexPassthrough:
 
     @pytest.fixture(autouse=True)
     def _sycl_host(self, monkeypatch):
+        # Pin vulkan False too: _native_gpu_index_space_is_opaque() is an OR
+        # over both leaves, so on a host where the real (unpinned) vulkan
+        # leaf also answers True, that leaf alone would drive the opaque
+        # branch and this class would pass without the sycl leaf mattering.
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: False)
         monkeypatch.setattr("localm.discover._native_backend_has_sycl",
                             lambda: True)
 
@@ -3012,6 +3052,10 @@ class TestGpuSplitShortfallSycl:
     ]
 
     def test_sycl_skips_per_device_check_and_logs_info(self, monkeypatch, caplog):
+        # Pin vulkan False too: see TestSyclBackendIndexPassthrough._sycl_host
+        # for why the sycl leaf alone is not enough to drive this branch on a
+        # host where the real vulkan leaf also answers True.
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.discover._native_backend_has_sycl", lambda: True)
         monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._MIXED)
         cfg = {"gpu_split_indices": [0, 1]}
@@ -3023,6 +3067,7 @@ class TestGpuSplitShortfallSycl:
         assert info, "the sycl skip must be surfaced at INFO (reaches a bug report), not debug/silence"
 
     def test_sycl_skip_does_not_probe_torch(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.discover._native_backend_has_sycl", lambda: True)
         called = {"n": 0}
         monkeypatch.setattr(

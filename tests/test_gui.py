@@ -1364,6 +1364,33 @@ class TestGpusEndpointNativeIndexSpace:
         assert [(g["index"], g["name"]) for g in data["gpus"]] == [
             (0, "NVIDIA RTX 4090")]
 
+    def test_sycl_build_serves_native_devices_with_index_space(self, gui_app):
+        """The sycl side of test_vulkan_build_serves_native_devices_with_index_space:
+        the same native-first branch, driven by the sycl leaf instead of the
+        vulkan one. Vulkan is pinned False too, mirroring
+        TestSyclBackendIndexPassthrough._sycl_host in test_discover.py - the
+        opaque check is an OR over both leaves, so leaving the real vulkan
+        leaf unpinned would let a vulkan-provisioned host mask a broken sycl
+        leaf here."""
+        app, _ = gui_app
+        with patch("localm.discover._native_backend_has_vulkan", return_value=False), \
+             patch("localm.discover._native_backend_has_sycl", return_value=True), \
+             patch("localm.discover.native_gpu_devices",
+                   return_value=list(self._NATIVE)) as native, \
+             patch("localm.discover.list_gpus", new=probe_double([])), \
+             patch("localm.config.load_config",
+                   return_value={"main_gpu_index": None,
+                                 "gpu_split_indices": [0, 1]}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpus"] == self._NATIVE
+        assert data["index_space"] == "native"
+        assert data["probe_status"] == GPU_PROBE_OK
+        assert data["gpu_split_indices"] == [0, 1]
+        native.assert_called_once()
+
     def test_non_vulkan_build_never_touches_the_daemon(self, gui_app):
         """CUDA/HIP/CPU builds keep the exact pre-existing behavior, and the
         native enumeration (a daemon spawn) is never even attempted."""

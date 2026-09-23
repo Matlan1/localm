@@ -618,17 +618,27 @@ def _known_blind_without_torch(reason: str) -> bool:
     the bundled HIP llama.cpp runtime is resident in this process
     (``discover.native_hip_runtime_resident()``), since every raw free-VRAM
     reading this process can then take is HIP-sourced, which is the blind source
-    this module corrects. Where no HIP runtime is resident, False.
+    this module corrects. Where no HIP runtime is resident - including when
+    torch could not be consulted for a SYCL-related reason, which this module
+    does not correct for - False.
 
-    *reason* says why torch could not be consulted, and is surfaced at debug."""
+    *reason* says why torch could not be consulted, and is surfaced at debug
+    either way, so a bug report shows the decision that was made even when it
+    resolves to False."""
     from localm import discover as _discover
     resident = _discover.native_hip_runtime_resident()
-    if resident and _notice_once("process-scoped", reason):
+    if resident:
+        if _notice_once("process-scoped", reason):
+            logger.debug(
+                "gpu_usage: raw VRAM readings in this process are process-scoped: "
+                "torch is not consultable (%s) but the bundled HIP llama.cpp "
+                "runtime is resident, which is itself the measured-blind source",
+                reason)
+    elif _notice_once("not-process-scoped", reason):
         logger.debug(
-            "gpu_usage: raw VRAM readings in this process are process-scoped: "
-            "torch is not consultable (%s) but the bundled HIP llama.cpp "
-            "runtime is resident, which is itself the measured-blind source",
-            reason)
+            "gpu_usage: torch is not consultable (%s) and no HIP llama.cpp "
+            "runtime is resident, so the raw VRAM reading is not treated as "
+            "process-scoped", reason)
     return resident
 
 
@@ -774,8 +784,9 @@ def _torch_pci_bus(index) -> Optional[int]:
     pairing with an ADL adapter is exact rather than positional.
 
     Never triggers a fresh ``import torch`` while a GPU probe is in flight or
-    while the resident-HIP-runtime conflict makes the import known-doomed;
-    returns None in those cases. Never raises.
+    while a resident native runtime makes the import known-doomed
+    (``discover._torch_gpu_probe_known_doomed`` - HIP or SYCL); returns None
+    in those cases. Never raises.
     """
     if index is None:
         return None
