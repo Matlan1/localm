@@ -251,9 +251,7 @@ def main(argv=None) -> int:
         print(f"REFUSED: {e}")
         return 1
 
-    if new_text == text:
-        print(f"nothing to change: the tree already pins {tag}@{commit}")
-    elif args.write:
+    if args.write:
         _write(CONSTANTS_PATH, new_text, newline)
         print(f"wrote {CONSTANTS_PATH.relative_to(REPO).as_posix()}")
     else:
