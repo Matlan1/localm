@@ -500,6 +500,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   status text, and the GUI localizes from that code, so a non-English
   interface no longer flips back to English status text partway through
   a turn.
+- **Installing the PyTorch/HuggingFace stack on Windows with an AMD Radeon RX 7000 or RX 9000
+  GPU always failed outright, reporting no compatible PyTorch wheel could be found.** AMD moved
+  its official Windows ROCm preview wheels to a new location; the install command now resolves
+  the current pinned build there, and a fresh ComfyUI install on this hardware picks up the
+  same fix.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role

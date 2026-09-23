@@ -233,11 +233,21 @@ def test_torch_spec_amd_linux_is_upstream_rocm(monkeypatch):
 
 
 def test_torch_spec_amd_gfx110x_windows_is_rocm_win(monkeypatch):
+    """RX 7000/9000 get AMD's official Windows ROCm preview wheels: pinned exact
+    versions via find_links (a flat wheel listing, not a pip package index),
+    never index_url/extra_index_url - those resolve no candidates there."""
     from localm.media import managed_comfy_fresh as fresh
+    from localm import hwdetect
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 7900 XTX"))
     assert spec.variant == "rocm"
-    assert spec.index_url == "https://download.pytorch.org/whl/rocm6.4"
+    torch, torchvision, torchaudio = hwdetect.amd_rocm_win_torch_packages()
+    assert torch in spec.packages
+    assert torchvision in spec.packages
+    assert torchaudio in spec.packages
+    assert spec.find_links == hwdetect.amd_rocm_win_find_links()
+    assert spec.index_url is None
+    assert spec.extra_index_url is None
 
 
 def test_torch_spec_unknown_amd_windows_degrades_to_cpu_with_note(monkeypatch):
@@ -261,6 +271,25 @@ def test_torch_install_args_amd_uses_extra_index(monkeypatch):
     assert "torch==2.9.1+rocm7.13.0" in args
     assert "--extra-index-url" in args
     assert "https://repo.amd.com/rocm/whl/gfx103X-all/" in args
+
+
+def test_torch_install_args_amd_rocm_win_uses_find_links(monkeypatch):
+    """The pip args builder: AMD's official Windows ROCm preview packages go in
+    with --find-links (a flat wheel listing, not a pip index), never
+    --index-url/--extra-index-url, which resolve no candidates there."""
+    from localm import hwdetect
+    from localm.media import managed_comfy_fresh as fresh
+    monkeypatch.setattr(sys, "platform", "win32")
+    spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 7900 XTX"))
+    args = fresh.comfy_torch_install_args(spec)
+    torch, torchvision, torchaudio = hwdetect.amd_rocm_win_torch_packages()
+    assert torch in args
+    assert torchvision in args
+    assert torchaudio in args
+    assert "--find-links" in args
+    assert hwdetect.amd_rocm_win_find_links() in args
+    assert "--index-url" not in args
+    assert "--extra-index-url" not in args
 
 
 def test_torch_install_args_cuda_uses_index_url(monkeypatch):
