@@ -36,11 +36,14 @@ and ``http_server.py``'s ``bind_host`` gates) - and no such check may be added.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import logging
 import re
+import signal
 import sys
-from typing import Optional
+import threading
+from typing import Callable, Optional
 
 from localm.netlisten import create_listen_socket
 
@@ -66,6 +69,110 @@ _HOST6_RE = re.compile(r"^\[[0-9A-Fa-f:]+\](:\d+)?$")
 _PATH_RE = re.compile(r"^/[!-~]*$")
 
 _READ_CHUNK = 65536
+
+# Signals run_server() turns into a graceful stop while it serves on the main
+# thread. Names this platform does not define are skipped.
+SERVE_STOP_SIGNALS = ("SIGHUP", "SIGTERM", "SIGBREAK")
+# Signals a caller hosting run_server() on another thread routes the same way
+# from the main thread (see gui/cli.py's app-window branch).
+HOSTED_STOP_SIGNALS = ("SIGHUP", "SIGTERM")
+
+# run_server() calls in progress in this process, across threads.
+_active_runs = 0
+# A routed stop signal arrived during the current run_server() call.
+_stop_requested = False
+# The current run_server() call has finished serving and is disarming.
+_stopping = False
+# One callable per server currently serving, each ending that server's serve.
+_stop_hooks: "list[Callable[[], None]]" = []
+
+
+def _discard_stop_hook(hook) -> None:
+    try:
+        _stop_hooks.remove(hook)
+    except ValueError:
+        pass
+
+
+@contextlib.contextmanager
+def _stop_hook(hook):
+    """Register *hook* in _stop_hooks for the duration of the block."""
+    _stop_hooks.append(hook)
+    try:
+        yield
+    finally:
+        _discard_stop_hook(hook)
+
+
+def _track_server(server, serve_task) -> None:
+    """Make uvicorn *server* stoppable by _on_stop_signal until *serve_task*
+    (its serve() task) is done. A stop requested before this call is applied
+    at once."""
+    def hook():
+        server.should_exit = True
+    _stop_hooks.append(hook)
+    serve_task.add_done_callback(lambda _task: _discard_stop_hook(hook))
+    if _stop_requested and _active_runs > 0:
+        hook()
+
+
+def _interrupt_serving() -> None:
+    raise KeyboardInterrupt
+
+
+def _on_stop_signal(signum, frame) -> None:
+    """Handler installed by route_stop_signals().
+
+    While a run_server() call is active it records the stop request and ends
+    every registered server's serve through its stop hook, so serving winds
+    down and run_server() disarms the crash guard itself; once that call is
+    disarming it only records the request. With no run_server() call active it
+    restores the default disposition and re-delivers *signum*, so the signal
+    has its default effect."""
+    global _stop_requested
+    if _active_runs <= 0:
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except (OSError, ValueError, RuntimeError):
+            return
+        signal.raise_signal(signum)
+        return
+    _stop_requested = True
+    if _stopping:
+        return
+    for hook in list(_stop_hooks):
+        hook()
+
+
+@contextlib.contextmanager
+def route_stop_signals(names=SERVE_STOP_SIGNALS):
+    """On the main thread, point every signal named in *names* that is at its
+    default disposition (SIG_DFL) at _on_stop_signal for the duration of the
+    block, then put SIG_DFL back on each one still pointing there. Ignored or
+    otherwise handled signals are left alone, and so is every signal when this
+    runs off the main thread. Names this platform does not define are skipped.
+    Yields the list of signals it routed."""
+    routed = []
+    if threading.current_thread() is threading.main_thread():
+        for name in names:
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                if signal.getsignal(sig) is signal.SIG_DFL:
+                    signal.signal(sig, _on_stop_signal)
+                    routed.append(sig)
+            except (OSError, ValueError, RuntimeError):
+                pass
+    try:
+        yield routed
+    finally:
+        for sig in routed:
+            try:
+                if signal.getsignal(sig) is _on_stop_signal:
+                    signal.signal(sig, signal.SIG_DFL)
+            except (OSError, ValueError, RuntimeError):
+                pass
 
 
 def _crash_watchdog_disabled() -> bool:
@@ -149,53 +256,76 @@ def run_server(
     reachable URLs (``localm serve`` / ``localm gui``), so the advertised name and
     the printed name can never disagree - see ``localm/netname.py`` and the
     ``start_advertiser`` callers.
+
+    On the main thread, SIGHUP, SIGTERM and SIGBREAK that are at their default
+    disposition end serving gracefully for the whole call instead of ending the
+    process (see route_stop_signals), so the crash guard is disarmed on those
+    stops as on Ctrl+C. The crash guard is disarmed only after serving has
+    ended.
     """
     import uvicorn
 
     from localm import bugreport
+    global _active_runs, _stop_requested, _stopping
     # Report a prior hard crash, then arm the crash guard for this run. Disarmed
     # in the finally on a clean exit. instance_id scopes the marker to this
     # instance. *app* is a generic ASGI callable, so .state is read via getattr.
     instance_id = getattr(getattr(app, "state", None), "instance_id", None)
-    bugreport.check_and_report_prior_crash()
-    bugreport.arm_crash_guard(context={"host": host, "port": port,
-                                        "tls": bool(ssl_certfile)},
-                              instance_id=instance_id)
-    _spawn_crash_recovery_watchdog(host=host, port=port, tls=bool(ssl_certfile),
-                                   instance_id=instance_id)
-
+    _stop_requested = False
+    _stopping = False
+    _active_runs += 1
     try:
-        if not ssl_certfile:
-            # Plain-HTTP bind. Fronted with the same first-byte peek the TLS path
-            # uses, so a TLS connection opened on this HTTP port is closed at the
-            # socket layer instead of reaching uvicorn's HTTP parser.
+        with route_stop_signals():
+            bugreport.check_and_report_prior_crash()
+            bugreport.arm_crash_guard(context={"host": host, "port": port,
+                                                "tls": bool(ssl_certfile)},
+                                      instance_id=instance_id)
+            _spawn_crash_recovery_watchdog(host=host, port=port,
+                                           tls=bool(ssl_certfile),
+                                           instance_id=instance_id)
             try:
-                asyncio.run(_serve_async_plain(app, host, port, log_level))
-            except KeyboardInterrupt:
-                pass
-            except Exception:   # pragma: no cover - defensive fallback
-                # Fall back to a direct uvicorn.run if the peek layer fails.
-                import traceback
-                traceback.print_exc()
-                _run_uvicorn_on_socket(uvicorn, app, host, port,
-                                       log_level=log_level)
-            return
+                if not _stop_requested:
+                    _serve(uvicorn, app, host, port, ssl_certfile, ssl_keyfile,
+                           log_level)
+            finally:
+                _stopping = True
+                bugreport.disarm_crash_guard(instance_id=instance_id)
+    finally:
+        _active_runs -= 1
 
+
+def _serve(uvicorn, app, host, port, ssl_certfile, ssl_keyfile, log_level) -> None:
+    """run_server()'s serving step: blocks until serving ends. A Ctrl+C
+    (KeyboardInterrupt) ends it normally."""
+    if not ssl_certfile:
+        # Plain-HTTP bind. Fronted with the same first-byte peek the TLS path
+        # uses, so a TLS connection opened on this HTTP port is closed at the
+        # socket layer instead of reaching uvicorn's HTTP parser.
         try:
-            asyncio.run(_serve_async(app, host, port, ssl_certfile, ssl_keyfile,
-                                     log_level))
+            asyncio.run(_serve_async_plain(app, host, port, log_level))
         except KeyboardInterrupt:
             pass
         except Exception:   # pragma: no cover - defensive fallback
-            # Fall back to a direct TLS bind if the peek layer fails.
+            # Fall back to a direct uvicorn.run if the peek layer fails.
             import traceback
             traceback.print_exc()
             _run_uvicorn_on_socket(uvicorn, app, host, port,
-                                   log_level=log_level,
-                                   ssl_certfile=ssl_certfile,
-                                   ssl_keyfile=ssl_keyfile)
-    finally:
-        bugreport.disarm_crash_guard(instance_id=instance_id)
+                                   log_level=log_level)
+        return
+
+    try:
+        asyncio.run(_serve_async(app, host, port, ssl_certfile, ssl_keyfile,
+                                 log_level))
+    except KeyboardInterrupt:
+        pass
+    except Exception:   # pragma: no cover - defensive fallback
+        # Fall back to a direct TLS bind if the peek layer fails.
+        import traceback
+        traceback.print_exc()
+        _run_uvicorn_on_socket(uvicorn, app, host, port,
+                               log_level=log_level,
+                               ssl_certfile=ssl_certfile,
+                               ssl_keyfile=ssl_keyfile)
 
 
 def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
@@ -210,7 +340,12 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
     degraded path as on the normal one.
 
     If even the socket cannot be built, this falls back to uvicorn's own binding
-    and logs a warning naming the failure."""
+    and logs a warning naming the failure.
+
+    Either server is stoppable by _on_stop_signal while it serves. uvicorn.run()
+    exposes no server object, so its stop hook raises KeyboardInterrupt, which
+    uvicorn.run() catches and returns from. Nothing is served when a stop was
+    already requested in the current run_server() call."""
     config_kwargs = dict(app=app, log_level=log_level,
                          timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
     if ssl_certfile:
@@ -221,10 +356,19 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
         _log.warning("portmux: could not build the listening socket for %s:%s "
                      "(%s); falling back to uvicorn's own bind, which serves "
                      "IPv6 only for a :: host", host, port, e)
-        uvicorn.run(host=host, port=port, **config_kwargs)
+        if _stop_requested and _active_runs > 0:
+            return
+        with _stop_hook(_interrupt_serving):
+            uvicorn.run(host=host, port=port, **config_kwargs)
         return
     server = uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs))
-    server.run(sockets=[sock])
+
+    def hook():
+        server.should_exit = True
+    with _stop_hook(hook):
+        if _stop_requested and _active_runs > 0:
+            hook()
+        server.run(sockets=[sock])
 
 
 def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
@@ -267,6 +411,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
     )
     server = uvicorn.Server(config)
     serve_task = asyncio.ensure_future(server.serve())
+    _track_server(server, serve_task)
 
     # Wait until uvicorn is actually listening so we know the internal port.
     while not server.started and not serve_task.done():
@@ -329,6 +474,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
                             timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
     server = uvicorn.Server(config)
     serve_task = asyncio.ensure_future(server.serve())
+    _track_server(server, serve_task)
 
     while not server.started and not serve_task.done():
         await asyncio.sleep(0.02)

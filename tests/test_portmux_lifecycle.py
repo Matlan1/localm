@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import signal
 import socket
 import ssl
+import threading
+import time
 
 import pytest
 
@@ -609,3 +612,280 @@ def test_run_server_tls_falls_back_to_uvicorn_run_on_unexpected_error(monkeypatc
         "ssl_certfile": "cert.pem", "ssl_keyfile": "key.pem",
     }]
     assert calls[-1] == ("disarmed", None)
+
+
+# --------------------------------------------------------------------------- #
+#  Stop signals: while run_server() is active, SIGHUP/SIGTERM/SIGBREAK end
+#  serving gracefully instead of ending the process, so it disarms itself.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def _stop_state(monkeypatch):
+    """Fresh portmux stop state for one test, restored afterwards."""
+    monkeypatch.setattr(portmux, "_active_runs", 0)
+    monkeypatch.setattr(portmux, "_stop_requested", False)
+    monkeypatch.setattr(portmux, "_stopping", False)
+    monkeypatch.setattr(portmux, "_stop_hooks", [])
+
+
+@pytest.fixture
+def _sigterm_default():
+    """SIGTERM at SIG_DFL for the test, whatever the runner installed."""
+    original = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    yield
+    signal.signal(signal.SIGTERM, original if original is not None else signal.SIG_DFL)
+
+
+def test_route_stop_signals_routes_a_default_signal_and_restores_it(_sigterm_default):
+    with portmux.route_stop_signals(("SIGTERM", "SIGNOTAREALSIGNAL")) as routed:
+        assert routed == [signal.SIGTERM]
+        assert signal.getsignal(signal.SIGTERM) is portmux._on_stop_signal
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+
+
+def test_route_stop_signals_leaves_an_ignored_signal_ignored(_sigterm_default):
+    """nohup ignores SIGHUP; such a choice must survive run_server()."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with portmux.route_stop_signals(("SIGTERM",)) as routed:
+        assert routed == []
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+
+
+def test_route_stop_signals_leaves_a_custom_handler_alone(_sigterm_default):
+    def custom(signum, frame):
+        pass
+    signal.signal(signal.SIGTERM, custom)
+    with portmux.route_stop_signals(("SIGTERM",)) as routed:
+        assert routed == []
+        assert signal.getsignal(signal.SIGTERM) is custom
+    assert signal.getsignal(signal.SIGTERM) is custom
+
+
+def test_route_stop_signals_keeps_a_handler_replaced_inside_the_block(_sigterm_default):
+    def later(signum, frame):
+        pass
+    with portmux.route_stop_signals(("SIGTERM",)):
+        signal.signal(signal.SIGTERM, later)
+    assert signal.getsignal(signal.SIGTERM) is later
+
+
+def test_route_stop_signals_does_nothing_off_the_main_thread(_sigterm_default):
+    out = {}
+
+    def run():
+        with portmux.route_stop_signals(("SIGTERM",)) as routed:
+            out["routed"] = routed
+            out["handler"] = signal.getsignal(signal.SIGTERM)
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(10)
+    assert out == {"routed": [], "handler": signal.SIG_DFL}
+
+
+def test_stop_signal_during_run_server_ends_serving_through_the_hooks(
+        _stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_active_runs", 1)
+    hits = []
+    portmux._stop_hooks.extend([lambda: hits.append("a"), lambda: hits.append("b")])
+
+    portmux._on_stop_signal(signal.SIGTERM, None)   # must not raise or exit
+
+    assert hits == ["a", "b"]
+    assert portmux._stop_requested is True
+
+
+def test_stop_signal_while_run_server_disarms_only_records_the_request(
+        _stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_active_runs", 1)
+    monkeypatch.setattr(portmux, "_stopping", True)
+    hits = []
+    portmux._stop_hooks.append(lambda: hits.append(1))
+
+    portmux._on_stop_signal(signal.SIGTERM, None)
+
+    assert hits == []
+    assert portmux._stop_requested is True
+
+
+def test_stop_signal_with_no_run_server_active_gets_its_default_effect(
+        _stop_state, monkeypatch):
+    set_calls, raised, hits = [], [], []
+    monkeypatch.setattr(portmux.signal, "signal", lambda s, h: set_calls.append((s, h)))
+    monkeypatch.setattr(portmux.signal, "raise_signal", lambda s: raised.append(s))
+    portmux._stop_hooks.append(lambda: hits.append(1))
+
+    portmux._on_stop_signal(signal.SIGTERM, None)
+
+    assert set_calls == [(signal.SIGTERM, signal.SIG_DFL)]
+    assert raised == [signal.SIGTERM]
+    assert hits == []
+    assert portmux._stop_requested is False
+
+
+def test_track_server_stops_that_server_until_its_serve_task_is_done(_stop_state):
+    class _Server:
+        should_exit = False
+    server = _Server()
+
+    async def go():
+        serve_task = asyncio.get_running_loop().create_future()
+        portmux._track_server(server, serve_task)
+        assert server.should_exit is False
+        assert len(portmux._stop_hooks) == 1
+        portmux._stop_hooks[0]()
+        assert server.should_exit is True
+        serve_task.set_result(None)
+        await asyncio.sleep(0)
+        assert portmux._stop_hooks == []
+
+    asyncio.run(go())
+
+
+def test_track_server_applies_a_stop_requested_earlier_in_the_run(
+        _stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_active_runs", 1)
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+
+    class _Server:
+        should_exit = False
+    server = _Server()
+
+    async def go():
+        serve_task = asyncio.get_running_loop().create_future()
+        portmux._track_server(server, serve_task)
+        serve_task.set_result(None)
+
+    asyncio.run(go())
+    assert server.should_exit is True
+
+
+def test_track_server_ignores_a_request_left_over_from_an_earlier_run(
+        _stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+
+    class _Server:
+        should_exit = False
+    server = _Server()
+
+    async def go():
+        serve_task = asyncio.get_running_loop().create_future()
+        portmux._track_server(server, serve_task)
+        serve_task.set_result(None)
+
+    asyncio.run(go())
+    assert server.should_exit is False
+
+
+def test_run_server_routes_stop_signals_only_while_it_runs(
+        _stop_state, _sigterm_default, monkeypatch):
+    calls = _patch_bugreport(monkeypatch)
+    seen = {}
+
+    async def fake_serve(app, host, port, log_level):
+        seen["handler"] = signal.getsignal(signal.SIGTERM)
+        seen["active"] = portmux._active_runs
+        seen["stopping"] = portmux._stopping
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+
+    portmux.run_server(_bare_app, "127.0.0.1", 8005)
+
+    assert seen == {"handler": portmux._on_stop_signal, "active": 1, "stopping": False}
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    assert portmux._active_runs == 0
+    assert calls[-1] == ("disarmed", None)
+
+
+def test_run_server_does_not_serve_after_a_stop_during_startup(
+        _stop_state, _sigterm_default, monkeypatch):
+    calls = _patch_bugreport(monkeypatch)
+
+    def arm_then_stop(context=None, home=None, instance_id=None):
+        calls.append(("armed", context, instance_id))
+        portmux._on_stop_signal(signal.SIGTERM, None)
+    monkeypatch.setattr(bugreport_mod, "arm_crash_guard", arm_then_stop)
+    served = []
+
+    async def fake_serve(app, host, port, log_level):
+        served.append(1)
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+
+    portmux.run_server(_bare_app, "127.0.0.1", 8006)
+
+    assert served == [], "run_server served after a stop signal had already arrived"
+    assert calls[-1] == ("disarmed", None)
+
+
+def test_run_server_is_stopping_before_it_disarms_and_a_signal_then_is_absorbed(
+        _stop_state, _sigterm_default, monkeypatch):
+    """A second terminal-close SIGHUP can land inside the disarm itself; it must
+    neither raise into it nor run a stop hook."""
+    calls = _patch_bugreport(monkeypatch)
+    seen = {}
+    hits = []
+
+    def disarm(home=None, instance_id=None):
+        seen["stopping"] = portmux._stopping
+        portmux._stop_hooks.append(lambda: hits.append(1))
+        portmux._on_stop_signal(signal.SIGTERM, None)
+        calls.append(("disarmed", instance_id))
+    monkeypatch.setattr(bugreport_mod, "disarm_crash_guard", disarm)
+
+    async def fake_serve(app, host, port, log_level):
+        return
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+
+    portmux.run_server(_bare_app, "127.0.0.1", 8007)
+
+    assert seen == {"stopping": True}
+    assert hits == []
+    assert calls[-1] == ("disarmed", None)
+
+
+def _stop_when_listening(port, outcome):
+    """Wait until *port* accepts, then deliver a stop the way the handler would.
+    If run_server() is still serving 15s later, interrupt the main thread so a
+    missing stop hook fails the test instead of hanging it."""
+    import _thread
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), 0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
+    portmux._on_stop_signal(signal.SIGTERM, None)
+    outcome["stop_sent"] = time.monotonic()
+    while time.monotonic() < outcome["stop_sent"] + 15.0:
+        if outcome.get("returned"):
+            return
+        time.sleep(0.05)
+    outcome["interrupted"] = True
+    _thread.interrupt_main()
+
+
+@pytest.mark.parametrize("use_tls", [False, True])
+def test_a_stop_signal_ends_a_real_serve_and_run_server_disarms(
+        _stop_state, _sigterm_default, monkeypatch, tmp_path, use_tls):
+    calls = _patch_bugreport(monkeypatch)
+    port = _free_port()
+    cert = key = None
+    if use_tls:
+        cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
+    outcome = {}
+    stopper = threading.Thread(target=_stop_when_listening, args=(port, outcome),
+                                daemon=True)
+    stopper.start()
+
+    portmux.run_server(_tiny_asgi_app, "127.0.0.1", port,
+                       ssl_certfile=cert, ssl_keyfile=key)
+    outcome["returned"] = True
+    stopper.join(20)
+
+    assert not outcome.get("interrupted"), (
+        "the stop signal did not end serving - run_server had to be interrupted")
+    assert "stop_sent" in outcome
+    assert calls[-1] == ("disarmed", None)
+    assert portmux._stop_hooks == []

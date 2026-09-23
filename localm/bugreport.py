@@ -1780,6 +1780,27 @@ def _all_crash_markers(d):
     return markers
 
 
+def _instance_id_for_trace(trace) -> Optional[str]:
+    """The instance_id encoded in a native-fault trace file's name, or None for
+    the legacy unscoped name (the inverse of _crash_trace_path's naming)."""
+    name = trace.name
+    prefix, suffix = "server-crash-trace.", ".txt"
+    if name.startswith(prefix) and name.endswith(suffix) and name != "server-crash-trace.txt":
+        return name[len(prefix):-len(suffix)]
+    return None
+
+
+def _orphan_crash_traces(d):
+    """Every native-fault trace file under *d* (including the legacy unscoped
+    name) whose own crash marker is absent."""
+    traces = list(d.glob("server-crash-trace.*.txt"))
+    legacy = d / "server-crash-trace.txt"
+    if legacy.exists():
+        traces.append(legacy)
+    return [t for t in traces
+            if not _crash_marker_path(d, _instance_id_for_trace(t)).exists()]
+
+
 def arm_crash_guard(context: Optional[dict] = None, home=None,
                     instance_id: Optional[str] = None) -> bool:
     """Mark that a server run is in progress, and when diagnostics are allowed
@@ -1845,20 +1866,14 @@ def armed_instance_id() -> Optional[str]:
     return _armed_instance_id
 
 
-def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
-    """Clean shutdown: drop THIS instance's own marker and its native-fault
-    trace file (never a sibling's) so the next start does not report a crash
-    and no trace is left behind. *instance_id* must be the SAME id passed to
-    the matching arm_crash_guard() call - see the module note above for why an
-    unscoped delete is unsafe when more than one instance shares a LOCALM_HOME.
-    The trace handle is closed before the file is unlinked (an open handle
-    blocks the unlink on Windows). The module-level faulthandler/trace handle
-    is only released when *instance_id* matches the instance that armed it in
-    THIS process; a sibling's own marker and trace file are still removed
-    regardless, but this process's own live trace stays open and attached."""
-    global _crash_trace_fh, _crash_trace_instance_id, _armed_instance_id
-    import faulthandler
-    d = None
+def clear_crash_marker(home=None, instance_id: Optional[str] = None) -> None:
+    """Drop THIS instance's own crash marker only, leaving its native-fault
+    trace file and faulthandler attached (see release_crash_trace). Once the
+    marker is gone the crash-recovery watchdog reads the run as a clean stop.
+    *instance_id* must be the SAME id passed to the matching arm_crash_guard()
+    call. armed_instance_id() returns None afterwards when *instance_id* is the
+    one armed in this process. Never raises."""
+    global _armed_instance_id
     try:
         d = _crash_dir(home)
         _crash_marker_path(d, instance_id).unlink(missing_ok=True)
@@ -1869,6 +1884,16 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
         pass
     if _armed_instance_id == instance_id:
         _armed_instance_id = None
+
+
+def release_crash_trace(home=None, instance_id: Optional[str] = None) -> None:
+    """Disable faulthandler and close this process's native-fault trace file
+    when *instance_id* is the instance that armed it here, then delete that
+    instance's trace file. The handle is closed before the unlink (an open
+    handle blocks the unlink on Windows). A trace owned by another instance id
+    stays open and attached. Never raises."""
+    global _crash_trace_fh, _crash_trace_instance_id
+    import faulthandler
     try:
         if _crash_trace_fh is not None and _crash_trace_instance_id == instance_id:
             faulthandler.disable()
@@ -1880,12 +1905,26 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
         # leaks a file handle until process exit (imminent anyway); never raise.
         pass
     try:
-        if d is not None:
-            _crash_trace_path(d, instance_id).unlink(missing_ok=True)
+        _crash_trace_path(_crash_dir(home), instance_id).unlink(missing_ok=True)
     except Exception:
         # Best-effort: a trace file that cannot be removed is reported and
         # deleted by the next start's check_and_report_prior_crash().
         pass
+
+
+def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
+    """Clean shutdown: drop THIS instance's own marker and its native-fault
+    trace file (never a sibling's) so the next start does not report a crash
+    and no trace is left behind: clear_crash_marker() then
+    release_crash_trace(). *instance_id* must be the SAME id passed to the
+    matching arm_crash_guard() call - see the module note above for why an
+    unscoped delete is unsafe when more than one instance shares a LOCALM_HOME.
+    The module-level faulthandler/trace handle is only released when
+    *instance_id* matches the instance that armed it in THIS process; a
+    sibling's own marker and trace file are still removed regardless, but this
+    process's own live trace stays open and attached. Never raises."""
+    clear_crash_marker(home=home, instance_id=instance_id)
+    release_crash_trace(home=home, instance_id=instance_id)
 
 
 # A native/ggml status line printed via raw fprintf (no "TIMESTAMP LEVEL NAME:"
@@ -2131,15 +2170,59 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
         return None
 
 
+def _report_orphan_crash_trace(d, trace, interactive: bool):
+    """Handle a native-fault trace file whose crash marker is gone: a run that
+    cleared its marker for a clean stop (clear_crash_marker) and ended before
+    release_crash_trace() ran. Left untouched while its instance's registry
+    entry names a live pid, or while another process holds the file open.
+    Otherwise the file is deleted, and when it names a fatal fault (see
+    _fatal_fault_line) and diagnostics are allowed now, it is reported as a
+    crash during the stop. Returns the report path, or None. Never raises."""
+    from localm.debuglog import logger
+    from localm.instances import pid_alive, read_entry
+    try:
+        instance_id = _instance_id_for_trace(trace)
+        if instance_id:
+            entry = read_entry(d / f"{instance_id}.json")
+            if entry is not None and pid_alive(int(entry.get("pid", -1) or -1)):
+                return None
+        text = trace.read_text(encoding="utf-8", errors="replace").strip()
+        try:
+            trace.unlink()
+        except OSError:
+            return None
+        fatal_fault = _fatal_fault_line(text)
+        if not fatal_fault:
+            return None
+        if not _diagnostics_allowed():
+            logger.info(
+                "bugreport: native fault during a prior clean stop detected (%s); "
+                "not reported: privacy mode", trace.name)
+            return None
+        return report_failure(
+            summary=("localm server crashed while stopping - native fault "
+                     f"captured: {fatal_fault}"),
+            reason=("a native crash was caught by the fault handler after the "
+                    "server had begun a clean stop; see the captured trace below "
+                    "for the exact fault and thread/frame."),
+            error=None,
+            context={"native_trace": text[:4000],
+                     "prior_run": {"stage": "stopping", "trace_file": trace.name}},
+            interactive=interactive)
+    except Exception:
+        return None
+
+
 def check_and_report_prior_crash(home=None, interactive: bool = False):
     """Scan every crash marker left under this LOCALM_HOME's run/ dir (one per
     instance that has ever armed here) and report+clear any whose recorded pid
     is no longer alive - a hard crash: a native fault, an OS kill, or a
     force-closed window. A marker whose pid IS still alive is a sibling
     instance simply still running (see the per-instance-scoping module note
-    above) and is left untouched: not reported, not deleted. Returns the last
-    report path filed, or None if nothing was reported. Never raises into the
-    caller."""
+    above) and is left untouched: not reported, not deleted. Then handle every
+    native-fault trace file left without its marker (see
+    _report_orphan_crash_trace). Returns the last report path filed, or None if
+    nothing was reported. Never raises into the caller."""
     try:
         d = _crash_dir(home)
         markers = _all_crash_markers(d)
@@ -2148,6 +2231,14 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
     filed = None
     for marker in markers:
         result = _report_one_crash_marker(d, marker, home, interactive)
+        if result is not None:
+            filed = result
+    try:
+        orphans = _orphan_crash_traces(d)
+    except Exception:
+        orphans = []
+    for trace in orphans:
+        result = _report_orphan_crash_trace(d, trace, interactive)
         if result is not None:
             filed = result
     return filed
