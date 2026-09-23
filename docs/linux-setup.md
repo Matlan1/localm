@@ -140,9 +140,11 @@ index (ROCm / CUDA / CPU). If the version it picks does not suit your setup,
 install torch yourself, e.g.:
 
 ```sh
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
-# or .../whl/cu126 (CUDA, most cards) or .../whl/cu130 (CUDA, Blackwell and
-# newer - cu126 has no kernels for these) or .../whl/cpu (CPU)
+uv pip install -p .venv torch torchvision --torch-backend=rocm6.2
+# or cu126 (CUDA, most cards) or cu130 (CUDA, Blackwell and newer - cu126 has
+# no kernels for these) or cpu (CPU). --torch-backend, not --index-url: the
+# latter replaces PyPI outright for the whole install, and every PyTorch wheel
+# index caps setuptools below what this project requires.
 ```
 
 Not sure which CUDA line your card needs? `.venv/bin/python -m localm.hwdetect
@@ -159,8 +161,8 @@ or CPU as it does elsewhere.
 The `[gpu]` pip extra pins AMD ROCm torch wheels and can only resolve them on
 Windows. A pip extra cannot carry a custom package index, so on Linux
 `pip install "localm[gpu]"` will NOT install a GPU torch build. On Linux use
-`setup.sh` (it adds the right `--index-url`) or the manual
-`uv pip install ... --index-url` command shown above.
+`setup.sh` (it picks the right `--torch-backend`) or the manual
+`uv pip install ... --torch-backend` command shown above.
 
 ### WSL2 and virtual machines
 
