@@ -302,7 +302,10 @@ class TestVectorMatrixFollowsItsVectors:
         c._save()
 
         r = Collection("kb", base=base)
-        query_vec = lambda texts: [[1.0, 0.0, 0.0]]
+
+        def query_vec(texts):
+            return [[1.0, 0.0, 0.0]]
+
         before = r._vector_scores("q", query_vec)
         assert before[0] > before[1]
         r._vectors = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]
