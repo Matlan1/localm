@@ -2777,7 +2777,7 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
                 out.append({"name": name, "built_with": built_with,
                             "n_chunks": peeked.get("n_chunks")})
                 continue
-            coll = Collection(name)
+            coll = Collection(name, cache=False)
             stats = coll.stats()
         except Exception as e:
             _log.warning("rag: %r could not be read for the embedding-switch "

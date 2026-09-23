@@ -181,6 +181,22 @@ class TestBulkPathsDoNotPopulateTheCache:
             "kb0", "kb1", "kb2", "kb3"]
         assert len(store._COLLECTION_CACHE) == 0
 
+    def test_embedding_provenance_report_cold_path(self, tmp_path, monkeypatch):
+        base = _isolated_home(tmp_path, monkeypatch)
+        for i in range(3):
+            _build(base, f"kb{i}", n_chunks=20, seed=i, model="old-model")
+            meta_path = base / f"kb{i}" / "meta.json"
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            del meta[store._STATS_CACHE_KEY]
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        store._COLLECTION_CACHE.clear()
+
+        report = store.collection_provenance_report("new-model")
+
+        assert sorted(r["name"] for r in report) == ["kb0", "kb1", "kb2"]
+        assert all(r["built_with"] == "old-model" for r in report), report
+        assert len(store._COLLECTION_CACHE) == 0
+
     def test_model_rename_label_migration(self, tmp_path, monkeypatch):
         base = _isolated_home(tmp_path, monkeypatch)
         for i in range(3):
