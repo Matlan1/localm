@@ -843,6 +843,44 @@ def test_run_server_counts_itself_on_top_of_a_run_already_active(
     assert calls[-1] == ("disarmed", None)
 
 
+@pytest.mark.parametrize("tls_files", [None, ("cert.pem", "key.pem")])
+def test_run_server_hands_its_own_arguments_to_the_watchdog_and_the_serve_step(
+        _stop_state, _sigterm_default, monkeypatch, tls_files):
+    _patch_bugreport(monkeypatch)
+    spawned = []
+    monkeypatch.setattr(portmux, "_spawn_crash_recovery_watchdog",
+                        lambda **kw: spawned.append(kw))
+    served = []
+
+    async def fake_plain(app, host, port, log_level):
+        served.append((app, host, port, log_level))
+
+    async def fake_tls(app, host, port, ssl_certfile, ssl_keyfile, log_level):
+        served.append((app, host, port, ssl_certfile, ssl_keyfile, log_level))
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_plain)
+    monkeypatch.setattr(portmux, "_serve_async", fake_tls)
+
+    class State:
+        instance_id = "inst-args"
+
+    class App:
+        state = State()
+
+        async def __call__(self, scope, receive, send):
+            pass
+
+    app = App()
+    cert, key = tls_files or (None, None)
+    portmux.run_server(app, "0.0.0.0", 9011, ssl_certfile=cert, ssl_keyfile=key)
+
+    assert spawned == [{"host": "0.0.0.0", "port": 9011, "tls": bool(cert),
+                        "instance_id": "inst-args"}]
+    if cert:
+        assert served == [(app, "0.0.0.0", 9011, cert, key, "warning")]
+    else:
+        assert served == [(app, "0.0.0.0", 9011, "warning")]
+
+
 def test_run_server_does_not_serve_after_a_stop_during_startup(
         _stop_state, _sigterm_default, monkeypatch):
     calls = _patch_bugreport(monkeypatch)
