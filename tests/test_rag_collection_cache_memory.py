@@ -250,6 +250,40 @@ class TestBulkPathsDoNotPopulateTheCache:
         assert "kb1" in result.output
         assert len(store._COLLECTION_CACHE) == 0
 
+    def test_listing_cold_path_while_the_collection_is_busy(self, tmp_path, monkeypatch):
+        base = _isolated_home(tmp_path, monkeypatch)
+        _build(base, "kb0", n_chunks=20)
+        store._COLLECTION_CACHE.clear()
+        from localm.rag.collection_lock import collection_write_lock, lock_path_for
+
+        with collection_write_lock(lock_path_for(base / "kb0"), collection="kb0",
+                                   op="a test hold"):
+            stats = Collection.load_and_maybe_backfill("kb0").stats()
+
+        assert stats["n_chunks"] == 20
+        assert len(store._COLLECTION_CACHE) == 0
+
+    def test_listing_cold_path_backfill_reads_disk_not_the_cache(
+            self, tmp_path, monkeypatch):
+        base = _isolated_home(tmp_path, monkeypatch)
+        _build(base, "kb", n_chunks=20)
+        other = tmp_path / "other"
+        _build(other, "kb", n_chunks=25)
+        monkeypatch.setattr(store, "_collection_cache_fingerprint",
+                            lambda coll_dir: {"meta": None, "chunks": None,
+                                              "vectors": None})
+        store._COLLECTION_CACHE.clear()
+        Collection("kb")
+        for name in ("chunks.jsonl", "vectors.json", "meta.json"):
+            (base / "kb" / name).write_bytes((other / "kb" / name).read_bytes())
+
+        stats = Collection.load_and_maybe_backfill("kb").stats()
+
+        meta = json.loads((base / "kb" / "meta.json").read_text(encoding="utf-8"))
+        assert meta["_stats_cache"]["n_chunks"] == 25, (
+            "the backfill persisted stats for data the cache held, not the files")
+        assert stats["n_chunks"] == 25
+
     def test_listing_cold_path_backfill(self, tmp_path, monkeypatch):
         base = _isolated_home(tmp_path, monkeypatch)
         for i in range(3):
