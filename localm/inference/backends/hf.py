@@ -485,6 +485,7 @@ class HFBackend(BaseBackend):
         self.last_finish_reason = "stop"
         yield from self._runner.chat_stream(
             first_chunk_timeout=self._first_token_timeout_seconds(),
+            on_status=on_status,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,

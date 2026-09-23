@@ -80,6 +80,10 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
                                   a RuntimeError, which callers read as "the
                                   isolated worker faulted" (503), so anything the
                                   CALLER can fix needs a tag
+    ("status", text)           - a human-readable generation-stage update
+                                  (chat_stream only); relayed to the parent's
+                                  on_status callback and never counted as the
+                                  stream's first response for timeout purposes.
     ("chunk", text)            - one streamed token (chat_stream only)
     ("done", {"finish_reason": "stop"|"length"}) - end of one chat_stream,
                                   whether it ran to completion, hit a genuine
@@ -112,7 +116,7 @@ import os
 import queue as _queue
 import threading
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 
 class RunnerBusy(Exception):
@@ -362,7 +366,10 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             stream_cancel_event.clear()   # a stale cancel from a PRIOR stream
                                            # on this same model must not fire early
             try:
-                gen = worker.chat_stream(cancel_event=stream_cancel_event, **payload)
+                def _worker_status(s: str) -> None:
+                    resp_q.put(("status", s))
+                gen = worker.chat_stream(cancel_event=stream_cancel_event,
+                                          on_status=_worker_status, **payload)
                 for token in gen:
                     resp_q.put(("chunk", token))
                 resp_q.put(("done", {"finish_reason": worker.last_finish_reason}))
@@ -688,12 +695,19 @@ class HFRunner:
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the HF model-loading process: {result!r}")
 
-    def chat_stream(self, *, first_chunk_timeout: Optional[float] = None, **kwargs):
+    def chat_stream(self, *, first_chunk_timeout: Optional[float] = None,
+                    on_status: Optional[Callable[[str], None]] = None, **kwargs):
         """Yield text tokens. On the caller's ``GeneratorExit`` (a client
         disconnect or a superseding request), requests a cooperative cancel
         and drains for its confirmation - see ``_cancel_stream_and_drain``
         and the module docstring for the mechanism and its fallback to a
         kill.
+
+        *on_status*, when given, is called in THIS process with each
+        generation-stage update the child sends (see the module docstring's
+        ``("status", text)`` envelope) - never put on ``req_q``, so it is
+        never sent across the process boundary. Keyword-only and popped
+        here, mirroring ``first_chunk_timeout``.
 
         Holds ``_q_lock`` for the whole drive so no concurrent token-count
         RPC can consume this stream's envelopes off the shared response
@@ -760,8 +774,17 @@ class HFRunner:
                                     "Generation stalled: the model process "
                                     "stopped responding. It has been unloaded "
                                     "and will reload on the next request.")
-                    awaiting_first = False
                     kind = result[0]
+                    if kind == "status":
+                        status_text = result[1]
+                        logger.info("hf worker: status: %s", status_text)
+                        if on_status:
+                            try:
+                                on_status(status_text)
+                            except Exception:
+                                logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
+                        continue
+                    awaiting_first = False
                     if kind == "chunk":
                         yield result[1]
                     elif kind == "done":
