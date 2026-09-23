@@ -493,6 +493,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead of f16.** The tie-break between same-repo projector variants matched "f16" as a
   substring, which "bf16" also contains, so a listing ordered bf16-before-f16 picked the
   wrong one. It now matches the precision as a whole token.
+- **The chat status pill (Processing prompt, Encoding image, Generating response,
+  and the GPU-to-CPU vision fallback warning) now follows the interface
+  language for the whole reply instead of only until the server's first
+  update.** The server now sends a stable status code alongside its English
+  status text, and the GUI localizes from that code, so a non-English
+  interface no longer flips back to English status text partway through
+  a turn.
 - **Re-indexing, uploading to, or repairing a knowledge collection under a different embedding
   model of the same vector size no longer keeps reporting a model switch as safe.** Only the
   model that first embedded a collection was ever recorded; adding to it later under a
