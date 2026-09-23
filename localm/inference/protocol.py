@@ -8,6 +8,8 @@ from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
+from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+
 
 # ------------------------------------------------------------------ #
 #  Request content parts                                               #
@@ -215,7 +217,7 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     "Encoding image...": "encoding_image",
     "Encoding image (GPU)...": "encoding_image_gpu",
     "Encoding image (CPU)...": "encoding_image_cpu",
-    "GPU vision encode failed; retrying on CPU (this may take longer)...": "vision_cpu_retry",
+    VISION_CPU_FALLBACK_STATUS: "vision_cpu_retry",
 }
 
 

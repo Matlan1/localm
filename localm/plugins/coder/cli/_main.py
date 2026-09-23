@@ -265,7 +265,7 @@ def main(
 
     # Resolve CI defaults, project config (.localcoder/config.toml), the session
     # mode plus privacy setup, and the LLM gen kwargs.
-    model, max_turns, yes, always_confirm, session_mode, gen_kw = (
+    model, max_turns, yes, always_confirm, session_mode, gen_kw, max_tokens_explicit = (
         _resolve_session_config(
             work_dir, model, max_turns, max_tokens, temperature, seed, yes,
             interactive_confirm, mode, ci, provider))
@@ -337,6 +337,7 @@ def main(
         custom_instructions=system_instructions,
         verify_cmd=session_verify,
         browser_enabled=_browser_enabled(),
+        max_tokens_explicit=max_tokens_explicit,
     )
 
     if patch_mode:
@@ -588,8 +589,9 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
                             seed, yes, interactive_confirm, mode, ci, provider):
     """Resolve CI defaults, project config (.localcoder/config.toml, CLI flags
     override), the session mode + privacy setup, and the LLM gen kwargs. Returns
-    (model, max_turns, yes, always_confirm, session_mode, gen_kw). Split out of
-    main; exits (2 under --ci, else 1) on an invalid mode."""
+    (model, max_turns, yes, always_confirm, session_mode, gen_kw,
+    max_tokens_explicit). Split out of main; exits (2 under --ci, else 1) on
+    an invalid mode."""
     # CI mode setup
     if ci:
         yes = True          # never prompt
@@ -636,7 +638,8 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
     # Warn when privacy mode is requested but prompts leave the machine
     if session_mode == SessionMode.PRIVACY and provider in ("openai", "anthropic"):
         warn_external_provider(provider)
-    return model, max_turns, yes, always_confirm, session_mode, gen_kw
+    return (model, max_turns, yes, always_confirm, session_mode, gen_kw,
+            cfg.max_tokens_explicit)
 
 
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,

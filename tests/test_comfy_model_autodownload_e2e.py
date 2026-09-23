@@ -28,6 +28,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(mm, "MODELS_DIR", h / "models")
     monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
     monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: None)
     return h
 
 

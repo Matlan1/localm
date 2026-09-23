@@ -174,10 +174,16 @@ class TestAnUnknownTotalStreamsRatherThanGoingSilent:
 
 class TestTheInFlightScanIsScopedToThisJob:
     def _incomplete(self, base, rel, prefix, size):
+        import json
+        import os
+        from localm.model_manager.pull import _partial_owner_path
         d = base / ".cache" / "huggingface" / "download"
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"{prefix}.deadbeef.incomplete"
         f.write_bytes(b"z" * size)
+        # Owned by this process and not in flight, so it counts as reusable.
+        _partial_owner_path(f).write_text(
+            json.dumps({"pid": os.getpid(), "created": None}), encoding="utf-8")
         return f
 
     def test_a_concurrent_pulls_temp_file_is_not_counted(self, gui, capsys, tmp_path):

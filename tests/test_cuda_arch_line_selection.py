@@ -6,7 +6,7 @@ NVIDIA Blackwell (datacenter sm_100 / consumer+workstation sm_120, e.g. RTX
 50-series) is not supported by the 12.4-toolkit build's fatbin - upstream only
 added Blackwell kernels starting CUDA 12.8 - so a Blackwell card handed the 12.x
 build fails at inference time even though the DLL loads cleanly. Upstream ships
-a 13.3-toolkit build that does support it.
+a 13.4-toolkit build that does support it.
 
 These tests are entirely offline (no network, no real GPU) and drive the
 selection logic with a faked ``NvidiaInfo`` across a card-architecture x
@@ -107,13 +107,13 @@ def test_blackwell_card_with_only_12x_driver_is_not_driver_ok():
 
 def test_blackwell_card_with_13x_driver_is_driver_ok():
     info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="571.96",
-                         cuda_capability="13.3", compute_capability="12.0")
+                         cuda_capability="13.4", compute_capability="12.0")
     assert info.cuda_line == "cuda-13"
     assert info.driver_ok is True
 
 
 def test_blackwell_card_with_13x_driver_below_pinned_patch_is_not_yet_ok():
-    """The 13.3 minimum follows the 12.4 convention: match the PINNED asset's
+    """The 13.4 minimum follows the 12.4 convention: match the PINNED asset's
     own version, not just its major. A driver reporting 13.0 is therefore
     treated as not-yet-ok and falls back to Vulkan."""
     info = sl.NvidiaInfo(present=True, compute_capability="12.0", cuda_capability="13.0")
@@ -127,10 +127,10 @@ def test_driver_ok_bare_major_driver_version_padded_not_prefix_compared():
     rather than letting Python's tuple ordering treat the shorter tuple as
     smaller regardless of value. Padding with a trailing 0 reads a bare "13"
     as the earliest possible 13.x, so it fails a minimum that needs a specific
-    minor (13.3), while a bare major numerically higher than the whole
+    minor (13.4), while a bare major numerically higher than the whole
     threshold still passes."""
-    # Bare "13" against the cuda-13 line's (13,3) minimum: 13.0 does not
-    # clear 13.3 - correctly not-ok, not waved through by a padding bug.
+    # Bare "13" against the cuda-13 line's (13,4) minimum: 13.0 does not
+    # clear 13.4 - correctly not-ok, not waved through by a padding bug.
     assert sl.NvidiaInfo(present=True, compute_capability="12.0",
                          cuda_capability="13").driver_ok is False
     # No compute_capability set -> cuda-12 line, (12,4) minimum: bare "12"
@@ -147,7 +147,7 @@ def test_pre_blackwell_card_driver_thresholds_unchanged():
     driver_ok assertions, still true after the refactor."""
     assert sl.NvidiaInfo(present=True, cuda_capability="11.2").driver_ok is False
     assert sl.NvidiaInfo(present=True, cuda_capability="12.4").driver_ok is True
-    assert sl.NvidiaInfo(present=True, cuda_capability="13.3").driver_ok is True
+    assert sl.NvidiaInfo(present=True, cuda_capability="13.4").driver_ok is True
 
 
 def test_unknown_driver_capability_never_blocks_even_on_blackwell():
@@ -171,13 +171,13 @@ def test_dialogue_blackwell_old_driver_falls_back_to_vulkan_not_cuda13(monkeypat
 
 def test_dialogue_blackwell_new_driver_offers_cuda(monkeypatch):
     info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="571.96",
-                         cuda_capability="13.3", compute_capability="12.0")
+                         cuda_capability="13.4", compute_capability="12.0")
     assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True)
 
 
 def test_dialogue_prints_detected_architecture_and_line(monkeypatch, capsys):
     info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="571.96",
-                         cuda_capability="13.3", compute_capability="12.0")
+                         cuda_capability="13.4", compute_capability="12.0")
     sl._cuda_setup_dialogue(info, assume_yes=True)
     out = capsys.readouterr().out
     assert "12.0" in out
@@ -259,7 +259,7 @@ def test_resolve_backend_asset_cuda_line_selects_matching_asset(monkeypatch, lin
 # _PINNED_FALLBACK_SHA256 table, not a test fixture.                         #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("line, expected_fragment", [("cuda-12", "12.4"), ("cuda-13", "13.3")])
+@pytest.mark.parametrize("line, expected_fragment", [("cuda-12", "12.4"), ("cuda-13", "13.4")])
 def test_pinned_fallback_offline_url_names_a_real_checksum_table_entry(monkeypatch, line, expected_fragment):
     """With the release API entirely unreachable (the templated-URL fallback
     inside _resolve_backend_asset), the guessed filename for EITHER line must
@@ -283,7 +283,7 @@ def test_both_pinned_cuda_lines_share_the_same_upstream_tag():
     matching cudart bundles - are already pinned for the SAME upstream tag,
     so this was always a selection problem, never a missing-asset one."""
     tag = sl._PINNED_TAG
-    for line, ver in (("cuda-12", "12.4"), ("cuda-13", "13.3")):
+    for line, ver in (("cuda-12", "12.4"), ("cuda-13", "13.4")):
         build_name = f"llama-{tag}-bin-win-cuda-{ver}-x64.zip"
         cudart_name = f"cudart-llama-bin-win-cuda-{ver}-x64.zip"
         assert build_name in sl._PINNED_FALLBACK_SHA256, build_name
@@ -303,9 +303,9 @@ def test_both_pinned_cuda_lines_share_the_same_upstream_tag():
         ("RTX 3080", "8.6", "11.2", "cuda-12", False),
         ("RTX 4090", "8.9", "12.4", "cuda-12", True),
         ("H100", "9.0", "12.4", "cuda-12", True),
-        ("B200", "10.0", "13.3", "cuda-13", True),
+        ("B200", "10.0", "13.4", "cuda-13", True),
         ("B200", "10.0", "12.4", "cuda-13", False),      # arch needs 13.x, driver can't
-        ("RTX 5090", "12.0", "13.3", "cuda-13", True),
+        ("RTX 5090", "12.0", "13.4", "cuda-13", True),
         ("RTX 5090", "12.0", "12.4", "cuda-13", False),   # THE reported bug, exactly
         ("unknown NVIDIA GPU", "", "12.4", "cuda-12", True),
         ("unknown NVIDIA GPU", "N/A", "", "cuda-12", True),
@@ -347,7 +347,7 @@ def test_main_threads_blackwell_arch_into_cuda13_fetch(monkeypatch, tmp_path):
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "nvidia_preflight", lambda: sl.NvidiaInfo(
         present=True, gpu_name="RTX 5090", driver_version="571.96",
-        cuda_capability="13.3", compute_capability="12.0"))
+        cuda_capability="13.4", compute_capability="12.0"))
 
     target = tmp_path / "lib"
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)

@@ -44,6 +44,9 @@ class TaskConfig:
     always_confirm: frozenset
     session_mode: SessionMode
     gen_kw: dict
+    # False: gen_kw["max_tokens"] came from harness_profiles.cli_max_tokens.
+    # True: it is an explicit CLI flag or project-config value.
+    max_tokens_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,10 +125,12 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
         model = proj_cfg.get("model")
     if max_turns is None:
         max_turns = int(proj_cfg.get("max_turns", DEFAULT_MAX_TURNS))
+    max_tokens_explicit = max_tokens is not None
     if max_tokens is None:
         cfg_max_tokens = proj_cfg.get("max_tokens")
         if cfg_max_tokens is not None:
             max_tokens = int(cfg_max_tokens)
+            max_tokens_explicit = True
         else:
             from .harness_profiles import cli_max_tokens
             max_tokens = cli_max_tokens(model)
@@ -157,7 +162,8 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
     ] if v is not None}
     return TaskConfig(model=model, max_turns=max_turns, auto_approve=yes,
                       always_confirm=frozenset(always_confirm),
-                      session_mode=session_mode, gen_kw=gen_kw)
+                      session_mode=session_mode, gen_kw=gen_kw,
+                      max_tokens_explicit=max_tokens_explicit)
 
 
 def unattended_shell_gated(task: str, auto_approve: bool) -> bool:
@@ -171,12 +177,18 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
                 gen_kw: Optional[dict] = None, verbose: bool = False,
                 dry_run: bool = False, scope: Optional[str] = None,
                 custom_instructions: Optional[str] = None, verify_cmd=None,
-                browser_enabled: bool = False, on_event=None) -> Agent:
+                browser_enabled: bool = False, on_event=None,
+                max_tokens_explicit: bool = False) -> Agent:
     """Construct the Agent for a session the way the CLI does.
 
     A one-shot task auto-approves file writes; without ``auto_approve`` the
     shell tools are added to ``always_confirm`` so an unattended run denies
-    them instead of executing unconfirmed."""
+    them instead of executing unconfirmed.
+
+    ``max_tokens_explicit`` should be ``TaskConfig.max_tokens_explicit`` from
+    the same ``resolve_task_config`` call that produced ``gen_kw``, so a later
+    ``set_model`` can tell a project/CLI-pinned max_tokens from the
+    cli_max_tokens default."""
     always_confirm = set(always_confirm or ())
     if unattended_shell_gated(task, auto_approve):
         always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
@@ -194,6 +206,7 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
         custom_instructions=custom_instructions,
         verify_cmd=verify_cmd,
         browser_enabled=browser_enabled,
+        max_tokens_explicit=max_tokens_explicit,
         on_event=on_event,
         **(gen_kw or {}),
     )

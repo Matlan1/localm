@@ -109,6 +109,15 @@ class _SessionMixin:
         Updates the backend, updates the agent's model name, family id
         (for family-specific prompt tuning), harness overrides, and rebuilds
         the system prompt so family-specific instructions are applied.
+
+        gen_kwargs is rebuilt from the NEW model's profile plus only the
+        caller-explicit keys recorded at construction (see
+        _explicit_gen_kwargs), so a value the OLD model's profile filled in
+        does not survive as if it had been chosen for the new one. max_tokens
+        follows _max_tokens_explicit: recomputed via cli_max_tokens for the
+        new model when it was itself profile-derived, left alone otherwise.
+        The grammar-unsupported latches are cleared too, since they describe
+        the backend that was loaded before this switch.
         """
         set_model_backend = getattr(self.backend, "set_model", None)
         if set_model_backend is not None:
@@ -124,8 +133,17 @@ class _SessionMixin:
                 self._family_id = f"{model} {src}"
         except Exception:
             pass
-        from ..harness_profiles import agent_gen_overrides
-        self.gen_kwargs = {**agent_gen_overrides(model), **self.gen_kwargs}
+        from ..harness_profiles import agent_gen_overrides, cli_max_tokens
+        explicit = {k: self.gen_kwargs[k] for k in self._explicit_gen_kwargs
+                    if k in self.gen_kwargs}
+        new_gen_kwargs = {**agent_gen_overrides(model), **explicit}
+        if self._max_tokens_explicit is False:
+            new_gen_kwargs["max_tokens"] = cli_max_tokens(model)
+        elif "max_tokens" in self.gen_kwargs:
+            new_gen_kwargs["max_tokens"] = self.gen_kwargs["max_tokens"]
+        self.gen_kwargs = new_gen_kwargs
+        self._grammar_confirmed_unsupported = False
+        self._lazy_grammar_confirmed_unsupported = False
         self._rebuild_system_prompt()
         self._audit.notice(
             "model_switch", f"switched model {old_model} -> {model} at turn {self.turns}")

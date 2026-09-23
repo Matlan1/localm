@@ -40,6 +40,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   allows queueing follow-up messages while generation or retrieval is active.
 
 ### Changed
+- **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
 - **Web activity in the chat is its own collapsed card, not a user turn.** A
   web search, a page read, a declined or repeated request and the chat's own
   web notes are now stored in the conversation as tool events rather than as
@@ -84,6 +85,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **A plugin's secret setting (an API key it registers via `add_settings()`) now correctly shows its configured status and a Clear button in Settings.** It previously always displayed as not set, and could never be cleared from the GUI, because the Settings page dropped the saved/environment status when rendering plugin, TTS, and per-plugin media secret fields.
+- **Resumed HuggingFace downloads are safe to run alongside another download, resume on Xet-backed repos, and are verified before they are registered.** A pull now writes its own temp file and only continues from a partial whose owning process is confirmed gone, so two pulls of the same file (or another program using the HuggingFace cache) can no longer be stitched into one corrupt file. A partial left by an earlier upload of the same file is no longer counted as "already downloaded" and is cleaned up. "Resuming ... (skipping first N MB)" is now only printed when those bytes are really reused, including on Xet-backed repos where the retry previously started over from zero. Every pull whose sha256 HuggingFace publishes is now hashed against it after download; a mismatch deletes the file and fails instead of registering it.
 - **Curated model download shortcuts for Phi-4-mini and Gemma-3 now resolve to their correct HuggingFace repositories.** The curated shortcuts dropdown in the GUI and `localm pull <alias>` now use the `microsoft_` and `google_` upstream repo prefixes for `phi4-mini`, `gemma3-4b`, and `gemma3-12b`, resolving previous 401 download failures.
 - **HuggingFace backend loading no longer emits docstring lint errors, `torch_dtype` deprecation warnings, or offloaded buffer warnings.** `_hf_worker` dynamically passes `dtype` on modern Transformers, sets `offload_buffers=True` to offload layer buffers to CPU alongside parameters during partial offloading (preventing GPU VRAM contention on AWQ models), and filters upstream `@auto_docstring` stdout leaks.
 - **Ctrl+C and closing the console window no longer trigger automatic watchdog restarts on Windows.** Disarms the crash guard immediately on `CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, and `CTRL_CLOSE_EVENT` before teardown waits or OS process termination, and hardens `crash_recovery_watchdog.py` to recognize `STATUS_CONTROL_C_EXIT` (`0xC000013A`) and fast-exit on clean stops without waiting for the grace period.
@@ -476,6 +478,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   like `setuptools`, through PyTorch's vendor-specific wheel index, which does not mirror a
   recent enough `setuptools` to satisfy this project's own requirement. It now routes only the
   PyTorch packages through that index and leaves the rest on the normal package index.
+- **Switching the coder plugin's model mid-session (the REPL's `/model`, or the GUI's model
+  switcher) no longer leaves the previous model's temperature, token limit, or tool-call-grammar
+  support stuck on the new one.** A small model's steadier temperature, or a reasoning model's
+  larger token limit, used to carry over onto an unrelated model after a switch instead of
+  applying the new model's own settings; an explicit temperature or token-limit choice still
+  survives a switch as before, and a model that had been refused constrained tool-call sampling
+  is given a fresh chance to use it after switching away.
+- **Stopping the server with Ctrl+Break or by closing its console window on Windows could leave
+  an orphaned crash trace file behind.** The crash-recovery watchdog already removed the crash
+  marker on an intentional console stop; it now also removes the paired native-fault trace file.
 - **The chat status pill (Processing prompt, Encoding image, Generating response,
   and the GPU-to-CPU vision fallback warning) now follows the interface
   language for the whole reply instead of only until the server's first
