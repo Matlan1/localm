@@ -17,6 +17,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   starting a new session or losing history. In the GUI, click the session model
   badge in the session bar or use the Model section in session controls; switching
   the active model in the sidebar also updates local coder sessions automatically.
+  When loading the chosen model would evict a model that is in use, or would only
+  partly fit in VRAM, the coder asks first, as the sidebar model picker does. If
+  the load does not complete, starting a session reports why instead of starting
+  on a model that is not loaded, and switching keeps the session on its current
+  model.
   In the CLI, switch models in the REPL with `/model <name>` (or inspect with
   `/model`), and resume any past session with a specified model via `localm coder
   --resume [id] --model <name>`.

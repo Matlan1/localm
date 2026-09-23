@@ -734,24 +734,13 @@ class CoderSession:
         so a model switch elsewhere in the app never reaches a running session.
 
         False when the agent is mid-task (the same busy guard undo()/compact()
-        use, so a turn cannot be answered by a model that changed under it), or
-        when the backend does not support being repointed. Only HTTPBackend
-        does; a backend type without set_model reports "not supported" rather
-        than raising AttributeError."""
+        use, so a turn cannot be answered by a model that changed under it).
+        Raises ModelSwitchUnsupported, with the session unchanged, when the
+        backend has no set_model to repoint. Only HTTPBackend has one."""
         with self._lock:
             if self.busy:
                 return False
-        agent_set_model = getattr(self.agent, "set_model", None)
-        if agent_set_model is not None:
-            agent_set_model(model)
-        else:
-            set_model_fn = getattr(self.agent.backend, "set_model", None)
-            if set_model_fn is None:
-                return False
-            set_model_fn(model)
-            self.agent._audit.notice(
-                "model_switch", f"switched model {self.model} -> {model} "
-                f"at turn {self.agent.turns}")
+        self.agent.set_model(model)
         if self.backend_info and isinstance(self.backend_info, dict):
             self.backend_info["model"] = model
         self.model = model          # keep info() truthful - see its docstring

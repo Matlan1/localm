@@ -37,8 +37,8 @@ _UNC = "\\\\192.0.2.1\\share"
 #  Harness                                                                     #
 # --------------------------------------------------------------------------- #
 
-class _StubBackend:
-    """Enough backend for a session, with no model behind it."""
+class _FixedModelBackend:
+    """Enough backend for a session, with no model behind it and no set_model."""
     model_id = "stub-model"
     native_tools = False
     supports_native_tools = True
@@ -54,6 +54,18 @@ class _StubBackend:
     def chat(self, messages, **kw):
         self.calls.append(messages)
         return "ok"
+
+
+class _StubBackend(_FixedModelBackend):
+    """A stub backend that can be repointed; records every set_model call."""
+
+    def __init__(self):
+        super().__init__()
+        self.set_model_calls: list = []
+
+    def set_model(self, model):
+        self.set_model_calls.append(model)
+        self.model_id = model
 
 
 def _coder_app(tmp_path, monkeypatch, *, api_key):
@@ -1030,6 +1042,9 @@ def test_session_set_model_route_updates_session_and_backend(tmp_path, monkeypat
         assert sess.backend_info["model"] == "model-switched"
         assert sess.agent._model_name == "model-switched"
         assert switched == ["model-initial", "model-switched"]
+        # The backend is what names the model on every request.
+        assert sess.agent.backend.set_model_calls == ["model-switched"]
+        assert sess.agent.backend.model_id == "model-switched"
 
 
 def test_session_set_model_rejected_while_busy(tmp_path, monkeypatch):
@@ -1076,6 +1091,51 @@ def test_session_set_model_remote_backend(tmp_path, monkeypatch):
         assert r.json()["model"] == "gpt-4o-mini"
         assert sess.model == "gpt-4o-mini"
         assert sess.agent._model_name == "gpt-4o-mini"
+        assert sess.agent.backend.set_model_calls == ["gpt-4o-mini"]
+        assert sess.agent.backend.model_id == "gpt-4o-mini"
+
+
+def test_set_model_with_backend_that_cannot_switch_returns_409(tmp_path, monkeypatch):
+    """A backend without set_model keeps sending its original model name, so
+    the switch is refused and the session keeps its model everywhere."""
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"model-initial": {}, "model-switched": {}})
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj, model="model-initial")
+        sess = app.state.coder_sessions.get(sid)
+        backend = sess.agent.backend = _FixedModelBackend()
+
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "model-switched"})
+
+        assert sess.model == "model-initial"
+        assert sess.backend_info["model"] == "model-initial"
+        assert sess.agent._model_name == "model-initial"
+        assert backend.model_id == "stub-model"
+        assert r.status_code == 409, r.text
+        assert "cannot switch models" in r.json()["detail"]
+
+
+def test_repl_model_command_reports_a_backend_that_cannot_switch(tmp_path, monkeypatch):
+    """The REPL's /model reports the refusal instead of claiming the switch."""
+    from localm.plugins.coder.cli import repl as _repl
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj)
+        agent = app.state.coder_sessions.get(sid).agent
+        agent.backend = _FixedModelBackend()
+        before = agent._model_name
+
+        errors: list = []
+        successes: list = []
+        monkeypatch.setattr(_repl, "print_error", lambda m: errors.append(m))
+        monkeypatch.setattr(_repl, "print_success", lambda m: successes.append(m))
+        _repl._handle_command("/model other-model", agent)
+
+        assert agent._model_name == before
+        assert successes == []
+        assert errors and "Failed to switch model" in errors[-1], errors
 
 
 def test_session_set_model_pushes_sse_info_event(tmp_path, monkeypatch):

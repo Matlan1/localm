@@ -65,6 +65,7 @@ from pydantic import BaseModel, Field
 
 from localm.pathsafe import confined_file as _confined_file
 from localm.pathsafe import is_unc_or_device_path as _is_unc_or_device_path
+from localm.plugins.coder.backends.base import ModelSwitchUnsupported
 from localm.plugins.coder.sessions import CoderSession, SessionUnavailable
 from localm.executor import get_plugin_executor
 
@@ -84,6 +85,9 @@ class CreateSessionRequest(BaseModel):
     max_turns: int = 40
     mode: str | None = None           # None = config coder_mode/mode, else privacy
     model: str | None = None          # switch active engine when given
+    # Proceed with a model switch that answered 409 confirm_required (a busy
+    # model in the way, or a load that would fall back to CPU offload).
+    force: bool = False
     scope: str | None = None          # glob restricting file-access tools
     dry_run: bool = False             # destructive tools report but don't run
     # The CLI's --interactive-confirm: auto-approve file writes but STILL prompt
@@ -165,6 +169,8 @@ class EpisodeTargetRequest(BaseModel):
 
 class SetModelRequest(BaseModel):
     model: str
+    # Proceed with a model switch that answered 409 confirm_required.
+    force: bool = False
 
 
 class SessionSettingsRequest(BaseModel):
@@ -507,6 +513,59 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
                      "target": base, "model": target_model}, notes
 
 
+async def _ensure_model_loaded(request: Request, model: str, *,
+                               force: bool = False) -> None:
+    """Load *model* as the shared engine through ``app.state.switch_model``.
+
+    Returns only when the switch reports ``loaded`` or ``already_active``, or
+    reports no status at all (a minimal switch callable). ``force`` is passed
+    to the switch only when True.
+
+    Raises HTTPException:
+      503  no switch_model is wired, or the load was superseded, cancelled or
+           reported any other status;
+      409  the load needs confirmation; ``detail`` is
+           ``{"status": "confirm_required", "model", "detail"}`` and a retry
+           with ``force`` proceeds;
+      500  the switch raised; an HTTPException it raised passes through
+           unchanged.
+    """
+    switch_model = getattr(request.app.state, "switch_model", None)
+    if switch_model is None:
+        raise HTTPException(503, "Model switching needs the localm GUI server.")
+    try:
+        res = await (switch_model(model, force=True) if force
+                     else switch_model(model))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to load {model}: {e}")
+    status = res.get("status") if isinstance(res, dict) else None
+    if status in (None, "loaded", "already_active"):
+        return
+    if status == "confirm_required":
+        raise HTTPException(409, {
+            "status": "confirm_required", "model": model,
+            "detail": res.get("detail") or f"Loading '{model}' needs confirmation."})
+    if status == "superseded":
+        raise HTTPException(
+            503, f"Model load was superseded by a newer request: {res.get('by')}")
+    if status == "cancelled":
+        raise HTTPException(503, f"Model load was cancelled: {res.get('reason')}")
+    raise HTTPException(503, f"Model load of {model} did not complete: {status}")
+
+
+def _set_session_model(session: CoderSession, model: str) -> None:
+    """Repoint *session* at *model*, or raise HTTPException 409 when the
+    session is busy or its backend cannot switch models in place."""
+    try:
+        switched = session.set_model(model)
+    except ModelSwitchUnsupported as e:
+        raise HTTPException(409, str(e))
+    if not switched:
+        raise HTTPException(409, "Session is busy; cannot switch models mid-task")
+
+
 # ------------------------------------------------------------------ #
 #  Session lifecycle                                                  #
 # ------------------------------------------------------------------ #
@@ -603,14 +662,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
                         from localm.config import load_registry
                         if req.model not in load_registry():
                             raise HTTPException(404, f"Model not registered: {req.model}")
-                        switch_model = getattr(request.app.state, "switch_model", None)
-                        if switch_model is None:
-                            raise HTTPException(503, "Model switching needs the localm GUI server.")
-                        try:
-                            await switch_model(req.model)
-                        except Exception as e:
-                            raise HTTPException(500, f"Failed to load {req.model}: {e}")
-                    existing.set_model(req.model)
+                        await _ensure_model_loaded(request, req.model, force=req.force)
+                    _set_session_model(existing, req.model)
                 return {**existing.info(), "resumed": False,
                         "notes": ["Already open - joined the session already "
                                   "running for this folder instead of starting "
@@ -633,13 +686,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         from localm.config import load_registry
         if req.model not in load_registry():
             raise HTTPException(404, f"Model not registered: {req.model}")
-        switch_model = getattr(request.app.state, "switch_model", None)
-        if switch_model is None:
-            raise HTTPException(503, "Model switching needs the localm GUI server.")
-        try:
-            await switch_model(req.model)
-        except Exception as e:
-            raise HTTPException(500, f"Failed to load {req.model}: {e}")
+        await _ensure_model_loaded(request, req.model, force=req.force)
 
     from localm.audit import effective_mode, mode_at_least_as_private, parse_mode
     # Pass the session's project dir so a per-project .localcoder/config.toml mode
@@ -1046,32 +1093,13 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
             from localm.config import load_registry
             if req.model not in load_registry():
                 raise HTTPException(404, f"Model not registered: {req.model}")
-            switch_model = getattr(request.app.state, "switch_model", None)
-            if switch_model is None:
-                raise HTTPException(503, "Model switching needs the localm GUI server.")
-            try:
-                res = await switch_model(req.model)
-            except Exception as e:
-                raise HTTPException(500, f"Failed to load {req.model}: {e}")
-            # switch_model preempts an in-flight load of a DIFFERENT model (single-
-            # slot, http_server.switch_engine's preempt=True default) - a newer
-            # switch elsewhere can abandon THIS one mid-load, and it reports that
-            # by returning {"status": "superseded"} rather than raising. Reporting
-            # 200 here would tell the caller its switch happened when it did not
-            # (get_engine() itself guards the identical case at http_server.py).
-            if isinstance(res, dict) and res.get("status") == "superseded":
-                raise HTTPException(
-                    503, f"Model load was superseded by a newer request: {res.get('by')}")
-            if isinstance(res, dict) and res.get("status") == "cancelled":
-                raise HTTPException(
-                    503, f"Model load was cancelled: {res.get('reason')}")
+            await _ensure_model_loaded(request, req.model, force=req.force)
     elif restricted:
         raise HTTPException(
             403, "Switching models needs the owner key; a scoped key uses the "
             "active model.")
 
-    if not session.set_model(req.model):
-        raise HTTPException(409, "Session is busy; cannot switch models mid-task")
+    _set_session_model(session, req.model)
     return session.info()
 
 
