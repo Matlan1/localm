@@ -171,3 +171,40 @@ class TestCoderBackend:
         base, engines, _ = live
         self._backend(base, pinned=False).chat([{"role": "user", "content": "x"}])
         assert hs._resolve_unnamed_model_name() == "plain"
+
+
+# --------------------------------------------------------------------------- #
+#  `localm run MODEL` attached to a server (HttpEngine)                        #
+# --------------------------------------------------------------------------- #
+
+_IMAGE = [{"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+    {"type": "text", "text": "what is this?"}]}]
+
+
+class TestTerminalChatAttached:
+    def _engine(self, base, *, pinned):
+        from localm.inference.http_engine import HttpEngine
+        return HttpEngine(base, model="plain", display_name="plain", pin_model=pinned)
+
+    def test_an_image_is_answered_by_the_vision_model(self, live):
+        base, engines, _ = live
+        eng = self._engine(base, pinned=False)
+        text = "".join(eng.chat_stream(_IMAGE))
+        assert _answering(engines) == ["seer"]
+        assert text == "answered-by-seer"
+        assert eng.answered_model == "seer"
+
+    def test_pinned_the_image_is_refused_as_before(self, live):
+        from localm.inference.backends.base import UnsupportedInputError
+        base, engines, _ = live
+        eng = self._engine(base, pinned=True)
+        with pytest.raises(UnsupportedInputError):
+            "".join(eng.chat_stream(_IMAGE))
+        assert _answering(engines) == []
+
+    def test_min_context_is_answered_by_a_roomier_model(self, live):
+        base, engines, _ = live
+        eng = self._engine(base, pinned=False)
+        "".join(eng.chat_stream([{"role": "user", "content": "hi"}], min_context=20000))
+        assert _answering(engines) == ["tooly"]

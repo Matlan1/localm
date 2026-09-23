@@ -1277,18 +1277,10 @@ def plan_capability_route(model_name: str | None, messages: list,
     one loads nothing here."""
     from localm import peer_routing
     from localm.inference import capability_routing as _cr
-    from localm.inference.backends.base import messages_contain_image
     from localm.model_manager import capabilities as _caps
 
-    wanted = list(required_capabilities or ())
-    if messages_contain_image(messages) and _caps.VISION not in wanted:
-        wanted.append(_caps.VISION)
-    derived_ctx = _cr.context_need(messages) if messages else None
-    ctx_candidates = [c for c in (derived_ctx, min_context) if isinstance(c, int) and c > 0]
-    needs = _cr.CapabilityNeeds(
-        capabilities=tuple(wanted),
-        min_context=max(ctx_candidates) if ctx_candidates else None,
-    )
+    needs = _cr.request_needs(messages or [], required=required_capabilities or (),
+                              min_context=min_context)
     named = (model_name or "").strip()
     if named == "localm":
         named = ""

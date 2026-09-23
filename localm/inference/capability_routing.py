@@ -23,6 +23,7 @@ A pinned request therefore still gets a decision describing what it lacks, and
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, Optional, Sequence, Tuple
 
@@ -147,6 +148,36 @@ def context_need(messages: Sequence[dict]) -> Optional[int]:
     if est < _CONTEXT_ROUTING_FLOOR_TOKENS:
         return None
     return int(est * _CONTEXT_HEADROOM)
+
+
+def compaction_context_need(messages: Sequence[dict], trained: Optional[int],
+                            ratio: float) -> Optional[int]:
+    """The trained window a conversation needs so it is not compacted, for a
+    client that compacts at *ratio* of the window: ``ceil(estimate / ratio)``
+    once the conversation has reached *ratio* of *trained* (the answering
+    model's trained window), else None. None too when *trained* is unknown."""
+    if not trained or trained <= 0 or ratio <= 0:
+        return None
+    est = estimate_prompt_tokens(messages)
+    if est < ratio * trained:
+        return None
+    return math.ceil(est / ratio)
+
+
+def request_needs(messages: Sequence[dict], *, required: Sequence[str] = (),
+                  min_context: Optional[int] = None) -> CapabilityNeeds:
+    """What a chat request with *messages* needs: vision when a message carries
+    an image, the context window its size implies, plus *required* capabilities
+    and *min_context*. The same derivation the server applies to
+    ``/v1/chat/completions``."""
+    from localm.inference.backends.base import messages_contain_image
+    wanted = list(required)
+    if messages_contain_image(list(messages)) and caps.VISION not in wanted:
+        wanted.append(caps.VISION)
+    derived = context_need(messages) if messages else None
+    ctx = [c for c in (derived, min_context) if isinstance(c, int) and c > 0]
+    return CapabilityNeeds(capabilities=tuple(wanted),
+                           min_context=max(ctx) if ctx else None)
 
 
 def estimate_prompt_tokens(messages: Sequence[dict]) -> int:
