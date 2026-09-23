@@ -405,9 +405,9 @@ def probe_placement_capability(api_url: str, *,
     - It is the guard for a ComfyUI that PREDATES the multigpu nodes (first added
       upstream 2026-05-25, tag v0.23.0). There the probe returns unavailable and
       placement declines cleanly, rather than injecting a node ComfyUI would reject.
-      That is only ever a ComfyUI of the user's OWN: localm's managed pin is
-      v0.31.1 and DOES offer the nodes (see ``COMFYUI_PLACEMENT_MIN_VERSION`` next to
-      the pin itself).
+      That is only ever a ComfyUI of the user's OWN: localm's managed pin
+      (``COMFYUI_PINNED_VERSION``) DOES offer the nodes (see
+      ``COMFYUI_PLACEMENT_MIN_VERSION`` next to the pin itself).
     - It reads ComfyUI's OWN device enumeration (the ``gpu:N`` combo), which is
       authoritative about how many cards ComfyUI actually sees. (The caller's Gate 2
       uses ``applied_split_device_count`` as a cheap Vulkan-sound pre-filter; this probe

@@ -10,8 +10,8 @@ nodes, located BY CLASS, never by hardcoded id.
 These tests exercise the REAL shipped workflow JSONs and the REAL helper code
 paths, not mocks of them.
 
-localm's MANAGED ComfyUI is pinned at v0.31.1, which DOES ship the placement nodes
-(they first appear in tag v0.23.0). A decline on the managed install is therefore
+localm's MANAGED ComfyUI is pinned at COMFYUI_PINNED_VERSION, which DOES ship the placement
+nodes (they first appear in tag v0.23.0). A decline on the managed install is therefore
 upstream's own rule that the device combo only offers gpu:N once ComfyUI sees MORE
 THAN ONE card (model_management.get_gpu_device_options), which on a single-GPU box
 yields ['default', 'cpu'] and nothing to place onto.
