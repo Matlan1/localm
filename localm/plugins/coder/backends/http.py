@@ -183,6 +183,15 @@ class HTTPBackend(BaseLLMBackend):
         Per-request timeout in seconds.
     extra_params:
         Additional fields merged into every request body (e.g. ``top_k``).
+    model_pinned:
+        Whether *model* is a pin. False sends it to a localm server as the
+        preferred model only, which the server may replace with an installed
+        model that has what a request needs (see ``required_capabilities``).
+        Ignored by any other server.
+    required_capabilities:
+        Capabilities the answering model must have, e.g. ``("tool_use",)``,
+        sent to a localm server with every request. Ignored by any other
+        server.
     """
 
     # Anthropic requires max_tokens on every request; OpenAI-compat does not.
@@ -200,6 +209,8 @@ class HTTPBackend(BaseLLMBackend):
         localm_server: bool = False,
         verify=None,
         pinned: bool = False,
+        model_pinned: bool = True,
+        required_capabilities=None,
         **extra_params,
     ) -> None:
         self._base_url     = base_url.rstrip("/")
@@ -250,6 +261,11 @@ class HTTPBackend(BaseLLMBackend):
         self.supports_grammar = bool(localm_server) and not anthropic
         self._ctx_capacity_cached = False
         self._ctx_capacity: Optional[int] = None
+        self.model_pinned = bool(model_pinned)
+        self.required_capabilities = tuple(required_capabilities or ())
+        # The model the server reported answering the most recent request, or
+        # None before the first response.
+        self.answered_model: Optional[str] = None
 
     @property
     def supports_native_tools(self) -> bool:
@@ -308,8 +324,9 @@ class HTTPBackend(BaseLLMBackend):
     def model_id(self) -> str:
         return self._model
 
-    def set_model(self, model: str) -> None:
-        """Repoint this backend at a different model NAME, in place.
+    def set_model(self, model: str, *, pinned: Optional[bool] = None) -> None:
+        """Repoint this backend at a different model NAME, in place. *pinned*,
+        when given, also sets ``model_pinned``.
 
         Every chat()/chat_stream() call sends ``self._model`` in the request
         body (see _body()/_anthropic_body()), so this is the one thing a caller
@@ -322,8 +339,21 @@ class HTTPBackend(BaseLLMBackend):
         so a switch must re-fetch it or the coder keeps budgeting history
         against the OLD model's window."""
         self._model = model
+        if pinned is not None:
+            self.model_pinned = bool(pinned)
         self._ctx_capacity_cached = False
         self._ctx_capacity = None
+
+    def _note_answer(self, model, usage) -> None:
+        """Record which model answered, and the context capacity it reported
+        (``usage.context_capacity``), which then answers ``context_capacity()``
+        in place of the loaded model's."""
+        if isinstance(model, str) and model:
+            self.answered_model = model
+        cap = usage.get("context_capacity") if isinstance(usage, dict) else None
+        if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+            self._ctx_capacity = cap
+            self._ctx_capacity_cached = True
 
     @property
     def last_usage(self) -> dict:
@@ -451,6 +481,11 @@ class HTTPBackend(BaseLLMBackend):
         if self.native_tools and self._tool_defs:
             body["tools"] = self._tool_defs
             body["tool_choice"] = "auto"
+        if self._is_local_server:
+            if not self.model_pinned:
+                body["pin_model"] = False
+            if self.required_capabilities:
+                body["required_capabilities"] = list(self.required_capabilities)
         return {k: v for k, v in body.items() if v is not None}
 
     def _anthropic_body(self, messages: list[dict], stream: bool, **kwargs) -> dict:
@@ -553,6 +588,7 @@ class HTTPBackend(BaseLLMBackend):
             return self._parse_anthropic_response(data)
         if data.get("usage"):
             self._last_usage = data["usage"]
+        self._note_answer(data.get("model"), data.get("usage"))
         message = data["choices"][0]["message"]
         text    = message.get("content") or ""
         # The server splits a thinking model's reasoning into its own
@@ -610,6 +646,7 @@ class HTTPBackend(BaseLLMBackend):
                 # Capture usage from the final stop chunk (sent by localm server)
                 if chunk.get("usage"):
                     self._last_usage = chunk["usage"]
+                self._note_answer(chunk.get("model"), chunk.get("usage"))
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
                 # Reasoning delta: routed to on_reasoning (a SEPARATE channel
                 # from the yielded content), never yielded inline - see chat()'s

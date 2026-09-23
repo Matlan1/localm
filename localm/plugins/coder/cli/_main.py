@@ -83,6 +83,11 @@ def _complete_model(ctx, param, incomplete):
 @click.option("-m", "--model",      default=None,  envvar="LOCALCODER_MODEL",
               shell_complete=_complete_model,
               help="Model name (must be registered in localm).")
+@click.option("--pin-model", "pin_model", is_flag=True,
+              help="Always answer with --model. Without it, a request --model "
+                   "cannot serve (structured tool calls, a longer conversation "
+                   "than it was trained for) is answered by an installed model "
+                   "that can. localm server only.")
 @click.option("-u", "--url",        default=None,  envvar="LOCALCODER_URL",
               help="OpenAI-compat base URL, e.g. http://127.0.0.1:8642/v1.")
 @click.option("-k", "--api-key",    default="localm", envvar="LOCALM_API_KEY",
@@ -214,7 +219,7 @@ def _complete_model(ctx, param, incomplete):
 @click.option("--resume", "-r", "resume", default=None, is_flag=False, flag_value="",
               help="Resume the last saved session (or specify checkpoint ID) with the chosen model.")
 def main(
-    task, model, url, api_key, port, cwd,
+    task, model, pin_model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens, seed,
     verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope, system_instructions,
@@ -287,6 +292,12 @@ def main(
     backend = _build_backend(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci)
+    # Every coder request needs structured tool calls. A localm server answers
+    # one --model cannot serve with an installed model that can, unless pinned;
+    # any other server ignores both.
+    if hasattr(backend, "model_pinned"):
+        backend.model_pinned = bool(pin_model)
+        backend.required_capabilities = ("tool_use",)
 
     # --native-tools asked for a protocol the chosen server does not implement.
     # localm's own /v1/chat/completions declares no tools/tool_choice fields, so a

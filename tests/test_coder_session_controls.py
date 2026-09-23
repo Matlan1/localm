@@ -1213,3 +1213,57 @@ def test_repl_model_command_shows_and_switches(tmp_path, monkeypatch):
     assert agent.switched_to == "target-model"
     assert any("target-model" in p for p in printed_success)
 
+
+
+# --------------------------------------------------------------------------- #
+#  A session's model: pinned when chosen, preferred when it follows the         #
+#  loaded model                                                                 #
+# --------------------------------------------------------------------------- #
+
+def test_a_session_started_without_a_model_is_not_pinned(tmp_path, monkeypatch):
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions", headers=owner, json={"cwd": str(proj)})
+        assert r.status_code == 200, r.text
+        info = r.json()
+        sess = app.state.coder_sessions.get(info["id"])
+        assert info["model_pinned"] is False
+        assert sess.agent.backend.model_pinned is False
+        assert sess.agent.backend.required_capabilities == ("tool_use",)
+        body = sess.agent.backend._body([{"role": "user", "content": "x"}], stream=False)
+        assert body["pin_model"] is False
+        assert body["required_capabilities"] == ["tool_use"]
+
+
+def test_a_session_started_with_a_chosen_model_is_pinned(tmp_path, monkeypatch):
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"chosen": {}})
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "model": "chosen"})
+        assert r.status_code == 200, r.text
+        info = r.json()
+        sess = app.state.coder_sessions.get(info["id"])
+        assert info["model_pinned"] is True
+        body = sess.agent.backend._body([{"role": "user", "content": "x"}], stream=False)
+        assert "pin_model" not in body
+        assert body["model"] == "chosen"
+
+
+def test_following_the_loaded_model_keeps_the_session_unpinned(tmp_path, monkeypatch):
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"a": {}, "b": {}})
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj)
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "b", "pin": False})
+        assert r.status_code == 200, r.text
+        assert r.json()["model_pinned"] is False
+        assert app.state.coder_sessions.get(sid).agent.backend.model_pinned is False
+
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "a"})
+        assert r.json()["model_pinned"] is True, "an explicit pick pins by default"
+        assert app.state.coder_sessions.get(sid).agent.backend.model_pinned is True

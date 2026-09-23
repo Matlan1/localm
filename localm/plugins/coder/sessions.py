@@ -186,6 +186,10 @@ class CoderSession:
         self.principal: Optional[str] = None
         self.restricted = restricted
         self.model = getattr(backend, "model_id", "")
+        # Whether this session's model is a pin: always answered by it, or the
+        # preferred model, which the server may replace when a request needs
+        # something it lacks.
+        self.model_pinned = bool(getattr(backend, "model_pinned", True))
         self.auto_approve = auto_approve
         self.mode = mode
         self.dry_run = dry_run
@@ -726,7 +730,7 @@ class CoderSession:
             "dropped": registry.dropped_for(owner),
         }
 
-    def set_model(self, model: str) -> bool:
+    def set_model(self, model: str, pinned: Optional[bool] = None) -> bool:
         """Repoint this session's backend at a different model, in place:
         conversation history, tools and agent state are untouched, and no new
         Agent or backend is built. The backend otherwise keeps sending the
@@ -736,11 +740,17 @@ class CoderSession:
         False when the agent is mid-task (the same busy guard undo()/compact()
         use, so a turn cannot be answered by a model that changed under it).
         Raises ModelSwitchUnsupported, with the session unchanged, when the
-        backend has no set_model to repoint. Only HTTPBackend has one."""
+        backend has no set_model to repoint. Only HTTPBackend has one.
+
+        *pinned*, when given, makes *model* this session's pin (True) or its
+        preferred model (False); see ``model_pinned``."""
         with self._lock:
             if self.busy:
                 return False
         self.agent.set_model(model)
+        if pinned is not None and hasattr(self.agent.backend, "model_pinned"):
+            self.agent.backend.model_pinned = bool(pinned)
+            self.model_pinned = bool(pinned)
         if self.backend_info and isinstance(self.backend_info, dict):
             self.backend_info["model"] = model
         self.model = model          # keep info() truthful - see its docstring
@@ -874,6 +884,12 @@ class CoderSession:
             "checkpoint_degraded": self.checkpoint_degraded,
             "cwd": str(self.cwd),
             "model": self.model,
+            # True: every request is answered by "model". False: "model" is
+            # preferred, and a request it cannot serve (structured tool calls,
+            # a longer conversation) is answered by an installed model that
+            # can; "answered_by" names the model that answered last.
+            "model_pinned": self.model_pinned,
+            "answered_by": getattr(self.agent.backend, "answered_model", None),
             "mode": self.mode,
             "auto_approve": self.auto_approve,
             # The LIVE glob, not the one passed at creation: it is settable

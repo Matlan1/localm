@@ -716,5 +716,9 @@ def _coder_backend(job: Job):
     from localm.auth import resolve_bearer_token
     api_key = resolve_bearer_token(entry.get("token") if entry else None) or "localm"
     # self-connection: grammar sampling available
+    # A job's own model is a pin. Without one, each request is answered by the
+    # loaded model, or by an installed one with structured tool calls when the
+    # loaded model lacks them.
     return HTTPBackend(self_url, model=job.model or "localm", api_key=api_key,
-                       localm_server=True)
+                       localm_server=True, model_pinned=bool(job.model),
+                       required_capabilities=("tool_use",))

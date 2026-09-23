@@ -713,3 +713,17 @@ class TestAPeerRoutedModelIsARoutingTarget:
         assert sent and sent[0]["model"] == "tooly"
         assert r.status_code == 200
         assert _answering_model(engines) == []
+
+
+class TestCoderRoutingNote:
+    """An unpinned coder session is told which model answers its requests."""
+
+    def test_an_unpinned_session_is_told_which_model_answers(self, server):
+        from localm.plugins.builtin.coder import plug
+        note = plug._tool_capability_note("plain", pinned=False)
+        assert "tooly" in note
+        assert "answered by" in note
+
+    def test_silent_when_its_model_has_tool_calls(self, server):
+        from localm.plugins.builtin.coder import plug
+        assert plug._tool_capability_note("tooly", pinned=False) == ""
