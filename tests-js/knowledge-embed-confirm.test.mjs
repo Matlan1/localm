@@ -15,8 +15,22 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const settles = (p, ms = 2000) =>
   Promise.race([p, new Promise((r) => setTimeout(() => r("__PENDING__"), ms))]);
 
-function setup({ dryRun, jobOk = true }) {
+async function waitFor(fn, timeout = 2000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  return false;
+}
+
+// collectionsAfterSwitch, when given, is returned by GET /api/rag/collections
+// only once the confirm:true POST has gone out - so a caller can distinguish
+// the boot-time fetch (and any pre-switch fetch) from one made after the
+// switch actually completed, instead of a payload that never changes.
+function setup({ dryRun, jobOk = true, collectionsAfterSwitch } = {}) {
   const calls = [];
+  let switched = false;
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
     calls.push({ url: u, opts });
@@ -25,6 +39,7 @@ function setup({ dryRun, jobOk = true }) {
       if (!body.confirm) {
         return { ok: true, status: 200, text: async () => "", json: async () => dryRun };
       }
+      switched = true;
       return { ok: true, status: 200, text: async () => "", json: async () => ({ job_id: "j1" }) };
     }
     if (u.includes("/api/rag/embedding"))
@@ -32,6 +47,9 @@ function setup({ dryRun, jobOk = true }) {
         status: "ready", model: "bge-small-en-v1.5", dim: 384, internal: [], error: null }) };
     if (u.includes("/api/models"))
       return { ok: true, status: 200, text: async () => "", json: async () => ({ models: [] }) };
+    if (u.includes("/api/rag/collections") && switched && collectionsAfterSwitch) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ collections: collectionsAfterSwitch }) };
+    }
     return { ok: true, status: 200, text: async () => "", json: async () => ({ collections: [] }) };
   };
   const { window } = loadAppWithPages({ fetchImpl });
@@ -211,15 +229,31 @@ test("confirmEmbeddingModelSwitch: an x/backdrop dismissal resolves false", asyn
 });
 
 test("applyEmbeddingModel refreshes collections table after a successful switch", async () => {
+  const collectionsGets = (calls) => calls.filter((c) => c.url.includes("/api/rag/collections")
+    && (!c.opts.method || c.opts.method === "GET"));
+  const AFTER_SWITCH = [{ name: "docs-post-switch", n_docs: 3, n_chunks: 7, has_vectors: true }];
   const { window, calls } = setup({
     dryRun: { needs_confirm: true, model: "new-model", collections: [],
               note: "nothing to invalidate" },
+    collectionsAfterSwitch: AFTER_SWITCH,
   });
-  runScript(window, `applyEmbeddingModel("new-model");`);
-  await tick(); await tick(); await tick(); await tick(); await tick();
 
-  const collectionsCalls = calls.filter((c) => c.url.includes("/api/rag/collections")
-    && (!c.opts.method || c.opts.method === "GET"));
-  assert.ok(collectionsCalls.length >= 1, "refreshKnowledgePage re-fetched collections after switch");
+  // Let the boot chain's own refreshKbSelect() GET (init.js) land first, so it
+  // is never mistaken for the switch's own re-fetch below.
+  await waitFor(() => collectionsGets(calls).length >= 1);
+  const before = calls.length;
+
+  runScript(window, `applyEmbeddingModel("new-model");`);
+  const table = window.document.getElementById("kb-table");
+  const rendered = await waitFor(() => table.textContent.includes("docs-post-switch"));
+
+  const collectionsCallsAfterSwitch = collectionsGets(calls.slice(before));
+  assert.ok(collectionsCallsAfterSwitch.length >= 1,
+    "refreshKnowledgePage re-fetched collections after the switch completed, " +
+    "not merely at boot");
+  assert.ok(rendered,
+    "the collections table re-rendered from the post-switch fetch (the fix " +
+    "for stale 're-embed needed' badges after an embedding-model switch)");
+  assert.match(table.textContent, /docs-post-switch/);
 });
 
