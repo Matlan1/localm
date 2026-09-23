@@ -853,15 +853,20 @@ def vision_input_guidance(mmproj_failed: bool = False,
                 "log for the mtmd error).")
     elif active_model_path and (missing := _active_model_missing_mmproj(active_model_path)):
         name, repo_id = missing
-        return (
-            "This model cannot accept image input yet: "
-            f"'{name}' is a vision-capable model, but its vision projector "
-            "(mmproj) has not been downloaded. localm checks for it "
+        msg = (
+            "This model cannot accept image input: "
+            f"'{name}' has no vision projector (mmproj) recorded. If it is a "
+            "vision model whose repository publishes one, localm fetches it "
             "automatically the next time it starts (subject to your network "
             "setting) - restart localm, or reload the Models page. If network "
             "access is off (net_mode=off), turn it on, or pull the projector "
             f"explicitly: `localm pull {repo_id} --mmproj <repo>:<file>`."
         )
+        others = [n for n in vision_capable_models() if n != name]
+        if others:
+            msg += (f" A vision-capable model is already in your library: "
+                    f"{', '.join(others[:3])}.")
+        return msg
     else:
         head = ("This model cannot accept image input (it is text-only), so the "
                 "attached image would be ignored.")

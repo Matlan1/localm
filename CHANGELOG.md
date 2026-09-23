@@ -112,6 +112,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   message fail.** The image is removed from the conversation with an explanation,
   and a message that failed for another reason is withdrawn instead of being sent
   again ahead of the next one.
+- **The message for an image a model cannot read no longer calls any text model
+  downloaded from HuggingFace "a vision-capable model" missing its projector.** It
+  says the model has no projector recorded, and names a model in your library that
+  can read images when there is one.
 - **Using a model another localm instance on this machine already has loaded now
   works.** An instance with no API key can be used without inventing a key; a key
   is checked before the route is kept, and one that stops being accepted clears the
