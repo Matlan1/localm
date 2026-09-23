@@ -485,6 +485,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   applying the new model's own settings; an explicit temperature or token-limit choice still
   survives a switch as before, and a model that had been refused constrained tool-call sampling
   is given a fresh chance to use it after switching away.
+- **Stopping the server with Ctrl+Break or by closing its console window on Windows could leave
+  an orphaned crash trace file behind.** The crash-recovery watchdog already removed the crash
+  marker on an intentional console stop; it now also removes the paired native-fault trace file.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role

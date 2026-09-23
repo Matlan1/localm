@@ -157,6 +157,13 @@ def marker_path(crash_dir: Path, instance_id: str) -> Path:
     return crash_dir / f"server-crash.{instance_id}.marker"
 
 
+def trace_path(crash_dir: Path, instance_id: str) -> Path:
+    """Mirrors localm.bugreport._crash_trace_path's naming exactly - pinned
+    by test_trace_path_matches_bugreport so the two cannot silently drift
+    apart."""
+    return crash_dir / f"server-crash-trace.{instance_id}.txt"
+
+
 def read_marker_pid(marker: Path) -> Optional[int]:
     """The pid recorded in *marker*, or None if it is missing/unreadable."""
     try:
@@ -332,6 +339,10 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
     if exit_code in (0xC000013A, 0x40010004, 0x40010008):
         try:
             marker.unlink()
+        except OSError:
+            pass
+        try:
+            trace_path(crash_dir, instance_id).unlink()
         except OSError:
             pass
         _log(log_path,

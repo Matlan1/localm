@@ -80,6 +80,13 @@ def _write_marker(crash_dir: Path, instance_id: str, pid: int) -> Path:
     return p
 
 
+def _write_trace(crash_dir: Path, instance_id: str) -> Path:
+    crash_dir.mkdir(parents=True, exist_ok=True)
+    p = crash_dir / f"server-crash-trace.{instance_id}.txt"
+    p.write_text("native fault trace", encoding="utf-8")
+    return p
+
+
 class TestMarkerPathMatchesBugreport:
     def test_marker_path_matches_bugreport(self):
         wd = _load_wd()
@@ -87,6 +94,15 @@ class TestMarkerPathMatchesBugreport:
         d = Path("D:/does/not/need/to/exist/run")
         for instance_id in ("abc123", "0" * 16, "with-dashes-99"):
             assert wd.marker_path(d, instance_id) == bugreport._crash_marker_path(d, instance_id)
+
+
+class TestTracePathMatchesBugreport:
+    def test_trace_path_matches_bugreport(self):
+        wd = _load_wd()
+        from localm import bugreport
+        d = Path("D:/does/not/need/to/exist/run")
+        for instance_id in ("abc123", "0" * 16, "with-dashes-99"):
+            assert wd.trace_path(d, instance_id) == bugreport._crash_trace_path(d, instance_id)
 
 
 class TestPidAlive:
@@ -209,6 +225,7 @@ class TestRunCleanShutdown:
                 sys.executable, "-c",
                 "import ctypes; ctypes.windll.kernel32.ExitProcess(0xC000013A)"])
             marker = _write_marker(tmp_path, "ctrlc-inst", proc.pid)
+            trace = _write_trace(tmp_path, "ctrlc-inst")
             sentinel = tmp_path / "relaunched.txt"
             relaunch_argv = [sys.executable, "-c",
                              f"open(r'{sentinel}', 'w').write('x')"]
@@ -220,6 +237,7 @@ class TestRunCleanShutdown:
             proc.wait(timeout=5)
             assert code == wd.EXIT_OK
             assert not marker.exists(), "watchdog should have unlinked the marker"
+            assert not trace.exists(), "watchdog should have unlinked the paired trace file"
             assert not sentinel.exists(), "Ctrl+C exit code must not be relaunched"
         finally:
             server.shutdown()
