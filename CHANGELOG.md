@@ -40,7 +40,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Accelerated RAG vector queries, BM25 inverted index, and chat message queueing.**
   Vector search uses a normalized NumPy matrix dot product for fast vectorized
   cosine similarity, BM25 uses an inverted postings index for term lookups, and
-  collections maintain an in-memory cache validated against file fingerprints.
+  recently queried collections stay in memory (at most 256 MiB in total, least
+  recently used dropped first) and are re-read whenever their files change.
   Chat now displays an immediate search status indicator with elapsed timer and
   allows queueing follow-up messages while generation or retrieval is active.
 

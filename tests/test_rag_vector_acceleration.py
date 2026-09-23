@@ -141,7 +141,7 @@ class TestCollectionCache:
         c2 = Collection("cache_test", base=base)
         cached_entry = _get_cached_collection_data(base / "cache_test")
         assert cached_entry is not None
-        assert len(cached_entry["chunks"]) == len(c2._chunks)
+        assert len(cached_entry.chunks) == len(c2._chunks)
 
         # Subsequent load reads from cache
         c3 = Collection("cache_test", base=base)

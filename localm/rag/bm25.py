@@ -98,14 +98,12 @@ class BM25:
         # index time also keeps stopwords out of the IDF table and document
         # lengths, so a stopword contributes no lexical signal at all.
         self._stop_words = stop_words
-        self._tfs: list[Counter] = []
         self._lengths: list[int] = []
         self._postings: dict[str, list[tuple[int, int]]] = {}
         df: Counter = Counter()
         for i, text in enumerate(texts):
             tokens = tokenize(text, stop_words)
             tf = Counter(tokens)
-            self._tfs.append(tf)
             self._lengths.append(len(tokens))
             for term, count in tf.items():
                 if term not in self._postings:
