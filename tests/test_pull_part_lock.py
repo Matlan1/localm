@@ -14,11 +14,14 @@ at the same time, so a ``threading.Lock`` would serialise nothing. The central
 test here therefore drives TWO REAL INTERPRETERS: a monkeypatched liveness
 check cannot demonstrate atomicity across processes, which is the whole claim.
 
-STALENESS IS DECIDED BY PID LIVENESS, NEVER BY ELAPSED TIME. Any fixed timeout
-eventually reclaims a live holder's lock, and a large model on a slow link is
-exactly the download that outlives a generous one. Every uncertainty KEEPS the
-lock, and the tests below pin both directions: a live holder is never evicted,
-a proven-dead one always is.
+STALENESS IS DECIDED BY PID LIVENESS AND THE HOLDER'S START IDENTITY, NEVER BY
+ELAPSED TIME OR THE WALL CLOCK. Any fixed timeout eventually reclaims a live
+holder's lock, and a large model on a slow link is exactly the download that
+outlives a generous one. A clock step moves the time, the boot time and, on
+Linux, psutil's create_time of a process already running, so none of them can
+tell a live holder from a replaced one. Every uncertainty KEEPS the lock, and
+the tests below pin both directions: a live holder is never evicted, a
+proven-dead or replaced one always is.
 """
 
 from __future__ import annotations
@@ -27,8 +30,7 @@ import json
 import os
 import subprocess
 import sys
-import textwrap
-from pathlib import Path
+import time
 
 import pytest
 
@@ -38,6 +40,14 @@ from localm.model_manager.pull import (
     PullInFlight,
     _part_lock,
     _part_lock_dir,
+    _part_lock_holder_is_gone,
+)
+from tests._process_identity import (
+    a_forward_step_past_boot,
+    spawn_on_this_tree,
+    start_identity_of,
+    started_an_hour_earlier,
+    step_the_clock,
 )
 
 
@@ -54,32 +64,12 @@ def home(tmp_path, monkeypatch):
     return h
 
 
-def _worktree_root() -> str:
-    """The checkout THIS test is running from.
-
-    A child started with ``python -c`` resolves ``localm`` through the venv's
-    editable-install .pth, which points at the main checkout, so without this
-    the subprocesses below would exercise a different tree than the one under
-    test.
-    """
-    import localm
-    return str(Path(localm.__file__).resolve().parent.parent)
-
-
 # --------------------------------------------------------------------------
 #  The claim: atomicity across real processes
 # --------------------------------------------------------------------------
 
-CONTEND = textwrap.dedent('''
-    import json, os, sys, time
-    import localm
-    root = os.environ["EXPECT_ROOT"]
-    # Prove the child is running the tree under test, not the venv's editable
-    # install of the main checkout. A child on the wrong tree would report a
-    # perfectly plausible result about the wrong code.
-    assert os.path.normcase(os.path.dirname(os.path.dirname(
-        os.path.abspath(localm.__file__)))) == os.path.normcase(root), (
-        "child imported localm from " + localm.__file__)
+CONTEND = '''
+    import sys, time
     from localm.model_manager.pull import _part_lock, PullInFlight
     try:
         with _part_lock(sys.argv[1]):
@@ -89,18 +79,67 @@ CONTEND = textwrap.dedent('''
             time.sleep(float(sys.argv[2]))
     except PullInFlight as e:
         print("LOST", flush=True)
-''')
+'''
+
+HOLD = '''
+    import os, sys
+    from localm.model_manager.pull import _part_lock
+    with _part_lock(sys.argv[1]):
+        print("HELD", os.getpid(), flush=True)
+        sys.stdin.read()
+'''
+
+REPORT = '''
+    import json, os, sys
+    from localm.model_manager.pull import _process_start_identity
+    print(os.getpid(), json.dumps(_process_start_identity(os.getpid())),
+          flush=True)
+    sys.stdin.read()
+'''
 
 
 def _spawn(script: str, home_dir, *args):
-    env = dict(os.environ)
-    env["LOCALM_HOME"] = str(home_dir)
-    env["EXPECT_ROOT"] = _worktree_root()
-    env["PYTHONPATH"] = _worktree_root()
+    return spawn_on_this_tree(script, home_dir, *args)
+
+
+def _hold(home_dir, filename: str = "m.gguf"):
+    """A real process holding the lock on *filename* until its stdin closes.
+
+    Returns the process and the holder's own pid, which on Windows differs from
+    ``Popen.pid`` when ``sys.executable`` is a venv launcher.
+    """
+    p = spawn_on_this_tree(HOLD, home_dir, filename, stdin=subprocess.PIPE)
+    first = p.stdout.readline().split()
+    if first[:1] != ["HELD"]:
+        _release(p)
+        pytest.fail(f"the holder did not take the lock: {first} "
+                    f"{p.stderr.read()}")
+    return p, int(first[1])
+
+
+def _idle_child():
+    """A live process that exits when its stdin closes."""
     return subprocess.Popen(
-        [sys.executable, "-c", script, *[str(a) for a in args]],
-        cwd=_worktree_root(), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE)
+
+
+def _release(p) -> None:
+    p.stdin.close()
+    p.wait(timeout=60)
+
+
+def _write_owner(d, pid, **fields) -> None:
+    d.mkdir(parents=True)
+    (d / "owner.json").write_text(
+        json.dumps({"pid": pid, "filename": "m.gguf", **fields}),
+        encoding="utf-8")
+
+
+def _record(d):
+    """The lock's owner record as text, or None when it does not exist."""
+    f = d / "owner.json"
+    return f.read_text(encoding="utf-8") if f.exists() else None
 
 
 def test_two_real_interpreters_cannot_both_hold_the_lock(home):
@@ -196,44 +235,179 @@ def test_a_dead_holders_lock_is_reclaimed(home):
         "the lock was not actually re-taken by this process")
 
 
-def test_a_pre_boot_lock_is_reclaimed(home, monkeypatch):
-    """A lock whose start timestamp precedes OS boot is reclaimed even if the PID is reused."""
+@pytest.mark.parametrize("direction", ["forward", "back"])
+def test_a_live_holder_keeps_its_lock_across_a_clock_step(home, monkeypatch,
+                                                          direction):
+    """A clock step while a download runs (NTP after sleep, a VM or WSL guest
+    resyncing) leaves the live holder's lock in place and refuses a second
+    pull. The forward step is an hour larger than the machine's uptime.
+    """
     import psutil
-    d = _part_lock_dir("m.gguf")
-    d.mkdir(parents=True)
-    (d / "owner.json").write_text(
-        json.dumps({"pid": os.getpid() + 99999, "filename": "m.gguf",
-                    "started": 1000.0}), encoding="utf-8")
-    monkeypatch.setattr(psutil, "boot_time", lambda: 2000.0)
+    from localm import instances
+    holder, pid = _hold(home)
+    try:
+        d = _part_lock_dir("m.gguf")
+        before = _record(d)
+        # The injection took: a real, live process holds this lock.
+        assert json.loads(before)["pid"] == pid
+        assert instances.pid_alive(pid)
 
+        step = a_forward_step_past_boot() if direction == "forward" else -3600.0
+        boot = psutil.boot_time()
+        refused = None
+        with monkeypatch.context() as m:
+            step_the_clock(m, step)
+            assert abs(psutil.boot_time() - (boot + step)) < 5.0
+            gone = _part_lock_holder_is_gone(d)
+            try:
+                with _part_lock("m.gguf"):
+                    pass
+            except PullInFlight as e:
+                refused = e
+
+        assert _record(d) == before, (
+            f"the live holder's lock record changed after a {step:+.0f} s "
+            f"clock step")
+        assert holder.poll() is None, "the holder died during the test"
+        assert gone is False, (
+            f"a live holder was judged gone after a {step:+.0f} s clock step")
+        assert refused is not None and str(pid) in str(refused)
+    finally:
+        _release(holder)
+
+
+def test_a_live_pid_now_naming_a_different_process_is_reclaimed(home):
+    """The recorded pid is alive but is not the process that took the lock:
+    its start identity differs from the recorded one, so the lock is
+    reclaimed."""
+    other = _idle_child()
+    try:
+        ident = start_identity_of(other.pid)
+        d = _part_lock_dir("m.gguf")
+        _write_owner(d, other.pid, start=started_an_hour_earlier(ident),
+                     started=time.time())
+        assert other.poll() is None, "the pid's current process died early"
+
+        with _part_lock("m.gguf"):
+            rec = json.loads(_record(d))
+        assert rec["pid"] == os.getpid(), (
+            "the lock was not actually re-taken by this process")
+    finally:
+        _release(other)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="the boot id is read from Linux's /proc")
+def test_a_lock_from_an_earlier_boot_is_reclaimed_while_its_pid_is_alive(home):
+    """A record from an earlier boot names a process that cannot be running,
+    even when the pid and start ticks match a live process now."""
+    other = _idle_child()
+    try:
+        ident = start_identity_of(other.pid)
+        assert ident["boot"], "no boot id was read on Linux"
+        d = _part_lock_dir("m.gguf")
+        _write_owner(d, other.pid, started=time.time(), start={
+            **ident, "boot": "00000000-0000-0000-0000-000000000000"})
+
+        with _part_lock("m.gguf"):
+            rec = json.loads(_record(d))
+        assert rec["pid"] == os.getpid()
+    finally:
+        _release(other)
+
+
+def _foreign(ident):
+    """A start identity in the other supported platform's shape."""
+    if "ticks" in ident:
+        return {"created": 1.0}
+    return {"boot": "00000000-0000-0000-0000-000000000000", "ticks": 1}
+
+
+@pytest.mark.parametrize("start", [
+    "absent", None, {}, "foreign",
+    {"boot": None, "ticks": True},
+    {"boot": None, "ticks": "12"},
+    {"created": "12.5"},
+    {"created": float("inf")},
+    {"created": float("nan")},
+], ids=["absent", "null", "empty", "foreign", "bool-ticks", "text-ticks",
+        "text-created", "inf-created", "nan-created"])
+def test_a_live_holder_without_a_comparable_start_identity_keeps_the_lock(
+        home, start):
+    """Uncertainty KEEPS the lock: a record with no start identity, or one
+    that cannot be compared with the live pid's, is not evidence the holder
+    died."""
+    other = _idle_child()
+    try:
+        fields = {"started": 0.0}
+        if start == "foreign":
+            fields["start"] = _foreign(start_identity_of(other.pid))
+        elif start != "absent":
+            fields["start"] = start
+        d = _part_lock_dir("m.gguf")
+        _write_owner(d, other.pid, **fields)
+        before = _record(d)
+
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before
+        assert refused is not None and str(other.pid) in str(refused)
+    finally:
+        _release(other)
+
+
+def test_a_live_holder_keeps_the_lock_when_its_identity_cannot_be_read_now(
+        home, monkeypatch):
+    """A record that would prove a replaced process keeps the lock when the
+    live pid's own start identity cannot be read."""
+    from localm.model_manager import pull
+    other = _idle_child()
+    try:
+        ident = start_identity_of(other.pid)
+        d = _part_lock_dir("m.gguf")
+        _write_owner(d, other.pid, start=started_an_hour_earlier(ident),
+                     started=time.time())
+        before = _record(d)
+        monkeypatch.setattr(pull, "_process_start_identity", lambda pid: None)
+
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before
+        assert refused is not None
+    finally:
+        _release(other)
+
+
+def test_a_process_and_an_observer_read_the_same_start_identity(home):
+    """The identity a process records for itself equals the one another
+    process reads for its pid."""
+    child = spawn_on_this_tree(REPORT, home, stdin=subprocess.PIPE)
+    try:
+        line = child.stdout.readline()
+        pid_text, _, own_text = line.strip().partition(" ")
+        if not pid_text.isdigit():
+            _release(child)
+            pytest.fail(f"the child did not report: {line!r} "
+                        f"{child.stderr.read()}")
+        assert start_identity_of(int(pid_text)) == json.loads(own_text)
+    finally:
+        _release(child)
+
+
+def test_the_lock_records_its_holders_start_identity(home):
+    from localm.model_manager.pull import _process_start_identity
     with _part_lock("m.gguf"):
-        rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
+        rec = json.loads(_record(_part_lock_dir("m.gguf")))
     assert rec["pid"] == os.getpid()
-
-
-def test_a_reused_pid_with_newer_create_time_is_reclaimed(home, monkeypatch):
-    """A lock held by a PID that was recycled after the download started is reclaimed."""
-    import psutil
-    d = _part_lock_dir("m.gguf")
-    d.mkdir(parents=True)
-    (d / "owner.json").write_text(
-        json.dumps({"pid": 12345, "filename": "m.gguf",
-                    "started": 1000.0}), encoding="utf-8")
-    monkeypatch.setattr(psutil, "boot_time", lambda: 500.0)
-    monkeypatch.setattr("localm.instances.pid_alive", lambda pid: True)
-
-    class FakeProcess:
-        def __init__(self, pid):
-            self.pid = pid
-
-        def create_time(self):
-            return 1500.0
-
-    monkeypatch.setattr(psutil, "Process", FakeProcess)
-
-    with _part_lock("m.gguf"):
-        rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
-    assert rec["pid"] == os.getpid()
+    assert rec["start"] == _process_start_identity(os.getpid())
 
 
 @pytest.mark.parametrize("body", [

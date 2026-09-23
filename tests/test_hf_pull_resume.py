@@ -20,22 +20,30 @@ from localm.model_manager.pull import (
     _partial_owner_path,
     _resumable_download_to_tmp_and_move,
 )
+from tests._process_identity import (
+    a_forward_step_past_boot,
+    spawn_on_this_tree,
+    start_identity_of,
+    started_an_hour_earlier,
+    step_the_clock,
+)
 
 
-def _owner(path: Path, pid: int, created: float) -> None:
-    """Write the owner record for *path* naming *pid* / *created*."""
+def _owner(path: Path, pid: int, start) -> None:
+    """Write the owner record for *path* naming *pid* / start identity *start*."""
     _partial_owner_path(path).write_text(
-        json.dumps({"pid": pid, "created": created}), encoding="utf-8")
+        json.dumps({"pid": pid, "start": start}), encoding="utf-8")
 
 
 @pytest.fixture()
 def live_child():
-    """A real child process that stays alive for the test."""
-    import psutil
+    """A real child process that stays alive for the test, with its start
+    identity."""
+    from localm.model_manager.pull import _process_start_identity
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        yield p.pid, psutil.Process(p.pid).create_time()
+        yield p.pid, _process_start_identity(p.pid)
     finally:
         p.kill()
         p.wait()
@@ -43,15 +51,27 @@ def live_child():
 
 @pytest.fixture()
 def dead_pid():
-    """The pid and create_time of a child that has already exited."""
-    import psutil
+    """The pid and start identity of a child that has already exited."""
+    from localm.model_manager.pull import _process_start_identity
     p = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
-    created = psutil.Process(p.pid).create_time()
+    start = _process_start_identity(p.pid)
     p.stdin.close()
     p.wait()
-    return p.pid, created
+    return p.pid, start
+
+
+OWN_PARTIAL = '''
+    import sys
+    from pathlib import Path
+    from localm.model_manager.pull import _write_partial_owner
+    p = Path(sys.argv[1])
+    p.write_bytes(b"LIVE-PROCESS-BYTES")
+    _write_partial_owner(p)
+    print("OWNED", flush=True)
+    sys.stdin.read()
+'''
 
 
 def _call(inc_path: Path, dest: Path, *, expected_size, force=False,
@@ -116,6 +136,60 @@ class TestPartialOwnership:
         assert captured["resume_size"] == 5
         assert not orphan.exists() and not _partial_owner_path(orphan).exists()
         assert _partials(cache) == [live.name], _partials(cache)
+
+    def test_a_live_owners_partial_survives_a_clock_step(
+            self, cache, tmp_path, monkeypatch):
+        """A clock step (NTP after sleep, a VM or WSL guest resyncing) does not
+        make a live download's temp file look orphaned."""
+        inc_path = cache / "file.etag.incomplete"
+        live = cache / "file.etag.aaaa1111.incomplete"
+        owner = spawn_on_this_tree(OWN_PARTIAL, tmp_path / ".localm", live,
+                                   stdin=subprocess.PIPE)
+        try:
+            ready = owner.stdout.readline().strip()
+            if ready != "OWNED":
+                owner.stdin.close()
+                owner.wait(timeout=60)
+                pytest.fail(f"the owner did not start: {ready!r} "
+                            f"{owner.stderr.read()}")
+            # The injection took: a live process recorded itself as the owner.
+            assert _partial_owner_path(live).exists()
+            dest = tmp_path / "dest.gguf"
+            captured = _wire_http(monkeypatch, b"HELLO")
+
+            with monkeypatch.context() as m:
+                step_the_clock(m, a_forward_step_past_boot())
+                _call(inc_path, dest, expected_size=5)
+
+            assert (live.read_bytes() if live.exists() else None) == (
+                b"LIVE-PROCESS-BYTES"), (
+                "another process's in-flight temp file was touched after a "
+                "clock step")
+            assert _partial_owner_path(live).exists()
+            assert captured["resume_size"] == 0
+            assert dest.read_bytes() == b"HELLO"
+        finally:
+            owner.stdin.close()
+            owner.wait(timeout=60)
+
+    def test_a_partial_whose_pid_now_names_another_process_is_adopted(
+            self, cache, tmp_path, monkeypatch, live_child):
+        """The recorded pid is alive but its start identity is not the
+        recorded one, so the partial's owner is gone and the partial is
+        resumed from."""
+        pid, _ = live_child
+        inc_path = cache / "file.etag.incomplete"
+        orphan = cache / "file.etag.bbbb2222.incomplete"
+        orphan.write_bytes(b"HELLO")
+        _owner(orphan, pid, started_an_hour_earlier(start_identity_of(pid)))
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b" WORLD")
+
+        _call(inc_path, dest, expected_size=11)
+
+        assert dest.read_bytes() == b"HELLO WORLD"
+        assert captured["resume_size"] == 5
+        assert not orphan.exists() and not _partial_owner_path(orphan).exists()
 
     def test_partial_without_owner_record_is_neither_adopted_nor_deleted(
             self, cache, tmp_path, monkeypatch):
