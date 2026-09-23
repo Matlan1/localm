@@ -79,7 +79,6 @@ import datetime as _dt
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -486,8 +485,8 @@ def run_smoke_phase(tag: str, commit: str, workdir: Path, receipt_path: Path) ->
             print(f"INCONCLUSIVE: {identity_why}")
             return 2
 
-        _check_nodes_registered(receipt, api_url, root, _PLACEMENT_NODES,
-                                _shipped_workflow_files, _class_types_in)
+        _check_nodes_registered(receipt, api_url, _PLACEMENT_NODES,
+                                _shipped_workflow_files, _class_types_in, cc)
         _check_shipped_workflows(receipt, api_url, _shipped_workflow_files, _MODEL_FILE_EXTS,
                                  cc)
         _check_gpu_roundtrip(receipt, api_url, workdir, cc)
@@ -540,10 +539,9 @@ def _verify_identity(stats: "dict | None", root: Path) -> "tuple[bool, str]":
     return True, f"/system_stats confirms argv[0] ({argv0}) resolves inside {root}"
 
 
-def _check_nodes_registered(receipt, api_url, root, placement_nodes,
-                            shipped_workflow_files, class_types_in) -> None:
-    from localm.media import comfy_client as cc
-    info = cc.comfy_object_info(api_url)
+def _check_nodes_registered(receipt, api_url, placement_nodes,
+                            shipped_workflow_files, class_types_in, comfy_client_mod) -> None:
+    info = comfy_client_mod.comfy_object_info(api_url)
     if info is None:
         _set_check(receipt, "nodes_registered", INCONCLUSIVE,
                   "/object_info could not be fetched")
@@ -593,12 +591,15 @@ def _check_shipped_workflows(receipt, api_url, shipped_workflow_files, model_fil
         unacceptable = []
         for node_id, node_info in (body.get("node_errors") or {}).items():
             for err in node_info.get("errors", []):
+                extra = err.get("extra_info") or {}
                 if err.get("type") == "value_not_in_list":
-                    received = str((err.get("extra_info") or {}).get("received_value") or "")
+                    received = str(extra.get("received_value") or "")
                     if received.endswith(model_file_exts):
                         continue
+                detail = (f" (input {extra['input_name']!r}, got {extra['received_value']!r})"
+                         if "input_name" in extra else "")
                 unacceptable.append(f"{node_info.get('class_type', node_id)}: "
-                                   f"{err.get('type')} - {err.get('message')}")
+                                   f"{err.get('type')} - {err.get('message')}{detail}")
         if unacceptable:
             bad.append(f"{f.name}: {'; '.join(unacceptable)}")
     if bad:
@@ -743,21 +744,41 @@ def _paeth_predictor(a: int, b: int, c: int) -> int:
 # --------------------------------------------------------------------------- #
 
 def run_teardown_phase(workdir: Path) -> int:
+    """Never claims success on a silent partial failure (AGENTS.md rule 5): a
+    managed ComfyUI is a git checkout, and git marks its object store
+    read-only, so a plain shutil.rmtree fails on Windows (WinError 5) and
+    ignore_errors=True would then report "cleared" while custom_nodes/.git
+    actually survive - measured for real on the first live teardown run.
+    Uses managed_comfy.rmtree_robust (already proven for exactly this) and
+    surfaces any genuine removal failure rather than swallowing it."""
+    _prepare_scratch_env(workdir)
+    from localm.media.managed_comfy import rmtree_robust
+
     home = workdir / "home"
+    failures: list = []
     if home.is_dir():
         for entry in home.iterdir():
             if entry.name == "cache":
                 continue
             try:
                 if entry.is_dir():
-                    shutil.rmtree(entry, ignore_errors=True)
+                    rmtree_robust(entry)
                 else:
                     entry.unlink()
             except OSError as e:
-                print(f"  could not remove {entry}: {e}")
+                failures.append(f"{entry}: {e}")
     tmp = workdir / "tmp"
     if tmp.is_dir():
-        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            rmtree_robust(tmp)
+        except OSError as e:
+            failures.append(f"{tmp}: {e}")
+
+    if failures:
+        for f in failures:
+            print(f"  could not remove {f}")
+        print(f"teardown FAILED: {len(failures)} item(s) under {home} could not be removed")
+        return 1
     print(f"teardown: cleared {home} (kept cache/), removed {tmp}")
     return 0
 

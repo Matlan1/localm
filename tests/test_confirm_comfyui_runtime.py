@@ -415,3 +415,210 @@ def test_teardown_keeps_cache_and_removes_everything_else(confirm, tmp_path):
     assert not (home / "comfyui").exists(), "the installed ComfyUI is removed"
     assert not (home / "stray-file.txt").exists()
     assert not (workdir / "tmp").exists()
+
+
+def test_teardown_removes_readonly_files_a_real_git_checkout_leaves(confirm, tmp_path):
+    """The actual bug found by the first live run: a managed ComfyUI is a git
+    checkout, git marks its object store read-only, and a plain
+    shutil.rmtree(ignore_errors=True) then silently leaves .git/custom_nodes
+    behind while still reporting success. Reproduces the exact mechanism (a
+    real read-only file), not just a directory shutil.rmtree could always
+    have deleted anyway."""
+    import os
+    import stat
+    workdir = tmp_path / "wd"
+    comfyui = workdir / "home" / "comfyui"
+    comfyui.mkdir(parents=True)
+    ro_file = comfyui / "readonly.pack"
+    ro_file.write_text("git object data", encoding="utf-8")
+    os.chmod(ro_file, stat.S_IREAD)
+
+    try:
+        rc = confirm.run_teardown_phase(workdir)
+    finally:
+        # Defensive: if the test itself fails before removal, leave nothing
+        # read-only behind for pytest's own tmp_path cleanup to trip over.
+        if ro_file.exists():
+            os.chmod(ro_file, stat.S_IWRITE)
+
+    assert rc == 0
+    assert not comfyui.exists(), "the read-only file (and its parent) must actually be removed"
+
+
+def test_teardown_reports_failure_rather_than_silently_swallowing_one(confirm, tmp_path,
+                                                                       monkeypatch):
+    """A GENUINE removal failure (not just a read-only file rmtree_robust can
+    fix) must be surfaced as a real failure, never reported as a clean
+    teardown - the exact rule-5 violation the read-only-file bug above was an
+    instance of."""
+    workdir = tmp_path / "wd"
+    (workdir / "home" / "comfyui").mkdir(parents=True)
+
+    def _boom(path):
+        raise OSError("simulated: genuinely could not remove this")
+    monkeypatch.setattr(
+        "localm.media.managed_comfy.rmtree_robust", _boom)
+
+    rc = confirm.run_teardown_phase(workdir)
+    assert rc == 1
+
+
+# --------------------------------------------------------------------------- #
+#  _check_nodes_registered / _check_shipped_workflows / _check_gpu_roundtrip #
+#  - no live run exercised these directly before, only end to end on real    #
+#  hardware, so their FAIL/INCONCLUSIVE paths had zero unit coverage.        #
+# --------------------------------------------------------------------------- #
+
+class _FakeHTTPError:
+    """Stands in for urllib.error.HTTPError: .read() returns the body bytes
+    a real ComfyUI /prompt 400 response would carry."""
+    def __init__(self, code, body: dict):
+        self.code = code
+        self._body = json.dumps(body).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+
+class _FakeComfyClient:
+    """A minimal stand-in for localm.media.comfy_client, driven entirely by
+    the test - never a real socket."""
+    SUBMIT_OK = "ok"
+    SUBMIT_HTTP_ERROR = "http_error"
+    POLL_FINISHED = "finished"
+    POLL_TIMEOUT = "timeout"
+
+    def __init__(self, *, submit_result, poll_result=None, output_info=None,
+                fetch_writes: bytes = b""):
+        self._submit_result = submit_result
+        self._poll_result = poll_result
+        self._output_info = output_info
+        self._fetch_writes = fetch_writes
+        self.interrupted = []
+        self.fetched_to = None
+
+    def comfy_object_info(self, api_url):
+        return self._object_info
+
+    def comfy_submit_prompt(self, api_url, workflow, timeout=10.0):
+        return self._submit_result
+
+    def interrupt_comfy(self, api_url):
+        self.interrupted.append(api_url)
+
+    def comfy_poll_until_done(self, api_url, prompt_id, *, max_poll_seconds, **kw):
+        return self._poll_result
+
+    def select_output_info(self, entry, output_keys):
+        return self._output_info
+
+    def comfy_fetch_output(self, api_url, info, output_path, *, timeout):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(self._fetch_writes)
+        self.fetched_to = output_path
+
+
+def test_check_nodes_registered_passes_when_everything_is_present(confirm):
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(submit_result=None)
+    fake._object_info = {"EmptyImage": {}, "SaveImage": {}, "SelectModelDevice": {}}
+    confirm._check_nodes_registered(
+        receipt, "http://x", ("SelectModelDevice",),
+        lambda: [], lambda f: {"EmptyImage", "SaveImage"}, fake)
+    assert confirm._check_passed(receipt, "nodes_registered")
+
+
+def test_check_nodes_registered_fails_when_a_node_is_missing(confirm):
+    """The regression this exists to catch: a custom node (or a core node
+    upstream renamed/removed) that no longer registers against the candidate
+    commit."""
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(submit_result=None)
+    fake._object_info = {"EmptyImage": {}}  # SaveImage missing
+    confirm._check_nodes_registered(
+        receipt, "http://x", (), lambda: [Path("fake_workflow.json")],
+        lambda f: {"EmptyImage", "SaveImage"}, fake)
+    assert receipt["checks"]["nodes_registered"]["verdict"] == confirm.FAIL
+    assert "SaveImage" in receipt["checks"]["nodes_registered"]["why"]
+
+
+def test_check_nodes_registered_inconclusive_when_object_info_unreachable(confirm):
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(submit_result=None)
+    fake._object_info = None
+    confirm._check_nodes_registered(receipt, "http://x", (), lambda: [], lambda f: set(), fake)
+    assert receipt["checks"]["nodes_registered"]["verdict"] == confirm.INCONCLUSIVE
+
+
+def test_check_shipped_workflows_accepts_a_missing_model_rejection(confirm, tmp_path):
+    """With an empty scratch models dir, a value_not_in_list error whose
+    received_value is a model filename is the ONE acceptable rejection - the
+    workflow validated correctly and simply has no model to run against yet."""
+    wf = tmp_path / "flux_workflow.json"
+    wf.write_text(json.dumps({"1": {"class_type": "CheckpointLoaderSimple", "inputs": {}}}),
+                  encoding="utf-8")
+    body = {"node_errors": {"1": {"class_type": "CheckpointLoaderSimple", "errors": [
+        {"type": "value_not_in_list", "message": "Value not in list",
+         "extra_info": {"input_name": "ckpt_name", "received_value": "flux1-dev.safetensors"}}
+    ]}}}
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(submit_result=(_FakeComfyClient.SUBMIT_HTTP_ERROR,
+                                           _FakeHTTPError(400, body)))
+    confirm._check_shipped_workflows(receipt, "http://x", lambda: [wf], (".safetensors",), fake)
+    assert confirm._check_passed(receipt, "shipped_workflows")
+
+
+def test_check_shipped_workflows_fails_on_any_other_validation_error(confirm, tmp_path):
+    """The actual regression this exists to catch: a renamed input, a
+    dropped enum option, a changed output slot - anything that is NOT simply
+    'this model file is not on disk'."""
+    wf = tmp_path / "flux_workflow.json"
+    wf.write_text("{}", encoding="utf-8")
+    body = {"node_errors": {"1": {"class_type": "KSampler", "errors": [
+        {"type": "value_not_in_list", "message": "Value not in list",
+         "extra_info": {"input_name": "sampler_name", "received_value": "euler"}}
+    ]}}}
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(submit_result=(_FakeComfyClient.SUBMIT_HTTP_ERROR,
+                                           _FakeHTTPError(400, body)))
+    confirm._check_shipped_workflows(receipt, "http://x", lambda: [wf], (".safetensors",), fake)
+    assert receipt["checks"]["shipped_workflows"]["verdict"] == confirm.FAIL
+    assert "sampler_name" in receipt["checks"]["shipped_workflows"]["why"]
+    assert "euler" in receipt["checks"]["shipped_workflows"]["why"]
+
+
+def test_check_shipped_workflows_accepts_outright_submission(confirm, tmp_path):
+    """A workflow needing no model at all (or one that happens to already
+    resolve) is accepted outright - and the run is interrupted so it never
+    actually executes during a confirm."""
+    wf = tmp_path / "model_free.json"
+    wf.write_text("{}", encoding="utf-8")
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(submit_result=(_FakeComfyClient.SUBMIT_OK, "prompt-id-1"))
+    confirm._check_shipped_workflows(receipt, "http://x", lambda: [wf], (".safetensors",), fake)
+    assert confirm._check_passed(receipt, "shipped_workflows")
+    assert fake.interrupted == ["http://x"]
+
+
+def test_check_gpu_roundtrip_passes_and_fetches_the_output(confirm, tmp_path):
+    real_png = tmp_path / "src.png"
+    _make_solid_png(real_png, confirm._PROBE_RGB)
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(
+        submit_result=(_FakeComfyClient.SUBMIT_OK, "prompt-id-1"),
+        poll_result=(_FakeComfyClient.POLL_FINISHED, {"outputs": {}}),
+        output_info={"filename": "out.png"},
+        fetch_writes=real_png.read_bytes())
+    confirm._check_gpu_roundtrip(receipt, "http://x", tmp_path, fake)
+    assert confirm._check_passed(receipt, "gpu_roundtrip")
+    assert fake.fetched_to == tmp_path / "gpu_roundtrip_output.png"
+
+
+def test_check_gpu_roundtrip_fails_when_polling_times_out(confirm, tmp_path):
+    receipt = confirm._new_receipt("v0.32.0", "a" * 40)
+    fake = _FakeComfyClient(
+        submit_result=(_FakeComfyClient.SUBMIT_OK, "prompt-id-1"),
+        poll_result=(_FakeComfyClient.POLL_TIMEOUT, None))
+    confirm._check_gpu_roundtrip(receipt, "http://x", tmp_path, fake)
+    assert receipt["checks"]["gpu_roundtrip"]["verdict"] == confirm.FAIL
+    assert "did not finish" in receipt["checks"]["gpu_roundtrip"]["why"]
