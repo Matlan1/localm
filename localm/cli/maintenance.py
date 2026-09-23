@@ -123,12 +123,9 @@ def setup_embeddings(model, yes=False):
     from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
                                       KNOWN_EMBEDDING_MODELS,
                                       resolve_embedding_model_path)
-    # Whether the ready banner below still needs its generic "existing
-    # collections stay lexical" reminder. Left True by default (no --model, or
-    # --model equal to the current config, never resolve this either way), and
-    # set to False only when a real switch was attempted AND its OWN
-    # collection_provenance_report() already proved nothing is affected - so
-    # the reminder is not printed on top of a report that just said otherwise.
+    # Whether the ready banner below prints its "existing collections stay
+    # lexical" reminder. See
+    # TestSetupEmbeddingsPreSwitchConfirm.test_switch_to_model_matching_existing_collection_skips_reembed_note.
     reembed_hint = True
     if model:
         current = str(load_config().get("embedding_model") or "")

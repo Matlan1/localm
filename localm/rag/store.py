@@ -2824,12 +2824,9 @@ def collection_provenance_note(model: str, affected: list, *,
     if unchanged:
         return (f"'{model}' is already the active embedding model, so there "
                 "is nothing to invalidate.")
-    # affected is empty for a reason other than "unchanged": either no
-    # collection has embeddings at all, or every collection that does is
-    # already built with *model* (collection_provenance_report()'s own
-    # exclusion). Both leave nothing to invalidate, but only the first makes
-    # "no existing collection currently has embeddings" true - so the wording
-    # below asserts only what both cases share.
+    # See TestEmbeddingSetConfirmGate
+    # .test_unconfirmed_with_candidate_matching_collection_provenance_reports_nothing_to_invalidate
+    # and ..._with_same_active_model_reports_nothing_to_invalidate.
     return (f"Switching to '{model}' has nothing to invalidate: no existing "
             f"collection's semantic search would change.")
 
