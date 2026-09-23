@@ -64,7 +64,7 @@ def test_nvidia_preflight_absent_when_no_smi(monkeypatch):
 def test_driver_ok_false_for_old_capability():
     assert sl.NvidiaInfo(present=True, cuda_capability="11.2").driver_ok is False
     assert sl.NvidiaInfo(present=True, cuda_capability="12.4").driver_ok is True
-    assert sl.NvidiaInfo(present=True, cuda_capability="13.3").driver_ok is True
+    assert sl.NvidiaInfo(present=True, cuda_capability="13.4").driver_ok is True
 
 
 # --------------------------- asset resolution ----------------------------- #
@@ -371,7 +371,7 @@ def test_main_threads_cuda_line_detection_on_linux(monkeypatch, tmp_path):
     # "cuda-13".
     monkeypatch.setattr(sl, "nvidia_preflight", lambda: sl.NvidiaInfo(
         present=True, gpu_name="NVIDIA RTX PRO 4000 Blackwell",
-        driver_version="580.65", cuda_capability="13.3",
+        driver_version="580.65", cuda_capability="13.4",
         compute_capability="12.0"))
 
     target = tmp_path / "lib"
