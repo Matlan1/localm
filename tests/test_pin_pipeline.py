@@ -249,6 +249,166 @@ def test_issues_intro_anchor_matches_the_real_shipped_file(tmp_path):
     assert "NEW-PIN-PIPELINE-LLAMA-B10999-REAL-ANCHOR-PROBE-CONFIRM-FAILED" in after
 
 
+def test_append_fail_issue_kind_changes_the_title_and_the_dedup_key(tmp_path):
+    """A STUCK-INCONCLUSIVE entry and a CONFIRM-FAILED entry for the exact
+    same candidate must never silently deduplicate against each other -
+    they are different, unrelated facts about that candidate."""
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    fail = pipeline.append_fail_issue("b10999", "genuine FAIL reason", None, issues_path=path)
+    stuck = pipeline.append_fail_issue("b10999", "5 in a row", None, issues_path=path,
+                                       kind="STUCK-INCONCLUSIVE")
+    assert fail is True and stuck is True
+    out = path.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-LLAMA-B10999-CONFIRM-FAILED" in out
+    assert "NEW-PIN-PIPELINE-LLAMA-B10999-STUCK-INCONCLUSIVE" in out
+    assert "genuine FAIL reason" in out and "5 in a row" in out, (
+        "both entries must actually be present, not one silently skipped as a dupe")
+
+
+def test_append_fail_issue_still_dedupes_within_the_same_kind(tmp_path):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    pipeline.append_fail_issue("b10999", "first", None, issues_path=path,
+                               kind="STUCK-INCONCLUSIVE")
+    pipeline.append_fail_issue("b10999", "second", None, issues_path=path,
+                               kind="STUCK-INCONCLUSIVE")
+    out = path.read_text(encoding="utf-8")
+    assert out.count("NEW-PIN-PIPELINE-LLAMA-B10999-STUCK-INCONCLUSIVE") == 1
+    assert "first" in out and "second" not in out
+
+
+# --------------------------------------------------------------------------- #
+#  _record_inconclusive - the streak counter and the INCONCLUSIVE_ISSUE_     #
+#  THRESHOLD backport (both pins share this one helper)                     #
+# --------------------------------------------------------------------------- #
+
+def test_record_inconclusive_starts_a_fresh_streak_at_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    streak = pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    assert streak == 1
+    state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["inconclusive_streak"] == 1
+    assert state["verdict"] == "INCONCLUSIVE"
+
+
+def test_record_inconclusive_increments_for_the_same_candidate(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    for expected in (1, 2, 3):
+        streak = pipeline._record_inconclusive("b105", tmp_path / "r.json")
+        assert streak == expected
+
+
+def test_record_inconclusive_resets_when_the_candidate_changes(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    streak = pipeline._record_inconclusive("b106", tmp_path / "r.json")
+    assert streak == 1, "a different (newer) candidate must never inherit the old streak"
+
+
+def test_record_inconclusive_resets_when_a_pass_or_fail_intervenes(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    pipeline.save_state({"last_tag_tried": "b105", "verdict": "FAIL", "timestamp": "x"})
+    streak = pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    assert streak == 1, "a FAIL verdict in between must break the streak, not extend it"
+
+
+def test_record_inconclusive_never_promotes_the_verdict_past_the_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(pipeline, "append_fail_issue", lambda *a, **k: True)
+    for _ in range(pipeline.INCONCLUSIVE_ISSUE_THRESHOLD + 3):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "INCONCLUSIVE", (
+        "no streak length ever promotes this to a permanent FAIL")
+
+
+def test_record_inconclusive_logs_exactly_once_at_the_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    for i in range(1, pipeline.INCONCLUSIVE_ISSUE_THRESHOLD + 3):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json")
+        if i < pipeline.INCONCLUSIVE_ISSUE_THRESHOLD:
+            assert not issue_spy.calls, f"must not log before the threshold (run {i})"
+    assert len(issue_spy.calls) == 1, (
+        "must log exactly once when the streak first crosses the threshold, "
+        "never once per run afterward")
+    _args, kwargs = issue_spy.calls[0]
+    assert kwargs.get("kind") == "STUCK-INCONCLUSIVE"
+
+
+def test_record_inconclusive_uses_the_stuck_kind_never_confirm_failed(monkeypatch, tmp_path):
+    """A STUCK-INCONCLUSIVE entry must never collide with (and silently
+    suppress) a genuine CONFIRM-FAILED entry for the same candidate."""
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    real_append = pipeline.append_fail_issue
+    issues_path = tmp_path / "issues.txt"
+    issues_path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    monkeypatch.setattr(pipeline, "ISSUES_PATH", issues_path)
+    monkeypatch.setattr(pipeline, "append_fail_issue",
+                        lambda *a, **k: real_append(*a, issues_path=issues_path,
+                                                    **{k2: v for k2, v in k.items()
+                                                       if k2 != "issues_path"}))
+    for _ in range(pipeline.INCONCLUSIVE_ISSUE_THRESHOLD):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    real_append("b105", "a genuine build FAIL", None, issues_path=issues_path)
+    out = issues_path.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-LLAMA-B105-STUCK-INCONCLUSIVE" in out
+    assert "NEW-PIN-PIPELINE-LLAMA-B105-CONFIRM-FAILED" in out, (
+        "the genuine FAIL must still get its own entry, not be silently "
+        "deduped away by the earlier stuck-inconclusive one")
+
+
+def test_record_inconclusive_force_issue_logs_every_time_regardless_of_streak(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    for _ in range(3):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json", force_issue=True)
+    assert len(issue_spy.calls) == 3, "force_issue must log on every single call, not gated"
+    for _args, kwargs in issue_spy.calls:
+        assert kwargs.get("kind", "CONFIRM-FAILED") != "STUCK-INCONCLUSIVE", (
+            "a forced (unexpected-exception) log keeps the default kind")
+
+
+def test_record_inconclusive_tracks_the_comfyui_pin_independently(monkeypatch, tmp_path):
+    """The two pins must never share one streak - a llama INCONCLUSIVE run
+    must not silently count toward comfyui's threshold or vice versa."""
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    for _ in range(pipeline.INCONCLUSIVE_ISSUE_THRESHOLD - 1):
+        pipeline._record_inconclusive("v0.32.0", tmp_path / "r.json", pin="comfyui")
+    assert not issue_spy.calls
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")  # a fresh llama streak
+    assert not issue_spy.calls, "llama's own first run must not inherit comfyui's streak"
+    pipeline._record_inconclusive("v0.32.0", tmp_path / "r.json", pin="comfyui")
+    assert len(issue_spy.calls) == 1
+    llama_state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    comfyui_state = json.loads((tmp_path / "comfyui-state.json").read_text(encoding="utf-8"))
+    assert llama_state["inconclusive_streak"] == 1
+    assert comfyui_state["inconclusive_streak"] == pipeline.INCONCLUSIVE_ISSUE_THRESHOLD
+
+
+def test_record_inconclusive_extra_kwargs_reach_the_saved_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json", open_pr=42)
+    state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["open_pr"] == 42
+
+
+def test_record_inconclusive_result_still_satisfies_should_skip_cooldown(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    state = pipeline.load_state()
+    skip_reason = pipeline.should_skip(state, "b105")
+    assert skip_reason is not None and "cooldown" in skip_reason
+
+
 # --------------------------------------------------------------------------- #
 #  gpu_lease_script - configurable, verified to exist, never silently absent #
 # --------------------------------------------------------------------------- #
@@ -806,6 +966,31 @@ def test_run_llama_pipeline_inconclusive_receipt_stops_before_any_write(monkeypa
         "an INCONCLUSIVE receipt must never reach the worktree/bump/commit stage")
 
 
+def test_run_llama_pipeline_logs_after_a_run_of_the_threshold_worth_of_inconclusives(
+        monkeypatch, tmp_path):
+    """Proves the INCONCLUSIVE_ISSUE_THRESHOLD wiring end to end through the
+    real pipeline entry point, not only through _record_inconclusive
+    called directly: pre-seed a state file already one INCONCLUSIVE run
+    short of the threshold for this exact candidate, then run the pipeline
+    once more and confirm THIS run is the one that logs."""
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "llama-state.json").write_text(json.dumps({
+        "last_tag_tried": "b105", "verdict": "INCONCLUSIVE", "timestamp": _iso(_day(0)),
+        "inconclusive_streak": pipeline.INCONCLUSIVE_ISSUE_THRESHOLD - 1}), encoding="utf-8")
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 2)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2, "still INCONCLUSIVE, never promoted to FAIL"
+    assert issue_spy.calls, "this run must be the one that crosses the threshold and logs"
+    state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["inconclusive_streak"] == pipeline.INCONCLUSIVE_ISSUE_THRESHOLD
+
+
 def test_run_llama_pipeline_unexpected_confirm_exit_code_is_fail_not_silent_pass(monkeypatch, tmp_path):
     """run_confirm's contract is 0/1/2/LEASE_BUSY_EXIT; falling through to
     PASS on ANY other value (e.g. a native crash producing an OS exit code)
@@ -1158,3 +1343,570 @@ def test_merge_pr_detaches_and_deletes_local_branch_without_delete_branch_flag(t
     branches = subprocess.run(["git", "branch", "--list", branch],
                               cwd=worktree, capture_output=True, text=True).stdout
     assert branch not in branches, "the local branch must be deleted after merge"
+
+
+# =============================================================================
+#  ComfyUI pin - the parallel pipeline. Mirrors the llama sections above     #
+#  where the shape matches; new tests where it does not (the 3-part          #
+#  candidate, the 3-phase confirm, the cross-pin lock).                      #
+# =============================================================================
+
+def test_newest_comfyui_candidate_none_when_already_current(monkeypatch):
+    check_comfyui_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_comfyui_pin.py", "check_comfyui_pin_for_test")
+    pin = check_comfyui_pin._pinned_version()
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_comfyui_pin)
+    monkeypatch.setattr(check_comfyui_pin, "_fetch_releases",
+                        lambda: [{"tag_name": pin, "prerelease": False, "draft": False}])
+    assert pipeline.newest_comfyui_candidate() is None
+
+
+def test_newest_comfyui_candidate_returns_triple_when_upstream_is_ahead_and_resolves(monkeypatch):
+    check_comfyui_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_comfyui_pin.py", "check_comfyui_pin_for_test2")
+    pin = check_comfyui_pin._pinned_version()
+    newest = "v99.0.0"
+    commit = "a" * 40
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_comfyui_pin)
+    monkeypatch.setattr(check_comfyui_pin, "_fetch_releases",
+                        lambda: [{"tag_name": newest, "prerelease": False, "draft": False},
+                                 {"tag_name": pin, "prerelease": False, "draft": False}])
+    monkeypatch.setattr(check_comfyui_pin, "resolve_tag_commit", lambda tag: commit)
+    assert pipeline.newest_comfyui_candidate() == (pin, newest, commit)
+
+
+def test_newest_comfyui_candidate_none_when_commit_does_not_resolve(monkeypatch):
+    """The candidate exists upstream but its commit could not be resolved (a
+    transient GitHub API failure, say) - this is nothing to do THIS run,
+    never a FAIL, and never a candidate silently passed downstream with no
+    commit to actually confirm against."""
+    check_comfyui_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_comfyui_pin.py", "check_comfyui_pin_for_test3")
+    pin = check_comfyui_pin._pinned_version()
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_comfyui_pin)
+    monkeypatch.setattr(check_comfyui_pin, "_fetch_releases",
+                        lambda: [{"tag_name": "v99.0.0", "prerelease": False, "draft": False},
+                                 {"tag_name": pin, "prerelease": False, "draft": False}])
+    monkeypatch.setattr(check_comfyui_pin, "resolve_tag_commit", lambda tag: None)
+    assert pipeline.newest_comfyui_candidate() is None
+
+
+def test_newest_comfyui_candidate_none_on_upstream_error(monkeypatch):
+    check_comfyui_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_comfyui_pin.py", "check_comfyui_pin_for_test4")
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_comfyui_pin)
+    monkeypatch.setattr(check_comfyui_pin, "_fetch_releases", lambda: None)
+    assert pipeline.newest_comfyui_candidate() is None
+
+
+def test_newest_comfyui_candidate_raises_when_the_constant_is_unreadable(monkeypatch):
+    check_comfyui_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_comfyui_pin.py", "check_comfyui_pin_for_test5")
+
+    def _boom():
+        raise SystemExit("constant renamed")
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_comfyui_pin)
+    monkeypatch.setattr(check_comfyui_pin, "_pinned_version", _boom)
+    with pytest.raises(pipeline.PipelineError, match="could not read the ComfyUI pin"):
+        pipeline.newest_comfyui_candidate()
+
+
+# --------------------------------------------------------------------------- #
+#  comfyui_changelog_bullet                                                   #
+# --------------------------------------------------------------------------- #
+
+def test_comfyui_changelog_bullet_names_both_tags():
+    bullet = pipeline.comfyui_changelog_bullet("v0.31.1", "v0.32.0")
+    assert "v0.31.1" in bullet and "v0.32.0" in bullet
+    assert "localm comfy update" in bullet
+    assert "--reinstall-requirements" not in bullet
+
+
+def test_comfyui_changelog_bullet_names_reinstall_requirements_when_changed():
+    bullet = pipeline.comfyui_changelog_bullet("v0.31.1", "v0.32.0", requirements_changed=True)
+    assert "--reinstall-requirements" in bullet
+
+
+# --------------------------------------------------------------------------- #
+#  run_comfyui_bump / run_comfyui_targeted_tests - the worktree-scoped        #
+#  analogs of run_bump/run_targeted_tests                                     #
+# --------------------------------------------------------------------------- #
+
+def test_run_comfyui_bump_uses_the_worktrees_own_copy(monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    (worktree / "scripts").mkdir(parents=True)
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: (calls.append((cmd, k)), _Proc())[1])
+
+    rc, out = pipeline.run_comfyui_bump(worktree, "v0.32.0", "a" * 40,
+                                        tmp_path / "r.json", write=True)
+    assert rc == 0
+    cmd, kwargs = calls[0]
+    assert cmd[1] == str(worktree / "scripts" / "bump_comfyui_pin.py")
+    assert "--tag" in cmd and "v0.32.0" in cmd
+    assert "--commit" in cmd and "a" * 40 in cmd
+    assert "--write" in cmd
+    assert kwargs["cwd"] == worktree
+    assert kwargs["env"]["PYTHONPATH"] == str(worktree)
+
+
+def test_run_comfyui_bump_without_write_omits_the_flag(monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: (calls.append(cmd), _Proc())[1])
+    pipeline.run_comfyui_bump(worktree, "v0.32.0", "a" * 40, tmp_path / "r.json", write=False)
+    assert "--write" not in calls[0]
+
+
+def test_run_comfyui_targeted_tests_runs_against_the_worktree_with_pythonpath_set(
+        monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "9 passed"
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: (calls.append((cmd, k)), _Proc())[1])
+    passed, out = pipeline.run_comfyui_targeted_tests(worktree)
+    assert passed is True
+    cmd, kwargs = calls[0]
+    assert "tests/test_check_comfyui_pin.py" in cmd
+    assert "tests/test_bump_comfyui_pin.py" in cmd
+    assert "tests/test_confirm_comfyui_runtime.py" in cmd
+    assert kwargs["env"]["PYTHONPATH"] == str(worktree)
+
+
+# --------------------------------------------------------------------------- #
+#  run_comfyui_confirm - the 3-phase subprocess orchestration + GPU lease     #
+#  scoping (provision/teardown unlocked, smoke locked)                       #
+# --------------------------------------------------------------------------- #
+
+def test_run_comfyui_confirm_provision_and_teardown_never_hold_the_lease(monkeypatch, tmp_path):
+    """The load-bearing property from the module docstring of
+    confirm_comfyui_runtime.py: an install can run well past the lease TTL,
+    so only smoke (the phase that actually touches the GPU) may go through
+    run_under_gpu_lease."""
+    phases_run = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        phase = cmd[cmd.index("--phase") + 1]
+        phases_run.append(("subprocess.run", phase))
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _Proc()
+
+    def fake_lease(cmd, *, purpose, cwd):
+        phase = cmd[cmd.index("--phase") + 1]
+        phases_run.append(("run_under_gpu_lease", phase))
+        return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(pipeline, "run_under_gpu_lease", fake_lease)
+    monkeypatch.setattr(pipeline, "_comfyui_scratch_workdir", lambda: tmp_path / "scratch")
+
+    rc = pipeline.run_comfyui_confirm("v0.32.0", "a" * 40, tmp_path / "r.json")
+
+    assert rc == 0
+    assert phases_run[0] == ("subprocess.run", "teardown"), "pre-run cleanup, unlocked"
+    assert ("subprocess.run", "provision") in phases_run, "provision must never be under the lease"
+    assert ("run_under_gpu_lease", "smoke") in phases_run, "smoke MUST be under the lease"
+    assert phases_run[-1] == ("subprocess.run", "teardown"), "post-run cleanup, unlocked"
+    assert phases_run.count(("subprocess.run", "teardown")) == 2, "pre AND post, always"
+
+
+def test_run_comfyui_confirm_still_tears_down_after_a_provision_failure(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        phase = cmd[cmd.index("--phase") + 1]
+        calls.append(phase)
+        class _Proc:
+            returncode = 1 if phase == "provision" else 0
+            stdout = "provision failed" if phase == "provision" else ""
+            stderr = ""
+        return _Proc()
+    lease_spy = _CallSpy()
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(pipeline, "run_under_gpu_lease", lease_spy)
+    monkeypatch.setattr(pipeline, "_comfyui_scratch_workdir", lambda: tmp_path / "scratch")
+
+    rc = pipeline.run_comfyui_confirm("v0.32.0", "a" * 40, tmp_path / "r.json")
+
+    assert rc == 1
+    assert not lease_spy.calls, "smoke must never run after a provision failure"
+    assert calls.count("teardown") == 2, "still torn down: pre-run AND after the failure"
+
+
+def test_run_comfyui_confirm_still_tears_down_after_a_smoke_crash(monkeypatch, tmp_path):
+    """Teardown is the finally-equivalent: even if the lease-wrapped smoke
+    call itself raises, the scratch install must not be left behind."""
+    calls = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        phase = cmd[cmd.index("--phase") + 1]
+        calls.append(("subprocess.run", phase))
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _Proc()
+
+    def fake_lease(cmd, *, purpose, cwd):
+        raise RuntimeError("simulated: the lease subprocess itself blew up")
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(pipeline, "run_under_gpu_lease", fake_lease)
+    monkeypatch.setattr(pipeline, "_comfyui_scratch_workdir", lambda: tmp_path / "scratch")
+
+    with pytest.raises(RuntimeError):
+        pipeline.run_comfyui_confirm("v0.32.0", "a" * 40, tmp_path / "r.json")
+
+    teardowns = [p for kind, p in calls if p == "teardown"]
+    assert len(teardowns) == 2, "pre-run AND post-crash teardown must both still have run"
+
+
+def test_run_comfyui_confirm_returns_lease_busy_without_a_verdict(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: type(
+        "P", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(pipeline, "run_under_gpu_lease",
+                        lambda cmd, *, purpose, cwd: pipeline.LEASE_BUSY_EXIT)
+    monkeypatch.setattr(pipeline, "_comfyui_scratch_workdir", lambda: tmp_path / "scratch")
+    rc = pipeline.run_comfyui_confirm("v0.32.0", "a" * 40, tmp_path / "r.json")
+    assert rc == pipeline.LEASE_BUSY_EXIT
+
+
+# --------------------------------------------------------------------------- #
+#  pipeline_lock - the cross-pin serialization                                #
+# --------------------------------------------------------------------------- #
+
+def test_pipeline_lock_acquires_and_releases_cleanly(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    lock = pipeline._pipeline_lock_path()
+    with pipeline.pipeline_lock():
+        assert lock.exists()
+    assert not lock.exists()
+
+
+def test_pipeline_lock_refuses_when_held_by_a_live_pid(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    lock = pipeline._pipeline_lock_path()
+    lock.mkdir(parents=True)
+    import os
+    (lock / pipeline._LOCK_OWNER_FILE).write_text(json.dumps({"pid": os.getpid()}))
+    with pytest.raises(pipeline.PipelineLockBusy, match="already holds"):
+        with pipeline.pipeline_lock():
+            pass
+    assert lock.exists(), "the lock of a genuinely live holder must not be touched"
+
+
+def test_pipeline_lock_reclaims_a_stale_lock_from_a_dead_pid(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    lock = pipeline._pipeline_lock_path()
+    lock.mkdir(parents=True)
+    # A pid that (almost certainly) does not exist on any real machine.
+    (lock / pipeline._LOCK_OWNER_FILE).write_text(json.dumps({"pid": 999999999}))
+    with pipeline.pipeline_lock():
+        assert lock.exists()
+    assert not lock.exists()
+
+
+def test_pipeline_lock_refuses_when_owner_file_is_unreadable(monkeypatch, tmp_path):
+    """An unreadable owner must never be treated as reclaimable - that would
+    let a lock with a corrupted owner file be silently stolen."""
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    lock = pipeline._pipeline_lock_path()
+    lock.mkdir(parents=True)
+    with pytest.raises(pipeline.PipelineLockBusy, match="owner unreadable"):
+        with pipeline.pipeline_lock():
+            pass
+
+
+# --------------------------------------------------------------------------- #
+#  run_comfyui_pipeline - mirrors the run_llama_pipeline orchestration tests  #
+# --------------------------------------------------------------------------- #
+
+def _patch_comfyui_write_path_as_spy(monkeypatch) -> dict:
+    names = ("ensure_pipeline_worktree", "prepare_bump_branch", "run_comfyui_bump",
+             "run_comfyui_targeted_tests", "commit_and_push", "open_pr", "wait_for_ci",
+             "merge_pr")
+    spies = {}
+    for name in names:
+        spy = _CallSpy()
+        monkeypatch.setattr(pipeline, name, spy)
+        spies[name] = spy
+    return spies
+
+
+def test_run_comfyui_pipeline_fail_receipt_stops_before_any_write(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", lambda tag, commit, receipt_path: 1)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    spies = _patch_comfyui_write_path_as_spy(monkeypatch)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not any(s.calls for s in spies.values())
+    assert issue_spy.calls
+    assert issue_spy.calls[0][1].get("pin") == "comfyui"
+
+
+def test_run_comfyui_pipeline_inconclusive_receipt_stops_before_any_write(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", lambda tag, commit, receipt_path: 2)
+    spies = _patch_comfyui_write_path_as_spy(monkeypatch)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert not any(s.calls for s in spies.values())
+
+
+def test_run_comfyui_pipeline_logs_after_a_run_of_the_threshold_worth_of_inconclusives(
+        monkeypatch, tmp_path):
+    """The comfyui-side twin of the equivalent llama test: proves the same
+    INCONCLUSIVE_ISSUE_THRESHOLD wiring through run_comfyui_pipeline's own
+    entry point, and that it is tracked under the comfyui-state.json file,
+    never llama's."""
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "comfyui-state.json").write_text(json.dumps({
+        "last_tag_tried": "v0.32.0", "verdict": "INCONCLUSIVE", "timestamp": _iso(_day(0)),
+        "inconclusive_streak": pipeline.INCONCLUSIVE_ISSUE_THRESHOLD - 1}), encoding="utf-8")
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", lambda tag, commit, receipt_path: 2)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert issue_spy.calls
+    state = json.loads((state_dir / "comfyui-state.json").read_text(encoding="utf-8"))
+    assert state["inconclusive_streak"] == pipeline.INCONCLUSIVE_ISSUE_THRESHOLD
+    assert not (state_dir / "llama-state.json").exists(), (
+        "a comfyui-only run must never create or touch the llama state file")
+
+
+def test_run_comfyui_pipeline_lease_busy_records_no_verdict(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm",
+                        lambda tag, commit, receipt_path: pipeline.LEASE_BUSY_EXIT)
+    spies = _patch_comfyui_write_path_as_spy(monkeypatch)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert not any(s.calls for s in spies.values())
+    assert not (state_dir / "comfyui-state.json").exists()
+
+
+def test_run_comfyui_pipeline_dry_run_stops_before_worktree(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", lambda tag, commit, receipt_path: 0)
+    spies = _patch_comfyui_write_path_as_spy(monkeypatch)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=True)
+
+    assert rc == 0
+    assert not any(s.calls for s in spies.values())
+
+
+def test_run_comfyui_pipeline_skips_a_recorded_fail_without_calling_confirm(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "comfyui-state.json").write_text(
+        json.dumps({"last_tag_tried": "v0.32.0", "verdict": "FAIL", "timestamp": _iso(_day(0))}),
+        encoding="utf-8")
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    confirm_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", confirm_spy)
+    spies = _patch_comfyui_write_path_as_spy(monkeypatch)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 0
+    assert not confirm_spy.calls
+    assert not any(s.calls for s in spies.values())
+
+
+def test_run_comfyui_pipeline_full_pass_path_merges_on_green_ci(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+    receipt_path_holder = {}
+
+    def fake_confirm(tag, commit, receipt_path):
+        receipt_path_holder["path"] = receipt_path
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps({
+            "baseline": {"requirements_changed": True}}), encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", fake_confirm)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch",
+                        lambda wt, candidate, pin: "claude/pin-pipeline-comfyui-v0.32.0")
+    monkeypatch.setattr(pipeline, "run_comfyui_bump",
+                        lambda wt, tag, commit, receipt_path, write: (0, "ok"))
+    monkeypatch.setattr(pipeline, "run_comfyui_targeted_tests", lambda wt: (True, "ok"))
+    commit_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "commit_and_push", commit_spy)
+    monkeypatch.setattr(pipeline, "open_pr", lambda *a, **k: 5150)
+    monkeypatch.setattr(pipeline, "wait_for_ci", lambda wt: "GREEN")
+    merge_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "merge_pr", merge_spy)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 0
+    assert commit_spy.calls, "a PASS must commit the bump"
+    assert merge_spy.calls[0][0][:4] == (5150, worktree, "claude/pin-pipeline-comfyui-v0.32.0",
+                                         "v0.32.0")
+    changed = (worktree / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "v0.31.1" in changed and "v0.32.0" in changed
+    assert "--reinstall-requirements" in changed, (
+        "the receipt said requirements changed - the bullet must say so too")
+    state = json.loads((state_dir / "comfyui-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "PASS"
+    assert state["merged_pr"] == 5150
+
+
+def test_run_comfyui_pipeline_red_ci_leaves_pr_open_never_merges(monkeypatch, tmp_path):
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    def fake_confirm(tag, commit, receipt_path):
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps({"baseline": {}}), encoding="utf-8")
+        return 0
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", fake_confirm)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", lambda wt, candidate, pin: "b")
+    monkeypatch.setattr(pipeline, "run_comfyui_bump",
+                        lambda wt, tag, commit, receipt_path, write: (0, "ok"))
+    monkeypatch.setattr(pipeline, "run_comfyui_targeted_tests", lambda wt: (True, "ok"))
+    monkeypatch.setattr(pipeline, "commit_and_push", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "open_pr", lambda *a, **k: 1)
+    monkeypatch.setattr(pipeline, "wait_for_ci", lambda wt: "RED")
+    merge_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "merge_pr", merge_spy)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not merge_spy.calls
+    assert issue_spy.calls
+    state = json.loads((state_dir / "comfyui-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "FAIL"
+
+
+def test_run_comfyui_pipeline_bump_refusal_stops_before_commit(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    worktree = _fake_worktree_with_changelog(tmp_path)
+
+    def fake_confirm(tag, commit, receipt_path):
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps({"baseline": {}}), encoding="utf-8")
+        return 0
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", fake_confirm)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", lambda: worktree)
+    monkeypatch.setattr(pipeline, "prepare_bump_branch", lambda wt, candidate, pin: "b")
+    monkeypatch.setattr(pipeline, "run_comfyui_bump",
+                        lambda wt, tag, commit, receipt_path, write: (1, "REFUSED: bad receipt"))
+    commit_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "commit_and_push", commit_spy)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 1
+    assert not commit_spy.calls
+
+
+def test_run_comfyui_pipeline_unexpected_exception_is_inconclusive_and_logged(monkeypatch, tmp_path):
+    _patch_state_dir(monkeypatch, tmp_path)
+    worktree_spy_calls = []
+
+    def _boom():
+        worktree_spy_calls.append(True)
+        raise FileNotFoundError("simulated: gh not on PATH")
+
+    def fake_confirm(tag, commit, receipt_path):
+        # A real receipt must exist before ensure_pipeline_worktree() runs -
+        # the PASS path reads it first (requirements_changed) - otherwise a
+        # missing-file read would raise before the mocked worktree step is
+        # ever reached, and this test would pass for the wrong reason.
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps({"baseline": {}}), encoding="utf-8")
+        return 0
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", fake_confirm)
+    monkeypatch.setattr(pipeline, "ensure_pipeline_worktree", _boom)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert worktree_spy_calls, "ensure_pipeline_worktree must actually have been reached"
+    assert issue_spy.calls, "an uncaught exception is always logged, even though INCONCLUSIVE"
+
+
+# --------------------------------------------------------------------------- #
+#  main() dispatch                                                            #
+# --------------------------------------------------------------------------- #
+
+def test_main_dispatches_comfyui_under_the_lock(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "run_comfyui_pipeline", lambda dry_run: (spy(dry_run), 0)[1])
+    rc = pipeline.main(["--pin", "comfyui"])
+    assert rc == 0
+    assert spy.calls == [((False,), {})]
+
+
+def test_main_rocm_still_refuses(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    assert pipeline.main(["--pin", "rocm"]) == 1
+
+
+def test_main_reports_inconclusive_when_the_lock_is_held(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    lock = pipeline._pipeline_lock_path()
+    lock.mkdir(parents=True)
+    import os
+    (lock / pipeline._LOCK_OWNER_FILE).write_text(json.dumps({"pid": os.getpid()}))
+    rc = pipeline.main(["--pin", "llama"])
+    assert rc == 2
+    assert "INCONCLUSIVE" in capsys.readouterr().out

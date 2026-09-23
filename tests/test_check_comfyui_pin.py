@@ -362,6 +362,128 @@ def test_release_date_by_tag_http_hits_the_real_endpoint_shape(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  resolve_tag_commit() - tag -> the 40-hex commit sha it points at           #
+# --------------------------------------------------------------------------- #
+
+def test_resolve_tag_commit_lightweight_tag_resolves_directly():
+    """A lightweight tag's ref object IS the commit - no second hop needed."""
+    commit_sha = "a" * 40
+
+    def ref_opener(repo, tag):
+        return {"ref": f"refs/tags/{tag}",
+                "object": {"sha": commit_sha, "type": "commit"}}
+    result = pincheck.resolve_tag_commit("v0.32.0", "owner/repo", ref_opener=ref_opener)
+    assert result == commit_sha
+
+
+def test_resolve_tag_commit_annotated_tag_follows_one_hop():
+    """An annotated tag's ref object is the TAG, whose own object.sha is the
+    commit - resolve_tag_commit must follow exactly that one hop."""
+    tag_obj_sha = "b" * 40
+    commit_sha = "c" * 40
+
+    def ref_opener(repo, tag):
+        return {"ref": f"refs/tags/{tag}", "object": {"sha": tag_obj_sha, "type": "tag"}}
+
+    def tag_opener(repo, sha):
+        assert sha == tag_obj_sha
+        return {"sha": tag_obj_sha, "tag": "v0.32.0",
+                "object": {"sha": commit_sha, "type": "commit"}}
+    result = pincheck.resolve_tag_commit("v0.32.0", "owner/repo",
+                                         ref_opener=ref_opener, tag_opener=tag_opener)
+    assert result == commit_sha
+
+
+def test_resolve_tag_commit_none_on_ref_mismatch():
+    """The singular /git/ref/tags/<tag> endpoint is an exact match, but this
+    still defends against a future refactor accidentally pointing at the
+    PLURAL /git/refs/tags/ endpoint (a prefix match: asking for 'v0.3' could
+    return 'v0.31.1's ref) by refusing any response whose own ref does not
+    name exactly the tag that was asked for."""
+    def ref_opener(repo, tag):
+        return {"ref": "refs/tags/v0.31.1", "object": {"sha": "d" * 40, "type": "commit"}}
+    assert pincheck.resolve_tag_commit("v0.3", "owner/repo", ref_opener=ref_opener) is None
+
+
+def test_resolve_tag_commit_none_on_plural_endpoint_style_list_response():
+    """A list response (what the plural refs/ endpoint returns for an
+    ambiguous prefix) is not a dict and must be refused, not indexed into."""
+    def ref_opener(repo, tag):
+        return [{"ref": f"refs/tags/{tag}", "object": {"sha": "e" * 40, "type": "commit"}}]
+    assert pincheck.resolve_tag_commit("v0.31.1", "owner/repo", ref_opener=ref_opener) is None
+
+
+def test_resolve_tag_commit_none_on_malformed_sha():
+    def ref_opener(repo, tag):
+        return {"ref": f"refs/tags/{tag}", "object": {"sha": "not-40-hex-chars", "type": "commit"}}
+    assert pincheck.resolve_tag_commit("v0.31.1", "owner/repo", ref_opener=ref_opener) is None
+
+
+def test_resolve_tag_commit_none_on_unexpected_object_type():
+    def ref_opener(repo, tag):
+        return {"ref": f"refs/tags/{tag}", "object": {"sha": "f" * 40, "type": "blob"}}
+    assert pincheck.resolve_tag_commit("v0.31.1", "owner/repo", ref_opener=ref_opener) is None
+
+
+def test_resolve_tag_commit_none_when_ref_opener_raises():
+    def raiser(repo, tag):
+        raise urllib.error.HTTPError("url", 404, "Not Found", {}, None)
+    assert pincheck.resolve_tag_commit("v0.31.1", "owner/repo", ref_opener=raiser) is None
+
+
+def test_resolve_tag_commit_none_when_tag_opener_raises_mid_hop():
+    def ref_opener(repo, tag):
+        return {"ref": f"refs/tags/{tag}", "object": {"sha": "a" * 40, "type": "tag"}}
+
+    def raiser(repo, sha):
+        raise TimeoutError("slow")
+    assert pincheck.resolve_tag_commit(
+        "v0.31.1", "owner/repo", ref_opener=ref_opener, tag_opener=raiser) is None
+
+
+def test_resolve_tag_commit_never_calls_the_network_for_an_unparseable_tag():
+    """An invalid tag is rejected before any opener runs at all - proven by a
+    call-count assertion, not just by the return value, per this repo's own
+    discipline that a negative result must prove the guard actually fired."""
+    calls = []
+
+    def spy(repo, tag):
+        calls.append((repo, tag))
+        return {"ref": f"refs/tags/{tag}", "object": {"sha": "a" * 40, "type": "commit"}}
+    assert pincheck.resolve_tag_commit("not-a-version", "owner/repo", ref_opener=spy) is None
+    assert calls == []
+
+
+def test_fetch_tag_ref_http_hits_the_real_endpoint_shape(monkeypatch):
+    """Only the true leaf (urlopen) is patched - the SINGULAR ref/ path (not
+    the plural refs/) is asserted here, since that distinction is the whole
+    point of using this endpoint over the more obvious-looking one."""
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["accept"] = req.get_header("Accept")
+        return _FakeHTTP({"ref": "refs/tags/v1.2.3", "object": {"sha": "a" * 40, "type": "commit"}})
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    result = pincheck._fetch_tag_ref_http("owner/repo", "v1.2.3")
+    assert result["ref"] == "refs/tags/v1.2.3"
+    assert captured["url"] == "https://api.github.com/repos/owner/repo/git/ref/tags/v1.2.3"
+    assert captured["accept"] == "application/vnd.github+json"
+
+
+def test_fetch_tag_object_http_hits_the_real_endpoint_shape(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return _FakeHTTP({"sha": "b" * 40, "object": {"sha": "c" * 40, "type": "commit"}})
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    result = pincheck._fetch_tag_object_http("owner/repo", "b" * 40)
+    assert result["object"]["sha"] == "c" * 40
+    assert captured["url"] == f"https://api.github.com/repos/owner/repo/git/tags/{'b' * 40}"
+
+
+# --------------------------------------------------------------------------- #
 #  --gate: exit codes, annotations, and the real bundled pin                  #
 # --------------------------------------------------------------------------- #
 
