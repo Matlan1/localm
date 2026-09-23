@@ -233,7 +233,8 @@ clients you trust.
 - **Routing a chat request to a model loaded on another localm instance on
   this machine** verifies the target before forwarding anything: accepting a
   peer offer (Models page, when another running instance already has the
-  model loaded) sends that instance's own API key once, and every request
+  model loaded) checks that instance's own API key against it once, or no
+  key for an instance that has none, before anything is stored, and every request
   after that is only ever forwarded to a target confirmed to resolve to
   loopback over plain HTTP or HTTPS - a forged or LAN-facing offer cannot
   redirect your requests off this machine. The peer's key lives in this

@@ -12,11 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The MCP `chat` tool takes `images`** (local image files or `data:image/...`
+  URIs), and **`localm mcp --share-loaded-models`** lets the MCP server use a model
+  another localm instance on this machine already has loaded instead of loading a
+  second copy.
 - **Switch models in running coder sessions and resume any session with any model.**
   You can now change the model powering an active coder session in place without
   starting a new session or losing history. In the GUI, click the session model
   badge in the session bar or use the Model section in session controls; switching
-  the active model in the sidebar also updates local coder sessions automatically.
+  the active model in the sidebar also updates local coder sessions that were not
+  started with a chosen model.
   When loading the chosen model would evict a model that is in use, or would only
   partly fit in VRAM, the coder asks first, as the sidebar model picker does. If
   the load does not complete, starting a session reports why instead of starting
@@ -89,6 +94,32 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A request that needs something the loaded model lacks is now answered by an
+  installed model that has it from every part of localm, not only from API clients
+  that leave `model` empty.** An image attached in the GUI chat or `localm run`, web
+  access or the coding agent with a model that cannot format structured tool calls,
+  a conversation that outgrows the window the model was trained for, a Knowledge
+  image being described, and an MCP `chat` or `run_coder_task` call without a model
+  are now answered by an installed model that can, and the reply names it. A model
+  answering one such request no longer becomes the loaded model for everything
+  after it, and only chat models whose file is present are chosen, never an
+  embedding, diffusion or other component model. Pinning is always honored: pin a
+  GUI chat to a model in its parameters, pass `--pin-model` to `localm run` or
+  `localcoder`, name the model in an API request, an MCP call or a coder session,
+  or set it on a scheduled job. A scheduled chat job now runs on its own model even
+  while a different one is loaded, where it used to run on whichever was loaded.
+- **`localm run`: an image the model could not read no longer makes every later
+  message fail.** The image is removed from the conversation with an explanation,
+  and a message that failed for another reason is withdrawn instead of being sent
+  again ahead of the next one.
+- **Using a model another localm instance on this machine already has loaded now
+  works.** An instance with no API key can be used without inventing a key; a key
+  is checked before the route is kept, and one that stops being accepted clears the
+  route instead of failing every request; the chosen model no longer snaps back to
+  the local one in the sidebar within 30 seconds; models are matched by file, so a
+  different model that shares a name is never offered; any model that instance has
+  loaded counts, not only its active one; and forwarded requests name the model the
+  way that instance does.
 - **A plugin's secret setting (an API key it registers via `add_settings()`) now correctly shows its configured status and a Clear button in Settings.** It previously always displayed as not set, and could never be cleared from the GUI, because the Settings page dropped the saved/environment status when rendering plugin, TTS, and per-plugin media secret fields.
 - **Resumed HuggingFace downloads are safe to run alongside another download, resume on Xet-backed repos, and are verified before they are registered.** A pull now writes its own temp file and only continues from a partial whose owning process is confirmed gone, so two pulls of the same file (or another program using the HuggingFace cache) can no longer be stitched into one corrupt file. A partial left by an earlier upload of the same file is no longer counted as "already downloaded" and is cleaned up. "Resuming ... (skipping first N MB)" is now only printed when those bytes are really reused, including on Xet-backed repos where the retry previously started over from zero. Every pull whose sha256 HuggingFace publishes is now hashed against it after download; a mismatch deletes the file and fails instead of registering it.
 - **Curated model download shortcuts for Phi-4-mini and Gemma-3 now resolve to their correct HuggingFace repositories.** The curated shortcuts dropdown in the GUI and `localm pull <alias>` now use the `microsoft_` and `google_` upstream repo prefixes for `phi4-mini`, `gemma3-4b`, and `gemma3-12b`, resolving previous 401 download failures.

@@ -34,7 +34,16 @@ localm run mymodel --gpu-layers 99        # GPU layers (GGUF only; 99=all)
 localm run mymodel --image photo.jpg --prompt "Describe this image."
 localm run mymodel --debug                # write debug log
 localm run mymodel --mode privacy         # privacy/log/full persistence mode
+localm run mymodel --pin-model            # always answer with mymodel
 ```
+
+A message mymodel cannot handle - an image it cannot read, or a conversation
+that has outgrown the context window it was trained for - is answered by an
+installed model that can, followed by a line naming that model and why.
+`--pin-model` keeps every message on mymodel instead. Loaded in this process
+(`--no-server`), the other model is swapped in for those messages and
+mymodel is loaded again afterwards. An image the answering model cannot read
+is removed from the conversation, so later messages are not refused for it.
 
 MODEL can be a registered name or a direct path:
 
@@ -584,11 +593,19 @@ Third-party plugins are folders containing a `plugin.toml` manifest and Python f
 localm coder --model mymodel              # interactive session in the current repo
 localm coder "fix the failing test"       # single task
 localcoder --model mymodel                # same thing, standalone entry point (installed with the coder plugin)
+localm coder --model mymodel --pin-model  # always answer with mymodel
 localm coder --system "always run pytest before finishing"   # custom instructions for this run
 localm coder "make the suite pass" --until "pytest -x"       # one-shot, verified by exit code
 localm coder --model mymodel --verify "pytest -x"            # interactive, same check per turn
 localm coder --model mymodel --seed 1234                     # reproducible sampling
 ```
+
+Every request the agent makes needs structured tool calls. When `--model`
+names a model whose chat template cannot format them and an installed model
+can, localm answers with that one instead; `--pin-model` keeps the named
+model. In the GUI coder, a session started without choosing a model follows
+the model selected in the sidebar the same way, while a session given a
+model is pinned to it.
 
 The agent auto-starts `localm serve` when needed and plans with tool calls: reading and searching the project, writing and patching files, running the shell and the test suite, git, web fetch and search, image generation, Knowledge-collection search, background jobs, and delegating to sub-agents. Plus any MCP server tools, plugin-exported tools, and Agent Skills available in that project. The full list is in [Built-in tools](#built-in-tools) below. It asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
 

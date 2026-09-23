@@ -124,21 +124,37 @@ When the memory plugin is active and recalls facts for a turn, the response also
 
 ### Capability-based model routing
 
-When a request leaves `model` unset, empty, or `"localm"`, the loaded model is
-not automatically who answers: localm checks what the request actually needs
-(an attached image, a request for structured tool calls, a longer
-conversation than the loaded model was trained to hold, or an explicit
-`required_capabilities` list on the request body - any of `vision`,
-`tool_use`, `reasoning`, `context_length`) against what the loaded model can
-do, and answers with an installed model that has it when the loaded one does
-not. **A model you named explicitly is never swapped out from under you** -
-naming one pins it, gap or no gap.
+When a request leaves `model` unset, empty, or `"localm"`, or names a model
+with `"pin_model": false`, the model that would answer (the loaded one, or the
+one named) is not automatically who answers: localm checks what the request
+actually needs (an attached image, a request for structured tool calls, a
+longer conversation than that model was trained to hold, or an explicit
+`required_capabilities` list) against what that model can do, and answers
+with an installed model that has it when it does not. **A model you named is
+never swapped out from under you** - naming one pins it, gap or no gap, unless
+you also send `"pin_model": false`.
 
-The response body's own `"model"` field only reflects the model that actually
-answered when the request left `model` unset; a pinned request always echoes
-back the name you sent, whether or not it could fully meet what you asked
-for. Whenever there is something to explain - a swap happened, or a pinned
-model was missing something the request needed - the response also carries an
+Three localm extensions on the request body steer this:
+
+| Field | Meaning |
+|---|---|
+| `pin_model` | `false`: `model` is only the preferred model, which routing may replace. `true`: whatever answers is never replaced, named or not. Unset: a named model is pinned, an unnamed one is not. |
+| `required_capabilities` | Capabilities the answering model must have, any of `vision`, `tool_use`, `reasoning`. Vision and context length never need listing: an image part and the prompt's size already say so. |
+| `min_context` | Tokens the answering model's trained context window must hold. The larger of this and what the prompt's own size implies applies. |
+
+Only installed chat models whose file is present are candidates (never an
+embedding, diffusion, VAE, LoRA or projector entry), a candidate is only
+chosen when it is confirmed to have what is needed, and one that is already
+loaded is preferred. A routed model is loaded for the request without
+becoming the loaded model: the next request that needs nothing special is
+answered by the loaded model again. If a capable model fails to load, the
+next one is tried, then the model the request would otherwise use.
+
+The response body's own `"model"` field names the model that actually
+answered whenever routing changed it; otherwise it echoes the name you sent
+(or, for an unnamed request, the model that answered). Whenever there is
+something to explain - a swap happened, or the model that answered was
+missing something the request needed - the response also carries an
 `X-Localm-Model-Routing` header, a compact JSON object:
 
 ```json
@@ -147,9 +163,15 @@ model was missing something the request needed - the response also carries an
 ```
 
 `gaps` maps each unmet or unknown capability to `"absent"` or `"unknown"` (a
-model that has not been inspected yet); `unmet` lists what a *pinned* model
-still lacks after routing declined to touch it. The header is omitted
-entirely when nothing needs explaining.
+model that has not been inspected yet); `unmet` lists what the model that
+answered still lacks because no installed model could provide it, or none
+could be loaded, in which case `load_errors` says why. A pinned request
+reports its gaps with `"pinned": true` and an empty `unmet`. The header is
+omitted entirely when nothing needs explaining.
+
+A request that resolves to a model with an accepted peer route (see
+[Using a model another instance has loaded](#using-a-model-another-instance-has-loaded))
+is forwarded to that instance, named the way that instance names it.
 
 Multimodal input uses the standard multipart content format with base64
 data-URIs (`{"type": "image_url", "image_url": {"url": "data:image/..."}}`)
@@ -161,6 +183,30 @@ model that can see and answers with that one instead (see routing above).
 Only when no such model is installed, or the request pinned the loaded
 text-only model by name, does it reject the attached image with a clear
 error.
+
+### Using a model another instance has loaded
+
+When another localm instance on this machine already has a model loaded,
+chat and completion requests for it can be forwarded there instead of this
+instance loading its own copy into VRAM. It is always an explicit choice: the
+GUI offers it when you pick that model in the sidebar.
+
+| Route | Scope | Purpose |
+|---|---|---|
+| `GET /v1/models/{model}/peer-offer` | `models:read` | Whether a live instance has this model loaded. `{"available": bool, "peer": {"instance_id", "host", "port", "scheme", "model", "requires_key"}}`. `model` is that instance's own name for it; `requires_key` is false for an instance with no API key. |
+| `POST /v1/models/{model}/peer-route` | `models:write` | Accept an offer. Body `{"instance_id": "...", "api_key": "..."}`, with `api_key` empty for an instance that has no key. The key is checked against that instance first: a refused key is a 403 and nothing is stored. |
+| `DELETE /v1/models/{model}/peer-route` | `models:write` | Stop forwarding. |
+
+A model is matched by its file (the same path, the same sha256, or the same
+file name and size), so a different model that merely shares a name is never
+offered; an instance that reports only its active model's name is matched by
+name. Any model that instance has loaded counts, not only its active one.
+Only an instance reached over loopback, with its identity verified, is ever
+offered or forwarded to. A route is dropped when that instance stops
+answering or refuses the key it was given (the request that found out gets a
+502 saying so); the next request loads the model here. Routes live in this
+process's memory and do not survive a restart; `GET /api/models` lists them
+under `peer_routes`.
 
 ### `POST /v1/completions`
 
