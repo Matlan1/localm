@@ -22,6 +22,9 @@ import pytest
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 SERVER = HERE / "_portmux_stop_signal_server.py"
+GUI = HERE / "_gui_stop_signal.py"
+# A Windows child gets no console of its own and none of the test runner's.
+_NO_CONSOLE = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
 def _free_port() -> int:
@@ -109,7 +112,7 @@ def test_ctrl_break_during_serving_disarms_the_crash_guard(tmp_path):
     log = open(tmp_path / "server.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
         [sys.executable, str(SERVER), str(port), "ctrl-break", "SIGBREAK"],
-        env=_child_env(home), stdout=log, stderr=subprocess.STDOUT)
+        env=_child_env(home), stdout=log, stderr=subprocess.STDOUT, **_NO_CONSOLE)
     rc = None
     try:
         rc = proc.wait(timeout=90)
@@ -127,15 +130,14 @@ def test_ctrl_break_during_serving_disarms_the_crash_guard(tmp_path):
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 @pytest.mark.parametrize("signame", ["SIGHUP", "SIGTERM"])
 def test_localm_gui_stopped_by_a_posix_signal_disarms_its_crash_guard(tmp_path, signame):
-    """The real `localm gui` entry: closing its terminal (SIGHUP) or `kill`
-    (SIGTERM) is a clean stop, not a crash."""
+    """The real `localm gui` command (no status window or tray icon): closing
+    its terminal (SIGHUP) or `kill` (SIGTERM) is a clean stop, not a crash."""
     home = tmp_path / "home"
     home.mkdir()
     port = _free_port()
     log = open(tmp_path / "gui.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "localm", "gui", "--no-model", "--no-browser",
-         "--isolated", "-p", str(port)],
+        [sys.executable, str(GUI), str(port)],
         env=_child_env(home), cwd=str(tmp_path), stdout=log,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     rc = None
@@ -152,6 +154,7 @@ def test_localm_gui_stopped_by_a_posix_signal_disarms_its_crash_guard(tmp_path, 
         f"(exit {rc}):\n{output}")
     assert _markers(home) == []
     assert rc == 0, output
+    assert "real UI requested" not in output, output
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
@@ -166,7 +169,7 @@ def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
     port = _free_port()
     log = open(tmp_path / "gui-native.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, str(HERE / "_gui_native_stop_signal.py"), str(port)],
+        [sys.executable, str(GUI), str(port), "--app-window"],
         env=_child_env(home), cwd=str(tmp_path), stdout=log,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     rc = None
@@ -194,6 +197,7 @@ def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
     assert "server_stopped handed over: True" in output, output
     assert "server_stopped set before close: True" in output, output
     assert rc == 0, output
+    assert "real UI requested" not in output, output
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Ctrl+Break is Windows-only")
@@ -206,10 +210,9 @@ def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
     port = _free_port()
     log = open(tmp_path / "gui-native.log", "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, str(HERE / "_gui_native_stop_signal.py"), str(port),
-         "SIGBREAK"],
+        [sys.executable, str(GUI), str(port), "--app-window", "--raise", "SIGBREAK"],
         env=_child_env(home), cwd=str(tmp_path), stdout=log,
-        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **_NO_CONSOLE)
     rc = None
     try:
         rc = proc.wait(timeout=90)
@@ -224,3 +227,4 @@ def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
     assert "server_stopped handed over: True" in output, output
     assert "server_stopped set before close: True" in output, output
     assert rc == 0, output
+    assert "real UI requested" not in output, output
