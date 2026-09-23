@@ -102,6 +102,9 @@ def native_window_available() -> bool:
 # supports only one window loop per process.
 _native_window = None
 _native_window_may_really_close = threading.Event()
+# Held while run_native_window() checks server_stopped and publishes
+# _native_window, and while close_native_window() reads it.
+_native_window_lock = threading.Lock()
 
 _COINIT_APARTMENTTHREADED = 0x2
 
@@ -303,12 +306,14 @@ def run_native_window(url: str, name: str = "LocaLM", *,
 
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
-    _native_window = window
-    # Checked after _native_window is set: a stop signalled before this point
-    # is seen here, and a later close_native_window() finds the window.
-    if server_stopped is not None and server_stopped.is_set():
-        _native_window = None
-        return True
+    # One step under the lock close_native_window() reads under: either the
+    # stop is seen here and no window is published, or the window is published
+    # and a later close_native_window() destroys it. See
+    # test_a_stop_racing_the_window_publish_neither_hangs_nor_stalls.
+    with _native_window_lock:
+        if server_stopped is not None and server_stopped.is_set():
+            return True
+        _native_window = window
     try:
         # private_mode=False keeps the login cookie across restarts, like the
         # browser tab this replaces. Blocks until the window is destroyed.
@@ -350,7 +355,8 @@ def close_native_window() -> None:
     returns and the process can exit. Call this once the server has
     genuinely stopped - never merely because the window was hidden. A no-op
     when no native window is active. NEVER raises."""
-    window = _native_window
+    with _native_window_lock:
+        window = _native_window
     if window is None:
         return
     _native_window_may_really_close.set()

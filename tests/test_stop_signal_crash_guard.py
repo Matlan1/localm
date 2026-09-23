@@ -159,8 +159,8 @@ def test_localm_gui_stopped_by_a_posix_signal_disarms_its_crash_guard(tmp_path, 
 def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
         tmp_path, signame):
     """App-window mode serves from a background thread while the window loop
-    holds the main thread, where the signal lands: the server still stops
-    cleanly and the window closes."""
+    holds the main thread in native code with the signal blocked there: the
+    server still stops cleanly and the window closes."""
     home = tmp_path / "home"
     home.mkdir()
     port = _free_port()
@@ -191,13 +191,16 @@ def test_app_window_mode_stopped_by_a_posix_signal_disarms_its_crash_guard(
         f"{signame} left {marker.name} behind in app-window mode, so the "
         f"crash-recovery watchdog would relaunch it (exit {rc}):\n{output}")
     assert "native window closed" in output, output
+    assert "server_stopped handed over: True" in output, output
+    assert "server_stopped set before close: True" in output, output
     assert rc == 0, output
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Ctrl+Break is Windows-only")
 def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
-    """App-window mode on Windows: Ctrl+Break (SIGBREAK) lands on the main
-    thread held by the window loop and still stops the server cleanly."""
+    """App-window mode on Windows: Ctrl+Break (SIGBREAK) arrives while the
+    window loop holds the main thread in native code, and still stops the
+    server cleanly."""
     home = tmp_path / "home"
     home.mkdir()
     port = _free_port()
@@ -209,7 +212,7 @@ def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     rc = None
     try:
-        rc = proc.wait(timeout=180)
+        rc = proc.wait(timeout=90)
     finally:
         output = _stop(proc, log)
 
@@ -218,4 +221,6 @@ def test_app_window_mode_ctrl_break_disarms_its_crash_guard(tmp_path):
         f"Ctrl+Break left a crash marker behind in app-window mode, so the "
         f"next start reports a crash that never happened (exit {rc}):\n{output}")
     assert "native window closed" in output, output
+    assert "server_stopped handed over: True" in output, output
+    assert "server_stopped set before close: True" in output, output
     assert rc == 0, output
