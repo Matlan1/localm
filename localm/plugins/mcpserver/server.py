@@ -294,12 +294,15 @@ class EngineCache:
         """A client for another localm instance on this machine that has
         *name* loaded (matched by model file), or None.
 
-        An instance of this same install is authenticated with this install's
-        own credential; any other instance only when it needs none (open
-        mode). Best-effort: a failed lookup is logged and answers None."""
+        An instance of this same install is reached at the address in this
+        install's own instance file and authenticated with this install's
+        credential; an entry claiming such an instance at any other port is
+        not used. Any other instance is used only when it needs no credential
+        (open mode). Best-effort: a failed lookup is logged and answers None."""
         try:
             from localm import instances, peer_routing
             from localm.auth import resolve_bearer_token
+            from localm.bindhost import self_connect_host
             from localm.config import home_dir, load_registry
             from localm.inference.http_engine import HttpEngine
             reg = load_registry()
@@ -312,18 +315,29 @@ class EngineCache:
             own = {str(e.get("instance_id")): e for e in instances.list_entries(home_dir())}
             same_install = own.get(str(peer.get("instance_id")))
             token = None
+            target = peer
             if same_install is not None:
+                if str(same_install.get("port")) != str(peer.get("port")):
+                    _log(f"not using {name}: the machine-wide registry names this "
+                         f"install's instance {peer.get('instance_id')} at port "
+                         f"{peer.get('port')}, but it serves port "
+                         f"{same_install.get('port')}")
+                    return None
+                target = {**peer,
+                          "host": self_connect_host(same_install.get("host")),
+                          "port": same_install.get("port"),
+                          "scheme": same_install.get("scheme") or "http"}
                 token = resolve_bearer_token(same_install.get("token"))
             try:
-                peer_routing.verify_peer_credential(peer, token)
+                peer_routing.verify_peer_credential(target, token)
             except Exception as e:
                 _log(f"not using {name} loaded by the localm instance on port "
-                     f"{peer.get('port')}: {e}")
+                     f"{target.get('port')}: {e}")
                 return None
             route = peer_routing.PeerRoute(
-                model=name, instance_id=str(peer.get("instance_id")),
-                host=peer.get("host"), port=int(peer.get("port")),
-                scheme=peer.get("scheme") or "http", api_key=token or "")
+                model=name, instance_id=str(target.get("instance_id")),
+                host=target.get("host"), port=int(target.get("port")),
+                scheme=target.get("scheme") or "http", api_key=token or "")
             base = peer_routing._peer_url(route, "/v1")
             eng = HttpEngine(base, token=token,
                              model=peer.get("matched_model") or name,
@@ -332,7 +346,7 @@ class EngineCache:
             eng.unloading = False
             self._peers[name] = eng
             _log(f"using {name} already loaded by the localm instance on port "
-                 f"{peer.get('port')} (no second copy loaded)")
+                 f"{target.get('port')} (no second copy loaded)")
             return eng
         except Exception as e:
             _log(f"warning: looking for another instance with {name} loaded "

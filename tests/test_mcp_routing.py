@@ -142,6 +142,46 @@ class TestCoderRouting:
         d = engines.route("plain", [], required=("tool_use",), pinned=True)
         assert d.resolved == "plain"
 
+    @staticmethod
+    def _two_tool_models(reg, failing, exc):
+        registry, _, tmp_path = reg
+        (tmp_path / "tooly2").mkdir(exist_ok=True)
+        (tmp_path / "tooly2" / "tooly2.gguf").write_bytes(b"GGUF" + b"tooly2" * 8)
+        registry["tooly2"] = {"path": str(tmp_path / "tooly2" / "tooly2.gguf"),
+                              "source": "local", "model_type": "llm", "tool_use": True}
+        made = {}
+
+        def factory(name):
+            if name in failing:
+                raise exc(f"{name} is unavailable")
+            return made.setdefault(name, _Engine(name))
+        cache = EngineCache("plain", engine_factory=factory)
+        cache.made = made
+        return cache
+
+    @pytest.mark.parametrize("exc", [RuntimeError, ValueError])
+    def test_a_candidate_that_fails_gives_way_to_the_next_one(self, reg, exc):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        d = TestCoderRouting._two_tool_models(reg, set(), exc)
+        decision = d.route(None, [], required=("tool_use",), pinned=False)
+        first, second = decision.candidates
+        engines = TestCoderRouting._two_tool_models(reg, {first}, exc)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            engine, name, got = coder_engine(engines, decision)
+        assert name == second and engine is engines.made[second]
+        assert got.routed and got.resolved == second, \
+            "the decision names the candidate that is used, so the reply says so"
+
+    @pytest.mark.parametrize("exc", [RuntimeError, ValueError])
+    def test_when_every_candidate_fails_the_default_is_used(self, reg, exc):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = TestCoderRouting._two_tool_models(reg, {"tooly", "tooly2"}, exc)
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            engine, name, got = coder_engine(engines, decision)
+        assert name == "plain" and not got.routed
+        assert len(got.load_errors) == 2
+
 
 # --------------------------------------------------------------------------- #
 #  --share-loaded-models                                                       #
@@ -155,12 +195,14 @@ class _Peer:
     def __init__(self):
         outer = self
         self.bodies = []
+        self.auth = []
 
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
 
             def do_GET(self):
+                outer.auth.append(self.headers.get("Authorization"))
                 data = b'{"object": "list", "data": []}'
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -169,6 +211,7 @@ class _Peer:
                 self.wfile.write(data)
 
             def do_POST(self):
+                outer.auth.append(self.headers.get("Authorization"))
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n))
                 outer.bodies.append(body)
@@ -226,3 +269,51 @@ class TestShareLoadedModels:
         res = _call(engines, "chat", {"prompt": "again"})
         assert res["content"][0]["text"] == "reply-from-plain"
         assert "plain" in engines.made
+
+
+def _claimed_as_this_install(reg, tmp_path, monkeypatch, advertised_port, served_port):
+    """A machine-wide registry entry naming this install's instance "mine" at
+    *advertised_port* while this install's own instance file says it serves
+    *served_port*. The owner key is OWNER-KEY."""
+    registry, _, _ = reg
+    d = tmp_path / "gpu"
+    monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
+    monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(gpu_registry, "_try_whoami", lambda scheme, port, iid, timeout: True)
+    plain = os.path.realpath(registry["plain"]["path"])
+    gpu_registry.write_entry(
+        d, instance_id="mine", pid=os.getpid() + 1, port=advertised_port,
+        host="127.0.0.1", scheme="http", model="their-plain", vram_estimate_bytes=None,
+        gpu_index=0, coordination_token="t",
+        models=[{"name": "their-plain", "path": plain,
+                 "size": os.path.getsize(plain), "sha256": None}])
+    monkeypatch.setattr("localm.instances.list_entries", lambda home: [
+        {"instance_id": "mine", "port": served_port, "host": "127.0.0.1",
+         "scheme": "http", "token": "instance-token"}])
+    monkeypatch.setattr("localm.auth.get_api_key", lambda: "OWNER-KEY")
+
+
+class TestThisInstallsCredential:
+    def test_it_never_reaches_a_port_this_install_does_not_serve(
+            self, reg, tmp_path, monkeypatch):
+        genuine, forged = _Peer(), _Peer()
+        _claimed_as_this_install(reg, tmp_path, monkeypatch,
+                                 advertised_port=forged.port, served_port=genuine.port)
+        engines = _cache(share_loaded=True)
+        res = _call(engines, "chat", {"prompt": "hi"})
+        assert forged.auth == [], "nothing, credential or not, is sent to the claimed port"
+        assert genuine.auth == []
+        assert res["content"][0]["text"] == "reply-from-plain"
+        assert "plain" in engines.made
+
+    def test_this_installs_own_instance_is_used_with_its_credential(
+            self, reg, tmp_path, monkeypatch):
+        genuine = _Peer()
+        _claimed_as_this_install(reg, tmp_path, monkeypatch,
+                                 advertised_port=genuine.port, served_port=genuine.port)
+        engines = _cache(share_loaded=True)
+        res = _call(engines, "chat", {"prompt": "hi"})
+        assert res["content"][0]["text"] == "reply-from-peer"
+        assert genuine.auth and set(genuine.auth) == {"Bearer OWNER-KEY"}
+        assert engines.made == {}
+

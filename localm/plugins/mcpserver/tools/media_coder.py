@@ -9,6 +9,7 @@ binds.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from pathlib import Path
 from typing import Dict
@@ -19,6 +20,31 @@ from localm.pathsafe import is_unc_or_device_path
 from .. import server as _srv
 from ..server import EngineCache, _quiet_stdout, _text_result
 from ._common import MODEL_PARAM
+
+
+def coder_engine(engines: EngineCache, decision):
+    """The engine for a coder task under *decision*: each routed candidate in
+    order, then the model the task would otherwise use. Returns
+    ``(engine, name, decision)``, the decision rewritten to name the model
+    whose engine is returned. Raises what getting that last model raised."""
+    names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
+    load_errors = []
+    for name in names:
+        try:
+            with _quiet_stdout():
+                engine = engines.get_chat(name)
+        except Exception as e:
+            load_errors.append(f"{name}: {e}")
+            _srv._log(f"warning: could not load {name} for a coder task: {e}")
+            continue
+        if name != decision.resolved:
+            decision = dataclasses.replace(decision, resolved=name)
+        return engine, name, decision
+    with _quiet_stdout():
+        engine = engines.get_chat(decision.current)
+    if decision.routed:
+        decision = decision.without_route(load_errors)
+    return engine, decision.current, decision
 
 
 def build(engines: EngineCache) -> Dict[str, dict]:
@@ -169,26 +195,12 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                                      pinned=bool(cfg.model))
         except ValueError as e:
             return _text_result(str(e), is_error=True)
-        names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
-        names.append(decision.current)
-        engine = model_name = None
-        load_errors = []
-        for name in names:
-            try:
-                with _quiet_stdout():
-                    engine = engines.get_chat(name)
-                model_name = name
-                break
-            except ValueError as e:
-                return _text_result(str(e), is_error=True)
-            except Exception as e:
-                if name == decision.current:
-                    return _text_result(f"coder task failed to start: {e}",
-                                        is_error=True)
-                load_errors.append(f"{name}: {e}")
-                _srv._log(f"warning: could not load {name} for a coder task: {e}")
-        if model_name != decision.resolved:
-            decision = decision.without_route(load_errors)
+        try:
+            engine, model_name, decision = coder_engine(engines, decision)
+        except ValueError as e:
+            return _text_result(str(e), is_error=True)
+        except Exception as e:
+            return _text_result(f"coder task failed to start: {e}", is_error=True)
         if engines.is_peer(engine):
             # Another localm instance's loaded copy, reached over its own API.
             from localm.plugins.coder.backends.http import HTTPBackend
