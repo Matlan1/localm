@@ -249,6 +249,166 @@ def test_issues_intro_anchor_matches_the_real_shipped_file(tmp_path):
     assert "NEW-PIN-PIPELINE-LLAMA-B10999-REAL-ANCHOR-PROBE-CONFIRM-FAILED" in after
 
 
+def test_append_fail_issue_kind_changes_the_title_and_the_dedup_key(tmp_path):
+    """A STUCK-INCONCLUSIVE entry and a CONFIRM-FAILED entry for the exact
+    same candidate must never silently deduplicate against each other -
+    they are different, unrelated facts about that candidate."""
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    fail = pipeline.append_fail_issue("b10999", "genuine FAIL reason", None, issues_path=path)
+    stuck = pipeline.append_fail_issue("b10999", "5 in a row", None, issues_path=path,
+                                       kind="STUCK-INCONCLUSIVE")
+    assert fail is True and stuck is True
+    out = path.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-LLAMA-B10999-CONFIRM-FAILED" in out
+    assert "NEW-PIN-PIPELINE-LLAMA-B10999-STUCK-INCONCLUSIVE" in out
+    assert "genuine FAIL reason" in out and "5 in a row" in out, (
+        "both entries must actually be present, not one silently skipped as a dupe")
+
+
+def test_append_fail_issue_still_dedupes_within_the_same_kind(tmp_path):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    pipeline.append_fail_issue("b10999", "first", None, issues_path=path,
+                               kind="STUCK-INCONCLUSIVE")
+    pipeline.append_fail_issue("b10999", "second", None, issues_path=path,
+                               kind="STUCK-INCONCLUSIVE")
+    out = path.read_text(encoding="utf-8")
+    assert out.count("NEW-PIN-PIPELINE-LLAMA-B10999-STUCK-INCONCLUSIVE") == 1
+    assert "first" in out and "second" not in out
+
+
+# --------------------------------------------------------------------------- #
+#  _record_inconclusive - the streak counter and the INCONCLUSIVE_ISSUE_     #
+#  THRESHOLD backport (both pins share this one helper)                     #
+# --------------------------------------------------------------------------- #
+
+def test_record_inconclusive_starts_a_fresh_streak_at_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    streak = pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    assert streak == 1
+    state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["inconclusive_streak"] == 1
+    assert state["verdict"] == "INCONCLUSIVE"
+
+
+def test_record_inconclusive_increments_for_the_same_candidate(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    for expected in (1, 2, 3):
+        streak = pipeline._record_inconclusive("b105", tmp_path / "r.json")
+        assert streak == expected
+
+
+def test_record_inconclusive_resets_when_the_candidate_changes(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    streak = pipeline._record_inconclusive("b106", tmp_path / "r.json")
+    assert streak == 1, "a different (newer) candidate must never inherit the old streak"
+
+
+def test_record_inconclusive_resets_when_a_pass_or_fail_intervenes(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    pipeline.save_state({"last_tag_tried": "b105", "verdict": "FAIL", "timestamp": "x"})
+    streak = pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    assert streak == 1, "a FAIL verdict in between must break the streak, not extend it"
+
+
+def test_record_inconclusive_never_promotes_the_verdict_past_the_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(pipeline, "append_fail_issue", lambda *a, **k: True)
+    for _ in range(pipeline.INCONCLUSIVE_ISSUE_THRESHOLD + 3):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["verdict"] == "INCONCLUSIVE", (
+        "no streak length ever promotes this to a permanent FAIL")
+
+
+def test_record_inconclusive_logs_exactly_once_at_the_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    for i in range(1, pipeline.INCONCLUSIVE_ISSUE_THRESHOLD + 3):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json")
+        if i < pipeline.INCONCLUSIVE_ISSUE_THRESHOLD:
+            assert not issue_spy.calls, f"must not log before the threshold (run {i})"
+    assert len(issue_spy.calls) == 1, (
+        "must log exactly once when the streak first crosses the threshold, "
+        "never once per run afterward")
+    _args, kwargs = issue_spy.calls[0]
+    assert kwargs.get("kind") == "STUCK-INCONCLUSIVE"
+
+
+def test_record_inconclusive_uses_the_stuck_kind_never_confirm_failed(monkeypatch, tmp_path):
+    """A STUCK-INCONCLUSIVE entry must never collide with (and silently
+    suppress) a genuine CONFIRM-FAILED entry for the same candidate."""
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    real_append = pipeline.append_fail_issue
+    issues_path = tmp_path / "issues.txt"
+    issues_path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    monkeypatch.setattr(pipeline, "ISSUES_PATH", issues_path)
+    monkeypatch.setattr(pipeline, "append_fail_issue",
+                        lambda *a, **k: real_append(*a, issues_path=issues_path,
+                                                    **{k2: v for k2, v in k.items()
+                                                       if k2 != "issues_path"}))
+    for _ in range(pipeline.INCONCLUSIVE_ISSUE_THRESHOLD):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    real_append("b105", "a genuine build FAIL", None, issues_path=issues_path)
+    out = issues_path.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-LLAMA-B105-STUCK-INCONCLUSIVE" in out
+    assert "NEW-PIN-PIPELINE-LLAMA-B105-CONFIRM-FAILED" in out, (
+        "the genuine FAIL must still get its own entry, not be silently "
+        "deduped away by the earlier stuck-inconclusive one")
+
+
+def test_record_inconclusive_force_issue_logs_every_time_regardless_of_streak(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    for _ in range(3):
+        pipeline._record_inconclusive("b105", tmp_path / "r.json", force_issue=True)
+    assert len(issue_spy.calls) == 3, "force_issue must log on every single call, not gated"
+    for _args, kwargs in issue_spy.calls:
+        assert kwargs.get("kind", "CONFIRM-FAILED") != "STUCK-INCONCLUSIVE", (
+            "a forced (unexpected-exception) log keeps the default kind")
+
+
+def test_record_inconclusive_tracks_the_comfyui_pin_independently(monkeypatch, tmp_path):
+    """The two pins must never share one streak - a llama INCONCLUSIVE run
+    must not silently count toward comfyui's threshold or vice versa."""
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+    for _ in range(pipeline.INCONCLUSIVE_ISSUE_THRESHOLD - 1):
+        pipeline._record_inconclusive("v0.32.0", tmp_path / "r.json", pin="comfyui")
+    assert not issue_spy.calls
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")  # a fresh llama streak
+    assert not issue_spy.calls, "llama's own first run must not inherit comfyui's streak"
+    pipeline._record_inconclusive("v0.32.0", tmp_path / "r.json", pin="comfyui")
+    assert len(issue_spy.calls) == 1
+    llama_state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    comfyui_state = json.loads((tmp_path / "comfyui-state.json").read_text(encoding="utf-8"))
+    assert llama_state["inconclusive_streak"] == 1
+    assert comfyui_state["inconclusive_streak"] == pipeline.INCONCLUSIVE_ISSUE_THRESHOLD
+
+
+def test_record_inconclusive_extra_kwargs_reach_the_saved_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json", open_pr=42)
+    state = json.loads((tmp_path / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["open_pr"] == 42
+
+
+def test_record_inconclusive_result_still_satisfies_should_skip_cooldown(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._record_inconclusive("b105", tmp_path / "r.json")
+    state = pipeline.load_state()
+    skip_reason = pipeline.should_skip(state, "b105")
+    assert skip_reason is not None and "cooldown" in skip_reason
+
+
 # --------------------------------------------------------------------------- #
 #  gpu_lease_script - configurable, verified to exist, never silently absent #
 # --------------------------------------------------------------------------- #
@@ -804,6 +964,31 @@ def test_run_llama_pipeline_inconclusive_receipt_stops_before_any_write(monkeypa
     assert rc == 2
     assert not any(s.calls for s in spies.values()), (
         "an INCONCLUSIVE receipt must never reach the worktree/bump/commit stage")
+
+
+def test_run_llama_pipeline_logs_after_a_run_of_the_threshold_worth_of_inconclusives(
+        monkeypatch, tmp_path):
+    """Proves the INCONCLUSIVE_ISSUE_THRESHOLD wiring end to end through the
+    real pipeline entry point, not only through _record_inconclusive
+    called directly: pre-seed a state file already one INCONCLUSIVE run
+    short of the threshold for this exact candidate, then run the pipeline
+    once more and confirm THIS run is the one that logs."""
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "llama-state.json").write_text(json.dumps({
+        "last_tag_tried": "b105", "verdict": "INCONCLUSIVE", "timestamp": _iso(_day(0)),
+        "inconclusive_streak": pipeline.INCONCLUSIVE_ISSUE_THRESHOLD - 1}), encoding="utf-8")
+    monkeypatch.setattr(pipeline, "newest_candidate", lambda: ("b100", "b105"))
+    monkeypatch.setattr(pipeline, "run_confirm", lambda candidate, receipt_path: 2)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_llama_pipeline(dry_run=False)
+
+    assert rc == 2, "still INCONCLUSIVE, never promoted to FAIL"
+    assert issue_spy.calls, "this run must be the one that crosses the threshold and logs"
+    state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
+    assert state["inconclusive_streak"] == pipeline.INCONCLUSIVE_ISSUE_THRESHOLD
 
 
 def test_run_llama_pipeline_unexpected_confirm_exit_code_is_fail_not_silent_pass(monkeypatch, tmp_path):
@@ -1492,6 +1677,33 @@ def test_run_comfyui_pipeline_inconclusive_receipt_stops_before_any_write(monkey
 
     assert rc == 2
     assert not any(s.calls for s in spies.values())
+
+
+def test_run_comfyui_pipeline_logs_after_a_run_of_the_threshold_worth_of_inconclusives(
+        monkeypatch, tmp_path):
+    """The comfyui-side twin of the equivalent llama test: proves the same
+    INCONCLUSIVE_ISSUE_THRESHOLD wiring through run_comfyui_pipeline's own
+    entry point, and that it is tracked under the comfyui-state.json file,
+    never llama's."""
+    state_dir = _patch_state_dir(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "comfyui-state.json").write_text(json.dumps({
+        "last_tag_tried": "v0.32.0", "verdict": "INCONCLUSIVE", "timestamp": _iso(_day(0)),
+        "inconclusive_streak": pipeline.INCONCLUSIVE_ISSUE_THRESHOLD - 1}), encoding="utf-8")
+    monkeypatch.setattr(pipeline, "newest_comfyui_candidate",
+                        lambda: ("v0.31.1", "v0.32.0", "a" * 40))
+    monkeypatch.setattr(pipeline, "run_comfyui_confirm", lambda tag, commit, receipt_path: 2)
+    issue_spy = _CallSpy()
+    monkeypatch.setattr(pipeline, "append_fail_issue", issue_spy)
+
+    rc = pipeline.run_comfyui_pipeline(dry_run=False)
+
+    assert rc == 2
+    assert issue_spy.calls
+    state = json.loads((state_dir / "comfyui-state.json").read_text(encoding="utf-8"))
+    assert state["inconclusive_streak"] == pipeline.INCONCLUSIVE_ISSUE_THRESHOLD
+    assert not (state_dir / "llama-state.json").exists(), (
+        "a comfyui-only run must never create or touch the llama state file")
 
 
 def test_run_comfyui_pipeline_lease_busy_records_no_verdict(monkeypatch, tmp_path):

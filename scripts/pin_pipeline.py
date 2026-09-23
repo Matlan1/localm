@@ -72,6 +72,13 @@ _GPU_LEASE_GUESS = REPO.parent / ".claude" / "gpu_lease.py"
 # newer candidate appearing.
 INCONCLUSIVE_COOLDOWN_HOURS = 24
 
+# After this many CONSECUTIVE INCONCLUSIVE runs for the same candidate, log
+# an issue even though the verdict itself stays INCONCLUSIVE (still
+# cooldown-retried, never promoted to a permanent FAIL) - a command line or
+# environment that is silently broken every single run must not loop
+# invisibly forever with nobody ever finding out. See _record_inconclusive.
+INCONCLUSIVE_ISSUE_THRESHOLD = 5
+
 # How long to wait for a merged branch's CI checks before giving up for this
 # run (leaving the PR open, never force-merging, never abandoning it).
 CI_WAIT_TIMEOUT_SECONDS = 45 * 60
@@ -459,29 +466,39 @@ _ISSUES_INTRO_RE = re.compile(r"an entry lives\nin exactly one\..*?\n\n", re.S)
 
 def append_fail_issue(candidate: str, reason: str, receipt_path: "Path | None",
                       issues_path: Path = ISSUES_PATH, *, pin: str = "llama",
-                      summary: "str | None" = None) -> bool:
+                      summary: "str | None" = None, kind: str = "CONFIRM-FAILED") -> bool:
     """Append a new OPEN entry to issues/issues.txt for a genuine FAIL (never
-    for INCONCLUSIVE - that is not evidence of anything). Anchored on the
-    file's own intro paragraph, matching the file's title-text convention -
-    never a line number, which drifts as the file grows. Returns True if the
-    entry was written or already present. Returns False, printing a warning,
-    if issues_path exists but the intro anchor no longer matches (NOT the
-    same as issues_path simply not existing, which is the expected, silent
-    case on CI or a fresh clone).
+    for an ordinary INCONCLUSIVE - that is not evidence of anything; a
+    repeated-INCONCLUSIVE streak past INCONCLUSIVE_ISSUE_THRESHOLD and an
+    uncaught-exception INCONCLUSIVE are both deliberate exceptions, logged
+    via _record_inconclusive). Anchored on the file's own intro paragraph,
+    matching the file's title-text convention - never a line number, which
+    drifts as the file grows. Returns True if the entry was written or
+    already present. Returns False, printing a warning, if issues_path
+    exists but the intro anchor no longer matches (NOT the same as
+    issues_path simply not existing, which is the expected, silent case on
+    CI or a fresh clone).
 
     *pin* names the title prefix (upper-cased; a dotted candidate like a
     ComfyUI tag is dash-safed for the title only - issue ids use dashes,
-    never dots). *summary* overrides the WHOLE default llama-specific
-    descriptive block (what ran, on what, and how) - the default reproduces
-    the exact original text so the llama call site needs no change; a
-    different pin passes its own multi-line description ending in
-    ": {reason}{receipt_note}." to match the same shape."""
+    never dots). *kind* names the title's final segment and is the dedup
+    key alongside pin+candidate - keeping it at its default for every FAIL
+    call site and giving _record_inconclusive's own STUCK-INCONCLUSIVE
+    entries a DIFFERENT kind means the two can never silently deduplicate
+    against each other: a genuine FAIL reported after a candidate already
+    has a stuck-INCONCLUSIVE entry (or the reverse) still gets its own
+    entry, rather than the second call finding the first's title already
+    present and silently writing nothing. *summary* overrides the WHOLE
+    default llama-specific descriptive block (what ran, on what, and how) -
+    the default reproduces the exact original text so the llama call site
+    needs no change; a different pin passes its own multi-line description
+    ending in ": {reason}{receipt_note}." to match the same shape."""
     if not issues_path.exists():
         return False
     text = issues_path.read_text(encoding="utf-8")
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
     title = (f"NEW-PIN-PIPELINE-{pin.upper()}-"
-            f"{candidate.upper().replace('.', '-')}-CONFIRM-FAILED")
+            f"{candidate.upper().replace('.', '-')}-{kind}")
     if title in text:
         return True  # already logged for this exact candidate
     m = _ISSUES_INTRO_RE.search(text)
@@ -502,6 +519,59 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: "Path | None",
     )
     issues_path.write_text(text[:m.end()] + entry + text[m.end():], encoding="utf-8")
     return True
+
+
+def _record_inconclusive(candidate: str, receipt_path: "Path | None", *, pin: str = "llama",
+                         reason: "str | None" = None, force_issue: bool = False,
+                         issue_summary: "str | None" = None, **extra) -> int:
+    """Save an INCONCLUSIVE verdict for *candidate* and track how many
+    CONSECUTIVE runs have been INCONCLUSIVE for this exact candidate (any
+    other verdict, or a different candidate becoming newest, resets the
+    streak to 1). The verdict itself always stays INCONCLUSIVE - never
+    promoted to FAIL - regardless of the streak.
+
+    Once the streak first reaches INCONCLUSIVE_ISSUE_THRESHOLD, logs a
+    STUCK-INCONCLUSIVE issue - a DIFFERENT kind than a genuine FAIL, so the
+    two can never silently deduplicate against each other via
+    append_fail_issue's own per-title dedup: a command line or environment
+    that is silently broken every single run must not retry forever with
+    nobody ever finding out.
+
+    *force_issue* additionally logs on EVERY call regardless of streak,
+    using the default CONFIRM-FAILED kind, for the unexpected-exception
+    handlers which already log unconditionally on their own reasoning (an
+    uncaught exception is always worth a human's attention - see
+    test_run_llama_pipeline_unexpected_exception_is_inconclusive_and_logged).
+    *issue_summary*, when given, overrides append_fail_issue's own default
+    summary text. Returns the new streak count."""
+    prior = load_state(pin=pin)
+    streak = (prior.get("inconclusive_streak", 0) + 1
+             if prior.get("last_tag_tried") == candidate and prior.get("verdict") == "INCONCLUSIVE"
+             else 1)
+    now_iso = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state = {"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
+             "receipt_path": str(receipt_path), "inconclusive_streak": streak}
+    if reason is not None:
+        state["reason"] = reason
+    state.update(extra)
+    save_state(state, pin=pin)
+    if force_issue:
+        append_fail_issue(candidate, reason or "unexpected error", receipt_path, pin=pin,
+                          summary=issue_summary)
+    elif streak == INCONCLUSIVE_ISSUE_THRESHOLD:
+        append_fail_issue(
+            candidate, reason or "repeated INCONCLUSIVE results", receipt_path, pin=pin,
+            kind="STUCK-INCONCLUSIVE",
+            summary=issue_summary or (
+                f"{pin} pin pipeline: {candidate} has been INCONCLUSIVE for {streak} runs "
+                f"in a row\n    scripts/pin_pipeline.py --pin {pin} could not reach a "
+                f"verdict for {candidate} on\n    {streak} consecutive attempts. The verdict "
+                f"stays INCONCLUSIVE (never promoted to\n    a build FAIL, still "
+                f"cooldown-retried automatically), but this many repeats\n    in a row "
+                f"usually means the command line or environment itself is broken\n    "
+                f"rather than transient GPU contention - worth a human look. Latest "
+                f"reason:\n    {reason or 'n/a'}."))
+    return streak
 
 
 # --------------------------------------------------------------------------- #
@@ -836,8 +906,7 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
         print(f"FAIL: {reason}")
         return 1
     if rc == 2:
-        save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
-                   "receipt_path": str(receipt_path)})
+        _record_inconclusive(candidate, receipt_path)
         print("INCONCLUSIVE: could not measure this run; will retry after cooldown")
         return 2
     if rc != 0:
@@ -885,8 +954,7 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
             # the build is bad, so this retries after a cooldown like any other
             # INCONCLUSIVE, and the next attempt's prepare_bump_branch() closes
             # this PR and its branch before starting fresh.
-            save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
-                       "receipt_path": str(receipt_path), "open_pr": pr_number})
+            _record_inconclusive(candidate, receipt_path, open_pr=pr_number)
             print(f"INCONCLUSIVE: CI still pending on PR #{pr_number} after the wait window; "
                  "left open, will retry")
             return 2
@@ -898,8 +966,7 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
         return 1
     except PipelineError as e:
         if isinstance(e, InfraError):
-            save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
-                       "receipt_path": str(receipt_path), "reason": str(e)})
+            _record_inconclusive(candidate, receipt_path, reason=str(e))
             print(f"INCONCLUSIVE (infra): {e}")
             return 2
         save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,
@@ -918,9 +985,7 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
         # the retry eventually does. See
         # test_run_llama_pipeline_unexpected_exception_is_inconclusive_and_logged.
         reason = f"unexpected error after a PASS confirm: {type(e).__name__}: {e}"
-        save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
-                   "receipt_path": str(receipt_path), "reason": reason})
-        append_fail_issue(candidate, reason, receipt_path)
+        _record_inconclusive(candidate, receipt_path, reason=reason, force_issue=True)
         print(f"INCONCLUSIVE (unexpected error): {reason}")
         return 2
 
@@ -975,8 +1040,7 @@ def run_comfyui_pipeline(*, dry_run: bool) -> int:
         print(f"FAIL: {reason}")
         return 1
     if rc == 2:
-        save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
-                   "receipt_path": str(receipt_path)}, pin="comfyui")
+        _record_inconclusive(candidate, receipt_path, pin="comfyui")
         print("INCONCLUSIVE: could not measure this run; will retry after cooldown")
         return 2
     if rc != 0:
@@ -1041,9 +1105,7 @@ def run_comfyui_pipeline(*, dry_run: bool) -> int:
             print(f"merged PR #{pr_number}: {old_tag} -> {candidate}")
             return 0
         if outcome == "PENDING":
-            save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE",
-                       "timestamp": now_iso, "receipt_path": str(receipt_path),
-                       "open_pr": pr_number}, pin="comfyui")
+            _record_inconclusive(candidate, receipt_path, pin="comfyui", open_pr=pr_number)
             print(f"INCONCLUSIVE: CI still pending on PR #{pr_number} after the wait window; "
                  "left open, will retry")
             return 2
@@ -1056,9 +1118,7 @@ def run_comfyui_pipeline(*, dry_run: bool) -> int:
         return 1
     except PipelineError as e:
         if isinstance(e, InfraError):
-            save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE",
-                       "timestamp": now_iso, "receipt_path": str(receipt_path),
-                       "reason": str(e)}, pin="comfyui")
+            _record_inconclusive(candidate, receipt_path, pin="comfyui", reason=str(e))
             print(f"INCONCLUSIVE (infra): {e}")
             return 2
         save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,
@@ -1072,9 +1132,12 @@ def run_comfyui_pipeline(*, dry_run: bool) -> int:
         # (already proven by a PASS confirm before this block runs), so it is
         # INCONCLUSIVE (cooldown retry) but always logged regardless.
         reason = f"unexpected error after a PASS confirm: {type(e).__name__}: {e}"
-        save_state({"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
-                   "receipt_path": str(receipt_path), "reason": reason}, pin="comfyui")
-        append_fail_issue(candidate, reason, receipt_path, pin="comfyui")
+        _record_inconclusive(
+            candidate, receipt_path, pin="comfyui", reason=reason, force_issue=True,
+            issue_summary=f"ComfyUI {candidate}: unexpected pipeline error after a PASS "
+                         f"confirm\n    scripts/pin_pipeline.py confirmed {candidate} for "
+                         f"real but then hit an\n    unexpected error before it could "
+                         f"bump/commit/merge: {reason}\n    (receipt: {receipt_path}).")
         print(f"INCONCLUSIVE (unexpected error): {reason}")
         return 2
 
