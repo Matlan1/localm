@@ -807,6 +807,7 @@ def test_route_stop_signals_restores_the_wakeup_fd_and_ends_its_helper(
         helpers = [t for t in threading.enumerate()
                    if t.name == "localm-stop-signals" and t.ident not in before]
         assert len(helpers) == 1
+        assert helpers[0].daemon, "the stop-signal helper must not keep the process alive"
         assert _current_wakeup_fd() != before_fd
     assert not helpers[0].is_alive(), "the stop-signal helper thread outlived the block"
     assert _current_wakeup_fd() == before_fd, "the previous wakeup fd was not restored"

@@ -113,18 +113,17 @@ def _track_server(server, serve_task) -> None:
         hook()
 
 
-def _request_stop() -> bool:
+def _request_stop() -> None:
     """Record a stop request and end every registered server's serve through
     its stop hook; once the active run_server() call is disarming, only record
-    it. Returns False, doing nothing, when no run_server() call is active."""
+    it. Does nothing when no run_server() call is active."""
     global _stop_requested
     if _active_runs <= 0:
-        return False
+        return
     _stop_requested = True
     if not _stopping:
         for hook in list(_stop_hooks):
             hook()
-    return True
 
 
 def _on_stop_signal(signum, frame) -> None:
@@ -133,7 +132,8 @@ def _on_stop_signal(signum, frame) -> None:
     does nothing when a stop was already requested (a repeated signal while
     the process winds down); otherwise it restores the default disposition and
     re-delivers *signum*, so the signal has its default effect."""
-    if _request_stop() or _stop_requested:
+    _request_stop()
+    if _stop_requested:
         return
     try:
         signal.signal(signum, signal.SIG_DFL)
@@ -170,7 +170,7 @@ def _start_stop_waker(routed):
         return None
     try:
         writer.setblocking(False)
-        previous = signal.set_wakeup_fd(writer.fileno(), warn_on_full_buffer=False)
+        previous = signal.set_wakeup_fd(writer.fileno())
     except (OSError, ValueError, RuntimeError) as e:
         reader.close()
         writer.close()
