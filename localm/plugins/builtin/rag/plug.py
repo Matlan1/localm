@@ -848,9 +848,9 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         check_collection_name(name)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    # Resolved here (never raises) so a missing collection can be reported as
-    # 404 before any 403 - the raising confinement check is the in-executor
-    # recheck below, which runs AFTER _get_collection() has proved existence.
+    # Resolved (never raises) here; the raising confinement check is the
+    # in-executor recheck below. See
+    # TestRagQueryRouteKeyScopedRoots.test_query_missing_collection_gets_404_not_403.
     from localm.inference.http_server import effective_rag_roots
     key_roots = effective_rag_roots(request)
     if not req.query.strip():
