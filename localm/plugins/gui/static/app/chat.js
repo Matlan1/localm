@@ -2067,10 +2067,10 @@ function statusIndicatorI18nKey(code) {
 }
 
 /** Update the text and warning state of an existing status indicator in bodyEl,
- *  or mount a new one if not present. `code` is the server's delta.status_code;
- *  when it resolves to a catalog entry the indicator shows that localized text
- *  and picks the warning style from the code, otherwise `text` (the server's
- *  English status) and the substring-matched style are used as before. */
+ *  or mount a new one if not present. `code` is the server's delta.status_code:
+ *  when it resolves to a catalog entry, that localized text and the code's
+ *  warning style are used; otherwise `text` is shown as given and the warning
+ *  style is matched from its English wording. */
 export function updateStatusIndicator(bodyEl, text, code = null) {
   if (!bodyEl) return null;
   const label = code ? tOr(statusIndicatorI18nKey(code), text) : text;
