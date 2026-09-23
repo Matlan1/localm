@@ -741,7 +741,7 @@ export function handleCoderEvent(s, ev) {
     }
     case "info": {
       flushAssistantBlock(s);
-      feedAppend(s, el("div", "feed-info", ev.text));
+      feedAppend(s, el("div", "feed-info", ev.text || ""));
       break;
     }
     case "episodes_recalled": {
@@ -754,11 +754,6 @@ export function handleCoderEvent(s, ev) {
       const label = tn("coder.episodes.recalled", eps.length) +
         eps.map((e) => `${e.lesson || ""} (${e.id})`).join(" · ");
       feedAppend(s, el("div", "feed-info", label));
-      break;
-    }
-    case "info": {
-      flushAssistantBlock(s);
-      feedAppend(s, el("div", "feed-info", ev.text || ""));
       break;
     }
     case "estimate": {
