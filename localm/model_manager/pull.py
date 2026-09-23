@@ -163,9 +163,10 @@ def _reusable_partial_bytes(incomplete_path: Path,
 
 
 def _adopt_partial(incomplete_path: Path, tmp_path: Path,
-                   expected_size: "int | None") -> int:
+                   expected_size: "int | None", adopt: bool = True) -> int:
     """Rename the largest usable proven-orphan candidate for this blob onto
-    *tmp_path* and delete every other proven-orphan candidate. Candidates whose
+    *tmp_path* and delete every other proven-orphan candidate; with *adopt*
+    False every proven-orphan candidate is deleted instead. Candidates whose
     owner is not proven gone are left untouched. Returns the adopted size, 0
     when nothing was adopted."""
     adoptable = []
@@ -178,8 +179,8 @@ def _adopt_partial(incomplete_path: Path, tmp_path: Path,
     adoptable.sort(key=lambda t: t[0], reverse=True)
     adopted = 0
     for n, c in adoptable:
-        usable = n > 0 and (expected_size is None or expected_size <= 0
-                            or n <= expected_size)
+        usable = adopt and n > 0 and (expected_size is None or expected_size <= 0
+                                      or n <= expected_size)
         if adopted == 0 and usable:
             try:
                 c.rename(tmp_path)
@@ -258,9 +259,8 @@ def _resumable_download_to_tmp_and_move(
     with _INFLIGHT_LOCK:
         _INFLIGHT_PARTIALS.add(str(tmp_path))
     try:
-        resume_size = 0
-        if not force_download:
-            resume_size = _adopt_partial(incomplete_path, tmp_path, expected_size)
+        resume_size = _adopt_partial(incomplete_path, tmp_path, expected_size,
+                                     adopt=not force_download)
         _reap_stale_etag_partials(incomplete_path)
 
         needed = max(0, (expected_size or 0) - resume_size)

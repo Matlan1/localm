@@ -209,12 +209,15 @@ class TestPartialOwnership:
         assert dest.read_bytes() == b"CORRECT"
         assert not big.exists()
 
-    def test_force_download_ignores_a_reusable_orphan(
-            self, cache, tmp_path, monkeypatch, dead_pid):
+    def test_force_download_discards_a_reusable_orphan_and_keeps_a_live_one(
+            self, cache, tmp_path, monkeypatch, dead_pid, live_child):
         inc_path = cache / "file.etag.incomplete"
         orphan = cache / "file.etag.aaaa1111.incomplete"
         orphan.write_bytes(b"OLD_PARTIAL")
         _owner(orphan, *dead_pid)
+        live = cache / "file.etag.bbbb2222.incomplete"
+        live.write_bytes(b"LIVE")
+        _owner(live, *live_child)
         dest = tmp_path / "dest.gguf"
         captured = _wire_http(monkeypatch, b"FRESH")
 
@@ -222,6 +225,9 @@ class TestPartialOwnership:
 
         assert captured["resume_size"] == 0
         assert dest.read_bytes() == b"FRESH"
+        assert not orphan.exists() and not _partial_owner_path(orphan).exists()
+        assert live.read_bytes() == b"LIVE"
+        assert _partials(cache) == [live.name]
 
     def test_importing_pull_does_not_patch_huggingface_hub(self):
         code = (
