@@ -48,6 +48,11 @@ _CONTEXT_HEADROOM = 1.25
 # a registry read plus a probe per candidate on every short request.
 _CONTEXT_ROUTING_FLOOR_TOKENS = 2048
 
+# Capabilities a model must have to take the request at all: a model without
+# vision refuses an image. A confirmed context shortfall is the other such need.
+# Every other capability only changes how the request is answered.
+_REQUIRED_TO_ANSWER = (caps.VISION,)
+
 
 @dataclass(frozen=True)
 class CapabilityNeeds:
@@ -79,9 +84,10 @@ class RoutingDecision:
     flattened them would report a model nobody has looked at as one that cannot
     do the job.
 
-    ``unmet`` names the needs no installed model could satisfy, which is the
-    honest fallback the ADR asks for - routing that found nowhere better to go
-    says so instead of silently doing nothing."""
+    ``unmet`` names the needs the model that answers still lacks: every gap
+    when no installed model could take the request, or, when a model was chosen
+    for what the request cannot be answered without (an image, the context
+    window), the other needs it lacks because no installed model has them all."""
 
     current: Optional[str]
     resolved: Optional[str]
@@ -121,6 +127,9 @@ class RoutingDecision:
             parts.append(f"{cap}=" + ("absent" if state is False else "unknown"))
         gap_text = ", ".join(parts)
         if self.routed:
+            if self.unmet:
+                return (f"routed {self.current} -> {self.resolved} ({gap_text}); "
+                        f"no installed model also provides {', '.join(self.unmet)}")
             return f"routed {self.current} -> {self.resolved} ({gap_text})"
         if self.pinned:
             return f"kept pinned {self.current} ({gap_text})"
@@ -279,6 +288,12 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
 
     Only chat LLMs whose file is not recorded missing are candidates.
 
+    When no model meets every need, a model is still chosen when the current
+    one cannot take the request at all (an image it cannot read, a confirmed
+    context shortfall): the candidates are the models that meet those needs, the
+    ones meeting more of the rest first, and ``unmet`` names what the chosen one
+    lacks.
+
     Ranking among qualified candidates: already resident first, then the largest
     confirmed context window, then name, so the result is deterministic and a
     test can assert on it."""
@@ -304,20 +319,38 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         return RoutingDecision(current=current, resolved=current, pinned=True,
                                needs=needs, gaps=gaps)
 
-    qualified = [n for n in reg
-                 if n != current and _model_satisfies(n, needs, reg, dir_cache)]
-    if not qualified:
-        unmet = tuple(sorted(gaps))
-        return RoutingDecision(current=current, resolved=current, pinned=False,
-                               needs=needs, gaps=gaps, unmet=unmet)
-
     resident_set = set(resident)
 
     def rank(n: str):
         ctx = caps.model_context_length(n, reg=reg) or 0
         return (0 if n in resident_set else 1, -ctx, n)
 
-    qualified.sort(key=rank)
-    return RoutingDecision(current=current, resolved=qualified[0], pinned=False,
-                           needs=needs, gaps=gaps,
-                           candidates=tuple(qualified))
+    qualified = [n for n in reg
+                 if n != current and _model_satisfies(n, needs, reg, dir_cache)]
+    if qualified:
+        qualified.sort(key=rank)
+        return RoutingDecision(current=current, resolved=qualified[0], pinned=False,
+                               needs=needs, gaps=gaps,
+                               candidates=tuple(qualified))
+
+    required = CapabilityNeeds(
+        capabilities=tuple(c for c in needs.capabilities if c in _REQUIRED_TO_ANSWER),
+        min_context=needs.min_context)
+    optional = tuple(c for c in needs.capabilities if c not in _REQUIRED_TO_ANSWER)
+    cannot_take = (any(c in gaps for c in required.capabilities)
+                   or caps.CONTEXT_LENGTH in gaps)
+    if cannot_take and optional:
+        def has(n: str, cap: str) -> bool:
+            return caps.model_capability(n, cap, reg=reg, dir_cache=dir_cache) is True
+
+        partial = [n for n in reg
+                   if n != current and _model_satisfies(n, required, reg, dir_cache)]
+        if partial:
+            partial.sort(key=lambda n: (-sum(has(n, c) for c in optional), *rank(n)))
+            unmet = tuple(sorted(c for c in optional if not has(partial[0], c)))
+            return RoutingDecision(current=current, resolved=partial[0], pinned=False,
+                                   needs=needs, gaps=gaps, unmet=unmet,
+                                   candidates=tuple(partial))
+
+    return RoutingDecision(current=current, resolved=current, pinned=False,
+                           needs=needs, gaps=gaps, unmet=tuple(sorted(gaps)))

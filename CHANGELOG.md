@@ -108,6 +108,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localcoder`, name the model in an API request, an MCP call or a coder session,
   or set it on a scheduled job. A scheduled chat job now runs on its own model even
   while a different one is loaded, where it used to run on whichever was loaded.
+  When no installed model has everything a message needs, an attached image still
+  goes to a model that can read it, for example with web access on and no model
+  that both reads images and makes tool calls.
 - **`localm run`: an image the model could not read no longer makes every later
   message fail.** That message is withdrawn from the conversation with an
   explanation, as is a message that failed for another reason, instead of being

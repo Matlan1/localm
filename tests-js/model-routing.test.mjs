@@ -128,7 +128,13 @@ test("parseRoutingHeader reads the header and survives junk", () => {
     gaps: { vision: "absent", tool_use: "unknown" } })));
   assert.deepEqual(JSON.parse(JSON.stringify(r)),
                    { resolved: "b", requested: "a", routed: true, pinned: false,
-                     gaps: ["vision", "tool_use"] });
+                     gaps: ["vision", "tool_use"], unmet: [] });
+  const partial = window.parseRoutingHeader(resp(JSON.stringify({
+    resolved: "seer", requested: "smol", routed: true, pinned: false,
+    gaps: { vision: "absent", tool_use: "unknown" }, unmet: ["tool_use"] })));
+  assert.deepEqual(JSON.parse(JSON.stringify(partial.gaps)), ["vision"],
+                   "the chip names only what the answering model provides");
+  assert.deepEqual(JSON.parse(JSON.stringify(partial.unmet)), ["tool_use"]);
   assert.equal(window.parseRoutingHeader(resp(null)), null);
   assert.equal(window.parseRoutingHeader(resp("not json")), null);
   assert.equal(window.parseRoutingHeader(null), null);

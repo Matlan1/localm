@@ -143,6 +143,31 @@ class TestPlanRoute:
                           pinned=False, reg=reg)
         assert d.resolved == "big"
 
+    def test_a_conversation_too_long_for_every_tool_model_goes_to_the_roomy_one(self):
+        """Nothing has both, and the current model cannot hold the conversation
+        at all: the roomy model answers and the reply says what it lacks."""
+        reg = _reg(plain={"tool_use": False, "context_length": 4096},
+                   toolsmall={"tool_use": True, "context_length": 4096},
+                   roomy={"tool_use": False, "context_length": 131072})
+        d = cr.plan_route(
+            "plain", cr.CapabilityNeeds(capabilities=("tool_use",),
+                                        min_context=100000),
+            pinned=False, reg=reg)
+        assert d.resolved == "roomy"
+        assert d.unmet == ("tool_use",)
+        assert "no installed model also provides tool_use" in d.describe()
+
+    def test_a_missing_tool_capability_alone_never_picks_a_partial_model(self):
+        """The current model can take the request, so a model that lacks the
+        requested capability too is no better and nothing moves."""
+        reg = _reg(plain={"tool_use": False, "context_length": 131072},
+                   other={"tool_use": False, "context_length": 131072})
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",),
+                                                      min_context=100000),
+                          pinned=False, reg=reg)
+        assert d.resolved == "plain"
+        assert d.unmet == ("tool_use",)
+
     def test_multiple_needs_must_all_be_met_by_one_model(self):
         reg = _reg(plain={"tool_use": False, "context_length": 4096},
                    toolsonly={"tool_use": True, "context_length": 4096},
@@ -447,6 +472,22 @@ class TestVisionMismatchReconciliation:
         assert r.status_code == 400
         assert "cannot accept image" in r.json()["detail"]
         assert _answering_model(engines) == []
+
+    def test_an_image_with_web_access_on_is_read_by_the_vision_model(
+            self, vision_server):
+        """The GUI with Web access on asks for tool calls on every message. No
+        installed model has both, so the one that can read the image answers,
+        and the routing header names tool calls as what it lacks."""
+        client, engines, _ = vision_server
+        r = client.post("/v1/chat/completions",
+                        json={"model": "plain", "pin_model": False,
+                              "required_capabilities": ["tool_use"],
+                              "messages": _IMAGE_MSG, "stream": False})
+        assert _answering_model(engines) == ["seer"]
+        assert r.status_code == 200
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["routed"] is True and blob["resolved"] == "seer"
+        assert blob["unmet"] == ["tool_use"]
 
     def test_unpinned_image_request_with_no_capable_model_still_400s(
             self, vision_server, monkeypatch):

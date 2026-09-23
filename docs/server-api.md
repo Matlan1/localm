@@ -150,6 +150,13 @@ becoming the loaded model: the next request that needs nothing special is
 answered by the loaded model again. If a capable model fails to load, the
 next one is tried, then the model the request would otherwise use.
 
+When no installed model has everything a request needs, what the request
+cannot be answered without decides: an image goes to a model that can read
+it, and a conversation too long for the model goes to one that can hold it,
+even if that model lacks a listed capability such as `tool_use`. `unmet` in
+the routing header below names what it lacks. A request that only lists a
+capability no installed model has stays with the model it would otherwise use.
+
 The response body's own `"model"` field names the model that actually
 answered whenever routing changed it; otherwise it echoes the name you sent
 (or, for an unnamed request, the model that answered). Whenever there is

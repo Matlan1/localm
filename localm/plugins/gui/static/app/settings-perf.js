@@ -2115,7 +2115,8 @@ $("persona-delete").onclick = () => {
 
 /** The server's capability-routing note for one reply (the
  *  `X-Localm-Model-Routing` response header): which model answered, which
- *  model the request asked for, and which capabilities drove the choice.
+ *  model the request asked for, which capabilities drove the choice (`gaps`,
+ *  the ones the answering model provides) and which it still lacks (`unmet`).
  *  Returns null when the header is absent or unparseable. */
 export function parseRoutingHeader(resp) {
   try {
@@ -2124,12 +2125,15 @@ export function parseRoutingHeader(resp) {
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (!data || typeof data !== "object") return null;
+    const unmet = Array.isArray(data.unmet) ? data.unmet : [];
     return {
       resolved: data.resolved || null,
       requested: data.requested || null,
       routed: data.routed === true,
       pinned: data.pinned === true,
-      gaps: data.gaps && typeof data.gaps === "object" ? Object.keys(data.gaps) : [],
+      gaps: data.gaps && typeof data.gaps === "object"
+        ? Object.keys(data.gaps).filter((g) => !unmet.includes(g)) : [],
+      unmet,
     };
   } catch { return null; }
 }
@@ -2961,7 +2965,7 @@ $("p-pin-model").addEventListener("change", () => {
   setConversationPin($("p-pin-model").checked);
 });
 window.addEventListener("localm:model-switched", () => syncPinModelToggle(currentConv()));
-modelSelect.addEventListener("change", () => syncPinModelToggle(currentConv()));
+$("model-select").addEventListener("change", () => syncPinModelToggle(currentConv()));
 
 $("p-web").addEventListener("change", () => {
   lsSetScoped("localm.webAccess", $("p-web").checked ? "1" : "0");
