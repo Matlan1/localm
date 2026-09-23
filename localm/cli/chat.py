@@ -474,6 +474,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     from localm.inference.backends.base import (
         ImageDecodeUnavailable,
         UnsupportedInputError,
+        VISION_CPU_FALLBACK_STATUS,
     )
     parts: list[str] = []
     printer = _ThinkPrinter()
@@ -482,7 +483,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     stream_kwargs = dict(kwargs)
     if "on_status" not in stream_kwargs:
         def _cli_status(s: str) -> None:
-            if "GPU vision encode failed" in s:
+            if s == VISION_CPU_FALLBACK_STATUS:
                 console.print(f"\n[yellow]{escape(s)}[/yellow]")
         stream_kwargs["on_status"] = _cli_status
     try:
@@ -608,8 +609,10 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         first_at: Optional[float] = None
         interactive_opts = dict(gen_opts)
         if "on_status" not in interactive_opts:
+            from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+
             def _cli_interactive_status(s: str) -> None:
-                if "GPU vision encode failed" in s:
+                if s == VISION_CPU_FALLBACK_STATUS:
                     console.print(f"\n[yellow]{escape(s)}[/yellow]")
             interactive_opts["on_status"] = _cli_interactive_status
         try:

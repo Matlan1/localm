@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
+from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
 from localm.inference.http_server import create_app
 
 
@@ -74,7 +75,7 @@ def test_stream_sse_emits_initial_and_live_status_chunks():
 
 def test_stream_sse_image_initial_status():
     engine = _make_status_mock_engine(
-        statuses=["GPU vision encode failed; retrying on CPU..."],
+        statuses=[VISION_CPU_FALLBACK_STATUS],
         supports_images=True,
     )
     app = create_app(engine)
@@ -109,5 +110,5 @@ def test_stream_sse_image_initial_status():
 
     assert statuses_received == [
         "Encoding image...",
-        "GPU vision encode failed; retrying on CPU...",
+        VISION_CPU_FALLBACK_STATUS,
     ]
