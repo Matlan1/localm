@@ -182,6 +182,13 @@ IMAGE_UNSUPPORTED_MESSAGE = (
 )
 
 
+# Emitted via on_status when a GPU vision encode fails and the request is
+# retried on CPU.
+VISION_CPU_FALLBACK_STATUS = (
+    "GPU vision encode failed; retrying on CPU (this may take longer)..."
+)
+
+
 # Shown when a grammar is requested of a backend that cannot apply one. Names
 # both routes out: a GGUF model has native grammar support, an HF model needs the
 # optional extra that ships xgrammar.

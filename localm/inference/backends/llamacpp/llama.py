@@ -2037,7 +2037,8 @@ class LlamaCpp:
                             if not self._mtmd.retry_on_cpu():
                                 raise
                             if on_status:
-                                on_status("GPU vision encode failed; retrying on CPU (this may take longer)...")
+                                from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+                                on_status(VISION_CPU_FALLBACK_STATUS)
                             self._reset_kv_for_image()
                             pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
                                                        add_special=add_special)
