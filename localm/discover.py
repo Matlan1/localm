@@ -1324,11 +1324,12 @@ def _torch_gpu_probe_known_doomed() -> bool:
     compiled code references any of these DLLs by name - the basename
     overlap and the directory-visibility mechanism are both confirmed real;
     the collision itself is not. It is still wired in because the cost of
-    being wrong is asymmetric and small: no SYCL/XPU torch enumeration
-    exists anywhere in this codebase today, so skipping changes nothing
-    this probe currently returns, while catching it if the collision is
-    real avoids the HIP case's exact symptoms (a crash-prone import, a
-    repeating stderr trace).
+    being wrong is asymmetric and small: this probe enumerates only
+    torch.cuda devices (the HF backend separately enumerates torch.xpu, in
+    ``backends/_hf_worker.py``), so skipping the torch.cuda attempt here
+    changes nothing this probe currently returns, while catching it if the
+    collision is real avoids the HIP case's exact symptoms (a crash-prone
+    import, a repeating stderr trace).
 
     Fails OPEN: if either detector pair errors, the probe proceeds with its
     normal torch attempt (which catches its own failures) - detection must
@@ -2023,6 +2024,34 @@ def _apply_device_global_free(gpus: list) -> None:
         g["free_scope"] = FREE_SCOPE_DEVICE
 
 
+_ggml_names_scope = threading.local()
+
+
+def _native_backend_ggml_names() -> list:
+    """Lowercased basenames of the ggml backend libraries in the
+    currently-resolved native runtime directory, or ``[]`` when unresolved or
+    on any error.
+
+    When called from WITHIN a :func:`_native_gpu_index_space_is_opaque` call
+    on this same thread, reuses that call's own resolution instead of
+    resolving again - see that function. A standalone call (the common case:
+    :func:`_native_backend_has_vulkan` / :func:`_native_backend_has_sycl`
+    called on their own) always resolves fresh, exactly as before."""
+    cached = getattr(_ggml_names_scope, "names", None)
+    if cached is not None:
+        return cached
+    try:
+        from localm.inference.backends.llamacpp._loader import (
+            runtime_binary_dir, _ggml_glob,
+        )
+        d = runtime_binary_dir()
+        if d is None:
+            return []
+        return [p.name.lower() for p in d.glob(_ggml_glob())]
+    except Exception:
+        return []
+
+
 def _native_backend_has_vulkan() -> bool:
     """True when the currently-resolved native runtime directory ships the
     Vulkan ggml backend (a ``ggml-vulkan.*`` file) - i.e. the active install
@@ -2045,16 +2074,7 @@ def _native_backend_has_vulkan() -> bool:
     ``--from`` build, an install predating the marker) or generic (e.g.
     ``"custom"`` for a ``--url``/``--sha256`` provision) - the real file set
     is always authoritative for which backend will actually be loaded."""
-    try:
-        from localm.inference.backends.llamacpp._loader import (
-            runtime_binary_dir, _ggml_glob,
-        )
-        d = runtime_binary_dir()
-        if d is None:
-            return False
-        return any("vulkan" in p.name.lower() for p in d.glob(_ggml_glob()))
-    except Exception:
-        return False
+    return any("vulkan" in n for n in _native_backend_ggml_names())
 
 
 def _native_backend_has_sycl() -> bool:
@@ -2067,16 +2087,7 @@ def _native_backend_has_sycl() -> bool:
     Level-Zero/SYCL registry, a different index space from list_gpus()'s
     torch-derived one, which list_gpus() never queries and is therefore
     structurally blind to."""
-    try:
-        from localm.inference.backends.llamacpp._loader import (
-            runtime_binary_dir, _ggml_glob,
-        )
-        d = runtime_binary_dir()
-        if d is None:
-            return False
-        return any("sycl" in p.name.lower() for p in d.glob(_ggml_glob()))
-    except Exception:
-        return False
+    return any("sycl" in n for n in _native_backend_ggml_names())
 
 
 def _native_gpu_index_space_is_opaque() -> bool:
@@ -2088,8 +2099,18 @@ def _native_gpu_index_space_is_opaque() -> bool:
     configured ``main_gpu_index``/``gpu_split_indices`` is passed through
     unchecked below rather than cross-checked against list_gpus(), and any
     per-device figure comes from :func:`native_gpu_devices` (the native
-    registry, via the isolated probe daemon) instead."""
-    return _native_backend_has_vulkan() or _native_backend_has_sycl()
+    registry, via the isolated probe daemon) instead.
+
+    Resolves :func:`_native_backend_ggml_names` once up front and publishes
+    it (thread-scoped) for the two leaf calls below to reuse, so a real,
+    unmocked check of both backends pays for the runtime-directory
+    resolution and glob only once rather than once per leaf."""
+    names = _native_backend_ggml_names()
+    _ggml_names_scope.names = names
+    try:
+        return _native_backend_has_vulkan() or _native_backend_has_sycl()
+    finally:
+        _ggml_names_scope.names = None
 
 
 def _llama_visible_devices(devices: list) -> list:
@@ -2488,10 +2509,15 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
       branch REQUIRES every configured device's ``free_scope`` to be
       :data:`FREE_SCOPE_DEVICE` before trusting the proportion, unlike
       ``gpu_split_shortfall``'s refuse-only use of the identical reading.
-      :func:`native_gpu_devices` carries no such tag, and nothing establishes
-      that ggml's own ``ggml_backend_dev_memory`` query is cross-process
-      blind on any backend, so the opaque-index-space branch is left UNGATED
-      on scope.
+      :func:`native_gpu_devices` carries no such tag. Nothing establishes
+      that ggml-vulkan's or ggml-sycl's own ``ggml_backend_dev_memory`` query
+      is cross-process blind, so the opaque-index-space branch (vulkan or
+      sycl only - see :func:`_native_gpu_index_space_is_opaque`) is left
+      UNGATED on scope. On Windows with an AMD ROCm/HIP build that same kind
+      of query IS cross-process blind (see the module docstring of
+      ``localm.gpu_usage``), which is exactly why a HIP backend must never
+      join this branch without the same scope gate the ``list_gpus()``
+      branch enforces.
 
     A device reporting 0 bytes free keeps a tiny positive share (1-byte
     floor) instead of a 0.0 ratio: ``resolve_gpu_split`` discards the WHOLE

@@ -76,6 +76,10 @@ def _ggml_glob() -> str:
 # The message logged for the current broken-install warning, or None. Read by
 # last_runtime_resolution_warning().
 _last_broken_runtime_warning: Optional[str] = None
+# The last broken-runtime message actually logged at WARNING, or None. Lets a
+# repeat of the SAME message log at DEBUG instead, while a NEW or first-seen
+# message still reaches WARNING.
+_last_warned_broken_runtime: Optional[str] = None
 
 
 def _candidate_dirs() -> List[Path]:
@@ -97,15 +101,17 @@ def _candidate_dirs() -> List[Path]:
 
     # The self-contained location: binaries bundled in the venv via the
     # localm-llama-runtime wheel (populated by `localm setup-llama`).
-    global _last_broken_runtime_warning
+    global _last_broken_runtime_warning, _last_warned_broken_runtime
     try:
         import localm_llama_runtime
         d = localm_llama_runtime.lib_dir()
         if d:
             dirs.append(Path(d))
         _last_broken_runtime_warning = None    # this resolution was clean
+        _last_warned_broken_runtime = None
     except ImportError:
         _last_broken_runtime_warning = None    # not installed yet, not broken
+        _last_warned_broken_runtime = None
         pass   # the wheel is not installed yet - normal before `localm setup-llama`
     except Exception as e:
         # Anything other than "not installed" (e.g. an AttributeError from a
@@ -114,7 +120,11 @@ def _candidate_dirs() -> List[Path]:
         _last_broken_runtime_warning = (
             f"localm_llama_runtime is installed but broken ({e!r}); skipping it "
             f"as a runtime candidate. Try reinstalling it: uv pip install -e ./runtime")
-        logger.warning(_last_broken_runtime_warning)
+        if _last_warned_broken_runtime != _last_broken_runtime_warning:
+            _last_warned_broken_runtime = _last_broken_runtime_warning
+            logger.warning(_last_broken_runtime_warning)
+        else:
+            logger.debug(_last_broken_runtime_warning)
 
     return dirs
 
