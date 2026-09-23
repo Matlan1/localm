@@ -40,6 +40,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   allows queueing follow-up messages while generation or retrieval is active.
 
 ### Changed
+- **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
 - **Web activity in the chat is its own collapsed card, not a user turn.** A
   web search, a page read, a declined or repeated request and the chat's own
   web notes are now stored in the conversation as tool events rather than as
