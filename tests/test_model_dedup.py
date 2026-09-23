@@ -464,9 +464,11 @@ class TestPullDedup:
 
     def test_redownload_bypasses_check(
             self, fake_registry, tmp_path, monkeypatch):
+        import hashlib
         store, models_dir = fake_registry
-        store["have"] = {"path": "x", "source": "hf:o/r", "sha256": "deadbeef"}
-        monkeypatch.setattr(mm, "_hf_file_sha256", lambda r, fn: "deadbeef")
+        digest = hashlib.sha256(b"fresh").hexdigest()
+        store["have"] = {"path": "x", "source": "hf:o/r", "sha256": digest}
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda r, fn: digest)
         prompted = []
         monkeypatch.setattr(
             mm, "_prompt_predownload_dup",

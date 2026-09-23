@@ -24,6 +24,7 @@ def fake_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(mm, "MODELS_DIR", models_dir)
     monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
     monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: None)
     monkeypatch.setattr(mm, "load_registry", lambda: dict(store))
 
     def _save(reg):
@@ -174,7 +175,9 @@ class TestPullModelDestDirGuard:
 # destination. In a pull JOB (no TTY) _prompt_predownload_dup returns "skip".
 # ---------------------------------------------------------------------------
 
-_DIGEST = "ab" * 32
+import hashlib
+
+_DIGEST = hashlib.sha256(b"fake-model-bytes").hexdigest()
 
 
 class TestDestDirDuplicateSkip:
