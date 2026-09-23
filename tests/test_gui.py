@@ -469,18 +469,32 @@ class TestModelShortcutsEndpoint:
             assert by_alias[alias]["spec"] == spec
             assert by_alias[alias]["size"] == _SHORTCUT_SIZES[alias]
 
-    def test_resolve_spec_expands_a_returned_alias_back_to_its_spec(self, gui_app):
+    def test_resolve_spec_expands_a_returned_alias_back_to_its_spec(self, gui_app, monkeypatch):
         """The route's own reason to exist: an alias is only a useful shortcut if
         pulling it (resolve_spec, which model_pull's CLI subprocess calls) lands
         on exactly the spec this route advertised for it - otherwise the picker
-        would show one download and the pull would fetch another."""
-        from localm.model_manager import resolve_spec
+        would show one download and the pull would fetch another.
+
+        The route builds "spec" from the same MODEL_SHORTCUTS.items() that
+        resolve_spec's `.get(alias, alias)` reads, so comparing the two is true
+        by construction for any registry content and cannot, on its own, prove
+        they stay wired together. Prove it is not vacuous: break only
+        resolve_spec and confirm the identical comparison goes red for it."""
+        import localm.model_manager as mm
         app, _ = gui_app
         with TestClient(app) as client:
             rows = client.get("/api/models/shortcuts").json()["shortcuts"]
         assert rows, "MODEL_SHORTCUTS must not be empty for this test to mean anything"
-        for row in rows:
-            assert resolve_spec(row["alias"]) == row["spec"]
+
+        def _assert_each_alias_resolves_to_its_advertised_spec():
+            for row in rows:
+                assert mm.resolve_spec(row["alias"]) == row["spec"]
+
+        _assert_each_alias_resolves_to_its_advertised_spec()
+
+        monkeypatch.setattr(mm, "resolve_spec", lambda spec: f"{spec}-diverged-from-route")
+        with pytest.raises(AssertionError):
+            _assert_each_alias_resolves_to_its_advertised_spec()
 
     def test_still_serves_data_under_net_mode_off(self, gui_app, monkeypatch):
         """/api/discover/search 403s with net_mode=off (test_net_off_is_403),
