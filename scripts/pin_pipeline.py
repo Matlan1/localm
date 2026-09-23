@@ -453,12 +453,22 @@ def prepare_bump_branch(worktree: Path, candidate: str) -> str:
 
 
 def commit_and_push(worktree: Path, branch: str, candidate: str, old_tag: str) -> None:
+    """Stages every TRACKED modification (`git add -u`), not a hardcoded file
+    list. run_bump() always touches setup_llama.py/_api.py/CHANGELOG.md, but
+    a bump can also require a manual follow-on fix to a safety-relevant
+    constant elsewhere in setup_llama.py plus its own tests (see the
+    b11118 cuda-13 13.3->13.4 toolkit rename) - a hardcoded list silently
+    drops such a fix from the commit, so the PR would pass locally (the
+    working tree has the fix) and then fail on CI (the commit does not).
+    `git add -u` is safe here because prepare_bump_branch() always resets
+    this dedicated worktree to a fresh origin/master checkout first, so
+    nothing untracked or unrelated can be sitting in it. See
+    test_commit_and_push_stages_every_tracked_modification_not_just_the_bump_files."""
     commit_msg = (f"chore(llamacpp): advance the pinned build to {candidate}\n\n"
                   f"Automated: confirmed via scripts/confirm_llama_runtime.py on cpu+vulkan "
                   f"(real hardware, this machine) before advancing from {old_tag}.\n\n"
                   "Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n")
-    _run_git(["add", "localm/setup_llama.py",
-             "localm/inference/backends/llamacpp/_api.py", "CHANGELOG.md"], cwd=worktree)
+    _run_git(["add", "-u"], cwd=worktree)
     result = _run_git(["commit", "-m", commit_msg], cwd=worktree)
     if result.returncode != 0:
         raise InfraError(f"commit failed: {result.stderr}")

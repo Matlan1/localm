@@ -688,6 +688,43 @@ def test_close_stale_pr_raises_infra_error_when_gh_pr_list_fails(tmp_path, monke
         pipeline.close_stale_pr("claude/pin-pipeline-llama-b105", worktree)
 
 
+def test_commit_and_push_stages_every_tracked_modification_not_just_the_bump_files(tmp_path):
+    """run_bump() always touches setup_llama.py/_api.py/CHANGELOG.md, but a
+    bump can also require a manual follow-on fix elsewhere in the tree (a
+    safety-relevant constant plus its own tests - see the b11118 cuda-13
+    13.3->13.4 toolkit rename). commit_and_push must stage that too, or the
+    fix silently never reaches the commit: the PR would pass locally (the
+    working tree has it) and fail on CI (the commit does not)."""
+    repo = _init_bare_origin_and_clone(tmp_path)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    branch = "claude/pin-pipeline-llama-b999"
+    subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=worktree, check=True)
+    # CHANGELOG.md is not part of the minimal _init_bare_origin_and_clone fixture;
+    # in the real repo it always already exists and is tracked, so seed that here
+    # too - run_bump() only ever MODIFIES it, never creates it fresh.
+    (worktree / "CHANGELOG.md").write_text("## [Unreleased]\n", encoding="utf-8")
+    subprocess.run(["git", "add", "CHANGELOG.md"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed CHANGELOG.md"], cwd=worktree, check=True)
+
+    # README.md is a real TRACKED file (committed by _init_bare_origin_and_clone)
+    # that is nowhere on the old hardcoded list - the exact shape of "a follow-on
+    # fix outside setup_llama.py/_api.py/CHANGELOG.md".
+    (worktree / "README.md").write_text("scratch\nfollow-on fix\n", encoding="utf-8")
+    (worktree / "CHANGELOG.md").write_text("## [Unreleased]\n- bumped\n", encoding="utf-8")
+
+    pipeline.commit_and_push(worktree, branch, "b999", "b998")
+
+    committed = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"],
+                               cwd=worktree, capture_output=True, text=True).stdout
+    assert "README.md" in committed, (
+        "a follow-on fix outside the bump's own 3 files must not be silently "
+        f"dropped from the commit:\n{committed}")
+    assert "CHANGELOG.md" in committed
+    dirty = subprocess.run(["git", "status", "--porcelain"],
+                           cwd=worktree, capture_output=True, text=True).stdout
+    assert dirty == "", f"every tracked modification must be committed, nothing left dirty: {dirty!r}"
+
+
 def _patch_state_dir(monkeypatch, tmp_path):
     """Also no-ops sync_main_checkout: every run_llama_pipeline orchestration
     test calls this, and none of them are testing the main-checkout sync
