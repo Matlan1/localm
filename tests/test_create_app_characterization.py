@@ -5,8 +5,9 @@ Pins the assembled app as behaviour rather than source text: the route set for
 both ``api_landing`` shapes, every route's dependency tree with the scope each
 gate enforces, the middleware stack order, the exception handlers and the
 response each one produces, the ``app.state`` fields assembly sets and the ones
-its own middleware, handlers and lifespan read back, and the plugin-attach
-failure path. Changing any of these means changing the matching expected table
+its own middleware, handlers and lifespan read back, the plugin-attach failure
+path, and the engine ``create_app(engine)`` publishes to the module globals.
+Changing any of these means changing the matching expected table or assertion
 in this file.
 """
 
@@ -16,7 +17,7 @@ import sys
 from typing import Optional
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.exception_handlers import websocket_request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError, WebSocketRequestValidationError
 from fastapi.routing import APIRoute, APIWebSocketRoute
@@ -389,6 +390,19 @@ def test_origin_guard_refusal_carries_security_headers_and_no_cors_grant():
     assert "access-control-allow-origin" not in refused.headers
 
 
+def test_security_headers_hand_the_handler_the_nonce_they_send():
+    app = create_app(None)
+
+    @app.get("/characterize/nonce")
+    async def _nonce(request: Request):
+        return {"nonce": request.state.csp_nonce}
+
+    response = TestClient(app).get("/characterize/nonce")
+    nonce = response.json()["nonce"]
+    assert nonce
+    assert f"'nonce-{nonce}'" in response.headers["content-security-policy"]
+
+
 _DEFAULT_CORS = {"allow_methods": ["*"], "allow_headers": ["*"]}
 
 
@@ -629,6 +643,46 @@ def test_lifespan_runs_the_plugin_manager_startup_callbacks(monkeypatch):
                         lambda: calls.append("startup"))
     with TestClient(app):
         assert calls == ["startup"]
+        assert "gpu_coordination_token" not in app.state._state
+
+
+# --------------------------------------------------------------------------- #
+# Engine registration
+# --------------------------------------------------------------------------- #
+
+
+class _StubEngine:
+    display_name = "characterization-model"
+    loaded = True
+
+
+def test_create_app_publishes_its_engine_and_a_later_call_resets_it():
+    from localm.inference import http_server as hs
+
+    engine = _StubEngine()
+    try:
+        app = create_app(engine)
+        assert hs._engine is engine
+        assert hs._engines == {"characterization-model": engine}
+        assert hs._engines_lru == ["characterization-model"]
+        assert hs._default_model_name == "characterization-model"
+        assert hs._active_model_name == "characterization-model"
+        assert hs._inference_sem is not None
+        assert hs._inference_sems == {"characterization-model": hs._inference_sem}
+        assert set(hs._last_activity_per_model) == {"characterization-model"}
+        assert TestClient(app).get("/health").json() == {
+            "status": "ok", "model": "characterization-model", "loaded": True}
+    finally:
+        create_app(None)
+
+    assert hs._engine is None
+    assert hs._inference_sem is None
+    assert hs._engines == {}
+    assert hs._engines_lru == []
+    assert hs._inference_sems == {}
+    assert hs._last_activity_per_model == {}
+    assert hs._default_model_name is None
+    assert hs._active_model_name is None
 
 
 # --------------------------------------------------------------------------- #
