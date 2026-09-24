@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Guards on the [gpu] extra's pins: the HF/torch backend must stay importable.
+"""Guards on the [gpu] and [grammar] extras' pins: the HF/torch backend and its
+grammar support must stay importable.
 
 transformers 5.14/5.14.1 imports `transformers/distributed/fsdp.py` on the
 ordinary `from transformers import AutoTokenizer` path (via generation ->
@@ -9,10 +10,10 @@ GenerationMixin), and fsdp needs torch's distributed C extension
 model load die at "loading processor..." - and the lazy-import layer reports it
 as "Could not import module 'AutoTokenizer'", hiding the real cause.
 
-The assertions target uv.lock, NOT the installed venv: a lock refresh can move
-transformers while a dev venv stays on an older pin, so every dev machine and
-the whole test suite stay green while the artifact a real user installs is
-broken. uv.lock is what ships, so uv.lock is what gets asserted.
+The assertions target pyproject.toml, which installs resolve from, and uv.lock,
+NOT the installed venv: a lock refresh can move transformers while a dev venv
+stays on an older pin, so every dev machine and the whole test suite stay green
+while the locked set is broken.
 
 The cap moves version by version rather than being lifted outright: only the
 range actually verified against the pinned ROCm torch is allowed. See
@@ -95,8 +96,8 @@ def test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins():
 
 
 def test_locked_transformers_cannot_break_the_hf_backend():
-    """uv.lock ships inside the release zip, so the LOCKED version is what a real
-    user installs. This is the assertion that catches a lock drift while every dev
+    """uv.lock ships inside the release zip and is what a locked environment
+    installs. This is the assertion that catches a lock drift while every dev
     venv stays green on an older pin."""
     packaging_version = pytest.importorskip("packaging.version")
 
@@ -125,3 +126,31 @@ def test_locked_torch_is_the_pinned_rocm_wheel_on_windows():
         "transformers cap in this module is still needed (it exists only because that "
         "wheel lacks torch._C._distributed_c10d)."
     )
+
+
+# (first xgrammar release that needs it, the apache-tvm-ffi floor it loads with)
+_XGRAMMAR_NEEDS_TVM_FFI = ("0.2.6", "0.1.13")
+
+
+def test_grammar_extra_pairs_xgrammar_with_a_loadable_tvm_ffi():
+    """xgrammar 0.2.6 and later fail at import with an apache-tvm-ffi older than
+    0.1.13. The [grammar] extra must require that floor, and uv.lock must not
+    pair such an xgrammar with an older apache-tvm-ffi."""
+    packaging_requirements = pytest.importorskip("packaging.requirements")
+    packaging_version = pytest.importorskip("packaging.version")
+    xgrammar_from, tvm_ffi_floor = map(packaging_version.Version, _XGRAMMAR_NEEDS_TVM_FFI)
+
+    specs = {r.name: r.specifier for r in
+             map(packaging_requirements.Requirement, _extra_requirements("grammar"))}
+    assert "apache-tvm-ffi" in specs, "the [grammar] extra must pin apache-tvm-ffi"
+    below = f"{tvm_ffi_floor.major}.{tvm_ffi_floor.minor}.{tvm_ffi_floor.micro - 1}"
+    assert not specs["apache-tvm-ffi"].contains(below), (
+        f"[grammar] admits apache-tvm-ffi {below}, which xgrammar {xgrammar_from}+ "
+        "cannot load")
+
+    xgrammar, tvm_ffi = _locked_version("xgrammar"), _locked_version("apache-tvm-ffi")
+    assert xgrammar and tvm_ffi, "xgrammar and apache-tvm-ffi must be present in uv.lock"
+    if packaging_version.Version(xgrammar) >= xgrammar_from:
+        assert packaging_version.Version(tvm_ffi) >= tvm_ffi_floor, (
+            f"uv.lock pairs xgrammar {xgrammar} with apache-tvm-ffi {tvm_ffi}, "
+            "which it cannot load")
