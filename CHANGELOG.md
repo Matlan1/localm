@@ -535,6 +535,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   its official Windows ROCm preview wheels to a new location; the install command now resolves
   the current pinned build there, and a fresh ComfyUI install on this hardware picks up the
   same fix.
+- **A GGUF model load that fails while running CPU-only (`-g 0`) no longer pauses for several
+  extra seconds before reporting the error.** The failure message computed a "GPU is low on
+  memory" hint by probing VRAM even when the load never used the GPU, adding needless latency to
+  every CPU-only load failure; the probe is now skipped for a CPU-only load, matching the
+  preflight check's own behavior.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
