@@ -891,13 +891,32 @@ def test_a_takeover_keeps_its_guard_until_the_lock_is_re_created(home, tmp_path)
 
 def test_the_reclaim_guard_name_is_shorter_than_the_lock_name_and_never_one():
     from localm.model_manager.pull import _reclaim_guard_path
-    for name in ("m.gguf", "m" * 240 + ".gguf", "x.lock"):
+    names = ("m.gguf", "m" * 240 + ".gguf", "x.lock")
+    guards = set()
+    for name in names:
         d = _part_lock_dir(name)
         guard = _reclaim_guard_path(d, name)
         assert guard.parent == d.parent
         assert len(guard.name) < len(d.name)
         assert not guard.name.lower().endswith(".lock")
+        guards.add(guard)
+    assert len(guards) == len(names), "two file names share one reclaim guard"
     assert len(_part_lock_dir("m" * 240 + ".gguf").name) == 255
+
+
+def test_a_guard_held_for_one_file_does_not_block_a_takeover_of_another(home):
+    d = _write_stale_lock()
+    guard = spawn_on_this_tree(GUARD, home, _part_lock_dir("other.gguf"),
+                               "other.gguf", stdin=subprocess.PIPE)
+    try:
+        _first_line(guard)
+        with _part_lock("m.gguf"):
+            rec = json.loads(_record(d))
+        assert rec["pid"] == os.getpid(), (
+            "a stale lock was not taken over while another file's guard was "
+            "held")
+    finally:
+        _release(guard)
 
 
 def _case_insensitive(directory) -> bool:
