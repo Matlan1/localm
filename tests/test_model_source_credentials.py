@@ -704,6 +704,25 @@ def test_patch_on_an_unreadable_store_applies_no_config_change(app_env):
     assert "model_source_credentials.json" in r.json()["detail"]
 
 
+def test_store_unreadable_only_at_write_time_is_still_a_409(app_env, monkeypatch):
+    """The store turning unreadable between the readability check and the
+    write is refused by set_credentials itself and still answered as a 409."""
+    import localm.model_source_credentials as msc
+    c, _scoped_key, _home = app_env
+    path = _write_corrupt_store()
+    checked = []
+    monkeypatch.setattr(msc, "check_credentials_readable",
+                        lambda: checked.append(True))
+
+    r = _answering(c).patch("/v1/config", headers=_owner(),
+                            json={"hf_token": "hf_new"})
+
+    assert checked == [True], "the patched readability check was not reached"
+    assert path.read_bytes() == _CORRUPT_STORE
+    assert r.status_code == 409, r.text
+    assert "model_source_credentials.json" in r.json()["detail"]
+
+
 def test_patch_on_an_unreadable_config_file_is_a_409_naming_the_file(app_env):
     import localm.config as cfg
     c, _scoped_key, _home = app_env
