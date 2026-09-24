@@ -43,11 +43,11 @@ def a_forward_step_past_boot() -> float:
 
 
 def start_identity_of(pid: int):
-    """``_process_start_identity(pid)``, asserted readable on Linux and
-    Windows; the calling test is skipped where the platform has none."""
+    """``instances.process_start_identity(pid)``, asserted readable on Linux
+    and Windows; the calling test is skipped where the platform has none."""
     import pytest
-    from localm.model_manager.pull import _process_start_identity
-    ident = _process_start_identity(pid)
+    from localm.instances import process_start_identity
+    ident = process_start_identity(pid)
     if sys.platform.startswith("linux") or sys.platform == "win32":
         assert ident is not None, (
             f"no start identity for live pid {pid} on {sys.platform}")

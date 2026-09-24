@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import math
 import os
 import secrets
 import sys
@@ -39,6 +40,8 @@ APP_NAME = "localm"
 # Markers that identify a project root, walked up from cwd. Mirrors the coder's
 # .localcoder model; .git covers most repos.
 _ROOT_MARKERS = (".git", ".localcoder")
+
+_LINUX_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 
 
 def _version() -> str:
@@ -317,6 +320,60 @@ def pid_alive(pid: int) -> bool:
         return True       # exists, owned by someone else
     except OSError:
         return True
+
+
+def process_start_identity(pid: int) -> "dict | None":
+    """When process *pid* started, in a form no later change of the system
+    clock alters, or None when it cannot be read.
+
+    Linux: ``{"boot": <boot id or None>, "ticks": <start time in clock ticks
+    since boot>}``, read from /proc. Windows: ``{"created": <psutil
+    create_time>}``, the creation timestamp Windows stores when the process
+    starts. Every other platform: None.
+    """
+    if sys.platform.startswith("linux"):
+        # Start ticks come from /proc, not psutil's create_time. See
+        # test_a_live_holder_keeps_its_lock_across_a_clock_step.
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_bytes()
+            ticks = int(stat[stat.rindex(b")") + 2:].split()[19])
+        except (OSError, ValueError, IndexError):
+            return None
+        try:
+            boot = _LINUX_BOOT_ID.read_text(encoding="ascii").strip() or None
+        except (OSError, ValueError):
+            boot = None
+        return {"boot": boot, "ticks": ticks}
+    if sys.platform == "win32":
+        try:
+            import psutil
+            return {"created": float(psutil.Process(pid).create_time())}
+        except Exception:
+            return None
+    return None
+
+
+def start_identity_differs(recorded, current) -> bool:
+    """True only when *recorded* and *current* are start identities of the
+    same shape that name two different processes: a different start tick
+    under the same boot id, or creation times more than a second apart.
+
+    Anything missing, malformed, of different shapes, or ticks under different
+    or unknown boot ids returns False.
+    """
+    if not isinstance(recorded, dict) or not isinstance(current, dict):
+        return False
+    rt, ct = recorded.get("ticks"), current.get("ticks")
+    if type(rt) is int and type(ct) is int:
+        rb, cb = recorded.get("boot"), current.get("boot")
+        if not (isinstance(rb, str) and isinstance(cb, str) and rb == cb):
+            return False
+        return rt != ct
+    rc, cc = recorded.get("created"), current.get("created")
+    if type(rc) in (int, float) and type(cc) in (int, float):
+        if math.isfinite(rc) and math.isfinite(cc):
+            return abs(rc - cc) > 1.0
+    return False
 
 
 def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:

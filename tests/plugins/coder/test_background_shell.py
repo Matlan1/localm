@@ -1403,6 +1403,33 @@ def test_tree_snapshot_pins_a_REAL_descendant_and_clears_once_it_dies(tmp_path, 
         f"failure: {unexplained}")
 
 
+# -- clock step: a stepped system clock must not orphan the kill path -------- #
+
+def test_a_clock_step_does_not_orphan_the_kill_path(tmp_path, monkeypatch):
+    """A system clock step (NTP after sleep, a VM/WSL guest resyncing) must
+    never make a live job's own identity check read as "someone else's pid",
+    nor make _terminate fall back to _kill_via_handle. See
+    tests/_process_identity.py::step_the_clock.
+    """
+    from tests._process_identity import a_forward_step_past_boot, step_the_clock
+    pytest.importorskip("psutil")
+    job = ShellJob(_argv("import time; time.sleep(120)"), tmp_path, label="clockstep")
+    handle_calls = []
+    monkeypatch.setattr(job, "_kill_via_handle", lambda **kw: handle_calls.append(kw))
+    try:
+        with job._lock, monkeypatch.context() as m:
+            step_the_clock(m, a_forward_step_past_boot())
+            assert bg._still_the_same_process(job.pid, job._create_time), (
+                "a live job's own pid read as a different process after a "
+                "clock step")
+            job._terminate(force=False)
+        assert handle_calls == [], (
+            f"fell back to _kill_via_handle after a clock step: {handle_calls}")
+        assert not any("no longer matches" in w for w in job.warnings), job.warnings
+    finally:
+        job.kill()
+
+
 # -- finding 5: two independent status snapshots could tear ------------------ #
 
 class _TearingJob:

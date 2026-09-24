@@ -40,10 +40,11 @@ Three invariants are load-bearing:
    ``poll() is None`` observed under that lock proves the child is still
    unreaped: on POSIX it is a live process or a zombie (either way the pid is
    not reusable), and on Windows the process handle is still held (which
-   reserves the pid). Killing by pid is therefore safe at that instant. psutil's
-   ``create_time`` is pinned alongside the pid as a second, independent check,
-   but correctness does not depend on it: psutil is an OPTIONAL dependency here,
-   not a core one.
+   reserves the pid). Killing by pid is therefore safe at that instant. A
+   process start identity (``localm.instances.process_start_identity``, stable
+   across a system clock step) is pinned alongside the pid as a second,
+   independent check, but correctness does not depend on it: an unreadable or
+   absent identity reads as inconclusive, never as evidence of a mismatch.
 2. **Kill reaps the TREE, and says so only once it has CHECKED.** A build or dev
    server spawns children; killing only the direct child strands them. POSIX
    gets its own session/process group (``start_new_session``) and is killed with
@@ -75,6 +76,8 @@ import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from localm import instances
 
 # Per-kind ceilings on jobs running at once. A kind with no entry falls back to
 # _DEFAULT_CAP. Exceeding a cap raises rather than queueing.
@@ -161,17 +164,15 @@ class RingBuffer:
 #  pid identity helpers                                                       #
 # --------------------------------------------------------------------------- #
 
-def _process_create_time(pid: int) -> Optional[float]:
-    """The process start timestamp, or None when psutil is unavailable.
+def _process_create_time(pid: int) -> "dict | None":
+    """The process start identity, or None when it cannot be read.
 
-    psutil is an optional dependency (pyproject declares it only in extras), so
-    None is the normal case on a core install, not an error.
+    See :func:`localm.instances.process_start_identity`: a boot id plus start
+    ticks on Linux, the psutil creation timestamp on Windows. None is the
+    normal case on a core install with no psutil extra on a platform whose
+    identity needs it (Windows), not an error.
     """
-    try:
-        import psutil
-        return psutil.Process(pid).create_time()
-    except Exception:
-        return None
+    return instances.process_start_identity(pid)
 
 
 def _describe(job) -> str:
@@ -196,27 +197,23 @@ def _decode(raw) -> str:
     return " ".join(raw.split())
 
 
-def _still_the_same_process(pid: int, create_time: Optional[float]) -> bool:
+def _still_the_same_process(pid: int, start_identity) -> bool:
     """Is *pid* still the process we started?
 
-    Returns True when it cannot tell (no psutil, or an unexpected probe error):
-    the caller's lock-plus-unreaped-child argument is the primary guarantee and
-    this check only ever adds a veto. Returns False only on positive evidence of
-    a mismatch (the pid is gone, or its start time no longer matches).
+    Returns True when it cannot tell (no start identity recorded for the pid
+    we spawned): the caller's lock-plus-unreaped-child argument is the primary
+    guarantee and this check only ever adds a veto. Returns False only on
+    positive evidence of a mismatch (the pid is gone, or its recorded start
+    identity differs from the live process's - see
+    :func:`localm.instances.start_identity_differs`, stable across a system
+    clock step, unlike a raw ``psutil.create_time()`` reading).
     """
-    if create_time is None:
+    if start_identity is None:
         return True
-    try:
-        import psutil
-    except Exception:
-        return True
-    try:
-        # Tolerance for platform clock granularity on create_time.
-        return abs(psutil.Process(pid).create_time() - create_time) < 0.05
-    except psutil.NoSuchProcess:
+    if not instances.pid_alive(pid):
         return False
-    except Exception:
-        return True
+    return not instances.start_identity_differs(
+        start_identity, instances.process_start_identity(pid))
 
 
 # --------------------------------------------------------------------------- #
@@ -596,14 +593,16 @@ class ShellJob(BackgroundJob):
     # -- tree verification ---------------------------------------------------- #
 
     def _snapshot_tree(self) -> None:
-        """Pin every live descendant as ``(pid, create_time)`` before signalling.
+        """Pin every live descendant as ``(pid, start_identity)`` before
+        signalling.
 
         Must be taken while the child is still alive: once it exits and is reaped
         its children are re-parented (to init on POSIX, to nothing followable on
-        Windows), so they are unreachable from our pid afterwards. The
-        create_time pin is what makes killing a survivor safe later - the same
-        identity check the direct child uses, so a recycled pid can never be
-        signalled.
+        Windows), so they are unreachable from our pid afterwards. The start
+        identity pin is what makes killing a survivor safe later - the same
+        identity check the direct child uses (see
+        :func:`localm.instances.process_start_identity`), so a recycled pid can
+        never be signalled.
         """
         self._tree_snapshot = None
         self._tree_unverified_reason = None
@@ -615,10 +614,13 @@ class ShellJob(BackgroundJob):
             self._tree_unverified_reason = "psutil is not installed"
             return
         try:
-            self._tree_snapshot = [
-                (child.pid, child.create_time())
-                for child in psutil.Process(self.pid).children(recursive=True)
-            ]
+            snapshot = []
+            for child in psutil.Process(self.pid).children(recursive=True):
+                identity = instances.process_start_identity(child.pid)
+                if identity is None:
+                    raise LookupError(f"no start identity for pid {child.pid}")
+                snapshot.append((child.pid, identity))
+            self._tree_snapshot = snapshot
         except Exception as e:
             # Nothing to pin. The reason is kept so the warning names the real
             # one.
@@ -640,11 +642,14 @@ class ShellJob(BackgroundJob):
         except Exception:
             return None
         alive = []
-        for pid, created in self._tree_snapshot:
+        for pid, start_identity in self._tree_snapshot:
+            if not instances.pid_alive(pid):
+                continue
+            current = instances.process_start_identity(pid)
+            if instances.start_identity_differs(start_identity, current):
+                continue
             try:
-                proc = psutil.Process(pid)
-                if abs(proc.create_time() - created) < 0.05:
-                    alive.append(proc)
+                alive.append(psutil.Process(pid))
             except Exception:
                 # Gone, or unreadable. Neither counts as a survivor.
                 continue

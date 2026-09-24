@@ -94,9 +94,10 @@ HOLD = '''
 
 REPORT = '''
     import json, os, sys
-    from localm.model_manager.pull import _pid_space_id, _process_start_identity
+    from localm.instances import process_start_identity
+    from localm.model_manager.pull import _pid_space_id
     print(os.getpid(), _pid_space_id(),
-          json.dumps(_process_start_identity(os.getpid())), flush=True)
+          json.dumps(process_start_identity(os.getpid())), flush=True)
     sys.stdin.read()
 '''
 
@@ -419,7 +420,7 @@ def test_a_live_holder_keeps_the_lock_when_its_identity_cannot_be_read_now(
         _write_owner(d, other.pid, start=started_an_hour_earlier(ident),
                      started=time.time())
         before = _record(d)
-        monkeypatch.setattr(pull, "_process_start_identity", lambda pid: None)
+        monkeypatch.setattr(pull.instances, "process_start_identity", lambda pid: None)
 
         refused = None
         try:
@@ -616,12 +617,13 @@ def test_the_windows_machine_guid_is_read():
 
 
 def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
-    from localm.model_manager.pull import _pid_space_id, _process_start_identity
+    from localm.instances import process_start_identity
+    from localm.model_manager.pull import _pid_space_id
     with _part_lock("m.gguf"):
         rec = json.loads(_record(_part_lock_dir("m.gguf")))
     assert rec["pid"] == os.getpid()
     assert rec["space"] == _pid_space_id()
-    assert rec["start"] == _process_start_identity(os.getpid())
+    assert rec["start"] == process_start_identity(os.getpid())
 
 
 @pytest.mark.parametrize("body", [
