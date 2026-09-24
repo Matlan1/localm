@@ -138,14 +138,14 @@ def _should_auto_open_browser(no_browser: bool) -> bool:
     """Whether THIS process's own startup should auto-open a browser tab.
 
     False with --no-browser. Also False when this process was re-exec'd by a
-    server restart (LOCALM_RESTART_IN_PROGRESS, set by
-    http_server._set_restart_env) and the previous run's GUI surface
-    (LOCALM_RESTART_UI) is anything other than "window": "browser", an
-    unrecognised value, or unset. Pops both variables from the environment."""
+    server restart (LOCALM_RESTART_IN_PROGRESS is set, by
+    http_server._set_restart_env) and its value, the previous run's GUI
+    surface, is anything other than "window": "browser", "1" (no surface
+    recorded), or an unrecognised value. Pops the variable from the
+    environment."""
     import os
-    is_restart = os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None) is not None
-    previous_ui = os.environ.pop("LOCALM_RESTART_UI", None)
-    tab_reconnects = is_restart and previous_ui != "window"
+    restart = os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+    tab_reconnects = restart is not None and restart != "window"
     return (not no_browser) and (not tab_reconnects)
 
 
@@ -159,8 +159,8 @@ def _resolve_gui_launch_mode(no_browser: bool) -> tuple[bool, bool]:
     should_open_browser: whether to spawn the background thread opening a browser
     tab. True only when want_native is False and _should_auto_open_browser is
     True: never with --no-browser, and on a restart only when the previous run
-    showed the native app window. Pops LOCALM_RESTART_IN_PROGRESS and
-    LOCALM_RESTART_UI from the environment."""
+    showed the native app window. Pops LOCALM_RESTART_IN_PROGRESS from the
+    environment."""
     from localm import appface
     want_native = (not no_browser) and appface.native_window_available()
     auto_open_browser = _should_auto_open_browser(no_browser)

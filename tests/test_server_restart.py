@@ -152,16 +152,19 @@ def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
 
 
 def _clear_restart_env(monkeypatch):
-    """Unset both restart variables; monkeypatch removes them again at
+    """Unset LOCALM_RESTART_IN_PROGRESS; monkeypatch removes it again at
     teardown whatever the code under test set."""
-    for name in ("LOCALM_RESTART_IN_PROGRESS", "LOCALM_RESTART_UI"):
-        monkeypatch.setenv(name, "1")
-        monkeypatch.delenv(name)
+    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS")
 
 
-@pytest.mark.parametrize("recorded", ["window", "browser"])
-def test_do_restart_hands_the_recorded_gui_surface_to_the_relaunch(monkeypatch,
-                                                                   recorded):
+@pytest.mark.parametrize("recorded, expected", [
+    ("window", "window"), ("browser", "browser"), (None, "1"),
+])
+def test_do_restart_hands_the_recorded_gui_surface_to_the_relaunch(
+        monkeypatch, recorded, expected):
+    """The flag's value is the recorded surface, or "1" when none is recorded
+    (localm serve, gui --no-browser)."""
     monkeypatch.setattr(http_server, "_engine", None)
     monkeypatch.setattr(http_server, "_restart_ui", None)
     _clear_restart_env(monkeypatch)
@@ -170,7 +173,6 @@ def test_do_restart_hands_the_recorded_gui_surface_to_the_relaunch(monkeypatch,
 
     def _fake_relaunch(exe, argv):
         seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
-        seen["ui"] = os.environ.get("LOCALM_RESTART_UI")
         raise SystemExit(0)
 
     monkeypatch.setattr(os, "execv", _fake_relaunch)
@@ -178,29 +180,7 @@ def test_do_restart_hands_the_recorded_gui_surface_to_the_relaunch(monkeypatch,
         http_server._do_restart()
     except SystemExit:
         pass
-    assert seen == {"flag": "1", "ui": recorded}
-
-
-def test_do_restart_with_no_recorded_surface_drops_an_inherited_one(monkeypatch):
-    """With no surface recorded (localm serve, gui --no-browser) the re-exec'd
-    process gets no LOCALM_RESTART_UI, even one this process inherited."""
-    monkeypatch.setattr(http_server, "_engine", None)
-    monkeypatch.setattr(http_server, "_restart_ui", None)
-    _clear_restart_env(monkeypatch)
-    monkeypatch.setenv("LOCALM_RESTART_UI", "window")
-    seen = {}
-
-    def _fake_relaunch(exe, argv):
-        seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
-        seen["ui"] = os.environ.get("LOCALM_RESTART_UI", "<unset>")
-        raise SystemExit(0)
-
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
-    try:
-        http_server._do_restart()
-    except SystemExit:
-        pass
-    assert seen == {"flag": "1", "ui": "<unset>"}
+    assert seen == {"flag": expected}
 
 
 def test_hang_restart_forced_fallback_hands_the_recorded_gui_surface_over(
@@ -224,7 +204,6 @@ def test_hang_restart_forced_fallback_hands_the_recorded_gui_surface_over(
 
     def _fake_execv(exe, argv):
         seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
-        seen["ui"] = os.environ.get("LOCALM_RESTART_UI")
         raise SystemExit(0)
 
     monkeypatch.setattr(os, "execv", _fake_execv)
@@ -234,7 +213,7 @@ def test_hang_restart_forced_fallback_hands_the_recorded_gui_surface_over(
         http_server._hang_restart_action(app)
     except SystemExit:
         pass
-    assert seen == {"flag": "1", "ui": "window"}
+    assert seen == {"flag": "window"}
 
 
 def test_do_restart_releases_embedder(monkeypatch):

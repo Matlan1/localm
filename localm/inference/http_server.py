@@ -3448,14 +3448,10 @@ def set_restart_ui(ui: Optional[str]) -> None:
 
 
 def _set_restart_env() -> None:
-    """Set the environment a restart's re-exec'd process inherits:
-    LOCALM_RESTART_IN_PROGRESS=1, and LOCALM_RESTART_UI set to the surface
-    recorded by set_restart_ui, or removed when none is recorded."""
-    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
-    if _restart_ui:
-        os.environ["LOCALM_RESTART_UI"] = _restart_ui
-    else:
-        os.environ.pop("LOCALM_RESTART_UI", None)
+    """Set LOCALM_RESTART_IN_PROGRESS, which a restart's re-exec'd process
+    inherits, to the surface recorded by set_restart_ui, or to "1" when none
+    is recorded."""
+    os.environ["LOCALM_RESTART_IN_PROGRESS"] = _restart_ui or "1"
 
 
 def _restart_argv(port: Optional[int] = None) -> list:
