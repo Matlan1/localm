@@ -89,9 +89,14 @@ def get_credential(key: str) -> Optional[str]:
 
 
 def get_credential_source(key: str) -> Optional[str]:
-    """Return 'stored' if *key* is persisted in the credentials file, 'env' if
-    sourced from an environment variable fallback, else None."""
-    if _blank_to_none(_read_all().get(key)) is not None:
+    """Return 'unreadable' if the credentials file exists but could not be
+    read (so whether *key* is stored there is unknown), 'stored' if *key* is
+    persisted in the credentials file, 'env' if sourced from an environment
+    variable fallback, else None."""
+    records, read_ok = _read_all_checked()
+    if not read_ok:
+        return "unreadable"
+    if _blank_to_none(records.get(key)) is not None:
         return "stored"
     env_name = _ENV_FALLBACK.get(key)
     if env_name and _blank_to_none(os.environ.get(env_name)) is not None:
@@ -112,14 +117,11 @@ def get_civitai_api_key() -> Optional[str]:
     return get_credential("civitai_api_key")
 
 
-def set_credentials(updates: dict) -> None:
-    """Apply *updates* (a subset of CREDENTIAL_KEYS -> str | None) as one
-    read-modify-write. A blank or None value clears that key. Raises
-    ValueError on an unknown key or a non-string value before anything is
-    written, and ``config.ConfigUnreadable`` if the store file exists but
-    could not be read - refusing rather than silently persisting ``{}`` (and
-    so dropping every other stored credential) over it, mirroring
-    ``auth.create_key``'s identical refusal for the scoped-key store."""
+def validate_credential_updates(updates: dict) -> dict:
+    """Check *updates* (a subset of CREDENTIAL_KEYS -> str | None) without
+    writing anything. Returns ``{key: value}`` with each value stripped, where
+    ``""`` means clear that key. Raises ValueError on an unknown key, a
+    non-string value, or a value longer than the length cap."""
     checked: dict = {}
     for key, value in updates.items():
         if key not in CREDENTIAL_KEYS:
@@ -131,17 +133,40 @@ def set_credentials(updates: dict) -> None:
             raise ValueError(
                 f"{key}: too long ({len(s)} characters, max {_MAX_CREDENTIAL_LEN})")
         checked[key] = s
-    from localm.config import ConfigUnreadable, _cross_process_lock, ensure_dirs
+    return checked
+
+
+def _unreadable_store_error(path: Path):
+    from localm.config import ConfigUnreadable
+    return ConfigUnreadable(
+        f"{path.name} exists but could not be read, so saving would "
+        f"replace every stored credential with just this change; "
+        f"refused. Fix or remove {path.name} (deleting it clears "
+        f"stored credentials).")
+
+
+def check_credentials_readable() -> None:
+    """Raise ``config.ConfigUnreadable`` if the credentials file exists but
+    could not be read; return None when it is readable or absent. Writes
+    nothing and takes no lock."""
+    if not _read_all_checked()[1]:
+        raise _unreadable_store_error(credentials_path())
+
+
+def set_credentials(updates: dict) -> None:
+    """Apply *updates* (a subset of CREDENTIAL_KEYS -> str | None) as one
+    read-modify-write. A blank or None value clears that key. Raises
+    ValueError (see validate_credential_updates) before anything is written,
+    and ``config.ConfigUnreadable``, writing nothing, if the store file exists
+    but could not be read."""
+    checked = validate_credential_updates(updates)
+    from localm.config import _cross_process_lock, ensure_dirs
     ensure_dirs()
     path = credentials_path()
     with _CRED_LOCK, _cross_process_lock(path):
         records, read_ok = _read_all_checked()
         if not read_ok:
-            raise ConfigUnreadable(
-                f"{path.name} exists but could not be read, so saving would "
-                f"replace every stored credential with just this change; "
-                f"refused. Fix or remove {path.name} (deleting it clears "
-                f"stored credentials).")
+            raise _unreadable_store_error(path)
         for key, s in checked.items():
             if s:
                 records[key] = s

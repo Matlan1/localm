@@ -119,8 +119,13 @@ def register(app: FastAPI, ctx) -> None:
 
         The read-only extras the GET handler injects (effective_mode etc.) are
         dropped first, so a client that round-trips the whole config object is
-        not rejected for echoing back values it never edited."""
-        from localm.config import update_config
+        not rejected for echoing back values it never edited.
+
+        Model-source credential keys are written to their own store only after
+        every other check and the config write have succeeded, so any error
+        response leaves stored credentials unchanged. A config or credential
+        file that exists but cannot be read is a 409 naming that file."""
+        from localm.config import ConfigUnreadable, update_config
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
@@ -166,13 +171,17 @@ def register(app: FastAPI, ctx) -> None:
                     "value and enforces its own permission.")
         # Model-source credentials (hf_token, civitai_api_key) are not in
         # DEFAULT_CONFIG and must never reach config.json: popped out of body and
-        # routed to their own owner-only file before validate_update runs. The
-        # admin_only check above already covers authorization for these two keys.
-        from localm.model_source_credentials import CREDENTIAL_KEYS, set_credentials
+        # validated here, then written to their own owner-only file after
+        # update_config below returns. The admin_only check above already covers
+        # authorization for these two keys.
+        from localm.model_source_credentials import (CREDENTIAL_KEYS,
+                                                     check_credentials_readable,
+                                                     set_credentials,
+                                                     validate_credential_updates)
         cred_updates = {k: body.pop(k) for k in list(body) if k in CREDENTIAL_KEYS}
         if cred_updates:
             try:
-                set_credentials(cred_updates)
+                cred_updates = validate_credential_updates(cred_updates)
             except ValueError as e:
                 raise HTTPException(400, str(e))
         # The second writer of `embedding_model`, besides POST /api/rag/embedding.
@@ -211,6 +220,16 @@ def register(app: FastAPI, ctx) -> None:
                     "Cannot enable require_auth while no API key is configured: "
                     "this would lock you out. Set an owner key (the launcher or "
                     "LOCALM_API_KEY) or create a named key first, then enable it.")
+        # INVARIANT: the credential store is written last, synchronously, after
+        # update_config has returned, and only checked (never written) before
+        # it. A request that returns an error therefore leaves stored
+        # credentials unchanged. See
+        # test_config_save_timeout_leaves_the_stored_credential_alone.
+        if cred_updates:
+            try:
+                check_credentials_readable()
+            except ConfigUnreadable as e:
+                raise HTTPException(409, str(e))
         # update_config() is the atomic read-modify-write helper: a bare
         # load_config()/save_config() pair has an unlocked window in which a
         # concurrent config write can be lost.
@@ -227,6 +246,13 @@ def register(app: FastAPI, ctx) -> None:
                 timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Saving the config timed out: {e}")
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e))
+        if cred_updates:
+            try:
+                set_credentials(cred_updates)
+            except ConfigUnreadable as e:
+                raise HTTPException(409, str(e))
         # update_config() returns the FULL merged config, not just the changed
         # keys, so an admin_only field's value is stripped from a non-owner's
         # response echo - the same boundary get_config applies above.

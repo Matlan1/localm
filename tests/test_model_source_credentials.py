@@ -452,3 +452,272 @@ def test_whitespace_only_value_agrees_between_get_and_source(isolated_home, monk
     monkeypatch.setenv("HF_TOKEN", "  real-token  ")
     assert get_credential("hf_token") == "real-token"
     assert get_credential_source("hf_token") == "env"
+
+
+# --------------------------------------------------------------------------- #
+#  PATCH /v1/config changes a stored credential only once every other gate    #
+#  in the same request has passed                                              #
+# --------------------------------------------------------------------------- #
+
+def _stored_credentials() -> dict:
+    """The credentials file's own contents, read straight from disk."""
+    from localm.model_source_credentials import credentials_path
+    path = credentials_path()
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def open_client(monkeypatch):
+    """Open-mode app (no API key anywhere) with the loopback shell token that
+    PATCH /v1/config requires when no key is configured."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    app = create_app(None)
+    with TestClient(app, headers={
+            "Authorization": f"Bearer {app.state.shell_token}"}) as c:
+        yield c
+
+
+@pytest.mark.parametrize("new_value", ["", "hf_replacement_value"])
+def test_rejected_config_field_leaves_the_stored_credential_alone(app_env, new_value):
+    c, _scoped_key, _home = app_env
+    from localm.model_source_credentials import set_credentials
+    set_credentials({"hf_token": "hf_keep_me"})
+
+    r = c.patch("/v1/config", headers=_owner(),
+                json={"hf_token": new_value, "import_max_depth": 50})
+
+    assert _stored_credentials().get("hf_token") == "hf_keep_me", (
+        "a PATCH that validate_update rejected still changed the stored hf_token")
+    assert r.status_code == 400, r.text
+    assert "import_max_depth" in r.json()["detail"]
+
+
+def test_require_auth_lockout_refusal_leaves_the_stored_credential_alone(open_client):
+    from localm.auth import any_key_configured
+    from localm.model_source_credentials import set_credentials
+    assert not any_key_configured(), "the lock-out guard only fires with no key"
+    set_credentials({"hf_token": "hf_keep_me"})
+
+    r = open_client.patch("/v1/config",
+                          json={"hf_token": "", "require_auth": True})
+
+    assert _stored_credentials().get("hf_token") == "hf_keep_me", (
+        "a PATCH refused by the require_auth lock-out guard still cleared hf_token")
+    assert r.status_code == 400, r.text
+    assert "require_auth" in r.json()["detail"]
+    from localm.config import load_config
+    assert load_config().get("require_auth") is not True
+
+
+def test_unconfirmed_embedding_switch_leaves_the_stored_credential_alone(app_env):
+    """The needs_confirm dry run writes nothing; the confirmed re-send, which
+    carries the same body, applies the credential change with the rest."""
+    c, _scoped_key, _home = app_env
+    from localm.model_source_credentials import set_credentials
+    from localm.rag.store import Collection
+    set_credentials({"hf_token": "hf_keep_me"})
+    coll = Collection("docs").create()
+    coll._chunks = [{"source": "doc0.txt", "pos": 0, "text": "alpha"}]
+    coll._vectors = [[0.1] * 8]
+    coll._meta["embedding_model"] = "old-model"
+    coll._save()
+    body = {"hf_token": "", "embedding_model": "new-model"}
+
+    dry = c.patch("/v1/config", headers=_owner(), json=body)
+
+    assert _stored_credentials().get("hf_token") == "hf_keep_me", (
+        "the unconfirmed needs_confirm dry run cleared hf_token")
+    assert dry.status_code == 200, dry.text
+    assert dry.json().get("needs_confirm") is True
+
+    confirmed = c.patch("/v1/config", headers=_owner(),
+                        json={**body, "confirm": True})
+
+    assert "hf_token" not in _stored_credentials()
+    assert confirmed.status_code == 200, confirmed.text
+    from localm.config import load_config
+    assert load_config().get("embedding_model") == "new-model"
+
+
+def test_config_save_timeout_leaves_the_stored_credential_alone(app_env, monkeypatch):
+    """A 504 from the bounded config write means the credential store was never
+    touched: the credential change is applied only after update_config returns."""
+    import threading
+
+    import localm.config as cfg
+    import localm.inference.routes.config as config_routes
+    c, _scoped_key, _home = app_env
+    from localm.model_source_credentials import set_credentials
+    set_credentials({"hf_token": "hf_keep_me"})
+    entered = threading.Event()
+    release = threading.Event()
+
+    def stalled_update_config(mutator):
+        entered.set()
+        release.wait(10)
+        return {}
+
+    monkeypatch.setattr(cfg, "update_config", stalled_update_config)
+    monkeypatch.setattr(config_routes, "_CONFIG_RMW_TIMEOUT_S", 0.2)
+    try:
+        r = c.patch("/v1/config", headers=_owner(),
+                    json={"hf_token": "", "import_max_depth": 5})
+    finally:
+        release.set()
+
+    assert entered.is_set(), "the stalled update_config was never reached"
+    assert _stored_credentials().get("hf_token") == "hf_keep_me", (
+        "hf_token was cleared although the config save timed out")
+    assert r.status_code == 504, r.text
+
+
+def test_accepted_patch_applies_a_blank_credential_with_the_config_change(app_env):
+    c, _scoped_key, _home = app_env
+    from localm.model_source_credentials import set_credentials
+    set_credentials({"hf_token": "hf_to_remove", "civitai_api_key": "civ_keep"})
+
+    r = c.patch("/v1/config", headers=_owner(),
+                json={"hf_token": "", "import_max_depth": 5})
+
+    assert _stored_credentials() == {"civitai_api_key": "civ_keep"}
+    assert r.status_code == 200, r.text
+    from localm.config import load_config
+    assert load_config()["import_max_depth"] == 5
+
+
+def test_malformed_credential_is_refused_before_any_config_write(app_env):
+    c, _scoped_key, _home = app_env
+    from localm.config import load_config
+    before = load_config()["import_max_depth"]
+    assert before != 5
+
+    r = c.patch("/v1/config", headers=_owner(),
+                json={"hf_token": "x" * 5000, "import_max_depth": 5})
+
+    assert load_config()["import_max_depth"] == before
+    assert _stored_credentials() == {}
+    assert r.status_code == 400, r.text
+    assert "hf_token" in r.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+#  an unreadable credential store is reported as such, never as "not set"     #
+# --------------------------------------------------------------------------- #
+
+_CORRUPT_STORE = b'{"hf_token": '
+
+
+def _answering(c):
+    """A client on *c*'s already-started app that returns an unhandled server
+    error as a 500 response instead of raising it into the test."""
+    return TestClient(c.app, raise_server_exceptions=False)
+
+
+def _write_corrupt_store():
+    from localm.model_source_credentials import credentials_path
+    path = credentials_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_CORRUPT_STORE)
+    return path
+
+
+def test_unreadable_store_reports_unreadable_not_unset(isolated_home, monkeypatch):
+    from localm.model_source_credentials import get_credential_source
+    _write_corrupt_store()
+    assert get_credential_source("hf_token") == "unreadable"
+    assert get_credential_source("civitai_api_key") == "unreadable"
+
+    monkeypatch.setenv("HF_TOKEN", "hf_env_1")
+    assert get_credential_source("hf_token") == "unreadable"
+
+
+def test_schema_marks_credential_status_unknown_on_an_unreadable_store(isolated_home):
+    from localm.config import load_config
+    from localm.settings_schema import schema_json
+    _write_corrupt_store()
+
+    fields = {f["key"]: f for f in schema_json(values=load_config())}
+
+    for key in ("hf_token", "civitai_api_key"):
+        f = fields[key]
+        assert f.get("status_unknown") is True, (
+            f"{key}: an unreadable store was reported without the unknown flag: {f}")
+        assert f["is_set"] is False
+        assert f["env_set"] is False
+
+
+def test_schema_status_unknown_is_false_on_a_readable_store(isolated_home):
+    from localm.config import load_config
+    from localm.model_source_credentials import set_credentials
+    from localm.settings_schema import schema_json
+    set_credentials({"hf_token": "hf_stored_1"})
+
+    fields = {f["key"]: f for f in schema_json(values=load_config())}
+
+    assert fields["hf_token"]["status_unknown"] is False
+    assert fields["hf_token"]["is_set"] is True
+    assert fields["civitai_api_key"]["status_unknown"] is False
+    assert fields["civitai_api_key"]["is_set"] is False
+
+
+def test_schema_route_marks_credential_status_unknown(app_env):
+    c, _scoped_key, _home = app_env
+    _write_corrupt_store()
+
+    fields = {f["key"]: f for f in
+              c.get("/v1/config/schema", headers=_owner()).json()["fields"]}
+
+    assert fields["hf_token"]["status_unknown"] is True
+    assert fields["hf_token"]["is_set"] is False
+
+
+def test_patch_on_an_unreadable_store_is_a_409_naming_the_file(app_env):
+    c, _scoped_key, _home = app_env
+    path = _write_corrupt_store()
+
+    r = _answering(c).patch("/v1/config", headers=_owner(),
+                            json={"hf_token": "hf_new"})
+
+    assert path.read_bytes() == _CORRUPT_STORE
+    assert r.status_code == 409, r.text
+    assert "model_source_credentials.json" in r.json()["detail"]
+
+
+def test_patch_on_an_unreadable_store_applies_no_config_change(app_env):
+    c, _scoped_key, _home = app_env
+    from localm.config import load_config
+    before = load_config()["import_max_depth"]
+    assert before != 5
+    path = _write_corrupt_store()
+
+    r = _answering(c).patch("/v1/config", headers=_owner(),
+                            json={"hf_token": "", "import_max_depth": 5})
+
+    assert path.read_bytes() == _CORRUPT_STORE
+    assert load_config()["import_max_depth"] == before, (
+        "the config change was applied although the credential change was refused")
+    assert r.status_code == 409, r.text
+    assert "model_source_credentials.json" in r.json()["detail"]
+
+
+def test_patch_on_an_unreadable_config_file_is_a_409_naming_the_file(app_env):
+    import localm.config as cfg
+    c, _scoped_key, _home = app_env
+    from localm.model_source_credentials import set_credentials
+    set_credentials({"hf_token": "hf_keep_me"})
+    corrupt = b'{"import_max_depth": '
+    cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    cfg.CONFIG_FILE.write_bytes(corrupt)
+    cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".bak").unlink(missing_ok=True)
+
+    r = _answering(c).patch("/v1/config", headers=_owner(),
+                            json={"hf_token": "", "import_max_depth": 5})
+
+    assert cfg.CONFIG_FILE.read_bytes() == corrupt
+    assert _stored_credentials().get("hf_token") == "hf_keep_me"
+    assert r.status_code == 409, r.text
+    assert "config.json" in r.json()["detail"]

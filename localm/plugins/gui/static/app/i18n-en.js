@@ -1257,6 +1257,8 @@ export const I18N_EN = {
   "settings.field.secretEnvTag": "(from environment)",
   "settings.field.secretWillClearTag": "(will clear on save)",
   "settings.field.secretNewValueTag": "(new value)",
+  "settings.field.secretUnknownTag": "(status unknown)",
+  "settings.field.secretUnknownPlaceholder": "stored credentials could not be read",
   "settings.field.secretClearButton": "Clear",
   "settings.field.secretUndoButton": "Undo",
   "settings.field.secretClearTitle": "Clear stored secret on save",
