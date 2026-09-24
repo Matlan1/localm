@@ -2588,7 +2588,7 @@ class TestSessionExtras:
                 client.delete(f"/api/coder/sessions/{sid}")
         assert calls_after_first == 0
         assert model_after_first == "model-a"
-        set_model.assert_called_once_with("model-b")
+        set_model.assert_called_once_with("model-b", pinned=True)
         assert sess.model == "model-b"
         assert switch_model.await_args_list == [call("model-b"),
                                                 call("model-b", force=True)]
