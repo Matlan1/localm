@@ -1988,10 +1988,10 @@ def _unlock_guard_file(f) -> None:
 
 def _reclaim_guard_path(d: Path, filename: str) -> Path:
     """The reclaim guard file for *filename*'s lock *d*: beside it, named
-    ``reclaim-<first 16 hex digits of the name's sha256>.guard``."""
-    import hashlib
-    digest = hashlib.sha256(filename.encode("utf-8", "surrogatepass")).hexdigest()
-    return d.parent / ("reclaim-" + digest[:16] + ".guard")
+    ``pull-<filename>.grd``, one character shorter than the lock's own name.
+    Two spellings of *filename* that the filesystem resolves to one lock
+    resolve to one guard file."""
+    return d.parent / ("pull-" + filename + ".grd")
 
 
 @contextlib.contextmanager

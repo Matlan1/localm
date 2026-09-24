@@ -889,17 +889,49 @@ def test_a_takeover_keeps_its_guard_until_the_lock_is_re_created(home, tmp_path)
         _release(b)
 
 
-def test_the_reclaim_guard_name_is_short_and_never_a_lock_name():
+def test_the_reclaim_guard_name_is_shorter_than_the_lock_name_and_never_one():
     from localm.model_manager.pull import _reclaim_guard_path
-    longest = "m" * 240 + ".gguf"
-    d = _part_lock_dir(longest)
-    guard = _reclaim_guard_path(d, longest)
-    assert len(d.name) == 255
-    assert guard.parent == d.parent
-    assert len(guard.name) <= 30
-    assert not (guard.name.startswith("pull-") and guard.name.endswith(".lock"))
-    assert _reclaim_guard_path(d, longest) == guard
-    assert _reclaim_guard_path(_part_lock_dir("n.gguf"), "n.gguf") != guard
+    for name in ("m.gguf", "m" * 240 + ".gguf", "x.lock"):
+        d = _part_lock_dir(name)
+        guard = _reclaim_guard_path(d, name)
+        assert guard.parent == d.parent
+        assert len(guard.name) < len(d.name)
+        assert not guard.name.lower().endswith(".lock")
+    assert len(_part_lock_dir("m" * 240 + ".gguf").name) == 255
+
+
+def _case_insensitive(directory) -> bool:
+    probe = directory / "CaseProbe"
+    probe.write_text("", encoding="utf-8")
+    try:
+        return (directory / "caseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+def test_two_spellings_of_one_file_name_share_one_reclaim_guard(home):
+    """On a case-insensitive filesystem two spellings of one file name name one
+    lock, so a takeover under one spelling waits for another spelling's guard."""
+    d = _write_stale_lock()
+    if not _case_insensitive(d.parent):
+        pytest.skip("the data folder is on a case-sensitive filesystem")
+    before = _record(d)
+    guard = spawn_on_this_tree(GUARD, home, _part_lock_dir("M.GGUF"), "M.GGUF",
+                               stdin=subprocess.PIPE)
+    try:
+        _first_line(guard)
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before, (
+            "a stale lock was taken over under one spelling while its guard "
+            "was held under another")
+        assert refused is not None
+    finally:
+        _release(guard)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"),
