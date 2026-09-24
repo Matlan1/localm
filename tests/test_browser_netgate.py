@@ -159,6 +159,27 @@ class TestAsyncWrapper:
         assert allowed is None
 
 
+class _SessionShape:
+    """Method shapes the timeout walk must find, or must skip."""
+
+    def _call(self, make_coro, timeout=1.0):
+        return make_coro()
+
+    def public_delegating(self):
+        return self._helper()
+
+    def _helper(self):
+        return self._call(lambda: None)
+
+    def public_nested(self):
+        def inner():
+            return self._call(lambda: None)
+        return inner()
+
+    def unrelated(self):
+        return None
+
+
 class TestTimeoutsNest:
     """The marshalling timeout must OUTLAST every browser timeout it wraps.
 
@@ -166,23 +187,76 @@ class TestTimeoutsNest:
     so the page's own timeout never gets to produce a real error and the worker
     keeps running past the report. Asserted as the RELATION, not as literals, so
     retuning one end cannot silently break it.
+
+    The methods are found by walking BrowserSession's source for every method,
+    public or private, that calls self._call, so a new one is checked without
+    being listed.
     """
 
-    def _default_ms(self, fn, name):
-        import inspect
-        return inspect.signature(fn).parameters[name].default
+    #: Methods that call self._call without a timeout_ms of their own, mapped
+    #: to the reason they need no inner bound.
+    EXEMPT: dict = {}
 
-    def test_every_page_timeout_fits_inside_the_call_timeout(self):
+    def _marshalling_methods(self, klass=None):
+        import ast
+        import inspect
+        import textwrap
+        from localm.browser.session import BrowserSession
+        tree = ast.parse(textwrap.dedent(inspect.getsource(klass or BrowserSession)))
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+        found = {}
+        for node in cls.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == "_call":
+                continue
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "_call"
+                        and isinstance(sub.func.value, ast.Name)
+                        and sub.func.value.id == "self"):
+                    found[node.name] = node
+                    break
+        return found
+
+    def test_the_walk_finds_the_driving_methods(self):
+        found = set(self._marshalling_methods())
+        expected = {"navigate", "click", "fill", "click_coords", "scroll",
+                    "type_text", "press_key"}
+        assert expected <= found, "the walk missed %s" % sorted(expected - found)
+
+    def test_the_walk_finds_a_private_helper_that_marshals(self):
+        found = set(self._marshalling_methods(_SessionShape))
+        assert found == {"_helper", "public_nested"}, found
+
+    def test_every_marshalled_method_bounds_its_work_inside_the_call_timeout(self):
+        import ast
+        import inspect
         from localm.browser.session import BrowserSession, DEFAULT_CALL_TIMEOUT
-        inner = [
-            self._default_ms(BrowserSession.navigate, "timeout_ms"),
-            self._default_ms(BrowserSession.click, "timeout_ms"),
-            self._default_ms(BrowserSession.fill, "timeout_ms"),
-        ]
-        for ms in inner:
-            assert ms / 1000.0 < DEFAULT_CALL_TIMEOUT, (
-                "a browser timeout of %sms is not inside the %ss call timeout"
-                % (ms, DEFAULT_CALL_TIMEOUT))
+        problems = []
+        for name, node in sorted(self._marshalling_methods().items()):
+            if name in self.EXEMPT:
+                continue
+            params = inspect.signature(getattr(BrowserSession, name)).parameters
+            if "timeout_ms" not in params:
+                problems.append("%s calls self._call with no timeout_ms and no "
+                                "exemption" % name)
+                continue
+            ms = params["timeout_ms"].default
+            if not (isinstance(ms, (int, float)) and not isinstance(ms, bool)
+                    and 0 < ms / 1000.0 < DEFAULT_CALL_TIMEOUT):
+                problems.append("%s: a timeout_ms of %r is not inside the %ss "
+                                "call timeout" % (name, ms, DEFAULT_CALL_TIMEOUT))
+            if not any(isinstance(n, ast.Name) and n.id == "timeout_ms"
+                       for n in ast.walk(node)):
+                problems.append("%s declares timeout_ms and never uses it" % name)
+        assert problems == [], problems
+
+    def test_every_exemption_names_a_method_that_exists(self):
+        found = set(self._marshalling_methods())
+        stale = sorted(set(self.EXEMPT) - found)
+        assert stale == [], "exemptions for methods that no longer call _call: %s" % stale
 
 
 class TestWebSocketsUseTheSameHostPolicy:

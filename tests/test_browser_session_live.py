@@ -52,6 +52,51 @@ def _set(**values):
     save_config(cfg)
 
 
+#: A link covering the top-left corner, so a click at (50, 50) follows it.
+_CORNER_LINK = (b"<a id=go href='%s' target='_blank' style='position:absolute;"
+                b"left:0;top:0;width:300px;height:120px;background:#ccc'>go</a>")
+
+#: Pages served by path. PORT is replaced with the origin's own port.
+_PAGES = {
+    "/opener": b"<html><body>" + _CORNER_LINK % b"/popup-page" + b"</body></html>",
+    "/popup-page": (
+        b"<html><body><div id=n>0</div><script>"
+        b"let i=0;setInterval(()=>{document.getElementById('n').textContent=++i;"
+        b"console.log('popup-alive '+i);},100);</script></body></html>"),
+    "/scripted": (
+        b"<html><body>scripted<script>"
+        b"setTimeout(()=>window.open('/popup-page'),300);</script></body></html>"),
+    "/closer": b"<html><body>" + _CORNER_LINK % b"/selfclose" + b"</body></html>",
+    "/selfclose": (
+        b"<html><body>closing<script>setTimeout(()=>window.close(),300);"
+        b"</script></body></html>"),
+    "/denied-opener": (
+        b"<html><body>" + _CORNER_LINK % b"http://127.0.0.1:PORT/TARGET"
+        + b"</body></html>"),
+    "/typing": (
+        b"<html><body><textarea id=t style='position:absolute;left:0;top:0;"
+        b"width:300px;height:120px'></textarea><script>"
+        b"document.getElementById('t').addEventListener('keydown',()=>{"
+        b"const t=performance.now();while(performance.now()-t<25){}});"
+        b"</script></body></html>"),
+    "/blank-then-go": (
+        b"<html><body><button id=b style='position:absolute;left:0;top:0;"
+        b"width:300px;height:120px' onclick=\"const w=window.open('');"
+        b"setTimeout(()=>{w.location='/popup-page';},500);\">go</button>"
+        b"</body></html>"),
+    "/late-link": (
+        b"<html><body>waiting<script>setTimeout(()=>{document.body.innerHTML="
+        b"\"<a id=late href='/popup-page' target='_blank'>late</a>\";},6000);"
+        b"</script></body></html>"),
+    "/stalled": (
+        b"<html><body><img src='/slow.png'><script>"
+        b"setTimeout(()=>window.open('/popup-page'),100);</script></body></html>"),
+}
+
+#: Seconds the origin takes to answer /slow.png.
+_SLOW_SECONDS = 8
+
+
 class _Recorder(http.server.BaseHTTPRequestHandler):
     seen: list = []
 
@@ -72,7 +117,14 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if self.path.endswith(".png"):
+        if self.path in _PAGES:
+            body = _PAGES[self.path].replace(b"PORT", str(port).encode())
+            ctype = "text/html"
+        elif self.path == "/slow.png":
+            time.sleep(_SLOW_SECONDS)
+            body = b"\x89PNG\r\n\x1a\n"
+            ctype = "image/png"
+        elif self.path.endswith(".png"):
             body = b"\x89PNG\r\n\x1a\n"
             ctype = "image/png"
         elif self.path.startswith("/ws-page"):
@@ -316,3 +368,173 @@ def test_a_gate_that_raises_refuses_the_request(browser, origin, monkeypatch):
     assert _Recorder.seen == [], "the request went out while the gate was broken"
     assert any("gate failed" in x["reason"] for x in b.blocked_requests()), \
         b.blocked_requests()
+
+
+# --------------------------------------------------------------------------- #
+#  Windows a page opens. The session keeps exactly one page: a window a click
+#  opened replaces the page, any other window is closed and the refusal
+#  recorded, and a shown window that closes itself leaves a blank page behind.
+# --------------------------------------------------------------------------- #
+
+def _pages(b):
+    """The URLs of every open page, and the URL of the page being driven."""
+    async def snap():
+        return [p.url for p in b._ctx.pages], b._page.url
+    return b._call(snap)
+
+
+def _wait_until(predicate, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(0.1)
+
+
+def test_a_window_opened_by_a_click_replaces_the_page(browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    frames = []
+    b = browser(on_frame=lambda data: frames.append(time.monotonic()))
+    assert b.navigate("http://localhost:%d/opener" % port)["ok"] is True
+    target = "http://localhost:%d/popup-page" % port
+    res = b.click_coords(50, 50)
+    assert res["ok"] is True, res
+    _wait_until(lambda: _pages(b) == ([target], target))
+    switched = time.monotonic()
+    time.sleep(1.5)
+    urls, driven = _pages(b)
+    assert urls == [target], "open pages after the click: %r" % (urls,)
+    assert driven == target
+    assert any("popup-alive" in m["text"] for m in b.console_messages()), (
+        "the console of the page now shown is not being recorded")
+    assert any(t > switched for t in frames), (
+        "no live-view frame arrived from the page now shown")
+    assert any(m["type"] == "localm" and target in m["text"]
+               for m in b.console_messages()), b.console_messages()
+
+
+def test_a_window_opened_without_a_click_is_closed(browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    start = "http://localhost:%d/scripted" % port
+    assert b.navigate(start)["ok"] is True
+
+    def refused():
+        return [x for x in b.blocked_requests()
+                if x["url"].endswith("/popup-page")]
+    _wait_until(lambda: refused() and len(_pages(b)[0]) == 1)
+    urls, driven = _pages(b)
+    assert urls == [start], "open pages: %r" % (urls,)
+    assert driven == start
+    assert refused(), "the closed window was not recorded: %r" % (b.blocked_requests(),)
+    assert "click" in refused()[0]["reason"], refused()
+
+
+def test_a_shown_window_that_closes_itself_leaves_a_working_page(browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    assert b.navigate("http://localhost:%d/closer" % port)["ok"] is True
+    assert b.click_coords(50, 50)["ok"] is True
+    _wait_until(lambda: "/selfclose" in _Recorder.seen)
+    _wait_until(lambda: _pages(b) == (["about:blank"], "about:blank"))
+    urls, driven = _pages(b)
+    assert urls == ["about:blank"], "open pages: %r" % (urls,)
+    assert driven == "about:blank"
+    res = b.navigate("http://localhost:%d/index.html" % port)
+    assert res["ok"] is True, res
+    assert any(m["type"] == "localm" and "closed itself" in m["text"]
+               for m in b.console_messages()), b.console_messages()
+
+
+def test_a_clicked_window_that_does_not_load_is_closed(browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True, net_deny=["127.0.0.1"])
+    b = browser()
+    start = "http://localhost:%d/denied-opener" % port
+    assert b.navigate(start)["ok"] is True
+    assert b.click_coords(50, 50)["ok"] is True
+    _wait_until(lambda: any(x["url"].endswith("/TARGET")
+                            for x in b.blocked_requests())
+                and any("did not load" in x["reason"]
+                        for x in b.blocked_requests())
+                and len(_pages(b)[0]) == 1)
+    urls, driven = _pages(b)
+    assert urls == [start], "open pages: %r" % (urls,)
+    assert driven == start
+    assert "/TARGET" not in _Recorder.seen
+    assert any(x["url"].endswith("/TARGET") and "deny list" in x["reason"]
+               for x in b.blocked_requests()), b.blocked_requests()
+    assert any("did not load" in x["reason"] for x in b.blocked_requests()), (
+        b.blocked_requests())
+
+
+def test_typing_stops_when_the_call_gives_up(browser, origin):
+    """On a page whose key handler is slow, typing stops within a few
+    characters of type_text reporting that it timed out."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    assert b.navigate("http://localhost:%d/typing" % port)["ok"] is True
+    assert b.click_coords(50, 50)["ok"] is True
+
+    def typed():
+        return b._call(lambda: b._page.eval_on_selector(
+            "#t", "e => e.value.length"))
+    res = b.type_text("a" * 2000, timeout_ms=1000)
+    after = typed()
+    time.sleep(2.0)
+    later = typed()
+    assert later - after <= 32, (
+        "%d characters kept landing after type_text reported failure"
+        % (later - after))
+    assert after > 0, "nothing was typed, so the check above is vacuous"
+    assert res["ok"] is False, res
+    assert "typing" in res["error"], res
+
+
+def test_a_clicked_blank_window_is_shown_once_its_opener_sends_it_on(
+        browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    assert b.navigate("http://localhost:%d/blank-then-go" % port)["ok"] is True
+    target = "http://localhost:%d/popup-page" % port
+    assert b.click_coords(50, 50)["ok"] is True
+    _wait_until(lambda: _pages(b) == ([target], target))
+    urls, driven = _pages(b)
+    assert urls == [target], "open pages: %r" % (urls,)
+    assert driven == target
+
+
+def test_a_window_from_a_selector_click_that_waited_is_shown(browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    assert b.navigate("http://localhost:%d/late-link" % port)["ok"] is True
+    target = "http://localhost:%d/popup-page" % port
+    res = b.click("#late")
+    assert res["ok"] is True, res
+    _wait_until(lambda: _pages(b) == ([target], target))
+    urls, driven = _pages(b)
+    assert urls == [target], "open pages: %r" % (urls,)
+    assert driven == target
+    assert not any("without a click" in x["reason"] for x in b.blocked_requests())
+
+
+def test_a_navigation_timeout_is_not_reported_as_a_refused_window(
+        browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    res = b.navigate("http://localhost:%d/stalled" % port, timeout_ms=3000)
+    _wait_until(lambda: any(x["url"].endswith("/popup-page")
+                            for x in b.blocked_requests()))
+    assert any(x["url"].endswith("/popup-page") for x in b.blocked_requests()), (
+        "the window the page opened was not refused, so this checks nothing")
+    assert res["ok"] is False, res
+    assert res["refused"] is None, (
+        "a navigation timeout was reported as a refusal: %r" % (res,))

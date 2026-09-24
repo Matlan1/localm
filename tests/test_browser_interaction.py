@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for interactive controls in the automated browser live view."""
 
+import asyncio
+import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -196,6 +200,408 @@ class TestPointerValuesAreBounded:
             assert r2.status_code == 200, r2.text
         finally:
             bsession.close("gui-owner")
+
+
+class TestTypedInputIsBounded:
+    """The type and key routes refuse an oversized body before any of it
+    reaches the browser session."""
+
+    def test_text_longer_than_the_cap_is_refused(self, served):
+        _set(browser_enabled=True)
+        from localm.browser import session as bsession
+        from localm.plugins.builtin.browser import plug
+
+        fake = _InteractiveFakeSession("gui-owner")
+        bsession.register(fake)
+        try:
+            body = json.dumps({"text": "a" * (plug._MAX_TYPED_TEXT + 1)})
+            r = _post_raw(served, "/api/browser/type", body)
+            assert fake.typed == [], (
+                "an oversized text reached the browser session, so the caller "
+                "decides how long typing runs")
+            assert r.status_code == 422, r.text
+        finally:
+            bsession.close("gui-owner")
+
+    def test_text_at_the_cap_is_still_typed(self, served):
+        _set(browser_enabled=True)
+        from localm.browser import session as bsession
+        from localm.plugins.builtin.browser import plug
+
+        fake = _InteractiveFakeSession("gui-owner")
+        bsession.register(fake)
+        try:
+            text = "a" * plug._MAX_TYPED_TEXT
+            r = _post_raw(served, "/api/browser/type", json.dumps({"text": text}))
+            assert fake.typed == [text]
+            assert r.status_code == 200, r.text
+        finally:
+            bsession.close("gui-owner")
+
+    def test_a_key_name_longer_than_the_cap_is_refused(self, served):
+        _set(browser_enabled=True)
+        from localm.browser import session as bsession
+        from localm.plugins.builtin.browser import plug
+
+        fake = _InteractiveFakeSession("gui-owner")
+        bsession.register(fake)
+        try:
+            body = json.dumps({"key": "K" * (plug._MAX_KEY_NAME + 1)})
+            r = _post_raw(served, "/api/browser/key", body)
+            assert fake.keys == [], "an oversized key name reached the session"
+            assert r.status_code == 422, r.text
+        finally:
+            bsession.close("gui-owner")
+
+    def test_every_key_the_live_view_sends_fits_the_cap(self):
+        from localm.plugins.builtin.browser import plug
+        sent = ["Backspace", "Enter", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft",
+                "ArrowRight", "PageUp", "PageDown", "Home", "End", "Delete"]
+        assert max(len(k) for k in sent) <= plug._MAX_KEY_NAME
+
+
+@pytest.fixture
+def looped():
+    """BrowserSessions on a real event loop thread, driving a fake page.
+
+    No Chromium is launched: only the marshalling onto the session's loop, and
+    what happens to work that outlives its caller, are exercised."""
+    from localm.browser.session import BrowserSession
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    made = []
+
+    def _make(page):
+        sess = BrowserSession("t-looped")
+        sess._loop = loop
+        sess._page = page
+        made.append(sess)
+        return sess
+    yield _make
+    for sess in made:
+        sess._closed = True
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(5)
+    loop.close()
+
+
+class _Hung:
+    """Records each input call, then waits far longer than any test runs."""
+
+    def __init__(self):
+        self.started = []
+        self.cancelled = []
+
+    async def wait(self, name):
+        self.started.append(name)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled.append(name)
+            raise
+
+
+class _HungPage:
+    def __init__(self):
+        self.url = "about:blank"
+        self.rec = _Hung()
+        rec = self.rec
+
+        class _Keyboard:
+            async def type(self, text):
+                await rec.wait("type")
+
+            async def press(self, key):
+                await rec.wait("press")
+
+        class _Mouse:
+            async def click(self, x, y, button="left"):
+                await rec.wait("click")
+
+            async def wheel(self, dx, dy):
+                await rec.wait("wheel")
+
+        self.keyboard = _Keyboard()
+        self.mouse = _Mouse()
+
+
+class _DriverKeyboard:
+    """Types one character at a time the way Playwright's driver does: a call
+    keeps typing on its own after the caller awaiting it is cancelled."""
+
+    def __init__(self):
+        self.landed = []
+
+    async def type(self, text):
+        async def run():
+            for ch in text:
+                await asyncio.sleep(0.005)
+                self.landed.append(ch)
+        await asyncio.shield(asyncio.ensure_future(run()))
+
+
+class _TypingPage:
+    def __init__(self):
+        self.url = "about:blank"
+        self.keyboard = _DriverKeyboard()
+
+
+_HUNG_INPUTS = [
+    ("type", lambda s: s.type_text("abc", timeout_ms=300)),
+    ("press", lambda s: s.press_key("Enter", timeout_ms=300)),
+    ("click", lambda s: s.click_coords(1, 2, timeout_ms=300)),
+    ("wheel", lambda s: s.scroll(0, 50, timeout_ms=300)),
+]
+
+
+class TestAbandonedWorkIsCancelled:
+    """A call that runs past its deadline is cancelled on the browser loop and
+    reported with a message naming what timed out."""
+
+    @pytest.mark.parametrize("name,call", _HUNG_INPUTS,
+                             ids=[n for n, _ in _HUNG_INPUTS])
+    def test_a_hung_input_is_cancelled_and_named(self, looped, name, call):
+        page = _HungPage()
+        sess = looped(page)
+        started = time.monotonic()
+        res = call(sess)
+        elapsed = time.monotonic() - started
+        time.sleep(0.2)
+        assert page.rec.cancelled == [name], (
+            "the %s call was left running on the browser loop after its "
+            "caller was told it failed" % name)
+        assert res["ok"] is False, res
+        assert res["error"], "the timeout came back with an empty message"
+        assert "0.3s" in res["error"], res
+        assert elapsed < 10, "the call was not bounded by its own timeout"
+
+    def test_typing_stops_soon_after_the_call_gives_up(self, looped):
+        page = _TypingPage()
+        sess = looped(page)
+        res = sess.type_text("a" * 2000, timeout_ms=300)
+        after = len(page.keyboard.landed)
+        time.sleep(1.5)
+        later = len(page.keyboard.landed)
+        assert later - after <= 32, (
+            "%d characters kept landing after type_text reported failure"
+            % (later - after))
+        assert res["ok"] is False, res
+        assert "typing" in res["error"], res
+
+    def test_a_call_past_the_marshalling_timeout_is_cancelled(self, looped):
+        sess = looped(_HungPage())
+        state = {"cancelled": False}
+
+        async def hang():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+        err = None
+        try:
+            sess._call(hang, timeout=0.3, what="typing")
+        except Exception as exc:                     # noqa: BLE001
+            err = exc
+        time.sleep(0.2)
+        assert state["cancelled"] is True, (
+            "the coroutine kept running on the browser loop after _call gave up")
+        assert isinstance(err, TimeoutError), repr(err)
+        assert "typing" in str(err) and "0.3s" in str(err), str(err)
+
+    def test_a_result_that_lands_on_time_is_returned(self, looped):
+        sess = looped(_HungPage())
+
+        async def quick():
+            return 42
+        assert sess._call(quick, timeout=5, what="a quick call") == 42
+
+
+class _StallingCDP:
+    """A DevTools session whose Page.enable never answers."""
+
+    def __init__(self):
+        self.sent = []
+        self.detached = False
+
+    def on(self, event, handler):
+        pass
+
+    async def send(self, method, params=None):
+        self.sent.append((method, params))
+        if method == "Page.enable":
+            await asyncio.sleep(60)
+
+    async def detach(self):
+        self.detached = True
+
+
+class _RecordingCDP(_StallingCDP):
+    async def send(self, method, params=None):
+        self.sent.append((method, params))
+
+
+class _FakeContext:
+    def __init__(self):
+        self.sessions = []
+
+    async def new_cdp_session(self, page):
+        cdp = _StallingCDP()
+        self.sessions.append(cdp)
+        return cdp
+
+
+class TestLiveViewAttach:
+    def test_a_stalled_attach_is_retried_not_reported_running(
+            self, looped, monkeypatch):
+        from localm.browser import session as bsession
+        monkeypatch.setattr(bsession, "_PAGE_SETUP_MS", 60000)
+        sess = looped(_HungPage())
+        sess._ctx = _FakeContext()
+        first = sess.enable_live_view(lambda data: None, timeout_ms=300)
+        second = sess.enable_live_view(lambda data: None, timeout_ms=300)
+        time.sleep(0.2)
+        assert sess._cdp is None, (
+            "a screencast that never started is recorded as running")
+        assert len(sess._ctx.sessions) == 2, "the second call did not try again"
+        assert all(c.detached for c in sess._ctx.sessions), (
+            "a half-attached DevTools session was left behind")
+        assert first is False and second is False, (first, second)
+
+    def test_a_frame_is_acknowledged_on_the_session_that_sent_it(self, looped):
+        sess = looped(_HungPage())
+        cdp = _RecordingCDP()
+        frames = []
+        sess._on_frame = frames.append
+
+        async def deliver():
+            sess._on_screencast_frame({"data": "jpeg", "sessionId": 7}, cdp)
+            await asyncio.sleep(0.05)
+        sess._call(deliver)
+        assert ("Page.screencastFrameAck", {"sessionId": 7}) in cdp.sent, cdp.sent
+        assert frames == ["jpeg"]
+
+
+class _Popup:
+    def __init__(self, url):
+        self.url = url
+        self.closed = False
+
+    def is_closed(self):
+        return self.closed
+
+    async def close(self):
+        self.closed = True
+
+
+class _GotoTimeout(Exception):
+    pass
+
+
+class TestNavigationFailureAttribution:
+    def test_a_refused_window_is_not_reported_as_the_navigation_refusal(
+            self, looped, monkeypatch):
+        from localm.browser import session as bsession
+        monkeypatch.setattr(bsession.netgate, "decide", lambda *a, **k: None)
+        popup = _Popup("https://popup.example/")
+        holder = {}
+
+        class _Page:
+            url = "about:blank"
+
+            async def goto(self, url, timeout):
+                await holder["sess"]._on_new_page(popup)
+                raise _GotoTimeout("Timeout 3000ms exceeded")
+
+        sess = looped(_Page())
+        holder["sess"] = sess
+        res = sess.navigate("https://slow.example/", timeout_ms=3000)
+        assert popup.closed is True
+        assert any(b["url"] == popup.url for b in sess.blocked_requests()), (
+            "the refused window is no longer listed")
+        assert res["ok"] is False, res
+        assert res["refused"] is None, (
+            "a navigation timeout was reported as a refusal: %r" % (res,))
+        assert "Timeout" in res["error"], res
+
+
+class TestSlowSelectorClick:
+    def test_a_window_opened_by_a_click_that_waited_long_counts(
+            self, looped, monkeypatch):
+        from localm.browser import session as bsession
+        monkeypatch.setattr(bsession, "_INPUT_ACTIVATION", 0.1)
+        url = "https://popup.example/"
+        holder = {}
+
+        class _Page:
+            url = "about:blank"
+
+            async def click(self, selector, timeout):
+                await asyncio.sleep(0.3)
+                holder["sess"]._on_window_open({"url": url, "userGesture": True})
+
+        sess = looped(_Page())
+        holder["sess"] = sess
+        assert sess.click("#late")["ok"] is True
+        assert sess._take_clicked_window(url) is True, (
+            "a window opened while a selector click was still in progress was "
+            "not counted as clicked")
+
+
+class TestClickedWindows:
+    """Which new windows count as opened by a click: Chromium must report a
+    user gesture AND this session must have sent a click or key press within
+    the activation window. A gesture flag with no recent input from this
+    session does not count."""
+
+    URL = "https://popup.example/"
+
+    def _session(self):
+        from localm.browser.session import BrowserSession
+        return BrowserSession("t-windows")
+
+    def test_a_gesture_flag_without_recent_input_is_not_a_click(self):
+        s = self._session()
+        s._on_window_open({"url": self.URL, "userGesture": True})
+        assert s._take_clicked_window(self.URL) is False
+
+    def test_a_gesture_right_after_input_is_a_click_once(self):
+        s = self._session()
+        s._mark_input()
+        s._on_window_open({"url": self.URL, "userGesture": True})
+        assert s._take_clicked_window(self.URL) is True
+        assert s._take_clicked_window(self.URL) is False
+
+    def test_no_gesture_after_input_is_not_a_click(self):
+        s = self._session()
+        s._mark_input()
+        s._on_window_open({"url": self.URL, "userGesture": False})
+        assert s._take_clicked_window(self.URL) is False
+
+    def test_input_older_than_the_activation_window_does_not_count(self):
+        from localm.browser import session as bsession
+        s = self._session()
+        s._last_input = time.monotonic() - bsession._INPUT_ACTIVATION - 1
+        s._on_window_open({"url": self.URL, "userGesture": True})
+        assert s._take_clicked_window(self.URL) is False
+
+    def test_a_click_is_matched_by_url(self):
+        s = self._session()
+        s._mark_input()
+        s._on_window_open({"url": self.URL, "userGesture": True})
+        assert s._take_clicked_window("https://other.example/") is False
+        assert s._take_clicked_window(self.URL) is True
+
+    def test_the_record_is_bounded(self):
+        from localm.browser import session as bsession
+        s = self._session()
+        s._mark_input()
+        for i in range(bsession._CLICKED_WINDOW_CAP * 3):
+            s._on_window_open({"url": "https://p%d.example/" % i,
+                               "userGesture": True})
+        assert len(s._clicked_windows) == bsession._CLICKED_WINDOW_CAP
 
 
 class TestBrowserSessionInteractionMethods:

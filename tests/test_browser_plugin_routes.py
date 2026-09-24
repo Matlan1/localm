@@ -9,6 +9,8 @@ GUI caller cannot reach a browser the setting says is off.
 These need no browser: the switch is checked before anything is launched.
 """
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -151,6 +153,249 @@ class TestLiveViewJobOwnership:
                 assert job.owner != auth._hash_key(b)
             finally:
                 c.post(f"/api/jobs/{job_id}/cancel", headers=_h(a))
+
+
+class _SlowStartSession:
+    """A BrowserSession stand-in whose start() waits until the test releases it.
+    Every instance is recorded on the class, in construction order."""
+
+    made: list = []
+    release: threading.Event = threading.Event()
+    fail_start: bool = False
+
+    def __init__(self, sid, **kw):
+        self.session_id = sid
+        self.stopped = False
+        type(self).made.append(self)
+
+    def start(self):
+        type(self).release.wait(10)
+        if type(self).fail_start:
+            from localm.browser.session import BrowserUnavailableError
+            raise BrowserUnavailableError("no browser here")
+
+    def navigate(self, url):
+        return {"ok": True, "url": url}
+
+    def stop(self):
+        self.stopped = True
+
+
+class _StandIn:
+    def __init__(self, sid):
+        self.session_id = sid
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+def _wait_until(predicate, timeout=5.0):
+    """Poll *predicate* until it holds or *timeout* passes. Returns its last value."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def slow_start(monkeypatch):
+    from localm.browser import session as bsession
+    _SlowStartSession.made = []
+    _SlowStartSession.release = threading.Event()
+    _SlowStartSession.fail_start = False
+    monkeypatch.setattr(bsession, "BrowserSession", _SlowStartSession)
+    yield _SlowStartSession
+    _SlowStartSession.release.set()
+    bsession.close_all()
+
+
+def _job_status(app, job_id):
+    job = app.state.jobs.get(job_id)
+    return None if job is None else job.status
+
+
+class TestOpeningIsAtomic:
+    """One key gets one browser, and a worker's teardown touches only the
+    browser that worker started."""
+
+    def test_a_second_open_while_the_first_starts_launches_nothing(
+            self, app, slow_start):
+        from localm.browser import session as bsession
+        _set(browser_enabled=True)
+        with TestClient(app) as c:
+            r1 = c.post("/api/browser/session", json={})
+            _wait_until(lambda: len(slow_start.made) >= 1)
+            r2 = c.post("/api/browser/session", json={})
+            if r2.status_code == 200:
+                _wait_until(lambda: len(slow_start.made) >= 2)
+            made = list(slow_start.made)
+            slow_start.release.set()
+            try:
+                assert len(made) == 1, (
+                    "two browsers were launched for one key: %d" % len(made))
+                assert r2.status_code == 409, r2.text
+                assert r1.status_code == 200, r1.text
+            finally:
+                for r in (r1, r2):
+                    if r.status_code == 200:
+                        c.post("/api/jobs/%s/cancel" % r.json()["job_id"])
+                assert _wait_until(lambda: all(s.stopped for s in made))
+                assert bsession.active_ids() == []
+
+    def test_a_workers_teardown_stops_only_its_own_browser(self, app, slow_start):
+        from localm.browser import session as bsession
+        _set(browser_enabled=True)
+        slow_start.release.set()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/session", json={})
+            assert r.status_code == 200, r.text
+            sid = r.json()["session_id"]
+            first = _wait_until(lambda: bsession.get(sid))
+            assert first is slow_start.made[0], "the first browser never registered"
+            other = _StandIn(sid)
+            bsession.register(other)
+            try:
+                c.post("/api/jobs/%s/cancel" % r.json()["job_id"])
+                _wait_until(lambda: first.stopped)
+                assert other.stopped is False, (
+                    "the first worker's teardown stopped a browser it did not start")
+                assert bsession.get(sid) is other
+                assert first.stopped is True, "the first worker never stopped its own browser"
+            finally:
+                bsession.close(sid)
+
+    def test_stop_while_starting_stops_the_browser_once_it_is_up(
+            self, app, slow_start):
+        from localm.browser import session as bsession
+        _set(browser_enabled=True)
+        with TestClient(app) as c:
+            r = c.post("/api/browser/session", json={})
+            assert r.status_code == 200, r.text
+            sid = r.json()["session_id"]
+            job_id = r.json()["job_id"]
+            _wait_until(lambda: len(slow_start.made) >= 1)
+            s = c.post("/api/browser/stop")
+            slow_start.release.set()
+            _wait_until(lambda: slow_start.made[0].stopped)
+            _wait_until(lambda: _job_status(app, job_id) not in (None, "running"))
+            assert slow_start.made[0].stopped is True, (
+                "a browser stopped while starting kept running once it was up")
+            assert bsession.get(sid) is None
+            assert sid not in bsession.active_ids()
+            assert s.json() == {"closed": True}
+            assert _job_status(app, job_id) == "done"
+
+    def test_a_failed_start_frees_the_key(self, app, slow_start):
+        from localm.browser import session as bsession
+        _set(browser_enabled=True)
+        slow_start.fail_start = True
+        slow_start.release.set()
+        with TestClient(app) as c:
+            r1 = c.post("/api/browser/session", json={})
+            assert r1.status_code == 200, r1.text
+            job_id = r1.json()["job_id"]
+            _wait_until(lambda: _job_status(app, job_id) == "failed")
+            sid = r1.json()["session_id"]
+            assert sid not in bsession.active_ids(), (
+                "a browser that failed to start still holds its key")
+            slow_start.fail_start = False
+            r2 = c.post("/api/browser/session", json={})
+            try:
+                assert r2.status_code == 200, r2.text
+            finally:
+                if r2.status_code == 200:
+                    c.post("/api/jobs/%s/cancel" % r2.json()["job_id"])
+
+    def test_a_failure_before_the_launch_does_not_hold_the_key(
+            self, app, slow_start, monkeypatch):
+        from localm.browser import session as bsession
+        from localm.plugins.builtin.browser import plug
+        _set(browser_enabled=True)
+        slow_start.release.set()
+        real = plug._settings
+        calls = {"n": 0}
+
+        def failing_once():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("settings unreadable")
+            return real()
+        monkeypatch.setattr(plug, "_settings", failing_once)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            r1 = c.post("/api/browser/session", json={})
+            held = bsession.active_ids()
+            r2 = c.post("/api/browser/session", json={})
+            try:
+                assert held == [], "a failed open still holds the key: %r" % held
+                assert r1.status_code == 500, r1.text
+                assert r2.status_code == 200, r2.text
+            finally:
+                if r2.status_code == 200:
+                    c.post("/api/jobs/%s/cancel" % r2.json()["job_id"])
+
+    def test_the_stop_route_ends_the_job(self, app, slow_start):
+        from localm.browser import session as bsession
+        _set(browser_enabled=True)
+        slow_start.release.set()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/session", json={})
+            sid = r.json()["session_id"]
+            job_id = r.json()["job_id"]
+            live = _wait_until(lambda: bsession.get(sid))
+            assert live is not None
+            assert c.post("/api/browser/stop").json() == {"closed": True}
+            _wait_until(lambda: _job_status(app, job_id) not in (None, "running"))
+            assert live.stopped is True
+            assert _job_status(app, job_id) == "done", (
+                "the job outlived the browser it streams")
+
+
+class TestTheRegistry:
+    def test_a_claimed_id_reads_as_not_open(self):
+        from localm.browser import session as bsession
+        claim = bsession.reserve("gui-claimed")
+        try:
+            assert claim is not None
+            assert bsession.get("gui-claimed") is None
+            assert bsession.reserve("gui-claimed") is None, "one id was claimed twice"
+        finally:
+            assert bsession.release_if("gui-claimed", claim) is True
+
+    def test_install_needs_the_claim_to_still_be_held(self):
+        from localm.browser import session as bsession
+        claim = bsession.reserve("gui-install")
+        assert claim is not None
+        assert bsession.close("gui-install") is True
+        late = _StandIn("gui-install")
+        assert bsession.install(claim, late) is False
+        assert bsession.get("gui-install") is None
+        assert late.stopped is False
+
+    def test_release_if_removes_only_the_named_entry(self):
+        from localm.browser import session as bsession
+        a = _StandIn("gui-rel")
+        b = _StandIn("gui-rel")
+        bsession.register(a)
+        bsession.register(b)
+        try:
+            assert bsession.release_if("gui-rel", a) is False
+            assert bsession.get("gui-rel") is b
+        finally:
+            assert bsession.release_if("gui-rel", b) is True
+        assert a.stopped is False and b.stopped is False
+
+    def test_close_all_skips_a_claim(self):
+        from localm.browser import session as bsession
+        claim = bsession.reserve("gui-closeall")
+        running = _StandIn("gui-running")
+        bsession.register(running)
+        bsession.close_all()
+        assert running.stopped is True
+        assert bsession.active_ids() == []
+        assert bsession.install(claim, _StandIn("gui-closeall")) is False
 
 
 class TestTheDocstringInventory:
