@@ -3,7 +3,9 @@
 // request needs (capability routing) unless the conversation is pinned to a
 // model; a routed reply records and shows which model answered; a
 // conversation that outgrows the selected model's trained window asks for a
-// roomier installed model instead of being compacted.
+// roomier installed model instead of being compacted, when that model can also
+// read the images the conversation sends; a compaction summary is written by
+// the model that answers the conversation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -246,4 +248,104 @@ test("a selected model whose window is unknown compacts as before", async () => 
   activateConv(window, conv);
   await window.runCompletion(conv);
   assert.equal(chatPosts(calls).length, 2);
+});
+
+// ---- a longer conversation that also sends an image ----
+
+const PHOTO = { role: "user", content: [
+  { type: "text", text: "what is this?" },
+  { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+] };
+const GENERATED = { role: "assistant", content: [
+  { type: "text", text: "here it is" },
+  { type: "image_url", image_url: { url: "/api/images/cat.png" } },
+] };
+
+function longConvWith(...turns) {
+  const conv = longConv();
+  conv.messages.splice(1, 0, ...turns);
+  return conv;
+}
+
+for (const [label, roomy] of [
+  ["cannot read images", { name: "roomy", model_type: "llm", context_length: 32768, vision: false }],
+  ["is not known to read images", { name: "roomy", model_type: "llm", context_length: 32768 }],
+]) {
+  test(`a conversation with an image compacts when the roomier model ${label}`, async () => {
+    const { window, calls } = setup({ active: "seer", models: [
+      { name: "seer", model_type: "llm", context_length: 4096, vision: true },
+      roomy,
+    ] });
+    runScript(window, "chat.ctxMax = 4096;");
+    const conv = longConvWith(PHOTO, { role: "assistant", content: "a cat" });
+    activateConv(window, conv);
+    await window.runCompletion(conv);
+    const posts = chatPosts(calls);
+    assert.equal(posts.length, 2,
+      "one summarisation request, then the reply: no model can take both the image and the length");
+    assert.equal(posts[1].body.min_context, undefined);
+  });
+}
+
+test("a conversation with an image asks for a roomier model that reads images", async () => {
+  const { window, calls } = setup({ active: "seer", models: [
+    { name: "seer", model_type: "llm", context_length: 4096, vision: true },
+    { name: "roomy", model_type: "llm", context_length: 32768, vision: true },
+  ] });
+  runScript(window, "chat.ctxMax = 4096;");
+  const conv = longConvWith(PHOTO, { role: "assistant", content: "a cat" });
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const posts = chatPosts(calls);
+  assert.equal(posts.length, 1, "no summarisation request: the conversation was not compacted");
+  assert.ok(posts[0].body.min_context > 4096);
+});
+
+test("a generated image is sent as text, so a roomier text-only model still takes the conversation", async () => {
+  const { window, calls } = setup({ models: [
+    { name: "plain", model_type: "llm", context_length: 4096 },
+    { name: "roomy", model_type: "llm", context_length: 32768, vision: false },
+  ] });
+  runScript(window, "chat.ctxMax = 4096;");
+  const conv = longConvWith(GENERATED);
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const posts = chatPosts(calls);
+  assert.equal(posts.length, 1, "no summarisation request: the conversation was not compacted");
+  assert.ok(posts[0].body.min_context > 4096);
+});
+
+// ---- the model that writes a compaction summary ----
+
+test("a pinned conversation's summary is written by its pinned model, pinned", async () => {
+  const { window, calls } = setup({ active: "seer", models: [
+    { name: "plain", model_type: "llm", context_length: 4096 },
+    { name: "seer", model_type: "llm", context_length: 4096 },
+  ] });
+  runScript(window, "chat.ctxMax = 4096;");
+  const conv = longConv({ pinnedModel: "plain" });
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const [summary, reply] = chatPosts(calls);
+  assert.match(summary.body.messages[0].content, /^Summarise the following conversation/);
+  assert.equal(summary.body.model, "plain", "the pinned model, not the sidebar's selection");
+  assert.equal(summary.body.pin_model, true);
+  assert.equal(reply.body.model, "plain");
+  assert.equal(reply.body.pin_model, true);
+});
+
+test("an unpinned conversation's summary names the selected model as a preference", async () => {
+  const { window, calls } = setup({ models: [
+    { name: "plain", model_type: "llm", context_length: 4096 },
+  ] });
+  runScript(window, "chat.ctxMax = 4096;");
+  const conv = longConv();
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const [summary, reply] = chatPosts(calls);
+  assert.match(summary.body.messages[0].content, /^Summarise the following conversation/);
+  assert.equal(summary.body.model, "plain");
+  assert.equal(summary.body.pin_model, false);
+  assert.equal(summary.body.model, reply.body.model, "the model that answers writes the summary");
+  assert.equal(summary.body.pin_model, reply.body.pin_model);
 });

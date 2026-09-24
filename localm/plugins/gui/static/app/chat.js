@@ -268,13 +268,17 @@ export async function compactConversation(conv, signal = null) {
     `${isToolEvent(m) ? "WEB" : m.role.toUpperCase()}: ` +
     truncateAtWord(stripThink(msgText(m)), 1200)).join("\n\n");
 
+  // The summary is written by the model that answers the conversation: its
+  // pinned model, pinned, else the selected model as a preference.
+  const pinnedModel = conv.pinnedModel || "";
   let summary = "";
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({
-        model: modelSelect.value,
+        model: pinnedModel || modelSelect.value || modelCache.active,
+        pin_model: !!pinnedModel,
         messages: [{
           role: "user",
           content: "Summarise the following conversation in under 200 words. " +
@@ -329,12 +333,26 @@ export async function compactConversation(conv, signal = null) {
   return true;
 }
 
+/** Whether the chat request built from *conv* carries an image: a message
+ *  with an image_url part and no server-generated /api/ image (a message with
+ *  one is sent as text). */
+function convSendsImage(conv) {
+  return conv.messages.some((m) => {
+    if (isToolEvent(m) || !Array.isArray(m.content)) return false;
+    const images = m.content.filter((p) => p.type === "image_url");
+    return images.length > 0 &&
+      !images.some((p) => p.image_url?.url?.startsWith("/api/"));
+  });
+}
+
 /** The trained context window a longer conversation needs, when the model
  *  that would answer it cannot hold it and an installed one can: returns
  *  { minContext } for the request's `min_context`, so the server answers with
- *  that roomier model instead of the conversation being compacted. Null when
- *  the chat is pinned, when the answering model's window is unknown or big
- *  enough, or when no installed model has a bigger one. */
+ *  that roomier model instead of the conversation being compacted. A
+ *  conversation that sends an image counts only a roomier model confirmed to
+ *  read images (`vision: true`). Null when the chat is pinned, when the
+ *  answering model's window is unknown or big enough, or when no installed
+ *  model qualifies. */
 export function contextRoutingNeed(conv, est) {
   if (!conv || conv.pinnedModel) return null;
   const current = modelSelect.value || modelCache.active;
@@ -344,8 +362,10 @@ export function contextRoutingNeed(conv, est) {
   if (!trained) return null;
   if (est < COMPACT_RATIO * trained) return null;
   const need = Math.ceil(est / COMPACT_RATIO);
+  const image = convSendsImage(conv);
   const roomier = models.some((m) => m.name !== current && !m.missing &&
-    (m.model_type || "llm") === "llm" && (m.context_length || 0) >= need);
+    (m.model_type || "llm") === "llm" && (m.context_length || 0) >= need &&
+    (!image || m.vision === true));
   return roomier ? { minContext: need } : null;
 }
 
