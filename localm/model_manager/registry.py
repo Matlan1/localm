@@ -1916,7 +1916,222 @@ def _space_needed(sources_on: Path, action: str, total: int) -> int:
     return total
 
 
-def _store_into_models_dir(path: Path, action: str) -> Path:
+class StoredModel(NamedTuple):
+    """Where :func:`_store_with_projector` put a model.
+
+    ``path`` is the primary file or directory to register (the first part, for
+    a split GGUF). ``mmproj`` is the vision projector to record on that
+    registry entry, at its new location, or None when there is none to record.
+    """
+    path: Path
+    mmproj: Optional[Path]
+
+
+@dataclass(frozen=True)
+class _ProjectorTransfer:
+    """One mmproj file travelling with a model: ``mode`` is ``"copy"`` or
+    ``"move"``, ``shared_with`` names the other models in the source folder
+    that may also use it (non-empty only when a move was downgraded to a copy)."""
+    src: Path
+    mode: str
+    shared_with: tuple = ()
+
+
+# Shortest leading name token that counts as evidence a projector is named for
+# a DIFFERENT model in the same folder.
+_MIN_SIBLING_TOKEN_LEN = 3
+
+
+def _name_token(stem: str) -> str:
+    """Leading lower-case token of a GGUF file stem, e.g. ``"gemma"`` for
+    ``"gemma-3-4b-it-Q4_K_M"``. Empty for a stem that starts with ``mmproj``."""
+    return stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
+
+
+def _projector_relation(model: Path, proj: Path, others: List[Path], width) -> Optional[bool]:
+    """Whether the mmproj file *proj* can be *model*'s vision projector.
+
+    Returns False when it cannot: both embedding widths are known and differ,
+    or *proj*'s name carries the leading token of a model in *others*, not
+    *model*'s own, and that other model's width does not rule it out. Returns
+    True when it plausibly is: the widths are known and equal, or its name
+    carries *model*'s leading token. Returns None when neither applies.
+    *model* and every path in *others* are first split parts; *width* maps a
+    path to its :func:`gguf_n_embd` value.
+    """
+    model_width, proj_width = width(model), width(proj)
+    if model_width and proj_width and model_width != proj_width:
+        return False
+    name = proj.name.lower()
+    token = _name_token(model.stem)
+    own = bool(token) and token in name
+    if not own:
+        for other in others:
+            other_token = _name_token(other.stem)
+            if len(other_token) < _MIN_SIBLING_TOKEN_LEN or other_token not in name:
+                continue
+            other_width = width(other)
+            if not (other_width and proj_width and other_width != proj_width):
+                return False
+    if own or (model_width and proj_width):
+        return True
+    return None
+
+
+def _plan_projectors(path: Path, parts: List[str], action: str,
+                     attached_only: bool) -> tuple:
+    """The mmproj files that travel with the GGUF model *path* (whose split
+    parts are *parts*, all in ``path.parent``) on a copy or move into
+    MODELS_DIR, and the one the attach policy picks for it.
+
+    Returns ``(transfers, attached)``: a list of :class:`_ProjectorTransfer`
+    and ``find_sibling_mmproj(path)`` evaluated in the SOURCE folder (None when
+    it picks nothing). The attached projector always travels.
+
+    With *attached_only*, nothing else travels. Otherwise every mmproj file in
+    the folder whose :func:`_projector_relation` to the model is not False
+    travels too, unless *path* is itself mmproj-named or already lives in
+    MODELS_DIR. For a ``"move"``, a travelling projector that another model in
+    the folder could also use (its relation to that model is not False) is
+    copied instead, and that model is named in ``shared_with``.
+    """
+    attached = find_sibling_mmproj(path)
+    transfers: List[_ProjectorTransfer] = []
+    if attached is not None:
+        transfers.append(_ProjectorTransfer(attached, action))
+    folder = path.parent
+    if (attached_only or "mmproj" in path.name.lower()
+            or folder.resolve() == _mm.MODELS_DIR.resolve()):
+        return transfers, attached
+
+    own = set(parts)
+    projectors: List[Path] = []
+    models: dict = {}
+    for f in sorted(folder.glob("*.gguf")):
+        if f.name in own:
+            continue
+        if "mmproj" in f.name.lower():
+            projectors.append(f)
+        else:
+            first = first_split_part(f.name)
+            models.setdefault(first, folder / first)
+    model = folder / parts[0]
+    others = list(models.values())
+
+    widths: dict = {}
+
+    def width(p: Path) -> Optional[int]:
+        if p not in widths:
+            widths[p] = gguf_n_embd(p)
+        return widths[p]
+
+    for proj in projectors:
+        if proj == attached:
+            if action == "move":
+                shared = _projector_sharers(proj, model, others, width)
+                if shared:
+                    transfers[0] = _ProjectorTransfer(attached, "copy", shared)
+            continue
+        if _projector_relation(model, proj, others, width) is False:
+            logger.debug("_store_into_models_dir: %s is not %s's projector, "
+                         "leaving it in place", proj.name, path.name)
+            continue
+        shared = _projector_sharers(proj, model, others, width) if action == "move" else ()
+        transfers.append(_ProjectorTransfer(proj, "copy" if shared else action, shared))
+    return transfers, attached
+
+
+def _projector_sharers(proj: Path, model: Path, others: List[Path], width) -> tuple:
+    """Names of the models in *others* that *proj* could also belong to
+    (:func:`_projector_relation` is not False), each judged against every
+    other model in the folder including *model*."""
+    everyone = [model, *others]
+    return tuple(
+        other.name for other in others
+        if _projector_relation(other, proj, [m for m in everyone if m != other], width)
+        is not False
+    )
+
+
+# Highest ``-<n>`` suffix _projector_dest tries before giving up.
+_MAX_PROJECTOR_NAME_SUFFIX = 999
+
+
+def _projector_dest(src: Path, taken: set) -> tuple:
+    """Where the mmproj file *src* goes in MODELS_DIR: its own name, or when a
+    different file already holds that, the first free ``<src stem>-<n>.gguf``
+    for n from 2. Names in *taken* (lower-cased) are treated as occupied. A
+    file counts as identical when its size and sha256 match *src*'s.
+
+    Returns ``(dest, reuse)``; ``reuse`` is True when *dest* already holds a
+    byte-identical copy, so nothing needs transferring. Raises RuntimeError
+    when every name up to ``-<_MAX_PROJECTOR_NAME_SUFFIX>`` holds a different
+    file.
+    """
+    purpose = "to compare it with the file already in the models folder"
+    try:
+        src_size: Optional[int] = src.stat().st_size
+    except OSError:
+        src_size = None
+    src_digest: Optional[str] = None
+    for n in range(1, _MAX_PROJECTOR_NAME_SUFFIX + 1):
+        name = src.name if n == 1 else f"{src.stem}-{n}{src.suffix}"
+        if name.lower() in taken:
+            continue
+        dest = _mm.MODELS_DIR / name
+        if not dest.exists() or dest.resolve() == src.resolve():
+            return dest, False
+        try:
+            same_size = src_size is not None and dest.stat().st_size == src_size
+        except OSError:
+            same_size = False
+        if same_size:
+            if src_digest is None:
+                src_digest = _verify_digest(src, purpose=purpose)
+            if _verify_digest(dest, purpose=purpose) == src_digest:
+                return dest, True
+    raise RuntimeError(f"Cannot store {src.name}: every name for it in "
+                       f"{_mm.MODELS_DIR} is taken by a different file")
+
+
+def _repoint_projector_references(moved: dict) -> None:
+    """Point every registry entry whose ``path`` or ``mmproj`` names a projector
+    that was just moved at its new location, in one atomic registry update.
+
+    *moved* maps ``os.path.normcase`` of a projector's old resolved path to its
+    new resolved path. Prints the names of the entries it changed.
+    """
+    from rich.markup import escape
+
+    repointed: List[str] = []
+
+    def _repoint(reg: dict) -> None:
+        repointed.clear()
+        for entry_name, entry in reg.items():
+            if not isinstance(entry, dict):
+                continue
+            for field in ("path", "mmproj"):
+                value = entry.get(field)
+                if isinstance(value, str) and os.path.normcase(value) in moved:
+                    entry[field] = moved[os.path.normcase(value)]
+                    repointed.append(entry_name)
+
+    _mm.update_registry(_repoint)
+    if repointed:
+        # repointed: registry names, not restricted to a safe charset.
+        names = ", ".join(escape(n) for n in dict.fromkeys(repointed))
+        console.print(f"[dim]Updated the projector path recorded for {names}.[/dim]")
+
+
+def _store_into_models_dir(path: Path, action: str, *,
+                           attached_projector_only: bool = False) -> Path:
+    """:func:`_store_with_projector`, returning only the new primary path."""
+    return _store_with_projector(
+        path, action, attached_projector_only=attached_projector_only).path
+
+
+def _store_with_projector(path: Path, action: str, *,
+                          attached_projector_only: bool = False) -> StoredModel:
     """Copy or move an external model (file or directory) INTO ``MODELS_DIR``, so
     it can be registered from there and treated exactly like a pulled model
     afterward. ``action`` is ``"copy"`` or ``"move"``.
@@ -1925,35 +2140,48 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
       - a single-file GGUF
       - a split GGUF - every ``-NNNNN-of-NNNNN.gguf`` part (split_gguf_parts),
         not just the part *path* happens to point at
-      - a GGUF's sibling mmproj vision-projector file, if one exists next to it
-        (find_sibling_mmproj) - it MUST travel with the model, or vision
-        capability silently breaks with no error at registration time
+      - the mmproj vision-projector files beside a GGUF, chosen by
+        :func:`_plan_projectors`: the one ``find_sibling_mmproj`` attaches,
+        plus every other one that may belong to this model. On a move, a
+        projector another model in the source folder may also use is copied,
+        not moved, and a console note names that model. With
+        *attached_projector_only* only the attached one travels.
       - an HF-style model directory - the whole tree (shutil.copytree/move)
 
     Refuses (raises RuntimeError, does not touch anything) when a name inside
     MODELS_DIR is already occupied by a genuinely different file - the same
-    path-identity guard the duplicate-content prompt applies inline. Preflights
-    free disk space before copying (a copy needs room for both the original and
-    the new copy at once); a same-name/no-op destination (already in place)
-    contributes nothing to that check. After each copy the destination is
-    re-hashed against a pre-copy digest of the source and the whole operation
-    fails loudly on any mismatch, so a copy that landed corrupted is never
-    registered as if it worked. A move is NOT re-verified: on the same volume it
-    is an atomic rename with no data written twice.
+    path-identity guard the duplicate-content prompt applies inline. Without
+    *attached_projector_only*, a projector is exempt: a byte-identical file
+    already under its name is reused as is, and a different one makes it land
+    as ``<projector stem>-<n>.gguf`` instead (see :func:`_projector_dest`).
+    Preflights free disk space before copying (a copy needs room for both the
+    original and the new copy at once); a same-name/no-op destination (already
+    in place) contributes nothing to that check. After each copy the
+    destination is re-hashed against a pre-copy digest of the source and the
+    whole operation fails loudly on any mismatch, so a copy that landed
+    corrupted is never registered as if it worked. A move is NOT re-verified: on
+    the same volume it is an atomic rename with no data written twice. Every
+    registry entry whose ``path`` or ``mmproj`` named an mmproj file that moved
+    (a travelling projector, or *path* itself when it is mmproj-named) is
+    pointed at its new location, including when a later transfer raises; a
+    failure to update the registry is printed and logged, never raised.
 
-    Returns the new path of the primary file/directory (the first part, for a
-    split GGUF) - the caller registers THIS path, not the original.
+    Returns a :class:`StoredModel`: the new path of the primary file/directory
+    (the first part, for a split GGUF), which the caller registers instead of
+    the original, and the attached projector's new path when it passes
+    :func:`gguf_is_mmproj`, which the caller records on the entry. When
+    projectors travelled but none is attached, a console note says so.
     """
     from rich.markup import escape
 
     _mm.ensure_dirs()
     path = path.resolve()
-    verb = "Copying" if action == "copy" else "Moving"
 
     if path.is_dir():
+        verb = "Copying" if action == "copy" else "Moving"
         dest = _mm.MODELS_DIR / path.name
         if dest.resolve() == path:
-            return path                                    # already in place
+            return StoredModel(path, None)                 # already in place
         if dest.exists():
             raise RuntimeError(f"Cannot {action}: {dest} already exists")
         total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
@@ -1968,66 +2196,155 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
             shutil.copytree(path, dest)
         else:
             shutil.move(str(path), str(dest))
-        return dest
+        return StoredModel(dest, None)
 
-    # Single GGUF: gather every split part plus a sibling mmproj (if any) -
-    # all of it must travel together or the model breaks (multi-part loading)
-    # or silently loses a capability (vision) with no error at registration time.
+    # Single GGUF: every split part, plus the projector files _plan_projectors
+    # picks.
     parts = split_gguf_parts(path.name) or [path.name]
-    sources = [path.parent / part for part in parts]
+    transfers: List[_ProjectorTransfer] = []
+    attached: Optional[Path] = None
     if path.suffix.lower() == ".gguf":
-        mmproj = find_sibling_mmproj(path)
-        if mmproj is not None and mmproj not in sources:
-            sources.append(mmproj)
+        transfers, attached = _plan_projectors(path, parts, action, attached_projector_only)
 
-    dests: List[Path] = []
-    for src in sources:
-        dest = _mm.MODELS_DIR / src.name
+    # (src, dest, mode, note printed after the transfer)
+    items: List[tuple] = []
+    for part in parts:
+        src = path.parent / part
+        dest = _mm.MODELS_DIR / part
         if dest.exists() and dest.resolve() != src.resolve():
             raise RuntimeError(f"Cannot {action}: {dest} already exists")
-        dests.append(dest)
+        items.append((src, dest, action, None))
 
-    to_transfer = [(s, d) for s, d in zip(sources, dests) if s.resolve() != d.resolve()]
-    total = sum(s.stat().st_size for s, _ in to_transfer if s.exists())
+    taken = {part.lower() for part in parts}
+    placed: dict = {}          # projector src -> its path under MODELS_DIR
+    arrived: set = set()       # projector srcs now present at their placed path
+    reused: List[Path] = []
+    for t in transfers:
+        if attached_projector_only:
+            dest = _mm.MODELS_DIR / t.src.name
+            if dest.exists() and dest.resolve() != t.src.resolve():
+                raise RuntimeError(f"Cannot {action}: {dest} already exists")
+            reuse = False
+        else:
+            dest, reuse = _projector_dest(t.src, taken)
+        taken.add(dest.name.lower())
+        placed[t.src] = dest
+        if reuse:
+            reused.append(dest)
+            arrived.add(t.src)
+            continue
+        notes = []
+        if dest.name != t.src.name:
+            notes.append(f"Stored {escape(t.src.name)} as {escape(dest.name)}: a "
+                         f"different {escape(t.src.name)} is already in the models folder.")
+        if t.shared_with:
+            more = len(t.shared_with) - 1
+            who = escape(t.shared_with[0]) + (f" and {more} more" if more else "")
+            notes.append(f"Copied {escape(t.src.name)} instead of moving it: {who} "
+                         "in the same folder may also use it.")
+        items.append((t.src, dest, t.mode, " ".join(notes) or None))
+
+    to_transfer = []
+    for item in items:
+        if item[0].resolve() != item[1].resolve():
+            to_transfer.append(item)
+        elif item[0] in placed:
+            arrived.add(item[0])
+    copy_bytes = sum(s.stat().st_size for s, _, mode, _ in to_transfer
+                     if mode == "copy" and s.exists())
+    move_bytes = sum(s.stat().st_size for s, _, mode, _ in to_transfer
+                     if mode == "move" and s.exists())
     # Every source is a sibling of *path*, so one volume check covers them all.
-    if not _mm._check_disk_space(_mm.MODELS_DIR,
-                                 _space_needed(path.parent, action, total)):
+    if not _mm._check_disk_space(
+            _mm.MODELS_DIR, copy_bytes + _space_needed(path.parent, "move", move_bytes)):
         raise RuntimeError(
             f"Not enough disk space to {action} {path.name} into {_mm.MODELS_DIR}"
         )
 
-    for src, dest in to_transfer:
-        if not src.exists():
-            # A split part or mmproj sibling that vanished between discovery and
-            # transfer (pre-existing incomplete/broken model on disk) - not this
-            # operation's problem to fix; note it and continue with the rest.
-            logger.debug("_store_into_models_dir: %s no longer exists, skipping", src)
-            continue
-        # src.name/dest: a split-GGUF part or mmproj sibling filename, sourced
-        # from the caller's own filesystem - not restricted to a safe charset.
-        console.print(f"[dim]{verb} {escape(src.name)} to {escape(str(dest))}…[/dim]")
-        if action == "copy":
-            # Two full hashes of a multi-GB model, either side of the copy, so
-            # the "Copying ..." line above is followed by a long silence.
-            pre_digest = _verify_digest(src, purpose="to check the source before copying")
-            shutil.copy2(src, dest)
-            post_digest = _verify_digest(dest, purpose="to confirm the copy")
-            if post_digest != pre_digest:
-                # Don't leave a known-bad copy sitting in MODELS_DIR - it would
-                # otherwise be a ticking time bomb for a future sync_models_dir
-                # to auto-register as its own (corrupt) model.
-                try:
-                    dest.unlink()
-                except OSError:
-                    pass  # best-effort cleanup; the mismatch itself still raises
-                raise RuntimeError(
-                    f"Copy verification failed for {src.name}: sha256 mismatch "
-                    f"after copy to {dest} (source left untouched, bad copy removed)"
-                )
-        else:
-            shutil.move(str(src), str(dest))
+    for dest in reused:
+        # dest: a projector filename from the caller's own filesystem - not
+        # restricted to a safe charset.
+        console.print(f"[dim]{escape(dest.name)} is already in the models folder "
+                      "with the same content; using that copy and leaving the "
+                      "original where it is.[/dim]")
 
-    return _mm.MODELS_DIR / path.name
+    moved_projectors: dict = {}    # normcase(old resolved path) -> new resolved path
+    try:
+        for src, dest, mode, note in to_transfer:
+            if not src.exists():
+                # A split part or mmproj sibling that vanished between discovery and
+                # transfer (pre-existing incomplete/broken model on disk) - not this
+                # operation's problem to fix; note it and continue with the rest.
+                logger.debug("_store_into_models_dir: %s no longer exists, skipping", src)
+                continue
+            verb = "Copying" if mode == "copy" else "Moving"
+            # src.name/dest: a split-GGUF part or mmproj sibling filename, sourced
+            # from the caller's own filesystem - not restricted to a safe charset.
+            console.print(f"[dim]{verb} {escape(src.name)} to {escape(str(dest))}…[/dim]")
+            if mode == "copy":
+                # Two full hashes of a multi-GB model, either side of the copy, so
+                # the "Copying ..." line above is followed by a long silence.
+                pre_digest = _verify_digest(src, purpose="to check the source before copying")
+                shutil.copy2(src, dest)
+                post_digest = _verify_digest(dest, purpose="to confirm the copy")
+                if post_digest != pre_digest:
+                    # Don't leave a known-bad copy sitting in MODELS_DIR - it would
+                    # otherwise be a ticking time bomb for a future sync_models_dir
+                    # to auto-register as its own (corrupt) model.
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass  # best-effort cleanup; the mismatch itself still raises
+                    raise RuntimeError(
+                        f"Copy verification failed for {src.name}: sha256 mismatch "
+                        f"after copy to {dest} (source left untouched, bad copy removed)"
+                    )
+            else:
+                old_key = os.path.normcase(str(src.resolve()))
+                shutil.move(str(src), str(dest))
+                if src in placed or "mmproj" in src.name.lower():
+                    moved_projectors[old_key] = str(dest.resolve())
+            if src in placed:
+                arrived.add(src)
+            if note:
+                console.print(f"[yellow]{note}[/yellow]")
+    finally:
+        if moved_projectors:
+            try:
+                _repoint_projector_references(moved_projectors)
+            except Exception as e:
+                # Reports the failure instead of raising; an exception from the
+                # transfer loop keeps propagating unchanged. See
+                # test_repoint_failure_does_not_replace_the_transfer_error.
+                logger.warning("_store_into_models_dir: could not update the "
+                               "registry entries recording %s: %s",
+                               ", ".join(moved_projectors.values()), e)
+                console.print(
+                    "[yellow]Could not update the registry entries that record "
+                    f"{', '.join(escape(Path(p).name) for p in moved_projectors.values())}"
+                    f" (now in the models folder): {escape(str(e))}[/yellow]")
+
+    mmproj: Optional[Path] = None
+    if attached is not None and attached in arrived and gguf_is_mmproj(placed[attached]):
+        mmproj = placed[attached]
+    unattached = [placed[t.src] for t in transfers
+                  if t.src != attached and t.src in arrived]
+    if attached is None and unattached:
+        names = ", ".join(escape(p.name) for p in unattached)
+        if len(unattached) == 1:
+            console.print(
+                f"[yellow]Note:[/yellow] {names} came along but is not attached: "
+                f"localm could not tell whether it is {escape(path.name)}'s vision "
+                f"projector. To use it, pass --mmproj {escape(str(unattached[0]))} "
+                "when you run the model.")
+        else:
+            console.print(
+                f"[yellow]Note:[/yellow] {names} came along but none is attached: "
+                f"localm could not tell which one is {escape(path.name)}'s vision "
+                "projector. To use one, pass its path with --mmproj when you run "
+                "the model.")
+
+    return StoredModel(_mm.MODELS_DIR / path.name, mmproj)
 
 
 def _name_collision(model_name: str, p: Path, reg: dict) -> Optional[str]:
@@ -2057,6 +2374,7 @@ def _register_with_dedup(
     mmproj: Optional[Path] = None,
     architecture: Optional[str] = None,
     expert_count: Optional[int] = None,
+    attached_projector_only: bool = False,
 ) -> bool:
     """
     Register a model, detecting duplicates first.
@@ -2074,6 +2392,11 @@ def _register_with_dedup(
     ``expert_count=0`` must still backfill (a confirmed fact, not "nothing to
     write") while an entry that already HAS either key, even a falsy one, is
     never overwritten.
+
+    A "copy" / "move" answer stores *p* with :func:`_store_with_projector`,
+    passing *attached_projector_only* through; the projector it attaches is
+    recorded on the new entry when no *mmproj* was given, and on a move also on
+    every other name that pointed at *p* and has none.
 
     Returns True when *model_name* ends up correctly registered for *p*
     (freshly registered, aliased, deduped, or already correct) - False for
@@ -2168,12 +2491,16 @@ def _register_with_dedup(
             # touches anything - it's the key the alias-relink below matches on.
             moved_from = str(p.resolve())
             try:
-                dest = _mm._store_into_models_dir(p, action)
+                stored = _mm._store_with_projector(
+                    p, action, attached_projector_only=attached_projector_only)
             except RuntimeError as e:
                 # e: built from Path objects derived from the caller's own
                 # filesystem paths - not restricted to a safe charset.
                 console.print(f"[red]{escape(str(e))}[/red]")
                 return False
+            dest = stored.path
+            if mmproj is None and model_type == "llm":
+                mmproj = stored.mmproj
             if action == "move":
                 dest_str = str(dest.resolve())
                 entry = {"path": dest_str, "source": source, "model_type": model_type}
@@ -2198,6 +2525,9 @@ def _register_with_dedup(
                     for alias_name in dup_names:
                         if r.get(alias_name, {}).get("path") == moved_from:
                             r[alias_name]["path"] = dest_str
+                            if (mmproj and r[alias_name].get("model_type") == "llm"
+                                    and not r[alias_name].get("mmproj")):
+                                r[alias_name]["mmproj"] = entry["mmproj"]
                     r[model_name] = entry
 
                 _mm.update_registry(_relink_and_register)
@@ -2670,7 +3000,8 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
             new_parts.append(gguf)
             continue
         try:
-            new_parts.append(_mm._store_into_models_dir(gguf, store))
+            new_parts.append(_mm._store_into_models_dir(gguf, store,
+                                                        attached_projector_only=True))
         except RuntimeError as e:
             # e: built from Path objects derived from the caller's own
             # filesystem paths - not restricted to a safe charset.
@@ -2696,9 +3027,26 @@ def _add_local_gguf_dir(
     ``_unique_registry_name``. A user-supplied ``-n`` name is only honoured for
     a single-model folder, since it cannot apply to many. Returns True - the
     caller has already checked *first_parts* is non-empty.
+
+    A duplicate answered with "copy" / "move" carries only the projector
+    ``find_sibling_mmproj`` attaches (``attached_projector_only``). An entry
+    whose file an earlier model's move already carried into MODELS_DIR is
+    registered at ``MODELS_DIR / <its name>``; one that is gone from both
+    places is skipped with a message.
     """
+    from rich.markup import escape
+
     use_given_name = bool(name) and len(first_parts) == 1
     for gguf in first_parts:
+        if not gguf.exists():
+            carried = _mm.MODELS_DIR / gguf.name
+            if not carried.is_file():
+                # gguf: a filename from the caller's own folder - not restricted
+                # to a safe charset.
+                console.print(f"[yellow]Skipped {escape(gguf.name)}: it is no "
+                              f"longer in {escape(str(gguf.parent))}.[/yellow]")
+                continue
+            gguf = carried
         split = _SPLIT_GGUF_RE.match(gguf.name)
         base = split.group("stem") if (split and split_gguf_parts(gguf.name)) else gguf.stem
         reg = _mm.load_registry()
@@ -2726,6 +3074,7 @@ def _add_local_gguf_dir(
         _mm._register_with_dedup(
             model_name, gguf, "local", on_duplicate=on_duplicate,
             digest=digest, size=size, model_type=model_type,
+            attached_projector_only=True,
         )
     return True
 
@@ -2918,8 +3267,9 @@ def add_local(
 
     # Bring an external file/dir into managed storage BEFORE registering, so the
     # registry ends up pointing at the copy/move destination, not the original.
-    # Handles the split-GGUF parts and any sibling mmproj on its own
-    # (_store_into_models_dir); works for is_hf's whole directory too.
+    # Handles the split-GGUF parts and the mmproj siblings on its own
+    # (_store_with_projector); works for is_hf's whole directory too.
+    stored_mmproj: Optional[Path] = None
     if store and _mm.is_external_path(p):
         # Refuse before touching the filesystem when registration is already
         # known to be refused - a name collision with no terminal to confirm an
@@ -2939,10 +3289,11 @@ def add_local(
                 )
                 return False
         try:
-            p = _mm._store_into_models_dir(p, store)
+            stored = _mm._store_with_projector(p, store)
         except RuntimeError as e:
             console.print(f"[red]{escape(str(e))}[/red]")
             return False
+        p, stored_mmproj = stored.path, stored.mmproj
 
     size: Optional[int] = None
     if is_blob:
@@ -2984,6 +3335,7 @@ def add_local(
     # (sync_models_dir/`localm list` will pick it up under an auto name).
     registered = _mm._register_with_dedup(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,
+        mmproj=stored_mmproj if model_type == "llm" else None,
         architecture=gguf_metadata.get("architecture"), expert_count=gguf_metadata.get("expert_count"),
     )
     if not registered and store:

@@ -10,6 +10,7 @@ directory, and a folder of several independent loose GGUFs (including a
 model+mmproj pair) all have to travel together.
 """
 
+import struct
 from pathlib import Path
 
 import pytest
@@ -183,6 +184,453 @@ class TestStoreMmproj:
         found = get_model_mmproj("vision-model")
         assert found is not None
         assert Path(found).name == mmproj.name
+
+
+# --------------------------------------------------------------------------- #
+#  Projector files travel by fit, not only by the auto-attach heuristic
+# --------------------------------------------------------------------------- #
+
+_T_UINT32 = 4
+_T_STRING = 8
+
+
+def _gguf_str(text: str) -> bytes:
+    raw = text.encode("utf-8")
+    return struct.pack("<Q", len(raw)) + raw
+
+
+def _real_gguf(path: Path, kv) -> Path:
+    """A minimal but real GGUF v3 header carrying the metadata *kv*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, len(kv))]
+    for key, vtype, val in kv:
+        out.append(_gguf_str(key))
+        out.append(struct.pack("<I", vtype))
+        out.append(_gguf_str(val) if vtype == _T_STRING else struct.pack("<I", val))
+    path.write_bytes(b"".join(out))
+    return path
+
+
+def _text_model(path: Path, width: int, arch: str = "gemma3") -> Path:
+    """A text model whose ``<arch>.embedding_length`` is *width*; its filename is
+    in the metadata so two models never hash alike."""
+    return _real_gguf(path, [("general.architecture", _T_STRING, arch),
+                             (f"{arch}.embedding_length", _T_UINT32, width),
+                             ("general.name", _T_STRING, path.name)])
+
+
+def _projector(path: Path, width: int, tag: str = "") -> Path:
+    """A clip mmproj whose ``clip.vision.projection_dim`` is *width*. *tag*
+    (default: the filename) goes into the metadata and decides the bytes."""
+    return _real_gguf(path, [("general.architecture", _T_STRING, "clip"),
+                             ("clip.vision.projection_dim", _T_UINT32, width),
+                             ("general.name", _T_STRING, tag or path.name)])
+
+
+@pytest.fixture
+def wide_console(monkeypatch):
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="400")
+
+
+class TestProjectorTravel:
+    def test_move_brings_generically_named_projector_along(self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560)
+        attached_in_place = mm.find_sibling_mmproj(model)
+
+        assert add_local(str(model), store="move") is True
+
+        moved = _models_dir() / "mmproj-F16.gguf"
+        assert moved.is_file(), "the projector must travel with its model"
+        assert not proj.exists(), "a move must not leave the projector behind"
+        resolved = mm.get_model_mmproj("gemma-3-4b-it-Q4_K_M")
+        expected = str(moved.resolve()) if attached_in_place is not None else None
+        assert (str(Path(resolved).resolve()) if resolved else None) == expected, (
+            "the moved model must resolve exactly the projector it resolved in place")
+
+    def test_copy_brings_generically_named_projector_along(self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560)
+
+        mm._store_into_models_dir(model, "copy")
+
+        assert (_models_dir() / "mmproj-F16.gguf").read_bytes() == proj.read_bytes()
+        assert model.exists() and proj.exists()
+
+    def test_move_leaves_another_models_projector_in_the_source_folder(
+            self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        model_a = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        model_b = _text_model(src / "qwen2.5-vl-7b-instruct-Q4_K_M.gguf", 3584, arch="qwen2")
+        proj_a = _projector(src / "mmproj-F16.gguf", 2560)
+        proj_b = _projector(src / "mmproj-model-f16.gguf", 3584)
+
+        mm._store_into_models_dir(model_a, "move")
+
+        assert (_models_dir() / proj_a.name).is_file() and not proj_a.exists()
+        assert proj_b.is_file(), "the other model's projector must stay beside it"
+        assert not (_models_dir() / proj_b.name).exists()
+        assert model_b.is_file()
+
+    def test_move_uses_names_when_widths_are_unknown(self, tmp_path, isolated_home):
+        d = tmp_path / "drop"
+        model_a = _gguf(d, "alpha-7b.gguf")
+        _gguf(d, "bravo-7b.gguf")
+        proj_a = _gguf(d, "mmproj-alpha-7b-f16.gguf")
+        proj_b = _gguf(d, "mmproj-bravo-7b-f16.gguf")
+
+        mm._store_into_models_dir(model_a, "move")
+
+        assert (_models_dir() / proj_a.name).is_file() and not proj_a.exists()
+        assert proj_b.is_file()
+        assert not (_models_dir() / proj_b.name).exists()
+
+    def test_projector_of_a_different_width_stays_behind(self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 5120)
+
+        mm._store_into_models_dir(model, "move")
+
+        assert proj.is_file()
+        assert not (_models_dir() / proj.name).exists()
+
+    def test_move_copies_a_projector_another_model_in_the_folder_can_use(
+            self, tmp_path, isolated_home, wide_console, capsys):
+        src = tmp_path / "downloads"
+        q4 = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _text_model(src / "gemma-3-4b-it-Q8_0.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560)
+
+        mm._store_into_models_dir(q4, "move")
+
+        out = capsys.readouterr().out
+        assert (_models_dir() / "mmproj-F16.gguf").read_bytes() == proj.read_bytes()
+        assert proj.is_file(), "the Q8 quant in the same folder still needs it"
+        assert "Copied mmproj-F16.gguf instead of moving it: gemma-3-4b-it-Q8_0.gguf" in out
+
+    def test_move_keeps_a_shared_attached_projector_for_the_other_quant(
+            self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        q4 = _text_model(src / "google_gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _text_model(src / "google_gemma-3-4b-it-Q8_0.gguf", 2560)
+        proj = _projector(src / "mmproj-google_gemma-3-4b-it-f16.gguf", 2560)
+        assert mm.find_sibling_mmproj(q4) == proj
+
+        assert add_local(str(q4), store="move") is True
+
+        dest = _models_dir() / proj.name
+        assert proj.is_file(), "moving the Q4 quant must not strip the Q8 quant's projector"
+        assert dest.read_bytes() == proj.read_bytes()
+        assert load_registry()["google_gemma-3-4b-it-Q4_K_M"]["mmproj"] == str(dest.resolve())
+
+    def test_attached_projector_is_recorded_so_a_crowded_models_folder_resolves_it(
+            self, tmp_path, isolated_home):
+        mm.ensure_dirs()
+        _text_model(_models_dir() / "gemma-3-12b-it-Q4_K_M.gguf", 3840)
+        _projector(_models_dir() / "mmproj-gemma-3-12b-it-f16.gguf", 3840)
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-gemma-3-4b-it-f16.gguf", 2560)
+        assert mm.find_sibling_mmproj(model) == proj
+
+        assert add_local(str(model), store="move") is True
+
+        dest = _models_dir() / proj.name
+        assert mm.get_model_mmproj("gemma-3-4b-it-Q4_K_M") == str(dest.resolve())
+
+    def test_duplicate_move_records_the_projector_on_every_name(self, tmp_path, isolated_home):
+        mm.ensure_dirs()
+        _text_model(_models_dir() / "gemma-3-12b-it-Q4_K_M.gguf", 3840)
+        _projector(_models_dir() / "mmproj-gemma-3-12b-it-f16.gguf", 3840)
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-gemma-3-4b-it-f16.gguf", 2560)
+        assert add_local(str(model)) is True                     # registered in place
+
+        assert add_local(str(model), name="g4", on_duplicate="move") is True
+
+        reg = load_registry()
+        dest = _models_dir() / proj.name
+        assert not proj.exists()
+        assert reg["g4"]["mmproj"] == str(dest.resolve())
+        assert reg["gemma-3-4b-it-Q4_K_M"]["path"] == str(
+            (_models_dir() / model.name).resolve())
+        assert reg["gemma-3-4b-it-Q4_K_M"]["mmproj"] == str(dest.resolve())
+
+    def test_identical_projector_already_in_models_folder_is_reused(
+            self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        q8 = _text_model(src / "gemma-3-4b-it-Q8_0.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560)
+        mm.ensure_dirs()
+        existing = _models_dir() / "mmproj-F16.gguf"
+        existing.write_bytes(proj.read_bytes())
+
+        assert add_local(str(q8), store="move") is True
+
+        assert (_models_dir() / q8.name).is_file()
+        assert existing.read_bytes() == proj.read_bytes()
+        assert proj.is_file(), "the original is left where it is"
+        assert not (_models_dir() / "mmproj-F16-2.gguf").exists()
+
+    def test_different_projector_with_the_same_name_lands_under_a_numbered_name(
+            self, tmp_path, isolated_home):
+        mm.ensure_dirs()
+        other = _projector(_models_dir() / "mmproj-F16.gguf", 3584, tag="another model")
+        other_bytes = other.read_bytes()
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560, tag="gemma")
+        proj_bytes = proj.read_bytes()
+
+        assert add_local(str(model), store="move") is True
+
+        renamed = _models_dir() / "mmproj-F16-2.gguf"
+        assert renamed.read_bytes() == proj_bytes
+        assert other.read_bytes() == other_bytes
+        assert not proj.exists()
+
+    def test_numbering_continues_past_every_taken_name(self, tmp_path, isolated_home):
+        mm.ensure_dirs()
+        first = _projector(_models_dir() / "mmproj-F16.gguf", 3584, tag="model one")
+        second = _projector(_models_dir() / "mmproj-F16-2.gguf", 4096, tag="model two")
+        before = (first.read_bytes(), second.read_bytes())
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560, tag="gemma")
+        proj_bytes = proj.read_bytes()
+
+        assert add_local(str(model), store="move") is True
+
+        assert (_models_dir() / "mmproj-F16-3.gguf").read_bytes() == proj_bytes
+        assert (first.read_bytes(), second.read_bytes()) == before
+
+    def test_renamed_projector_does_not_hide_another_models_projector(
+            self, tmp_path, isolated_home):
+        mm.ensure_dirs()
+        big = _text_model(_models_dir() / "gemma-3-12b-it-Q4_K_M.gguf", 3840)
+        big_proj = _projector(_models_dir() / "mmproj-gemma-3-12b-it-f16.gguf", 3840)
+        _projector(_models_dir() / "mmproj-F16.gguf", 3584, tag="another model")
+        assert add_local(str(big)) is True
+        resolved = mm.get_model_mmproj("gemma-3-12b-it-Q4_K_M")
+        assert resolved and Path(resolved).resolve() == big_proj.resolve()
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _projector(src / "mmproj-F16.gguf", 2560, tag="gemma 4b")
+
+        assert add_local(str(model), store="move") is True
+
+        resolved = mm.get_model_mmproj("gemma-3-12b-it-Q4_K_M")
+        assert resolved and Path(resolved).resolve() == big_proj.resolve(), (
+            "a projector renamed into the models folder must not make another "
+            "model's own projector ambiguous")
+
+    def test_projector_named_for_a_model_that_cannot_use_it_still_travels(
+            self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        model = _text_model(src / "google_gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _text_model(src / "gemma-2-2b-it-Q4_K_M.gguf", 2304, arch="gemma2")
+        proj = _projector(src / "mmproj-gemma-3-4b-it-f16.gguf", 2560)
+
+        mm._store_into_models_dir(model, "move")
+
+        assert (_models_dir() / proj.name).is_file()
+        assert not proj.exists()
+
+    def test_duplicate_move_repoints_a_projector_path_recorded_on_the_original_entry(
+            self, tmp_path, isolated_home):
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560)
+        assert add_local(str(model)) is True
+        assert mm.persist_cli_mmproj("gemma-3-4b-it-Q4_K_M", str(proj)) is not None
+
+        assert add_local(str(model), name="g4", on_duplicate="move") is True
+
+        dest = _models_dir() / "mmproj-F16.gguf"
+        assert dest.is_file() and not proj.exists()
+        assert load_registry()["gemma-3-4b-it-Q4_K_M"]["mmproj"] == str(dest.resolve())
+        assert mm.get_model_mmproj("gemma-3-4b-it-Q4_K_M") == str(dest.resolve())
+
+    def test_move_repoints_a_projector_another_models_entry_records(
+            self, tmp_path, isolated_home):
+        other = _text_model(tmp_path / "elsewhere" / "gemma-3-4b-it-Q8_0.gguf", 2560)
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(src / "mmproj-F16.gguf", 2560)
+        assert add_local(str(other)) is True
+        assert mm.persist_cli_mmproj("gemma-3-4b-it-Q8_0", str(proj)) is not None
+
+        assert add_local(str(model), store="move") is True
+
+        dest = _models_dir() / "mmproj-F16.gguf"
+        assert dest.is_file() and not proj.exists()
+        assert mm.get_model_mmproj("gemma-3-4b-it-Q8_0") == str(dest.resolve())
+
+    def test_recorded_projector_is_repointed_even_when_a_later_transfer_fails(
+            self, tmp_path, isolated_home, monkeypatch):
+        other = _text_model(tmp_path / "elsewhere" / "gemma-3-4b-it-Q8_0.gguf", 2560)
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _text_model(src / "qwen2.5-vl-7b-instruct-Q4_K_M.gguf", 3584, arch="qwen2")
+        mine = _projector(src / "mmproj-F16.gguf", 2560)
+        _gguf(src, "mmproj-model-f16.gguf")          # unknown width: copied, shared
+        assert add_local(str(other)) is True
+        assert mm.persist_cli_mmproj("gemma-3-4b-it-Q8_0", str(mine)) is not None
+        real_sha = mm._sha256_file
+
+        def _sha(path, progress=None):
+            if Path(path).name == "mmproj-model-f16.gguf":
+                return "source" if Path(path).parent == src else "corrupted copy"
+            return real_sha(path, progress)
+
+        monkeypatch.setattr(mm, "_sha256_file", _sha)
+        error = None
+        try:
+            mm._store_into_models_dir(model, "move")
+        except RuntimeError as e:
+            error = e
+
+        dest = _models_dir() / "mmproj-F16.gguf"
+        assert dest.is_file() and not mine.exists()
+        assert load_registry()["gemma-3-4b-it-Q8_0"]["mmproj"] == str(dest.resolve())
+        assert error is not None and "Copy verification failed" in str(error)
+
+    def test_repoint_failure_does_not_replace_the_transfer_error(
+            self, tmp_path, isolated_home, monkeypatch, wide_console, capsys):
+        other = _text_model(tmp_path / "elsewhere" / "gemma-3-4b-it-Q8_0.gguf", 2560)
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _text_model(src / "qwen2.5-vl-7b-instruct-Q4_K_M.gguf", 3584, arch="qwen2")
+        mine = _projector(src / "mmproj-F16.gguf", 2560)
+        _gguf(src, "mmproj-model-f16.gguf")          # unknown width: copied, shared
+        assert add_local(str(other)) is True
+        assert mm.persist_cli_mmproj("gemma-3-4b-it-Q8_0", str(mine)) is not None
+        real_sha = mm._sha256_file
+
+        def _sha(path, progress=None):
+            if Path(path).name == "mmproj-model-f16.gguf":
+                return "source" if Path(path).parent == src else "corrupted copy"
+            return real_sha(path, progress)
+
+        def _registry_locked(mutator):
+            raise OSError("registry is locked")
+
+        monkeypatch.setattr(mm, "_sha256_file", _sha)
+        monkeypatch.setattr(mm, "update_registry", _registry_locked)
+        error = None
+        try:
+            mm._store_into_models_dir(model, "move")
+        except Exception as e:
+            error = e
+
+        out = capsys.readouterr().out
+        assert isinstance(error, RuntimeError), f"the transfer error was replaced: {error!r}"
+        assert "Copy verification failed" in str(error)
+        assert "Could not update the registry entries that record mmproj-F16.gguf" in out
+
+    def test_storing_a_projector_file_repoints_entries_that_record_it(
+            self, tmp_path, isolated_home):
+        other = _text_model(tmp_path / "elsewhere" / "gemma-3-4b-it-Q8_0.gguf", 2560)
+        proj = _projector(tmp_path / "downloads" / "mmproj-F16.gguf", 2560)
+        assert add_local(str(other)) is True
+        assert mm.persist_cli_mmproj("gemma-3-4b-it-Q8_0", str(proj)) is not None
+
+        assert add_local(str(proj), store="move") is True
+
+        dest = _models_dir() / "mmproj-F16.gguf"
+        assert dest.is_file() and not proj.exists()
+        assert load_registry()["gemma-3-4b-it-Q8_0"]["mmproj"] == str(dest.resolve())
+        assert mm.get_model_mmproj("gemma-3-4b-it-Q8_0") == str(dest.resolve())
+
+    def test_unattached_projectors_are_named_in_a_note(
+            self, tmp_path, isolated_home, wide_console, capsys):
+        src = tmp_path / "downloads"
+        model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _projector(src / "mmproj-BF16.gguf", 2560)
+        _projector(src / "mmproj-F16.gguf", 2560)
+        assert mm.find_sibling_mmproj(model) is None
+
+        mm._store_into_models_dir(model, "move")
+
+        out = capsys.readouterr().out
+        assert (_models_dir() / "mmproj-BF16.gguf").is_file()
+        assert (_models_dir() / "mmproj-F16.gguf").is_file()
+        assert "mmproj-BF16.gguf, mmproj-F16.gguf came along but none is attached" in out
+
+    def test_folder_import_with_a_generic_projector_transfers_each_file_once(
+            self, tmp_path, isolated_home):
+        d = tmp_path / "drop"
+        _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _projector(d / "mmproj-F16.gguf", 2560)
+
+        assert add_local(str(d), store="move") is True
+
+        assert (_models_dir() / "gemma-3-4b-it-Q4_K_M.gguf").is_file()
+        assert (_models_dir() / "mmproj-F16.gguf").is_file()
+        assert not any(d.iterdir())
+
+    def test_folder_duplicate_move_registers_a_carried_projector_where_it_landed(
+            self, tmp_path, isolated_home):
+        d = tmp_path / "downloads"
+        model = _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        _projector(d / "mmproj-gemma-3-4b-it-f16.gguf", 2560)
+        assert add_local(str(model)) is True                     # registered in place
+
+        assert add_local(str(d), on_duplicate="move") is True
+
+        entry = load_registry()["mmproj-gemma-3-4b-it-f16"]
+        assert Path(entry["path"]).is_file(), f"dangling registry entry: {entry['path']}"
+        assert Path(entry["path"]).resolve().parent == _models_dir().resolve()
+
+    def test_folder_duplicate_move_keeps_a_generic_projector_registered_in_place(
+            self, tmp_path, isolated_home):
+        d = tmp_path / "downloads"
+        model = _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(d / "mmproj-F16.gguf", 2560)
+        assert add_local(str(model)) is True
+
+        assert add_local(str(d), on_duplicate="move") is True
+
+        entry = load_registry()["mmproj-F16"]
+        assert Path(entry["path"]).is_file(), f"dangling registry entry: {entry['path']}"
+        assert proj.is_file()
+
+    def test_folder_duplicate_move_repoints_a_projector_registered_before_its_model(
+            self, tmp_path, isolated_home):
+        d = tmp_path / "downloads"
+        model = _text_model(d / "qwen2.5-vl-7b-instruct-Q4_K_M.gguf", 3584, arch="qwen2")
+        _projector(d / "mmproj-qwen2.5-vl-7b-instruct-f16.gguf", 3584)
+        assert add_local(str(model)) is True
+
+        assert add_local(str(d), on_duplicate="move") is True
+
+        entry = load_registry()["mmproj-qwen2.5-vl-7b-instruct-f16"]
+        assert Path(entry["path"]).is_file(), f"dangling registry entry: {entry['path']}"
+        assert Path(entry["path"]).resolve().parent == _models_dir().resolve()
+
+    def test_folder_duplicate_move_repoints_a_models_projector_moved_as_its_own_duplicate(
+            self, tmp_path, isolated_home):
+        mm.ensure_dirs()
+        _projector(_models_dir() / "mmproj-qwen2-vl-2b-instruct-f16.gguf", 1536)
+        d = tmp_path / "downloads"
+        model = _text_model(d / "qwen2.5-vl-7b-instruct-Q4_K_M.gguf", 3584, arch="qwen2")
+        proj = _projector(d / "mmproj-qwen2.5-vl-7b-instruct-f16.gguf", 3584)
+        assert add_local(str(model)) is True
+        assert add_local(str(proj)) is True
+        assert mm.persist_cli_mmproj("qwen2.5-vl-7b-instruct-Q4_K_M", str(proj)) is not None
+
+        assert add_local(str(d), on_duplicate="move") is True
+
+        dest = _models_dir() / proj.name
+        assert dest.is_file() and not proj.exists()
+        entry = load_registry()["qwen2.5-vl-7b-instruct-Q4_K_M"]
+        assert entry["mmproj"] == str(dest.resolve()), f"dangling mmproj: {entry['mmproj']}"
+        assert mm.get_model_mmproj("qwen2.5-vl-7b-instruct-Q4_K_M") == str(dest.resolve())
 
 
 # --------------------------------------------------------------------------- #
