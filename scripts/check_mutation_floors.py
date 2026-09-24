@@ -312,11 +312,12 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
                 f"{' ...' if len(regressions) > 5 else ''} - either a test that "
                 "caught them was weakened or removed, or their outcome is "
                 "nondeterministic (it can depend on the hash seed, timing or test "
-                "order). Re-run each one, e.g. `PYTHONHASHSEED=<n> python "
-                "scripts/mutmut_run.py run <mutant id>` for a few values of n: if "
-                "a re-run kills it, make the test that catches it deterministic or "
-                "record it as {\"unstable\": \"<reason>\"}; if every re-run "
-                "survives, restore the test")
+                "order). Re-run each one with `PYTHONHASHSEED=<n> python "
+                "scripts/mutmut_run.py run <mutant id>`, for the seed the "
+                "mutation-run step printed and a few others: if a re-run kills "
+                "it, make the test that catches it deterministic or record it as "
+                "{\"unstable\": \"<reason>\"}; if every re-run survives, restore "
+                "the test")
 
         score, detected, scored = module_score(statuses, equivalents | unstables)
         floor = base.get("score_floor")

@@ -627,10 +627,18 @@ jobs:
       # multiplier itself stays at mutmut's default of 15: two genuine
       # survivors run 3.4-4.4x slower than clean while still passing, and a
       # smaller multiplier would count them as detected.
+      #
+      # The run gets a fresh random PYTHONHASHSEED, printed before mutmut
+      # starts; `PYTHONHASHSEED=<printed value> python scripts/mutmut_run.py
+      # run <mutant id>` replays one mutant with the same seed.
       - name: Mutation test one trust-boundary module
         timeout-minutes: 170
         continue-on-error: true
-        run: python scripts/mutmut_run.py run --max-children 16 "localm.${MUTATION_MODULE}.*"
+        run: |-
+          PYTHONHASHSEED="$(python -c 'import secrets; print(secrets.randbelow(2**32))')"
+          export PYTHONHASHSEED
+          echo "PYTHONHASHSEED=${PYTHONHASHSEED}"
+          python scripts/mutmut_run.py run --max-children 16 "localm.${MUTATION_MODULE}.*"
 
       - name: Upload this module's mutation results
         if: always()

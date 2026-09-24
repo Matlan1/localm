@@ -663,6 +663,21 @@ class TestCommittedBaseline:
         assert scope_step["env"]["MUTATION_TEST_LABEL"] == "${{ %s }}" % label_clause
         assert "${{" not in scope_step["run"]
 
+    def test_ci_shards_export_and_print_their_hash_seed_before_mutmut(self):
+        """The mutation-run step exports a random PYTHONHASHSEED for the mutmut
+        process and prints it before mutmut starts."""
+        import yaml
+        wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        run_step = next(st for st in wf["jobs"]["mutation-run"]["steps"]
+                        if st.get("name", "").startswith("Mutation test"))
+        lines = [ln.strip() for ln in run_step["run"].splitlines()]
+        mutmut_at = next(i for i, ln in enumerate(lines) if "scripts/mutmut_run.py run" in ln)
+        before = lines[:mutmut_at]
+        assert "export PYTHONHASHSEED" in before
+        assert 'echo "PYTHONHASHSEED=${PYTHONHASHSEED}"' in before
+        assert any(ln.startswith("PYTHONHASHSEED=") and "secrets.randbelow(2**32)" in ln
+                   for ln in before), before
+
     def test_every_sec01_control_class_is_pinned_to_a_killed_mutant(self, baseline):
         """The baseline's controls are exactly the controls of the six control
         mutant classes that live inside the only_mutate modules, each pinned to
