@@ -504,9 +504,9 @@ class TestCoderTaskOnAPeer:
         _advertise(reg, tmp_path, monkeypatch, p)
         engines = _cache(lazy=True, share_loaded=True)
         res = _run_coder_task(engines, coder_project, model="plain")
+        assert engines.made == {}, "an answer from a live peer is not a reason to load here"
         assert res["isError"] is True
         assert "peer failure 503" in res["content"][0]["text"]
-        assert engines.made == {}, "an answer from a live peer is not a reason to load here"
 
     @pytest.mark.parametrize("stop", ["cancel", "release"])
     def test_nothing_is_loaded_here_once_the_run_is_over(
