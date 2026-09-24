@@ -767,6 +767,43 @@ jobs:
         continue-on-error: true
         run: python scripts/check_llama_rocm_pin.py
 
+  # Live canary for the web-search retrieval pipeline (ADR-0022 Phase 5, item
+  # 25). Every OTHER test of localm.web_retrieval runs against a recorded
+  # fixture double on purpose - offline PR CI must never depend on the
+  # internet - so nothing else here ever makes a real call to DuckDuckGo or a
+  # configured SearXNG instance. A markup change or a datacenter-IP rate limit
+  # would otherwise go unnoticed until a user hit it.
+  #
+  # UNLIKE comfyui-pin-check/llama-rocm-pin-check above, this job is NOT left
+  # to run on every trigger: `if:` restricts it to `schedule` and
+  # `workflow_dispatch` ONLY, so it structurally cannot run on `pull_request`
+  # or the paths-scoped `push` above - a live scrape against a real search
+  # backend must never be a thing a PR's CI run does, non-blocking or not.
+  # `continue-on-error: true` on top of that means even a schedule/dispatch
+  # run can never fail the build - see scripts/check_web_search_canary.py,
+  # which also always exits 0 on its own.
+  web-search-canary:
+    name: web search canary (warn-only, schedule/dispatch only)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run one real search and report whether the layout still parses
+        continue-on-error: true
+        run: python scripts/check_web_search_canary.py
+
   # The one check that sums up the others (docs/architecture.md, "Merge
   # policy"). Runs on every pull_request once the five jobs it needs have
   # finished, whatever their results, and never on push, dispatch or
