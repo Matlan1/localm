@@ -54,7 +54,8 @@ from localm.inference import residency
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
     ChatChunk, ChatResponse,
-    FullChoice, Message, UsageInfo, make_chunk_id,
+    FullChoice, Message, STATUS_CODE_BY_TEXT, UsageInfo,
+    WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
 
 # Map of display name -> Engine instance
@@ -5143,10 +5144,10 @@ async def _stream_sse(
     )
     yield f"data: {role_chunk.model_dump_json()}\n\n"
 
-    from localm.inference.backends.base import messages_contain_image
-    initial_status = "Encoding image..." if messages_contain_image(messages) else "Processing prompt..."
-    status_chunk = ChatChunk.status_chunk(initial_status, model_id, chunk_id, ts)
-    yield f"data: {status_chunk.model_dump_json()}\n\n"
+    if sem.locked():
+        waiting_chunk = ChatChunk.status_chunk(
+            WAITING_FOR_MODEL_STATUS, model_id, chunk_id, ts)
+        yield f"data: {waiting_chunk.model_dump_json()}\n\n"
 
     # Run blocking generator in executor so we don't block the event loop
     loop = asyncio.get_running_loop()
@@ -5226,6 +5227,11 @@ async def _stream_sse(
 
     # Serialise inference - only one request runs at a time
     async with sem:
+        from localm.inference.backends.base import messages_contain_image
+        initial_status = "Encoding image..." if messages_contain_image(messages) else "Processing prompt..."
+        status_chunk = ChatChunk.status_chunk(initial_status, model_id, chunk_id, ts)
+        yield f"data: {status_chunk.model_dump_json()}\n\n"
+
         gen_start = time.perf_counter()
         first_token_at: float | None = None
         t = threading.Thread(target=_generate, daemon=True)
@@ -5422,7 +5428,11 @@ async def _stream_sse_completion(
                         chunk = {
                             "id": chunk_id, "object": "text_completion.chunk",
                             "created": ts, "model": model_id,
-                            "choices": [{"text": "", "index": 0, "finish_reason": None, "status": token.text}],
+                            "choices": [{
+                                "text": "", "index": 0, "finish_reason": None,
+                                "status": token.text,
+                                "status_code": STATUS_CODE_BY_TEXT.get(token.text),
+                            }],
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
                         continue

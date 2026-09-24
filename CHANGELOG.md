@@ -37,10 +37,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   needs. Previously this required a separate, undocumented-in-app
   `python -m playwright install chromium` step after installing the browser
   extra; it is now a regular localm command that respects the network policy.
-- **Live inference status indicator and CPU fallback notifications in chat and CLI.**
-  Shows pulsing stage text (prompt processing, vision image encoding, generating)
-  with an elapsed timer during inference, and visibly warns when GPU vision
-  encoding fails and falls back to CPU.
+- **Live inference status indicator in chat, and a CPU fallback warning in
+  chat and the CLI.** Chat shows pulsing stage text (prompt processing,
+  vision image encoding, generating) with an elapsed timer during inference.
+  Both chat and `localm run` visibly warn when GPU vision encoding fails and
+  falls back to CPU; the CLI's warning goes to stderr, so a piped `-p` reply
+  stays clean.
 - **The automated browser can now mirror its live view directly inside the
   coder session driving it, in addition to the dedicated Browser tab.** Off by
   default; turn on "Show the agent's browser inline in the coder session" in

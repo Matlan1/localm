@@ -371,6 +371,15 @@ class BaseBackend(ABC):
         seed:
             RNG seed for reproducible generation.  GGUF: passed to the sampler.
             HF: sets ``torch.manual_seed`` before generating.
+        on_status:
+            Optional, best-effort stage callback.  A backend may call it zero or
+            more times before the first yielded token with one of the English
+            strings in ``localm.inference.protocol.STATUS_CODE_BY_TEXT`` (for
+            example ``"Processing prompt..."`` or ``"Encoding image (GPU)..."``)
+            or with :data:`VISION_CPU_FALLBACK_STATUS`.  A caller matches on
+            these strings, or on ``STATUS_CODE_BY_TEXT``'s stable id for the
+            ones present there.  Backends and transports must not let an
+            exception raised by this callback interrupt generation.
         """
 
     @property

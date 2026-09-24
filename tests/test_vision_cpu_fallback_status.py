@@ -8,7 +8,10 @@ than each side hand-typing its own copy of the text."""
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 
+from localm.audit import SessionMode
+from localm.cli.chat import run
 from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
 from tests._bare_llama import make_bare_llama
 
@@ -43,19 +46,26 @@ def _wide_console(monkeypatch):
     from localm.cli import _core
     monkeypatch.setattr(_core.console, "_width", 300)
     monkeypatch.setattr(_core.console, "_height", 25)
+    monkeypatch.setattr(_core.err_console, "_width", 300)
+    monkeypatch.setattr(_core.err_console, "_height", 25)
 
 
 class TestStreamOnceVisionCpuFallbackWarning:
-    def test_prints_the_status_verbatim(self, capsys):
+    def test_prints_the_status_to_stderr_not_stdout(self, capsys):
+        """`localm run -p ... > answer.txt` must not capture this warning: it
+        is a status notice, not part of the reply."""
         from localm.cli.chat import _stream_once
         engine = _fake_cli_engine(statuses=[VISION_CPU_FALLBACK_STATUS])
 
         _stream_once(engine, [{"role": "user", "content": "describe this"}])
 
-        out = capsys.readouterr().out
-        assert VISION_CPU_FALLBACK_STATUS in out, (
-            f"_stream_once must print the vision-CPU-fallback status when "
-            f"the engine reports it via on_status: {out!r}")
+        captured = capsys.readouterr()
+        assert VISION_CPU_FALLBACK_STATUS in captured.err, (
+            f"_stream_once must print the vision-CPU-fallback status to "
+            f"stderr when the engine reports it via on_status: {captured.err!r}")
+        assert VISION_CPU_FALLBACK_STATUS not in captured.out, (
+            f"the vision-CPU-fallback status leaked into stdout, where a "
+            f"piped -p reply is read from: {captured.out!r}")
 
     def test_other_statuses_are_not_printed(self, capsys):
         from localm.cli.chat import _stream_once
@@ -70,7 +80,7 @@ class TestStreamOnceVisionCpuFallbackWarning:
 
 
 class TestInteractiveVisionCpuFallbackWarning:
-    def test_prints_the_status_verbatim(self, monkeypatch, capsys):
+    def test_prints_the_status_to_stderr_not_stdout(self, monkeypatch, capsys):
         from localm.cli import chat as chat_mod
         engine = _fake_cli_engine(statuses=[VISION_CPU_FALLBACK_STATUS])
         inputs = iter(["describe this image"])
@@ -84,10 +94,55 @@ class TestInteractiveVisionCpuFallbackWarning:
 
         chat_mod._interactive(engine, None, {})
 
-        out = capsys.readouterr().out
-        assert VISION_CPU_FALLBACK_STATUS in out, (
-            f"_interactive must print the vision-CPU-fallback status when "
-            f"the engine reports it via on_status: {out!r}")
+        captured = capsys.readouterr()
+        assert VISION_CPU_FALLBACK_STATUS in captured.err, (
+            f"_interactive must print the vision-CPU-fallback status to "
+            f"stderr when the engine reports it via on_status: {captured.err!r}")
+        assert VISION_CPU_FALLBACK_STATUS not in captured.out, (
+            f"the vision-CPU-fallback status leaked into stdout: {captured.out!r}")
+
+
+class TestRunCommandEndToEnd:
+    """The same property, driven through the real `run` command and a real
+    CliRunner invocation rather than calling _stream_once directly - proves
+    it through the full `localm run -p` dispatch, matching how a piped
+    `localm run M -p ... > answer.txt` actually invokes the CLI."""
+
+    @pytest.fixture
+    def patched_attach(self, monkeypatch):
+        """Same seam test_run_p_exit_code_on_load_failure.py stubs: attach to
+        a fake server already serving the requested model."""
+        fake_target = {"base_url": "http://127.0.0.1:8642/v1", "token": "tok"}
+        engine_instance = MagicMock(name="HttpEngine_instance")
+
+        def _chat_stream(messages, on_status=None, **kwargs):
+            if on_status:
+                on_status(VISION_CPU_FALLBACK_STATUS)
+            yield "answer"
+        engine_instance.chat_stream.side_effect = _chat_stream
+        engine_instance.count_tokens.return_value = 1
+        engine_cls = MagicMock(name="HttpEngine", return_value=engine_instance)
+
+        monkeypatch.setattr("localm.instances.attach_target",
+                            lambda *a, **k: fake_target)
+        monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: ".")
+        monkeypatch.setattr("localm.inference.http_engine.HttpEngine", engine_cls)
+        monkeypatch.setattr("localm.inference.http_engine.remote_model_status",
+                            lambda *a, **k: ("loaded", "qa-chat"))
+        monkeypatch.setattr("localm.audit.effective_mode",
+                            lambda *a, **k: SessionMode.LOG)
+        return engine_instance
+
+    def test_piped_reply_excludes_the_warning_which_lands_on_stderr(self, patched_attach):
+        result = CliRunner().invoke(run, ["qa-chat", "-p", "describe this"])
+        assert result.exit_code == 0, result.output
+        assert "answer" in result.stdout
+        assert VISION_CPU_FALLBACK_STATUS not in result.stdout, (
+            f"a piped `localm run -p` reply must not carry the status "
+            f"warning: {result.stdout!r}")
+        assert VISION_CPU_FALLBACK_STATUS in result.stderr, (
+            f"the warning must still reach the user, on stderr: "
+            f"{result.stderr!r}")
 
 
 class TestLlamaCppEmitsTheSharedFallbackConstant:

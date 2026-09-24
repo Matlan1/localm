@@ -13,8 +13,7 @@ from ..bindhost import self_connect_host, url_host
 
 
 console = Console()
-
-
+err_console = Console(stderr=True)
 
 
 

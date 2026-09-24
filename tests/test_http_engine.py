@@ -86,6 +86,28 @@ def test_chat_stream_surfaces_reasoning_content(monkeypatch):
     assert reasoning == "because reasons"
 
 
+def test_chat_stream_on_status_exception_is_logged_not_swallowed(monkeypatch, caplog):
+    """A raising on_status must not abort the stream, and must leave a trace -
+    the sibling GGUF path (llamacpp/_runner.py) logs the same failure at
+    debug instead of a bare ``except Exception: pass``."""
+    import logging
+    caplog.set_level(logging.DEBUG, logger="localm")
+    deltas = [{"status": "Processing prompt..."}, {"content": "hi"}]
+    monkeypatch.setattr("requests.post", lambda *a, **k: _sse_reasoning(*deltas))
+
+    def _raising_on_status(s):
+        raise RuntimeError("boom")
+
+    out = list(HttpEngine("http://x/v1").chat_stream(
+        [{"role": "user", "content": "hi"}], on_status=_raising_on_status))
+
+    assert out == ["hi"], "a raising on_status must not abort the stream"
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("on_status" in r.getMessage() for r in debug_records), (
+        f"on_status raising RuntimeError('boom') left no debug record: "
+        f"{[r.getMessage() for r in caplog.records]!r}")
+
+
 def test_chat_stream_ignores_non_sse(monkeypatch):
     # NEGATIVE: a non-SSE / non-JSON body yields no tokens and does not crash.
     r = MagicMock()
