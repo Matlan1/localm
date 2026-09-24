@@ -70,10 +70,10 @@ class TestBenchmarkMarkupEscaping:
             f"as literal text: {res.output!r}")
 
     def test_invalid_prompts_shows_bracketed_value_verbatim(self, cli_runner, monkeypatch):
-        # get_model_info must succeed first (--prompts is only parsed after),
-        # so force it rather than needing a real registered/loadable model.
+        # get_operator_model_info must succeed first (--prompts is only parsed
+        # after), so force it rather than needing a real registered/loadable model.
         import localm.cli.models as modelscli
-        monkeypatch.setattr(modelscli, "get_model_info",
+        monkeypatch.setattr(modelscli, "get_operator_model_info",
                             lambda *a, **k: ("/some/model.gguf", None))
         bad_prompts = "64,not-a-number[bold red],2048"
         res = CliRunner().invoke(

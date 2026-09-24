@@ -43,6 +43,10 @@ Scans tracked files and fails on:
      carries the key. A removed or renamed response field is caught at the
      assertion that still names it, without running the test. A handler whose
      response shape cannot be read statically is not judged.
+ 11. A module under localm/ that imports a CodeQL barrier accessor (see
+     _CODEQL_BARRIER_NAMES) with a RELATIVE import and calls it. The barriers in
+     .github/codeql/extensions/ apply only to calls reached through an absolute
+     import.
 
 It also runs the release-file manifest gate (scripts/check_manifest.py): every
 tracked file must be classified release-include or release-exclude, nothing
@@ -2200,6 +2204,63 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
     return list(cm.check_manifest()), []
 
 
+# ---- check 11: CodeQL barrier accessors are imported absolutely -----------
+# The path-injection barriers in .github/codeql/extensions/ are models-as-data
+# rows. CodeQL applies them only to a call reached through an absolute import
+# (``from localm.config import load_registry``, ``import localm.model_manager as
+# _mm``); a relative import of the same name leaves its calls outside the barrier.
+_CODEQL_BARRIER_NAMES = frozenset({
+    "load_registry", "update_registry", "_is_valid_plugin_name", "_check_plugin_name",
+})
+
+
+def _codeql_barrier_import_violations(files: list[Path]) -> list[str]:
+    """``rel:line`` problems for each call under localm/ to a barrier accessor
+    bound by a relative import: ``from ..config import load_registry`` then
+    ``load_registry()``, or ``from .. import config`` then
+    ``config.load_registry()``. A relative import that is never called (a
+    package re-export) is not a problem."""
+    problems = []
+    localm_root = REPO / "localm"
+    for path in files:
+        if path.suffix != ".py" or localm_root not in path.parents:
+            continue
+        rel = path.relative_to(REPO).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        except (UnicodeDecodeError, OSError, SyntaxError) as e:
+            problems.append(
+                f"{rel}: could not read/parse to check CodeQL barrier imports "
+                f"({type(e).__name__}: {e}) - not checked.")
+            continue
+        relative_names: dict[str, str] = {}   # local name -> imported name
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level > 0:
+                for imp in node.names:
+                    relative_names[imp.asname or imp.name] = imp.name
+        if not relative_names:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = None
+            if isinstance(func, ast.Name) and \
+                    relative_names.get(func.id) in _CODEQL_BARRIER_NAMES:
+                called = relative_names[func.id]
+            elif isinstance(func, ast.Attribute) and func.attr in _CODEQL_BARRIER_NAMES \
+                    and isinstance(func.value, ast.Name) \
+                    and func.value.id in relative_names:
+                called = func.attr
+            if called:
+                problems.append(
+                    f"{rel}:{node.lineno}: calls {called}() through a relative "
+                    f"import - import it absolutely (from localm... import "
+                    f"{called}) so the CodeQL path-injection barrier in "
+                    f".github/codeql/extensions/ applies to this call")
+    return problems
+
+
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
@@ -2224,6 +2285,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_import_direction_violations())
     problems.extend(_child_process_console_print_violations())
     problems.extend(_response_key_violations(tracked))
+    problems.extend(_codeql_barrier_import_violations(tracked))
     manifest_failures, manifest_warnings = _release_manifest_gate()
     problems.extend(manifest_failures)
     # Check 4b is warn-only by default; --strict / LOCALM_HYGIENE_STRICT=1 folds the

@@ -666,6 +666,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     from localm.config import PortInUseError, load_registry, pick_port
     from localm.model_manager import (get_model_info, get_model_mmproj,
                                       is_auto_chat_eligible, sync_models_dir)
+    from localm.model_manager.registry import (get_operator_model_info,
+                                               get_operator_model_mmproj)
 
     # Pick up models added to (or gone missing from) the models folder since
     # last run. Local reconciliation only; no network I/O.
@@ -801,10 +803,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     model_path = None
     display_name = ""
     if not model_less:
-        # allow_direct_path: this is the STARTUP model, typed by the operator as
-        # `localm gui <path>`. The runtime switch path below is a different case
-        # and does NOT opt in.
-        info = get_model_info(model, allow_direct_path=True)
+        # The startup model may be a path on disk (`localm gui <path>`); the
+        # switch factory below resolves registered names only.
+        info = get_operator_model_info(model)
         if info is None:
             console.print(f"[red]Model not found:[/red] {model}")
             sys.exit(1)
@@ -884,16 +885,22 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     from localm.inference import http_server as hs
     from .web import attach_gui
 
-    def _make_engine(name: str, *, allow_direct_path: bool = False) -> Engine:
-        # This factory has TWO callers with different trust: the startup load just
-        # below (operator-typed `localm gui <path>`, opts in) and switch_engine
-        # (a model name off the wire from the GUI/API, which must not). Defaulting
-        # to False means the wire path gets the safe behaviour by construction -
-        # switch_engine calls factory(name) positionally and cannot opt in.
-        m_info = get_model_info(name, allow_direct_path=allow_direct_path)
+    def _engine_for(name: str, m_info, mmproj_path) -> Engine:
+        m_path, m_hint = m_info
+        return Engine(
+            str(m_path),
+            n_ctx=ctx,
+            n_gpu_layers=gpu_layers,
+            mmproj_path=mmproj_path,
+            device=device,
+            display_name=name if name in load_registry() else m_hint,
+        )
+
+    def _make_engine(name: str) -> Engine:
+        # switch_engine's factory: resolves registered names only.
+        m_info = get_model_info(name)
         if m_info is None:
             raise ValueError(f"Model not found: {name}")
-        m_path, m_hint = m_info
         # An explicit --mmproj always wins for the model it was given for;
         # otherwise fall back to the model's own recorded/sibling projector
         # (get_model_mmproj), so a pulled vision GGUF with no --mmproj flag
@@ -908,21 +915,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         # correctly-recorded projector. Every name other than the startup model
         # falls through to its own registry lookup, exactly as if --mmproj had
         # never been given.
-        mmproj_path = (mmproj if name == model else None) or get_model_mmproj(
-            name, allow_direct_path=allow_direct_path)
-        return Engine(
-            str(m_path),
-            n_ctx=ctx,
-            n_gpu_layers=gpu_layers,
-            mmproj_path=mmproj_path,
-            device=device,
-            display_name=name if name in load_registry() else m_hint,
-        )
+        mmproj_path = (mmproj if name == model else None) or get_model_mmproj(name)
+        return _engine_for(name, m_info, mmproj_path)
 
     engine = None
     if not model_less:
         try:
-            engine = _make_engine(model, allow_direct_path=True)
+            # The startup model, resolved above by get_operator_model_info.
+            engine = _engine_for(
+                model, info, mmproj or get_operator_model_mmproj(model))
         except Exception as e:
             # A single bad registry entry must not stop the server from starting;
             # degrade to the model-less path and let the user pick on the Models page.
