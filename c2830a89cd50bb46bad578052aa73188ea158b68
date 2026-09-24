@@ -1,0 +1,14 @@
+A settings save that is refused or times out no longer deletes or replaces
+the stored Hugging Face / CivitAI token. PATCH /v1/config validates
+credential values up front and writes the credential store last, only after
+update_config has returned; before that the store is only read, so an error
+response never follows a credential write. A credential write that fails
+after the config save reports that the other settings were saved.
+
+An unreadable model_source_credentials.json is reported as status_unknown in
+the settings schema and "(status unknown)" in Settings. An unreadable
+credential store or config.json is a 409 naming the file on the config,
+media, tts and plugin-settings routes, and `localm config` reports it as an
+ordinary error.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
