@@ -387,12 +387,13 @@ class TestUnstable:
         assert any("invalid disposition" in p and M2 in p for p in problems), problems
 
     def test_unstable_entry_of_a_changed_function_is_stale(self):
-        res = _results({M1: "killed", M2: "survived", M3: "killed"},
+        res = _results({M2: "survived", M3: "killed"},
                        hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
-        base = _baseline({M1: "killed", M2: {"unstable": self.REASON}, M3: "killed"},
-                         floor=66.66)
-        problems, _, _ = cmf.check(res, base, [MOD])
-        assert len(problems) == 1 and "no disposition" in problems[0] and "x_grants" in problems[0]
+        base = _baseline({M2: {"unstable": self.REASON}, M3: "killed"}, floor=50.0)
+        problems, _, rows = cmf.check(res, base, [MOD])
+        assert len(problems) == 1, problems
+        assert "1 mutant(s) have no disposition" in problems[0] and M2 in problems[0]
+        assert rows[0]["unstable"] == 0 and rows[0]["scored"] == 2
 
     def test_update_keeps_an_unstable_entry_and_leaves_it_out_of_the_floor(self):
         res = _results({M1: "killed", M2: "survived", M3: "survived"})
