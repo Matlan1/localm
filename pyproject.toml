@@ -242,6 +242,9 @@ monitor = [
 # Install with:  pip install "localm[gpu,grammar]"
 grammar = [
     "xgrammar>=0.2.2",
+    # xgrammar 0.2.6+ cannot load its native bindings with apache-tvm-ffi older
+    # than 0.1.13. See test_grammar_extra_pairs_xgrammar_with_a_loadable_tvm_ffi.
+    "apache-tvm-ffi>=0.1.13",
     "triton-windows>=3.7; sys_platform == 'win32'",
 ]
 # CPU-only install - the base package already runs GGUF models on CPU via the

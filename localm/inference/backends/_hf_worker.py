@@ -465,6 +465,7 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
     state. A FRESH processor is built per call because the matcher is stateful.
     """
     from .base import (
+        GRAMMAR_LOAD_FAILED_MESSAGE,
         GRAMMAR_UNSUPPORTED_MESSAGE,
         GrammarUnsupportedError,
         InvalidGrammarError,
@@ -482,6 +483,11 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         # the install changed under a live worker, and the same error that check
         # would have raised is raised here.
         raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE)
+    except Exception as e:
+        # Installed but not loadable, e.g. its native bindings refuse to load.
+        logger.warning("xgrammar is installed but failed to load: %s: %s",
+                       type(e).__name__, e)
+        raise GrammarUnsupportedError(GRAMMAR_LOAD_FAILED_MESSAGE) from e
     try:
         vocab = getattr(getattr(model, "config", None), "vocab_size", None)
         info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab)

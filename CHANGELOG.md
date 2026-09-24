@@ -557,6 +557,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   memory" hint by probing VRAM even when the load never used the GPU, adding needless latency to
   every CPU-only load failure; the probe is now skipped for a CPU-only load, matching the
   preflight check's own behavior.
+- **The `grammar` extra now requires an `apache-tvm-ffi` that xgrammar can load.** Current
+  xgrammar releases fail to import with an older `apache-tvm-ffi`, which an existing install
+  could keep; `pip install -U 'localm[grammar]'` now upgrades it. If xgrammar still fails to
+  load, a grammar request on a HuggingFace-format model is refused with a message saying so
+  instead of failing with an unexplained error.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
