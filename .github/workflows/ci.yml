@@ -282,9 +282,13 @@ jobs:
     # The other job that runs a test suite, and jsdom has its own documented
     # hang. It finishes in a couple of minutes, so 20 fails a hang quickly.
     timeout-minutes: 20
-    # Cheap and independent of the Python suite: runs on every PR, not only
-    # under the `full-ci` label that gates the two-platform test matrix.
-    if: github.event_name != 'push'
+    # Same gate as the `test` matrix: on a pull_request only when the PR
+    # carries the `full-ci` label, never on push, unconditional for
+    # workflow_dispatch and schedule.
+    if: >-
+      github.event_name != 'push' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     strategy:
       fail-fast: false
       matrix:
