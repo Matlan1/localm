@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -95,7 +94,7 @@ def answer_with(engines: EngineCache, decision, run):
             return result, decision
         if name == decision.current:
             return result, decision.without_route(errors)
-        return result, dataclasses.replace(decision, resolved=name)
+        return result, decision.answered_by(name)
     raise RuntimeError("no model could answer: " + "; ".join(errors))
 
 

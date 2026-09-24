@@ -752,6 +752,21 @@ class TestAFailedRoutedLoadFallsBack:
         assert r.status_code == 200
         assert json.loads(r.headers["X-Localm-Model-Routing"])["resolved"] == "tooly"
 
+    def test_a_fallback_reports_what_the_model_that_answered_lacks(self, flaky):
+        """No model has every need; the roomier models are chosen for the
+        context. The first fails to load, the second answers, and `unmet` names
+        what the second lacks, not what the first lacked."""
+        client, engines, registry = flaky
+        registry["roomy"] = {"path": "Z:/models/roomy.gguf", "source": "local",
+                             "model_type": "llm", "tool_use": False,
+                             "context_length": 65536}
+        r = _ask(client, required_capabilities=["tool_use", "reasoning"],
+                 min_context=60000)
+        assert _answering_model(engines) == ["roomy"]
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["resolved"] == "roomy"
+        assert blob["unmet"] == ["reasoning", "tool_use"]
+
     def test_with_no_loadable_candidate_the_loaded_model_answers_and_says_why(
             self, flaky):
         client, engines, registry = flaky

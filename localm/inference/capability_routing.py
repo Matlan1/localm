@@ -97,6 +97,13 @@ class RoutingDecision:
     unmet: Tuple[str, ...] = ()
     candidates: Tuple[str, ...] = ()
     load_errors: Tuple[str, ...] = ()
+    candidate_unmet: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+
+    def answered_by(self, name: str) -> "RoutingDecision":
+        """This decision with candidate *name* answering: ``resolved`` names it and
+        ``unmet`` is what *name* lacks (``candidate_unmet``), else unchanged."""
+        return replace(self, resolved=name,
+                       unmet=self.candidate_unmet.get(name, self.unmet))
 
     def without_route(self, load_errors: Sequence[str] = ()) -> "RoutingDecision":
         """This decision with the route withdrawn: *current* answers, every gap
@@ -347,10 +354,11 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
                    if n != current and _model_satisfies(n, required, reg, dir_cache)]
         if partial:
             partial.sort(key=lambda n: (-sum(has(n, c) for c in optional), *rank(n)))
-            unmet = tuple(sorted(c for c in optional if not has(partial[0], c)))
+            lacks = {n: tuple(sorted(c for c in optional if not has(n, c)))
+                     for n in partial}
             return RoutingDecision(current=current, resolved=partial[0], pinned=False,
-                                   needs=needs, gaps=gaps, unmet=unmet,
-                                   candidates=tuple(partial))
+                                   needs=needs, gaps=gaps, unmet=lacks[partial[0]],
+                                   candidates=tuple(partial), candidate_unmet=lacks)
 
     return RoutingDecision(current=current, resolved=current, pinned=False,
                            needs=needs, gaps=gaps, unmet=tuple(sorted(gaps)))

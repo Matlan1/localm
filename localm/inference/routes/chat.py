@@ -17,7 +17,6 @@ register(), before any handler body shadows ``ctx``.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import functools
 import time
 
@@ -110,7 +109,7 @@ def register(app: FastAPI, ctx) -> None:
                                  ", ".join(sorted(route.gaps)), e.detail)
                     continue
                 if _cand != route.resolved:
-                    route = dataclasses.replace(route, resolved=_cand)
+                    route = route.answered_by(_cand)
                 break
             if engine is None:
                 route = route.without_route(load_errors)
