@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -30,6 +31,7 @@ from ._shared import _emit_progress
 from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _safe_models_filename
+from .gguf import gguf_n_embd
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _sanitize_name
 from .registry import alias_model
@@ -1051,6 +1053,103 @@ def _hf_repo_mmproj_filename(
     return _pick_mmproj_from_listing(files, model_filename, base_dir)
 
 
+# Highest -<n> suffix tried before giving up on a free local name for a
+# same-named projector from a different repo. Mirrors
+# registry._MAX_PROJECTOR_NAME_SUFFIX.
+_MAX_MMPROJ_COLLISION_SUFFIX = 999
+
+
+def _mmproj_reuse_confirmed(dest: Path, repo_id: str, candidate: str,
+                            model_path: "Path | None") -> Optional[bool]:
+    """Whether the file already at *dest* is confirmed to be *repo_id*'s own
+    *candidate* vision projector.
+
+    Checks the repo's published LFS sha256 first (``_hf_file_sha256``); when
+    that is not published (a non-LFS file, offline, an API error), falls back
+    to comparing *dest*'s GGUF embedding width against *model_path*'s, when
+    both are known - the same signal ``find_sibling_mmproj`` (registry.py)
+    already rejects a mismatch on. A vision projector's filename is not
+    unique across HF repos (several vendors' vision releases each ship a lone
+    ``mmproj-model-f16.gguf``), so a same-named file already at *dest* is
+    never assumed to be this repo's own without one of these two checks
+    confirming it.
+
+    True: confirmed the same file. False: confirmed a DIFFERENT file - never
+    reused or overwritten (see ``_mmproj_download_dest``). None: neither the
+    digest nor the width could be compared, so the caller falls back to
+    reusing *dest* as-is."""
+    remote_digest = _mm._hf_file_sha256(repo_id, candidate)
+    if remote_digest:
+        try:
+            local_digest = _verify_digest(
+                dest, purpose="to confirm it is this repo's own vision projector")
+        except OSError:
+            return None
+        return local_digest.lower() == remote_digest.lower()
+    if model_path is not None:
+        model_w = gguf_n_embd(model_path)
+        dest_w = gguf_n_embd(dest)
+        if model_w and dest_w:
+            return model_w == dest_w
+    logger.debug(
+        "cannot confirm the existing %s is %s's own vision projector (no "
+        "published digest, no comparable embedding width) - reusing it as-is",
+        dest, repo_id)
+    return None
+
+
+def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
+                          model_path: "Path | None") -> "tuple[Path | None, bool]":
+    """Where to place *candidate* (a vision projector from *repo_id*) under
+    *base_dir*, and whether a download can be skipped because that location
+    already holds it.
+
+    The plain *base_dir* / *candidate* name, unless that name is occupied by a
+    file ``_mmproj_reuse_confirmed`` rules out as a different repo's
+    projector - in which case the first free ``<candidate stem>-<n>.gguf`` is
+    returned instead, and the occupied file is never read from beyond that
+    one comparison or written to; it may be another entry's own correctly
+    recorded projector. Returns ``(None, False)`` when every numbered name up
+    to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
+    dest = base_dir / candidate
+    if not dest.exists():
+        return dest, False
+    if _mmproj_reuse_confirmed(dest, repo_id, candidate, model_path) is not False:
+        return dest, True
+    stem, suffix = Path(candidate).stem, Path(candidate).suffix
+    for n in range(2, _MAX_MMPROJ_COLLISION_SUFFIX + 1):
+        free = base_dir / f"{stem}-{n}{suffix}"
+        if not free.exists():
+            return free, False
+    return None, False
+
+
+def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: Path) -> None:
+    """Download *remote_name* from *repo_id* to *dest*. May raise; every call
+    site wraps this in its own try/except.
+
+    When *dest* is the plain *base_dir* / *remote_name*, downloads straight
+    there. Otherwise - the plain name is occupied by a confirmed-different
+    file - downloads into a private scratch directory under *base_dir* first
+    and moves the result to *dest*: huggingface_hub's local-dir download mode
+    names the downloaded file after *remote_name* alone, so downloading
+    straight into *base_dir* would land on the occupied name instead of
+    *dest*."""
+    from huggingface_hub import hf_hub_download
+    _ensure_hf_resumable_download()
+    plain = base_dir / remote_name
+    if dest == plain:
+        local = hf_hub_download(repo_id=repo_id, filename=remote_name,
+                                 local_dir=str(base_dir), endpoint=_HF_ENDPOINT)
+        if Path(local) != dest:
+            shutil.move(local, dest)
+        return
+    with tempfile.TemporaryDirectory(dir=base_dir, prefix=".mmproj-") as scratch:
+        local = hf_hub_download(repo_id=repo_id, filename=remote_name,
+                                 local_dir=scratch, endpoint=_HF_ENDPOINT)
+        shutil.move(local, dest)
+
+
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Optional[Path]:
     """Auto-attach companion: look for a vision projector shipped in the SAME
     HF repo as *filename* and fetch it too.
@@ -1081,16 +1180,18 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
             )
         return None
 
-    dest = base_dir / candidate
-    if not dest.exists():
+    dest, reuse_ok = _mmproj_download_dest(base_dir, candidate, repo_id, base_dir / filename)
+    if dest is None:
+        console.print(
+            f"[yellow]Found a vision projector ({escape(candidate)}) in "
+            f"{escape(repo_id)}, but every local name for it is already taken "
+            "by a different file - not attaching it.[/yellow]"
+        )
+        return None
+    if not reuse_ok:
         console.print(f"Pulling vision projector: {escape(candidate)}")
         try:
-            from huggingface_hub import hf_hub_download
-            _ensure_hf_resumable_download()
-            local = hf_hub_download(repo_id=repo_id, filename=candidate,
-                                     local_dir=str(base_dir), endpoint=_HF_ENDPOINT)
-            if Path(local) != dest:
-                shutil.move(local, dest)
+            _download_mmproj_file(repo_id, candidate, dest, base_dir)
         except Exception as e:
             console.print(
                 f"[yellow]Found a vision projector ({escape(candidate)}) in "
@@ -1104,7 +1205,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
         # heuristic, so a file that fails the real GGUF-metadata check is
         # reported as "none found" rather than attached.
         console.print(
-            f"[yellow]{escape(candidate)} does not look like a valid vision "
+            f"[yellow]{escape(dest.name)} does not look like a valid vision "
             "projector (GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
@@ -1160,13 +1261,19 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     return _maybe_fetch_repo_mmproj(repo_id, path.name, path.parent)
 
 
-def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
+def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
+                           model_filename: Optional[str] = None) -> Optional[Path]:
     """Download the user-named --mmproj file (owner/repo:file.gguf) into
     *base_dir* and return its local path, verified as a real vision projector
     - or None on a bad spec, failed download, or failed verification, each of
     which is printed. An explicit --mmproj always wins over the same-repo
     auto-detection in ``_maybe_fetch_repo_mmproj``; the caller only reaches
-    here when the user named one."""
+    here when the user named one.
+
+    *model_filename*, when given, is the model (also under *base_dir*) this
+    projector is being attached to - used only as a fallback identity check
+    when a same-named file already exists at the destination and the repo
+    publishes no digest for it; see ``_mmproj_reuse_confirmed``."""
     # "/" must be present (an owner/repo) as well as one of the two file
     # markers, matching pull_model's own is_single_file_spec check. Without the
     # "/" precondition a bare "file.gguf" passes this guard and then crashes
@@ -1196,23 +1303,24 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
         console.print(f"[red]Unsafe mmproj filename:[/red] {escape(m_file)}")
         return None
 
-    dest = base_dir / safe
-    if not dest.exists():
+    model_path = (base_dir / model_filename) if model_filename else None
+    dest, reuse_ok = _mmproj_download_dest(base_dir, safe, m_repo, model_path)
+    if dest is None:
+        console.print(
+            f"[red]Every local name for {escape(safe)} is already taken by a "
+            "different file[/red] - refusing to overwrite one.")
+        return None
+    if not reuse_ok:
         console.print(f"Pulling mmproj: {escape(mmproj_spec)}")
         try:
-            from huggingface_hub import hf_hub_download
-            _ensure_hf_resumable_download()
-            local = hf_hub_download(repo_id=m_repo, filename=safe, local_dir=str(base_dir),
-                                     endpoint=_HF_ENDPOINT)
-            if Path(local) != dest:
-                shutil.move(local, dest)
+            _download_mmproj_file(m_repo, safe, dest, base_dir)
         except Exception as e:
             console.print(f"[red]mmproj download failed:[/red] {escape(str(e))}")
             return None
 
     if not _mm.gguf_is_mmproj(dest):
         console.print(
-            f"[yellow]{escape(safe)} does not look like a valid vision projector "
+            f"[yellow]{escape(dest.name)} does not look like a valid vision projector "
             "(GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
@@ -1235,7 +1343,7 @@ def _mmproj_for_registration(
     if dest_dir is not None or reg_type != "llm" or "mmproj" in filename.lower():
         return None
     if mmproj_spec:
-        return _fetch_explicit_mmproj(mmproj_spec, base_dir)
+        return _fetch_explicit_mmproj(mmproj_spec, base_dir, model_filename=filename)
     return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir)
 
 
