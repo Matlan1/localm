@@ -472,12 +472,13 @@ def test_run_abi_input_gates_only_the_abi_check_job():
             f"{name}: run_abi must not gate this job - a plain dispatch "
             f"(run_abi=false) still runs it")
 
-    assert _norm(ci["jobs"]["gui-tests"]["if"]) == "github.event_name != 'push'"
-    assert _norm(ci["jobs"]["test"]["if"]) == _norm("""
+    full_ci_gated = _norm("""
         github.event_name != 'push' &&
         (github.event_name != 'pull_request' ||
          contains(github.event.pull_request.labels.*.name, 'full-ci'))
         """)
+    assert _norm(ci["jobs"]["gui-tests"]["if"]) == full_ci_gated
+    assert _norm(ci["jobs"]["test"]["if"]) == full_ci_gated
     # The mutation shards run on dispatch, on the weekly schedule, or on the
     # `mutation-test` label - never automatically on a pull request, which
     # would wait about an hour on the auth shard; the mutation-test gate
