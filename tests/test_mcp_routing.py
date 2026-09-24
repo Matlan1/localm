@@ -577,10 +577,11 @@ class TestCoderTaskOnAPeer:
         assert not engines.is_peer(peer_engine)
 
 
-def _claimed_as_this_install(reg, tmp_path, monkeypatch, advertised_port, served_port):
+def _claimed_as_this_install(reg, tmp_path, monkeypatch, advertised_port, served_port,
+                             advertised_host="127.0.0.1"):
     """A machine-wide registry entry naming this install's instance "mine" at
-    *advertised_port* while this install's own instance file says it serves
-    *served_port*. The owner key is OWNER-KEY."""
+    *advertised_host*:*advertised_port* while this install's own instance file
+    says it serves 127.0.0.1:*served_port*. The owner key is OWNER-KEY."""
     registry, _, _ = reg
     d = tmp_path / "gpu"
     monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
@@ -589,8 +590,8 @@ def _claimed_as_this_install(reg, tmp_path, monkeypatch, advertised_port, served
     plain = os.path.realpath(registry["plain"]["path"])
     gpu_registry.write_entry(
         d, instance_id="mine", pid=os.getpid() + 1, port=advertised_port,
-        host="127.0.0.1", scheme="http", model="their-plain", vram_estimate_bytes=None,
-        gpu_index=0, coordination_token="t",
+        host=advertised_host, scheme="http", model="their-plain",
+        vram_estimate_bytes=None, gpu_index=0, coordination_token="t",
         models=[{"name": "their-plain", "path": plain,
                  "size": os.path.getsize(plain), "sha256": None}])
     monkeypatch.setattr("localm.instances.list_entries", lambda home: [
@@ -621,5 +622,23 @@ class TestThisInstallsCredential:
         res = _call(engines, "chat", {"prompt": "hi"})
         assert res["content"][0]["text"] == "reply-from-peer"
         assert genuine.auth and set(genuine.auth) == {"Bearer OWNER-KEY"}
+        assert engines.made == {}
+
+    def test_it_never_reaches_another_loopback_host_at_this_installs_port(
+            self, reg, tmp_path, monkeypatch):
+        genuine = _Peer()
+        try:
+            forged = _Peer(host="127.0.0.2", port=genuine.port)
+        except OSError as e:
+            pytest.skip(f"cannot listen on 127.0.0.2 on this machine: {e}")
+        _claimed_as_this_install(reg, tmp_path, monkeypatch,
+                                 advertised_port=genuine.port, served_port=genuine.port,
+                                 advertised_host="127.0.0.2")
+        engines = _cache(share_loaded=True)
+        res = _call(engines, "chat", {"prompt": "hi"})
+        assert forged.auth == [], \
+            "a request went to the host the machine-wide entry claimed, not the instance file's"
+        assert genuine.auth and set(genuine.auth) == {"Bearer OWNER-KEY"}
+        assert res["content"][0]["text"] == "reply-from-peer"
         assert engines.made == {}
 
