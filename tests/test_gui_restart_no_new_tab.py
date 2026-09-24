@@ -11,9 +11,16 @@ in the SAME tab).
 http_server._do_restart sets LOCALM_RESTART_IN_PROGRESS right before
 os.execv (see test_server_restart.py's
 test_do_restart_sets_restart_in_progress_flag_before_relaunch);
-_should_auto_open_browser is the consumer on the re-exec'd side."""
+_should_auto_open_browser is the consumer on the re-exec'd side.
+
+LOCALM_RESTART_UI carries the GUI surface the previous run showed ("window" or
+"browser", recorded by `localm gui` through http_server.set_restart_ui). The
+native app window does not survive os.execv, so a restart from it into browser
+mode opens a tab; a restart from a browser tab does not."""
 
 import os
+
+import pytest
 
 from localm.plugins.gui.cli import (
     _RESTART_PORT_GRACE_WINDOW_S, _resolve_gui_launch_mode,
@@ -104,6 +111,128 @@ def test_resolve_gui_launch_mode_restart_browser_mode(monkeypatch):
         assert "LOCALM_RESTART_IN_PROGRESS" not in os.environ
     finally:
         os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+
+
+def _restart_env(monkeypatch, previous_ui):
+    """Set LOCALM_RESTART_IN_PROGRESS and LOCALM_RESTART_UI as a restart's
+    re-exec'd process sees them; both are restored at teardown."""
+    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
+    monkeypatch.setenv("LOCALM_RESTART_UI", previous_ui)
+
+
+def test_resolve_gui_launch_mode_restart_window_to_browser(monkeypatch):
+    """A restart from the native app window into browser mode opens a browser
+    tab: os.execv closed the window and no tab exists to reconnect."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: False)
+    _restart_env(monkeypatch, "window")
+    assert _resolve_gui_launch_mode(False) == (False, True)
+    assert "LOCALM_RESTART_IN_PROGRESS" not in os.environ
+    assert "LOCALM_RESTART_UI" not in os.environ
+
+
+def test_resolve_gui_launch_mode_restart_window_to_window(monkeypatch):
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: True)
+    _restart_env(monkeypatch, "window")
+    assert _resolve_gui_launch_mode(False) == (True, False)
+
+
+@pytest.mark.parametrize("previous_ui", ["browser", "unknown"])
+def test_resolve_gui_launch_mode_restart_from_a_browser_tab_opens_no_tab(
+        monkeypatch, previous_ui):
+    """A restart whose previous run showed a browser tab (or an unrecognised
+    surface) opens no new tab."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: False)
+    _restart_env(monkeypatch, previous_ui)
+    assert _resolve_gui_launch_mode(False) == (False, False)
+    assert "LOCALM_RESTART_UI" not in os.environ
+
+
+def test_resolve_gui_launch_mode_restart_from_the_window_with_no_browser(monkeypatch):
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: True)
+    _restart_env(monkeypatch, "window")
+    assert _resolve_gui_launch_mode(True) == (False, False)
+
+
+def test_restart_ui_without_the_restart_flag_is_a_fresh_launch(monkeypatch):
+    """LOCALM_RESTART_UI without LOCALM_RESTART_IN_PROGRESS (a crash-recovery
+    relaunch) is a fresh launch, and the variable is removed."""
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: False)
+    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS")
+    monkeypatch.setenv("LOCALM_RESTART_UI", "browser")
+    assert _resolve_gui_launch_mode(False) == (False, True)
+    assert "LOCALM_RESTART_UI" not in os.environ
+
+
+def _run_gui_startup(monkeypatch, *, native, window_loads=True, args=()):
+    """Run `localm gui --no-model --isolated` through its real startup, with the
+    server, the app window and the browser replaced by recorders. Returns the
+    surfaces passed to http_server.set_restart_ui and the URLs opened in a
+    browser."""
+    import contextlib
+    import socket
+    import threading
+
+    from click.testing import CliRunner
+
+    from localm.plugins.gui import cli as guicli
+
+    recorded, opened = [], []
+    monkeypatch.setattr("localm.appface.native_window_available", lambda: native)
+    monkeypatch.setattr("localm.appface.run_native_window",
+                        lambda url, *a, **k: window_loads)
+    monkeypatch.setattr("webbrowser.open", lambda url, *a, **k: opened.append(url))
+    monkeypatch.setattr("localm.inference.http_server.run_advertised",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("localm.inference.http_server.set_restart_ui",
+                        recorded.append)
+    monkeypatch.setattr("localm.winconsole.disable_quickedit", lambda: None)
+    monkeypatch.setattr("localm.winconsole.register_console_handler",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("localm.winconsole.set_console_title", lambda *a, **k: None)
+    monkeypatch.setattr("localm.applaunch.apply_window_identity",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda *a, **k: contextlib.nullcontext())
+    for name in ("LOCALM_RESTART_IN_PROGRESS", "LOCALM_RESTART_UI"):
+        monkeypatch.setenv(name, "1")
+        monkeypatch.delenv(name)
+
+    result = CliRunner().invoke(guicli.main, ["--no-model", "--isolated", *args])
+    for t in threading.enumerate():
+        if t.name == "open-browser":
+            t.join(10.0)
+            assert not t.is_alive(), "the browser-open thread did not finish"
+    assert result.exit_code == 0, result.output
+    return recorded, opened
+
+
+def test_gui_startup_records_the_app_window(monkeypatch):
+    recorded, opened = _run_gui_startup(monkeypatch, native=True)
+    assert recorded == ["window"]
+    assert opened == []
+
+
+def test_gui_startup_records_a_browser_tab(monkeypatch):
+    recorded, opened = _run_gui_startup(monkeypatch, native=False)
+    assert recorded == ["browser"]
+    assert len(opened) == 1
+
+
+def test_gui_startup_records_the_fallback_browser_tab(monkeypatch):
+    """An app window that fails to load falls back to a browser tab, which is
+    then the recorded surface."""
+    recorded, opened = _run_gui_startup(monkeypatch, native=True,
+                                        window_loads=False)
+    assert recorded == ["window", "browser"]
+    assert len(opened) == 1
+
+
+def test_gui_startup_with_no_browser_records_no_surface(monkeypatch):
+    recorded, opened = _run_gui_startup(monkeypatch, native=True,
+                                        args=("--no-browser",))
+    assert recorded == []
+    assert opened == []
 
 
 def test_resolve_gui_launch_mode_cold_start_with_native_window(monkeypatch):
