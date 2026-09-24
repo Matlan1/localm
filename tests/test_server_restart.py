@@ -128,13 +128,10 @@ def test_do_restart_unloads_before_relaunch(monkeypatch):
 
 
 def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
-    """A restart's re-exec'd process must not auto-open a NEW browser tab: the
-    tab the user is already looking at shows a reconnect overlay that resumes in
-    place (models.js's onServerUnreachable). _do_restart signals this to the
-    re-exec'd process by setting LOCALM_RESTART_IN_PROGRESS right before
-    os.execv, so it is present in the environment the new process image
-    inherits; plugins/gui/cli.py's _should_auto_open_browser consumes it on the
-    other end."""
+    """_do_restart sets LOCALM_RESTART_IN_PROGRESS right before os.execv, so it
+    is present in the environment the new process image inherits;
+    plugins/gui/cli.py's _should_auto_open_browser consumes it on the other
+    end."""
     monkeypatch.setattr(http_server, "_engine", None)
     seen = {}
 
@@ -152,6 +149,71 @@ def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
         assert seen.get("flag") == "1"
     finally:
         os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+
+
+def _clear_restart_env(monkeypatch):
+    """Unset LOCALM_RESTART_IN_PROGRESS; monkeypatch removes it again at
+    teardown whatever the code under test set."""
+    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS")
+
+
+@pytest.mark.parametrize("recorded, expected", [
+    ("window", "window"), ("browser", "browser"), (None, "1"),
+])
+def test_do_restart_hands_the_recorded_gui_surface_to_the_relaunch(
+        monkeypatch, recorded, expected):
+    """The flag's value is the recorded surface, or "1" when none is recorded
+    (localm serve, gui --no-browser)."""
+    monkeypatch.setattr(http_server, "_engine", None)
+    monkeypatch.setattr(http_server, "_restart_ui", None)
+    _clear_restart_env(monkeypatch)
+    http_server.set_restart_ui(recorded)
+    seen = {}
+
+    def _fake_relaunch(exe, argv):
+        seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert seen == {"flag": expected}
+
+
+def test_hang_restart_forced_fallback_hands_the_recorded_gui_surface_over(
+        monkeypatch):
+    """The hang alarm's forced re-exec (graceful _do_restart failed) sets the
+    same restart environment as _do_restart."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(http_server, "_restart_ui", None)
+    _clear_restart_env(monkeypatch)
+    http_server.set_restart_ui("window")
+
+    def _graceful_fails(**kw):
+        raise RuntimeError("graceful restart failed")
+
+    monkeypatch.setattr(http_server, "_do_restart", _graceful_fails)
+    monkeypatch.setattr(http_server, "_mark_fds_noninheritable", lambda: None)
+    monkeypatch.setattr(http_server, "_restart_argv",
+                        lambda port=None: ["python", "-m", "localm"])
+    seen = {}
+
+    def _fake_execv(exe, argv):
+        seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_execv)
+    app = SimpleNamespace(state=SimpleNamespace(instance_port=None,
+                                                instance_id=None))
+    try:
+        http_server._hang_restart_action(app)
+    except SystemExit:
+        pass
+    assert seen == {"flag": "window"}
 
 
 def test_do_restart_releases_embedder(monkeypatch):
