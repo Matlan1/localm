@@ -14,9 +14,9 @@ test_do_restart_sets_restart_in_progress_flag_before_relaunch);
 _should_auto_open_browser is the consumer on the re-exec'd side.
 
 LOCALM_RESTART_UI carries the GUI surface the previous run showed ("window" or
-"browser", recorded by `localm gui` through http_server.set_restart_ui). The
-native app window does not survive os.execv, so a restart from it into browser
-mode opens a tab; a restart from a browser tab does not."""
+"browser", recorded by `localm gui` through http_server.set_restart_ui). A
+restart from the native app window into browser mode opens a tab; a restart
+from a browser tab does not."""
 
 import os
 
@@ -122,7 +122,7 @@ def _restart_env(monkeypatch, previous_ui):
 
 def test_resolve_gui_launch_mode_restart_window_to_browser(monkeypatch):
     """A restart from the native app window into browser mode opens a browser
-    tab: os.execv closed the window and no tab exists to reconnect."""
+    tab."""
     monkeypatch.setattr("localm.appface.native_window_available", lambda: False)
     _restart_env(monkeypatch, "window")
     assert _resolve_gui_launch_mode(False) == (False, True)
