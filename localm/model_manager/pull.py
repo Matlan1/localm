@@ -5,6 +5,7 @@ resumable downloads, hashing-on-the-wire, and GUI progress streaming."""
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import contextlib
+import errno
 import json
 import math
 import os
@@ -13,6 +14,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from typing import List
@@ -1947,6 +1949,125 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
         rec.get("start"), _process_start_identity(pid))
 
 
+_GUARD_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK,
+                                errno.EDEADLK})
+
+
+def _lock_held_error(d: Path, filename: str) -> PullInFlight:
+    """The refusal for lock *d*, naming its recorded holder."""
+    rec = _part_lock_owner(d) or {}
+    who = rec.get("pid", "unknown")
+    return PullInFlight(
+        f"{filename} is already being downloaded by process {who}. "
+        f"Wait for it to finish, or - if you are certain no download "
+        f"is running - remove {d}.")
+
+
+def _lock_guard_file(f) -> None:
+    """Take a non-blocking, exclusive OS advisory lock on the open file *f*;
+    raises OSError when it cannot."""
+    if sys.platform == "win32":
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_guard_file(f) -> None:
+    """Release the lock :func:`_lock_guard_file` took on *f*."""
+    if sys.platform == "win32":
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _reclaim_guard(d: Path, filename: str):
+    """Hold an exclusive OS advisory lock on ``reclaim-<filename>.guard``
+    beside lock *d* for the block.
+
+    The guard file is created when missing and never deleted, and the OS
+    releases the lock when its holder exits, however it exits. Raises
+    :class:`PullInFlight` when another process holds the guard, or when the
+    lock cannot be taken at all; that message names the error and *d*.
+    """
+    guard = d.parent / ("reclaim-" + filename + ".guard")
+    try:
+        f = open(guard, "a+b")
+    except OSError as e:
+        raise PullInFlight(
+            f"could not open {guard} to take over the stale download lock for "
+            f"{filename}: {e}. If you are certain no download is running, "
+            f"remove {d}.")
+    with f:
+        try:
+            _lock_guard_file(f)
+        except OSError as e:
+            if e.errno in _GUARD_BUSY_ERRNOS:
+                raise PullInFlight(
+                    f"{filename} is already being taken over by another "
+                    f"download.")
+            raise PullInFlight(
+                f"could not lock {guard} to take over the stale download lock "
+                f"for {filename}: {e}. If you are certain no download is "
+                f"running, remove {d}.")
+        try:
+            yield
+        finally:
+            try:
+                _unlock_guard_file(f)
+            except OSError as e:
+                logger.debug("could not unlock %s (%s); closing the file "
+                             "releases it", guard, e)
+
+
+def _take_over_stale_lock(d: Path, filename: str) -> None:
+    """Take lock *d* while holding its reclaim guard: create it when it is
+    already gone, or remove and re-create it when the holder recorded in it
+    now is proven gone. Raises :class:`PullInFlight` otherwise."""
+    try:
+        d.mkdir()
+        return
+    except FileExistsError:
+        pass
+    except OSError as e:
+        raise PullInFlight(
+            f"could not take the download lock for {filename}: {e}")
+    if not _part_lock_holder_is_gone(d):
+        raise _lock_held_error(d, filename)
+    shutil.rmtree(d, ignore_errors=True)
+    try:
+        d.mkdir()
+    except OSError:
+        raise PullInFlight(
+            f"{filename} is already being downloaded by another process.")
+
+
+def _release_part_lock(d: Path, filename: str, token: str) -> None:
+    """Remove lock *d* when its record still carries *token*; otherwise leave
+    it in place and log a warning."""
+    if not d.exists():
+        logger.warning("the download lock at %s for %s disappeared while it "
+                       "was held", d, filename)
+        return
+    rec = _part_lock_owner(d)
+    if rec is None or rec.get("token") != token:
+        logger.warning(
+            "left the download lock at %s in place: its record is no longer "
+            "this download of %s", d, filename)
+        return
+    shutil.rmtree(d, ignore_errors=True)
+    if d.exists():
+        logger.warning(
+            "could not release the download lock at %s - a later pull of "
+            "%s will refuse until this directory is removed", d, filename)
+
+
 @contextlib.contextmanager
 def _part_lock(filename: str):
     """Serialise everything writing ``<filename>.part``, ACROSS PROCESSES.
@@ -1965,6 +2086,11 @@ def _part_lock(filename: str):
     the second one's ``already_have`` read decides append-or-truncate from a
     size the first is still changing, interleaving writes into a single file.
 
+    A stale lock is taken over only while holding its reclaim guard (see
+    :func:`_reclaim_guard`), after re-checking the holder recorded in it at
+    that moment. Release removes the lock only while its record still carries
+    this acquisition's token.
+
     Raises :class:`PullInFlight` when someone else holds it.
     """
     d = _part_lock_dir(filename)
@@ -1973,31 +2099,22 @@ def _part_lock(filename: str):
         d.mkdir()
     except FileExistsError:
         if not _part_lock_holder_is_gone(d):
-            rec = _part_lock_owner(d) or {}
-            who = rec.get("pid", "unknown")
-            raise PullInFlight(
-                f"{filename} is already being downloaded by process {who}. "
-                f"Wait for it to finish, or - if you are certain no download "
-                f"is running - remove {d}.")
-        # Proven dead. Reclaim, then take the lock through the same atomic
-        # mkdir: whoever else is reclaiming concurrently, exactly one wins.
-        shutil.rmtree(d, ignore_errors=True)
-        try:
-            d.mkdir()
-        except OSError:
-            raise PullInFlight(
-                f"{filename} is already being downloaded by another process.")
+            raise _lock_held_error(d, filename)
+        with _reclaim_guard(d, filename):
+            _take_over_stale_lock(d, filename)
     except OSError as e:
         raise PullInFlight(f"could not take the download lock for {filename}: {e}")
 
-    # `space` and `start` are what _part_lock_holder_is_gone compares;
-    # `started` is only read by a human inspecting the lock.
+    token = uuid.uuid4().hex
+    # `space` and `start` are what _part_lock_holder_is_gone compares and
+    # `token` is what the release checks; `started` is only read by a human
+    # inspecting the lock.
     try:
         (d / "owner.json").write_text(
             json.dumps({"pid": os.getpid(), "filename": filename,
                         "space": _pid_space_id(),
                         "start": _process_start_identity(os.getpid()),
-                        "started": time.time()}),
+                        "token": token, "started": time.time()}),
             encoding="utf-8")
     except OSError:
         # A lock nobody can identify would be un-reclaimable after a crash, so
@@ -2008,13 +2125,7 @@ def _part_lock(filename: str):
     try:
         yield
     finally:
-        shutil.rmtree(d, ignore_errors=True)
-        if d.exists():
-            # A lock that failed to drop blocks every later pull of this file
-            # until our pid dies, so the failure is reported, not swallowed.
-            logger.warning(
-                "could not release the download lock at %s - a later pull of "
-                "%s will refuse until this directory is removed", d, filename)
+        _release_part_lock(d, filename, token)
 
 
 def _pull_url(

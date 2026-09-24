@@ -657,6 +657,262 @@ def test_the_lock_is_dropped_even_when_the_download_raises(home):
 
 
 # --------------------------------------------------------------------------
+#  Taking over a stale lock
+# --------------------------------------------------------------------------
+
+RACE = '''
+    import os, sys, time
+    from pathlib import Path
+    import localm.model_manager.pull as pull
+    role, signals = sys.argv[1], Path(sys.argv[2])
+    real = pull._part_lock_holder_is_gone
+    verdicts = []
+
+    def await_signal(name):
+        deadline = time.monotonic() + 30
+        while not (signals / name).exists():
+            if time.monotonic() > deadline:
+                print("TIMEOUT", name, flush=True)
+                os._exit(3)
+            time.sleep(0.01)
+
+    def gated(d):
+        verdict = real(d)
+        verdicts.append(verdict)
+        if len(verdicts) == 1:
+            if role == "A":
+                await_signal("b-checked")
+            else:
+                (signals / "b-checked").touch()
+                await_signal("a-entered")
+        return verdict
+
+    pull._part_lock_holder_is_gone = gated
+    try:
+        with pull._part_lock("m.gguf"):
+            print("WON", os.getpid(), flush=True)
+            if role == "A":
+                (signals / "a-entered").touch()
+            sys.stdin.read()
+    except pull.PullInFlight:
+        print("LOST", os.getpid(), flush=True)
+'''
+
+RECHECK_RACE = '''
+    import os, sys, time
+    from pathlib import Path
+    import localm.model_manager.pull as pull
+    role, signals = sys.argv[1], Path(sys.argv[2])
+    real = pull._part_lock_holder_is_gone
+    verdicts = []
+
+    def await_signal(name):
+        deadline = time.monotonic() + 30
+        while not (signals / name).exists():
+            if time.monotonic() > deadline:
+                print("TIMEOUT", name, flush=True)
+                os._exit(3)
+            time.sleep(0.01)
+
+    def gated(d):
+        verdict = real(d)
+        verdicts.append(verdict)
+        if role == "A" and len(verdicts) == 2:
+            (signals / "a-rechecked").touch()
+            await_signal("b-done")
+        if role == "B" and len(verdicts) == 1:
+            await_signal("a-rechecked")
+        return verdict
+
+    pull._part_lock_holder_is_gone = gated
+    try:
+        with pull._part_lock("m.gguf"):
+            print("WON", os.getpid(), flush=True)
+            if role == "B":
+                (signals / "b-done").touch()
+            sys.stdin.read()
+    except pull.PullInFlight:
+        print("LOST", os.getpid(), flush=True)
+        if role == "B":
+            (signals / "b-done").touch()
+'''
+
+GUARD = '''
+    import os, sys
+    from pathlib import Path
+    import localm.model_manager.pull as pull
+    with pull._reclaim_guard(Path(sys.argv[1]), sys.argv[2]):
+        print("GUARDING", os.getpid(), flush=True)
+        sys.stdin.read()
+'''
+
+
+def _write_stale_lock():
+    """A lock left by a holder that has exited, in this pid space."""
+    d = _part_lock_dir("m.gguf")
+    _write_owner(d, _exited_pid(), started=0.0)
+    return d
+
+
+def _first_line(p):
+    """The first stdout line of *p*, split; on an empty or unexpected line the
+    process is released and the test fails with its stderr."""
+    words = p.stdout.readline().split()
+    if words[:1] not in (["WON"], ["LOST"], ["GUARDING"]):
+        _release(p)
+        pytest.fail(f"child reported {words}: {p.stderr.read()}")
+    return words
+
+
+def test_two_pulls_that_both_found_a_stale_lock_do_not_both_take_it(home, tmp_path):
+    """Two real processes reach a crashed download's lock together and both
+    judge its holder gone before either takes it over. Exactly one takes the
+    lock; the other refuses and leaves the winner's record alone."""
+    d = _write_stale_lock()
+    signals = tmp_path / "signals"
+    signals.mkdir()
+    a = spawn_on_this_tree(RACE, home, "A", signals, stdin=subprocess.PIPE)
+    b = spawn_on_this_tree(RACE, home, "B", signals, stdin=subprocess.PIPE)
+    try:
+        won_a = _first_line(a)
+        won_b = _first_line(b)
+        rec = json.loads(_record(d) or "null")
+        # The injection took: both processes checked the stale record before
+        # either took the lock over.
+        assert (signals / "b-checked").exists() and (signals / "a-entered").exists()
+        assert won_a[0] == "WON", f"the first process did not take the lock: {won_a}"
+        assert rec is not None and rec["pid"] == int(won_a[1]), (
+            "the first holder's lock record was replaced by a second process "
+            "that had judged the same stale lock gone")
+        assert won_b[0] == "LOST", (
+            f"both processes hold the lock: A={won_a} B={won_b}")
+    finally:
+        _release(a)
+        _release(b)
+
+
+def test_two_takeovers_of_one_stale_lock_are_serialised(home, tmp_path):
+    """One process has re-checked the stale lock under its reclaim guard and
+    is about to take it over when a second process, which also found it
+    stale, arrives. The second refuses instead of taking it over too."""
+    d = _write_stale_lock()
+    signals = tmp_path / "signals"
+    signals.mkdir()
+    a = spawn_on_this_tree(RECHECK_RACE, home, "A", signals,
+                           stdin=subprocess.PIPE)
+    b = spawn_on_this_tree(RECHECK_RACE, home, "B", signals,
+                           stdin=subprocess.PIPE)
+    try:
+        won_b = _first_line(b)
+        won_a = _first_line(a)
+        rec = json.loads(_record(d) or "null")
+        # The injection took: B found the lock stale after A had re-checked it.
+        assert (signals / "a-rechecked").exists()
+        assert won_a[0] == "WON", f"the first process did not take the lock: {won_a}"
+        assert rec is not None and rec["pid"] == int(won_a[1]), (
+            "the lock record is not the first process's")
+        assert won_b[0] == "LOST", (
+            f"both processes took the stale lock over: A={won_a} B={won_b}")
+    finally:
+        _release(a)
+        _release(b)
+
+
+def test_a_takeover_in_progress_elsewhere_refuses_and_leaves_the_stale_lock(home):
+    """While another process holds the reclaim guard for this file, a pull
+    refuses rather than taking the stale lock over, and takes it once the
+    guard is free."""
+    d = _write_stale_lock()
+    before = _record(d)
+    guard = spawn_on_this_tree(GUARD, home, d, "m.gguf", stdin=subprocess.PIPE)
+    try:
+        _first_line(guard)
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before, (
+            "a stale lock was taken over while another process held its "
+            "reclaim guard")
+        assert refused is not None and "taken over" in str(refused)
+    finally:
+        _release(guard)
+
+    with _part_lock("m.gguf"):
+        assert json.loads(_record(d))["pid"] == os.getpid()
+
+
+def test_a_reclaimer_killed_while_guarding_does_not_wedge_the_next_takeover(home):
+    """The OS releases the reclaim guard of a process that dies holding it, so
+    the next pull still takes the stale lock over."""
+    import signal
+    from localm import instances
+    d = _write_stale_lock()
+    guard = spawn_on_this_tree(GUARD, home, d, "m.gguf", stdin=subprocess.PIPE)
+    try:
+        pid = int(_first_line(guard)[1])
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        deadline = time.monotonic() + 30
+        while instances.pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not instances.pid_alive(pid), "the guarding process survived the kill"
+    finally:
+        _release(guard)
+
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            with _part_lock("m.gguf"):
+                rec = json.loads(_record(d))
+            break
+        except PullInFlight:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
+    assert rec["pid"] == os.getpid()
+
+
+def test_a_takeover_that_cannot_lock_the_guard_refuses_with_the_reason(
+        home, monkeypatch):
+    """A reclaim guard the filesystem cannot lock is not a reason to take the
+    stale lock over unguarded: the pull refuses, naming the error and the lock
+    to remove by hand."""
+    import errno
+    from localm.model_manager import pull
+    d = _write_stale_lock()
+    before = _record(d)
+
+    def cannot_lock(f):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(pull, "_lock_guard_file", cannot_lock)
+    with pytest.raises(PullInFlight) as e:
+        with _part_lock("m.gguf"):
+            pass
+    assert _record(d) == before
+    assert "No locks available" in str(e.value) and str(d) in str(e.value)
+
+
+def test_a_release_leaves_a_lock_whose_record_is_no_longer_this_one(home,
+                                                                   caplog):
+    """Release removes the lock only when its record still carries this
+    acquisition's token; anything else is left in place with a warning."""
+    import logging
+    d = _part_lock_dir("m.gguf")
+    with caplog.at_level(logging.WARNING):
+        with _part_lock("m.gguf"):
+            rec = json.loads(_record(d))
+            (d / "owner.json").write_text(
+                json.dumps({**rec, "token": "another-acquisition"}),
+                encoding="utf-8")
+    assert d.exists(), "a release removed a lock another acquisition recorded"
+    assert json.loads(_record(d))["token"] == "another-acquisition"
+    assert str(d) in caplog.text
+
+
+# --------------------------------------------------------------------------
 #  Placement and wiring
 # --------------------------------------------------------------------------
 
