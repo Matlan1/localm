@@ -114,11 +114,14 @@ class PeerCoderBackend:
                 raise RuntimeError(
                     f"the localm instance answering {self._name} failed ({error}), "
                     f"and loading {self._name} here failed: {e}") from e
-            from localm.plugins.coder.backends.shared_engine import SharedEngineBackend
-            local = SharedEngineBackend(
-                engine, self._name, lock=self._engines.generation_lock(engine),
-                still_resident=lambda: self._engines.is_resident(self._name, engine))
-            self._engines.pin(engine)
+            try:
+                from localm.plugins.coder.backends.shared_engine import SharedEngineBackend
+                local = SharedEngineBackend(
+                    engine, self._name, lock=self._engines.generation_lock(engine),
+                    still_resident=lambda: self._engines.is_resident(self._name, engine))
+            except Exception:
+                self._engines.unpin(engine)
+                raise
             self._local = (engine, local)
             self._current = local
         if self._cancel_reason is not None:

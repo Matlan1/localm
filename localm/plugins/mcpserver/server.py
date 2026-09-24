@@ -316,13 +316,16 @@ class EngineCache:
             return self._loaded(name, self.get_chat(name))
 
     def load_here_instead_of(self, name: str, peer):
-        """This server's own engine for *name*, loaded, in place of *peer*,
-        another instance's copy that can no longer be used; *peer* is dropped.
-        Raises what building or loading the engine raised."""
+        """This server's own engine for *name*, loaded and pinned (release it
+        with unpin()), in place of *peer*, another instance's copy that can no
+        longer be used; *peer* is dropped. Raises what building or loading the
+        engine raised."""
         with self._lock:
             if self._peers.get(name) is peer:
                 self.drop_peer(name)
-            return self._loaded(name, self.get(name))
+            engine = self._loaded(name, self.get(name))
+            self.pin(engine)
+            return engine
 
     def _loaded(self, name: str, engine):
         """*engine*, the cache's engine for *name*, ready to answer: another
