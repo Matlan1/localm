@@ -1410,6 +1410,23 @@ def _pull_gguf_file(
     except Exception:
         total_size = 0
 
+    # Same-repo vision projector this pull would auto-attach (mirrors
+    # _mmproj_for_registration's own gating): HEAD it too and fold its size
+    # into the preflight total.
+    if (register and mmproj_spec is None and dest_dir is None
+            and model_type not in ("mmproj", "embedding")
+            and "mmproj" not in filename.lower()):
+        try:
+            import requests as _req
+            mmproj_name = _mm._hf_repo_mmproj_filename(repo_id, filename, base_dir)
+            if mmproj_name:
+                mmproj_head = _req.head(
+                    hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT),
+                    allow_redirects=True, timeout=10)
+                total_size += int(mmproj_head.headers.get("content-length", 0))
+        except Exception:
+            pass
+
     # Only bytes a resume will actually reuse count: a partial of the current
     # etag whose owner is proven gone. An unknown etag counts nothing.
     already_have = 0
