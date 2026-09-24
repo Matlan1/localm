@@ -54,7 +54,8 @@ from localm.inference import residency
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
     ChatChunk, ChatResponse,
-    FullChoice, Message, UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
+    FullChoice, Message, STATUS_CODE_BY_TEXT, UsageInfo,
+    WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
 
 # Map of display name -> Engine instance
@@ -5427,7 +5428,11 @@ async def _stream_sse_completion(
                         chunk = {
                             "id": chunk_id, "object": "text_completion.chunk",
                             "created": ts, "model": model_id,
-                            "choices": [{"text": "", "index": 0, "finish_reason": None, "status": token.text}],
+                            "choices": [{
+                                "text": "", "index": 0, "finish_reason": None,
+                                "status": token.text,
+                                "status_code": STATUS_CODE_BY_TEXT.get(token.text),
+                            }],
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
                         continue

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for live inference status chunks in /v1/chat/completions SSE stream."""
+"""Tests for live inference status chunks in the /v1/chat/completions and
+/v1/completions SSE streams."""
 
 import asyncio
 import json
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
 from localm.inference.http_server import _stream_sse, create_app
-from localm.inference.protocol import WAITING_FOR_MODEL_STATUS
+from localm.inference.protocol import STATUS_CODE_BY_TEXT, WAITING_FOR_MODEL_STATUS
 
 
 def _make_status_mock_engine(statuses=None, supports_images=False):
@@ -217,3 +218,39 @@ def test_unqueued_request_reports_processing_first_with_no_waiting_chunk():
         await gen.aclose()
 
     asyncio.run(_drive())
+
+
+def test_completions_stream_status_chunk_carries_status_and_code():
+    """/v1/completions has no `delta`, so its status chunk lives directly on
+    the choice, but it must still carry status_code the same way chat does -
+    nothing currently reads this endpoint's stream, but the shape should not
+    silently diverge from the one that is read."""
+    engine = _make_status_mock_engine(statuses=["Generating response..."])
+    app = create_app(engine)
+    client = TestClient(app)
+
+    payload = {"model": "test-model", "prompt": "hi", "stream": True}
+
+    status_choices = []
+    with client.stream("POST", "/v1/completions", json=payload) as resp:
+        assert resp.status_code == 200
+        for raw in resp.iter_lines():
+            line = raw.strip() if isinstance(raw, str) else raw.decode("utf-8").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            body = line[len("data:"):].strip()
+            if body == "[DONE]":
+                break
+            chunk = json.loads(body)
+            choice = chunk.get("choices", [{}])[0]
+            if choice.get("status"):
+                status_choices.append(choice)
+
+    assert status_choices, "no status chunk was emitted at all"
+    for choice in status_choices:
+        assert "delta" not in choice, (
+            "text completions has no delta field; status belongs directly "
+            "on the choice")
+        assert choice["status_code"] == STATUS_CODE_BY_TEXT.get(choice["status"]), (
+            f"status_code must match the same table the chat endpoint uses: "
+            f"{choice!r}")
