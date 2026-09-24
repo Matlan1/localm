@@ -174,7 +174,8 @@ class HttpEngine:
                 try:
                     on_status(status)
                 except Exception:
-                    pass
+                    from localm.debuglog import logger
+                    logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
             # The server already splits <think> reasoning out of `content` into its
             # own `reasoning_content` field. Re-wrap it in the same inline
             # <think>...</think> markers the in-process Engine's raw stream carries,
