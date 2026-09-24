@@ -139,6 +139,20 @@ class TestCheck:
         problems, _, _ = cmf.check(res, base, [MOD])
         assert any("recorded as killed are no longer detected" in p and M2 in p for p in problems)
 
+    def test_regression_message_names_a_nondeterministic_outcome_as_a_cause(self):
+        """A killed mutant that survives one run is not proof of a weakened
+        test: the message offers both causes and the re-run that tells them
+        apart."""
+        res = _results({M1: "killed", M2: "survived", M3: "survived"})
+        base = _baseline({M1: "killed", M2: "killed", M3: "survived"}, floor=33.33)
+        problems, _, _ = cmf.check(res, base, [MOD])
+        (message,) = [p for p in problems if "recorded as killed are no longer detected" in p]
+        assert "weakened or removed" in message
+        assert "nondeterministic" in message and "hash seed" in message
+        assert "PYTHONHASHSEED=<n> python scripts/mutmut_run.py run <mutant id>" in message
+        assert '{"unstable": "<reason>"}' in message
+        assert "restore it" not in message
+
     def test_score_below_floor_fails_even_with_dispositions_present(self):
         res = _results({M1: "killed", M2: "survived", M3: "survived"})
         base = _baseline({M1: "killed", M2: "survived", M3: "survived"}, floor=50.0)
@@ -320,6 +334,84 @@ class TestControls:
         problems, _, _ = cmf.check(res, base, [MOD])
         assert any("needs 'module' and 'mutant'" in p for p in problems)
 
+    def test_control_recorded_as_unstable_fails_even_when_killed(self):
+        res = _results({M1: "killed", M2: "killed"})
+        base = _baseline({M1: {"unstable": TestUnstable.REASON}, M2: "killed"},
+                         controls=self.CTL)
+        problems, _, _ = cmf.check(res, base, [MOD])
+        assert len(problems) == 1
+        assert "scope-check-weakened" in problems[0] and "recorded as unstable" in problems[0]
+
+
+class TestUnstable:
+    """``{"unstable": "<reason>"}``: a mutant whose outcome differs between
+    runs of the same source and tests. It never regresses, is never
+    promotable, and is excluded from the score."""
+
+    REASON = "killed or survived with the hash seed: socket order comes from a set"
+
+    def test_unstable_mutant_that_survives_passes_while_a_stable_one_still_regresses(self):
+        """NEGATIVE and POSITIVE in one run, function hashes unchanged: the
+        unstable mutant's survival is not a failure, the stable one's is."""
+        res = _results({M1: "survived", M2: "survived", M3: "killed"})
+        base = _baseline({M1: "killed", M2: {"unstable": self.REASON}, M3: "killed"},
+                         floor=50.0)
+        problems, warnings, _ = cmf.check(res, base, [MOD])
+        assert len(problems) == 1, problems
+        assert "recorded as killed are no longer detected" in problems[0]
+        assert M1 in problems[0] and M2 not in problems[0]
+        assert warnings == []
+
+    def test_unstable_mutant_is_excluded_from_the_score(self):
+        res = _results({M1: "killed", M2: "survived"})
+        base = _baseline({M1: "killed", M2: {"unstable": self.REASON}}, floor=100.0)
+        problems, warnings, rows = cmf.check(res, base, [MOD])
+        assert problems == [] and warnings == []
+        assert rows[0]["score"] == 100.0 and rows[0]["scored"] == 1
+        assert rows[0]["unstable"] == 1 and rows[0]["equivalent"] == 0
+
+    def test_killed_unstable_mutant_is_not_promotable(self):
+        res = _results({M1: "killed", M2: "killed"})
+        base = _baseline({M1: "killed", M2: {"unstable": self.REASON}}, floor=100.0)
+        problems, warnings, _ = cmf.check(res, base, [MOD])
+        assert problems == [] and warnings == []
+
+    @pytest.mark.parametrize("value", [
+        {"unstable": ""}, {"unstable": "   "}, {"unstable": None}, {"unstable": 3},
+        {"unstable": "x", "equivalent": "y"}, "unstable", "UNSTABLE",
+    ])
+    def test_unstable_without_a_reason_or_in_any_other_shape_is_invalid(self, value):
+        res = _results({M1: "killed", M2: "survived"})
+        base = _baseline({M1: "killed", M2: value}, floor=0.0)
+        problems, _, _ = cmf.check(res, base, [MOD])
+        assert any("invalid disposition" in p and M2 in p for p in problems), problems
+
+    def test_unstable_entry_of_a_changed_function_is_stale(self):
+        res = _results({M2: "survived", M3: "killed"},
+                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+        base = _baseline({M2: {"unstable": self.REASON}, M3: "killed"}, floor=50.0)
+        problems, _, rows = cmf.check(res, base, [MOD])
+        assert len(problems) == 1, problems
+        assert "1 mutant(s) have no disposition" in problems[0] and M2 in problems[0]
+        assert rows[0]["unstable"] == 0 and rows[0]["scored"] == 2
+
+    def test_update_keeps_an_unstable_entry_and_leaves_it_out_of_the_floor(self):
+        res = _results({M1: "killed", M2: "survived", M3: "survived"})
+        base = _baseline({M1: "killed", M2: {"unstable": self.REASON}, M3: "survived"},
+                         floor=10.0)
+        prop = cmf.propose_baseline(res, base, [MOD])
+        entry = prop["modules"][MOD]
+        assert entry["mutants"][M2] == {"unstable": self.REASON}
+        assert entry["score_floor"] == 50.0
+        assert cmf.check(res, prop, [MOD])[0] == []
+
+    def test_update_re_evaluates_an_unstable_entry_of_a_changed_function(self):
+        res = _results({M1: "killed", M2: "killed"},
+                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+        base = _baseline({M1: "killed", M2: {"unstable": self.REASON}})
+        prop = cmf.propose_baseline(res, base, [MOD])
+        assert prop["modules"][MOD]["mutants"][M2] == "killed"
+
 
 # --------------------------------------------------------------------------- #
 #  propose_baseline(): --update                                               #
@@ -418,6 +510,14 @@ class TestMain:
         err = capsys.readouterr().err
         assert "FAILED" in err and M1 in err and "BELOW its floor" in err
 
+    def test_surviving_unstable_mutant_exits_zero_and_is_counted_in_the_table(self, tmp_path, capsys):
+        base = _baseline({M1: "killed", M2: {"unstable": TestUnstable.REASON}}, floor=100.0)
+        argv = self._setup(tmp_path, {M1: 1, M2: 0}, base)
+        assert cmf.main(argv) == 0
+        out = capsys.readouterr().out
+        header, row = out.splitlines()[:2]
+        assert row.split()[header.split().index("unst")] == "1"
+
     def test_missing_baseline_exits_one(self, tmp_path, capsys):
         argv = self._setup(tmp_path, {M1: 1}, None)
         assert cmf.main(argv) == 1
@@ -499,11 +599,13 @@ class TestCommittedBaseline:
     baseline would fail there for the wrong reason."""
 
     @pytest.fixture(scope="class")
-    def baseline(self):
+    @classmethod
+    def baseline(cls):
         return json.loads((SCRIPTS / "mutation_baseline.json").read_text(encoding="utf-8"))
 
     @pytest.fixture(scope="class")
-    def modules(self):
+    @classmethod
+    def modules(cls):
         return cmf.only_mutate_modules((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     def test_covers_exactly_the_only_mutate_modules(self, baseline, modules):
@@ -514,21 +616,36 @@ class TestCommittedBaseline:
     def test_every_disposition_is_valid_and_every_floor_is_earned(self, baseline):
         for module, entry in baseline["modules"].items():
             statuses = {}
-            equivalents = set()
+            excluded = set()
             for mutant, value in entry["mutants"].items():
                 kind, reason = cmf._disposition(value)
                 assert kind != "invalid", f"{module}: {mutant} -> {value!r}"
                 assert cmf.function_of(mutant) in entry["function_hashes"], (module, mutant)
-                if kind == "equivalent":
-                    equivalents.add(mutant)
+                if kind in cmf.EXCLUDED_KINDS:
+                    excluded.add(mutant)
                     assert len(reason) >= 20, f"{module}: {mutant} reason too thin: {reason!r}"
                 statuses[mutant] = kind
-            score, _, _ = cmf.module_score(statuses, equivalents)
+            score, _, _ = cmf.module_score(statuses, excluded)
             floor = entry["score_floor"]
             assert 0.0 <= floor <= 100.0
             assert floor <= score + 1e-9, (
                 f"{module}: floor {floor} exceeds the score its own dispositions "
                 f"imply ({score:.2f}); the baseline cannot pass its own check")
+
+    def test_ci_shards_export_and_print_their_hash_seed_before_mutmut(self):
+        """The mutation-run step exports a random PYTHONHASHSEED for the mutmut
+        process and prints it before mutmut starts."""
+        import yaml
+        wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        run_step = next(st for st in wf["jobs"]["mutation-run"]["steps"]
+                        if st.get("name", "").startswith("Mutation test"))
+        lines = [ln.strip() for ln in run_step["run"].splitlines()]
+        mutmut_at = next(i for i, ln in enumerate(lines) if "scripts/mutmut_run.py run" in ln)
+        before = lines[:mutmut_at]
+        assert "export PYTHONHASHSEED" in before
+        assert 'echo "PYTHONHASHSEED=${PYTHONHASHSEED}"' in before
+        assert any(ln.startswith("PYTHONHASHSEED=") and "secrets.randbelow(2**32)" in ln
+                   for ln in before), before
 
     def test_ci_shards_are_exactly_the_only_mutate_modules(self, modules):
         """The mutation-run matrix in ci.yml is the only_mutate list by
