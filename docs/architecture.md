@@ -121,22 +121,27 @@ workflows and gates. None of those blocks a merge; the list lives in
 eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`). On the
 weekly schedule, on a dispatch, or on a pull request carrying the
 `mutation-test` label, one `mutation-run` shard per module runs mutmut
-(`scripts/mutmut_run.py run "localm.<module>.*"`) and uploads its result
+(`scripts/mutmut_run.py run "localm.<module>.*"`, under a random
+`PYTHONHASHSEED` it prints first) and uploads its result
 file; `mutation-test` merges the eight and runs
 `scripts/check_mutation_floors.py` against the committed baseline
 `scripts/mutation_baseline.json`. The baseline records every mutant's
-disposition - `killed`, `survived` (a known gap, counted against the score)
-or `{"equivalent": "<reason>"}` (excluded, never silently) - plus a per-module
+disposition - `killed`, `survived` (a known gap, counted against the score),
+`{"equivalent": "<reason>"}` (excluded, never silently) or
+`{"unstable": "<reason>"}` (an outcome that differs between runs of the same
+source and tests: excluded and never a regression) - plus a per-module
 score floor and the `controls`: concrete mutants, at least one per
 security-decision class (a weakened scope check, an authorization fallback
 flipped to allow, a skipped SSRF redirect re-validation, a widened
 net_mode=off exemption, a path-confinement bypass, a loopback classifier
 that accepts an unparseable host), that must stay killed. The gate fails on
-a score below its floor, a mutant recorded as killed that now survives, a
-mutant with no disposition
-(new, or in a function whose source hash changed), a control not killed, or
-an incomplete run. The job uploads a proposed baseline
-(`mutation-baseline-proposed`, floors ratcheted up, equivalents kept) so a
+a score below its floor, a mutant recorded as killed that now survives (a
+weakened test or a nondeterministic outcome; the message names the re-run
+that tells them apart), a mutant with no disposition
+(new, or in a function whose source hash changed), a control not killed or
+recorded as unstable, or an incomplete run. The job uploads a proposed baseline
+(`mutation-baseline-proposed`, floors ratcheted up, equivalent and unstable
+entries kept) so a
 changed function's new mutants can be classified and committed without a
 local run; mutmut itself runs on Linux only. The shards never run
 automatically on a pull request (the `auth` shard alone takes about an hour);
