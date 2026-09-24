@@ -20,6 +20,7 @@ closed; any other new window is closed at once and recorded as refused.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -58,6 +59,10 @@ _CLICKED_WINDOW_CAP = 32
 #: window watch and for the screencast.
 _PAGE_SETUP_MS = 10000
 
+#: Milliseconds a blank window a click opened is given to start loading a URL
+#: before it is shown as it is.
+_BLANK_WINDOW_WAIT_MS = 5000
+
 
 class BrowserUnavailableError(RuntimeError):
     """Playwright, or the browser build it pins, is not installed."""
@@ -67,6 +72,9 @@ class BrowserUnavailableError(RuntimeError):
 class Blocked:
     url: str
     reason: str
+    #: "request" for a request or WebSocket the network gate refused, "window"
+    #: for a new window this session closed.
+    kind: str = "request"
 
 
 @dataclass
@@ -131,6 +139,8 @@ class BrowserSession:
         self._clicked_windows: list = []
         #: time.monotonic() of the last click or key press sent to the page.
         self._last_input = float("-inf")
+        #: Clicks and key presses currently being sent to the page.
+        self._inputs_in_flight = 0
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -217,23 +227,36 @@ class BrowserSession:
 
         Best-effort: a browser build without the screencast command still drives
         normally, it just has no live view, and the reason is logged rather than
-        raised into the session's startup. Gives up after _PAGE_SETUP_MS."""
+        raised into the session's startup. Gives up after _PAGE_SETUP_MS.
+        ``_cdp`` is set only once the screencast has started; an attach that
+        fails or is cancelled detaches its DevTools session and leaves ``_cdp``
+        None."""
+        attached = []
+
         async def attach():
-            self._cdp = await self._ctx.new_cdp_session(self._page)
-            await self._cdp.send("Page.enable")
-            self._cdp.on("Page.screencastFrame", self._on_screencast_frame)
-            await self._cdp.send("Page.startScreencast", {
+            cdp = await self._ctx.new_cdp_session(self._page)
+            attached.append(cdp)
+            await cdp.send("Page.enable")
+            cdp.on("Page.screencastFrame",
+                   lambda params: self._on_screencast_frame(params, cdp))
+            await cdp.send("Page.startScreencast", {
                 "format": "jpeg", "quality": 55,
                 "maxWidth": 1280, "maxHeight": 800,
             })
         try:
             await _within(attach(), _PAGE_SETUP_MS, "starting the screencast")
-        except Exception as exc:                     # noqa: BLE001
-            self._cdp = None
+        except BaseException as exc:
+            for cdp in attached:
+                asyncio.ensure_future(self._detach_quietly(cdp))
+            if not isinstance(exc, Exception):
+                raise
             logger.warning("browser %s has no live view: %s", self.session_id, exc)
+            return
+        self._cdp = attached[0]
 
-    def _on_screencast_frame(self, params: dict) -> None:
-        """Hand one frame on, then acknowledge it.
+    def _on_screencast_frame(self, params: dict, cdp) -> None:
+        """Hand one frame on, then acknowledge it on *cdp*, the DevTools session
+        that sent it.
 
         Chromium stops sending frames until the previous one is acknowledged, so
         a missed ack silently freezes the live view rather than dropping a frame.
@@ -246,13 +269,20 @@ class BrowserSession:
             logger.debug("browser %s frame callback failed: %s",
                          self.session_id, exc)
         sid = params.get("sessionId")
-        if self._cdp is not None and sid is not None:
-            asyncio.ensure_future(self._ack_frame(sid))
+        if sid is not None:
+            asyncio.ensure_future(self._ack_frame(cdp, sid))
 
-    async def _ack_frame(self, session_id) -> None:
+    @staticmethod
+    async def _ack_frame(cdp, session_id) -> None:
         try:
-            await self._cdp.send("Page.screencastFrameAck",
-                                 {"sessionId": session_id})
+            await cdp.send("Page.screencastFrameAck", {"sessionId": session_id})
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _detach_quietly(cdp) -> None:
+        try:
+            await cdp.detach()
         except Exception:
             pass
 
@@ -276,10 +306,7 @@ class BrowserSession:
         await self._watch_windows(page)
         if self._cdp is not None:
             previous, self._cdp = self._cdp, None
-            try:
-                await previous.detach()
-            except Exception:
-                pass
+            await self._detach_quietly(previous)
             await self._start_screencast()
 
     async def _watch_windows(self, page) -> None:
@@ -301,13 +328,27 @@ class BrowserSession:
         """Note that a click or key press is being sent to the page."""
         self._last_input = time.monotonic()
 
+    @contextlib.contextmanager
+    def _input(self):
+        """Count a click or key press as in flight for as long as the block
+        runs, and mark it sent both when the block starts and when it ends."""
+        self._inputs_in_flight += 1
+        self._mark_input()
+        try:
+            yield
+        finally:
+            self._inputs_in_flight -= 1
+            self._mark_input()
+
     def _on_window_open(self, params: dict) -> None:
         """Remember a window the page opened as clicked, when Chromium reports a
-        user gesture and this session sent a click or key press within
-        _INPUT_ACTIVATION seconds. See
+        user gesture and this session is sending a click or key press or sent
+        one within _INPUT_ACTIVATION seconds. See
         test_a_gesture_flag_without_recent_input_is_not_a_click."""
         now = time.monotonic()
-        if not params.get("userGesture") or now - self._last_input > _INPUT_ACTIVATION:
+        if not params.get("userGesture"):
+            return
+        if not self._inputs_in_flight and now - self._last_input > _INPUT_ACTIVATION:
             return
         live = [(u, t) for (u, t) in self._clicked_windows if t > now]
         live.append((str(params.get("url") or "about:blank"),
@@ -325,7 +366,11 @@ class BrowserSession:
 
     async def _on_new_page(self, page) -> None:
         """Show a loaded window that a click opened, in place of the page before
-        it. Close any other new window and record it as refused."""
+        it. Close any other new window and record it as refused.
+
+        A clicked window that is still blank is first given
+        _BLANK_WINDOW_WAIT_MS to start loading a URL, while the page that opened
+        it stays open."""
         try:
             async with self._page_lock:
                 if (page is self._page or page.is_closed()
@@ -334,19 +379,23 @@ class BrowserSession:
                 url = page.url
                 if url.startswith("chrome-error:"):
                     self._refuse(url, "a new window the page opened did not "
-                                      "load, so it was closed")
+                                      "load, so it was closed", kind="window")
                     await self._close_quietly(page)
                 elif self._take_clicked_window(url):
+                    if url == "about:blank":
+                        await self._await_navigation(page)
+                        if page.is_closed():
+                            return
                     previous = self._page
                     previous_url = previous.url if previous is not None else ""
                     await self._drive(page)
                     if previous is not None:
                         await self._close_quietly(previous)
                     self._note("showing the new window %s in place of %s, "
-                               "which was closed" % (url, previous_url))
+                               "which was closed" % (page.url, previous_url))
                 else:
                     self._refuse(url, "the page opened a new window without a "
-                                      "click, so it was closed")
+                                      "click, so it was closed", kind="window")
                     await self._close_quietly(page)
         except Exception as exc:                     # noqa: BLE001
             logger.warning("browser %s could not handle a new window: %s",
@@ -370,6 +419,17 @@ class BrowserSession:
         except Exception as exc:                     # noqa: BLE001
             logger.warning("browser %s could not replace a page that closed "
                            "itself: %s", self.session_id, exc)
+
+    async def _await_navigation(self, page) -> None:
+        """Wait up to _BLANK_WINDOW_WAIT_MS for a blank *page* to commit a
+        navigation to another URL. Returns either way."""
+        try:
+            await page.wait_for_url(lambda u: u != "about:blank",
+                                    wait_until="commit",
+                                    timeout=_BLANK_WINDOW_WAIT_MS)
+        except Exception as exc:                     # noqa: BLE001
+            logger.debug("browser %s: a new window stayed blank: %s",
+                         self.session_id, exc)
 
     @staticmethod
     async def _close_quietly(page) -> None:
@@ -428,7 +488,7 @@ class BrowserSession:
             raise TimeoutError("%s did not finish within %gs"
                                % (what, timeout)) from None
 
-    def enable_live_view(self, on_frame, *, timeout_ms: int = 10000) -> bool:
+    def enable_live_view(self, on_frame, *, timeout_ms: int = 15000) -> bool:
         """Start streaming this ALREADY-RUNNING session to *on_frame*.
 
         start() only starts the screencast when the session was built with an
@@ -457,9 +517,9 @@ class BrowserSession:
 
     # -- request gating ----------------------------------------------------- #
 
-    def _refuse(self, url: str, reason: str) -> None:
+    def _refuse(self, url: str, reason: str, *, kind: str = "request") -> None:
         if len(self.state.blocked) < _LOG_CAP:
-            self.state.blocked.append(Blocked(url=url, reason=reason))
+            self.state.blocked.append(Blocked(url=url, reason=reason, kind=kind))
         logger.info("browser %s blocked %s: %s", self.session_id, url, reason)
 
     async def _on_route(self, route, request) -> None:
@@ -594,8 +654,9 @@ class BrowserSession:
         # navigation failed, and it names the destination, which after a
         # redirect is not the URL that was asked for. A refusal on a
         # SUBRESOURCE does not fail the navigation: the page itself loaded.
+        # A window closed during the call is not a network refusal.
         if not res.get("ok"):
-            refused = self.state.blocked[mark:]
+            refused = [b for b in self.state.blocked[mark:] if b.kind == "request"]
             if refused:
                 res["refused"] = refused[0].reason
                 res["refused_url"] = refused[0].url
@@ -619,8 +680,8 @@ class BrowserSession:
 
     def click(self, selector: str, *, timeout_ms: int = 10000) -> dict:
         async def do():
-            self._mark_input()
-            await self._page.click(selector, timeout=timeout_ms)
+            with self._input():
+                await self._page.click(selector, timeout=timeout_ms)
             return {"ok": True, "selector": selector, "url": self._page.url}
         try:
             return self._call(do, what="the click")
@@ -639,8 +700,8 @@ class BrowserSession:
     def click_coords(self, x: float, y: float, button: str = "left", *,
                      timeout_ms: int = 10000) -> dict:
         async def do():
-            self._mark_input()
-            await self._page.mouse.click(x, y, button=button)
+            with self._input():
+                await self._page.mouse.click(x, y, button=button)
             return {"ok": True, "x": x, "y": y, "url": self._page.url}
         what = "the click"
         try:
@@ -665,8 +726,8 @@ class BrowserSession:
         sent; the ones already typed stay."""
         async def do():
             for start in range(0, len(text), _TYPE_CHUNK):
-                self._mark_input()
-                await self._page.keyboard.type(text[start:start + _TYPE_CHUNK])
+                with self._input():
+                    await self._page.keyboard.type(text[start:start + _TYPE_CHUNK])
             return {"ok": True}
         what = "typing"
         try:
@@ -676,8 +737,8 @@ class BrowserSession:
 
     def press_key(self, key: str, *, timeout_ms: int = 10000) -> dict:
         async def do():
-            self._mark_input()
-            await self._page.keyboard.press(key)
+            with self._input():
+                await self._page.keyboard.press(key)
             return {"ok": True}
         what = "the key press"
         try:

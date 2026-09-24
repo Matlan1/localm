@@ -309,6 +309,33 @@ class TestOpeningIsAtomic:
                 if r2.status_code == 200:
                     c.post("/api/jobs/%s/cancel" % r2.json()["job_id"])
 
+    def test_a_failure_before_the_launch_does_not_hold_the_key(
+            self, app, slow_start, monkeypatch):
+        from localm.browser import session as bsession
+        from localm.plugins.builtin.browser import plug
+        _set(browser_enabled=True)
+        slow_start.release.set()
+        real = plug._settings
+        calls = {"n": 0}
+
+        def failing_once():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("settings unreadable")
+            return real()
+        monkeypatch.setattr(plug, "_settings", failing_once)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            r1 = c.post("/api/browser/session", json={})
+            held = bsession.active_ids()
+            r2 = c.post("/api/browser/session", json={})
+            try:
+                assert held == [], "a failed open still holds the key: %r" % held
+                assert r1.status_code == 500, r1.text
+                assert r2.status_code == 200, r2.text
+            finally:
+                if r2.status_code == 200:
+                    c.post("/api/jobs/%s/cancel" % r2.json()["job_id"])
+
     def test_the_stop_route_ends_the_job(self, app, slow_start):
         from localm.browser import session as bsession
         _set(browser_enabled=True)
