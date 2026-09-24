@@ -46,13 +46,18 @@ class _Engine:
 class _LazyEngine(_Engine):
     """Built unloaded, as a real Engine is: load() brings the model up, or
     raises when it cannot, and chat_stream loads it first when it is not
-    loaded."""
+    loaded. Takes a grammar, as a GGUF engine does."""
+
+    supports_grammar = True
 
     def __init__(self, name, images=False, fails_to_load=False):
         super().__init__(name, images=images)
         self.loaded = False
         self.fails_to_load = fails_to_load
         self.released = False
+
+    def validate_grammar(self, grammar, lazy=False):
+        pass
 
     def load(self):
         if self.fails_to_load:
@@ -94,11 +99,12 @@ def reg(tmp_path, monkeypatch):
     return registry, img, tmp_path
 
 
-def _cache(**kw):
+def _cache(lazy=False, **kw):
     made = {}
+    kind = _LazyEngine if lazy else _Engine
 
     def factory(name):
-        return made.setdefault(name, _Engine(name, images=(name == "seer")))
+        return made.setdefault(name, kind(name, images=(name == "seer")))
 
     cache = EngineCache("plain", engine_factory=factory, **kw)
     cache.made = made
@@ -343,10 +349,14 @@ class TestCoderTaskRuns:
 
 class _Peer:
     """A real HTTP server standing in for another localm instance with a
-    model loaded: GET /v1/models and a streaming POST /v1/chat/completions,
-    with no API key (open mode)."""
+    model loaded: GET /v1/models and POST /v1/chat/completions, streamed or
+    not, with no API key (open mode), listening on *host*. *replies* are its
+    answers in order, the last one repeating. Every POST after the first
+    *answers* fails as *then*: "drop" closes the connection without a
+    response, a number answers with that HTTP status."""
 
-    def __init__(self):
+    def __init__(self, replies=("reply-from-peer",), answers=None, then="drop",
+                 host="127.0.0.1", port=0):
         outer = self
         self.bodies = []
         self.auth = []
@@ -355,49 +365,67 @@ class _Peer:
             def log_message(self, *a):
                 pass
 
-            def do_GET(self):
-                outer.auth.append(self.headers.get("Authorization"))
-                data = b'{"object": "list", "data": []}'
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
+            def _send(self, status, content_type, data):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            def do_GET(self):
+                outer.auth.append(self.headers.get("Authorization"))
+                self._send(200, "application/json", b'{"object": "list", "data": []}')
 
             def do_POST(self):
                 outer.auth.append(self.headers.get("Authorization"))
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n))
                 outer.bodies.append(body)
-                chunk = {"model": body["model"],
-                         "choices": [{"delta": {"content": "reply-from-peer"}}]}
-                data = (f"data: {json.dumps(chunk)}\n\n" + "data: [DONE]\n\n").encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                if answers is not None and len(outer.bodies) > answers:
+                    if then == "drop":
+                        self.close_connection = True
+                        return
+                    self._send(then, "application/json",
+                               json.dumps({"detail": f"peer failure {then}"}).encode())
+                    return
+                reply = replies[min(len(outer.bodies), len(replies)) - 1]
+                if body.get("stream"):
+                    chunk = {"model": body["model"],
+                             "choices": [{"delta": {"content": reply}}]}
+                    data = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+                    self._send(200, "text/event-stream", data)
+                else:
+                    message = {"role": "assistant", "content": reply}
+                    data = json.dumps({"model": body["model"],
+                                       "choices": [{"message": message}]}).encode()
+                    self._send(200, "application/json", data)
 
-        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = http.server.ThreadingHTTPServer((host, port), H)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
 
-@pytest.fixture
-def peer(reg, tmp_path, monkeypatch):
+def _advertise(reg, tmp_path, monkeypatch, p, *, instance_id="other", host="127.0.0.1"):
+    """A machine-wide registry entry for instance *instance_id* at *host* and
+    *p*'s port, with plain's model file loaded."""
     registry, _, _ = reg
     d = tmp_path / "gpu"
     monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
     monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
     monkeypatch.setattr(gpu_registry, "_try_whoami", lambda scheme, port, iid, timeout: True)
-    p = _Peer()
     plain = os.path.realpath(registry["plain"]["path"])
     gpu_registry.write_entry(
-        d, instance_id="other", pid=os.getpid() + 1, port=p.port, host="127.0.0.1",
+        d, instance_id=instance_id, pid=os.getpid() + 1, port=p.port, host=host,
         scheme="http", model="their-plain", vram_estimate_bytes=None, gpu_index=0,
         coordination_token="t",
         models=[{"name": "their-plain", "path": plain,
                  "size": os.path.getsize(plain), "sha256": None}])
+
+
+@pytest.fixture
+def peer(reg, tmp_path, monkeypatch):
+    p = _Peer()
+    _advertise(reg, tmp_path, monkeypatch, p)
     return p
 
 
@@ -423,6 +451,100 @@ class TestShareLoadedModels:
         res = _call(engines, "chat", {"prompt": "again"})
         assert res["content"][0]["text"] == "reply-from-plain"
         assert "plain" in engines.made
+
+
+def _tool_call(name, **args):
+    return "<tool_call>" + json.dumps({"name": name, "args": args}) + "</tool_call>"
+
+
+class TestCoderTaskOnAPeer:
+    def test_a_peer_that_stopped_answering_is_not_handed_to_the_next_task(self, peer):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = _cache(lazy=True, share_loaded=True)
+        decision = engines.route("plain", [], required=("tool_use",), pinned=True)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            first, _, _ = coder_engine(engines, decision)
+            assert engines.is_peer(first)
+            peer.srv.shutdown()
+            peer.srv.server_close()
+            second, name, _ = coder_engine(engines, decision)
+        assert not engines.is_peer(second), "the instance that stopped answering was used again"
+        assert name == "plain" and second is engines.made["plain"] and second.loaded
+        assert not engines.is_peer(first)
+
+    def test_a_peer_that_still_answers_is_kept(self, peer):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = _cache(lazy=True, share_loaded=True)
+        decision = engines.route("plain", [], required=("tool_use",), pinned=True)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            first, _, _ = coder_engine(engines, decision)
+            second, _, _ = coder_engine(engines, decision)
+        assert second is first and engines.is_peer(second)
+        assert engines.made == {}
+
+    @pytest.mark.parametrize("then", ["drop", 401])
+    def test_a_task_moves_to_a_copy_loaded_here_when_the_peer_fails_mid_run(
+            self, reg, tmp_path, monkeypatch, coder_project, then):
+        p = _Peer(replies=[_tool_call("read_file", path="a.py")], answers=1, then=then)
+        _advertise(reg, tmp_path, monkeypatch, p)
+        engines = _cache(lazy=True, share_loaded=True)
+        res = _run_coder_task(engines, coder_project, model="plain")
+        text = res["content"][0]["text"]
+        assert res["isError"] is False, text
+        assert "reply-from-plain" in text
+        assert len(p.bodies) == 2, "one answer from the peer, then the call that failed there"
+        local = engines.made["plain"]
+        assert local.answered >= 1
+        assert local.active_requests == 0, "the copy loaded here is unpinned when the run ends"
+        assert engines.resident == ["plain"]
+
+    def test_an_error_the_peer_answers_with_does_not_load_a_copy_here(
+            self, reg, tmp_path, monkeypatch, coder_project):
+        p = _Peer(answers=0, then=503)
+        _advertise(reg, tmp_path, monkeypatch, p)
+        engines = _cache(lazy=True, share_loaded=True)
+        res = _run_coder_task(engines, coder_project, model="plain")
+        assert res["isError"] is True
+        assert "peer failure 503" in res["content"][0]["text"]
+        assert engines.made == {}, "an answer from a live peer is not a reason to load here"
+
+    @pytest.mark.parametrize("stop", ["cancel", "release"])
+    def test_nothing_is_loaded_here_once_the_run_is_over(
+            self, reg, tmp_path, monkeypatch, stop):
+        import requests
+
+        from localm.plugins.coder.backends.http import HTTPBackend
+        from localm.plugins.mcpserver.tools.media_coder import PeerCoderBackend
+        p = _Peer(answers=0, then="drop")
+        _advertise(reg, tmp_path, monkeypatch, p)
+        engines = _cache(lazy=True, share_loaded=True)
+        peer_engine = engines.get_chat("plain")
+        assert engines.is_peer(peer_engine)
+        backend = PeerCoderBackend(engines, "plain", peer_engine, HTTPBackend(
+            peer_engine._base, model="their-plain", localm_server=True))
+        getattr(backend, stop)()
+        with pytest.raises(requests.ConnectionError):
+            backend.chat([{"role": "user", "content": "hi"}])
+        assert engines.made == {} and backend.local_engine is None
+
+    def test_a_stream_that_cannot_reach_the_peer_is_answered_here(
+            self, reg, tmp_path, monkeypatch):
+        from localm.plugins.coder.backends.http import HTTPBackend
+        from localm.plugins.mcpserver.tools.media_coder import PeerCoderBackend
+        p = _Peer(answers=0, then="drop")
+        _advertise(reg, tmp_path, monkeypatch, p)
+        engines = _cache(lazy=True, share_loaded=True)
+        peer_engine = engines.get_chat("plain")
+        backend = PeerCoderBackend(engines, "plain", peer_engine, HTTPBackend(
+            peer_engine._base, model="their-plain", localm_server=True))
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            pieces = list(backend.chat_stream([{"role": "user", "content": "hi"}]))
+        assert pieces == ["reply-from-plain"]
+        assert backend.local_engine is engines.made["plain"]
+        assert backend.local_engine.active_requests == 1
+        backend.release()
+        assert backend.local_engine.active_requests == 0
+        assert not engines.is_peer(peer_engine)
 
 
 def _claimed_as_this_install(reg, tmp_path, monkeypatch, advertised_port, served_port):

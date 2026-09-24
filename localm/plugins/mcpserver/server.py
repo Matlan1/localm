@@ -49,6 +49,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -140,6 +141,13 @@ class EngineCache:
         self.share_loaded = bool(share_loaded)
         # Display name -> a client for another instance's loaded copy.
         self._peers: Dict[str, Any] = {}
+        # Display name -> (endpoint, credential) that copy was verified with.
+        self._peer_targets: Dict[str, tuple] = {}
+        # Held by every method that reads or changes the engines and peers to
+        # pick or load one, on the protocol thread and on a coder run's worker
+        # thread alike. Never acquired while holding a generation lock
+        # (generation_lock), Engine's load lock or the residency pin lock.
+        self._lock = threading.RLock()
 
     # ---- back-compat views over the multi-resident state -------------------
     # _engine and _loaded_name read the most-recently-used resident.
@@ -263,38 +271,64 @@ class EngineCache:
         pinned = bool(requested) if pinned is None else bool(pinned)
         needs = cr.request_needs(messages or [], required=required)
         known = {}
-        eng = self._engines.get(current)
+        with self._lock:
+            eng = self._engines.get(current)
+            resident = list(self._lru) + list(self._peers)
         if (eng is not None and getattr(eng, "loaded", False)
                 and getattr(eng, "supports_images", False) is True):
             known[caps.VISION] = True
-        return cr.plan_route(current, needs, pinned=pinned,
-                             resident=list(self._lru) + list(self._peers),
+        return cr.plan_route(current, needs, pinned=pinned, resident=resident,
                              current_known=known)
 
     def get_chat(self, name: str):
         """The engine to answer a chat with model *name*: another localm
         instance's already-loaded copy when ``share_loaded`` and one is
         available, else this server's own (see get)."""
-        if self.share_loaded:
-            peer = self._peers.get(name) or self._peer_engine(name)
-            if peer is not None:
-                return peer
-        return self.get(name)
+        with self._lock:
+            if self.share_loaded:
+                peer = self._peers.get(name) or self._peer_engine(name)
+                if peer is not None:
+                    return peer
+            return self.get(name)
 
     def is_peer(self, engine) -> bool:
         """True when *engine* is another instance's copy, not one loaded here."""
-        return any(e is engine for e in self._peers.values())
+        return any(e is engine for e in list(self._peers.values()))
 
     def drop_peer(self, name: str) -> None:
         """Stop using another instance's copy of *name*, e.g. after it stopped
         answering; the next get_chat() looks again or loads it here."""
-        self._peers.pop(name, None)
+        with self._lock:
+            self._peers.pop(name, None)
+            self._peer_targets.pop(name, None)
 
     def get_loaded_chat(self, name: str):
-        """get_chat() with the model ready to answer: this server's own engine
-        is loaded before it is returned. An engine that fails to load is
-        removed from the cache and the load error raised."""
-        engine = self.get_chat(name)
+        """get_chat() with the model ready to answer. Another instance's copy
+        found by an earlier call is used only while that instance still
+        answers and accepts the credential it was verified with; otherwise it
+        is dropped, and another instance's copy is looked for or the model is
+        loaded here. This server's own engine is loaded before it is returned;
+        one that fails to load is removed from the cache and the load error
+        raised."""
+        with self._lock:
+            if name in self._peers and not self._peer_still_answers(name):
+                self.drop_peer(name)
+            return self._loaded(name, self.get_chat(name))
+
+    def load_here_instead_of(self, name: str, peer):
+        """This server's own engine for *name*, loaded, in place of *peer*,
+        another instance's copy that can no longer be used; *peer* is dropped.
+        Raises what building or loading the engine raised."""
+        with self._lock:
+            if self._peers.get(name) is peer:
+                self.drop_peer(name)
+            return self._loaded(name, self.get(name))
+
+    def _loaded(self, name: str, engine):
+        """*engine*, the cache's engine for *name*, ready to answer: another
+        instance's copy as it is, this server's own after ``load()``. An
+        engine that fails to load is removed from the cache and the load error
+        raised."""
         if self.is_peer(engine) or getattr(engine, "loaded", True):
             return engine
         try:
@@ -303,6 +337,23 @@ class EngineCache:
             self._discard(name, engine)
             raise
         return engine
+
+    def _peer_still_answers(self, name: str) -> bool:
+        """True while the instance behind the cached copy of *name* answers and
+        accepts the credential that copy was verified with. A failed check is
+        logged."""
+        target, token = self._peer_targets.get(name, (None, None))
+        if target is None:
+            _log(f"not using the cached copy of {name}: no endpoint is recorded for it")
+            return False
+        from localm import peer_routing
+        try:
+            peer_routing.verify_peer_credential(target, token)
+        except Exception as e:
+            _log(f"not using {name} loaded by the localm instance on port "
+                 f"{target.get('port')} any more: {e}")
+            return False
+        return True
 
     def _discard(self, name: str, engine) -> None:
         """Remove *engine*, the cache's engine for *name* whose load failed,
@@ -371,6 +422,7 @@ class EngineCache:
             eng.active_requests = 0
             eng.unloading = False
             self._peers[name] = eng
+            self._peer_targets[name] = (target, token)
             _log(f"using {name} already loaded by the localm instance on port "
                  f"{target.get('port')} (no second copy loaded)")
             return eng
@@ -381,25 +433,26 @@ class EngineCache:
 
     def get(self, requested: Optional[str]):
         name = self.resolve_model(requested)
-        engine = self._engines.get(name)
-        if engine is not None:
-            if (getattr(engine, "loaded", True)
-                    and getattr(engine, "unloading", False) is not True):
-                self._touch(name)      # already resident: never evict to reuse
+        with self._lock:
+            engine = self._engines.get(name)
+            if engine is not None:
+                if (getattr(engine, "loaded", True)
+                        and getattr(engine, "unloading", False) is not True):
+                    self._touch(name)      # already resident: never evict to reuse
+                    return engine
+                # Resident but NOT loaded, so it holds no VRAM yet and the
+                # free-VRAM probe cannot see it. Run the gate, then hand back the
+                # SAME object so the pulled engine is reused rather than silently
+                # replaced.
+                self._make_room_for(name)
+                self._touch(name)
                 return engine
-            # Resident but NOT loaded, so it holds no VRAM yet and the
-            # free-VRAM probe cannot see it. Run the gate, then hand back the
-            # SAME object so the pulled engine is reused rather than silently
-            # replaced.
             self._make_room_for(name)
+            _log(f"loading model {name}")
+            engine = self._factory(name)
+            self._engines[name] = engine
             self._touch(name)
             return engine
-        self._make_room_for(name)
-        _log(f"loading model {name}")
-        engine = self._factory(name)
-        self._engines[name] = engine
-        self._touch(name)
-        return engine
 
     def _touch(self, name: str) -> None:
         """Mark ``name`` most-recently-used."""
@@ -626,18 +679,19 @@ class EngineCache:
 
     def unload_all(self) -> None:
         """Free every resident engine (shutdown). N resident means N to free."""
-        for name in list(self._lru):
-            engine = self._engines.pop(name, None)
-            self._lru.remove(name)
-            if engine is None:
-                continue
-            try:
-                engine.unload()
-            except Exception as e:
-                # Process teardown, so nothing downstream can act on this, but a
-                # native free that failed leaves VRAM pinned after exit. stderr
-                # only; stdout belongs to the protocol.
-                _log(f"warning: failed to unload {name} at shutdown: {e}")
+        with self._lock:
+            for name in list(self._lru):
+                engine = self._engines.pop(name, None)
+                self._lru.remove(name)
+                if engine is None:
+                    continue
+                try:
+                    engine.unload()
+                except Exception as e:
+                    # Process teardown, so nothing downstream can act on this,
+                    # but a native free that failed leaves VRAM pinned after
+                    # exit. stderr only; stdout belongs to the protocol.
+                    _log(f"warning: failed to unload {name} at shutdown: {e}")
 
 
 def _text_result(text: str, is_error: bool = False) -> dict:
