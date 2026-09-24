@@ -153,6 +153,20 @@ class TestLiveViewJobOwnership:
                 c.post(f"/api/jobs/{job_id}/cancel", headers=_h(a))
 
 
+class TestTheDocstringInventory:
+    """A route missing from the module's own route inventory in its docstring
+    is a route an auditor reading that inventory would never learn exists."""
+
+    def test_every_route_is_listed_in_the_module_docstring(self):
+        from localm.plugins.builtin.browser import plug
+        doc = plug.__doc__ or ""
+        paths = sorted({route.path for route in plug._router.routes})
+        assert paths, "no routes registered; the router import is wrong"
+        missing = [p for p in paths if p not in doc]
+        assert missing == [], (
+            f"routes missing from the module docstring's inventory: {missing}")
+
+
 class TestTheManifest:
     def test_it_ships_disabled_and_declares_its_extra(self):
         from localm.plugins.engine import parse_spec

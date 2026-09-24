@@ -37,6 +37,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   coder session driving it, in addition to the dedicated Browser tab.** Off by
   default; turn on "Show the agent's browser inline in the coder session" in
   Settings > Network.
+- **The Browser tab's live view is now interactive.** Click on the screenshot
+  to click the corresponding point in the open browser, scroll with the mouse
+  wheel to scroll its page, and type to send keystrokes to it, including Tab,
+  Enter, Escape, the arrow keys, Page Up/Down, Home, End, Backspace and
+  Delete. Clicking the frame gives it keyboard focus, and Tab and Escape are
+  forwarded to the browser rather than leaving the frame.
 - **Accelerated RAG vector queries, BM25 inverted index, and chat message queueing.**
   Vector search uses a normalized NumPy matrix dot product for fast vectorized
   cosine similarity, BM25 uses an inverted postings index for term lookups, and

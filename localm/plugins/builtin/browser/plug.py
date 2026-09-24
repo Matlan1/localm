@@ -3,7 +3,13 @@
 
 Routes (mounted by the engine, auto-scoped to the ``browser`` capability):
   POST   /api/browser/session    - open a browser and start streaming it
+  GET    /api/browser/agent      - whether an agent-driven browser is available to watch
+  POST   /api/browser/agent      - stream the coding agent's own browser to this caller
   POST   /api/browser/navigate   - drive the open browser to a URL
+  POST   /api/browser/click      - click a point on the open browser's page
+  POST   /api/browser/scroll     - scroll the open browser's page
+  POST   /api/browser/key        - send a named key press to the open browser
+  POST   /api/browser/type       - type text into the open browser
   POST   /api/browser/stop       - close the browser and end the stream
   GET    /api/browser/state      - whether one is open, and what it reached
 
@@ -17,7 +23,8 @@ returns: the navigate route reaches the same live browser through the session
 registry while the worker is still streaming it.
 
 Ships DISABLED by default, and every route refuses unless ``browser_enabled`` is
-switched on, so holding the capability is not on its own enough to drive it.
+switched on, except ``/stop`` and ``/state``, which work regardless. Holding the
+capability is not on its own enough to drive a browser.
 """
 
 from __future__ import annotations
