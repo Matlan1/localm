@@ -539,9 +539,13 @@ async def _ensure_model_loaded(request: Request, model: str, *,
                                force: bool = False) -> None:
     """Load *model* as the shared engine through ``app.state.switch_model``.
 
-    Returns only when the switch reports ``loaded`` or ``already_active``, or
-    reports no status at all (a minimal switch callable). ``force`` is passed
-    to the switch only when True.
+    Returns without loading anything when *model* has an accepted peer route
+    (``localm.peer_routing.get_route``): ``/v1/chat/completions`` forwards this
+    instance's requests for that model to the peer.
+
+    Otherwise returns only when the switch reports ``loaded`` or
+    ``already_active``, or reports no status at all (a minimal switch
+    callable). ``force`` is passed to the switch only when True.
 
     Raises HTTPException:
       503  no switch_model is wired, or the load was superseded, cancelled or
@@ -552,6 +556,9 @@ async def _ensure_model_loaded(request: Request, model: str, *,
       500  the switch raised; an HTTPException it raised passes through
            unchanged.
     """
+    from localm import peer_routing
+    if peer_routing.get_route(model) is not None:
+        return
     switch_model = getattr(request.app.state, "switch_model", None)
     if switch_model is None:
         raise HTTPException(503, "Model switching needs the localm GUI server.")

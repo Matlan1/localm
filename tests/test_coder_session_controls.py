@@ -1299,3 +1299,82 @@ def test_following_the_loaded_model_keeps_the_session_unpinned(tmp_path, monkeyp
                         json={"model": "a"})
         assert r.json()["model_pinned"] is True, "an explicit pick pins by default"
         assert app.state.coder_sessions.get(sid).agent.backend.model_pinned is True
+
+
+# --------------------------------------------------------------------------- #
+#  A model this instance answers through an accepted peer route                #
+# --------------------------------------------------------------------------- #
+
+def _peer_routed(monkeypatch, model):
+    """An accepted peer route for *model*, in a route table private to the
+    test."""
+    from localm import peer_routing
+    monkeypatch.setattr(peer_routing, "_ROUTES", {})
+    peer_routing.set_route(peer_routing.PeerRoute(
+        model=model, instance_id="peer-1", host="127.0.0.1", port=9,
+        scheme="http", api_key=""))
+
+
+def _recording_switch(app):
+    """Replace the app's switch_model with one that records each load."""
+    loads = []
+
+    async def _switch(m, force=False):
+        loads.append(m)
+        return {"status": "loaded"}
+
+    app.state.switch_model = _switch
+    return loads
+
+
+@pytest.mark.parametrize("pin", [False, True])
+def test_switching_a_session_to_a_peer_routed_model_loads_nothing_here(
+        tmp_path, monkeypatch, pin):
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"local": {}, "shared": {}})
+    _peer_routed(monkeypatch, "shared")
+    loads = _recording_switch(app)
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj)
+        r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
+                        json={"model": "shared", "pin": pin})
+        assert loads == [], f"loaded a local copy of a peer-routed model: {loads}"
+        assert r.status_code == 200, r.text
+        backend = app.state.coder_sessions.get(sid).agent.backend
+        assert r.json()["model"] == "shared"
+        assert backend.model_id == "shared"
+        assert backend.model_pinned is pin
+
+
+def test_starting_a_session_on_a_peer_routed_model_loads_nothing_here(
+        tmp_path, monkeypatch):
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"local": {}, "shared": {}})
+    _peer_routed(monkeypatch, "shared")
+    loads = _recording_switch(app)
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "model": "shared"})
+        assert loads == [], f"loaded a local copy of a peer-routed model: {loads}"
+        assert r.status_code == 200, r.text
+        backend = app.state.coder_sessions.get(r.json()["id"]).agent.backend
+        assert backend.model_id == "shared"
+
+
+def test_rejoining_a_session_with_a_peer_routed_model_loads_nothing_here(
+        tmp_path, monkeypatch):
+    from localm.config import save_registry
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    save_registry({"local": {}, "shared": {}})
+    _peer_routed(monkeypatch, "shared")
+    loads = _recording_switch(app)
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj, model="local", resume=True)
+        r = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "resume": True, "model": "shared"})
+        assert loads == ["local"], f"loaded a local copy of a peer-routed model: {loads}"
+        assert r.status_code == 200, r.text
+        assert r.json()["id"] == sid
+        assert app.state.coder_sessions.get(sid).agent.backend.model_id == "shared"
