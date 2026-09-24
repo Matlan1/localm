@@ -253,6 +253,33 @@ class TestCoderRouting:
         assert "could not be loaded" in got.load_errors[0]
         assert engines.resident == ["plain"]
 
+    def test_a_fallback_names_what_the_candidate_that_answers_lacks(self, reg):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        registry, img, tmp_path = reg
+        (tmp_path / "seer2").mkdir()
+        (tmp_path / "seer2" / "seer2.gguf").write_bytes(b"GGUF" + b"seer2" * 8)
+        proj = tmp_path / "seer2" / "seer2-mmproj.gguf"
+        proj.write_bytes(b"GGUF")
+        registry["seer2"] = {"path": str(tmp_path / "seer2" / "seer2.gguf"),
+                             "source": "local", "model_type": "llm",
+                             "mmproj": str(proj), "tool_use": True}
+        made = {}
+
+        def factory(name):
+            return made.setdefault(name, _LazyEngine(
+                name, images=name.startswith("seer"), fails_to_load=(name == "seer2")))
+        engines = EngineCache("plain", engine_factory=factory)
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+        messages = [{"role": "user", "content": [image, {"type": "text", "text": "hi"}]}]
+        decision = engines.route(None, messages, required=("tool_use", "reasoning"))
+        assert decision.candidates == ("seer2", "seer")
+        assert decision.unmet == ("reasoning",)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            engine, name, got = coder_engine(engines, decision)
+        assert name == "seer" and got.resolved == "seer"
+        assert got.unmet == ("reasoning", "tool_use"), \
+            "unmet names what the model that answers lacks, not what the first candidate lacked"
+
     def test_the_default_failing_to_load_fails_the_call(self, reg):
         from localm.plugins.mcpserver.tools.media_coder import coder_engine
         engines = TestCoderRouting._lazy_tool_models(reg, {"plain"})

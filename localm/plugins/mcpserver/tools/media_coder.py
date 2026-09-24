@@ -9,7 +9,6 @@ binds.
 
 from __future__ import annotations
 
-import dataclasses
 import time
 from pathlib import Path
 from typing import Dict
@@ -39,7 +38,7 @@ def coder_engine(engines: EngineCache, decision):
             _srv._log(f"warning: could not load {name} for a coder task: {e}")
             continue
         if name != decision.resolved:
-            decision = dataclasses.replace(decision, resolved=name)
+            decision = decision.answered_by(name)
         return engine, name, decision
     with _quiet_stdout():
         engine = engines.get_loaded_chat(decision.current)
