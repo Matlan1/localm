@@ -33,7 +33,7 @@ def _complete_hidden(words):
     model_cmds = {"run", "serve", "rm", "alias"}
 
     if prior and prior[0] in model_cmds and len(prior) == 1:
-        from ..config import load_registry
+        from localm.config import load_registry
         candidates = sorted(load_registry())
     elif not prior:
         candidates = sorted(

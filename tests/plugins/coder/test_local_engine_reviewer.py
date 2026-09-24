@@ -104,9 +104,8 @@ def _agent_backend():
 
 def test_local_reviewer_built_heterogeneous(monkeypatch):
     _cfg(monkeypatch)
-    # **kw absorbs the allow_direct_path argument reviewer.py passes.
-    monkeypatch.setattr("localm.model_manager.get_model_path",
-                        lambda n, **kw: __import__("pathlib").Path("/models/mini.gguf"))
+    monkeypatch.setattr("localm.model_manager.registry.get_operator_model_info",
+                        lambda n: (__import__("pathlib").Path("/models/mini.gguf"), None))
     fake = MagicMock()
     with patch("localm.plugins.coder.backends.local_engine.LocalEngineBackend",
                return_value=fake) as mk:
@@ -117,9 +116,8 @@ def test_local_reviewer_built_heterogeneous(monkeypatch):
 
 def test_local_reviewer_allowed_in_privacy_mode(monkeypatch):
     _cfg(monkeypatch)
-    # **kw absorbs the allow_direct_path argument reviewer.py passes.
-    monkeypatch.setattr("localm.model_manager.get_model_path",
-                        lambda n, **kw: __import__("pathlib").Path("/models/mini.gguf"))
+    monkeypatch.setattr("localm.model_manager.registry.get_operator_model_info",
+                        lambda n: (__import__("pathlib").Path("/models/mini.gguf"), None))
     fake = MagicMock()
     with patch("localm.plugins.coder.backends.local_engine.LocalEngineBackend",
                return_value=fake):
@@ -129,7 +127,8 @@ def test_local_reviewer_allowed_in_privacy_mode(monkeypatch):
 
 def test_local_reviewer_missing_model_falls_back(monkeypatch):
     _cfg(monkeypatch)
-    monkeypatch.setattr("localm.model_manager.get_model_path", lambda n: None)
+    monkeypatch.setattr("localm.model_manager.registry.get_operator_model_info",
+                        lambda n: None)
     backend = _agent_backend()
     with patch("localm.plugins.coder.display.print_warning") as warn:
         rv = reviewer_for_agent(backend, SessionMode.FULL, False)

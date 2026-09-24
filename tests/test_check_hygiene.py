@@ -1427,3 +1427,115 @@ def test_baseline_ref_is_the_merge_base_not_the_moving_tip(monkeypatch):
     ref = ch._changelog_baseline_ref()
     assert calls and calls[0] == ("merge-base", "HEAD", "origin/master"), calls
     assert ref == "cafebabecafebabecafebabecafebabecafebabe"
+
+
+# ---- check 11: CodeQL barrier accessors are imported absolutely -------------
+
+def _barrier_problems(ch, tmp_path, rel, text):
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    return ch._codeql_barrier_import_violations([p])
+
+
+def test_relative_import_of_a_barrier_accessor_is_flagged(tmp_path, monkeypatch):
+    """NEGATIVE: a relative import of load_registry that is then called."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = _barrier_problems(
+        ch, tmp_path, "localm/cli/some_command.py",
+        "from ..config import load_registry\n"
+        "def f():\n"
+        "    return load_registry()\n")
+    assert len(problems) == 1
+    assert "localm/cli/some_command.py:3" in problems[0]
+    assert "load_registry" in problems[0]
+
+
+def test_relative_module_import_attribute_call_is_flagged(tmp_path, monkeypatch):
+    """NEGATIVE: `from .. import config` then `config.load_registry()`."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = _barrier_problems(
+        ch, tmp_path, "localm/cli/some_command.py",
+        "from .. import config\n"
+        "def f():\n"
+        "    return config.load_registry()\n")
+    assert len(problems) == 1 and "load_registry" in problems[0]
+
+
+def test_relative_alias_of_plugin_id_check_is_flagged(tmp_path, monkeypatch):
+    """NEGATIVE: an aliased relative import of the plugin-id check."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = _barrier_problems(
+        ch, tmp_path, "localm/plugins/other.py",
+        "from .ids import _is_valid_plugin_name as ok\n"
+        "def f(n):\n"
+        "    return ok(n)\n")
+    assert len(problems) == 1 and "_is_valid_plugin_name" in problems[0]
+
+
+def test_absolute_import_of_a_barrier_accessor_is_clean(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert _barrier_problems(
+        ch, tmp_path, "localm/cli/some_command.py",
+        "from localm.config import load_registry\n"
+        "import localm.model_manager as _mm\n"
+        "def f():\n"
+        "    return load_registry(), _mm.load_registry()\n") == []
+
+
+def test_uncalled_relative_reexport_is_clean(tmp_path, monkeypatch):
+    """A package __init__ re-exporting the name relatively never calls it."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert _barrier_problems(
+        ch, tmp_path, "localm/model_manager/__init__.py",
+        "from ..config import load_registry, update_registry\n") == []
+
+
+def test_absolute_reexport_and_absolute_module_chain_are_clean(tmp_path, monkeypatch):
+    """Shapes CodeQL resolves to the modeled function: an absolute import
+    through a re-exporting module, and an attribute chain whose module was
+    imported absolutely by another module (capabilities.py's
+    ``_registry._mm.load_registry()``)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert _barrier_problems(
+        ch, tmp_path, "localm/plugins/other.py",
+        "from localm.plugins.engine import _check_plugin_name\n"
+        "from localm.plugins import engine\n"
+        "from . import registry as _registry\n"
+        "def f(n):\n"
+        "    return (_check_plugin_name(n), engine._is_valid_plugin_name(n),\n"
+        "            _registry._mm.load_registry())\n") == []
+
+
+def test_modeled_module_forms_are_clean(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert _barrier_problems(
+        ch, tmp_path, "localm/cli/some_command.py",
+        "import localm.config as cfg\n"
+        "import localm.config\n"
+        "from localm import config\n"
+        "from localm.plugins.ids import _is_valid_plugin_name as ok\n"
+        "def f(n):\n"
+        "    return (cfg.load_registry(), localm.config.load_registry(),\n"
+        "            config.update_registry(lambda r: None), ok(n))\n") == []
+
+
+def test_barrier_import_check_ignores_files_outside_localm(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert _barrier_problems(
+        ch, tmp_path, "scripts/tool.py",
+        "from .config import load_registry\n"
+        "load_registry()\n") == []
+
+
+def test_real_tree_has_no_relative_barrier_accessor_calls():
+    ch = _load_check_hygiene()
+    assert ch._codeql_barrier_import_violations(ch._tracked_files()) == []

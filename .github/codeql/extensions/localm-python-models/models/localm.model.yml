@@ -1,0 +1,19 @@
+# Path-injection barriers for localm's own code. Type "localm" with a Member
+# chain: models-as-data resolves only absolute imports of these names.
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierModel
+    data:
+      # Values read from localm's own registry.json under its data directory.
+      - ["localm", "Member[config].Member[load_registry].ReturnValue", "path-injection"]
+      - ["localm", "Member[model_manager].Member[load_registry].ReturnValue", "path-injection"]
+      - ["localm", "Member[config].Member[update_registry].Argument[0,mutator:].Parameter[0]", "path-injection"]
+      - ["localm", "Member[model_manager].Member[update_registry].Argument[0,mutator:].Parameter[0]", "path-injection"]
+      # A plugin id that passed the single-path-component check.
+      - ["localm", "Member[plugins].Member[ids].Member[_check_plugin_name].ReturnValue", "path-injection"]
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierGuardModel
+    data:
+      - ["localm", "Member[plugins].Member[ids].Member[_is_valid_plugin_name].Argument[0,name:]", "true", "path-injection"]

@@ -105,16 +105,15 @@ class TestGgufBackendSplitCheck:
 
 
 class TestGetModelInfoSplitNormalisation:
-    # allow_direct_path=True throughout: split normalisation lives in the
-    # resolve-a-path-on-disk branch, which is opt-in and reached only from a
-    # command line (`localm run <path>`).
+    # Split normalisation lives in get_operator_model_info's path-on-disk
+    # branch, reached only from a command line (`localm run <path>`).
     def test_later_part_path_resolves_to_first(self, tmp_path):
         from localm import model_manager
         for i in (1, 2):
             (tmp_path / f"m-0000{i}-of-00002.gguf").write_bytes(b"x")
         with patch.object(model_manager, "load_registry", return_value={}):
-            result = model_manager.get_model_info(
-                str(tmp_path / "m-00002-of-00002.gguf"), allow_direct_path=True)
+            result = model_manager.registry.get_operator_model_info(
+                str(tmp_path / "m-00002-of-00002.gguf"))
         assert result is not None
         assert result[0].name == "m-00001-of-00002.gguf"
 
@@ -123,11 +122,11 @@ class TestGetModelInfoSplitNormalisation:
         f = tmp_path / "model.gguf"
         f.write_bytes(b"x")
         with patch.object(model_manager, "load_registry", return_value={}):
-            result = model_manager.get_model_info(str(f), allow_direct_path=True)
+            result = model_manager.registry.get_operator_model_info(str(f))
         assert result is not None
         assert result[0] == f
 
-    def test_direct_path_refused_without_the_opt_in(self, tmp_path):
+    def test_direct_path_refused_by_the_registry_lookup(self, tmp_path):
         """The same call from an untrusted caller resolves to nothing."""
         from localm import model_manager
         f = tmp_path / "model.gguf"

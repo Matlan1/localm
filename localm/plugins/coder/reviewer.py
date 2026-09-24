@@ -296,10 +296,10 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
                     "coder_reviewer='local' needs coder_reviewer_model (a model "
                     "name or path); reviewing with the agent's own model instead.")
                 return _local_same_model()
-            from localm.model_manager import get_model_path
-            # allow_direct_path: coder_reviewer_model accepts a model name or a
-            # path, and setting it needs the privileged config:write scope.
-            mp = get_model_path(rmodel, allow_direct_path=True)
+            from localm.model_manager.registry import get_operator_model_info
+            # coder_reviewer_model accepts a model name or a path.
+            info = get_operator_model_info(rmodel)
+            mp = info[0] if info else None
             if mp is None:
                 print_warning(
                     f"reviewer model '{rmodel}' not found; reviewing with the "

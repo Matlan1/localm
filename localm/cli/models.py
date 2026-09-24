@@ -6,9 +6,10 @@ import click
 
 from ..config import HOME_DIR, find_binary_dir, load_config, update_config
 from ..model_manager import (
-    get_model_info, list_models, MODEL_TYPES, pull_model, relocate_model,
+    list_models, MODEL_TYPES, pull_model, relocate_model,
     remove_model, set_model_type, show_shortcuts, sync_models_dir,
 )
+from ..model_manager.registry import get_operator_model_info
 from ..console import show_url
 from ._core import (console, main, _complete_model_name,
                     no_server_message, report_server_failure,
@@ -41,8 +42,8 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
 
     from rich.markup import escape
 
-    # allow_direct_path: operator-typed on the command line (`localm bench <path>`).
-    info = get_model_info(model, allow_direct_path=True)
+    # A registered name or a path on disk (`localm bench <path>`).
+    info = get_operator_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {escape(model)}")
         sys.exit(1)
@@ -199,7 +200,7 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers):
 
     from rich.markup import escape
 
-    info = get_model_info(model, allow_direct_path=True)
+    info = get_operator_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {escape(model)}")
         sys.exit(1)
@@ -578,7 +579,7 @@ def rm(model, yes):
     """
     from rich.markup import escape
 
-    from ..config import load_registry
+    from localm.config import load_registry
     from ..model_manager import (
         _entry_path, find_aliases_by_path, is_owned_model_path)
     from ..selfclient import remote_hold_reason
@@ -748,7 +749,7 @@ def _rename_on_running_server(old_name: str, new_name: str):
         # The request WAS sent and the reply did not arrive, so whether the
         # rename was applied is unknown. The registry is the ground truth, so
         # it is re-read rather than guessed at.
-        from ..config import load_registry
+        from localm.config import load_registry
         from ..model_manager import _sanitize_name
         safe = _sanitize_name(new_name)
         reg = load_registry()
