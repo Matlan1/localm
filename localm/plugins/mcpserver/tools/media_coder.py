@@ -311,11 +311,12 @@ def build(engines: EngineCache) -> Dict[str, dict]:
         # A model name from the client or the project config is registry-gated
         # by resolve_model; the operator's own --model default is the only path
         # allowed through. A named model is used as named; without one, a
-        # default model that cannot emit structured tool calls gives way to an
-        # installed model that can.
+        # default model that cannot emit structured tool calls, or whose
+        # trained window is too small for the task text, gives way to an
+        # installed model that has what it lacks.
         try:
-            decision = engines.route(cfg.model, [], required=("tool_use",),
-                                     pinned=bool(cfg.model))
+            decision = engines.route(cfg.model, [{"role": "user", "content": task}],
+                                     required=("tool_use",), pinned=bool(cfg.model))
         except ValueError as e:
             return _text_result(str(e), is_error=True)
         try:

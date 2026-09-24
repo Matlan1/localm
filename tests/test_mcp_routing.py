@@ -70,7 +70,7 @@ class _LazyEngine(_Engine):
         return super().chat_stream(messages, **kw)
 
     def context_capacity(self):
-        return 8192 if self.loaded else None
+        return 32768 if self.loaded else None
 
     def unload(self):
         self.released = True
@@ -341,6 +341,36 @@ class TestCoderTaskRuns:
         assert res["isError"] is False, text
         assert "reply-from-tooly2" in text
         assert "[answered by tooly2: plain lacks structured tool calls]" in text
+
+    @staticmethod
+    def _small_default(reg):
+        """plain emits tool calls but was trained on 4096 tokens; tooly was
+        trained on 131072."""
+        registry, _, _ = reg
+        registry["plain"].update(tool_use=True, context_length=4096)
+        registry["tooly"]["context_length"] = 131072
+
+    def test_a_task_longer_than_the_default_models_window_goes_to_a_roomier_one(
+            self, reg, coder_project):
+        TestCoderTaskRuns._small_default(reg)
+        engines = _cache(lazy=True)
+        task = "Refactor the parser as this log shows. " + "trace line " * 2400
+        res = _run_coder_task(engines, coder_project, task=task)
+        text = res["content"][0]["text"]
+        assert "tooly" in engines.made and "plain" not in engines.made, \
+            "the task was run on the model whose window is too small for it"
+        assert res["isError"] is False, text
+        assert "reply-from-tooly" in text
+        assert "[answered by tooly: plain lacks a longer conversation]" in text
+
+    def test_a_short_task_stays_on_the_default_model(self, reg, coder_project):
+        TestCoderTaskRuns._small_default(reg)
+        engines = _cache(lazy=True)
+        res = _run_coder_task(engines, coder_project)
+        text = res["content"][0]["text"]
+        assert list(engines.made) == ["plain"]
+        assert res["isError"] is False, text
+        assert "reply-from-plain" in text and "answered by" not in text
 
 
 # --------------------------------------------------------------------------- #

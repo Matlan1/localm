@@ -83,15 +83,20 @@ something it does not provide: images it cannot read, structured tool calls
 (every `run_coder_task` needs them), or a longer conversation than it was
 trained for. Then an installed model that has it answers instead, and the
 result ends with a note naming that model and the reason. A `model` in the
-project's `.localcoder/config.toml` counts as named.
+project's `.localcoder/config.toml` counts as named. A `run_coder_task` call
+is routed once, when it starts, and its task text is the conversation measured
+against the trained window. During the run the agent compacts its history as
+it nears the context window of the model it runs on; the task does not move to
+another model.
 
 With `--share-loaded-models`, a model another localm instance on this machine
 (a `localm gui` or `localm serve`) already has loaded is used through that
 instance instead of loading a second copy into VRAM. The match is by model
 file, not by name. An instance of the same install is reached with this
 install's own credential; an instance of another install only when it has no
-API key set. If that instance stops answering, the model is loaded here
-instead.
+API key set. If that instance stops answering, or refuses the credential, the
+model is loaded here instead, and a `run_coder_task` already running on it
+carries on with the copy loaded here.
 
 ## Quick start: expose localm to Claude Desktop
 
