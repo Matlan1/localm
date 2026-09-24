@@ -737,6 +737,50 @@ RECHECK_RACE = '''
             (signals / "b-done").touch()
 '''
 
+RMTREE_RACE = '''
+    import os, shutil, sys, time
+    from pathlib import Path
+    import localm.model_manager.pull as pull
+    role, signals = sys.argv[1], Path(sys.argv[2])
+    real_gone, real_rmtree = pull._part_lock_holder_is_gone, shutil.rmtree
+    calls = {"gone": 0, "rmtree": 0}
+
+    def await_signal(name):
+        deadline = time.monotonic() + 30
+        while not (signals / name).exists():
+            if time.monotonic() > deadline:
+                print("TIMEOUT", name, flush=True)
+                os._exit(3)
+            time.sleep(0.01)
+
+    def gated_gone(d):
+        verdict = real_gone(d)
+        calls["gone"] += 1
+        if role == "B" and calls["gone"] == 1:
+            await_signal("a-at-rmtree")
+        return verdict
+
+    def gated_rmtree(path, *args, **kwargs):
+        calls["rmtree"] += 1
+        if role == "A" and calls["rmtree"] == 1:
+            (signals / "a-at-rmtree").touch()
+            await_signal("b-done")
+        return real_rmtree(path, *args, **kwargs)
+
+    pull._part_lock_holder_is_gone = gated_gone
+    shutil.rmtree = gated_rmtree
+    try:
+        with pull._part_lock("m.gguf"):
+            print("WON", os.getpid(), flush=True)
+            if role == "B":
+                (signals / "b-done").touch()
+            sys.stdin.read()
+    except pull.PullInFlight:
+        print("LOST", os.getpid(), flush=True)
+        if role == "B":
+            (signals / "b-done").touch()
+'''
+
 GUARD = '''
     import os, sys
     from pathlib import Path
@@ -816,6 +860,57 @@ def test_two_takeovers_of_one_stale_lock_are_serialised(home, tmp_path):
     finally:
         _release(a)
         _release(b)
+
+
+def test_a_takeover_keeps_its_guard_until_the_lock_is_re_created(home, tmp_path):
+    """One process is removing the stale lock it took over when a second
+    process, which also found it stale, arrives. The second refuses instead of
+    taking the lock over between the first one's removal and re-creation."""
+    d = _write_stale_lock()
+    signals = tmp_path / "signals"
+    signals.mkdir()
+    a = spawn_on_this_tree(RMTREE_RACE, home, "A", signals,
+                           stdin=subprocess.PIPE)
+    b = spawn_on_this_tree(RMTREE_RACE, home, "B", signals,
+                           stdin=subprocess.PIPE)
+    try:
+        won_b = _first_line(b)
+        won_a = _first_line(a)
+        rec = json.loads(_record(d) or "null")
+        # The injection took: B found the lock stale while A was removing it.
+        assert (signals / "a-at-rmtree").exists()
+        assert won_a[0] == "WON", f"the first process did not take the lock: {won_a}"
+        assert rec is not None and rec["pid"] == int(won_a[1]), (
+            "the lock record is not the first process's")
+        assert won_b[0] == "LOST", (
+            f"both processes took the stale lock over: A={won_a} B={won_b}")
+    finally:
+        _release(a)
+        _release(b)
+
+
+def test_the_reclaim_guard_name_is_short_and_never_a_lock_name():
+    from localm.model_manager.pull import _reclaim_guard_path
+    longest = "m" * 240 + ".gguf"
+    d = _part_lock_dir(longest)
+    guard = _reclaim_guard_path(d, longest)
+    assert len(d.name) == 255
+    assert guard.parent == d.parent
+    assert len(guard.name) <= 30
+    assert not (guard.name.startswith("pull-") and guard.name.endswith(".lock"))
+    assert _reclaim_guard_path(d, longest) == guard
+    assert _reclaim_guard_path(_part_lock_dir("n.gguf"), "n.gguf") != guard
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="a 255-byte lock name needs a filesystem without "
+                           "a path length limit below it")
+def test_a_stale_lock_with_the_longest_lockable_name_is_taken_over(home):
+    longest = "m" * 240 + ".gguf"
+    d = _part_lock_dir(longest)
+    _write_owner(d, _exited_pid(), started=0.0)
+    with _part_lock(longest):
+        assert json.loads(_record(d))["pid"] == os.getpid()
 
 
 def test_a_takeover_in_progress_elsewhere_refuses_and_leaves_the_stale_lock(home):

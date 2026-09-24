@@ -1986,17 +1986,25 @@ def _unlock_guard_file(f) -> None:
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def _reclaim_guard_path(d: Path, filename: str) -> Path:
+    """The reclaim guard file for *filename*'s lock *d*: beside it, named
+    ``reclaim-<first 16 hex digits of the name's sha256>.guard``."""
+    import hashlib
+    digest = hashlib.sha256(filename.encode("utf-8", "surrogatepass")).hexdigest()
+    return d.parent / ("reclaim-" + digest[:16] + ".guard")
+
+
 @contextlib.contextmanager
 def _reclaim_guard(d: Path, filename: str):
-    """Hold an exclusive OS advisory lock on ``reclaim-<filename>.guard``
-    beside lock *d* for the block.
+    """Hold an exclusive OS advisory lock on the reclaim guard file of lock
+    *d* (see :func:`_reclaim_guard_path`) for the block.
 
     The guard file is created when missing and never deleted, and the OS
     releases the lock when its holder exits, however it exits. Raises
     :class:`PullInFlight` when another process holds the guard, or when the
     lock cannot be taken at all; that message names the error and *d*.
     """
-    guard = d.parent / ("reclaim-" + filename + ".guard")
+    guard = _reclaim_guard_path(d, filename)
     try:
         f = open(guard, "a+b")
     except OSError as e:
