@@ -51,42 +51,31 @@ def _partial_owner_path(partial: Path) -> Path:
 
 
 _LINUX_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
-_LINUX_MACHINE_IDS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
 _PID_SPACE: "str | None" = None
 
 
-def _machine_id_text() -> str:
-    """This installation's machine id, or "" when it cannot be read: the
-    systemd / D-Bus machine id on Linux, the Cryptography MachineGuid on
-    Windows."""
-    if sys.platform.startswith("linux"):
-        for p in _LINUX_MACHINE_IDS:
-            try:
-                text = p.read_text(encoding="ascii").strip()
-            except (OSError, ValueError):
-                continue
-            if text:
-                return text
+def _machine_guid() -> str:
+    """This Windows installation's MachineGuid, or "" on other platforms and
+    when it cannot be read."""
+    if sys.platform != "win32":
         return ""
-    if sys.platform == "win32":
-        try:
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                r"SOFTWARE\Microsoft\Cryptography", 0,
-                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
-                value, _ = winreg.QueryValueEx(k, "MachineGuid")
-        except OSError:
-            return ""
-        return str(value).strip()
-    return ""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Cryptography", 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+            value, _ = winreg.QueryValueEx(k, "MachineGuid")
+    except (OSError, ImportError):
+        return ""
+    return str(value).strip()
 
 
 def _pid_space_id() -> str:
     """An opaque id for the pid table this process's pids belong to: the
-    platform, the machine id (see :func:`_machine_id_text`), the host name
-    and, on Linux, the pid namespace, hashed.
+    platform, the Windows MachineGuid (see :func:`_machine_guid`), the host
+    name and, on Linux, the pid namespace, hashed.
 
-    A process that can read none of the machine id, the host name and the pid
+    A process that can read none of the MachineGuid, the host name and the pid
     namespace gets an id unique to itself, so no other process's record
     matches it.
     """
@@ -95,7 +84,7 @@ def _pid_space_id() -> str:
         import hashlib
         import platform
         import uuid
-        parts = [sys.platform, _machine_id_text()]
+        parts = [sys.platform, _machine_guid()]
         try:
             parts.append(platform.node() or "")
         except Exception:
@@ -144,18 +133,19 @@ def _process_start_identity(pid: int) -> "dict | None":
 
 def _start_identity_differs(recorded, current) -> bool:
     """True only when *recorded* and *current* are start identities of the
-    same shape that name two different processes: a different boot id, a
-    different start tick, or creation times more than a second apart.
+    same shape that name two different processes: a different start tick
+    under the same boot id, or creation times more than a second apart.
 
-    Anything missing, malformed or of different shapes returns False.
+    Anything missing, malformed, of different shapes, or ticks under different
+    or unknown boot ids returns False.
     """
     if not isinstance(recorded, dict) or not isinstance(current, dict):
         return False
     rt, ct = recorded.get("ticks"), current.get("ticks")
     if type(rt) is int and type(ct) is int:
         rb, cb = recorded.get("boot"), current.get("boot")
-        if isinstance(rb, str) and isinstance(cb, str) and rb != cb:
-            return True
+        if not (isinstance(rb, str) and isinstance(cb, str) and rb == cb):
+            return False
         return rt != ct
     rc, cc = recorded.get("created"), current.get("created")
     if type(rc) in (int, float) and type(cc) in (int, float):

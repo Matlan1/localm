@@ -332,20 +332,33 @@ def test_a_live_pid_now_naming_a_different_process_is_reclaimed(home):
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"),
                     reason="the boot id is read from Linux's /proc")
-def test_a_lock_from_an_earlier_boot_is_reclaimed_while_its_pid_is_alive(home):
-    """A record from an earlier boot names a process that cannot be running,
-    even when the pid and start ticks match a live process now."""
+@pytest.mark.parametrize("ticks", ["same", "earlier"])
+def test_a_record_under_another_boot_id_keeps_the_lock_while_its_pid_is_alive(
+        home, ticks):
+    """A record under another boot id comes from before a reboot or from
+    another machine with this host name, which cannot be told apart here, so a
+    live pid keeps the lock whatever its start ticks."""
     other = _idle_child()
     try:
         ident = start_identity_of(other.pid)
         assert ident["boot"], "no boot id was read on Linux"
+        if ticks == "earlier":
+            ident = started_an_hour_earlier(ident)
         d = _part_lock_dir("m.gguf")
         _write_owner(d, other.pid, started=time.time(), start={
             **ident, "boot": "00000000-0000-0000-0000-000000000000"})
+        before = _record(d)
 
-        with _part_lock("m.gguf"):
-            rec = json.loads(_record(d))
-        assert rec["pid"] == os.getpid()
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before, (
+            "a lock recorded under another boot id was reclaimed from a live "
+            "pid")
+        assert refused is not None
     finally:
         _release(other)
 
@@ -428,10 +441,11 @@ def _exited_pid() -> int:
 
 @pytest.mark.parametrize("pid_state", ["alive", "dead"])
 def test_a_record_from_another_pid_space_is_never_reclaimed(home, pid_state):
-    """A record written in another pid space (another pid namespace, a
-    LOCALM_HOME shared with WSL or another machine) names a pid this process
-    cannot look up, so it keeps the lock whether that number is alive here or
-    not and whatever start identity it carries."""
+    """A record written in another pid space (another pid namespace, the
+    other side of a data folder shared between Windows and WSL, another
+    Windows machine) names a pid this process cannot look up, so it keeps the
+    lock whether that number is alive here or not and whatever start identity
+    it carries."""
     other = _idle_child()
     try:
         if pid_state == "alive":
@@ -554,21 +568,30 @@ def test_a_process_and_an_observer_read_the_same_start_identity(home):
 
 def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
         home, monkeypatch):
-    """Two machines that share a data folder and a host name still compute
-    different pid spaces, so a remote holder's pid is never looked up here."""
+    """A holder on another machine that shares the data folder and the host
+    name records a pid that may be alive here as an unrelated process. On
+    Windows its MachineGuid gives it another pid space; on Linux the pid space
+    matches but its start identity carries another boot id. Either way the
+    lock stays."""
     from localm.model_manager import pull
     other = _idle_child()
     try:
         ident = start_identity_of(other.pid)
-        with monkeypatch.context() as m:
-            m.setattr(pull, "_PID_SPACE", None)
-            m.setattr(pull, "_machine_id_text", lambda: "another-machine-id")
-            remote_space = pull._pid_space_id()
-        # The injection took: the same host name, a different machine.
-        assert remote_space != this_pid_space()
+        if "ticks" in ident:
+            remote_space = this_pid_space()
+            remote_start = {**started_an_hour_earlier(ident),
+                            "boot": "00000000-0000-0000-0000-000000000000"}
+        else:
+            with monkeypatch.context() as m:
+                m.setattr(pull, "_PID_SPACE", None)
+                m.setattr(pull, "_machine_guid", lambda: "another-machine-guid")
+                remote_space = pull._pid_space_id()
+            # The injection took: the same host name, another MachineGuid.
+            assert remote_space != this_pid_space()
+            remote_start = started_an_hour_earlier(ident)
         d = _part_lock_dir("m.gguf")
-        _write_owner(d, other.pid, space=remote_space,
-                     start=started_an_hour_earlier(ident), started=time.time())
+        _write_owner(d, other.pid, space=remote_space, start=remote_start,
+                     started=time.time())
         before = _record(d)
 
         refused = None
@@ -585,12 +608,11 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
         _release(other)
 
 
-@pytest.mark.skipif(not (sys.platform.startswith("linux")
-                         or sys.platform == "win32"),
-                    reason="the machine id is read on Linux and Windows")
-def test_the_machine_id_is_read_on_linux_and_windows():
-    from localm.model_manager.pull import _machine_id_text
-    assert _machine_id_text(), "no machine id was read"
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="MachineGuid is a Windows registry value")
+def test_the_windows_machine_guid_is_read():
+    from localm.model_manager.pull import _machine_guid
+    assert _machine_guid(), "no MachineGuid was read"
 
 
 def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
