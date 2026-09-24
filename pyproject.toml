@@ -264,6 +264,8 @@ dev = [
     # everywhere (e.g. under a debugger, or -k a single test) without surprise
     # worker overhead.
     "pytest-xdist>=3.6",
+    # Imported directly by tests (async ASGI clients, streaming and SSE checks).
+    "httpx>=0.28.1",
     # Feature parsers whose extraction code has tests that otherwise SILENTLY SKIP
     # when the optional extra is absent (the default install is .[coder,voice,
     # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep
