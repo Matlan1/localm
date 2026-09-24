@@ -475,7 +475,8 @@ _TINY_CHAT_TEMPLATE = "{% for m in messages %}{{ m['content'] }}\n{% endfor %}"
 @pytest.mark.integration
 class TestRealWorkerRelaysStatusEndToEnd:
     @pytest.fixture(scope="class")
-    def hf_backend(self, tmp_path_factory):
+    @classmethod
+    def hf_backend(cls, tmp_path_factory):
         pytest.importorskip("torch", exc_type=ImportError)
         pytest.importorskip("transformers", exc_type=ImportError)
         import json
