@@ -25,6 +25,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   In the CLI, switch models in the REPL with `/model <name>` (or inspect with
   `/model`), and resume any past session with a specified model via `localm coder
   --resume [id] --model <name>`.
+  `/model` with no name, and the active-model tag in session controls, now
+  show in the interface's own language instead of always in English.
+  Switching to a different model and then back to the session's original
+  one in the same still-open session-controls dialog now actually applies
+  the second switch instead of silently doing nothing. `--resume` followed
+  by a task instead of a checkpoint id (`-r "some task"`, which is read as
+  the id, not as the task) now warns with the two ways to combine a resume
+  with a task instead of crashing.
 - **`localm setup-browser`** downloads the Chromium build the automated browser
   needs. Previously this required a separate, undocumented-in-app
   `python -m playwright install chromium` step after installing the browser
