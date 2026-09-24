@@ -3,11 +3,11 @@
 resumable downloads, hashing-on-the-wire, and GUI progress streaming."""
 
 import localm.model_manager as _mm  # read package-patchable names at call time
+from localm import instances
 
 import contextlib
 import errno
 import json
-import math
 import os
 import re
 import shutil
@@ -52,7 +52,6 @@ def _partial_owner_path(partial: Path) -> Path:
     return partial.with_name(partial.name + _PARTIAL_OWNER_SUFFIX)
 
 
-_LINUX_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _PID_SPACE: "str | None" = None
 
 
@@ -102,65 +101,11 @@ def _pid_space_id() -> str:
     return _PID_SPACE
 
 
-def _process_start_identity(pid: int) -> "dict | None":
-    """When process *pid* started, in a form no later change of the system
-    clock alters, or None when it cannot be read.
-
-    Linux: ``{"boot": <boot id or None>, "ticks": <start time in clock ticks
-    since boot>}``, read from /proc. Windows: ``{"created": <psutil
-    create_time>}``, the creation timestamp Windows stores when the process
-    starts. Every other platform: None.
-    """
-    if sys.platform.startswith("linux"):
-        # Start ticks come from /proc, not psutil's create_time. See
-        # test_a_live_holder_keeps_its_lock_across_a_clock_step.
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_bytes()
-            ticks = int(stat[stat.rindex(b")") + 2:].split()[19])
-        except (OSError, ValueError, IndexError):
-            return None
-        try:
-            boot = _LINUX_BOOT_ID.read_text(encoding="ascii").strip() or None
-        except (OSError, ValueError):
-            boot = None
-        return {"boot": boot, "ticks": ticks}
-    if sys.platform == "win32":
-        try:
-            import psutil
-            return {"created": float(psutil.Process(pid).create_time())}
-        except Exception:
-            return None
-    return None
-
-
-def _start_identity_differs(recorded, current) -> bool:
-    """True only when *recorded* and *current* are start identities of the
-    same shape that name two different processes: a different start tick
-    under the same boot id, or creation times more than a second apart.
-
-    Anything missing, malformed, of different shapes, or ticks under different
-    or unknown boot ids returns False.
-    """
-    if not isinstance(recorded, dict) or not isinstance(current, dict):
-        return False
-    rt, ct = recorded.get("ticks"), current.get("ticks")
-    if type(rt) is int and type(ct) is int:
-        rb, cb = recorded.get("boot"), current.get("boot")
-        if not (isinstance(rb, str) and isinstance(cb, str) and rb == cb):
-            return False
-        return rt != ct
-    rc, cc = recorded.get("created"), current.get("created")
-    if type(rc) in (int, float) and type(cc) in (int, float):
-        if math.isfinite(rc) and math.isfinite(cc):
-            return abs(rc - cc) > 1.0
-    return False
-
-
 def _write_partial_owner(partial: Path) -> None:
     """Record this process (pid, pid space and start identity) as the owner of
     *partial*."""
     rec = {"pid": os.getpid(), "space": _pid_space_id(),
-           "start": _process_start_identity(os.getpid())}
+           "start": instances.process_start_identity(os.getpid())}
     _partial_owner_path(partial).write_text(json.dumps(rec), encoding="utf-8")
 
 
@@ -193,11 +138,11 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     Returns False for a missing or unreadable sidecar, an unparsable pid, a
     record written in another pid space (see :func:`_pid_space_id`), a live
     pid whose start identity matches the record or cannot be compared with it
-    (see :func:`_start_identity_differs`), a live pid in a record that names
-    no pid space, and any probe failure. A pid that is this process's own is
-    gone when no download in this process currently holds the file.
+    (see :func:`localm.instances.start_identity_differs`), a live pid in a
+    record that names no pid space, and any probe failure. A pid that is this
+    process's own is gone when no download in this process currently holds
+    the file.
     """
-    from localm import instances
     rec = _read_partial_owner(partial)
     if rec is None:
         return False
@@ -214,8 +159,8 @@ def _partial_owner_is_gone(partial: Path) -> bool:
         return not _partial_in_flight(partial)
     if not instances.pid_alive(pid):
         return True
-    return space is not None and _start_identity_differs(
-        rec.get("start"), _process_start_identity(pid))
+    return space is not None and instances.start_identity_differs(
+        rec.get("start"), instances.process_start_identity(pid))
 
 
 def _partial_candidates(incomplete_path: Path) -> "list[Path]":
@@ -1931,8 +1876,9 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
     """True only when the recorded holder is PROVEN gone: its pid is dead, or
     the record names this pid space (see :func:`_pid_space_id`) and the live
     pid's start identity differs from the one the holder recorded (see
-    :func:`_process_start_identity`). A record from another pid space is never
-    gone; one that names no pid space is judged by pid liveness alone.
+    :func:`localm.instances.process_start_identity`). A record from another
+    pid space is never gone; one that names no pid space is judged by pid
+    liveness alone.
 
     Staleness is decided by PID LIVENESS and that identity, never by elapsed
     time or the wall clock. Any fixed timeout eventually reclaims a live
@@ -1947,7 +1893,6 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
     True when it genuinely cannot tell - so this composes rather than
     re-deciding.
     """
-    from localm import instances
     rec = _part_lock_owner(d)
     if rec is None:
         return False
@@ -1962,8 +1907,8 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
         return False
     if not instances.pid_alive(pid):
         return True
-    return space is not None and _start_identity_differs(
-        rec.get("start"), _process_start_identity(pid))
+    return space is not None and instances.start_identity_differs(
+        rec.get("start"), instances.process_start_identity(pid))
 
 
 _GUARD_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK,
@@ -2138,7 +2083,7 @@ def _part_lock(filename: str):
         (d / "owner.json").write_text(
             json.dumps({"pid": os.getpid(), "filename": filename,
                         "space": _pid_space_id(),
-                        "start": _process_start_identity(os.getpid()),
+                        "start": instances.process_start_identity(os.getpid()),
                         "token": token, "started": time.time()}),
             encoding="utf-8")
     except OSError:
