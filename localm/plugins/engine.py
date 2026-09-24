@@ -28,6 +28,7 @@ from typing import Any, Callable, Optional
 from localm.plugins.contract import (API_VERSION, KNOWN_PLUGIN_KEYS,
                                      KNOWN_SURFACE_KEYS, PluginSettingField,
                                      PluginSpec, Surface)
+from localm.plugins.ids import _check_plugin_name, _is_valid_plugin_name
 
 # Logger for the sequential plugin load, one line per plugin.
 _log = logging.getLogger("localm.plugins")
@@ -42,31 +43,6 @@ _PLUGIN_MARKER = ".localm-source.json"
 # --------------------------------------------------------------------------- #
 #  Path safety: the plugin id, and an untrusted source tree                    #
 # --------------------------------------------------------------------------- #
-
-def _is_valid_plugin_name(name: Any) -> bool:
-    """True iff *name* is a legal plugin id: ONE path component, shaped like an
-    identifier once hyphens are folded to underscores.
-
-    The SAME rule ``parse_spec`` applies to a manifest's ``[plugin] name``, and
-    it is enforced at the two places a name becomes a path (``_installed_dir``
-    / ``_store_dir``).
-    """
-    if not name or not isinstance(name, str):
-        return False
-    # isidentifier() rejects every separator, dot, space and leading digit, so
-    # '.', '..', '../x', 'a/b' and a drive-qualified path are all refused; the
-    # Path(name).name comparison re-checks that the id is a single path
-    # component. A SHAPE check, not a uniqueness one: 'MyTool' names the same
-    # directory as 'mytool' on a case-insensitive filesystem.
-    return name == Path(name).name and name.replace("-", "_").isidentifier()
-
-
-def _check_plugin_name(name: str) -> str:
-    """Return *name* if it is a legal plugin id, else raise ValueError."""
-    if not _is_valid_plugin_name(name):
-        raise ValueError(f"invalid plugin name: {name!r}")
-    return name
-
 
 # Reparse tags that make one path stand in for another. stat exports these
 # names on Windows only, so getattr supplies the literal values elsewhere.
@@ -1762,13 +1738,15 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     manager.load_enabled()
     app.state.plugin_manager = manager
 
-    def _valid_name_or_404(name: str) -> None:
-        """A ``{name}`` that is not a legal plugin id can never match a plugin,
-        so it is a 404. Called BEFORE each handler's try block, which catches
-        broad ``Exception`` and would otherwise turn this into a 400. The engine
-        rejects such an id again at the path join (_installed_dir)."""
+    def _valid_name_or_404(name: str) -> str:
+        """*name* when it is a legal plugin id, else HTTPException 404: such a
+        ``{name}`` can never match a plugin. Called BEFORE each handler's try
+        block, which catches broad ``Exception`` and would otherwise turn this
+        into a 400. The engine rejects such an id again at the path join
+        (_installed_dir)."""
         if not _is_valid_plugin_name(name):
             raise HTTPException(404, f"No such plugin: {name}")
+        return name
 
     @app.get("/api/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins_engine():
@@ -1777,7 +1755,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/install",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_engine(name: str):
-        _valid_name_or_404(name)
+        name = _valid_name_or_404(name)
         try:
             manager.install(name)
         except KeyError:
@@ -1811,7 +1789,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/uninstall",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def uninstall_plugin_engine(name: str, delete_data: bool = False):
-        _valid_name_or_404(name)
+        name = _valid_name_or_404(name)
         # is_installed_or_on_disk(), not is_installed(): a manifest-less
         # directory is something uninstall() below can still act on.
         existed = manager.is_installed_or_on_disk(name)
@@ -1845,7 +1823,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/refresh",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def refresh_plugin_engine(name: str):
-        _valid_name_or_404(name)
+        name = _valid_name_or_404(name)
         try:
             refreshed = manager.refresh(name)
         except KeyError:
@@ -1857,7 +1835,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/enable",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def enable_plugin(name: str):
-        _valid_name_or_404(name)
+        name = _valid_name_or_404(name)
         try:
             manager.enable(name)
         except KeyError:
@@ -1871,7 +1849,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/disable",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def disable_plugin(name: str):
-        _valid_name_or_404(name)
+        name = _valid_name_or_404(name)
         try:
             manager.disable(name)
         except ValueError as e:

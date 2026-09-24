@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A model NAME from an untrusted caller must never resolve to an arbitrary path.
 
-registry.get_model_info() falls through to ``Path(name)`` on a registry miss and
-accepts any GGUF / Ollama blob / HF directory anywhere on disk. That fallthrough
-is a documented CLI feature (``localm run D:/models/foo.gguf``), gated behind an
-opt-in ``allow_direct_path`` plus a registry-membership check at each untrusted
-entry point - the jobs plugin and the MCP server, neither of which is behind a
-privileged scope. For an HF *directory* the chosen backend is HFBackend, and
+registry.get_operator_model_info() falls through to ``Path(name)`` on a registry
+miss and accepts any GGUF / Ollama blob / HF directory anywhere on disk. That
+fallthrough is a documented CLI feature (``localm run D:/models/foo.gguf``);
+registry.get_model_info() never takes it, and each untrusted entry point adds a
+registry-membership check - the jobs plugin and the MCP server, neither of which
+is behind a privileged scope. For an HF *directory* the chosen backend is HFBackend, and
 ``trust_remote_code=True`` there makes transformers import and execute the model
 directory's own .py via ``auto_map``.
 
@@ -34,8 +34,9 @@ def home(tmp_path, monkeypatch):
 
     Non-empty matters: the membership check mirrors http_server's existing
     "only enforce registration when the registry is not empty" convention, so an
-    empty registry would skip layer 2 and test nothing. Layer 1
-    (allow_direct_path) is unconditional and is covered by (d) either way.
+    empty registry would skip layer 2 and test nothing. Layer 1 (get_model_info
+    resolving registered names only) is unconditional and is covered by (d)
+    either way.
     """
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     import localm.config as cfg
@@ -110,19 +111,20 @@ def test_get_model_info_refuses_direct_path_by_default(home, evil_gguf):
     assert get_model_info(str(evil_gguf)) is None
 
 
-def test_get_model_info_allows_direct_path_when_opted_in(home, evil_gguf):
-    """...and the documented CLI feature still works when a CLI asks for it."""
-    from localm.model_manager.registry import get_model_info
-    info = get_model_info(str(evil_gguf), allow_direct_path=True)
+def test_operator_model_info_resolves_a_direct_path(home, evil_gguf):
+    """...and the documented CLI feature still works through the operator
+    resolver."""
+    from localm.model_manager.registry import get_operator_model_info
+    info = get_operator_model_info(str(evil_gguf))
     assert info is not None, "localm run <path> must keep working"
     assert Path(info[0]) == evil_gguf
 
 
 def test_get_model_info_refuses_direct_hf_dir_by_default(home, evil_hf_dir):
     """The directory shape is the RCE one, so it must be refused by default too."""
-    from localm.model_manager.registry import get_model_info
+    from localm.model_manager.registry import get_model_info, get_operator_model_info
     assert get_model_info(str(evil_hf_dir)) is None
-    assert get_model_info(str(evil_hf_dir), allow_direct_path=True) is not None
+    assert get_operator_model_info(str(evil_hf_dir)) is not None
 
 
 def test_registered_name_still_resolves(home):
@@ -132,11 +134,34 @@ def test_registered_name_still_resolves(home):
     assert info is not None and Path(info[0]).name == "good-model.gguf"
 
 
-def test_get_model_path_defaults_to_refusing(home, evil_gguf):
-    """get_model_path is a thin wrapper and must inherit the same default."""
+def test_get_model_path_refuses_a_direct_path(home, evil_gguf):
+    """get_model_path is a thin wrapper over get_model_info."""
     from localm.model_manager.registry import get_model_path
     assert get_model_path(str(evil_gguf)) is None
-    assert get_model_path(str(evil_gguf), allow_direct_path=True) == evil_gguf
+
+
+@pytest.mark.parametrize("fn", ["get_model_info", "get_model_path", "get_model_mmproj"])
+def test_registry_lookup_has_no_direct_path_option(fn):
+    """The registry lookups that HTTP and MCP callers use take no switch that
+    would resolve a caller-supplied name as a path on disk."""
+    import inspect
+
+    import localm.model_manager.registry as reg
+    assert "allow_direct_path" not in inspect.signature(getattr(reg, fn)).parameters
+
+
+def test_operator_mmproj_finds_a_sibling_of_a_direct_path(home, tmp_path):
+    """get_operator_model_mmproj scans next to a path on disk; get_model_mmproj
+    does not resolve that path at all."""
+    from localm.model_manager.registry import get_model_mmproj, get_operator_model_mmproj
+    d = tmp_path / "vision"
+    d.mkdir()
+    model = d / "gemma-3-4b-it-Q8_0.gguf"
+    model.write_bytes(b"GGUF\x00weights")
+    proj = d / "mmproj-gemma-3-4b-it-f16.gguf"
+    proj.write_bytes(b"GGUF\x00proj")
+    assert get_model_mmproj(str(model)) is None
+    assert get_operator_model_mmproj(str(model)) == str(proj)
 
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +298,18 @@ def test_mcp_operator_default_model_may_be_a_path(home, evil_gguf):
     from localm.plugins.mcpserver.server import EngineCache
     engines = EngineCache(default_model=str(evil_gguf))
     assert engines.resolve_model(None) == str(evil_gguf)
+
+
+def test_mcp_build_engine_resolves_the_operator_default_path(home, evil_gguf, monkeypatch):
+    """The operator's own --model path still builds an engine on that path."""
+    from localm.plugins.mcpserver.server import EngineCache
+
+    built = []
+    import localm.inference.engine as engine_mod
+    monkeypatch.setattr(engine_mod, "Engine", lambda *a, **k: built.append((a, k)))
+
+    EngineCache(default_model=str(evil_gguf))._build_engine(str(evil_gguf))
+    assert [Path(a[0]) for a, _k in built] == [evil_gguf]
 
 
 def test_mcp_build_engine_rejects_absolute_path(home, evil_gguf, monkeypatch):
@@ -414,7 +451,7 @@ def _mcp_handler(name, monkeypatch):
 def test_run_coder_task_refuses_unregistered_model(home, evil_gguf, monkeypatch):
     """run_coder_task builds a command line, so 'it is argv' does not mean an
     operator typed it: the coder CLI spawns `localm gui <model>`, whose startup
-    resolver opts into allow_direct_path."""
+    resolver accepts a path on disk."""
     import subprocess
     spawned = []
     monkeypatch.setattr(subprocess, "run",

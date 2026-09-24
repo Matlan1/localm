@@ -198,15 +198,17 @@ class EngineCache:
     def _build_engine(self, model_name: str):
         from localm.inference.engine import Engine
         from localm.model_manager import get_model_info, unregistered_model_error
+        from localm.model_manager.registry import get_operator_model_info
         # Gated here as well as in resolve_model: _build_engine is also
         # reachable directly, so the gate must not depend on having come
         # through resolve_model.
-        trusted = self._operator_supplied(model_name)
-        if not trusted:
+        if self._operator_supplied(model_name):
+            info = get_operator_model_info(self.default_model)
+        else:
             bad = unregistered_model_error(model_name)
             if bad:
                 raise ValueError(bad)
-        info = get_model_info(model_name, allow_direct_path=trusted)
+            info = get_model_info(model_name)
         if info is None:
             raise ValueError(f"Model not found: {model_name!r}. "
                              f"Run 'localm list' to see registered models.")
@@ -278,10 +280,11 @@ class EngineCache:
             model_footprint_bytes, required_vram_bytes)
         try:
             from localm.model_manager import get_model_info
+            from localm.model_manager.registry import get_operator_model_info
             # Operator-supplied default may be a path; a client name may not,
             # and returns None here.
-            info = get_model_info(
-                name, allow_direct_path=self._operator_supplied(name))
+            info = (get_operator_model_info(self.default_model)
+                    if self._operator_supplied(name) else get_model_info(name))
             if info is None:
                 return None
             path, _hint = info
@@ -336,9 +339,10 @@ class EngineCache:
         try:
             from localm.inference.engine import _is_gguf
             from localm.model_manager import get_model_info
+            from localm.model_manager.registry import get_operator_model_info
             # Tells the operator's own --model path from a client-supplied name.
-            info = get_model_info(
-                name, allow_direct_path=self._operator_supplied(name))
+            info = (get_operator_model_info(self.default_model)
+                    if self._operator_supplied(name) else get_model_info(name))
             return bool(info) and _is_gguf(info[0])
         except Exception:
             # Fail CLOSED: this only decides whether to run the per-device split
@@ -540,10 +544,11 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
     try:
         name = engines.resolve_model(None)
         from localm.model_manager import get_model_info
+        from localm.model_manager.registry import get_operator_model_info
         # resolve_model(None) yields the operator's own default, so a path is
         # legitimate here; anything else is already registry-gated upstream.
-        info = get_model_info(
-            name, allow_direct_path=engines._operator_supplied(name))
+        info = (get_operator_model_info(engines.default_model)
+                if engines._operator_supplied(name) else get_model_info(name))
         if info is not None:
             path, _hint = info
             if str(path).lower().endswith(".gguf"):

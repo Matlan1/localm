@@ -180,7 +180,7 @@ def setup_embeddings(model, yes=False):
         # have (never silently override an existing choice).
         from ..inference.embedder import _embeddings_dir
         if p.parent == _embeddings_dir().resolve():
-            from ..config import load_registry
+            from localm.config import load_registry
             from ..model_manager import find_aliases_by_path, _register, _sanitize_name
             if not find_aliases_by_path(p, load_registry()):
                 reg_name = _sanitize_name(f"embedding-{name}")

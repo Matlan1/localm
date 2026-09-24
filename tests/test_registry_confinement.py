@@ -401,8 +401,9 @@ class TestPublicSurfaceSurvivesARebase:
 
     def test_a_registry_key_cannot_be_path_shaped(self):
         """Guards the assumption that makes the poisoned-row fallthrough in
-        get_model_info harmless. When an entry is malformed, get_model_info falls
-        through to Path(<registry KEY>); that is safe only while keys are model
+        get_operator_model_info harmless. When an entry is malformed,
+        get_operator_model_info falls through to Path(<registry KEY>); that is
+        safe only while keys are model
         NAMES and never path strings. _sanitize_name is the single chokepoint
         enforcing it for every registration route, so pin its behavior here - if
         it ever stops stripping separators, the fallthrough becomes a live

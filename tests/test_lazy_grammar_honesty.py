@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from localm.inference.backends.base import (
     GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+    GRAMMAR_LOAD_FAILED_MESSAGE,
     GRAMMAR_UNSUPPORTED_MESSAGE,
     BaseBackend,
     GrammarUnsupportedError,
@@ -243,14 +244,37 @@ def test_every_validate_grammar_override_accepts_the_lazy_keyword():
 #  The worker: never return "unconstrained" to mean "I gave up"                #
 # --------------------------------------------------------------------------- #
 
-def test_grammar_processor_raises_when_xgrammar_is_missing():
-    """xgrammar is genuinely absent in this venv, so this exercises the real
-    ImportError arm rather than a simulated one."""
+def test_grammar_processor_raises_when_xgrammar_is_missing(monkeypatch):
+    """A None entry in sys.modules makes the import statement itself raise
+    ImportError, whether or not the grammar extra is installed."""
     from localm.inference.backends._hf_worker import _grammar_processor
 
-    assert "xgrammar" not in sys.modules or sys.modules.get("xgrammar") is None
-    with pytest.raises(GrammarUnsupportedError):
+    monkeypatch.setitem(sys.modules, "xgrammar", None)
+    with pytest.raises(GrammarUnsupportedError) as err:
         _grammar_processor(_GRAMMAR, object(), object())
+    assert str(err.value) == GRAMMAR_UNSUPPORTED_MESSAGE
+
+
+def test_grammar_processor_reports_an_installed_xgrammar_that_fails_to_load(monkeypatch):
+    """xgrammar whose native bindings refuse to load raises a RuntimeError, not
+    an ImportError, at import time. That is refused with the load-failure
+    message, not the install hint."""
+    import importlib.abc
+
+    from localm.inference.backends._hf_worker import _grammar_processor
+
+    class _BrokenBindings(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "xgrammar":
+                raise RuntimeError("Failed to load dynamic shared library xgrammar_bindings")
+            return None
+
+    monkeypatch.delitem(sys.modules, "xgrammar", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_BrokenBindings(), *sys.meta_path])
+    with pytest.raises(GrammarUnsupportedError) as err:
+        _grammar_processor(_GRAMMAR, object(), object())
+    assert str(err.value) == GRAMMAR_LOAD_FAILED_MESSAGE
+    assert isinstance(err.value.__cause__, RuntimeError)
 
 
 def test_grammar_processor_returns_none_only_when_no_grammar_was_asked_for():
