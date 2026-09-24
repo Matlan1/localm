@@ -740,3 +740,42 @@ def test_patch_on_an_unreadable_config_file_is_a_409_naming_the_file(app_env):
     assert _stored_credentials().get("hf_token") == "hf_keep_me"
     assert r.status_code == 409, r.text
     assert "config.json" in r.json()["detail"]
+
+
+def test_cli_config_credential_on_an_unreadable_store_is_a_usage_error(isolated_home):
+    import click
+    from localm.cli.models import config_cmd
+    path = _write_corrupt_store()
+
+    exc = None
+    try:
+        config_cmd.callback(key="hf_token", value="hf_cli_token_1")
+    except Exception as e:  # noqa: BLE001
+        exc = e
+
+    assert path.read_bytes() == _CORRUPT_STORE
+    assert isinstance(exc, click.ClickException), (
+        f"an unreadable store must be a ClickException, not a crash; got {exc!r}")
+    assert "model_source_credentials.json" in exc.message
+
+
+def test_cli_config_setting_on_an_unreadable_config_is_a_usage_error(isolated_home):
+    import click
+
+    import localm.config as cfg
+    from localm.cli.models import config_cmd
+    corrupt = b'{"temperature": '
+    cfg.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    cfg.CONFIG_FILE.write_bytes(corrupt)
+    cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".bak").unlink(missing_ok=True)
+
+    exc = None
+    try:
+        config_cmd.callback(key="temperature", value="0.9")
+    except Exception as e:  # noqa: BLE001
+        exc = e
+
+    assert cfg.CONFIG_FILE.read_bytes() == corrupt
+    assert isinstance(exc, click.ClickException), (
+        f"an unreadable config.json must be a ClickException, not a crash; got {exc!r}")
+    assert "config.json" in exc.message

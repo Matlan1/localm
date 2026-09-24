@@ -1136,6 +1136,7 @@ def config_cmd(key, value):
     """
     from rich.markup import escape
 
+    from localm.config import ConfigUnreadable
     from localm.model_source_credentials import CREDENTIAL_KEYS, set_credentials
     from localm.settings_schema import validate_update
     # hf_token / civitai_api_key are not config.json keys (see
@@ -1145,7 +1146,7 @@ def config_cmd(key, value):
     if key in CREDENTIAL_KEYS:
         try:
             set_credentials({key: value})
-        except ValueError as e:
+        except (ValueError, ConfigUnreadable) as e:
             raise click.ClickException(str(e))
         action = "cleared" if not value.strip() else "updated"
         console.print(f"[green]✓[/green] {escape(str(key))} {action}")
@@ -1157,7 +1158,10 @@ def config_cmd(key, value):
     # update_config() is the atomic read-modify-write helper; a bare
     # load_config()/save_config() pair has an unlocked window where a
     # concurrent config write can be silently lost.
-    update_config(lambda cfg: cfg.update(validated))
+    try:
+        update_config(lambda cfg: cfg.update(validated))
+    except ConfigUnreadable as e:
+        raise click.ClickException(str(e))
     # `key` only reaches here after validate_update() proved it is one of
     # DEFAULT_CONFIG's own keys, and is escaped anyway; `value` (a free-text
     # setting like mdns_name) has no such guarantee.
