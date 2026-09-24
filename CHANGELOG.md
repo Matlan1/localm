@@ -40,9 +40,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The Browser tab's live view is now interactive.** Click on the screenshot
   to click the corresponding point in the open browser, scroll with the mouse
   wheel to scroll its page, and type to send keystrokes to it, including Tab,
-  Enter, Escape, the arrow keys, Page Up/Down, Home, End, Backspace and
-  Delete. Clicking the frame gives it keyboard focus, and Tab and Escape are
-  forwarded to the browser rather than leaving the frame.
+  Enter, the arrow keys, Page Up/Down, Home, End, Backspace and Delete.
+  Clicking the frame gives it keyboard focus, and Tab is forwarded to the
+  browser. Esc releases the keyboard from the frame and Shift+Tab moves focus
+  back to the controls above it, as a hint under the focused frame says.
 - **Accelerated RAG vector queries, BM25 inverted index, and chat message queueing.**
   Vector search uses a normalized NumPy matrix dot product for fast vectorized
   cosine similarity, BM25 uses an inverted postings index for term lookups, and
@@ -96,6 +97,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Input in the Browser tab's live view now reaches the page in the order you made it, and the frame no longer traps the keyboard.** Each click, key and scroll waits for the one before it to land, so a character typed right after a click can no longer arrive first and end up in the wrong field, and characters typed while an input is still on its way are sent together. An input that does not reach the browser is now reported in the status line instead of being dropped silently. Esc now releases the keyboard from the frame instead of being sent to the page, and Shift+Tab moves focus back to the controls above it; a hint under the focused frame names both keys. `POST /api/browser/click` and `/api/browser/scroll` now refuse a position that is not a finite number, or is beyond a million pixels, with a 422 instead of passing it to the browser, and a click's `button` must be `left`, `right` or `middle`.
 - **A plugin's secret setting (an API key it registers via `add_settings()`) now correctly shows its configured status and a Clear button in Settings.** It previously always displayed as not set, and could never be cleared from the GUI, because the Settings page dropped the saved/environment status when rendering plugin, TTS, and per-plugin media secret fields.
 - **Resumed HuggingFace downloads are safe to run alongside another download, resume on Xet-backed repos, and are verified before they are registered.** A pull now writes its own temp file and only continues from a partial whose owning process is confirmed gone, so two pulls of the same file (or another program using the HuggingFace cache) can no longer be stitched into one corrupt file. A partial left by an earlier upload of the same file is no longer counted as "already downloaded" and is cleaned up. "Resuming ... (skipping first N MB)" is now only printed when those bytes are really reused, including on Xet-backed repos where the retry previously started over from zero. Every pull whose sha256 HuggingFace publishes is now hashed against it after download; a mismatch deletes the file and fails instead of registering it.
 - **On Linux and Windows, a download cut off by a crash no longer blocks the next pull of the same file once its process id belongs to another program; on Windows this also holds after a reboot.** A pull still refuses while the original download is running, including after the system clock jumps (sleep, NTP, a VM or WSL resync) and when that download runs in another container or pid namespace that shares the data folder.
