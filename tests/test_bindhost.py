@@ -35,3 +35,20 @@ def test_system_route_uses_shared_predicate_not_a_drifted_inline_copy():
     from localm.inference.routes import system as system_routes
     assert system_routes.is_loopback_host is is_loopback_host
     assert system_routes.is_loopback_host("127.0.0.5") is True
+
+
+def test_interface_addresses_skip_an_address_that_does_not_parse(monkeypatch):
+    import ipaddress
+    import socket
+    from types import SimpleNamespace
+
+    import psutil
+
+    from localm import bindhost
+    monkeypatch.setattr(psutil, "net_if_addrs", lambda: {"eth0": [
+        SimpleNamespace(family=socket.AF_INET, address="192.0.2.7"),
+        SimpleNamespace(family=socket.AF_INET6, address="not-an-address"),
+        SimpleNamespace(family=socket.AF_INET6, address="fe80::1%12"),
+    ]})
+    assert bindhost._interface_addresses() == frozenset({
+        ipaddress.ip_address("192.0.2.7"), ipaddress.ip_address("fe80::1")})
