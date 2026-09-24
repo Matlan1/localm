@@ -485,7 +485,8 @@ def test_serve_async_tls_skips_the_wakeup_task_off_windows(tmp_path, monkeypatch
 def _patch_bugreport(monkeypatch):
     """Record calls to the crash-guard hooks without touching disk: run_server is
     tested here for its OWN wiring and ordering, not for bugreport's own
-    behaviour."""
+    behaviour. run_server's own finally calls clear_crash_marker, not
+    disarm_crash_guard."""
     calls = []
     monkeypatch.setattr(bugreport_mod, "check_and_report_prior_crash",
                         lambda *a, **k: calls.append(("checked",)))
@@ -494,8 +495,8 @@ def _patch_bugreport(monkeypatch):
         lambda context=None, home=None, instance_id=None:
             calls.append(("armed", context, instance_id)))
     monkeypatch.setattr(
-        bugreport_mod, "disarm_crash_guard",
-        lambda home=None, instance_id=None: calls.append(("disarmed", instance_id)))
+        bugreport_mod, "clear_crash_marker",
+        lambda home=None, instance_id=None: calls.append(("cleared", instance_id)))
     return calls
 
 
@@ -568,7 +569,7 @@ def test_run_server_plain_wires_crash_guard_and_extracts_instance_id(monkeypatch
 
     assert calls[0] == ("checked",)
     assert calls[1] == ("armed", {"host": "0.0.0.0", "port": 9999, "tls": False}, "inst-abc")
-    assert calls[2] == ("disarmed", "inst-abc")
+    assert calls[2] == ("cleared", "inst-abc")
 
 
 def test_run_server_handles_a_bare_asgi_callable_with_no_state(monkeypatch):
@@ -583,7 +584,7 @@ def test_run_server_handles_a_bare_asgi_callable_with_no_state(monkeypatch):
     portmux.run_server(_bare_app, "127.0.0.1", 8000)
 
     assert calls[1] == ("armed", {"host": "127.0.0.1", "port": 8000, "tls": False}, None)
-    assert calls[2] == ("disarmed", None)
+    assert calls[2] == ("cleared", None)
 
 
 def test_run_server_plain_swallows_keyboard_interrupt(monkeypatch):
@@ -594,7 +595,7 @@ def test_run_server_plain_swallows_keyboard_interrupt(monkeypatch):
     monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
 
     portmux.run_server(_bare_app, "127.0.0.1", 8001)   # must not raise
-    assert calls[-1] == ("disarmed", None), "crash guard must still be disarmed"
+    assert calls[-1] == ("cleared", None), "crash marker must still be cleared"
 
 
 def test_run_server_plain_falls_back_to_uvicorns_own_bind_on_unexpected_error(
@@ -615,7 +616,7 @@ def test_run_server_plain_falls_back_to_uvicorns_own_bind_on_unexpected_error(
         # waits for the longest open response.
         "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
     }, None)]
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
     assert ("portmux: could not build the listening socket for 127.0.0.1:8002 "
             "(simulated: cannot build the listening socket); falling back to "
             "uvicorn's own bind, which serves IPv6 only for a :: host"
@@ -668,7 +669,7 @@ def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypa
     server.hooks_at_run[0]()
     assert server.should_exit is True, "the stop hook does not end this server"
     assert portmux._stop_hooks == []
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
 def test_a_ctrl_c_on_the_prepared_socket_fallback_ends_run_server_normally(monkeypatch):
@@ -691,7 +692,7 @@ def test_a_ctrl_c_on_the_prepared_socket_fallback_ends_run_server_normally(monke
             for sock in sockets or []:
                 sock.close()
     assert len(fake.runs) == 1 and fake.runs[0][1], "the prepared socket was not used"
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
     assert portmux._stop_hooks == []
 
 
@@ -760,7 +761,7 @@ def test_run_server_tls_swallows_keyboard_interrupt(monkeypatch):
     portmux.run_server(_bare_app, "0.0.0.0", 8443,
                        ssl_certfile="cert.pem", ssl_keyfile="key.pem")   # must not raise
     assert calls[1][1]["tls"] is True
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
 def test_run_server_tls_falls_back_to_uvicorns_own_bind_on_unexpected_error(
@@ -780,7 +781,7 @@ def test_run_server_tls_falls_back_to_uvicorns_own_bind_on_unexpected_error(
         "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
         "ssl_certfile": "cert.pem", "ssl_keyfile": "key.pem",
     }, None)]
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -1153,7 +1154,7 @@ def test_run_server_routes_stop_signals_only_while_it_runs(
     assert seen == {"handler": portmux._on_stop_signal, "active": 1, "stopping": False}
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
     assert portmux._active_runs == 0
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
 def test_run_server_resets_a_stop_request_left_from_an_earlier_run(
@@ -1172,7 +1173,7 @@ def test_run_server_resets_a_stop_request_left_from_an_earlier_run(
 
     assert seen == {"requested": False, "stopping": False}, (
         "a stop left over from an earlier run_server() call reached this one")
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
 def test_run_server_counts_itself_on_top_of_a_run_already_active(
@@ -1191,7 +1192,7 @@ def test_run_server_counts_itself_on_top_of_a_run_already_active(
 
     assert seen == {"active": 2}
     assert portmux._active_runs == 1
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
 @pytest.mark.parametrize("tls_files", [None, ("cert.pem", "key.pem")])
@@ -1249,23 +1250,23 @@ def test_run_server_does_not_serve_after_a_stop_during_startup(
     portmux.run_server(_bare_app, "127.0.0.1", 8006)
 
     assert served == [], "run_server served after a stop signal had already arrived"
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
-def test_run_server_is_stopping_before_it_disarms_and_a_signal_then_is_absorbed(
+def test_run_server_is_stopping_before_it_clears_the_marker_and_a_signal_then_is_absorbed(
         _stop_state, _sigterm_default, monkeypatch):
-    """A second terminal-close SIGHUP can land inside the disarm itself; it must
-    neither raise into it nor run a stop hook."""
+    """A second terminal-close SIGHUP can land inside the marker clear itself;
+    it must neither raise into it nor run a stop hook."""
     calls = _patch_bugreport(monkeypatch)
     seen = {}
     hits = []
 
-    def disarm(home=None, instance_id=None):
+    def clear(home=None, instance_id=None):
         seen["stopping"] = portmux._stopping
         portmux._stop_hooks.append(lambda: hits.append(1))
         portmux._on_stop_signal(signal.SIGTERM, None)
-        calls.append(("disarmed", instance_id))
-    monkeypatch.setattr(bugreport_mod, "disarm_crash_guard", disarm)
+        calls.append(("cleared", instance_id))
+    monkeypatch.setattr(bugreport_mod, "clear_crash_marker", clear)
 
     async def fake_serve(app, host, port, log_level):
         return
@@ -1275,7 +1276,7 @@ def test_run_server_is_stopping_before_it_disarms_and_a_signal_then_is_absorbed(
 
     assert seen == {"stopping": True}
     assert hits == []
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
 
 
 def _stop_when_listening(port, outcome):
@@ -1321,7 +1322,7 @@ def test_a_stop_signal_ends_a_real_serve_and_run_server_disarms(
     assert not outcome.get("interrupted"), (
         "the stop signal did not end serving - run_server had to be interrupted")
     assert "stop_sent" in outcome
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
     assert portmux._stop_hooks == []
 
 
@@ -1379,5 +1380,5 @@ def test_a_stop_during_the_internal_servers_startup_ends_serving_cleanly(
     assert fallback == [], "a stop during startup was treated as a failed bind"
     assert app.counts["startup"] == 1, (
         f"the app's lifespan startup ran {app.counts['startup']} times")
-    assert calls[-1] == ("disarmed", None)
+    assert calls[-1] == ("cleared", None)
     assert portmux._stop_hooks == []

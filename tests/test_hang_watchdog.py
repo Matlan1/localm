@@ -8,6 +8,7 @@ while the loop is still alive.
 """
 
 import asyncio
+import re
 import sys
 import time
 
@@ -480,18 +481,24 @@ def test_debug_request_log_renders_cold_start_as_na_not_zero(caplog, monkeypatch
 
 def test_debug_request_log_renders_a_real_reading_as_before(caplog, monkeypatch):
     """The other half: once there IS a real reading, the log format is the
-    numeric one (%.2fs), never "n/a"."""
+    numeric one (%.2fs), never "n/a". _hb_monotonic is stamped right before
+    the request, inside the TestClient context: pytest stays in
+    sys.modules for this test, so the real heartbeat task (gated on
+    "pytest" not in sys.modules) never starts and nothing else can advance
+    _hb_monotonic between the stamp and the request - the measured gap is
+    therefore just the request's own handling time, not app-creation plus
+    lifespan-startup time."""
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     from localm.inference import http_server as hs
-    monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())   # "just ticked"
     app = create_app(None, api_landing=True)
     with caplog.at_level("DEBUG", logger="localm"):
         with TestClient(app) as c:
+            monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())   # "just ticked"
             r = c.get("/health")
     assert r.status_code == 503   # no engine loaded - see the sibling test above
     lines = [rec.getMessage() for rec in caplog.records if "loop_lag=" in rec.getMessage()]
     assert lines, "no request log line carrying loop_lag was captured"
-    assert any("loop_lag=0.00s" in ln for ln in lines), lines
+    assert any(re.search(r"loop_lag=\d+\.\d{2}s", ln) for ln in lines), lines
     assert not any("loop_lag=n/a" in ln for ln in lines), lines
 
 

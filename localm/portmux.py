@@ -316,9 +316,13 @@ def run_server(
 
     On the main thread, SIGHUP, SIGTERM and SIGBREAK that are at their default
     disposition end serving gracefully for the whole call instead of ending the
-    process (see route_stop_signals), so the crash guard is disarmed on those
-    stops as on Ctrl+C. The crash guard is disarmed only after serving has
-    ended.
+    process (see route_stop_signals), so the crash marker is cleared on those
+    stops as on Ctrl+C. The marker is cleared only after serving has ended,
+    via bugreport.clear_crash_marker rather than disarm_crash_guard: faulthandler
+    and the native-fault trace stay attached so a caller whose own teardown still
+    has to unload native engines/the embedder (run_advertised's finally, which
+    runs after this function returns) is still covered. That caller disarms the
+    guard fully once its own teardown has run.
     """
     import uvicorn
 
@@ -346,7 +350,7 @@ def run_server(
                            log_level)
             finally:
                 _stopping = True
-                bugreport.disarm_crash_guard(instance_id=instance_id)
+                bugreport.clear_crash_marker(instance_id=instance_id)
     finally:
         _active_runs -= 1
 

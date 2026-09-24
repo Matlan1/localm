@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm import model_manager as mm
+from localm.model_manager.gguf import gguf_n_embd
+from tests.test_mmproj_discovery import _real_mmproj_gguf, _real_text_model_gguf
 
 
 # ---------------------------------------------------------------------------
@@ -647,3 +649,175 @@ class TestSyncModelsDirBackfillsExistingEntry:
         result = mm.sync_models_dir()
 
         assert result.mmproj_backfilled == 3, "capped at _MMPROJ_BACKFILL_CAP, not all 5 at once"
+
+
+class TestCrossRepoFilenameCollision:
+    """A vision projector's filename is not unique across HF repos - several
+    vendors' vision releases each ship a lone "mmproj-model-f16.gguf". A file
+    already on disk under a candidate's name must be confirmed to actually be
+    the CURRENT repo's own projector (digest, else embedding width) before it
+    is reused; otherwise a second model can silently inherit the wrong repo's
+    projector by filename collision alone."""
+
+    def test_width_mismatch_downloads_under_a_new_name_not_the_stale_file(
+            self, fake_registry, monkeypatch, tmp_path):
+        store, models_dir = fake_registry
+        # An earlier pull ("gemma") already left its own projector at the
+        # plain candidate name.
+        wrong_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_wrong.gguf", 2560).read_bytes()
+        (models_dir / "mmproj-model-f16.gguf").write_bytes(wrong_bytes)
+        store["gemma-3-4b-it-Q4_K_M"] = {
+            "path": str((models_dir / "gemma-3-4b-it-Q4_K_M.gguf").resolve()),
+            "source": "hf:lmstudio-community/gemma-3-4b-it-GGUF",
+            "model_type": "llm",
+            "mmproj": str((models_dir / "mmproj-model-f16.gguf").resolve()),
+        }
+
+        # A second, unrelated repo ships a DIFFERENT projector under that
+        # same plain name. fake_registry forces _hf_file_sha256 to None, so
+        # this exercises the embedding-width fallback specifically.
+        model_bytes = _real_text_model_gguf(
+            tmp_path / "_scratch_model.gguf", "qwen2", 3584).read_bytes()
+        right_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_right.gguf", 3584).read_bytes()
+        _wire_repo_listing(monkeypatch, [
+            "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", "mmproj-model-f16.gguf"])
+        _wire_download(monkeypatch, {
+            "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf": model_bytes,
+            "mmproj-model-f16.gguf": right_bytes,
+        })
+
+        ok = mm._pull_gguf_file(
+            "lmstudio-community/Qwen2.5-VL-7B-Instruct-GGUF:"
+            "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", None)
+
+        assert ok is True
+        entry = store["Qwen2.5-VL-7B-Instruct-Q4_K_M"]
+        assert "mmproj" in entry
+        recorded = Path(entry["mmproj"])
+        # Data first: the new entry's own projector, not the stale file, and
+        # its width matches the model that was just pulled.
+        assert recorded.name == "mmproj-model-f16-2.gguf"
+        assert gguf_n_embd(recorded) == 3584
+        # The pre-existing file, and the entry that already records it, are
+        # untouched.
+        assert (models_dir / "mmproj-model-f16.gguf").read_bytes() == wrong_bytes
+        assert store["gemma-3-4b-it-Q4_K_M"]["mmproj"] == str(
+            (models_dir / "mmproj-model-f16.gguf").resolve())
+
+    def test_matching_width_reuses_the_existing_file_without_redownload(
+            self, fake_registry, monkeypatch, tmp_path):
+        """The legitimate case the fix must not break: re-pulling a model
+        whose own projector is already on disk still reuses it without a
+        second download."""
+        store, models_dir = fake_registry
+        proj_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_proj.gguf", 3584).read_bytes()
+        (models_dir / "mmproj-main-f16.gguf").write_bytes(proj_bytes)
+        model_bytes = _real_text_model_gguf(
+            tmp_path / "_scratch_model.gguf", "qwen2", 3584).read_bytes()
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        downloaded = _wire_download(monkeypatch, {"main.gguf": model_bytes})
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None)
+
+        assert ok is True
+        assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
+        assert "mmproj-main-f16.gguf" not in downloaded, (
+            "a genuinely matching projector must be reused, not re-fetched")
+        assert (models_dir / "mmproj-main-f16.gguf").read_bytes() == proj_bytes
+
+    def test_matching_digest_reuses_even_with_unreadable_width(
+            self, fake_registry, monkeypatch, tmp_path):
+        """The digest check is the primary signal and does not depend on the
+        model's own GGUF header being parseable."""
+        store, models_dir = fake_registry
+        proj_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_proj.gguf", 3584).read_bytes()
+        (models_dir / "mmproj-main-f16.gguf").write_bytes(proj_bytes)
+        import hashlib
+        digest = hashlib.sha256(proj_bytes).hexdigest()
+        monkeypatch.setattr(mm, "_hf_file_sha256",
+                            lambda repo, fn: digest if fn == "mmproj-main-f16.gguf" else None)
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        downloaded = _wire_download(monkeypatch, {})  # main.gguf: placeholder bytes only
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None)
+
+        assert ok is True
+        assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
+        assert "mmproj-main-f16.gguf" not in downloaded
+
+    def test_digest_mismatch_downloads_under_a_new_name_even_with_matching_width(
+            self, fake_registry, monkeypatch, tmp_path):
+        """The digest check is authoritative: it must reject a stale file even
+        when the (weaker) embedding-width fallback would have let it through."""
+        store, models_dir = fake_registry
+        wrong_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_wrong.gguf", 3584).read_bytes()   # same width
+        (models_dir / "mmproj-main-f16.gguf").write_bytes(wrong_bytes)
+        model_bytes = _real_text_model_gguf(
+            tmp_path / "_scratch_model.gguf", "qwen2", 3584).read_bytes()
+        right_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_right.gguf", 3584).read_bytes()
+        monkeypatch.setattr(mm, "_hf_file_sha256",
+                            lambda repo, fn: "f" * 64 if fn == "mmproj-main-f16.gguf" else None)
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        _wire_download(monkeypatch, {
+            "main.gguf": model_bytes,
+            "mmproj-main-f16.gguf": right_bytes,
+        })
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None)
+
+        assert ok is True
+        recorded = Path(store["main"]["mmproj"])
+        assert recorded.name == "mmproj-main-f16-2.gguf"
+        assert recorded.read_bytes() == right_bytes
+        assert (models_dir / "mmproj-main-f16.gguf").read_bytes() == wrong_bytes
+
+    def test_unverifiable_reuses_as_before_and_never_crashes(
+            self, fake_registry, monkeypatch, tmp_path):
+        """Neither the digest nor a comparable width is available (a
+        placeholder header, as most of this file's own fixtures use) - falls
+        back to the historical reuse-as-is behaviour rather than refusing to
+        attach anything."""
+        store, models_dir = fake_registry
+        (models_dir / "mmproj-main-f16.gguf").write_bytes(_CLIP_BYTES)  # no embedding key
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        downloaded = _wire_download(monkeypatch, {})
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None)
+
+        assert ok is True
+        assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
+        assert "mmproj-main-f16.gguf" not in downloaded
+
+
+class TestExplicitMmprojFilenameCollision:
+    """The same collision, via an explicit --mmproj spec (_fetch_explicit_mmproj)."""
+
+    def test_explicit_mmproj_width_mismatch_downloads_under_a_new_name(
+            self, fake_registry, monkeypatch, tmp_path):
+        store, models_dir = fake_registry
+        wrong_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_wrong.gguf", 2560).read_bytes()
+        (models_dir / "custom-mmproj.gguf").write_bytes(wrong_bytes)
+        model_bytes = _real_text_model_gguf(
+            tmp_path / "_scratch_model.gguf", "qwen2", 3584).read_bytes()
+        right_bytes = _real_mmproj_gguf(
+            tmp_path / "_scratch_right.gguf", 3584).read_bytes()
+        _wire_repo_listing(monkeypatch, ["main.gguf"])  # no auto-detected sibling
+        _wire_download(monkeypatch, {
+            "main.gguf": model_bytes,
+            "custom-mmproj.gguf": right_bytes,
+        })
+
+        ok = mm.pull_model("o/r:main.gguf", mmproj_spec="other/repo:custom-mmproj.gguf")
+
+        assert ok is True
+        recorded = Path(store["main"]["mmproj"])
+        assert recorded.name == "custom-mmproj-2.gguf"
+        assert gguf_n_embd(recorded) == 3584
+        assert (models_dir / "custom-mmproj.gguf").read_bytes() == wrong_bytes
