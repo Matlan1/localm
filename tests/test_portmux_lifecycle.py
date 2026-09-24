@@ -918,8 +918,11 @@ def test_a_ctrl_c_ends_the_last_resort_bind_normally(_stop_state, monkeypatch):
     monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
     fake = _fake_uvicorn("interrupted")
 
-    portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", 9010,
-                                   log_level="warning")   # must not raise
+    try:
+        portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", 9010,
+                                       log_level="warning")
+    except KeyboardInterrupt:
+        pytest.fail("a Ctrl+C escaped the last-resort bind")
 
     assert len(fake.runs) == 1
     assert fake.runs[0][1] is None, "uvicorn's own bind takes no prepared socket"
