@@ -706,21 +706,86 @@ def test_patch_on_an_unreadable_store_applies_no_config_change(app_env):
 
 def test_store_unreadable_only_at_write_time_is_still_a_409(app_env, monkeypatch):
     """The store turning unreadable between the readability check and the
-    write is refused by set_credentials itself and still answered as a 409."""
+    write is refused by set_credentials itself. The config part of the request
+    was already saved by then, and the 409 detail says so."""
     import localm.model_source_credentials as msc
     c, _scoped_key, _home = app_env
+    from localm.config import load_config
+    assert load_config()["import_max_depth"] != 5
     path = _write_corrupt_store()
     checked = []
     monkeypatch.setattr(msc, "check_credentials_readable",
                         lambda: checked.append(True))
 
     r = _answering(c).patch("/v1/config", headers=_owner(),
-                            json={"hf_token": "hf_new"})
+                            json={"hf_token": "hf_new", "import_max_depth": 5})
 
     assert checked == [True], "the patched readability check was not reached"
     assert path.read_bytes() == _CORRUPT_STORE
+    assert load_config()["import_max_depth"] == 5
     assert r.status_code == 409, r.text
-    assert "model_source_credentials.json" in r.json()["detail"]
+    detail = r.json()["detail"]
+    assert "credential change was not saved" in detail
+    assert "model_source_credentials.json" in detail
+    assert "other settings in this request were saved" in detail
+
+
+def test_credential_lock_timeout_after_the_config_save_is_reported(app_env, monkeypatch):
+    """Another process holding the credentials lock past the wait budget: the
+    stored credential is unchanged, the config part is saved, and the 504
+    detail says which of the two happened."""
+    import localm.config as cfg
+    c, _scoped_key, _home = app_env
+    from localm.model_source_credentials import credentials_path, set_credentials
+    set_credentials({"hf_token": "hf_keep_me"})
+    lock = credentials_path().with_name(credentials_path().name + ".lock")
+    lock.write_bytes(b"4194303:0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+
+    r = _answering(c).patch("/v1/config", headers=_owner(),
+                            json={"hf_token": "", "import_max_depth": 5})
+
+    assert lock.is_file(), "the foreign lock was reclaimed, so no wait happened"
+    assert _stored_credentials().get("hf_token") == "hf_keep_me"
+    assert cfg.load_config()["import_max_depth"] == 5
+    assert r.status_code == 504, r.text
+    detail = r.json()["detail"]
+    assert "credential change was not saved" in detail
+    assert "model_source_credentials.json.lock" in detail
+    assert "other settings in this request were saved" in detail
+
+
+def test_credential_write_os_error_after_the_config_save_is_reported(app_env, monkeypatch):
+    """A failed credential file write is a 500 whose detail names the file but
+    not its path, and says the config part was saved."""
+    import errno
+
+    import localm.config as cfg
+    import localm.model_source_credentials as msc
+    c, _scoped_key, home = app_env
+    msc.set_credentials({"hf_token": "hf_keep_me"})
+    attempted = []
+
+    def full_disk(records):
+        attempted.append(records)
+        raise OSError(errno.ENOSPC, "No space left on device",
+                      str(msc.credentials_path()) + ".tmp")
+
+    monkeypatch.setattr(msc, "_write_all", full_disk)
+
+    r = _answering(c).patch("/v1/config", headers=_owner(),
+                            json={"hf_token": "hf_new", "import_max_depth": 5})
+
+    assert attempted, "the failing credential write was never reached"
+    assert _stored_credentials().get("hf_token") == "hf_keep_me"
+    assert cfg.load_config()["import_max_depth"] == 5
+    assert r.status_code == 500, r.text
+    detail = r.json()["detail"]
+    assert "credential change was not saved" in detail
+    assert "model_source_credentials.json could not be written" in detail
+    assert "No space left on device" in detail
+    assert "other settings in this request were saved" in detail
+    assert str(home) not in detail
 
 
 def test_patch_on_an_unreadable_config_file_is_a_409_naming_the_file(app_env):
