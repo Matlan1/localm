@@ -627,6 +627,19 @@ test("every t() key in the migrated modules resolves in the English catalog", as
   assert.deepEqual(bad, []);
 });
 
+test("a renamed secret-status key in settings.js is caught by the t() drift gate", async () => {
+  const { window } = await loadIn(null);
+  const en = { ...evalIn(window, "I18N_EN") };
+  const probeKey = "settings.field.secretClearButton";
+  assert.equal(typeof en[probeKey], "string", `expected ${probeKey} in the English catalog`);
+  delete en[probeKey];
+  const bad = tCallKeys(read("pages", "settings.js"))
+    .filter((k) => typeof en[k] !== "string" && typeof en[`${k}.other`] !== "string");
+  assert.ok(bad.includes(probeKey),
+    "the secret-status keys must be plain t() calls so a rename is caught here, " +
+    "not tOr() calls the drift gate cannot see");
+});
+
 test("the settings nav group ids all have a catalog entry", async () => {
   const { window } = await loadIn(null, { withPages: true });
   const ids = Array.from(evalIn(window, "SETTINGS_GROUPS.map((g) => g.id)"));

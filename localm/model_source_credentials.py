@@ -65,15 +65,25 @@ def _write_all(records: dict) -> bool:
     return atomic_write_private(path, json.dumps(records, indent=2), retrying=True)
 
 
+def _blank_to_none(value) -> Optional[str]:
+    """*value* stripped, or None for anything that is not a non-blank string."""
+    if isinstance(value, str):
+        s = value.strip()
+        if s:
+            return s
+    return None
+
+
 def get_credential(key: str) -> Optional[str]:
-    """The stored value for *key*, else its env var fallback, else None."""
-    stored = _read_all().get(key)
-    if isinstance(stored, str) and stored:
+    """The stored value for *key*, else its env var fallback, else None. A
+    blank or whitespace-only value counts as unset in both cases."""
+    stored = _blank_to_none(_read_all().get(key))
+    if stored is not None:
         return stored
     env_name = _ENV_FALLBACK.get(key)
     if env_name:
-        env_val = os.environ.get(env_name)
-        if env_val:
+        env_val = _blank_to_none(os.environ.get(env_name))
+        if env_val is not None:
             return env_val
     return None
 
@@ -81,14 +91,11 @@ def get_credential(key: str) -> Optional[str]:
 def get_credential_source(key: str) -> Optional[str]:
     """Return 'stored' if *key* is persisted in the credentials file, 'env' if
     sourced from an environment variable fallback, else None."""
-    stored = _read_all().get(key)
-    if isinstance(stored, str) and stored.strip():
+    if _blank_to_none(_read_all().get(key)) is not None:
         return "stored"
     env_name = _ENV_FALLBACK.get(key)
-    if env_name:
-        env_val = os.environ.get(env_name)
-        if env_val and env_val.strip():
-            return "env"
+    if env_name and _blank_to_none(os.environ.get(env_name)) is not None:
+        return "env"
     return None
 
 

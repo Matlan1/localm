@@ -441,3 +441,14 @@ def test_get_credential_source_and_is_set(isolated_home, monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     assert get_credential_source("hf_token") is None
     assert is_credential_set("hf_token") is False
+
+
+def test_whitespace_only_value_agrees_between_get_and_source(isolated_home, monkeypatch):
+    from localm.model_source_credentials import get_credential, get_credential_source
+    monkeypatch.setenv("HF_TOKEN", " ")
+    assert get_credential("hf_token") is None
+    assert get_credential_source("hf_token") is None
+
+    monkeypatch.setenv("HF_TOKEN", "  real-token  ")
+    assert get_credential("hf_token") == "real-token"
+    assert get_credential_source("hf_token") == "env"
