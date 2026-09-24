@@ -450,6 +450,7 @@ def test_cwd_moves_the_session_and_its_saved_checkpoint(tmp_path, monkeypatch):
         assert not old_path.exists(), (
             "a phantom copy was left behind under the old project - it would be "
             "offered by 'continue last session' forever, frozen at this moment")
+        client.delete(f"/api/coder/sessions/{sid}", headers=owner)
 
 
 def test_cwd_is_refused_for_a_restricted_session(tmp_path, monkeypatch):
@@ -920,6 +921,7 @@ def test_cwd_allows_a_move_into_an_equally_or_more_recording_project(
                         json={"cwd": str(plain)})
         assert r.status_code == 200, r.text
         assert sess.agent.cwd == plain.resolve()
+        client.delete(f"/api/coder/sessions/{sid}", headers=owner)
 
 
 # --------------------------------------------------------------------------- #
@@ -1121,6 +1123,7 @@ def test_session_set_model_remote_backend(tmp_path, monkeypatch):
         assert sess.agent._model_name == "gpt-4o-mini"
         assert sess.agent.backend.set_model_calls == ["gpt-4o-mini"]
         assert sess.agent.backend.model_id == "gpt-4o-mini"
+        client.delete(f"/api/coder/sessions/{sid}", headers=owner)
 
 
 def test_set_model_with_backend_that_cannot_switch_returns_409(tmp_path, monkeypatch):
