@@ -333,9 +333,9 @@ class BrowserSession:
                     return
                 url = page.url
                 if url.startswith("chrome-error:"):
-                    await self._close_quietly(page)
                     self._refuse(url, "a new window the page opened did not "
                                       "load, so it was closed")
+                    await self._close_quietly(page)
                 elif self._take_clicked_window(url):
                     previous = self._page
                     previous_url = previous.url if previous is not None else ""
@@ -345,9 +345,9 @@ class BrowserSession:
                     self._note("showing the new window %s in place of %s, "
                                "which was closed" % (url, previous_url))
                 else:
-                    await self._close_quietly(page)
                     self._refuse(url, "the page opened a new window without a "
                                       "click, so it was closed")
+                    await self._close_quietly(page)
         except Exception as exc:                     # noqa: BLE001
             logger.warning("browser %s could not handle a new window: %s",
                            self.session_id, exc)

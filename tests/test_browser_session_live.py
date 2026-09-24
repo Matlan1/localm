@@ -440,6 +440,8 @@ def test_a_clicked_window_that_does_not_load_is_closed(browser, origin):
     assert b.click_coords(50, 50)["ok"] is True
     _wait_until(lambda: any(x["url"].endswith("/TARGET")
                             for x in b.blocked_requests())
+                and any("did not load" in x["reason"]
+                        for x in b.blocked_requests())
                 and len(_pages(b)[0]) == 1)
     urls, driven = _pages(b)
     assert urls == [start], "open pages: %r" % (urls,)
@@ -447,6 +449,8 @@ def test_a_clicked_window_that_does_not_load_is_closed(browser, origin):
     assert "/TARGET" not in _Recorder.seen
     assert any(x["url"].endswith("/TARGET") and "deny list" in x["reason"]
                for x in b.blocked_requests()), b.blocked_requests()
+    assert any("did not load" in x["reason"] for x in b.blocked_requests()), (
+        b.blocked_requests())
 
 
 def test_typing_stops_when_the_call_gives_up(browser, origin):
