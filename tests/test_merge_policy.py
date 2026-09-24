@@ -2,10 +2,11 @@
 """scripts/merge_policy.py, the decision behind the `merge-policy` job in
 ci.yml, and the shape of that job.
 
-The policy's contract: lint and gui-tests must succeed on every pull request;
-without the `full-ci` label python-pr-gate must succeed and the change must
-not be a release; with the label the matrix must succeed; mutation-test
-blocks when it ran and failed and is neutral when it was skipped; a release
+The policy's contract: lint, gui-tests and mutation-scope must succeed on
+every pull request; without the `full-ci` label python-pr-gate must succeed
+and the change must not be a release; with the label the matrix must
+succeed; mutation-test blocks when it ran and failed and is neutral when it
+was skipped; a release
 PR without the label fails with the label named, every other PR merges
 without the matrix; a skipped, failed, cancelled or missing needed job never
 passes.
@@ -27,9 +28,11 @@ _SCRIPT = REPO_ROOT / "scripts" / "merge_policy.py"
 _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 GREEN_UNLABELLED = {"python-pr-gate": "success", "lint": "success",
-                    "gui-tests": "success", "test": "skipped", "mutation-test": "skipped"}
+                    "gui-tests": "success", "test": "skipped",
+                    "mutation-scope": "success", "mutation-test": "skipped"}
 GREEN_LABELLED = {"python-pr-gate": "skipped", "lint": "success",
-                  "gui-tests": "success", "test": "success", "mutation-test": "skipped"}
+                  "gui-tests": "success", "test": "success",
+                  "mutation-scope": "success", "mutation-test": "skipped"}
 
 
 def _load(path=_SCRIPT, name="merge_policy"):
@@ -167,7 +170,7 @@ def test_every_pattern_names_something_that_exists_in_the_tree(mp):
 
 # --- the decision -------------------------------------------------------------
 
-def test_a_docs_only_unlabelled_pr_passes_on_the_three_cheap_jobs(mp):
+def test_a_docs_only_unlabelled_pr_passes_on_the_cheap_jobs(mp):
     v = mp.decide(False, GREEN_UNLABELLED, {})
     assert v.ok and v.reasons == []
     assert v.is_release is False
@@ -228,13 +231,23 @@ def test_the_unlabelled_arm_fails_on_a_red_gate(mp):
     assert v.reasons == ["python-pr-gate: failure"]
 
 
-@pytest.mark.parametrize("job", ["lint", "gui-tests"])
+@pytest.mark.parametrize("job", ["lint", "gui-tests", "mutation-scope"])
 @pytest.mark.parametrize("full_ci, results", [(False, GREEN_UNLABELLED), (True, GREEN_LABELLED)])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
-def test_lint_and_gui_tests_must_succeed_on_both_arms(mp, job, full_ci, results, result):
+def test_the_jobs_every_pr_runs_must_succeed_on_both_arms(mp, job, full_ci, results, result):
     v = mp.decide(full_ci, {**results, job: result}, {})
     assert not v.ok
     assert len(v.reasons) == 1 and v.reasons[0].startswith(f"{job}: {result}")
+
+
+@pytest.mark.parametrize("full_ci, results", [(False, GREEN_UNLABELLED), (True, GREEN_LABELLED)])
+def test_a_red_mutation_scope_fails_an_otherwise_green_pr(mp, full_ci, results):
+    """NEGATIVE: mutation-scope exits 1 when it cannot tell whether the change
+    touches the mutation-tested trust boundary; that unknown never merges."""
+    v = mp.decide(full_ci, {**results, "mutation-scope": "failure"},
+                  mp.classify(["localm/auth.py"]))
+    assert not v.ok
+    assert v.reasons == ["mutation-scope: failure"]
 
 
 @pytest.mark.parametrize("job", ["python-pr-gate", "test"])
@@ -256,7 +269,8 @@ def test_mutation_test_blocks_when_it_ran_red_and_is_neutral_when_skipped(mp, fu
         assert v.reasons == [f"mutation-test: {result}"]
 
 
-@pytest.mark.parametrize("job", ["python-pr-gate", "lint", "gui-tests", "test", "mutation-test"])
+@pytest.mark.parametrize("job", ["python-pr-gate", "lint", "gui-tests", "test",
+                                 "mutation-scope", "mutation-test"])
 def test_a_missing_result_never_passes(mp, job):
     for full_ci, results in ((False, GREEN_UNLABELLED), (True, GREEN_LABELLED)):
         results = {k: v for k, v in results.items() if k != job}
@@ -280,6 +294,7 @@ def test_the_summary_carries_the_verdict_the_results_and_the_reasons(mp):
     assert "- this is a release (VERSION changed)" in text
     assert "`full-ci` label: no" in text
     assert "| python-pr-gate | success |" in text and "| test | skipped |" in text
+    assert "| mutation-scope | success |" in text
     assert "- release: `VERSION`" in text
     assert "`localm/auth.py`" in text
     ok = mp.render_summary(mp.decide(True, GREEN_LABELLED, {}))
@@ -294,10 +309,12 @@ def _run(args, env_extra=None):
 
 _GREEN_UNLABELLED_ARGS = ["--full-ci", "false", "--result", "python-pr-gate=success",
                           "--result", "lint=success", "--result", "gui-tests=success",
-                          "--result", "test=skipped", "--result", "mutation-test=skipped"]
+                          "--result", "test=skipped", "--result", "mutation-scope=success",
+                          "--result", "mutation-test=skipped"]
 _GREEN_LABELLED_ARGS = ["--full-ci", "true", "--result", "python-pr-gate=skipped",
                         "--result", "lint=success", "--result", "gui-tests=success",
-                        "--result", "test=success", "--result", "mutation-test=skipped"]
+                        "--result", "test=success", "--result", "mutation-scope=success",
+                        "--result", "mutation-test=skipped"]
 
 
 def test_main_passes_a_docs_only_change():
@@ -335,6 +352,16 @@ def test_main_fails_a_labelled_pr_whose_matrix_did_not_run():
     assert "test: skipped (must be success on a labelled PR)" in proc.stdout
 
 
+def test_main_fails_a_pr_whose_mutation_scope_failed():
+    args = [a if a != "mutation-scope=success" else "mutation-scope=failure"
+            for a in _GREEN_UNLABELLED_ARGS]
+    proc = _run([*args, "--files", "localm/auth.py"])
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "**FAIL**" in proc.stdout
+    assert "- mutation-scope: failure" in proc.stdout
+    assert "| mutation-scope | failure |" in proc.stdout
+
+
 def test_main_writes_the_summary_to_the_step_summary_file(tmp_path):
     summary = tmp_path / "summary.md"
     proc = _run([*_GREEN_UNLABELLED_ARGS, "--files", "docs/architecture.md"],
@@ -346,7 +373,7 @@ def test_main_writes_the_summary_to_the_step_summary_file(tmp_path):
 def test_main_refuses_a_result_for_a_job_the_policy_does_not_know():
     proc = _run(["--full-ci", "false", "--result", "abi-check=success"])
     assert proc.returncode == 2
-    assert "python-pr-gate, lint, gui-tests, test, mutation-test" in proc.stderr
+    assert "python-pr-gate, lint, gui-tests, test, mutation-scope, mutation-test" in proc.stderr
 
 
 def test_evaluate_reads_the_change_from_git_when_no_files_are_given(mp, monkeypatch):
@@ -385,7 +412,8 @@ def test_the_merge_policy_job_cannot_be_skipped_green():
     ci = _load_workflow(_CI)
     job = ci["jobs"]["merge-policy"]
     assert job["name"] == "merge-policy", "the one check name to read"
-    assert sorted(job["needs"]) == ["gui-tests", "lint", "mutation-test", "python-pr-gate", "test"]
+    assert sorted(job["needs"]) == ["gui-tests", "lint", "mutation-scope", "mutation-test",
+                                    "python-pr-gate", "test"]
     cond = _norm(job["if"])
     assert "!cancelled()" in cond or "always()" in cond, (
         "without a status function success() is implied and a failed or skipped needed job "
@@ -398,7 +426,7 @@ def test_the_merge_policy_job_cannot_be_skipped_green():
         assert step.get("if") is None, f"{step.get('name')} must run unconditionally"
 
 
-def test_the_merge_policy_job_feeds_the_script_every_needed_result_and_the_label():
+def test_the_merge_policy_job_feeds_the_script_every_needed_result_and_the_label(mp):
     ci = _load_workflow(_CI)
     job = ci["jobs"]["merge-policy"]
     checkout = job["steps"][0]
@@ -411,7 +439,8 @@ def test_the_merge_policy_job_feeds_the_script_every_needed_result_and_the_label
     cmd = _norm(step["run"])
     env = step["env"]
     assert env["FULL_CI"] == "${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}"
-    for needed in ("python-pr-gate", "lint", "gui-tests", "test", "mutation-test"):
+    assert sorted(job["needs"]) == sorted(mp.JOBS), "the job needs exactly the jobs the script reads"
+    for needed in mp.JOBS:
         var = "RESULT_" + needed.upper().replace("-", "_")
         assert env[var] == "${{ needs.%s.result }}" % needed
         assert f'--result "{needed}=${var}"' in cmd
@@ -426,6 +455,9 @@ def test_the_jobs_the_policy_needs_still_exist_with_their_gating():
     assert "full-ci" in ci["jobs"]["python-pr-gate"]["if"]
     assert ci["jobs"]["lint"]["if"] == "github.event_name != 'push'"
     assert ci["jobs"]["gui-tests"]["if"] == "github.event_name != 'push'"
+    # merge-policy requires mutation-scope on both arms: it runs on every pull_request.
+    assert ci["jobs"]["mutation-scope"]["if"] == "github.event_name == 'pull_request'"
+    assert "needs" not in ci["jobs"]["mutation-scope"]
     assert "labeled" in ci["on"]["pull_request"]["types"]
     assert "merge-policy" not in ci["jobs"]["mutation-test"].get("needs", []), (
         "mutation testing stays label/dispatch-only and informational")
