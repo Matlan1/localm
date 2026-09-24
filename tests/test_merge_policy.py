@@ -2,9 +2,9 @@
 """scripts/merge_policy.py, the decision behind the `merge-policy` job in
 ci.yml, and the shape of that job.
 
-The policy's contract: lint, gui-tests and mutation-scope must succeed on
-every pull request; without the `full-ci` label python-pr-gate must succeed
-and the change must not be a release; with the label the matrix must
+The policy's contract: lint and mutation-scope must succeed on every pull
+request; without the `full-ci` label python-pr-gate must succeed and the
+change must not be a release; with the label the matrix and gui-tests must
 succeed; mutation-test blocks when it ran and failed and is neutral when it
 was skipped; a release
 PR without the label fails with the label named, every other PR merges
@@ -28,7 +28,7 @@ _SCRIPT = REPO_ROOT / "scripts" / "merge_policy.py"
 _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 GREEN_UNLABELLED = {"python-pr-gate": "success", "lint": "success",
-                    "gui-tests": "success", "test": "skipped",
+                    "gui-tests": "skipped", "test": "skipped",
                     "mutation-scope": "success", "mutation-test": "skipped"}
 GREEN_LABELLED = {"python-pr-gate": "skipped", "lint": "success",
                   "gui-tests": "success", "test": "success",
@@ -219,6 +219,24 @@ def test_the_labelled_arm_fails_on_a_red_matrix(mp):
     assert v.reasons == ["test: failure"]
 
 
+def test_the_labelled_arm_fails_when_gui_tests_was_skipped_rather_than_passing_silently(mp):
+    v = mp.decide(True, {**GREEN_LABELLED, "gui-tests": "skipped"}, {})
+    assert not v.ok
+    assert v.reasons == ["gui-tests: skipped (must be success on a labelled PR)"]
+
+
+def test_the_labelled_arm_fails_on_red_gui_tests(mp):
+    v = mp.decide(True, {**GREEN_LABELLED, "gui-tests": "failure"}, {})
+    assert not v.ok
+    assert v.reasons == ["gui-tests: failure"]
+
+
+def test_an_unlabelled_pr_passes_with_gui_tests_skipped_by_its_label_gate(mp):
+    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["localm/plugins/gui/static/app/chat.js"]))
+    assert v.ok, v.reasons
+    assert GREEN_UNLABELLED["gui-tests"] == "skipped"
+
+
 def test_the_unlabelled_arm_fails_when_the_gate_was_skipped_rather_than_passing_silently(mp):
     v = mp.decide(False, {**GREEN_UNLABELLED, "python-pr-gate": "skipped"}, {})
     assert not v.ok
@@ -231,7 +249,7 @@ def test_the_unlabelled_arm_fails_on_a_red_gate(mp):
     assert v.reasons == ["python-pr-gate: failure"]
 
 
-@pytest.mark.parametrize("job", ["lint", "gui-tests", "mutation-scope"])
+@pytest.mark.parametrize("job", ["lint", "mutation-scope"])
 @pytest.mark.parametrize("full_ci, results", [(False, GREEN_UNLABELLED), (True, GREEN_LABELLED)])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_the_jobs_every_pr_runs_must_succeed_on_both_arms(mp, job, full_ci, results, result):
@@ -250,7 +268,7 @@ def test_a_red_mutation_scope_fails_an_otherwise_green_pr(mp, full_ci, results):
     assert v.reasons == ["mutation-scope: failure"]
 
 
-@pytest.mark.parametrize("job", ["python-pr-gate", "test"])
+@pytest.mark.parametrize("job", ["python-pr-gate", "test", "gui-tests"])
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
 def test_a_job_skipped_by_design_on_one_arm_still_fails_that_arm_when_it_ran_red(mp, job, result):
     v = mp.decide(job == "python-pr-gate", {**GREEN_LABELLED, **GREEN_UNLABELLED,
@@ -454,7 +472,9 @@ def test_the_jobs_the_policy_needs_still_exist_with_their_gating():
     assert "full-ci" in ci["jobs"]["test"]["if"]
     assert "full-ci" in ci["jobs"]["python-pr-gate"]["if"]
     assert ci["jobs"]["lint"]["if"] == "github.event_name != 'push'"
-    assert ci["jobs"]["gui-tests"]["if"] == "github.event_name != 'push'"
+    assert "full-ci" in ci["jobs"]["gui-tests"]["if"]
+    assert _norm(ci["jobs"]["gui-tests"]["if"]) == _norm(ci["jobs"]["test"]["if"]), (
+        "gui-tests runs under exactly the matrix's label gate")
     # merge-policy requires mutation-scope on both arms: it runs on every pull_request.
     assert ci["jobs"]["mutation-scope"]["if"] == "github.event_name == 'pull_request'"
     assert "needs" not in ci["jobs"]["mutation-scope"]
