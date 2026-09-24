@@ -463,3 +463,17 @@ def test_get_hides_admin_only_value_from_a_config_read_only_key(env):
     assert "api_key" not in reader_fields, \
         "a non-owner must not see the admin_only field"
     assert "greeting" in reader_fields, "an ordinary field stays visible"
+
+
+def test_post_on_an_unreadable_config_is_a_409_and_writes_nothing(client_with_plugin, env):
+    p = env / "config.json"
+    p.write_bytes(b"{ this is not json")
+    (env / "config.json.bak").unlink(missing_ok=True)
+    corrupt = p.read_bytes()
+    answering = TestClient(client_with_plugin.app, raise_server_exceptions=False)
+
+    r = answering.post("/v1/plugins/myplug/settings", json={"greeting": "hey"})
+
+    assert p.read_bytes() == corrupt
+    assert r.status_code == 409, r.text
+    assert "config.json" in r.json()["detail"]

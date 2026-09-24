@@ -154,10 +154,10 @@ async def open_browser(req: OpenRequest, request: Request):
         raise HTTPException(503, "The live browser view needs this server's "
                                  "background job registry, which is "
                                  "unavailable.")
+    cfg = _settings()
     claim = bsession.reserve(sid)
     if claim is None:
         raise HTTPException(409, "A browser is already open for this key.")
-    cfg = _settings()
 
     def _run(job) -> bool:
         try:

@@ -1662,7 +1662,11 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
     Auto-detect fields also carry an ``auto`` value: the path localm would
     resolve when the field is left blank, so the GUI can SHOW it (filled, greyed)
     instead of an empty box that hides what is actually in use. Today only
-    ``binary_dir`` resolves one (the bundled llama.cpp runtime)."""
+    ``binary_dir`` resolves one (the bundled llama.cpp runtime).
+
+    A model-source credential field (``CREDENTIAL_KEYS``) also carries
+    ``status_unknown``: True when its store file exists but could not be read,
+    in which case ``is_set`` and ``env_set`` are both False."""
     from localm.config import DEFAULT_CONFIG
     base = DEFAULT_CONFIG if values is None else values
     # The GUI's Media section skips group="Media" fields in the flat form and
@@ -1685,7 +1689,8 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
                                                          get_credential_source)
             if f.key in CREDENTIAL_KEYS:
                 src = get_credential_source(f.key)
-                d["is_set"] = src is not None
+                d["status_unknown"] = (src == "unreadable")
+                d["is_set"] = src in ("stored", "env")
                 d["env_set"] = (src == "env")
             elif values is not None and f.key in values:
                 val = values[f.key]

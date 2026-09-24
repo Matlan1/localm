@@ -419,6 +419,137 @@ class TestAbandonedWorkIsCancelled:
         assert sess._call(quick, timeout=5, what="a quick call") == 42
 
 
+class _StallingCDP:
+    """A DevTools session whose Page.enable never answers."""
+
+    def __init__(self):
+        self.sent = []
+        self.detached = False
+
+    def on(self, event, handler):
+        pass
+
+    async def send(self, method, params=None):
+        self.sent.append((method, params))
+        if method == "Page.enable":
+            await asyncio.sleep(60)
+
+    async def detach(self):
+        self.detached = True
+
+
+class _RecordingCDP(_StallingCDP):
+    async def send(self, method, params=None):
+        self.sent.append((method, params))
+
+
+class _FakeContext:
+    def __init__(self):
+        self.sessions = []
+
+    async def new_cdp_session(self, page):
+        cdp = _StallingCDP()
+        self.sessions.append(cdp)
+        return cdp
+
+
+class TestLiveViewAttach:
+    def test_a_stalled_attach_is_retried_not_reported_running(
+            self, looped, monkeypatch):
+        from localm.browser import session as bsession
+        monkeypatch.setattr(bsession, "_PAGE_SETUP_MS", 60000)
+        sess = looped(_HungPage())
+        sess._ctx = _FakeContext()
+        first = sess.enable_live_view(lambda data: None, timeout_ms=300)
+        second = sess.enable_live_view(lambda data: None, timeout_ms=300)
+        time.sleep(0.2)
+        assert sess._cdp is None, (
+            "a screencast that never started is recorded as running")
+        assert len(sess._ctx.sessions) == 2, "the second call did not try again"
+        assert all(c.detached for c in sess._ctx.sessions), (
+            "a half-attached DevTools session was left behind")
+        assert first is False and second is False, (first, second)
+
+    def test_a_frame_is_acknowledged_on_the_session_that_sent_it(self, looped):
+        sess = looped(_HungPage())
+        cdp = _RecordingCDP()
+        frames = []
+        sess._on_frame = frames.append
+
+        async def deliver():
+            sess._on_screencast_frame({"data": "jpeg", "sessionId": 7}, cdp)
+            await asyncio.sleep(0.05)
+        sess._call(deliver)
+        assert ("Page.screencastFrameAck", {"sessionId": 7}) in cdp.sent, cdp.sent
+        assert frames == ["jpeg"]
+
+
+class _Popup:
+    def __init__(self, url):
+        self.url = url
+        self.closed = False
+
+    def is_closed(self):
+        return self.closed
+
+    async def close(self):
+        self.closed = True
+
+
+class _GotoTimeout(Exception):
+    pass
+
+
+class TestNavigationFailureAttribution:
+    def test_a_refused_window_is_not_reported_as_the_navigation_refusal(
+            self, looped, monkeypatch):
+        from localm.browser import session as bsession
+        monkeypatch.setattr(bsession.netgate, "decide", lambda *a, **k: None)
+        popup = _Popup("https://popup.example/")
+        holder = {}
+
+        class _Page:
+            url = "about:blank"
+
+            async def goto(self, url, timeout):
+                await holder["sess"]._on_new_page(popup)
+                raise _GotoTimeout("Timeout 3000ms exceeded")
+
+        sess = looped(_Page())
+        holder["sess"] = sess
+        res = sess.navigate("https://slow.example/", timeout_ms=3000)
+        assert popup.closed is True
+        assert any(b["url"] == popup.url for b in sess.blocked_requests()), (
+            "the refused window is no longer listed")
+        assert res["ok"] is False, res
+        assert res["refused"] is None, (
+            "a navigation timeout was reported as a refusal: %r" % (res,))
+        assert "Timeout" in res["error"], res
+
+
+class TestSlowSelectorClick:
+    def test_a_window_opened_by_a_click_that_waited_long_counts(
+            self, looped, monkeypatch):
+        from localm.browser import session as bsession
+        monkeypatch.setattr(bsession, "_INPUT_ACTIVATION", 0.1)
+        url = "https://popup.example/"
+        holder = {}
+
+        class _Page:
+            url = "about:blank"
+
+            async def click(self, selector, timeout):
+                await asyncio.sleep(0.3)
+                holder["sess"]._on_window_open({"url": url, "userGesture": True})
+
+        sess = looped(_Page())
+        holder["sess"] = sess
+        assert sess.click("#late")["ok"] is True
+        assert sess._take_clicked_window(url) is True, (
+            "a window opened while a selector click was still in progress was "
+            "not counted as clicked")
+
+
 class TestClickedWindows:
     """Which new windows count as opened by a click: Chromium must report a
     user gesture AND this session must have sent a click or key press within

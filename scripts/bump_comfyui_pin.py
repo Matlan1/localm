@@ -33,8 +33,8 @@ WHAT IT LEAVES TO A PERSON, printed as the remaining checklist: the targeted
 tests, ``check_comfyui_pin.py --gate``, a CHANGELOG bullet (with
 ``localm comfy update --reinstall-requirements`` advice when the receipt shows
 ``requirements.txt`` changed - plain ``update`` does not reinstall
-requirements by default), and a manual model-based run per
-qa/test-plans/media-gen.md.
+requirements by default), and a manual image, video and music generation
+run with a real model.
 
 Exit codes: 0 when the edit was applied or the dry run completed; 1 when
 refused (missing or inconsistent evidence, a same-or-older tag, the edited
@@ -200,7 +200,7 @@ def checklist(tag: str, requirements_changed: bool) -> str:
     lines += [
         "  3. python scripts/check_comfyui_pin.py --gate",
         "       must report the pin as current",
-        "  4. A real model-based run per qa/test-plans/media-gen.md - this bump's own",
+        "  4. A real image, video and music generation run with a model - this bump's own",
         "       confirm is deliberately model-free (see scripts/confirm_comfyui_runtime.py's",
         "       own not_covered list in the receipt)",
     ]

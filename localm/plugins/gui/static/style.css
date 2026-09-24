@@ -2404,7 +2404,8 @@ div:has(> .data-table) { overflow-x: auto; }
 .secret-status-tag.is-set {
   color: var(--accent, #5aa2fb);
 }
-.secret-status-tag.is-clearing {
+.secret-status-tag.is-clearing,
+.secret-status-tag.is-unknown {
   color: var(--warn, #f59e0b);
 }
 /* Settings PATHLIST field: a stack of folder rows + an "Add folder" button. */

@@ -12,14 +12,16 @@ source. This script compares those results against the committed baseline
 
 * a module's mutation score is below its ``score_floor``;
 * a mutant the baseline records as ``killed`` is no longer killed (a test
-  that used to catch it was weakened or removed);
+  that used to catch it was weakened or removed, or the mutant's outcome is
+  nondeterministic);
 * a mutant has no disposition: it is new, or the source of its function
   changed since the baseline (mutant ids are numbered per function, so a
   changed function's dispositions are stale), or its disposition is not one
-  of ``killed`` / ``survived`` / ``{"equivalent": "<reason>"}``;
-* a control mutant (the ``controls`` section: one concrete mutant per
-  security-decision class that must stay killed) is missing, stale or not
-  killed;
+  of ``killed`` / ``survived`` / ``{"equivalent": "<reason>"}`` /
+  ``{"unstable": "<reason>"}``;
+* a control mutant (the ``controls`` section: concrete mutants, at least one
+  per security-decision class, that must stay killed) is missing, stale,
+  recorded as unstable or not killed;
 * the run is incomplete (a mutant with no outcome), the baseline is missing
   or malformed, or an ``only_mutate`` module has no results or no baseline.
 
@@ -27,16 +29,22 @@ DISPOSITIONS. ``killed`` and ``survived`` are strings; ``survived`` is a known
 test gap that counts against the score, and the floor ratchet stops the count
 of them growing. An equivalent mutant (one no test can ever distinguish from
 the original) is written as ``{"equivalent": "<reason>"}`` with a non-empty
-reason and is excluded from the score. Every mutant mutmut generates is either
-scored or carries a written reason.
+reason and is excluded from the score. An unstable mutant (one whose outcome
+differs between runs of the same source and tests, e.g. with the hash seed)
+is written as ``{"unstable": "<reason>"}`` with a non-empty reason; it is
+excluded from the score and never counts as a regression. Every mutant mutmut
+generates is either scored or carries a written reason.
 
-SCORE. ``killed-like / (all mutants - equivalent)``, in percent, where
-killed-like is ``killed``, ``timeout`` and ``caught by type check`` (the
+SCORE. ``killed-like / (all mutants - equivalent - unstable)``, in percent,
+where killed-like is ``killed``, ``timeout`` and ``caught by type check`` (the
 mutant was detected: the tests did not pass under it) and everything else -
 ``survived``, ``no tests``, ``suspicious``, ``segfault``, ``skipped`` -
 counts as not detected. A baseline mutant that mutmut no longer generates
 although its function is unchanged (a ``pragma: no mutate``) fails the check
-until its entry is classified equivalent or deleted by hand. ``score_floor`` is the score measured when the baseline was
+until its entry is classified equivalent or deleted by hand. Recording a
+killed mutant as unstable removes a detected mutant from the score, which can
+take the score below its floor; that floor is then lowered by hand in the same
+PR. ``score_floor`` is the score measured when the baseline was
 written, rounded DOWN to two decimals, so it can only be raised by ``--update``
 and never lowered by it; lowering one is a hand edit in the same PR that
 explains why.
@@ -46,9 +54,9 @@ RUN. After ``mutmut run`` (Linux/WSL only; mutmut refuses to run on Windows):
     python scripts/check_mutation_floors.py [--mutants DIR] [--baseline FILE]
 
 ``--update`` writes a baseline from the current results: floors ratchet up,
-``equivalent`` entries and their reasons are kept, every other mutant gets
-``killed`` or ``survived`` from its outcome, and the mutants of a changed or
-removed function are pruned. Without ``--out`` it replaces the ``--baseline``
+``equivalent`` and ``unstable`` entries and their reasons are kept, every
+other mutant gets ``killed`` or ``survived`` from its outcome, and the mutants
+of a changed or removed function are pruned. Without ``--out`` it replaces the ``--baseline``
 file and the check then runs against the new file; with ``--out FILE`` the
 proposal goes to FILE and the check still runs against the committed
 baseline, so the CI job can publish the proposal as an artifact on every run
@@ -150,15 +158,18 @@ def load_results(mutants_dir: Path, modules: list[str]) -> tuple[dict, list[str]
     return results, problems
 
 
+EXCLUDED_KINDS = frozenset({"equivalent", "unstable"})
+
+
 def _disposition(value) -> tuple[str, str | None]:
     """``(kind, reason)`` for a baseline disposition value, or ``("invalid",
-    None)``. An equivalent needs a non-empty reason."""
+    None)``. An equivalent or unstable entry needs a non-empty reason."""
     if value in ("killed", "survived"):
         return value, None
-    if isinstance(value, dict) and set(value) == {"equivalent"}:
-        reason = value["equivalent"]
-        if isinstance(reason, str) and reason.strip():
-            return "equivalent", reason
+    if isinstance(value, dict) and len(value) == 1:
+        ((kind, reason),) = value.items()
+        if kind in EXCLUDED_KINDS and isinstance(reason, str) and reason.strip():
+            return kind, reason
     return "invalid", None
 
 
@@ -229,6 +240,7 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
         changed_functions = {
             fn for fn, h in hashes.items() if base_hashes.get(fn) != h}
         equivalents: set[str] = set()
+        unstables: set[str] = set()
         undispositioned: list[str] = []
         regressions: list[str] = []
         promotable: list[str] = []
@@ -243,6 +255,9 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
             kind, _reason = _disposition(value)
             if kind == "invalid":
                 invalid.append(mutant)
+                continue
+            if kind == "unstable":
+                unstables.add(mutant)
                 continue
             if kind == "equivalent":
                 equivalents.add(mutant)
@@ -280,7 +295,8 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
             problems.append(
                 f"{module}: {len(invalid)} mutant(s) carry an invalid disposition "
                 f"(e.g. {invalid[0]}); allowed: \"killed\", \"survived\", "
-                "{\"equivalent\": \"<non-empty reason>\"}")
+                "{\"equivalent\": \"<non-empty reason>\"}, "
+                "{\"unstable\": \"<non-empty reason>\"}")
         if undispositioned:
             fns = sorted({function_of(m.split(" ", 1)[0]) for m in undispositioned})
             problems.append(
@@ -293,10 +309,17 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
             problems.append(
                 f"{module}: {len(regressions)} mutant(s) recorded as killed are no "
                 f"longer detected: {', '.join(regressions[:5])}"
-                f"{' ...' if len(regressions) > 5 else ''} - a test that caught "
-                "them was weakened or removed; restore it")
+                f"{' ...' if len(regressions) > 5 else ''} - either a test that "
+                "caught them was weakened or removed, or their outcome is "
+                "nondeterministic (it can depend on the hash seed, timing or test "
+                "order). Re-run each one with `PYTHONHASHSEED=<n> python "
+                "scripts/mutmut_run.py run <mutant id>`, for the seed the "
+                "mutation-run step printed and a few others: if a re-run kills "
+                "it, make the test that catches it deterministic or record it as "
+                "{\"unstable\": \"<reason>\"}; if every re-run survives, restore "
+                "the test")
 
-        score, detected, scored = module_score(statuses, equivalents)
+        score, detected, scored = module_score(statuses, equivalents | unstables)
         floor = base.get("score_floor")
         if not isinstance(floor, (int, float)) or isinstance(floor, bool):
             problems.append(f"{module}: baseline score_floor is not a number")
@@ -312,7 +335,8 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
             counts[status] = counts.get(status, 0) + 1
         rows.append({
             "module": module, "total": len(statuses), "detected": detected,
-            "scored": scored, "equivalent": len(equivalents), "score": score,
+            "scored": scored, "equivalent": len(equivalents),
+            "unstable": len(unstables), "score": score,
             "floor": floor, "counts": counts,
         })
 
@@ -340,6 +364,13 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
                 f"{mutant} may no longer be the mutation it was pinned for - "
                 "re-verify which mutant now expresses this class and re-pin it")
             continue
+        base_value = ((base_modules.get(module) or {}).get("mutants") or {}).get(mutant)
+        if _disposition(base_value)[0] == "unstable":
+            problems.append(
+                f"control {name!r}: {mutant} is recorded as unstable in the "
+                "baseline, and a control must be killed on every run - pin a "
+                "mutant of the same class that the tests kill deterministically")
+            continue
         status = res["mutants"].get(mutant)
         if status is None:
             problems.append(f"control {name!r}: {mutant} was not generated")
@@ -353,9 +384,9 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
 
 def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
     """A baseline built from ``results``: floors ratchet up from ``baseline``,
-    equivalent classifications survive, everything else follows the outcome,
-    and the mutants of a changed or removed function are dropped. A vanished
-    mutant of an unchanged function keeps its old entry."""
+    equivalent and unstable classifications survive, everything else follows
+    the outcome, and the mutants of a changed or removed function are dropped.
+    A vanished mutant of an unchanged function keeps its old entry."""
     old_modules = baseline.get("modules") or {}
     new_modules: dict[str, dict] = {}
     for module in modules:
@@ -370,13 +401,13 @@ def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
         changed = {fn for fn, h in res["function_hashes"].items()
                    if old_hashes.get(fn) != h}
         mutants: dict = {}
-        equivalents: set[str] = set()
+        excluded: set[str] = set()
         for mutant, status in sorted(res["mutants"].items()):
             old_value = old_mutants.get(mutant)
             kind, _ = _disposition(old_value) if old_value is not None else ("invalid", None)
-            if kind == "equivalent" and function_of(mutant) not in changed:
+            if kind in EXCLUDED_KINDS and function_of(mutant) not in changed:
                 mutants[mutant] = old_value
-                equivalents.add(mutant)
+                excluded.add(mutant)
             elif status in KILLED_LIKE:
                 mutants[mutant] = "killed"
             elif status in INCOMPLETE:
@@ -387,7 +418,7 @@ def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
             fn = function_of(mutant)
             if mutant not in res["mutants"] and fn not in changed                     and fn in res["function_hashes"]:
                 mutants[mutant] = old_value
-        score, _, _ = module_score(res["mutants"], equivalents)
+        score, _, _ = module_score(res["mutants"], excluded)
         old_floor = old.get("score_floor")
         floor = floor_two_decimals(score)
         if isinstance(old_floor, (int, float)) and not isinstance(old_floor, bool):
@@ -408,13 +439,13 @@ def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
 def render_table(rows: list[dict]) -> str:
     """Plain-text per-module table for the log."""
     lines = [f"{'module':<22} {'mutants':>7} {'detected':>8} {'scored':>6} "
-             f"{'equiv':>5} {'surv':>5} {'notest':>6} {'susp':>4} {'score':>8} {'floor':>8}"]
+             f"{'equiv':>5} {'unst':>4} {'surv':>5} {'notest':>6} {'susp':>4} {'score':>8} {'floor':>8}"]
     for r in rows:
         c = r["counts"]
         floor = f"{r['floor']:.2f}%" if isinstance(r["floor"], (int, float)) else "?"
         lines.append(
             f"{r['module']:<22} {r['total']:>7} {r['detected']:>8} {r['scored']:>6} "
-            f"{r['equivalent']:>5} {c.get('survived', 0):>5} {c.get('no tests', 0):>6} "
+            f"{r['equivalent']:>5} {r['unstable']:>4} {c.get('survived', 0):>5} {c.get('no tests', 0):>6} "
             f"{c.get('suspicious', 0) + c.get('segfault', 0):>4} {r['score']:>7.2f}% {floor:>8}")
     return "\n".join(lines)
 

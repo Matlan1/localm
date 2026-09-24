@@ -159,6 +159,27 @@ class TestAsyncWrapper:
         assert allowed is None
 
 
+class _SessionShape:
+    """Method shapes the timeout walk must find, or must skip."""
+
+    def _call(self, make_coro, timeout=1.0):
+        return make_coro()
+
+    def public_delegating(self):
+        return self._helper()
+
+    def _helper(self):
+        return self._call(lambda: None)
+
+    def public_nested(self):
+        def inner():
+            return self._call(lambda: None)
+        return inner()
+
+    def unrelated(self):
+        return None
+
+
 class TestTimeoutsNest:
     """The marshalling timeout must OUTLAST every browser timeout it wraps.
 
@@ -167,26 +188,27 @@ class TestTimeoutsNest:
     keeps running past the report. Asserted as the RELATION, not as literals, so
     retuning one end cannot silently break it.
 
-    The methods are found by walking BrowserSession's source for every public
-    method that calls self._call, so a new one is checked without being listed.
+    The methods are found by walking BrowserSession's source for every method,
+    public or private, that calls self._call, so a new one is checked without
+    being listed.
     """
 
-    #: Public methods that call self._call without a timeout_ms of their own,
-    #: mapped to the reason they need no inner bound.
+    #: Methods that call self._call without a timeout_ms of their own, mapped
+    #: to the reason they need no inner bound.
     EXEMPT: dict = {}
 
-    def _marshalling_methods(self):
+    def _marshalling_methods(self, klass=None):
         import ast
         import inspect
         import textwrap
         from localm.browser.session import BrowserSession
-        tree = ast.parse(textwrap.dedent(inspect.getsource(BrowserSession)))
+        tree = ast.parse(textwrap.dedent(inspect.getsource(klass or BrowserSession)))
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
         found = {}
         for node in cls.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if node.name.startswith("_"):
+            if node.name == "_call":
                 continue
             for sub in ast.walk(node):
                 if (isinstance(sub, ast.Call)
@@ -203,6 +225,10 @@ class TestTimeoutsNest:
         expected = {"navigate", "click", "fill", "click_coords", "scroll",
                     "type_text", "press_key"}
         assert expected <= found, "the walk missed %s" % sorted(expected - found)
+
+    def test_the_walk_finds_a_private_helper_that_marshals(self):
+        found = set(self._marshalling_methods(_SessionShape))
+        assert found == {"_helper", "public_nested"}, found
 
     def test_every_marshalled_method_bounds_its_work_inside_the_call_timeout(self):
         import ast
