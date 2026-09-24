@@ -13,8 +13,9 @@ from ..bindhost import self_connect_host, url_host
 
 
 console = Console()
-
-
+# For output that is not the command's own result (a status/progress notice, a
+# warning) and must not land in a piped `-p` reply on stdout.
+err_console = Console(stderr=True)
 
 
 

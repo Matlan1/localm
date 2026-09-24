@@ -43,19 +43,26 @@ def _wide_console(monkeypatch):
     from localm.cli import _core
     monkeypatch.setattr(_core.console, "_width", 300)
     monkeypatch.setattr(_core.console, "_height", 25)
+    monkeypatch.setattr(_core.err_console, "_width", 300)
+    monkeypatch.setattr(_core.err_console, "_height", 25)
 
 
 class TestStreamOnceVisionCpuFallbackWarning:
-    def test_prints_the_status_verbatim(self, capsys):
+    def test_prints_the_status_to_stderr_not_stdout(self, capsys):
+        """`localm run -p ... > answer.txt` must not capture this warning: it
+        is a status notice, not part of the reply."""
         from localm.cli.chat import _stream_once
         engine = _fake_cli_engine(statuses=[VISION_CPU_FALLBACK_STATUS])
 
         _stream_once(engine, [{"role": "user", "content": "describe this"}])
 
-        out = capsys.readouterr().out
-        assert VISION_CPU_FALLBACK_STATUS in out, (
-            f"_stream_once must print the vision-CPU-fallback status when "
-            f"the engine reports it via on_status: {out!r}")
+        captured = capsys.readouterr()
+        assert VISION_CPU_FALLBACK_STATUS in captured.err, (
+            f"_stream_once must print the vision-CPU-fallback status to "
+            f"stderr when the engine reports it via on_status: {captured.err!r}")
+        assert VISION_CPU_FALLBACK_STATUS not in captured.out, (
+            f"the vision-CPU-fallback status leaked into stdout, where a "
+            f"piped -p reply is read from: {captured.out!r}")
 
     def test_other_statuses_are_not_printed(self, capsys):
         from localm.cli.chat import _stream_once
@@ -70,7 +77,7 @@ class TestStreamOnceVisionCpuFallbackWarning:
 
 
 class TestInteractiveVisionCpuFallbackWarning:
-    def test_prints_the_status_verbatim(self, monkeypatch, capsys):
+    def test_prints_the_status_to_stderr_not_stdout(self, monkeypatch, capsys):
         from localm.cli import chat as chat_mod
         engine = _fake_cli_engine(statuses=[VISION_CPU_FALLBACK_STATUS])
         inputs = iter(["describe this image"])
@@ -84,10 +91,12 @@ class TestInteractiveVisionCpuFallbackWarning:
 
         chat_mod._interactive(engine, None, {})
 
-        out = capsys.readouterr().out
-        assert VISION_CPU_FALLBACK_STATUS in out, (
-            f"_interactive must print the vision-CPU-fallback status when "
-            f"the engine reports it via on_status: {out!r}")
+        captured = capsys.readouterr()
+        assert VISION_CPU_FALLBACK_STATUS in captured.err, (
+            f"_interactive must print the vision-CPU-fallback status to "
+            f"stderr when the engine reports it via on_status: {captured.err!r}")
+        assert VISION_CPU_FALLBACK_STATUS not in captured.out, (
+            f"the vision-CPU-fallback status leaked into stdout: {captured.out!r}")
 
 
 class TestLlamaCppEmitsTheSharedFallbackConstant:
