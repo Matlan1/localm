@@ -1406,6 +1406,8 @@
   "settings.field.secretEnvTag": "(aus Umgebungsvariable)",
   "settings.field.secretWillClearTag": "(wird beim Speichern gelöscht)",
   "settings.field.secretNewValueTag": "(neuer Wert)",
+  "settings.field.secretUnknownTag": "(Status unbekannt)",
+  "settings.field.secretUnknownPlaceholder": "gespeicherte Zugangsdaten nicht lesbar",
   "settings.field.secretClearButton": "Löschen",
   "settings.field.secretUndoButton": "Rückgängig",
   "settings.field.secretClearTitle": "Gespeichertes Secret beim Speichern löschen",

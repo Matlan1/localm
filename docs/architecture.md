@@ -95,14 +95,15 @@ which runs on a PR carrying the `full-ci` label in place of the gate.
 
 `merge-policy` (`scripts/merge_policy.py`) is the one check that sums the
 others up. It runs on every pull request once `python-pr-gate`, `lint`,
-`gui-tests`, `test` and `mutation-test` have finished, whatever their
-results, and it is never skipped on a pull request, so a needed job that
-was skipped or failed cannot read as a pass. It passes when `lint` and
-`gui-tests` succeeded, `mutation-test` did not fail when it ran (skipped is
-neutral) and, on a PR without the `full-ci` label, `python-pr-gate`
-succeeded and the change is not a release (`VERSION` unchanged); on a PR
-with the label, when the `test` matrix succeeded. The two-platform matrix
-runs at release, not on
+`gui-tests`, `test`, `mutation-scope` and `mutation-test` have finished,
+whatever their results, and it is never skipped on a pull request, so a
+needed job that was skipped or failed cannot read as a pass. It passes when
+`lint` and `mutation-scope` succeeded, `mutation-test` did not fail when it
+ran (skipped is neutral) and, on a PR without the `full-ci` label,
+`python-pr-gate` succeeded and the change is not a release (`VERSION`
+unchanged); on a PR with the label, when the `test` matrix and `gui-tests`
+succeeded. `gui-tests`, like the matrix, runs on a pull request only when
+it carries the label. The two-platform matrix runs at release, not on
 an ordinary pull request: a release PR without the label fails
 `merge-policy` with the label named, and every other PR merges on the three
 cheap jobs. Adding the label to an open PR leaves the earlier unlabelled
@@ -121,27 +122,36 @@ workflows and gates. None of those blocks a merge; the list lives in
 eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`). On the
 weekly schedule, on a dispatch, or on a pull request carrying the
 `mutation-test` label, one `mutation-run` shard per module runs mutmut
-(`scripts/mutmut_run.py run "localm.<module>.*"`) and uploads its result
+(`scripts/mutmut_run.py run "localm.<module>.*"`, under a random
+`PYTHONHASHSEED` it prints first) and uploads its result
 file; `mutation-test` merges the eight and runs
 `scripts/check_mutation_floors.py` against the committed baseline
 `scripts/mutation_baseline.json`. The baseline records every mutant's
-disposition - `killed`, `survived` (a known gap, counted against the score)
-or `{"equivalent": "<reason>"}` (excluded, never silently) - plus a per-module
-score floor and the `controls`: one concrete mutant per security-decision
-class (a weakened scope check, an authorization fallback flipped to allow,
-a skipped SSRF redirect re-validation, a widened net_mode=off exemption, a
-path-confinement bypass, a loopback classifier that accepts an unparseable
-host) that must stay killed. The gate fails on a score below its floor, a
-mutant recorded as killed that now survives, a mutant with no disposition
-(new, or in a function whose source hash changed), a control not killed, or
-an incomplete run. The job uploads a proposed baseline
-(`mutation-baseline-proposed`, floors ratcheted up, equivalents kept) so a
+disposition - `killed`, `survived` (a known gap, counted against the score),
+`{"equivalent": "<reason>"}` (excluded, never silently) or
+`{"unstable": "<reason>"}` (an outcome that differs between runs of the same
+source and tests: excluded and never a regression) - plus a per-module
+score floor and the `controls`: concrete mutants, at least one per
+security-decision class (a weakened scope check, an authorization fallback
+flipped to allow, a skipped SSRF redirect re-validation, a widened
+net_mode=off exemption, a path-confinement bypass, a loopback classifier
+that accepts an unparseable host), that must stay killed. The gate fails on
+a score below its floor, a mutant recorded as killed that now survives (a
+weakened test or a nondeterministic outcome; the message names the re-run
+that tells them apart), a mutant with no disposition
+(new, or in a function whose source hash changed), a control not killed or
+recorded as unstable, or an incomplete run. The job uploads a proposed baseline
+(`mutation-baseline-proposed`, floors ratcheted up, equivalent and unstable
+entries kept) so a
 changed function's new mutants can be classified and committed without a
 local run; mutmut itself runs on Linux only. The shards never run
 automatically on a pull request (the `auth` shard alone takes about an hour);
-`mutation-scope` (`scripts/mutation_scope.py`) instead annotates a pull
-request that touches a mutated module or the gate with a notice that the
-gate did not run on it. The two decision classes that
+the weekly schedule is what gates master. `mutation-scope`
+(`scripts/mutation_scope.py`) instead annotates a pull request that touches
+a mutated module or the gate with a notice: that the gate runs on it when it
+carries the `mutation-test` label, and that the gate did not run on it
+otherwise. `mutation-scope` fails when it cannot compute the diff, and
+`merge-policy` fails with it. The two decision classes that
 live in `localm/inference/http_server.py` rather than a mutated module - an
 unsafe route exempted from the origin gate, and `bind_host` replaced by the
 peer address - are pinned by `tests/test_trust_boundary_controls.py`.

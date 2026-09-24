@@ -4,19 +4,21 @@
 .github/workflows/ci.yml: the one check that sums up the others.
 
 The job runs on every pull_request once python-pr-gate, lint, gui-tests,
-test and mutation-test have finished, whatever their results, and passes
-only when:
+test, mutation-scope and mutation-test have finished, whatever their
+results, and passes only when:
 
-  - lint and gui-tests succeeded, and no needed job failed or was cancelled
-    (mutation-test counts when it ran and is neutral when it was skipped);
+  - lint and mutation-scope succeeded, and no needed job failed or was
+    cancelled (mutation-test counts when it ran and is neutral when it was
+    skipped);
   - without the `full-ci` label: python-pr-gate succeeded and the change is
     not a release (VERSION is unchanged);
-  - with the `full-ci` label: the test matrix succeeded.
+  - with the `full-ci` label: the test matrix and gui-tests succeeded.
 
 The two-platform matrix runs at release, not on an ordinary pull request: a
 release PR (one that changes VERSION) without the label fails with the label
-named, every other PR merges on python-pr-gate, lint and gui-tests alone. A
-skipped, failed or missing result never reads as a pass.
+named, every other PR merges on python-pr-gate, lint and mutation-scope
+alone. A skipped, failed or missing result never reads as a
+pass.
 
 The summary also lists the matrix categories the change touches (CATEGORIES
 below: the trust boundary, the plugin engine, inference/workers/the native
@@ -25,7 +27,8 @@ release run to know what it covers; none of them blocks a merge.
 
     python scripts/merge_policy.py --full-ci false \
         --result python-pr-gate=success --result lint=success \
-        --result gui-tests=success --result test=skipped [--files ...]
+        --result gui-tests=skipped --result test=skipped \
+        --result mutation-scope=success --result mutation-test=skipped [--files ...]
 
 The verdict, the results and the matched categories are printed, and appended
 to the file named by GITHUB_STEP_SUMMARY when that variable is set. Exit
@@ -51,8 +54,10 @@ import affected_tests  # noqa: E402
 import run_affected_tests  # noqa: E402
 
 LABEL = "full-ci"
-JOBS = ("python-pr-gate", "lint", "gui-tests", "test", "mutation-test")
-ALWAYS_REQUIRED = ("lint", "gui-tests")
+JOBS = ("python-pr-gate", "lint", "gui-tests", "test", "mutation-scope", "mutation-test")
+ALWAYS_REQUIRED = ("lint", "mutation-scope")
+LABELLED_REQUIRED = ("test", "gui-tests")
+UNLABELLED_REQUIRED = ("python-pr-gate",)
 RELEASE = "release"
 
 # Category -> patterns. `**` matches across directories, `*` and `?` within
@@ -182,7 +187,7 @@ def decide(full_ci: bool, results: dict[str, str],
     for job in JOBS:
         if state[job] not in ("success", "skipped"):
             reasons.append(f"{job}: {state[job]}")
-    for job in (*ALWAYS_REQUIRED, "test" if full_ci else "python-pr-gate"):
+    for job in (*ALWAYS_REQUIRED, *(LABELLED_REQUIRED if full_ci else UNLABELLED_REQUIRED)):
         if state[job] == "skipped":
             reasons.append(f"{job}: skipped (must be success on "
                            f"{'a labelled' if full_ci else 'an unlabelled'} PR)")

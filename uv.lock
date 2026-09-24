@@ -652,6 +652,7 @@ desktop = [
     { name = "pywebview", extra = ["qt"], marker = "sys_platform == 'linux'" },
 ]
 dev = [
+    { name = "httpx" },
     { name = "psutil" },
     { name = "pypdf" },
     { name = "pytest" },
@@ -700,6 +701,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "faster-whisper", marker = "extra == 'voice'", specifier = ">=1.2.1" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.29.0" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.61,<1.62" },

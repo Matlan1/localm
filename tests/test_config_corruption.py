@@ -155,3 +155,45 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
         # default, so the default can never appear in the file.
         assert got["n_ctx"] == 8192
         assert got["net_mode"] == "off", "the .bak's real settings were lost"
+
+
+# --------------------------------------------------------------------------- #
+#  the config-writing routes answer an unreadable config.json with a 409      #
+# --------------------------------------------------------------------------- #
+
+_OWNER_KEY = "owner-admin-key-config-corruption-409"
+
+
+@pytest.fixture()
+def owner_client(cfg_home, monkeypatch):
+    """The real app with an owner key; unhandled server errors come back as a
+    500 response instead of being raised into the test."""
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+    monkeypatch.setenv("LOCALM_API_KEY", _OWNER_KEY)
+    app = create_app(None)
+    with TestClient(app, raise_server_exceptions=False,
+                    headers={"Authorization": f"Bearer {_OWNER_KEY}"}) as c:
+        yield c
+
+
+@pytest.mark.parametrize("method,url,body", [
+    ("PATCH", "/v1/config", {"import_max_depth": 5}),
+    ("POST", "/v1/media/config/image", {"delete_outputs": True}),
+    ("POST", "/v1/tts/config", {"voice": "am_onyx"}),
+])
+def test_config_route_answers_an_unreadable_config_with_409(
+        owner_client, cfg_home, method, url, body):
+    p = cfg_home / "config.json"
+    p.write_bytes(b"{ this is not json")
+    (cfg_home / "config.json.bak").unlink(missing_ok=True)
+    corrupt = p.read_bytes()
+
+    r = owner_client.request(method, url, json=body)
+
+    assert p.read_bytes() == corrupt
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert "config.json" in detail
+    assert str(cfg_home) not in detail

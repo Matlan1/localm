@@ -193,6 +193,39 @@ def test_serve_async_tls_relays_a_real_handshake_and_shuts_down_cleanly(tmp_path
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+def test_the_internal_server_listens_on_loopback_only(use_tls, tmp_path, monkeypatch):
+    """Every socket of the internal uvicorn behind the demux is bound to
+    127.0.0.1, so the relayed app is not reachable on any other interface."""
+    import uvicorn as uvicorn_mod
+    started = []
+
+    class _RecordingServer(uvicorn_mod.Server):
+        def __init__(self, config):
+            super().__init__(config)
+            started.append(self)
+
+    monkeypatch.setattr(uvicorn_mod, "Server", _RecordingServer)
+
+    async def go():
+        port = _free_port()
+        if use_tls:
+            cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
+            serve = portmux._serve_async(_tiny_asgi_app, "127.0.0.1", port, cert, key, "warning")
+        else:
+            serve = portmux._serve_async_plain(_tiny_asgi_app, "127.0.0.1", port, "warning")
+        task = asyncio.ensure_future(serve)
+        try:
+            await _wait_connectable(port)
+            (server,) = started
+            bound = [sock.getsockname()[0]
+                     for listener in server.servers for sock in listener.sockets]
+            assert bound and set(bound) == {"127.0.0.1"}, bound
+        finally:
+            await _shutdown(task)
+    asyncio.run(go())
+
+
 def test_serve_async_plain_cancels_an_inflight_connection_on_shutdown():
     """asyncio.start_server()'s client_connected_cb creates a Task for each
     connection that nothing keeps a reference to, so a connection still blocked

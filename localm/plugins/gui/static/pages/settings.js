@@ -235,10 +235,15 @@ export function buildSettingControl(field) {
   let statusTag = null;
   if (field.widget === "secret") {
     const isConfigured = !!(field.is_set || field.is_override);
-    statusTag = el("span", "secret-status-tag" + (isConfigured ? " is-set" : ""));
-    statusTag.textContent = field.env_set
-      ? t("settings.field.secretEnvTag")
-      : (isConfigured ? t("settings.field.secretConfiguredTag") : t("settings.field.secretNotSetTag"));
+    if (field.status_unknown) {
+      statusTag = el("span", "secret-status-tag is-unknown");
+      statusTag.textContent = t("settings.field.secretUnknownTag");
+    } else {
+      statusTag = el("span", "secret-status-tag" + (isConfigured ? " is-set" : ""));
+      statusTag.textContent = field.env_set
+        ? t("settings.field.secretEnvTag")
+        : (isConfigured ? t("settings.field.secretConfiguredTag") : t("settings.field.secretNotSetTag"));
+    }
     label.appendChild(statusTag);
   }
   wrap.appendChild(label);
@@ -312,15 +317,19 @@ export function buildSettingControl(field) {
       input.type = "password";
       input.value = "";                 // never prefill a real secret
       let willClear = false;
-      const isConfigured = !!(field.is_set || field.is_override);
-      const isEnv = !!field.env_set;
+      const isUnknown = !!field.status_unknown;
+      const isConfigured = !isUnknown && !!(field.is_set || field.is_override);
+      const isEnv = !isUnknown && !!field.env_set;
 
       const configuredPlaceholder = t("settings.field.secretConfiguredPlaceholder");
       const envPlaceholder = t("settings.field.secretEnvPlaceholder");
       const notSetPlaceholder = t("settings.field.secretNotSetPlaceholder");
       const willClearPlaceholder = t("settings.field.secretWillClearPlaceholder");
+      const unknownPlaceholder = t("settings.field.secretUnknownPlaceholder");
 
-      if (isEnv) {
+      if (isUnknown) {
+        input.placeholder = unknownPlaceholder;
+      } else if (isEnv) {
         input.placeholder = envPlaceholder;
       } else if (isConfigured) {
         input.placeholder = configuredPlaceholder;
@@ -370,6 +379,12 @@ export function buildSettingControl(field) {
             }
             input.placeholder = configuredPlaceholder;
           }
+        } else if (isUnknown) {
+          if (statusTag) {
+            statusTag.textContent = t("settings.field.secretUnknownTag");
+            statusTag.className = "secret-status-tag is-unknown";
+          }
+          input.placeholder = unknownPlaceholder;
         } else {
           if (statusTag) {
             statusTag.textContent = isEnv
