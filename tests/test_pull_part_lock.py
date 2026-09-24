@@ -1039,6 +1039,33 @@ def test_a_release_leaves_a_lock_whose_record_is_no_longer_this_one(home,
     assert str(d) in caplog.text
 
 
+@pytest.mark.parametrize("record", ["missing", "unreadable"])
+def test_a_release_leaves_a_lock_whose_record_cannot_be_read(home, caplog,
+                                                            record):
+    """A record that cannot be read at release time is not proof the lock is
+    this acquisition's: it is left in place with a warning."""
+    import logging
+    d = _part_lock_dir("m.gguf")
+    with caplog.at_level(logging.WARNING):
+        with _part_lock("m.gguf"):
+            if record == "missing":
+                (d / "owner.json").unlink()
+            else:
+                (d / "owner.json").write_text("{not json", encoding="utf-8")
+    assert d.exists(), "a release removed a lock whose record it could not read"
+    assert str(d) in caplog.text
+
+
+def test_each_acquisition_records_its_own_token(home):
+    d = _part_lock_dir("m.gguf")
+    tokens = []
+    for _ in range(3):
+        with _part_lock("m.gguf"):
+            tokens.append(json.loads(_record(d))["token"])
+    assert all(isinstance(t, str) and len(t) >= 32 for t in tokens), tokens
+    assert len(set(tokens)) == 3, f"acquisitions reused a token: {tokens}"
+
+
 # --------------------------------------------------------------------------
 #  Placement and wiring
 # --------------------------------------------------------------------------
