@@ -563,14 +563,15 @@ class TestCommittedBaseline:
         assert "${{" not in scope_step["run"]
 
     def test_every_sec01_control_class_is_pinned_to_a_killed_mutant(self, baseline):
-        """Every control of the six control mutant classes that live inside the
-        only_mutate modules is pinned to a killed mutant: a weakened scope check,
-        a deny-to-allow fallback, a skipped SSRF redirect re-validation, a
-        widened net_mode=off exemption, a path-confinement bypass, and a
-        loopback classifier that accepts an unparseable host. The two classes
-        that live in localm/inference/http_server.py (an unsafe route exempted
-        from the origin gate, bind_host replaced by the peer address) are not
-        mutmut mutants and are not pinned here."""
+        """The baseline's controls are exactly the controls of the six control
+        mutant classes that live inside the only_mutate modules, each pinned to
+        a killed mutant: a weakened scope check, a deny-to-allow fallback, a
+        skipped SSRF redirect re-validation, a widened net_mode=off exemption, a
+        path-confinement bypass, and a loopback classifier that accepts an
+        unparseable host. The two classes that live in
+        localm/inference/http_server.py (an unsafe route exempted from the origin
+        gate, bind_host replaced by the peer address) are not mutmut mutants and
+        are not pinned here."""
         expected = {
             "scope-check-weakened",
             "state-changing-fallback-deny-to-allow",
@@ -581,7 +582,9 @@ class TestCommittedBaseline:
             "bind-host-loopback-classifier-fallback",
         }
         controls = baseline["controls"]
-        assert expected <= set(controls), expected - set(controls)
+        assert set(controls) == expected, (
+            f"missing: {sorted(expected - set(controls))}, "
+            f"not listed here: {sorted(set(controls) - expected)}")
         for name, ctl in controls.items():
             entry = baseline["modules"][ctl["module"]]
             assert entry["mutants"].get(ctl["mutant"]) == "killed", (name, ctl)

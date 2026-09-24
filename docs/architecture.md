@@ -127,12 +127,13 @@ file; `mutation-test` merges the eight and runs
 `scripts/mutation_baseline.json`. The baseline records every mutant's
 disposition - `killed`, `survived` (a known gap, counted against the score)
 or `{"equivalent": "<reason>"}` (excluded, never silently) - plus a per-module
-score floor and the `controls`: one concrete mutant per security-decision
-class (a weakened scope check, an authorization fallback flipped to allow,
-a skipped SSRF redirect re-validation, a widened net_mode=off exemption, a
-path-confinement bypass, a loopback classifier that accepts an unparseable
-host) that must stay killed. The gate fails on a score below its floor, a
-mutant recorded as killed that now survives, a mutant with no disposition
+score floor and the `controls`: concrete mutants, at least one per
+security-decision class (a weakened scope check, an authorization fallback
+flipped to allow, a skipped SSRF redirect re-validation, a widened
+net_mode=off exemption, a path-confinement bypass, a loopback classifier
+that accepts an unparseable host), that must stay killed. The gate fails on
+a score below its floor, a mutant recorded as killed that now survives, a
+mutant with no disposition
 (new, or in a function whose source hash changed), a control not killed, or
 an incomplete run. The job uploads a proposed baseline
 (`mutation-baseline-proposed`, floors ratcheted up, equivalents kept) so a
