@@ -252,7 +252,7 @@ _SHORTCUT_SIZES: dict[str, str] = {
     "llama3.2-1b": "~0.7 GB", "llama3.2-3b": "~2 GB",
     "phi4-mini": "~2.5 GB",   "mistral-7b": "~4.1 GB",
     "qwen2.5-7b": "~4.7 GB",  "qwen2.5-14b": "~8.5 GB",
-    "gemma3-4b": "~2.5 GB",   "gemma3-12b": "~7.3 GB",
+    "gemma3-4b": "~2.5 GB + vision projector",   "gemma3-12b": "~7.3 GB + vision projector",
     "deepseek-r1-7b": "~4.7 GB", "deepseek-r1-14b": "~8.5 GB",
     "smollm2-1.7b": "~1 GB",
 }

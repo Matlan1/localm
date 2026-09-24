@@ -546,6 +546,79 @@ class TestGgufPullPreflight:
         assert checked == [10]
         assert "Resuming" not in capsys.readouterr().out
 
+    def test_charges_for_a_same_repo_projector_it_will_auto_attach(
+            self, hf_env, monkeypatch):
+        import huggingface_hub
+
+        class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                return ["test.gguf", "mmproj-test-f16.gguf"]
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+
+        assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+        assert checked == [20], (
+            "the preflight must charge for the model AND the same-repo "
+            "projector it is about to auto-attach")
+
+    def test_does_not_charge_a_projector_when_the_repo_has_none(
+            self, hf_env, monkeypatch):
+        import huggingface_hub
+
+        class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                return ["test.gguf"]
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+
+        assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+        assert checked == [10]
+
+    def test_does_not_charge_a_projector_for_an_explicit_mmproj_spec(
+            self, hf_env, monkeypatch):
+        """An explicit --mmproj is a separate, user-named download path
+        (_fetch_explicit_mmproj) that this preflight does not probe, so the
+        same-repo listing must not even be consulted."""
+        import huggingface_hub
+
+        class _FailingHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                raise AssertionError("same-repo listing must not be probed")
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FailingHfApi)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+
+        assert mm._pull_gguf_file(
+            "owner/repo:test.gguf", name="test",
+            mmproj_spec="owner/repo:mmproj-test-f16.gguf") is True
+        assert checked == [10]
+
 
 class TestGgufPullVerifiesHfDigest:
     def test_digest_mismatch_deletes_the_file_and_registers_nothing(

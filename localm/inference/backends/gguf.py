@@ -216,16 +216,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
-            # Combined-when-split free VRAM budget; the helper never raises.
-            free, _split_total, _split_devices = self._split_free_total_bytes()
-            if free is None:
-                free = self._free_vram_bytes()
             vram_hint = ""
-            if free is not None and free < self._model_bytes() + self._VRAM_OVERHEAD_BYTES:
-                vram_hint = (
-                    " The GPU is low on memory - free VRAM or retry with "
-                    "fewer GPU layers (-g 24, or -g 0 for CPU)."
-                )
+            if self.effective_gpu_layers:   # 0 = CPU-only, no VRAM probe needed
+                # Combined-when-split free VRAM budget; the helper never raises.
+                free, _split_total, _split_devices = self._split_free_total_bytes()
+                if free is None:
+                    free = self._free_vram_bytes()
+                if free is not None and free < self._model_bytes() + self._VRAM_OVERHEAD_BYTES:
+                    vram_hint = (
+                        " The GPU is low on memory - free VRAM or retry with "
+                        "fewer GPU layers (-g 24, or -g 0 for CPU)."
+                    )
             # The isolated worker failed or crashed loading the model.
             raise RuntimeError(
                 f"Native llama runtime failed to load: {exc}.{vram_hint}\n"

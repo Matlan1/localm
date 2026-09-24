@@ -24,7 +24,9 @@ class TestModelShortcuts:
             assert alias in _SHORTCUT_SIZES, f"Missing size mapping for shortcut alias: {alias}"
             size_str = _SHORTCUT_SIZES[alias]
             assert size_str.startswith("~"), f"Size string should start with '~': {size_str}"
-            assert size_str.endswith("GB"), f"Size string should end with 'GB': {size_str}"
+            assert re.match(r"^~[\d.]+ GB(\Z| \+ )", size_str), (
+                f"Size string should start with '~<number> GB', optionally followed "
+                f"by ' + <extra download>': {size_str}")
 
     def test_every_shortcut_spec_is_well_formed(self):
         for alias, spec in MODEL_SHORTCUTS.items():

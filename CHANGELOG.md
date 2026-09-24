@@ -25,6 +25,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   In the CLI, switch models in the REPL with `/model <name>` (or inspect with
   `/model`), and resume any past session with a specified model via `localm coder
   --resume [id] --model <name>`.
+  `/model` with no name, and the active-model tag in session controls, now
+  show in the interface's own language instead of always in English.
+  Switching to a different model and then back to the session's original
+  one in the same still-open session-controls dialog now actually applies
+  the second switch instead of silently doing nothing. `--resume` followed
+  by a task instead of a checkpoint id (`-r "some task"`, which is read as
+  the id, not as the task) now warns with the two ways to combine a resume
+  with a task instead of crashing.
 - **`localm setup-browser`** downloads the Chromium build the automated browser
   needs. Previously this required a separate, undocumented-in-app
   `python -m playwright install chromium` step after installing the browser
@@ -98,6 +106,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **The HuggingFace and CivitAI token fields in Settings now show whether a token is really configured.** A `HF_TOKEN`/`CIVITAI_API_KEY` environment variable that is blank or whitespace-only is now treated as not set, matching what downloads actually send, instead of disagreeing with the actual download code about whether a token is present. A stray `hf_token`/`civitai_api_key` entry in `config.json` (hand-edited, or left over from before these tokens moved to their own store) can no longer make Settings claim a token is configured, with a Clear button that has nothing to clear.
+- **Pulling `gemma3-4b` or `gemma3-12b` now checks free disk space for the vision projector too, and the curated shortcuts list says a projector comes with them.** The disk-space preflight for a plain HuggingFace model pull now also probes the same-repo vision projector it is about to auto-attach, so a pull with just enough room for the model alone no longer passes the check and then loses the projector download to insufficient disk space.
 - **Stop in chat now stops the whole turn, and messages queued while a reply is running are sent in order.** Pressing Stop while a long chat is being summarised no longer lets the reply stream anyway, and Stop no longer sends the next queued message: queued messages stay listed until you send or cancel them. A message typed during Regenerate or `/web` is now sent when that reply finishes instead of staying queued forever, and a new message goes after any older queued ones. Edit, Revert and Regenerate now appear on the transcript as soon as a reply finishes.
 - **Input in the Browser tab's live view now reaches the page in the order you made it, and the frame no longer traps the keyboard.** Each click, key and scroll waits for the one before it to land, so a character typed right after a click can no longer arrive first and end up in the wrong field, and characters typed while an input is still on its way are sent together. An input that does not reach the browser is now reported in the status line instead of being dropped silently. Esc now releases the keyboard from the frame instead of being sent to the page, and Shift+Tab moves focus back to the controls above it; a hint under the focused frame names both keys. `POST /api/browser/click` and `/api/browser/scroll` now refuse a position that is not a finite number, or is beyond a million pixels, with a 422 instead of passing it to the browser, and a click's `button` must be `left`, `right` or `middle`.
 - **A plugin's secret setting (an API key it registers via `add_settings()`) now correctly shows its configured status and a Clear button in Settings.** It previously always displayed as not set, and could never be cleared from the GUI, because the Settings page dropped the saved/environment status when rendering plugin, TTS, and per-plugin media secret fields.
@@ -536,6 +545,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   its official Windows ROCm preview wheels to a new location; the install command now resolves
   the current pinned build there, and a fresh ComfyUI install on this hardware picks up the
   same fix.
+- **A GGUF model load that fails while running CPU-only (`-g 0`) no longer pauses for several
+  extra seconds before reporting the error.** The failure message computed a "GPU is low on
+  memory" hint by probing VRAM even when the load never used the GPU, adding needless latency to
+  every CPU-only load failure; the probe is now skipped for a CPU-only load, matching the
+  preflight check's own behavior.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
