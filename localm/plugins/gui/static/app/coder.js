@@ -756,11 +756,6 @@ export function handleCoderEvent(s, ev) {
       feedAppend(s, el("div", "feed-info", label));
       break;
     }
-    case "info": {
-      flushAssistantBlock(s);
-      feedAppend(s, el("div", "feed-info", ev.text || ""));
-      break;
-    }
     case "estimate": {
       // A plan that was never executed (the CLI's --estimate). Rendered as an
       // assistant row because it is multi-paragraph prose, but labelled, so it
