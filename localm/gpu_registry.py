@@ -115,7 +115,7 @@ def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
     *models* lists every model this instance has loaded, each as
     ``{"name", "path", "size", "sha256"}`` (any of the last three may be None),
     so a sibling can match one by file identity rather than by name alone.
-    *model* stays the active one.
+    *model* is the active model, or a loaded one when none is active.
 
     Best-effort: a write failure is logged and returns None rather than
     raising, so it never breaks the model load/unload it piggybacks on."""
