@@ -33,6 +33,18 @@ const SCHEMA_CONFIGURED = {
   ],
 };
 
+// The server's shape when model_source_credentials.json exists but could not
+// be read: whether a token is stored is unknown.
+const SCHEMA_UNKNOWN = {
+  fields: [
+    { key: "hf_token", widget: "secret", label: "Hugging Face API token",
+      help: "Optional: raises rate limits.", group: "Models", owner: "core",
+      applies: "live", secret: true, is_set: false, env_set: false,
+      status_unknown: true },
+    MODELS_COMPANION_FIELD,
+  ],
+};
+
 const SCHEMA_ENV = {
   fields: [
     { key: "hf_token", widget: "secret", label: "Hugging Face API token",
@@ -168,6 +180,40 @@ test("secret field when set via environment displays (from environment) and no C
   assert.ok(tag.classList.contains("is-set"), "env-configured has is-set class");
   assert.equal(input.placeholder, "set via environment variable");
   assert.equal(clearBtn, null, "no Clear button for env credentials");
+});
+
+test("secret field with an unreadable store displays (status unknown), not (not set), and no Clear button", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_UNKNOWN) });
+  await render(win);
+  const input = win.document.querySelector('input[data-key="hf_token"]');
+  const wrap = input.closest("[data-field-key]");
+  const tag = wrap.querySelector(".secret-status-tag");
+  const clearBtn = wrap.querySelector(".secret-clear-btn");
+
+  assert.ok(tag, "status tag exists");
+  assert.equal(tag.textContent, "(status unknown)");
+  assert.ok(tag.classList.contains("is-unknown"), "unknown status has is-unknown class");
+  assert.ok(!tag.classList.contains("is-set"), "unknown status is not shown as set");
+  assert.equal(input.placeholder, "stored credentials could not be read");
+  assert.equal(clearBtn, null, "no Clear button when the stored value cannot be read");
+});
+
+test("typing into a status-unknown secret then emptying it restores (status unknown)", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_UNKNOWN) });
+  await render(win);
+  const input = win.document.querySelector('input[data-key="hf_token"]');
+  const wrap = input.closest("[data-field-key]");
+  const tag = wrap.querySelector(".secret-status-tag");
+
+  input.value = "hf_newtoken123";
+  input.dispatchEvent(new win.Event("input"));
+  assert.equal(tag.textContent, "(new value)");
+
+  input.value = "";
+  input.dispatchEvent(new win.Event("input"));
+  assert.equal(tag.textContent, "(status unknown)");
+  assert.ok(tag.classList.contains("is-unknown"));
+  assert.equal(input.placeholder, "stored credentials could not be read");
 });
 
 test("untouched secret field is omitted on save", async () => {

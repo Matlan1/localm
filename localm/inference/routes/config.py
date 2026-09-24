@@ -55,6 +55,18 @@ def _scrub_media_admin_only(cfg: dict) -> None:
                 node.pop(leaf, None)
 
 
+def _credentials_not_saved(reason: str, config_saved: bool) -> str:
+    """Error detail for a credential write that failed after update_config had
+    already saved the rest of the request."""
+    reason = reason.rstrip()
+    if not reason.endswith((".", "!", "?")):
+        reason += "."
+    detail = f"The credential change was not saved: {reason}"
+    if config_saved:
+        detail += " The other settings in this request were saved."
+    return detail
+
+
 def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
 
@@ -119,8 +131,15 @@ def register(app: FastAPI, ctx) -> None:
 
         The read-only extras the GET handler injects (effective_mode etc.) are
         dropped first, so a client that round-trips the whole config object is
-        not rejected for echoing back values it never edited."""
-        from localm.config import update_config
+        not rejected for echoing back values it never edited.
+
+        Model-source credential keys are written to their own store only after
+        every other check and the config write have succeeded, so any error
+        response leaves stored credentials unchanged. If that final credential
+        write fails, the error detail says so and says whether the other
+        settings in the request were saved. A config or credential file that
+        exists but cannot be read is a 409 naming that file."""
+        from localm.config import ConfigUnreadable, update_config
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
@@ -166,13 +185,18 @@ def register(app: FastAPI, ctx) -> None:
                     "value and enforces its own permission.")
         # Model-source credentials (hf_token, civitai_api_key) are not in
         # DEFAULT_CONFIG and must never reach config.json: popped out of body and
-        # routed to their own owner-only file before validate_update runs. The
-        # admin_only check above already covers authorization for these two keys.
-        from localm.model_source_credentials import CREDENTIAL_KEYS, set_credentials
+        # validated here, then written to their own owner-only file after
+        # update_config below returns. The admin_only check above already covers
+        # authorization for these two keys.
+        from localm.model_source_credentials import (CREDENTIAL_KEYS,
+                                                     check_credentials_readable,
+                                                     credentials_path,
+                                                     set_credentials,
+                                                     validate_credential_updates)
         cred_updates = {k: body.pop(k) for k in list(body) if k in CREDENTIAL_KEYS}
         if cred_updates:
             try:
-                set_credentials(cred_updates)
+                cred_updates = validate_credential_updates(cred_updates)
             except ValueError as e:
                 raise HTTPException(400, str(e))
         # The second writer of `embedding_model`, besides POST /api/rag/embedding.
@@ -211,6 +235,16 @@ def register(app: FastAPI, ctx) -> None:
                     "Cannot enable require_auth while no API key is configured: "
                     "this would lock you out. Set an owner key (the launcher or "
                     "LOCALM_API_KEY) or create a named key first, then enable it.")
+        # INVARIANT: the credential store is written last, synchronously, after
+        # update_config has returned, and only checked (never written) before
+        # it. A request that returns an error therefore leaves stored
+        # credentials unchanged. See
+        # test_config_save_timeout_leaves_the_stored_credential_alone.
+        if cred_updates:
+            try:
+                check_credentials_readable()
+            except ConfigUnreadable as e:
+                raise HTTPException(409, str(e))
         # update_config() is the atomic read-modify-write helper: a bare
         # load_config()/save_config() pair has an unlocked window in which a
         # concurrent config write can be lost.
@@ -227,6 +261,23 @@ def register(app: FastAPI, ctx) -> None:
                 timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Saving the config timed out: {e}")
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e))
+        if cred_updates:
+            try:
+                set_credentials(cred_updates)
+            except ConfigUnreadable as e:
+                raise HTTPException(409, _credentials_not_saved(str(e), bool(validated)))
+            except OSError as e:
+                from localm.debuglog import logger as _dbg
+                if isinstance(e, TimeoutError):
+                    status, reason = 504, str(e)
+                else:
+                    status = 500
+                    reason = (f"{credentials_path().name} could not be written "
+                              f"({e.strerror or type(e).__name__})")
+                _dbg.warning("credential write after a config save failed: %s", reason)
+                raise HTTPException(status, _credentials_not_saved(reason, bool(validated)))
         # update_config() returns the FULL merged config, not just the changed
         # keys, so an admin_only field's value is stripped from a non-owner's
         # response echo - the same boundary get_config applies above.
@@ -273,7 +324,7 @@ def register(app: FastAPI, ctx) -> None:
         """Save ONE media plugin's own config block, deep-merged so the other
         fields and the other plugins are untouched. A blank field clears that
         plugin's override (it falls back to the shared global default)."""
-        from localm.config import load_config, update_config
+        from localm.config import ConfigUnreadable, load_config, update_config
         from localm.settings_schema import (MEDIA_PLUGINS, media_schema_json,
                                              validate_media_block)
         if name not in MEDIA_PLUGINS:
@@ -321,6 +372,8 @@ def register(app: FastAPI, ctx) -> None:
                                             timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Saving the {name} config timed out: {e}")
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e))
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
         # Same admin_only filter as the GET route above: a non-owner config:write
@@ -374,7 +427,7 @@ def register(app: FastAPI, ctx) -> None:
         """Save the tts plugin's own config block, merged key by key so
         unlisted keys are untouched. A blank field clears that override (back to
         the shipped template default)."""
-        from localm.config import update_config
+        from localm.config import ConfigUnreadable, update_config
         from localm.settings_schema import (TTS_PLUGIN, tts_admin_only_fields,
                                             validate_tts_block)
         # library / wasm_paths become a script URL and a WASM base URL that every
@@ -411,6 +464,8 @@ def register(app: FastAPI, ctx) -> None:
                                             timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Saving the tts config timed out: {e}")
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e))
         return _tts_payload(request)
 
     # ---------------------------------------------------------------- #
@@ -461,7 +516,7 @@ def register(app: FastAPI, ctx) -> None:
         before the plugin is enabled), a dynamically-registered field list only
         exists while the plugin is actually loaded - there is nothing to
         validate against otherwise."""
-        from localm.config import load_config, update_config
+        from localm.config import ConfigUnreadable, load_config, update_config
         from localm.settings_schema import (plugin_settings_admin_only_fields,
                                             plugin_settings_schema_json,
                                             validate_plugin_settings_update)
@@ -501,6 +556,8 @@ def register(app: FastAPI, ctx) -> None:
                                             timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Saving {name}'s settings timed out: {e}")
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e))
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
         held = _hs.caller_scopes(request)
