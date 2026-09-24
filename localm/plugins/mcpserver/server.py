@@ -290,6 +290,32 @@ class EngineCache:
         answering; the next get_chat() looks again or loads it here."""
         self._peers.pop(name, None)
 
+    def get_loaded_chat(self, name: str):
+        """get_chat() with the model ready to answer: this server's own engine
+        is loaded before it is returned. An engine that fails to load is
+        removed from the cache and the load error raised."""
+        engine = self.get_chat(name)
+        if self.is_peer(engine) or getattr(engine, "loaded", True):
+            return engine
+        try:
+            engine.load()
+        except Exception:
+            self._discard(name, engine)
+            raise
+        return engine
+
+    def _discard(self, name: str, engine) -> None:
+        """Remove *engine*, the cache's engine for *name* whose load failed,
+        and release whatever the failed load left behind."""
+        if self._engines.get(name) is engine:
+            self._engines.pop(name, None)
+            if name in self._lru:
+                self._lru.remove(name)
+        try:
+            engine.unload()
+        except Exception as e:
+            _log(f"warning: failed to release {name} after its load failed: {e}")
+
     def _peer_engine(self, name: str):
         """A client for another localm instance on this machine that has
         *name* loaded (matched by model file), or None.

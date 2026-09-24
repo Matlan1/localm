@@ -23,8 +23,9 @@ from ._common import MODEL_PARAM
 
 
 def coder_engine(engines: EngineCache, decision):
-    """The engine for a coder task under *decision*: each routed candidate in
-    order, then the model the task would otherwise use. Returns
+    """The loaded engine for a coder task under *decision*: each routed
+    candidate in order, then the model the task would otherwise use. A
+    candidate that cannot be built or loaded is skipped. Returns
     ``(engine, name, decision)``, the decision rewritten to name the model
     whose engine is returned. Raises what getting that last model raised."""
     names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
@@ -32,7 +33,7 @@ def coder_engine(engines: EngineCache, decision):
     for name in names:
         try:
             with _quiet_stdout():
-                engine = engines.get_chat(name)
+                engine = engines.get_loaded_chat(name)
         except Exception as e:
             load_errors.append(f"{name}: {e}")
             _srv._log(f"warning: could not load {name} for a coder task: {e}")
@@ -41,7 +42,7 @@ def coder_engine(engines: EngineCache, decision):
             decision = dataclasses.replace(decision, resolved=name)
         return engine, name, decision
     with _quiet_stdout():
-        engine = engines.get_chat(decision.current)
+        engine = engines.get_loaded_chat(decision.current)
     if decision.routed:
         decision = decision.without_route(load_errors)
     return engine, decision.current, decision

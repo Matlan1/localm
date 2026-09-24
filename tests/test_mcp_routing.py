@@ -43,6 +43,35 @@ class _Engine:
         self.loaded = False
 
 
+class _LazyEngine(_Engine):
+    """Built unloaded, as a real Engine is: load() brings the model up, or
+    raises when it cannot, and chat_stream loads it first when it is not
+    loaded."""
+
+    def __init__(self, name, images=False, fails_to_load=False):
+        super().__init__(name, images=images)
+        self.loaded = False
+        self.fails_to_load = fails_to_load
+        self.released = False
+
+    def load(self):
+        if self.fails_to_load:
+            raise RuntimeError(f"{self.display_name} could not be loaded")
+        self.loaded = True
+
+    def chat_stream(self, messages, **kw):
+        if not self.loaded:
+            self.load()
+        return super().chat_stream(messages, **kw)
+
+    def context_capacity(self):
+        return 8192 if self.loaded else None
+
+    def unload(self):
+        self.released = True
+        self.loaded = False
+
+
 @pytest.fixture
 def reg(tmp_path, monkeypatch):
     for n in ("plain", "seer", "tooly"):
@@ -143,18 +172,36 @@ class TestCoderRouting:
         assert d.resolved == "plain"
 
     @staticmethod
-    def _two_tool_models(reg, failing, exc):
+    def _add_tooly2(reg):
         registry, _, tmp_path = reg
         (tmp_path / "tooly2").mkdir(exist_ok=True)
         (tmp_path / "tooly2" / "tooly2.gguf").write_bytes(b"GGUF" + b"tooly2" * 8)
         registry["tooly2"] = {"path": str(tmp_path / "tooly2" / "tooly2.gguf"),
                               "source": "local", "model_type": "llm", "tool_use": True}
+
+    @staticmethod
+    def _two_tool_models(reg, failing, exc):
+        TestCoderRouting._add_tooly2(reg)
         made = {}
 
         def factory(name):
             if name in failing:
                 raise exc(f"{name} is unavailable")
             return made.setdefault(name, _Engine(name))
+        cache = EngineCache("plain", engine_factory=factory)
+        cache.made = made
+        return cache
+
+    @staticmethod
+    def _lazy_tool_models(reg, fails_to_load):
+        """A cache over plain, tooly and tooly2 whose engines build unloaded;
+        the ones named in *fails_to_load* build fine and fail on load()."""
+        TestCoderRouting._add_tooly2(reg)
+        made = {}
+
+        def factory(name):
+            return made.setdefault(
+                name, _LazyEngine(name, fails_to_load=name in fails_to_load))
         cache = EngineCache("plain", engine_factory=factory)
         cache.made = made
         return cache
@@ -181,6 +228,86 @@ class TestCoderRouting:
             engine, name, got = coder_engine(engines, decision)
         assert name == "plain" and not got.routed
         assert len(got.load_errors) == 2
+
+    def test_a_candidate_that_fails_to_load_gives_way_to_the_next_one(self, reg):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = TestCoderRouting._lazy_tool_models(reg, {"tooly"})
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert decision.candidates == ("tooly", "tooly2")
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            engine, name, got = coder_engine(engines, decision)
+        assert name == "tooly2" and engine is engines.made["tooly2"]
+        assert engine.loaded, "the engine is loaded before the task gets it"
+        assert got.routed and got.resolved == "tooly2"
+        assert engines.resident == ["tooly2"], "a model that failed to load is not resident"
+        assert engines.made["tooly"].released
+
+    def test_when_every_candidate_fails_to_load_the_default_is_used(self, reg):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = TestCoderRouting._lazy_tool_models(reg, {"tooly", "tooly2"})
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            engine, name, got = coder_engine(engines, decision)
+        assert name == "plain" and engine.loaded and not got.routed
+        assert [e.split(":")[0] for e in got.load_errors] == ["tooly", "tooly2"]
+        assert "could not be loaded" in got.load_errors[0]
+        assert engines.resident == ["plain"]
+
+    def test_the_default_failing_to_load_fails_the_call(self, reg):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = TestCoderRouting._lazy_tool_models(reg, {"plain"})
+        decision = engines.route("plain", [], required=("tool_use",), pinned=True)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None), \
+                pytest.raises(RuntimeError, match="plain could not be loaded"):
+            coder_engine(engines, decision)
+        assert engines.resident == []
+
+
+@pytest.fixture
+def coder_project(tmp_path, monkeypatch):
+    """A project directory for run_coder_task, with the coder plugin active and
+    an isolated data dir."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr("localm.plugins.engine.PluginManager.is_active",
+                        lambda self, name: True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "a.py").write_text("x = 1\n", encoding="utf-8")
+    return project
+
+
+def _run_coder_task(engines, project, **args):
+    """The run_coder_task tool's result for *args* in *project*."""
+    with patch("localm.plugins.mcpserver.server._backend_can_embed", return_value=True):
+        server = MCPStdioServer(build_tools(engines, enable_images=False,
+                                            enable_memory=False))
+    call = {"task": "do the thing", "cwd": str(project), **args}
+    with patch.object(EngineCache, "_make_room_for", lambda self, name: None), \
+            patch("localm.plugins.coder.agent.ProjectMap") as project_map, \
+            patch("localm.plugins.coder.agent.make_audit_log"), \
+            patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        project_map.build.return_value.file_count.return_value = 0
+        resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "run_coder_task", "arguments": call}})
+    return resp["result"]
+
+
+class TestCoderTaskRuns:
+    def test_a_candidate_that_fails_to_load_is_skipped_for_the_run(
+            self, reg, coder_project):
+        engines = TestCoderRouting._lazy_tool_models(reg, {"tooly"})
+        res = _run_coder_task(engines, coder_project)
+        text = res["content"][0]["text"]
+        assert res["isError"] is False, text
+        assert "reply-from-tooly2" in text
+        assert "[answered by tooly2: plain lacks structured tool calls]" in text
 
 
 # --------------------------------------------------------------------------- #
