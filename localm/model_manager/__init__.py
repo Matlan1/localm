@@ -79,6 +79,7 @@ from .registry import (
     _SHORTCUT_SIZES,
     _store_into_models_dir,
     _store_loose_gguf_dir,
+    _store_with_projector,
     _unique_registry_name,
     add_local,
     alias_model,
@@ -173,7 +174,7 @@ __all__ = [
     "_backup_registry", "sync_models_dir", "_register_with_dedup", "remove_model",
     "_add_local_gguf_dir", "add_local", "show_shortcuts", "_prompt_duplicate_action",
     "_prompt_predownload_dup", "_resolve_ollama_manifest", "MODEL_TYPES",
-    "_store_into_models_dir", "_store_loose_gguf_dir",
+    "_store_into_models_dir", "_store_loose_gguf_dir", "_store_with_projector",
     # pull
     "_emit_outcome", "_emit_progress", "_progress_file_info", "_download_progress",
     "_snapshot_progress", "_verify_digest", "pull_model", "_stem_from_url",
