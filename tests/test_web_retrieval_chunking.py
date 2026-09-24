@@ -219,3 +219,34 @@ class TestSelectEvidence:
         by_source = {sid: sum(len(c.text) for c in chunks if c.source_id == sid)
                      for sid in ("S1", "S2")}
         assert by_source["S2"] > by_source["S1"] > 0
+
+
+class TestNonEnglishRelevance:
+    """Relevance ranking is not English-only: a non-Latin, space-delimited query
+    and document (Russian) still selects the matching content, the same way an
+    English one does. Existing coverage elsewhere only round-trips Unicode
+    BYTES through extraction (Grüße aus Linz); this pins that the SCORING
+    pipeline (query_terms/score_text/select_evidence) also works on a script
+    outside the English/German stopword lists."""
+
+    _RU_QUERY = "погода в москве"
+    _RU_ANSWER = ("Погода в Москве сегодня солнечно, днём до двадцати двух "
+                  "градусов.")
+
+    def test_matching_chunk_ranks_above_filler(self):
+        text = _doc([filler_paragraph(i, 300) for i in range(6)]
+                    + [self._RU_ANSWER])
+        ranked = rank_chunks(text, self._RU_QUERY)
+        assert self._RU_ANSWER in ranked[0].chunk.text
+        assert ranked[0].score > 0
+        assert all(s.score == 0 for s in ranked[1:])
+
+    def test_select_evidence_finds_it_among_other_sources(self):
+        pages = [
+            ("S1", "page", _doc([filler_paragraph(i, 300) for i in range(6)])),
+            ("S2", "page", _doc([filler_paragraph(i, 300) for i in range(6)]
+                                + [self._RU_ANSWER])),
+        ]
+        chunks = select_evidence(pages, self._RU_QUERY)
+        assert any(self._RU_ANSWER in c.text for c in chunks
+                  if c.source_id == "S2")
