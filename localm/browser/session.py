@@ -45,8 +45,8 @@ _MAX_REDIRECTS = 10
 _TYPE_CHUNK = 16
 
 #: Seconds after a click or key press this session sent during which a window
-#: the page opens counts as opened by it. Matches Chromium's transient user
-#: activation lifespan.
+#: the page opens counts as opened by it; a window opened while one is still
+#: being sent counts too. Matches Chromium's transient user activation lifespan.
 _INPUT_ACTIVATION = 5.0
 
 #: Seconds a window opened by a click may take to load and still be shown.
