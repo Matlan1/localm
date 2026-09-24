@@ -218,6 +218,73 @@ class TestServingStopRunsTheGuiButtonTeardown:
         assert ("teardown", "inst-42") in calls
         assert calls.index(("teardown", "inst-42")) < calls.index("advertise-exit")
 
+    def test_faulthandler_and_the_trace_survive_into_teardown(
+            self, monkeypatch):
+        """The real regression: portmux.run_server's own finally clears the
+        crash marker (never disarms the guard outright), so by the time this
+        function's own finally reaches _shutdown_teardown - which unloads the
+        engines and the embedder, native contexts that can fault while being
+        freed - faulthandler and the trace file are still attached. Drives the
+        REAL portmux.run_server (only the socket layer is faked) so the actual
+        finally ordering between the two functions is what is under test."""
+        import contextlib
+        import faulthandler
+        import sys
+
+        from localm import bugreport, portmux
+
+        was_enabled = faulthandler.is_enabled()
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"mode": "log", "keep_diagnostics": False})
+
+        class _App:
+            class state:
+                instance_id = "inst-teardown"
+
+        @contextlib.contextmanager
+        def _advertise(*a, **kw):
+            yield {}
+        monkeypatch.setattr("localm.instances.advertise", _advertise)
+        monkeypatch.setattr(http_server, "_announce_stopping", lambda: None)
+
+        async def fake_serve(app, host, port, log_level):
+            return
+        monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+
+        seen = {}
+        real_disarm = bugreport.disarm_crash_guard
+
+        def _spy_teardown(*, instance_id=None):
+            run = bugreport._crash_dir()
+            seen["faulthandler_enabled"] = faulthandler.is_enabled()
+            seen["trace_exists"] = (
+                run / f"server-crash-trace.{instance_id}.txt").exists()
+            seen["marker_gone"] = not (
+                run / f"server-crash.{instance_id}.marker").exists()
+            seen["stopping_record_exists"] = (
+                run / f"server-crash.{instance_id}.stopping").exists()
+            real_disarm(instance_id=instance_id)
+        monkeypatch.setattr(http_server, "_shutdown_teardown", _spy_teardown)
+
+        try:
+            http_server.run_advertised(_App(), "127.0.0.1", 1, mode="full")
+        finally:
+            if was_enabled and not faulthandler.is_enabled():
+                faulthandler.enable(file=sys.__stderr__, all_threads=True)
+
+        assert seen == {
+            "faulthandler_enabled": True,
+            "trace_exists": True,
+            "marker_gone": True,
+            "stopping_record_exists": True,
+        }, ("a native fault during teardown's own engine/embedder unload would "
+            f"go uncaptured: {seen}")
+
+        run = bugreport._crash_dir()
+        assert not (run / "server-crash-trace.inst-teardown.txt").exists()
+        assert not (run / "server-crash.inst-teardown.stopping").exists()
+
 
 class TestTheStopDoesNotWaitForALongResponse:
     """Without a bound, uvicorn's graceful shutdown waits for the LONGEST open
