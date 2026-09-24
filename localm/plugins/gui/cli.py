@@ -137,31 +137,30 @@ def _restart_port_grace_window() -> float:
 def _should_auto_open_browser(no_browser: bool) -> bool:
     """Whether THIS process's own startup should auto-open a browser tab.
 
-    False whenever the caller passed --no-browser, and ALSO false when this
-    process was re-exec'd by a server restart: http_server._do_restart sets
-    LOCALM_RESTART_IN_PROGRESS right before os.execv, because the tab the user
-    is already looking at shows a reconnect overlay that polls and reloads
-    itself in place once this process is back up - opening a second tab here
-    would strand that overlay instead of reusing it. The flag is CONSUMED
-    (popped), not merely read, so it can never leak into a later, genuinely
-    fresh launch that happens to inherit this process's environment."""
+    False with --no-browser. Also False when this process was re-exec'd by a
+    server restart (LOCALM_RESTART_IN_PROGRESS, set by
+    http_server._set_restart_env) and the previous run's GUI surface
+    (LOCALM_RESTART_UI) is anything other than "window": "browser", an
+    unrecognised value, or unset. Pops both variables from the environment."""
     import os
     is_restart = os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None) is not None
-    return (not no_browser) and (not is_restart)
+    previous_ui = os.environ.pop("LOCALM_RESTART_UI", None)
+    tab_reconnects = is_restart and previous_ui != "window"
+    return (not no_browser) and (not tab_reconnects)
 
 
 def _resolve_gui_launch_mode(no_browser: bool) -> tuple[bool, bool]:
     """Resolve (want_native, should_open_browser) for this process startup.
 
     want_native: whether to run the native OS app window on the main thread.
-    True when not in headless mode (no_browser=False) and pywebview is available
-    and permitted by config. Survives server restarts because the old window
-    was terminated by os.execv.
+    True when no_browser is False and appface.native_window_available() is
+    True, on a fresh launch and on a restart alike.
 
     should_open_browser: whether to spawn the background thread opening a browser
-    tab. False when want_native is True, when headless, or when restarting in
-    browser mode (the existing browser tab reconnects in place). Consumes
-    LOCALM_RESTART_IN_PROGRESS from the environment."""
+    tab. True only when want_native is False and _should_auto_open_browser is
+    True: never with --no-browser, and on a restart only when the previous run
+    showed the native app window. Pops LOCALM_RESTART_IN_PROGRESS and
+    LOCALM_RESTART_UI from the environment."""
     from localm import appface
     want_native = (not no_browser) and appface.native_window_available()
     auto_open_browser = _should_auto_open_browser(no_browser)
@@ -1121,6 +1120,11 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if should_open_browser:
         threading.Thread(target=_open_when_ready, args=(open_url, chosen_port),
                          daemon=True, name="open-browser").start()
+    # Records the surface a server restart hands to the re-exec'd process.
+    if want_native:
+        hs.set_restart_ui("window")
+    elif not no_browser:
+        hs.set_restart_ui("browser")
 
     # Record the bind host so the SPA-shell route knows whether every client is
     # loopback (a 127.0.0.1 bind) and can safely seed the API key into the page.
@@ -1250,6 +1254,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             # exactly like clicking Stop would, instead of just hiding it.
             if not appface.run_native_window(open_url, on_quit=on_stop,
                                              server_stopped=server_stopped):
+                hs.set_restart_ui("browser")
                 webbrowser.open(open_url)
             # MUST join here, not just rely on server_thread being non-daemon:
             # concurrent.futures.thread registers its shutdown via CPython's

@@ -2481,7 +2481,7 @@ def _hang_restart_action(app) -> None:
     except Exception:
         pass
     _mark_fds_noninheritable()
-    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
+    _set_restart_env()
     os.execv(sys.executable, _execv_argv(_restart_argv(port)))
 
 
@@ -3434,6 +3434,30 @@ def _request_shutdown(delay: float = 0.25, *,
     threading.Thread(target=_run, daemon=True).start()
 
 
+# The GUI surface this process shows the user, recorded by set_restart_ui:
+# "window", "browser", or None.
+_restart_ui: Optional[str] = None
+
+
+def set_restart_ui(ui: Optional[str]) -> None:
+    """Record the GUI surface this process shows the user: "window" for the
+    native app window, "browser" for a browser tab, None for neither.
+    _set_restart_env hands it to a restart's re-exec'd process."""
+    global _restart_ui
+    _restart_ui = ui
+
+
+def _set_restart_env() -> None:
+    """Set the environment a restart's re-exec'd process inherits:
+    LOCALM_RESTART_IN_PROGRESS=1, and LOCALM_RESTART_UI set to the surface
+    recorded by set_restart_ui, or removed when none is recorded."""
+    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
+    if _restart_ui:
+        os.environ["LOCALM_RESTART_UI"] = _restart_ui
+    else:
+        os.environ.pop("LOCALM_RESTART_UI", None)
+
+
 def _restart_argv(port: Optional[int] = None) -> list:
     """The command line to re-launch this server. Always ``python -m localm <args>``
     - the canonical entry the codebase uses - so a restart works regardless of how
@@ -3735,16 +3759,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             except Exception:
                 pass
 
-    # The re-exec'd process must NOT auto-open a new browser tab: this is a
-    # restart, not a fresh launch, and the tab the user is already looking at
-    # shows a reconnect overlay that polls and reloads itself in place once
-    # this process is back up (models.js's server-restart handler ->
-    # onServerUnreachable() in the GUI's init.js). Opening a second tab here
-    # would strand that overlay and leave the user looking at two tabs, only
-    # one of which is watching for the server's return. plugins/gui/cli.py's
-    # browser-open step checks and consumes this flag (never leaks into a
-    # later, genuinely-fresh launch of the same process tree).
-    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
+    _set_restart_env()
     os.execv(sys.executable, _execv_argv(_restart_argv(port)))
 
 
