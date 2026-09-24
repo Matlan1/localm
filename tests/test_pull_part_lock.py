@@ -94,9 +94,9 @@ HOLD = '''
 
 REPORT = '''
     import json, os, sys
-    from localm.model_manager.pull import _process_start_identity
-    print(os.getpid(), json.dumps(_process_start_identity(os.getpid())),
-          flush=True)
+    from localm.model_manager.pull import _pid_space_id, _process_start_identity
+    print(os.getpid(), _pid_space_id(),
+          json.dumps(_process_start_identity(os.getpid())), flush=True)
     sys.stdin.read()
 '''
 
@@ -535,18 +535,62 @@ def test_the_pid_space_id_differs_between_platforms_on_one_host(monkeypatch):
 
 def test_a_process_and_an_observer_read_the_same_start_identity(home):
     """The identity a process records for itself equals the one another
-    process reads for its pid."""
+    process reads for its pid, and two processes of one pid table compute the
+    same pid space."""
     child = spawn_on_this_tree(REPORT, home, stdin=subprocess.PIPE)
     try:
         line = child.stdout.readline()
-        pid_text, _, own_text = line.strip().partition(" ")
-        if not pid_text.isdigit():
+        fields = line.strip().split(" ", 2)
+        if len(fields) != 3 or not fields[0].isdigit():
             _release(child)
             pytest.fail(f"the child did not report: {line!r} "
                         f"{child.stderr.read()}")
+        pid_text, space_text, own_text = fields
+        assert space_text == this_pid_space()
         assert start_identity_of(int(pid_text)) == json.loads(own_text)
     finally:
         _release(child)
+
+
+def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
+        home, monkeypatch):
+    """Two machines that share a data folder and a host name still compute
+    different pid spaces, so a remote holder's pid is never looked up here."""
+    from localm.model_manager import pull
+    other = _idle_child()
+    try:
+        ident = start_identity_of(other.pid)
+        with monkeypatch.context() as m:
+            m.setattr(pull, "_PID_SPACE", None)
+            m.setattr(pull, "_machine_id_text", lambda: "another-machine-id")
+            remote_space = pull._pid_space_id()
+        # The injection took: the same host name, a different machine.
+        assert remote_space != this_pid_space()
+        d = _part_lock_dir("m.gguf")
+        _write_owner(d, other.pid, space=remote_space,
+                     start=started_an_hour_earlier(ident), started=time.time())
+        before = _record(d)
+
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before, (
+            "a lock recorded on another machine with this host name was "
+            "reclaimed")
+        assert refused is not None
+    finally:
+        _release(other)
+
+
+@pytest.mark.skipif(not (sys.platform.startswith("linux")
+                         or sys.platform == "win32"),
+                    reason="the machine id is read on Linux and Windows")
+def test_the_machine_id_is_read_on_linux_and_windows():
+    from localm.model_manager.pull import _machine_id_text
+    assert _machine_id_text(), "no machine id was read"
 
 
 def test_the_lock_records_its_holders_pid_space_and_start_identity(home):

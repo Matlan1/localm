@@ -51,22 +51,51 @@ def _partial_owner_path(partial: Path) -> Path:
 
 
 _LINUX_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+_LINUX_MACHINE_IDS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
 _PID_SPACE: "str | None" = None
+
+
+def _machine_id_text() -> str:
+    """This installation's machine id, or "" when it cannot be read: the
+    systemd / D-Bus machine id on Linux, the Cryptography MachineGuid on
+    Windows."""
+    if sys.platform.startswith("linux"):
+        for p in _LINUX_MACHINE_IDS:
+            try:
+                text = p.read_text(encoding="ascii").strip()
+            except (OSError, ValueError):
+                continue
+            if text:
+                return text
+        return ""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SOFTWARE\Microsoft\Cryptography", 0,
+                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+                value, _ = winreg.QueryValueEx(k, "MachineGuid")
+        except OSError:
+            return ""
+        return str(value).strip()
+    return ""
 
 
 def _pid_space_id() -> str:
     """An opaque id for the pid table this process's pids belong to: the
-    platform, the host name and, on Linux, the pid namespace, hashed.
+    platform, the machine id (see :func:`_machine_id_text`), the host name
+    and, on Linux, the pid namespace, hashed.
 
-    A process that can read neither the host name nor the pid namespace gets
-    an id unique to itself, so no other process's record matches it.
+    A process that can read none of the machine id, the host name and the pid
+    namespace gets an id unique to itself, so no other process's record
+    matches it.
     """
     global _PID_SPACE
     if _PID_SPACE is None:
         import hashlib
         import platform
         import uuid
-        parts = [sys.platform]
+        parts = [sys.platform, _machine_id_text()]
         try:
             parts.append(platform.node() or "")
         except Exception:
