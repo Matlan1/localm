@@ -3,7 +3,13 @@
 
 Routes (mounted by the engine, auto-scoped to the ``browser`` capability):
   POST   /api/browser/session    - open a browser and start streaming it
+  GET    /api/browser/agent      - whether an agent-driven browser is available to watch
+  POST   /api/browser/agent      - stream the coding agent's own browser to this caller
   POST   /api/browser/navigate   - drive the open browser to a URL
+  POST   /api/browser/click      - click a point on the open browser's page
+  POST   /api/browser/scroll     - scroll the open browser's page
+  POST   /api/browser/key        - send a named key press to the open browser
+  POST   /api/browser/type       - type text into the open browser
   POST   /api/browser/stop       - close the browser and end the stream
   GET    /api/browser/state      - whether one is open, and what it reached
 
@@ -17,15 +23,17 @@ returns: the navigate route reaches the same live browser through the session
 registry while the worker is still streaming it.
 
 Ships DISABLED by default, and every route refuses unless ``browser_enabled`` is
-switched on, so holding the capability is not on its own enough to drive it.
+switched on, except ``/stop`` and ``/state``, which work regardless. Holding the
+capability is not on its own enough to drive a browser.
 """
 
 from __future__ import annotations
 
 import time
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.browser import session as bsession
 from localm.inference.http_server import principal_id
@@ -35,6 +43,14 @@ _router = APIRouter()
 
 #: How often the worker checks whether it has been asked to stop.
 _TICK = 0.25
+
+#: The largest magnitude, in CSS pixels, of a click coordinate or wheel delta.
+_MAX_PIXELS = 1_000_000.0
+
+#: A click coordinate or wheel delta: a finite number within +/- _MAX_PIXELS.
+#: Anything else, NaN and Infinity included, is refused with a 422.
+_Pixels = Annotated[float, Field(allow_inf_nan=False,
+                                 ge=-_MAX_PIXELS, le=_MAX_PIXELS)]
 
 
 class OpenRequest(BaseModel):
@@ -46,14 +62,14 @@ class NavigateRequest(BaseModel):
 
 
 class ClickRequest(BaseModel):
-    x: float
-    y: float
-    button: str = "left"
+    x: _Pixels
+    y: _Pixels
+    button: Literal["left", "right", "middle"] = "left"
 
 
 class ScrollRequest(BaseModel):
-    delta_x: float = 0.0
-    delta_y: float = 0.0
+    delta_x: _Pixels = 0.0
+    delta_y: _Pixels = 0.0
 
 
 class KeyRequest(BaseModel):

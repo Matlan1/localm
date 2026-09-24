@@ -2224,5 +2224,11 @@ export const I18N_EN = {
   "video.widthLabel": "Width",
   "video.widthPlaceholder": "default (1280, native)",
 
+  // ---- Browser tab (browser plugin, static/browser.js) ----
+  "browser.liveView.inputFailed": "Input did not reach the browser: {detail}",
+  "browser.liveView.inputRestored": "Input is reaching the browser again.",
+  "browser.liveView.keysHint":
+    "Keys go to the page · Esc releases the keyboard · Shift+Tab moves back",
+
   // ---- Setup page (guided runtime + first model, manual entry only) ----
 };

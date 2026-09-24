@@ -616,7 +616,252 @@ test("keydown on the live frame in own mode posts to /key and /type", async () =
   const charEv = new win.KeyboardEvent("keydown", { key: "a" });
   charEv.preventDefault = () => {};
   shot.dispatchEvent(charEv);
+  await settle();
 
   assert.equal(calls.filter((c) => c.url.endsWith("/key")).length, 1);
   assert.equal(calls.filter((c) => c.url.endsWith("/type")).length, 1);
+});
+
+// --------------------------------------------------------------------------- //
+//  Live-view input reaches the page one request at a time, in the order it    //
+//  was made, and a keyboard user can always leave the frame.                  //
+// --------------------------------------------------------------------------- //
+
+/** A fetch double for an open browser whose input routes (click, key, type,
+ *  scroll) answer only when the test releases them. `fail(entry)` picks the
+ *  requests that fail as a network error would. */
+function gatedInput(win, { fail = () => false } = {}) {
+  const sent = [];
+  const pending = [];
+  const stats = { inFlight: 0, maxInFlight: 0 };
+  win.fetch = (url, opts = {}) => {
+    const u = String(url);
+    const m = (opts.method || "GET").toUpperCase();
+    if (u.endsWith("/session") && m === "POST") {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ job_id: "j1" }) });
+    }
+    const input = u.match(/\/api\/browser\/(click|key|type|scroll)$/);
+    if (!input) {
+      return Promise.resolve({ ok: true, status: 200, body: null, json: async () => ({}) });
+    }
+    const entry = { route: input[1], body: JSON.parse(opts.body) };
+    sent.push(entry);
+    stats.inFlight++;
+    stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+    return new Promise((resolve, reject) => {
+      pending.push(() => {
+        stats.inFlight--;
+        if (fail(entry)) reject(new TypeError("Failed to fetch"));
+        else resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+      });
+    });
+  };
+  global.fetch = win.fetch;
+  return { sent, pending, stats };
+}
+
+/** Release every pending input request, newest first, until none is left. */
+async function drain(pending) {
+  for (let round = 0; round < 50; round++) {
+    await settle();
+    if (!pending.length) return;
+    for (const release of pending.splice(0).reverse()) release();
+  }
+  throw new Error("input requests never stopped arriving");
+}
+
+/** Register the tab, open a browser in it, and give the frame a 1280x800
+ *  picture filling a 1280x800 box. */
+async function openOwn(win, mod) {
+  const toasts = [];
+  mod.register({ toast: (t) => toasts.push(t), authHeaders: () => ({}) });
+  const c = controls(win);
+  c.url.value = "https://first.example/";
+  c.go.onclick();
+  await settle();
+  const shot = win.document.querySelector("img.browser-frame");
+  Object.defineProperty(shot, "naturalWidth", { value: 1280, configurable: true });
+  Object.defineProperty(shot, "naturalHeight", { value: 800, configurable: true });
+  shot.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1280, height: 800 });
+  shot.hidden = false;
+  return { c, shot, toasts };
+}
+
+function keydown(win, key, extra = {}) {
+  return new win.KeyboardEvent("keydown",
+    { key, bubbles: true, cancelable: true, ...extra });
+}
+
+function frameClick(win) {
+  return new win.MouseEvent("click", { clientX: 640, clientY: 400, bubbles: true });
+}
+
+test("live-view input goes out one request at a time, in the order it was made", async () => {
+  const { win } = makeEnv();
+  const { sent, pending, stats } = gatedInput(win);
+  const mod = await load();
+  const { shot } = await openOwn(win, mod);
+
+  shot.dispatchEvent(frameClick(win));
+  shot.dispatchEvent(keydown(win, "a"));
+  shot.dispatchEvent(keydown(win, "b"));
+  shot.dispatchEvent(keydown(win, "Enter"));
+  await drain(pending);
+
+  assert.equal(stats.maxInFlight, 1,
+    `${stats.maxInFlight} input requests were in flight at once, so the server `
+    + "may apply them in any order");
+  // Consecutive typed text is merged here, so this holds with or without
+  // coalescing.
+  const order = [];
+  for (const s of sent) {
+    const last = order[order.length - 1];
+    if (s.route === "type" && last && last.route === "type") last.text += s.body.text;
+    else order.push({ route: s.route, ...s.body });
+  }
+  assert.deepEqual(order, [
+    { route: "click", x: 640, y: 400, button: "left" },
+    { route: "type", text: "ab" },
+    { route: "key", key: "Enter" },
+  ], "input reached the page in a different order from the one it was made in");
+});
+
+test("characters typed while an input request is in flight go out as one /type", async () => {
+  const { win } = makeEnv();
+  const { sent, pending } = gatedInput(win);
+  const mod = await load();
+  const { shot } = await openOwn(win, mod);
+
+  shot.dispatchEvent(keydown(win, "Enter"));
+  for (const ch of "hello") shot.dispatchEvent(keydown(win, ch));
+  await drain(pending);
+
+  assert.deepEqual(sent, [
+    { route: "key", body: { key: "Enter" } },
+    { route: "type", body: { text: "hello" } },
+  ]);
+});
+
+test("wheel deltas gathered before a click are sent before it", async () => {
+  const { win } = makeEnv();
+  const { sent, pending } = gatedInput(win);
+  const mod = await load();
+  const { shot } = await openOwn(win, mod);
+
+  const wheel = new win.Event("wheel", { cancelable: true });
+  wheel.deltaX = 0;
+  wheel.deltaY = 120;
+  shot.dispatchEvent(wheel);
+  shot.dispatchEvent(frameClick(win));
+  await drain(pending);
+
+  assert.deepEqual(sent.map((s) => s.route), ["scroll", "click"],
+    "a click overtook the scroll made before it");
+  assert.deepEqual(sent[0].body, { delta_x: 0, delta_y: 120 });
+});
+
+test("a failed input request is shown, and the input queued behind it is still sent", async () => {
+  const { win } = makeEnv();
+  const { sent, pending } = gatedInput(win, { fail: (e) => e.route === "click" });
+  const mod = await load();
+  const { c, shot, toasts } = await openOwn(win, mod);
+  const status = c.view.querySelector(".browser-status");
+
+  shot.dispatchEvent(frameClick(win));
+  shot.dispatchEvent(keydown(win, "x"));
+  await settle();
+  pending.shift()();                    // the click fails
+  await settle();
+
+  assert.match(status.textContent, /did not reach the browser/,
+    "a failed click left the status line saying nothing about it");
+  assert.equal(toasts.length, 1, "a failed click was not surfaced to the user");
+  assert.deepEqual(sent.map((s) => s.route), ["click", "type"],
+    "the input queued behind a failed request was not sent");
+
+  await drain(pending);
+  assert.match(status.textContent, /reaching the browser again/,
+    "the failure stayed on screen after input got through again");
+  assert.equal(toasts.length, 1, "a request that succeeded raised a toast");
+});
+
+test("stopping the browser drops input that has not been sent yet", async () => {
+  const { win } = makeEnv();
+  const { sent, pending } = gatedInput(win);
+  const mod = await load();
+  const { c, shot } = await openOwn(win, mod);
+
+  shot.dispatchEvent(keydown(win, "Enter"));
+  shot.dispatchEvent(keydown(win, "q"));
+  c.stop.onclick();
+  await drain(pending);
+
+  assert.deepEqual(sent.map((s) => s.route), ["key"],
+    "input made before Stop was sent after it");
+});
+
+test("switching to the agent view drops a scroll still being gathered", async () => {
+  const { win } = makeEnv();
+  const { sent, pending } = gatedInput(win);
+  const mod = await load();
+  const { c, shot } = await openOwn(win, mod);
+
+  const wheel = new win.Event("wheel", { cancelable: true });
+  wheel.deltaX = 0;
+  wheel.deltaY = 120;
+  shot.dispatchEvent(wheel);
+  c.watch.onclick();
+  await new Promise((r) => setTimeout(r, 60));
+  await drain(pending);
+
+  assert.deepEqual(sent, [],
+    "a scroll made in the tab's own browser was sent after the view moved to the agent's");
+});
+
+test("Esc releases the frame without reaching the page, and Shift+Tab is left to the browser", async () => {
+  const { win } = makeEnv();
+  const { sent, pending } = gatedInput(win);
+  const mod = await load();
+  const { shot } = await openOwn(win, mod);
+
+  shot.focus();
+  assert.equal(win.document.activeElement, shot, "precondition: the frame holds focus");
+  shot.dispatchEvent(keydown(win, "Escape"));
+  await drain(pending);
+  assert.notEqual(win.document.activeElement, shot,
+    "Esc left keyboard focus in the frame, so a keyboard user cannot leave it");
+  assert.deepEqual(sent.filter((s) => s.route === "key" && s.body.key === "Escape"), [],
+    "Esc was sent to the page instead of releasing the frame");
+
+  shot.focus();
+  const back = keydown(win, "Tab", { shiftKey: true });
+  shot.dispatchEvent(back);
+  await drain(pending);
+  assert.equal(back.defaultPrevented, false,
+    "Shift+Tab was cancelled, so focus cannot move back out of the frame");
+  assert.deepEqual(sent, [], "Shift+Tab was sent to the page");
+
+  const forward = keydown(win, "Tab");
+  shot.dispatchEvent(forward);
+  await drain(pending);
+  assert.deepEqual(sent, [{ route: "key", body: { key: "Tab" } }],
+    "Tab alone still moves through the page's own fields");
+});
+
+test("the focused frame shows a hint that names the key which releases it", async () => {
+  const { win } = makeEnv();
+  gatedInput(win);
+  const mod = await load();
+  const { shot } = await openOwn(win, mod);
+  const hint = win.document.querySelector(".browser-keys-hint");
+
+  assert.ok(hint, "the view has no keyboard hint");
+  assert.equal(hint.hidden, true, "the hint shows while the frame is not focused");
+  assert.equal(shot.getAttribute("aria-describedby"), hint.id,
+    "the frame does not point assistive technology at the hint");
+  shot.focus();
+  assert.equal(hint.hidden, false, "focusing the frame did not show the hint");
+  assert.match(hint.textContent, /\bEsc\b/, "the hint does not name the release key");
+  shot.dispatchEvent(keydown(win, "Escape"));
+  assert.equal(hint.hidden, true, "the hint stayed after the frame let go of the keyboard");
 });
