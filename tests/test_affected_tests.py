@@ -488,6 +488,48 @@ def test_a_dev_only_dependency_nothing_imports_or_names_selects_no_test(dep_repo
     assert _select(mod, ["uv.lock"]) == {}
 
 
+def test_a_committed_dependency_change_is_seen_from_its_base_not_from_head(dep_repo):
+    mod, root = dep_repo
+    base = _git(root, "rev-parse", "HEAD").strip()
+    _bump(root, "webkit-srv", "1.0.0", "1.1.0")
+    _git(root, "commit", "-qam", "bump webkit-srv")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+    assert set(_select(mod, ["uv.lock"], base_ref=base)) == {"tests/test_server.py"}
+    out = _run_cli(root, "--files", "uv.lock")
+    assert out.returncode == 3, out.stderr
+    assert "16 of 16 test files affected" in out.stderr
+
+
+def test_a_dependency_a_conftest_imports_selects_every_test_under_its_folder(dep_repo):
+    mod, root = dep_repo
+    (root / "tests" / "sub" / "conftest.py").write_text("import devtool\n", encoding="utf-8")
+    _git(root, "commit", "-qam", "sub conftest imports devtool")
+    _bump(root, "devtool", "1.0.0", "1.0.1")
+    assert _select(mod, ["uv.lock"]) == {"tests/sub/test_sub.py": [
+        "every test file under tests/sub/: its conftest.py imports devtool: "
+        "changed dependency devtool"]}
+
+
+def test_a_runtime_dependency_only_the_root_conftest_imports_reaches_every_test(dep_repo):
+    mod, root = dep_repo
+    (root / "tests" / "conftest.py").write_text("import runtimeonly\n", encoding="utf-8")
+    _git(root, "commit", "-qam", "root conftest imports runtimeonly")
+    _bump(root, "runtimeonly", "1.0.0", "1.0.1")
+    selected = _select(mod, ["uv.lock"])
+    assert len(selected) == len(mod.Graph().test_files) == 16
+    assert all(r == ["every test file under tests/: its conftest.py imports runtimeonly: "
+                     "changed dependency runtimeonly"] for r in selected.values())
+
+
+def test_a_runtime_dependency_only_a_script_imports_affects_every_test(dep_repo):
+    mod, root = dep_repo
+    (root / "scripts" / "tool.py").write_text("import runtimeonly\nprint('tool')\n",
+                                               encoding="utf-8")
+    _git(root, "commit", "-qam", "tool imports runtimeonly")
+    _bump(root, "runtimeonly", "1.0.0", "1.0.1")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+
+
 def test_an_installed_distributions_import_name_finds_its_importers(dep_repo, monkeypatch):
     mod, root = dep_repo
     _bump(root, "fancy-dist", "1.0.0", "2.0.0")

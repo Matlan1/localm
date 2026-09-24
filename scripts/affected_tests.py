@@ -13,18 +13,21 @@ A test file is selected when any of these holds:
   - it names a changed module by its dotted name (a monkeypatch target, an
     import written as a string), a changed script by file name, or a changed
     non-Python file by file name;
-  - it imports a changed dependency, names it in a string literal, or imports
-    a module that imports it (with --depth N, also that module's importers,
-    up to N hops). A changed dependency is a distribution whose requirement in
-    pyproject.toml or whose entry in uv.lock differs, and every package in
-    uv.lock that depends on one, transitively.
+  - it imports a changed dependency, names it in a string literal, imports a
+    module that imports it (with --depth N, also that module's importers, up
+    to N hops), or sits under the folder of a conftest.py that imports it. A
+    changed dependency is a distribution whose requirement in pyproject.toml
+    or whose entry in uv.lock differs, and every package in uv.lock that
+    depends on one, transitively.
 
 A change to tests/conftest.py affects every test file. So does a change to
 pyproject.toml or uv.lock outside the [project] requirement lists and the
-locked packages, either file missing or unparsable on either side, and a
-changed dependency the project declares outside the dev extra that nothing in
-the tree imports or names. A changed dependency declared only in the dev extra
-that nothing imports or names selects no test file.
+locked packages, either file missing or unparsable on either side, a listed
+pyproject.toml or uv.lock that does not differ from the base (a committed
+change named with --files), and a changed dependency the project declares
+outside the dev extra that the rules above reach no test file from. A changed
+dependency declared only in the dev extra selects only the test files those
+rules reach, possibly none.
 
 Changes are read from git: the diff from the merge base with --base (default
 origin/master) to HEAD, plus staged, unstaged and untracked work. --files takes
@@ -375,31 +378,51 @@ def _names_in_a_string(names: set[str]) -> re.Pattern[str]:
     return re.compile(r"""["'](?:""" + alternatives + r""")(?=["'.\[<>=!~;\s])""", re.IGNORECASE)
 
 
-def _dependency_uses(graph: Graph, base_ref: str, test_text) -> list[tuple] | None:
-    """(distribution, label, import names, importing modules, name pattern)
-    for each affected distribution the tree imports or names; None when every
-    test file is affected: dependency_change() returned None, or an affected
-    distribution the project requires outside the dev extra is imported and
-    named nowhere. *test_text* reads a test file."""
-    change = dependency_change(_read_at(base_ref, "pyproject.toml"), _read("pyproject.toml"),
-                               _read_at(base_ref, "uv.lock"), _read("uv.lock"))
+def _dependency_reasons(graph: Graph, base_ref: str, listed: list[str], depth: int,
+                        test_text) -> dict[str, list[str]] | None:
+    """{test file: reasons} for the test files a change to the *listed*
+    dependency files reaches: a test that imports an affected distribution,
+    names it in a string literal, or imports (within *depth* hops) a module
+    that imports it, and every test file under the folder of a conftest.py
+    that imports it. None when every test file is affected:
+    dependency_change() returned None, a listed file does not differ from
+    *base_ref*, or an affected distribution the project requires outside the
+    dev extra reaches no test file. *test_text* reads a test file."""
+    texts = {rel: (_read_at(base_ref, rel), _read(rel)) for rel in _DEPENDENCY_FILES}
+    if any(texts[rel][0] == texts[rel][1] for rel in listed):
+        return None
+    change = dependency_change(*texts["pyproject.toml"], *texts["uv.lock"])
     if change is None:
         return None
     changed, affected, runtime = change
-    uses = []
+    reasons: dict[str, list[str]] = {}
     for dist in sorted(affected):
         names = import_names(dist)
         users = {m for m, top in graph.source_top.items() if top & names}
         named = _names_in_a_string(names | {dist})
-        if not users and not any(graph.test_top[t] & names or named.search(test_text(t))
-                                 for t in graph.test_files):
-            if dist in runtime:
-                return None
-            continue
+        hops = graph.importers(users, depth)
+        folders = sorted(graph.sources[m].rsplit("/", 1)[0] + "/" for m in users
+                         if graph.sources[m].endswith("/conftest.py"))
         label = f"changed dependency {dist}" if dist in changed else \
             f"dependency {dist} (it depends on a changed package)"
-        uses.append((dist, label, names, users, named))
-    return uses
+        hits: dict[str, list[str]] = {}
+        for t in graph.test_files:
+            why = [f"every test file under {folder}: its conftest.py imports {dist}: {label}"
+                   for folder in folders if t.startswith(folder)]
+            why += [f"imports {name}: {label}" for name in sorted(graph.test_top[t] & names)]
+            for mod in sorted(graph.test_imports[t] & set(hops), key=lambda m: (hops[m], m)):
+                why.append(f"imports {mod}, which imports {dist}: {label}" if hops[mod] == 0
+                           else f"imports {mod} ({hops[mod]} hop(s) from a module importing "
+                                f"{dist}): {label}")
+            if named.search(test_text(t)):
+                why.append(f"names {dist}: {label}")
+            if why:
+                hits[t] = why
+        if not hits and dist in runtime:
+            return None
+        for t, why in hits.items():
+            reasons.setdefault(t, []).extend(why)
+    return reasons
 
 
 def changed_files(base: str) -> tuple[list[str], str]:
@@ -427,13 +450,14 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
 
     test_text = functools.cache(_read)
     whole = [c for c in changed if c in _EVERYTHING]
-    uses: list[tuple] = []
-    if any(c in _DEPENDENCY_FILES for c in changed):
-        found = _dependency_uses(graph, base_ref, test_text)
+    listed = [c for c in changed if c in _DEPENDENCY_FILES]
+    dependency_reasons: dict[str, list[str]] = {}
+    if listed:
+        found = _dependency_reasons(graph, base_ref, listed, depth, test_text)
         if found is None:
-            whole += [c for c in changed if c in _DEPENDENCY_FILES]
+            whole += listed
         else:
-            uses = found
+            dependency_reasons = found
     if whole:
         which = ", ".join(sorted(whole))
         for t in graph.test_files:
@@ -469,8 +493,6 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
                 needles.append((f"names {name}", re.compile(re.escape(name))))
 
     hops = graph.importers(changed_modules, depth)
-    dependency_hops = [(dist, label, names, graph.importers(users, depth), named)
-                       for dist, label, names, users, named in uses]
     for t in graph.test_files:
         hit = graph.test_imports[t] & set(hops)
         for mod in sorted(hit, key=lambda m: (hops[m], m)):
@@ -479,14 +501,8 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
             for label, rx in needles:
                 if rx.search(test_text(t)):
                     add(t, label)
-        for dist, label, names, dep_hops, named in dependency_hops:
-            for name in sorted(graph.test_top[t] & names):
-                add(t, f"imports {name}: {label}")
-            for mod in sorted(graph.test_imports[t] & set(dep_hops), key=lambda m: (dep_hops[m], m)):
-                add(t, f"imports {mod}, which imports {dist}: {label}" if dep_hops[mod] == 0
-                    else f"imports {mod} ({dep_hops[mod]} hop(s) from a module importing {dist}): {label}")
-            if named.search(test_text(t)):
-                add(t, f"names {dist}: {label}")
+        for why in dependency_reasons.get(t, []):
+            add(t, why)
     return reasons
 
 
