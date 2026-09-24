@@ -52,6 +52,13 @@ _MAX_PIXELS = 1_000_000.0
 _Pixels = Annotated[float, Field(allow_inf_nan=False,
                                  ge=-_MAX_PIXELS, le=_MAX_PIXELS)]
 
+#: The most characters one /type request may carry. Longer text is refused
+#: with a 422.
+_MAX_TYPED_TEXT = 4096
+
+#: The longest key name one /key request may carry, modifiers included.
+_MAX_KEY_NAME = 64
+
 
 class OpenRequest(BaseModel):
     url: str | None = None
@@ -73,11 +80,11 @@ class ScrollRequest(BaseModel):
 
 
 class KeyRequest(BaseModel):
-    key: str
+    key: str = Field(max_length=_MAX_KEY_NAME)
 
 
 class TypeRequest(BaseModel):
-    text: str
+    text: str = Field(max_length=_MAX_TYPED_TEXT)
 
 
 class WatchAgentRequest(BaseModel):
@@ -136,10 +143,10 @@ def _gui_session_id(request: Request) -> str:
 
 @_router.post("/api/browser/session")
 async def open_browser(req: OpenRequest, request: Request):
+    """Open this key's browser. The key's id is claimed before the job starts,
+    so a second open while the first is still starting is refused with 409."""
     _require_enabled()
     sid = _gui_session_id(request)
-    if bsession.get(sid) is not None:
-        raise HTTPException(409, "A browser is already open for this key.")
     # Any app built through attach_engine has this registry; reaching the None
     # branch means the router was mounted on an app that never ran it.
     jobs = getattr(request.app.state, "jobs", None)
@@ -148,34 +155,48 @@ async def open_browser(req: OpenRequest, request: Request):
                                  "background job registry, which is "
                                  "unavailable.")
     cfg = _settings()
+    claim = bsession.reserve(sid)
+    if claim is None:
+        raise HTTPException(409, "A browser is already open for this key.")
 
     def _run(job) -> bool:
-        live = bsession.BrowserSession(
-            sid,
-            headless=cfg["headless"],
-            engine=cfg["engine"],
-            extra_deny=cfg["deny"],
-            extra_allow=cfg["allow"],
-            on_frame=lambda data: job.push({"type": FRAME_EVENT, "data": data}),
-        )
-        live.start()
-        bsession.register(live)
-        job.push({"type": "line", "line": "browser ready"})
         try:
+            live = bsession.BrowserSession(
+                sid,
+                headless=cfg["headless"],
+                engine=cfg["engine"],
+                extra_deny=cfg["deny"],
+                extra_allow=cfg["allow"],
+                on_frame=lambda data: job.push({"type": FRAME_EVENT, "data": data}),
+            )
+            live.start()
+        except BaseException:
+            bsession.release_if(sid, claim)
+            raise
+        try:
+            if not bsession.install(claim, live):
+                job.push({"type": "line", "line": "stopped before it was ready"})
+                return True
+            job.push({"type": "line", "line": "browser ready"})
             if req.url:
                 res = live.navigate(req.url)
                 job.push({"type": "line",
                           "line": ("opened " + str(res.get("url")) if res.get("ok")
                                    else "refused: " + str(res.get("refused")
                                                           or res.get("error")))})
-            while not job.cancel_requested:
+            while not job.cancel_requested and bsession.get(sid) is live:
                 time.sleep(_TICK)
         finally:
-            bsession.close(sid)
+            bsession.release_if(sid, live)
+            live.stop()
         return True
 
-    job = jobs.start_fn("browser", _run, owner=principal_id(request),
-                        label="Browser session")
+    try:
+        job = jobs.start_fn("browser", _run, owner=principal_id(request),
+                            label="Browser session")
+    except BaseException:
+        bsession.release_if(sid, claim)
+        raise
     return {"job_id": job.id, "session_id": sid}
 
 
