@@ -56,6 +56,12 @@ def start_identity_of(pid: int):
     return ident
 
 
+def this_pid_space() -> str:
+    """The pid space id this process writes into ownership records."""
+    from localm.model_manager.pull import _pid_space_id
+    return _pid_space_id()
+
+
 def started_an_hour_earlier(ident: dict) -> dict:
     """*ident* as it reads for a process started an hour earlier in the same
     boot."""
@@ -80,9 +86,10 @@ CHECK_TREE = textwrap.dedent('''
 ''')
 
 
-def spawn_on_this_tree(script: str, home_dir, *args,
-                       stdin=None) -> subprocess.Popen:
-    """Run *script* in a child interpreter with ``LOCALM_HOME`` at *home_dir*.
+def spawn_on_this_tree(script: str, home_dir, *args, stdin=None,
+                       prefix=()) -> subprocess.Popen:
+    """Run *script* in a child interpreter with ``LOCALM_HOME`` at *home_dir*,
+    started through the command *prefix* when one is given.
 
     The child imports localm from :func:`tree_root` and first asserts that it
     did, so it never runs the venv's editable install of another checkout.
@@ -93,7 +100,7 @@ def spawn_on_this_tree(script: str, home_dir, *args,
     env["EXPECT_ROOT"] = root
     env["PYTHONPATH"] = root
     return subprocess.Popen(
-        [sys.executable, "-c", CHECK_TREE + textwrap.dedent(script),
+        [*prefix, sys.executable, "-c", CHECK_TREE + textwrap.dedent(script),
          *[str(a) for a in args]],
         cwd=root, env=env, stdin=stdin,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

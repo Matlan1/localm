@@ -51,6 +51,35 @@ def _partial_owner_path(partial: Path) -> Path:
 
 
 _LINUX_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+_PID_SPACE: "str | None" = None
+
+
+def _pid_space_id() -> str:
+    """An opaque id for the pid table this process's pids belong to: the
+    platform, the host name and, on Linux, the pid namespace, hashed.
+
+    A process that can read neither the host name nor the pid namespace gets
+    an id unique to itself, so no other process's record matches it.
+    """
+    global _PID_SPACE
+    if _PID_SPACE is None:
+        import hashlib
+        import platform
+        import uuid
+        parts = [sys.platform]
+        try:
+            parts.append(platform.node() or "")
+        except Exception:
+            parts.append("")
+        try:
+            parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
+        except OSError:
+            pass
+        if not any(parts[1:]):
+            parts.append(uuid.uuid4().hex)
+        _PID_SPACE = hashlib.sha256(
+            "\x1f".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+    return _PID_SPACE
 
 
 def _process_start_identity(pid: int) -> "dict | None":
@@ -107,9 +136,10 @@ def _start_identity_differs(recorded, current) -> bool:
 
 
 def _write_partial_owner(partial: Path) -> None:
-    """Record this process (pid and start identity) as the owner of
+    """Record this process (pid, pid space and start identity) as the owner of
     *partial*."""
-    rec = {"pid": os.getpid(), "start": _process_start_identity(os.getpid())}
+    rec = {"pid": os.getpid(), "space": _pid_space_id(),
+           "start": _process_start_identity(os.getpid())}
     _partial_owner_path(partial).write_text(json.dumps(rec), encoding="utf-8")
 
 
@@ -140,10 +170,11 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     """True only when the recorded owner of *partial* is PROVEN dead.
 
     Returns False for a missing or unreadable sidecar, an unparsable pid, a
-    live pid whose start identity matches the record or cannot be compared
-    with it (see :func:`_start_identity_differs`), and any probe failure. A
-    pid that is this process's own is gone when no download in this process
-    currently holds the file.
+    record written in another pid space (see :func:`_pid_space_id`), a live
+    pid whose start identity matches the record or cannot be compared with it
+    (see :func:`_start_identity_differs`), a live pid in a record that names
+    no pid space, and any probe failure. A pid that is this process's own is
+    gone when no download in this process currently holds the file.
     """
     from localm import instances
     rec = _read_partial_owner(partial)
@@ -155,12 +186,15 @@ def _partial_owner_is_gone(partial: Path) -> bool:
         return False
     if pid <= 0:
         return False
+    space = rec.get("space")
+    if space is not None and space != _pid_space_id():
+        return False
     if pid == os.getpid():
         return not _partial_in_flight(partial)
     if not instances.pid_alive(pid):
         return True
-    return _start_identity_differs(rec.get("start"),
-                                   _process_start_identity(pid))
+    return space is not None and _start_identity_differs(
+        rec.get("start"), _process_start_identity(pid))
 
 
 def _partial_candidates(incomplete_path: Path) -> "list[Path]":
@@ -1857,8 +1891,10 @@ def _part_lock_owner(d: Path):
 
 def _part_lock_holder_is_gone(d: Path) -> bool:
     """True only when the recorded holder is PROVEN gone: its pid is dead, or
-    the live pid's start identity differs from the one the holder recorded
-    (see :func:`_process_start_identity`).
+    the record names this pid space (see :func:`_pid_space_id`) and the live
+    pid's start identity differs from the one the holder recorded (see
+    :func:`_process_start_identity`). A record from another pid space is never
+    gone; one that names no pid space is judged by pid liveness alone.
 
     Staleness is decided by PID LIVENESS and that identity, never by elapsed
     time or the wall clock. Any fixed timeout eventually reclaims a live
@@ -1881,12 +1917,15 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
         pid = int(rec.get("pid", -1))
     except (TypeError, ValueError):
         return False
+    space = rec.get("space")
+    if space is not None and space != _pid_space_id():
+        return False
     if pid == os.getpid():
         return False
     if not instances.pid_alive(pid):
         return True
-    return _start_identity_differs(rec.get("start"),
-                                   _process_start_identity(pid))
+    return space is not None and _start_identity_differs(
+        rec.get("start"), _process_start_identity(pid))
 
 
 @contextlib.contextmanager
@@ -1932,11 +1971,12 @@ def _part_lock(filename: str):
     except OSError as e:
         raise PullInFlight(f"could not take the download lock for {filename}: {e}")
 
-    # `start` is what _part_lock_holder_is_gone compares; `started` is only
-    # read by a human inspecting the lock.
+    # `space` and `start` are what _part_lock_holder_is_gone compares;
+    # `started` is only read by a human inspecting the lock.
     try:
         (d / "owner.json").write_text(
             json.dumps({"pid": os.getpid(), "filename": filename,
+                        "space": _pid_space_id(),
                         "start": _process_start_identity(os.getpid()),
                         "started": time.time()}),
             encoding="utf-8")

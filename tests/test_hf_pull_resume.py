@@ -26,13 +26,18 @@ from tests._process_identity import (
     start_identity_of,
     started_an_hour_earlier,
     step_the_clock,
+    this_pid_space,
 )
 
 
-def _owner(path: Path, pid: int, start) -> None:
-    """Write the owner record for *path* naming *pid* / start identity *start*."""
+def _owner(path: Path, pid: int, start, space: "str | None" = "this") -> None:
+    """Write the owner record for *path* naming *pid* / start identity *start*,
+    in this process's pid space unless *space* names another one."""
+    if space == "this":
+        space = this_pid_space()
     _partial_owner_path(path).write_text(
-        json.dumps({"pid": pid, "start": start}), encoding="utf-8")
+        json.dumps({"pid": pid, "space": space, "start": start}),
+        encoding="utf-8")
 
 
 @pytest.fixture()
@@ -190,6 +195,40 @@ class TestPartialOwnership:
         assert dest.read_bytes() == b"HELLO WORLD"
         assert captured["resume_size"] == 5
         assert not orphan.exists() and not _partial_owner_path(orphan).exists()
+
+    @pytest.mark.parametrize("space", ["0123456789abcdef", None])
+    def test_a_live_pid_from_another_or_no_pid_space_keeps_its_partial(
+            self, cache, tmp_path, monkeypatch, live_child, space):
+        """A record from another pid space, or one naming none, is not
+        evidence that its live pid is a different process: the partial is
+        neither adopted nor deleted."""
+        pid, _ = live_child
+        inc_path = cache / "file.etag.incomplete"
+        other = cache / "file.etag.bbbb2222.incomplete"
+        other.write_bytes(b"OTHER-PID-SPACE")
+        _owner(other, pid, started_an_hour_earlier(start_identity_of(pid)),
+               space=space)
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b"FRESH")
+
+        _call(inc_path, dest, expected_size=5)
+
+        assert (other.read_bytes() if other.exists() else None) == (
+            b"OTHER-PID-SPACE"), "a partial of another pid space was touched"
+        assert _partial_owner_path(other).exists()
+        assert captured["resume_size"] == 0
+        assert dest.read_bytes() == b"FRESH"
+
+    def test_the_owner_record_names_this_process_its_pid_space_and_start(
+            self, cache):
+        from localm.model_manager.pull import (
+            _pid_space_id, _process_start_identity, _write_partial_owner)
+        p = cache / "file.etag.cccc3333.incomplete"
+        p.write_bytes(b"")
+        _write_partial_owner(p)
+        rec = json.loads(_partial_owner_path(p).read_text(encoding="utf-8"))
+        assert rec == {"pid": os.getpid(), "space": _pid_space_id(),
+                       "start": _process_start_identity(os.getpid())}
 
     def test_partial_without_owner_record_is_neither_adopted_nor_deleted(
             self, cache, tmp_path, monkeypatch):

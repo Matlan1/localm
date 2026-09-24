@@ -48,7 +48,10 @@ from tests._process_identity import (
     start_identity_of,
     started_an_hour_earlier,
     step_the_clock,
+    this_pid_space,
 )
+
+ANOTHER_PID_SPACE = "0123456789abcdef"
 
 
 @pytest.fixture
@@ -102,13 +105,15 @@ def _spawn(script: str, home_dir, *args):
     return spawn_on_this_tree(script, home_dir, *args)
 
 
-def _hold(home_dir, filename: str = "m.gguf"):
-    """A real process holding the lock on *filename* until its stdin closes.
+def _hold(home_dir, filename: str = "m.gguf", prefix=()):
+    """A real process holding the lock on *filename* until its stdin closes,
+    started through the command *prefix* when one is given.
 
     Returns the process and the holder's own pid, which on Windows differs from
     ``Popen.pid`` when ``sys.executable`` is a venv launcher.
     """
-    p = spawn_on_this_tree(HOLD, home_dir, filename, stdin=subprocess.PIPE)
+    p = spawn_on_this_tree(HOLD, home_dir, filename, stdin=subprocess.PIPE,
+                           prefix=prefix)
     first = p.stdout.readline().split()
     if first[:1] != ["HELD"]:
         _release(p)
@@ -130,6 +135,10 @@ def _release(p) -> None:
 
 
 def _write_owner(d, pid, **fields) -> None:
+    """Write a lock record for *pid*, in this process's pid space unless
+    *fields* names a ``space``."""
+    if "space" not in fields:
+        fields["space"] = this_pid_space()
     d.mkdir(parents=True)
     (d / "owner.json").write_text(
         json.dumps({"pid": pid, "filename": "m.gguf", **fields}),
@@ -386,6 +395,119 @@ def test_a_live_holder_keeps_the_lock_when_its_identity_cannot_be_read_now(
         _release(other)
 
 
+def _exited_pid() -> int:
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait(timeout=60)
+    return p.pid
+
+
+@pytest.mark.parametrize("pid_state", ["alive", "dead"])
+def test_a_record_from_another_pid_space_is_never_reclaimed(home, pid_state):
+    """A record written in another pid space (another pid namespace, a
+    LOCALM_HOME shared with WSL or another machine) names a pid this process
+    cannot look up, so it keeps the lock whether that number is alive here or
+    not and whatever start identity it carries."""
+    other = _idle_child()
+    try:
+        if pid_state == "alive":
+            pid = other.pid
+            start = started_an_hour_earlier(start_identity_of(pid))
+        else:
+            pid, start = _exited_pid(), None
+        d = _part_lock_dir("m.gguf")
+        _write_owner(d, pid, space=ANOTHER_PID_SPACE, start=start,
+                     started=time.time())
+        before = _record(d)
+
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before, (
+            "a lock recorded in another pid space was reclaimed")
+        assert refused is not None and str(pid) in str(refused)
+    finally:
+        _release(other)
+
+
+def test_a_record_naming_no_pid_space_is_judged_by_liveness_alone(home):
+    """A record with no pid space keeps the lock while its pid is alive,
+    whatever start identity it carries; with a dead pid it is reclaimed (see
+    test_a_dead_holders_lock_is_reclaimed)."""
+    other = _idle_child()
+    try:
+        ident = start_identity_of(other.pid)
+        d = _part_lock_dir("m.gguf")
+        _write_owner(d, other.pid, space=None,
+                     start=started_an_hour_earlier(ident), started=time.time())
+        before = _record(d)
+
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before
+        assert refused is not None and str(other.pid) in str(refused)
+    finally:
+        _release(other)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="pid namespaces are a Linux kernel feature")
+def test_a_holder_in_another_pid_namespace_keeps_its_lock(home):
+    """A real holder in its own pid namespace records a pid that names a
+    different, live process here; its lock stays held."""
+    import shutil as _shutil
+    from localm import instances
+    unshare = _shutil.which("unshare")
+    if unshare is None:
+        pytest.skip("unshare is not installed")
+    ns = (unshare, "--user", "--map-root-user", "--pid", "--fork",
+          "--mount-proc")
+    probe = subprocess.run([*ns, "true"], capture_output=True, text=True,
+                           timeout=60)
+    if probe.returncode != 0:
+        pytest.skip("cannot create a user and pid namespace here: "
+                    + probe.stderr.strip())
+    holder, _ = _hold(home, prefix=ns)
+    try:
+        d = _part_lock_dir("m.gguf")
+        before = _record(d)
+        rec = json.loads(before)
+        # The injection took: the recorded pid names a live process here that
+        # is not the holder.
+        assert instances.pid_alive(rec["pid"])
+        assert start_identity_of(rec["pid"]) != rec["start"]
+
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                pass
+        except PullInFlight as e:
+            refused = e
+        assert _record(d) == before, (
+            "a live holder in another pid namespace lost its lock")
+        assert holder.poll() is None, "the holder died during the test"
+        assert refused is not None
+    finally:
+        _release(holder)
+
+
+def test_the_pid_space_id_differs_between_platforms_on_one_host(monkeypatch):
+    from localm.model_manager import pull
+    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(sys, "platform", "win32")
+    windows = pull._pid_space_id()
+    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(sys, "platform", "linux")
+    linux = pull._pid_space_id()
+    assert windows != linux
+
+
 def test_a_process_and_an_observer_read_the_same_start_identity(home):
     """The identity a process records for itself equals the one another
     process reads for its pid."""
@@ -402,11 +524,12 @@ def test_a_process_and_an_observer_read_the_same_start_identity(home):
         _release(child)
 
 
-def test_the_lock_records_its_holders_start_identity(home):
-    from localm.model_manager.pull import _process_start_identity
+def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
+    from localm.model_manager.pull import _pid_space_id, _process_start_identity
     with _part_lock("m.gguf"):
         rec = json.loads(_record(_part_lock_dir("m.gguf")))
     assert rec["pid"] == os.getpid()
+    assert rec["space"] == _pid_space_id()
     assert rec["start"] == _process_start_identity(os.getpid())
 
 
