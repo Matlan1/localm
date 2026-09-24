@@ -13,10 +13,11 @@ only_mutate modules scripts/check_mutation_floors.py ratchets:
   peer looks like behind portmux), and served on a loopback bind even for a
   network peer.
 
-The other four classes (a weakened scope check, a skipped SSRF redirect
-re-validation, a deny-to-allow fallback, a path-confinement bypass) are
-mutmut mutants of the only_mutate modules and are pinned as ``controls`` in
-scripts/mutation_baseline.json.
+The other six classes (a weakened scope check, a deny-to-allow fallback, a
+skipped SSRF redirect re-validation, a widened net_mode=off exemption, a
+path-confinement bypass, a loopback classifier that accepts an unparseable
+host) are mutmut mutants of the only_mutate modules and are pinned as
+``controls`` in scripts/mutation_baseline.json.
 """
 
 from __future__ import annotations

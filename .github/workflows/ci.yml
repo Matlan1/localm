@@ -54,12 +54,8 @@ on:
     # localm/inference/backends/llamacpp/** and localm/setup_llama.py +
     # workflow_dispatch. NOT on every push.
     #
-    # The weekly cron below is otherwise the only automatic path to the
-    # ABI-drift check, and it is measured to actually fire on its target
-    # window only about 1 time in 6 (see the schedule comment). A push that
-    # touches the native llama.cpp binding directly is exactly the change
-    # most likely to break it, so it gets its own trigger instead of waiting
-    # on an unreliable cron.
+    # A push that touches the native llama.cpp binding runs the ABI-drift
+    # check on that commit instead of at the next weekly schedule run.
     #
     # Scoped to trigger ONLY the abi-check job below (see its `if:`), not the
     # full lint+hygiene+tests matrix - that stays manual/scheduled per the
@@ -90,29 +86,14 @@ on:
         type: boolean
         default: false
   schedule:
-    # Weekly drift check of the hand-written llama.cpp ctypes binding against the
-    # MOVING upstream release the cpu/vulkan/cuda backends track.
-    #
-    # Moved OFF the top of the hour, which is not cosmetic. Measured: this cron
-    # has been present since 2026-06-21 and the workflow state is `active` (not
-    # disabled manually, not disabled for inactivity), yet exactly ONE
-    # schedule-event run exists in the entire history (2026-07-06). Five of the
-    # six eligible Mondays never fired at all - so the ABI drift job has had
-    # essentially no automatic coverage for its whole life.
-    #
-    # GitHub queues scheduled workflows globally and drops or delays them under
-    # load; :00 is the single most contended minute of the hour, because it is
-    # what everyone writes. An odd off-peak minute is the standard mitigation and
-    # costs nothing. This is a MITIGATION, not a proven fix: if schedule runs are
-    # still missing several Mondays from now, the cron is not the cause and the
-    # next suspect is repository-level scheduling being throttled - check
-    # `gh run list --workflow=CI` filtered to event=schedule before assuming.
-    #
-    # This matters more since the run_abi input landed: a plain dispatch no longer
-    # runs abi-check. Since 2026-08-19 the narrow push trigger above covers a
-    # touch to the two llamacpp/setup_llama.py paths; this cron remains the
-    # only automatic path for everything else that could drift (an upstream
-    # release moving under an unrelated commit, for instance).
+    # Weekly, Monday 06:37 UTC, on master. The jobs it runs include the test
+    # matrix, the mutation shards with the mutation-test gate, and the
+    # ABI-drift check of the hand-written llama.cpp ctypes binding against
+    # the MOVING upstream release the cpu/vulkan/cuda backends track. GitHub
+    # can start a scheduled run hours late. Apart from the narrow push
+    # trigger above for the ABI-drift check, this is the only automatic run
+    # of the ABI-drift check and of the mutation gate. The minute stays off
+    # the top of the hour, where GitHub drops scheduled runs under load. (#860)
     - cron: "37 6 * * 1"
 
 concurrency:
@@ -546,12 +527,12 @@ jobs:
   # Cheap per-PR NOTICE, never a trigger: does the diff from the merge base
   # touch a [tool.mutmut] only_mutate module, the mutation baseline, or the
   # gate scripts? scripts/mutation_scope.py prints the touched paths and, on
-  # a hit, a ::notice annotation saying the mutation gate did not run on this
-  # PR and how to run it (the `mutation-test` label). It exits 1 (a red job,
-  # never a silent "not touched") when it cannot compute the diff. The
-  # shards below deliberately do NOT depend on this: a trust-boundary PR
-  # would otherwise wait about an hour for the auth shard, and the weekly
-  # schedule gates master instead.
+  # a hit, a ::notice annotation: with the `mutation-test` label (the same
+  # label clause as mutation-run's `if`) it says the mutation gate runs on
+  # this PR, without it that the gate did not run and how to run it. It
+  # exits 1 (a red job, never a silent "not touched") when it cannot compute
+  # the diff, and merge-policy fails on that. Runs on every pull_request; the
+  # shards below never depend on it.
   mutation-scope:
     name: mutation scope (trust-boundary module touched?)
     runs-on: ubuntu-latest
@@ -569,7 +550,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Did this change touch a mutation-tested module or the gate?
-        run: python scripts/mutation_scope.py --notice
+        env:
+          MUTATION_TEST_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'mutation-test') }}
+        run: python scripts/mutation_scope.py --notice --gate-runs "$MUTATION_TEST_LABEL"
 
   # Mutation testing (mutmut) for the eight trust-boundary modules
   # scripts/check_coverage_floors.py tracks - see pyproject.toml
@@ -805,20 +788,21 @@ jobs:
         run: python scripts/check_web_search_canary.py
 
   # The one check that sums up the others (docs/architecture.md, "Merge
-  # policy"). Runs on every pull_request once the five jobs it needs have
+  # policy"). Runs on every pull_request once the six jobs it needs have
   # finished, whatever their results, and never on push, dispatch or
   # schedule. scripts/merge_policy.py reads those results and the change:
-  # lint and gui-tests must have succeeded; without the `full-ci` label
-  # python-pr-gate must have succeeded and the change must not be a release
-  # (VERSION unchanged); with the label the test matrix must have succeeded;
-  # mutation-test must not have failed when it ran (skipped is neutral). A
-  # release PR without the label fails here with the label named; every
-  # other PR merges without the matrix. A skipped required job never passes.
+  # lint, gui-tests and mutation-scope must have succeeded; without the
+  # `full-ci` label python-pr-gate must have succeeded and the change must
+  # not be a release (VERSION unchanged); with the label the test matrix
+  # must have succeeded; mutation-test must not have failed when it ran
+  # (skipped is neutral). A release PR without the label fails here with the
+  # label named; every other PR merges without the matrix. A skipped
+  # required job never passes.
   merge-policy:
     name: merge-policy
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [python-pr-gate, lint, gui-tests, test, mutation-test]
+    needs: [python-pr-gate, lint, gui-tests, test, mutation-scope, mutation-test]
     # Runs after a needed job failed or was skipped. See
     # test_the_merge_policy_job_cannot_be_skipped_green.
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
@@ -843,6 +827,7 @@ jobs:
           RESULT_LINT: ${{ needs.lint.result }}
           RESULT_GUI_TESTS: ${{ needs.gui-tests.result }}
           RESULT_TEST: ${{ needs.test.result }}
+          RESULT_MUTATION_SCOPE: ${{ needs.mutation-scope.result }}
           RESULT_MUTATION_TEST: ${{ needs.mutation-test.result }}
         run: >-
           python scripts/merge_policy.py --full-ci "$FULL_CI"
@@ -850,4 +835,5 @@ jobs:
           --result "lint=$RESULT_LINT"
           --result "gui-tests=$RESULT_GUI_TESTS"
           --result "test=$RESULT_TEST"
+          --result "mutation-scope=$RESULT_MUTATION_SCOPE"
           --result "mutation-test=$RESULT_MUTATION_TEST"

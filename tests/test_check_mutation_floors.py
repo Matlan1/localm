@@ -555,19 +555,36 @@ class TestCommittedBaseline:
         scope_step = next(st for st in wf["jobs"]["mutation-scope"]["steps"]
                           if "mutation_scope.py" in (st.get("run") or ""))
         assert "--notice" in scope_step["run"] and "--github-output" not in scope_step["run"]
+        # The notice says the gate runs exactly when mutation-run's label clause holds.
+        label_clause = "contains(github.event.pull_request.labels.*.name, 'mutation-test')"
+        assert label_clause in " ".join(wf["jobs"]["mutation-run"]["if"].split())
+        assert '--gate-runs "$MUTATION_TEST_LABEL"' in scope_step["run"]
+        assert scope_step["env"]["MUTATION_TEST_LABEL"] == "${{ %s }}" % label_clause
+        assert "${{" not in scope_step["run"]
 
     def test_every_sec01_control_class_is_pinned_to_a_killed_mutant(self, baseline):
-        """The four SEC-01 mutant classes that live inside the only_mutate
-        modules. The other two (an unsafe route exempted from the origin gate,
-        bind_host replaced by the peer address) live in http_server.py and are
-        pinned by tests/test_trust_boundary_controls.py instead."""
+        """The baseline's controls are exactly the controls of the six control
+        mutant classes that live inside the only_mutate modules, each pinned to
+        a killed mutant: a weakened scope check, a deny-to-allow fallback, a
+        skipped SSRF redirect re-validation, a widened net_mode=off exemption, a
+        path-confinement bypass, and a loopback classifier that accepts an
+        unparseable host. The two classes that live in
+        localm/inference/http_server.py (an unsafe route exempted from the origin
+        gate, bind_host replaced by the peer address) are not mutmut mutants and
+        are not pinned here."""
         expected = {
-            "scope-check-weakened", "ssrf-redirect-revalidation-skipped",
-            "state-changing-fallback-deny-to-allow", "path-confinement-bypassed",
+            "scope-check-weakened",
+            "state-changing-fallback-deny-to-allow",
+            "ssrf-redirect-revalidation-skipped", "ssrf-redirect-revalidation-skipped-2",
+            "off-floor-exemption-default-widened", "off-floor-exemption-or",
+            "off-floor-downloads-default-true",
+            "path-confinement-bypassed", "path-traversal-check-inverted",
             "bind-host-loopback-classifier-fallback",
         }
         controls = baseline["controls"]
-        assert expected <= set(controls), expected - set(controls)
+        assert set(controls) == expected, (
+            f"missing: {sorted(expected - set(controls))}, "
+            f"not listed here: {sorted(set(controls) - expected)}")
         for name, ctl in controls.items():
             entry = baseline["modules"][ctl["module"]]
             assert entry["mutants"].get(ctl["mutant"]) == "killed", (name, ctl)

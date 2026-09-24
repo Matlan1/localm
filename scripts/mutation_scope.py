@@ -16,12 +16,16 @@ is checked against:
 Prints one ``touched=true`` or ``touched=false`` line followed by the matching
 paths. ``--github-output`` appends the ``touched=`` line to the file
 ``$GITHUB_OUTPUT`` names; ``--notice`` emits a ``::notice`` annotation on a hit
-saying the mutation gate did not run on this pull request and that the
-``mutation-test`` label runs it. Exits 1 when the diff cannot be computed (no
-merge base, git failure) or when ``[tool.mutmut] only_mutate`` is empty or
-missing: an unknown answer is never reported as ``touched=false``.
+and requires ``--gate-runs``: with ``--gate-runs true`` (the pull request
+carries the ``mutation-test`` label) the notice says the mutation gate runs on
+this pull request, with ``--gate-runs false`` it says the gate did not run and
+that the ``mutation-test`` label runs it. Exits 1 when the diff cannot be
+computed (no merge base, git failure) or when ``[tool.mutmut] only_mutate`` is
+empty or missing: an unknown answer is never reported as ``touched=false``.
+Exits 2 on a usage error, including ``--notice`` without ``--gate-runs``.
 
-Run:  python scripts/mutation_scope.py [--base REF] [--github-output] [--notice]
+Run:  python scripts/mutation_scope.py [--base REF] [--github-output]
+                                       [--notice --gate-runs true|false]
 """
 
 from __future__ import annotations
@@ -79,9 +83,14 @@ def main(argv: list[str]) -> int:
                     help="also append touched=... to $GITHUB_OUTPUT")
     ap.add_argument("--notice", action="store_true",
                     help="on a hit, print a ::notice annotation naming the touched "
-                         "paths and the mutation-test label")
+                         "paths and whether the mutation gate runs on this pull request")
+    ap.add_argument("--gate-runs", choices=("true", "false"),
+                    help="with --notice: whether the pull request carries the "
+                         "mutation-test label, which runs the mutation gate on it")
     ap.add_argument("--repo", type=Path, default=REPO, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.notice and args.gate_runs is None:
+        ap.error("--notice requires --gate-runs true|false")
 
     try:
         merge_base = _git(args.repo, "merge-base", args.base, "HEAD").strip()
@@ -108,10 +117,16 @@ def main(argv: list[str]) -> int:
     if args.github_output:
         ci_runner_files.append(ci_runner_files.OUTPUT, f"touched={verdict}\n")
     if args.notice and hits:
-        print("::notice title=Mutation gate did not run::This change touches the "
-              f"mutation-tested trust boundary ({', '.join(hits)}) - the mutation "
-              "shards only run on the weekly schedule, a dispatch, or a pull "
-              "request carrying the mutation-test label.")
+        if args.gate_runs == "true":
+            print("::notice title=Mutation gate runs on this pull request::This change "
+                  f"touches the mutation-tested trust boundary ({', '.join(hits)}) - the "
+                  "mutation-test label runs the mutation shards and the mutation-test "
+                  "gate on this pull request.")
+        else:
+            print("::notice title=Mutation gate did not run::This change touches the "
+                  f"mutation-tested trust boundary ({', '.join(hits)}) - the mutation "
+                  "shards only run on the weekly schedule, a dispatch, or a pull "
+                  "request carrying the mutation-test label.")
     return 0
 
 
