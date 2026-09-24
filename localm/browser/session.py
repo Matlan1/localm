@@ -11,6 +11,10 @@ loop with ``run_coroutine_threadsafe`` and waits for it. Never touch ``_page``,
 Every request the browser makes is put through ``netgate`` before it may
 proceed, and a refusal is recorded so a caller can be told which destination was
 blocked and why.
+
+A session keeps exactly one page open. A new window that a click opened becomes
+the page every call drives and the live view shows, and the page before it is
+closed; any other new window is closed at once and recorded as refused.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 from urllib.parse import urljoin
@@ -34,6 +39,24 @@ _LOG_CAP = 500
 
 #: Redirect hops followed for one request before it is refused.
 _MAX_REDIRECTS = 10
+
+#: Characters sent to the browser per keyboard call when typing.
+_TYPE_CHUNK = 16
+
+#: Seconds after a click or key press this session sent during which a window
+#: the page opens counts as opened by it. Matches Chromium's transient user
+#: activation lifespan.
+_INPUT_ACTIVATION = 5.0
+
+#: Seconds a window opened by a click may take to load and still be shown.
+_CLICKED_WINDOW_TTL = 30.0
+
+#: Windows opened by a click that are remembered while they load.
+_CLICKED_WINDOW_CAP = 32
+
+#: Milliseconds allowed for attaching a DevTools session to a page, for the
+#: window watch and for the screencast.
+_PAGE_SETUP_MS = 10000
 
 
 class BrowserUnavailableError(RuntimeError):
@@ -64,6 +87,17 @@ def _require_playwright():
     return async_playwright
 
 
+async def _within(coro, timeout_ms: float, what: str) -> Any:
+    """Await *coro*, cancelling it once *timeout_ms* has passed.
+
+    Raises TimeoutError naming *what* and the timeout when it is cancelled."""
+    seconds = timeout_ms / 1000.0
+    try:
+        return await asyncio.wait_for(coro, seconds)
+    except TimeoutError:
+        raise TimeoutError("%s did not finish within %gs" % (what, seconds)) from None
+
+
 class BrowserSession:
     """One Chromium session, owned by its own thread and event loop."""
 
@@ -89,6 +123,14 @@ class BrowserSession:
         self._ctx = None
         self._page = None
         self._closed = False
+        self._tearing_down = False
+        #: Held on the browser loop while the driven page or the screencast
+        #: changes.
+        self._page_lock = asyncio.Lock()
+        #: (url, expiry) for each window a click opened that has not yet loaded.
+        self._clicked_windows: list = []
+        #: time.monotonic() of the last click or key press sent to the page.
+        self._last_input = float("-inf")
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -156,8 +198,6 @@ class BrowserSession:
                 "downloaded separately from the Python package; get it with:  "
                 "localm setup-browser. " + str(exc)) from exc
         self._ctx = await self._browser.new_context()
-        self._page = await self._ctx.new_page()
-        self._page.on("console", self._on_console)
         # Routed on the CONTEXT rather than the page, so a popup or a second
         # page the site opens is gated too.
         await self._ctx.route("**/*", self._on_route)
@@ -165,16 +205,20 @@ class BrowserSession:
         # a routed WebSocket does not reach the server unless connect_to_server()
         # is called, so an unhandled one fails closed.
         await self._ctx.route_web_socket("**/*", self._on_ws_route)
+        page = await self._ctx.new_page()
+        async with self._page_lock:
+            await self._drive(page)
+        self._ctx.on("page", self._on_new_page)
         if self._on_frame is not None:
-            await self._start_screencast()
+            await self._ensure_screencast()
 
     async def _start_screencast(self) -> None:
         """Stream the page as JPEG frames to the on_frame callback.
 
         Best-effort: a browser build without the screencast command still drives
         normally, it just has no live view, and the reason is logged rather than
-        raised into the session's startup."""
-        try:
+        raised into the session's startup. Gives up after _PAGE_SETUP_MS."""
+        async def attach():
             self._cdp = await self._ctx.new_cdp_session(self._page)
             await self._cdp.send("Page.enable")
             self._cdp.on("Page.screencastFrame", self._on_screencast_frame)
@@ -182,6 +226,8 @@ class BrowserSession:
                 "format": "jpeg", "quality": 55,
                 "maxWidth": 1280, "maxHeight": 800,
             })
+        try:
+            await _within(attach(), _PAGE_SETUP_MS, "starting the screencast")
         except Exception as exc:                     # noqa: BLE001
             self._cdp = None
             logger.warning("browser %s has no live view: %s", self.session_id, exc)
@@ -210,6 +256,128 @@ class BrowserSession:
         except Exception:
             pass
 
+    async def _ensure_screencast(self) -> bool:
+        """Start the screencast on the driven page unless it is already running.
+        True when it is running."""
+        async with self._page_lock:
+            if self._cdp is None:
+                await self._start_screencast()
+            return self._cdp is not None
+
+    # -- the one page this session keeps ------------------------------------ #
+
+    async def _drive(self, page) -> None:
+        """Make *page* the page every call drives and the live view shows.
+
+        Caller must hold ``_page_lock``. A running screencast moves to *page*."""
+        self._page = page
+        page.on("console", self._on_console)
+        page.on("close", self._on_page_closed)
+        await self._watch_windows(page)
+        if self._cdp is not None:
+            previous, self._cdp = self._cdp, None
+            try:
+                await previous.detach()
+            except Exception:
+                pass
+            await self._start_screencast()
+
+    async def _watch_windows(self, page) -> None:
+        """Pass each Page.windowOpen event Chromium reports for *page* to
+        _on_window_open. When this cannot be set up within _PAGE_SETUP_MS,
+        every window *page* opens is treated as not clicked."""
+        async def attach():
+            cdp = await self._ctx.new_cdp_session(page)
+            cdp.on("Page.windowOpen", self._on_window_open)
+            await cdp.send("Page.enable")
+        try:
+            await _within(attach(), _PAGE_SETUP_MS, "watching for new windows")
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("browser %s cannot tell a clicked window from a "
+                           "scripted one, so every new window will be closed: %s",
+                           self.session_id, exc)
+
+    def _mark_input(self) -> None:
+        """Note that a click or key press is being sent to the page."""
+        self._last_input = time.monotonic()
+
+    def _on_window_open(self, params: dict) -> None:
+        """Remember a window the page opened as clicked, when Chromium reports a
+        user gesture and this session sent a click or key press within
+        _INPUT_ACTIVATION seconds. See
+        test_a_gesture_flag_without_recent_input_is_not_a_click."""
+        now = time.monotonic()
+        if not params.get("userGesture") or now - self._last_input > _INPUT_ACTIVATION:
+            return
+        live = [(u, t) for (u, t) in self._clicked_windows if t > now]
+        live.append((str(params.get("url") or "about:blank"),
+                     now + _CLICKED_WINDOW_TTL))
+        self._clicked_windows = live[-_CLICKED_WINDOW_CAP:]
+
+    def _take_clicked_window(self, url: str) -> bool:
+        """Consume the record of a click opening *url*. False when there is none."""
+        now = time.monotonic()
+        for i, (opened, expiry) in enumerate(self._clicked_windows):
+            if opened == url and expiry > now:
+                del self._clicked_windows[i]
+                return True
+        return False
+
+    async def _on_new_page(self, page) -> None:
+        """Show a loaded window that a click opened, in place of the page before
+        it. Close any other new window and record it as refused."""
+        try:
+            async with self._page_lock:
+                if (page is self._page or page.is_closed()
+                        or self._closed or self._tearing_down):
+                    return
+                url = page.url
+                if url.startswith("chrome-error:"):
+                    await self._close_quietly(page)
+                    self._refuse(url, "a new window the page opened did not "
+                                      "load, so it was closed")
+                elif self._take_clicked_window(url):
+                    previous = self._page
+                    previous_url = previous.url if previous is not None else ""
+                    await self._drive(page)
+                    if previous is not None:
+                        await self._close_quietly(previous)
+                    self._note("showing the new window %s in place of %s, "
+                               "which was closed" % (url, previous_url))
+                else:
+                    await self._close_quietly(page)
+                    self._refuse(url, "the page opened a new window without a "
+                                      "click, so it was closed")
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("browser %s could not handle a new window: %s",
+                           self.session_id, exc)
+
+    def _on_page_closed(self, page) -> None:
+        if page is self._page and not (self._closed or self._tearing_down):
+            asyncio.ensure_future(self._replace_closed_page(page))
+
+    async def _replace_closed_page(self, closed) -> None:
+        """Open a blank page in place of a driven page that closed itself."""
+        try:
+            async with self._page_lock:
+                if (closed is not self._page
+                        or self._closed or self._tearing_down):
+                    return
+                page = await self._ctx.new_page()
+                await self._drive(page)
+                self._note("the page %s closed itself; a blank page is open in "
+                           "its place" % closed.url)
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("browser %s could not replace a page that closed "
+                           "itself: %s", self.session_id, exc)
+
+    @staticmethod
+    async def _close_quietly(page) -> None:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
     def stop(self, timeout: float = 30.0) -> None:
         """Close the browser and stop the loop. Safe to call more than once."""
         if self._closed or self._loop is None:
@@ -227,6 +395,7 @@ class BrowserSession:
                 self._thread.join(timeout=timeout)
 
     async def _teardown(self) -> None:
+        self._tearing_down = True
         for closer in (self._ctx, self._browser):
             try:
                 if closer is not None:
@@ -242,14 +411,24 @@ class BrowserSession:
     # -- marshalling -------------------------------------------------------- #
 
     def _call(self, make_coro: Callable[[], Any],
-              timeout: float = DEFAULT_CALL_TIMEOUT) -> Any:
-        """Run *make_coro()* on this session's own loop and return its result."""
+              timeout: float = DEFAULT_CALL_TIMEOUT, *,
+              what: str = "the browser call") -> Any:
+        """Run *make_coro()* on this session's own loop and return its result.
+
+        When it has not finished within *timeout* seconds it is cancelled on the
+        loop and TimeoutError is raised, naming *what* and the timeout."""
         if self._closed or self._loop is None:
             raise BrowserUnavailableError("this browser session is closed")
         fut = asyncio.run_coroutine_threadsafe(make_coro(), self._loop)
-        return fut.result(timeout)
+        try:
+            return fut.result(timeout)
+        except TimeoutError:
+            if not fut.cancel():
+                return fut.result()
+            raise TimeoutError("%s did not finish within %gs"
+                               % (what, timeout)) from None
 
-    def enable_live_view(self, on_frame) -> bool:
+    def enable_live_view(self, on_frame, *, timeout_ms: int = 10000) -> bool:
         """Start streaming this ALREADY-RUNNING session to *on_frame*.
 
         start() only starts the screencast when the session was built with an
@@ -262,15 +441,15 @@ class BrowserSession:
         if self._closed or self._loop is None:
             return False
         self._on_frame = on_frame
-        if self._cdp is not None:
-            return True                      # already streaming
+        what = "starting the live view"
         try:
-            self._call(self._start_screencast)
+            return bool(self._call(
+                lambda: _within(self._ensure_screencast(), timeout_ms, what),
+                what=what))
         except Exception as exc:             # noqa: BLE001
             logger.warning("browser %s could not start a live view: %s",
                            self.session_id, exc)
             return False
-        return self._cdp is not None
 
     def disable_live_view(self) -> None:
         """Stop handing frames to a viewer. The session keeps running."""
@@ -380,6 +559,13 @@ class BrowserSession:
             except Exception:
                 pass
 
+    def _note(self, text: str) -> None:
+        """Record something the session did on its own, as a console line of
+        type ``localm``."""
+        if len(self.state.console) < _LOG_CAP:
+            self.state.console.append({"type": "localm", "text": text})
+        logger.info("browser %s: %s", self.session_id, text)
+
     # -- the driving surface ------------------------------------------------ #
 
     def navigate(self, url: str, *, timeout_ms: int = 30000) -> dict:
@@ -397,7 +583,7 @@ class BrowserSession:
                     "status": resp.status if resp else None,
                     "title": await self._page.title()}
         try:
-            res = self._call(go)
+            res = self._call(go, what="loading the page")
         except Exception as exc:                     # noqa: BLE001
             res = {"ok": False, "url": url, "error": str(exc)}
         # An error page is not a load. Chromium reports the failed navigation as
@@ -416,25 +602,28 @@ class BrowserSession:
         res.setdefault("refused", None)
         return res
 
-    def read_text(self, *, max_chars: int = 20000) -> str:
+    def read_text(self, *, max_chars: int = 20000, timeout_ms: int = 30000) -> str:
         async def read():
-            return await self._page.inner_text("body")
+            return await self._page.inner_text("body", timeout=timeout_ms)
         try:
-            return self._call(read)[:max_chars]
+            return self._call(read, what="reading the page")[:max_chars]
         except Exception as exc:                     # noqa: BLE001
             return "(could not read the page: " + str(exc) + ")"
 
-    def screenshot(self, *, full_page: bool = False) -> bytes:
+    def screenshot(self, *, full_page: bool = False,
+                   timeout_ms: int = 30000) -> bytes:
         async def shot():
-            return await self._page.screenshot(full_page=full_page, type="png")
-        return self._call(shot)
+            return await self._page.screenshot(full_page=full_page, type="png",
+                                               timeout=timeout_ms)
+        return self._call(shot, what="the screenshot")
 
     def click(self, selector: str, *, timeout_ms: int = 10000) -> dict:
         async def do():
+            self._mark_input()
             await self._page.click(selector, timeout=timeout_ms)
             return {"ok": True, "selector": selector, "url": self._page.url}
         try:
-            return self._call(do)
+            return self._call(do, what="the click")
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "selector": selector, "error": str(exc)}
 
@@ -443,43 +632,56 @@ class BrowserSession:
             await self._page.fill(selector, value, timeout=timeout_ms)
             return {"ok": True, "selector": selector}
         try:
-            return self._call(do)
+            return self._call(do, what="filling the field")
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "selector": selector, "error": str(exc)}
 
-    def click_coords(self, x: float, y: float, button: str = "left") -> dict:
+    def click_coords(self, x: float, y: float, button: str = "left", *,
+                     timeout_ms: int = 10000) -> dict:
         async def do():
+            self._mark_input()
             await self._page.mouse.click(x, y, button=button)
             return {"ok": True, "x": x, "y": y, "url": self._page.url}
+        what = "the click"
         try:
-            return self._call(do)
+            return self._call(lambda: _within(do(), timeout_ms, what), what=what)
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "x": x, "y": y, "error": str(exc)}
 
-    def scroll(self, delta_x: float, delta_y: float) -> dict:
+    def scroll(self, delta_x: float, delta_y: float, *,
+               timeout_ms: int = 10000) -> dict:
         async def do():
             await self._page.mouse.wheel(delta_x, delta_y)
             return {"ok": True}
+        what = "the scroll"
         try:
-            return self._call(do)
+            return self._call(lambda: _within(do(), timeout_ms, what), what=what)
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "error": str(exc)}
 
-    def type_text(self, text: str) -> dict:
+    def type_text(self, text: str, *, timeout_ms: int = 30000) -> dict:
+        """Type *text* into the focused element, _TYPE_CHUNK characters per
+        keyboard call. When *timeout_ms* runs out no further characters are
+        sent; the ones already typed stay."""
         async def do():
-            await self._page.keyboard.type(text)
+            for start in range(0, len(text), _TYPE_CHUNK):
+                self._mark_input()
+                await self._page.keyboard.type(text[start:start + _TYPE_CHUNK])
             return {"ok": True}
+        what = "typing"
         try:
-            return self._call(do)
+            return self._call(lambda: _within(do(), timeout_ms, what), what=what)
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "error": str(exc)}
 
-    def press_key(self, key: str) -> dict:
+    def press_key(self, key: str, *, timeout_ms: int = 10000) -> dict:
         async def do():
+            self._mark_input()
             await self._page.keyboard.press(key)
             return {"ok": True}
+        what = "the key press"
         try:
-            return self._call(do)
+            return self._call(lambda: _within(do(), timeout_ms, what), what=what)
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "error": str(exc)}
 
@@ -501,34 +703,85 @@ _SESSIONS: dict = {}
 _LOCK = threading.Lock()
 
 
+class Claim:
+    """Holds a session id in the registry while the browser for it starts."""
+
+    __slots__ = ("session_id",)
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+
+
 def register(session: BrowserSession) -> None:
     with _LOCK:
         _SESSIONS[session.session_id] = session
 
 
-def get(session_id: str) -> Optional[BrowserSession]:
+def reserve(session_id: str) -> Optional[Claim]:
+    """Claim *session_id* for a browser about to start.
+
+    Returns the claim, or None when the id is already registered or claimed."""
     with _LOCK:
-        return _SESSIONS.get(session_id)
+        if session_id in _SESSIONS:
+            return None
+        claim = Claim(session_id)
+        _SESSIONS[session_id] = claim
+        return claim
+
+
+def install(claim: Claim, session: BrowserSession) -> bool:
+    """Register *session* in place of *claim*.
+
+    False, registering nothing, when the claim is no longer held because it was
+    closed or released."""
+    with _LOCK:
+        if _SESSIONS.get(claim.session_id) is not claim:
+            return False
+        _SESSIONS[claim.session_id] = session
+        return True
+
+
+def release_if(session_id: str, entry) -> bool:
+    """Forget *entry*, a session or a claim, if it is still the one registered
+    under *session_id*. Stops nothing. True when it was removed."""
+    with _LOCK:
+        if _SESSIONS.get(session_id) is not entry:
+            return False
+        del _SESSIONS[session_id]
+        return True
+
+
+def get(session_id: str) -> Optional[BrowserSession]:
+    """The running session registered under *session_id*. None when there is
+    none, including while one is still starting."""
+    with _LOCK:
+        entry = _SESSIONS.get(session_id)
+    return None if isinstance(entry, Claim) else entry
 
 
 def close(session_id: str) -> bool:
-    """Close and forget one session. True when there was one to close."""
+    """Close and forget one session, or release the claim of one still
+    starting. True when there was either."""
     with _LOCK:
-        session = _SESSIONS.pop(session_id, None)
-    if session is None:
+        entry = _SESSIONS.pop(session_id, None)
+    if entry is None:
         return False
-    session.stop()
+    if not isinstance(entry, Claim):
+        entry.stop()
     return True
 
 
 def close_all() -> None:
+    """Close every running session and release every claim."""
     with _LOCK:
-        sessions = list(_SESSIONS.values())
+        entries = list(_SESSIONS.values())
         _SESSIONS.clear()
-    for session in sessions:
-        session.stop()
+    for entry in entries:
+        if not isinstance(entry, Claim):
+            entry.stop()
 
 
 def active_ids() -> list:
+    """Ids with a running session or one still starting."""
     with _LOCK:
         return sorted(_SESSIONS)
