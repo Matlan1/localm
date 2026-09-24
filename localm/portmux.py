@@ -18,7 +18,7 @@ path relays to an internal TLS uvicorn as described above; the plain-HTTP path
 runs the SAME first-byte peek (``_serve_async_plain``) so a client that wrongly
 opens a TLS connection on this HTTP port is closed cleanly at the socket layer
 instead of feeding a ClientHello into uvicorn's HTTP parser. Any setup failure
-falls back to a direct ``uvicorn.run``.
+falls back to a direct uvicorn bind (``_run_uvicorn_on_socket``).
 
 **CONSEQUENCE: the app never sees the client's socket.** Every accepted
 connection is relayed over a fresh internal loopback connection, so the peer
@@ -304,9 +304,10 @@ def run_server(
 ) -> None:
     """Serve *app* on ``(host, port)``, blocking until interrupted.
 
-    Without TLS this is a plain ``uvicorn.run``. With TLS it serves HTTPS and
-    also catches a plain-HTTP request on the same port with an https redirect,
-    falling back to a direct TLS bind if the demultiplexer cannot start.
+    Without TLS it serves plain HTTP and closes a TLS connection opened on that
+    port at the socket layer. With TLS it serves HTTPS and also catches a
+    plain-HTTP request on the same port with an https redirect. Either falls
+    back to a direct uvicorn bind if that first-byte peek cannot start.
 
     Pure transport: mDNS name advertising lives in the CLI that also prints the
     reachable URLs (``localm serve`` / ``localm gui``), so the advertised name and
@@ -362,7 +363,7 @@ def _serve(uvicorn, app, host, port, ssl_certfile, ssl_keyfile, log_level) -> No
         except KeyboardInterrupt:
             pass
         except Exception:   # pragma: no cover - defensive fallback
-            # Fall back to a direct uvicorn.run if the peek layer fails.
+            # Fall back to a direct uvicorn bind if the peek layer fails.
             import traceback
             traceback.print_exc()
             _run_uvicorn_on_socket(uvicorn, app, host, port,
@@ -389,17 +390,17 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
     """The last-resort direct uvicorn bind, on a socket built the same way the
     normal path builds it.
 
-    ``uvicorn.run(host=..., port=...)`` reaches asyncio's create_server and
-    silently re-applies IPV6_V6ONLY, which would serve IPv6 only on a ``::``
-    bind and contradict the URLs already printed. ``Server.run(sockets=[...])``
-    takes the prepared socket instead, so the reachable set is the same on the
-    degraded path as on the normal one.
+    uvicorn's own bind (a ``Config`` with host and port) reaches asyncio's
+    create_server and silently re-applies IPV6_V6ONLY, which would serve IPv6
+    only on a ``::`` bind and contradict the URLs already printed.
+    ``Server.run(sockets=[...])`` takes the prepared socket instead, so the
+    reachable set is the same on the degraded path as on the normal one.
 
     If even the socket cannot be built, this falls back to uvicorn's own binding
     (see _run_uvicorn_own_bind) and logs a warning naming the failure.
 
     Either server is stoppable by _request_stop, from any thread, while it
-    serves."""
+    serves, and a Ctrl+C (KeyboardInterrupt) ends either one normally."""
     config_kwargs = dict(app=app, log_level=log_level,
                          timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
     if ssl_certfile:
@@ -419,7 +420,10 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
     with _stop_hook(hook):
         if _stop_requested and _active_runs > 0:
             hook()
-        server.run(sockets=[sock])
+        try:
+            server.run(sockets=[sock])
+        except KeyboardInterrupt:
+            pass
 
 
 def _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs) -> None:

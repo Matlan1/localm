@@ -638,6 +638,47 @@ def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypa
     assert calls[-1] == ("disarmed", None)
 
 
+def test_a_ctrl_c_on_the_prepared_socket_fallback_ends_run_server_normally(monkeypatch):
+    calls = _patch_bugreport(monkeypatch)
+
+    async def fake_serve(app, host, port, log_level):
+        raise RuntimeError("peek layer exploded")
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+    import uvicorn as uvicorn_mod
+    fake = _fake_uvicorn("interrupted")
+    monkeypatch.setattr(uvicorn_mod, "Config", fake.Config)
+    monkeypatch.setattr(uvicorn_mod, "Server", fake.Server)
+
+    try:
+        portmux.run_server(_bare_app, "127.0.0.1", _free_port())
+    except KeyboardInterrupt:
+        pytest.fail("a Ctrl+C escaped run_server on the prepared-socket fallback")
+    finally:
+        for _kwargs, sockets in fake.runs:
+            for sock in sockets or []:
+                sock.close()
+    assert len(fake.runs) == 1 and fake.runs[0][1], "the prepared socket was not used"
+    assert calls[-1] == ("disarmed", None)
+    assert portmux._stop_hooks == []
+
+
+def test_the_own_bind_exits_with_uvicorns_code_when_run_returns_unstarted(
+        _stop_state, monkeypatch):
+    """When server.run() returns without the server having started, uvicorn's
+    own bind exits with uvicorn's startup-failure code, as uvicorn.run() does."""
+    from uvicorn.main import STARTUP_FAILURE
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    fake = _fake_uvicorn("failed")
+
+    with pytest.raises(SystemExit) as exc:
+        portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", 9010,
+                                       log_level="warning")
+
+    assert exc.value.code == STARTUP_FAILURE
+    assert len(fake.runs) == 1
+    assert portmux._stop_hooks == []
+
+
 def test_the_prepared_socket_bind_applies_an_earlier_stop(_stop_state, monkeypatch):
     monkeypatch.setattr(portmux, "_active_runs", 1)
     monkeypatch.setattr(portmux, "_stop_requested", True)
