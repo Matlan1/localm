@@ -2601,7 +2601,7 @@
       }
     },
     "localm/portmux.py": {
-      "score_floor": 71.13,
+      "score_floor": 71.5,
       "function_hashes": {
         "x__cancel_inflight_conns": "cdea648a7116",
         "x__crash_watchdog_disabled": "279fd0b74c86",
@@ -2877,7 +2877,7 @@
         "localm.portmux.x__serve_async__mutmut_27": "killed",
         "localm.portmux.x__serve_async__mutmut_28": "killed",
         "localm.portmux.x__serve_async__mutmut_29": "killed",
-        "localm.portmux.x__serve_async__mutmut_3": "survived",
+        "localm.portmux.x__serve_async__mutmut_3": "killed",
         "localm.portmux.x__serve_async__mutmut_30": "survived",
         "localm.portmux.x__serve_async__mutmut_31": "killed",
         "localm.portmux.x__serve_async__mutmut_32": "killed",
@@ -2940,7 +2940,7 @@
         "localm.portmux.x__serve_async_plain__mutmut_27": "killed",
         "localm.portmux.x__serve_async_plain__mutmut_28": "killed",
         "localm.portmux.x__serve_async_plain__mutmut_29": "killed",
-        "localm.portmux.x__serve_async_plain__mutmut_3": "survived",
+        "localm.portmux.x__serve_async_plain__mutmut_3": "killed",
         "localm.portmux.x__serve_async_plain__mutmut_30": "survived",
         "localm.portmux.x__serve_async_plain__mutmut_31": "survived",
         "localm.portmux.x__serve_async_plain__mutmut_32": "survived",
