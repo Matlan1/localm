@@ -5967,8 +5967,9 @@ def run_advertised(app, host: str, port: int, *, mode: str,
                              scheme=scheme, project=project, isolated=isolated):
         try:
             # On a TLS bind, also catch a plain-http request on the same port
-            # with an https redirect; plain binds are a direct uvicorn.run. In
-            # debug mode uvicorn logs at "info" so the console shows requests.
+            # with an https redirect; a plain bind closes a TLS connection opened
+            # on its port. In debug mode uvicorn logs at "info" so the console
+            # shows requests.
             portmux.run_server(app, host=host, port=port, log_level=log_level,
                                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
         finally:

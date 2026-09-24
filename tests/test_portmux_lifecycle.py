@@ -25,6 +25,7 @@ import ssl
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -469,6 +470,54 @@ async def _bare_app(scope, receive, send):
     pass
 
 
+def _refuse_listening_socket(host, port):
+    raise OSError("simulated: cannot build the listening socket")
+
+
+def _fake_uvicorn(outcome):
+    """A stand-in for the uvicorn module. Its Server.run() records the config
+    kwargs and sockets it was called with in ``runs`` and the server's
+    should_exit at that moment in ``exits``, then starts (sets started), raises
+    KeyboardInterrupt after starting, or returns without starting, as *outcome*
+    ("started", "interrupted" or "failed") says."""
+    runs = []
+    exits = []
+
+    class Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Server:
+        def __init__(self, config):
+            self.config = config
+            self.started = False
+            self.should_exit = False
+
+        def run(self, sockets=None):
+            runs.append((self.config.kwargs, sockets))
+            exits.append(self.should_exit)
+            if outcome == "failed":
+                return
+            self.started = True
+            if outcome == "interrupted":
+                raise KeyboardInterrupt
+
+    return types.SimpleNamespace(Config=Config, Server=Server, runs=runs, exits=exits)
+
+
+def _record_own_bind(monkeypatch):
+    """Replace uvicorn.Config and uvicorn.Server with the _fake_uvicorn("started")
+    stand-ins, and record uvicorn.run() calls as ("uvicorn.run", kwargs).
+    Returns the shared record."""
+    import uvicorn as uvicorn_mod
+    fake = _fake_uvicorn("started")
+    monkeypatch.setattr(uvicorn_mod, "Config", fake.Config)
+    monkeypatch.setattr(uvicorn_mod, "Server", fake.Server)
+    monkeypatch.setattr(uvicorn_mod, "run",
+                        lambda *args, **kwargs: fake.runs.append(("uvicorn.run", kwargs)))
+    return fake.runs
+
+
 def test_run_server_plain_wires_crash_guard_and_extracts_instance_id(monkeypatch):
     calls = _patch_bugreport(monkeypatch)
 
@@ -515,30 +564,29 @@ def test_run_server_plain_swallows_keyboard_interrupt(monkeypatch):
     assert calls[-1] == ("disarmed", None), "crash guard must still be disarmed"
 
 
-def test_run_server_plain_falls_back_to_uvicorn_run_on_unexpected_error(monkeypatch):
+def test_run_server_plain_falls_back_to_uvicorns_own_bind_on_unexpected_error(
+        monkeypatch, caplog):
     calls = _patch_bugreport(monkeypatch)
 
     async def fake_serve(app, host, port, log_level):
         raise RuntimeError("peek layer exploded")
     monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
-
-    def fail_socket(host, port):   # simulates create_listen_socket failing
-        raise OSError("simulated: cannot build the listening socket")
-    monkeypatch.setattr(portmux, "create_listen_socket", fail_socket)
-
-    import uvicorn as uvicorn_mod
-    fallback_calls = []
-    monkeypatch.setattr(uvicorn_mod, "run", lambda app, **kw: fallback_calls.append(kw))
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    runs = _record_own_bind(monkeypatch)
 
     portmux.run_server(_bare_app, "127.0.0.1", 8002)   # must not raise
-    assert fallback_calls == [{
-        "host": "127.0.0.1", "port": 8002, "log_level": "warning",
+    assert runs == [({
+        "app": _bare_app, "host": "127.0.0.1", "port": 8002, "log_level": "warning",
         # The fallback is a real server bind, so it carries the same bounded
         # stop as the primary path; without it a Ctrl+C on the degraded path
         # waits for the longest open response.
         "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
-    }]
+    }, None)]
     assert calls[-1] == ("disarmed", None)
+    assert ("portmux: could not build the listening socket for 127.0.0.1:8002 "
+            "(simulated: cannot build the listening socket); falling back to "
+            "uvicorn's own bind, which serves IPv6 only for a :: host"
+            in caplog.messages), caplog.messages
 
 
 def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypatch):
@@ -555,10 +603,15 @@ def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypa
         instances: list = []
         def __init__(self, config):
             self.config = config
+            self.should_exit = False
             self.run_sockets = None
+            self.should_exit_at_run = None
+            self.hooks_at_run = None
             _RecordingServer.instances.append(self)
         def run(self, sockets=None):
             self.run_sockets = sockets
+            self.should_exit_at_run = self.should_exit
+            self.hooks_at_run = list(portmux._stop_hooks)
 
     _RecordingServer.instances = []
     import uvicorn as uvicorn_mod
@@ -570,11 +623,98 @@ def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypa
     server = _RecordingServer.instances[0]
     try:
         assert server.run_sockets and len(server.run_sockets) == 1
-        assert server.run_sockets[0].getsockname()[1] == port
+        assert server.run_sockets[0].getsockname() == ("127.0.0.1", port)
     finally:
         for s in (server.run_sockets or []):
             s.close()
+    config = server.config
+    assert (config.host, config.port, config.app) == ("127.0.0.1", port, _bare_app)
+    assert config.timeout_graceful_shutdown == portmux.GRACEFUL_SHUTDOWN_TIMEOUT
+    assert server.should_exit_at_run is False, "served under a stop nobody requested"
+    assert len(server.hooks_at_run) == 1
+    server.hooks_at_run[0]()
+    assert server.should_exit is True, "the stop hook does not end this server"
+    assert portmux._stop_hooks == []
     assert calls[-1] == ("disarmed", None)
+
+
+def test_a_ctrl_c_on_the_prepared_socket_fallback_ends_run_server_normally(monkeypatch):
+    calls = _patch_bugreport(monkeypatch)
+
+    async def fake_serve(app, host, port, log_level):
+        raise RuntimeError("peek layer exploded")
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+    import uvicorn as uvicorn_mod
+    fake = _fake_uvicorn("interrupted")
+    monkeypatch.setattr(uvicorn_mod, "Config", fake.Config)
+    monkeypatch.setattr(uvicorn_mod, "Server", fake.Server)
+
+    try:
+        portmux.run_server(_bare_app, "127.0.0.1", _free_port())
+    except KeyboardInterrupt:
+        pytest.fail("a Ctrl+C escaped run_server on the prepared-socket fallback")
+    finally:
+        for _kwargs, sockets in fake.runs:
+            for sock in sockets or []:
+                sock.close()
+    assert len(fake.runs) == 1 and fake.runs[0][1], "the prepared socket was not used"
+    assert calls[-1] == ("disarmed", None)
+    assert portmux._stop_hooks == []
+
+
+def test_the_own_bind_exits_with_uvicorns_code_when_run_returns_unstarted(
+        _stop_state, monkeypatch):
+    """When server.run() returns without the server having started, uvicorn's
+    own bind exits with uvicorn's startup-failure code, as uvicorn.run() does."""
+    from uvicorn.main import STARTUP_FAILURE
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    fake = _fake_uvicorn("failed")
+
+    with pytest.raises(SystemExit) as exc:
+        portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", 9010,
+                                       log_level="warning")
+
+    assert exc.value.code == STARTUP_FAILURE
+    assert len(fake.runs) == 1
+    assert portmux._stop_hooks == []
+
+
+def test_the_prepared_socket_bind_applies_an_earlier_stop(_stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_active_runs", 1)
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+    fake = _fake_uvicorn("started")
+
+    portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", _free_port(),
+                                   log_level="warning")
+
+    for _kwargs, sockets in fake.runs:
+        for sock in sockets or []:
+            sock.close()
+    assert fake.exits == [True], "a stop requested earlier in the run did not reach the server"
+    assert portmux._stop_hooks == []
+
+
+def test_a_stop_left_from_a_finished_run_does_not_stop_a_bind(_stop_state, monkeypatch):
+    """_stop_requested stays set after a run_server() call that was stopped; a
+    bind made outside a run_server() call still serves."""
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+    on_socket = _fake_uvicorn("started")
+
+    portmux._run_uvicorn_on_socket(on_socket, _bare_app, "127.0.0.1", _free_port(),
+                                   log_level="warning")
+
+    for _kwargs, sockets in on_socket.runs:
+        for sock in sockets or []:
+            sock.close()
+    assert on_socket.exits == [False]
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    own_bind = _fake_uvicorn("started")
+
+    portmux._run_uvicorn_on_socket(own_bind, _bare_app, "127.0.0.1", 9010,
+                                   log_level="warning")
+
+    assert own_bind.exits == [False]
+    assert portmux._stop_hooks == []
 
 
 def test_run_server_tls_swallows_keyboard_interrupt(monkeypatch):
@@ -590,28 +730,23 @@ def test_run_server_tls_swallows_keyboard_interrupt(monkeypatch):
     assert calls[-1] == ("disarmed", None)
 
 
-def test_run_server_tls_falls_back_to_uvicorn_run_on_unexpected_error(monkeypatch):
+def test_run_server_tls_falls_back_to_uvicorns_own_bind_on_unexpected_error(
+        monkeypatch):
     calls = _patch_bugreport(monkeypatch)
 
     async def fake_serve(app, host, port, ssl_certfile, ssl_keyfile, log_level):
         raise RuntimeError("demux exploded")
     monkeypatch.setattr(portmux, "_serve_async", fake_serve)
-
-    def fail_socket(host, port):   # simulates create_listen_socket failing
-        raise OSError("simulated: cannot build the listening socket")
-    monkeypatch.setattr(portmux, "create_listen_socket", fail_socket)
-
-    import uvicorn as uvicorn_mod
-    fallback_calls = []
-    monkeypatch.setattr(uvicorn_mod, "run", lambda app, **kw: fallback_calls.append(kw))
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    runs = _record_own_bind(monkeypatch)
 
     portmux.run_server(_bare_app, "0.0.0.0", 8443,
                        ssl_certfile="cert.pem", ssl_keyfile="key.pem")   # must not raise
-    assert fallback_calls == [{
-        "host": "0.0.0.0", "port": 8443, "log_level": "warning",
+    assert runs == [({
+        "app": _bare_app, "host": "0.0.0.0", "port": 8443, "log_level": "warning",
         "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
         "ssl_certfile": "cert.pem", "ssl_keyfile": "key.pem",
-    }]
+    }, None)]
     assert calls[-1] == ("disarmed", None)
 
 
@@ -821,40 +956,97 @@ def test_route_stop_signals_starts_no_helper_when_serving_on_this_thread(
         assert _current_wakeup_fd() == before_fd
 
 
-def test_the_last_resort_bind_is_interrupted_only_from_its_own_thread(
-        _stop_state, monkeypatch):
-    import uvicorn as uvicorn_mod
+def test_a_stop_from_another_thread_ends_the_last_resort_bind(_stop_state, monkeypatch):
+    """App-window mode runs run_server() on a background thread and requests the
+    stop from another thread. uvicorn's own bind, used when even the listening
+    socket cannot be built, must end on that request."""
+    import uvicorn
+    from uvicorn.server import Server
     monkeypatch.setattr(portmux, "_active_runs", 1)
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    servers = []
+    real_init = Server.__init__
 
-    def fail_socket(host, port):
-        raise OSError("simulated: cannot build the listening socket")
-    monkeypatch.setattr(portmux, "create_listen_socket", fail_socket)
-    seen = {}
+    def recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        servers.append(self)
+    monkeypatch.setattr(Server, "__init__", recording_init)
+    errors = []
 
-    def fake_run(**kw):
-        other = []
-
-        def from_elsewhere():
-            try:
-                portmux._request_stop()
-                other.append("returned")
-            except KeyboardInterrupt:
-                other.append("interrupted")
-        t = threading.Thread(target=from_elsewhere)
-        t.start()
-        t.join(5)
-        seen["other thread"] = other
+    def serve():
         try:
-            portmux._request_stop()
-            seen["own thread"] = "returned"
-        except KeyboardInterrupt:
-            seen["own thread"] = "interrupted"
-    monkeypatch.setattr(uvicorn_mod, "run", fake_run)
+            portmux._run_uvicorn_on_socket(uvicorn, _bare_app, "127.0.0.1",
+                                           _free_port(), log_level="warning")
+        except BaseException as e:
+            errors.append(e)
+    serving = threading.Thread(target=serve, daemon=True)
+    serving.start()
+    try:
+        deadline = time.monotonic() + 30
+        while not (servers and servers[0].started) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert servers and servers[0].started, "uvicorn's own bind never started"
+        portmux._request_stop()
+        serving.join(15)
+        assert not serving.is_alive(), (
+            "the last-resort server kept serving after a stop requested from "
+            "another thread")
+    finally:
+        for server in servers:
+            server.should_exit = True
+        serving.join(15)
+    assert errors == []
+    assert portmux._stop_hooks == []
 
-    portmux._run_uvicorn_on_socket(uvicorn_mod, _bare_app, "127.0.0.1", 9010,
+
+def test_the_last_resort_bind_serves_nothing_after_an_earlier_stop(
+        _stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_active_runs", 1)
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    fake = _fake_uvicorn("started")
+
+    portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", 9010,
                                    log_level="warning")
 
-    assert seen == {"other thread": ["returned"], "own thread": "interrupted"}
+    assert fake.runs == []
+    assert portmux._stop_hooks == []
+
+
+def test_a_ctrl_c_ends_the_last_resort_bind_normally(_stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    fake = _fake_uvicorn("interrupted")
+
+    try:
+        portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", 9010,
+                                       log_level="warning")
+    except KeyboardInterrupt:
+        pytest.fail("a Ctrl+C escaped the last-resort bind")
+
+    assert len(fake.runs) == 1
+    assert fake.runs[0][1] is None, "uvicorn's own bind takes no prepared socket"
+    assert portmux._stop_hooks == []
+
+
+def test_a_last_resort_bind_that_never_started_exits_with_uvicorns_code(
+        _stop_state, monkeypatch):
+    """An app whose lifespan startup fails: uvicorn's own bind never starts, and
+    the process exits with uvicorn's startup-failure code, as uvicorn.run()
+    does."""
+    import uvicorn
+    from uvicorn.main import STARTUP_FAILURE
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+
+    async def startup_fails(scope, receive, send):
+        if scope["type"] == "lifespan":
+            await receive()
+            await send({"type": "lifespan.startup.failed",
+                        "message": "simulated startup failure"})
+
+    with pytest.raises(SystemExit) as exc:
+        portmux._run_uvicorn_on_socket(uvicorn, startup_fails, "127.0.0.1",
+                                       _free_port(), log_level="warning")
+    assert exc.value.code == STARTUP_FAILURE
     assert portmux._stop_hooks == []
 
 

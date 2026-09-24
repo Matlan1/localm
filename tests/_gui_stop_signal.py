@@ -5,6 +5,7 @@ None, as it does under the test suite). NOT a test module (underscore prefix ->
 pytest does not collect it).
 
 Usage: python _gui_stop_signal.py <port> [--app-window] [--raise <signal name>]
+                                   [--last-resort-bind]
 
 Without --app-window it runs `localm gui --no-model --no-browser --isolated`,
 serving on the main thread. With --app-window it runs the app-window mode (the
@@ -14,7 +15,9 @@ closes it, the way a real webview loop can. On POSIX the stop signals are
 blocked on the main thread for that wait, so they are handled on another
 thread. It prints whether the server_stopped event was handed to the window
 and whether it was already set when the window was closed. With --raise, the
-process raises that signal on itself once the window is open.
+process raises that signal on itself once the window is open. With
+--last-resort-bind, the server is served through uvicorn's own bind (see
+_portmux_stop_signal_server.force_last_resort_bind).
 """
 import argparse
 import signal
@@ -95,7 +98,11 @@ if __name__ == "__main__":
     ap.add_argument("port")
     ap.add_argument("--app-window", action="store_true")
     ap.add_argument("--raise", dest="raise_name", default=None)
+    ap.add_argument("--last-resort-bind", action="store_true")
     opts = ap.parse_args()
+    if opts.last_resort_bind:
+        from _portmux_stop_signal_server import force_last_resort_bind
+        force_last_resort_bind()
 
     from localm import appface
     from localm.cli import main
