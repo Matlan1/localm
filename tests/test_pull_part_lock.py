@@ -244,6 +244,31 @@ def test_a_dead_holders_lock_is_reclaimed(home):
         "the lock was not actually re-taken by this process")
 
 
+def test_a_hard_killed_holders_lock_is_reclaimed(home):
+    """A real holder killed while it holds the lock leaves the record it wrote
+    behind; the next pull reclaims it."""
+    import signal
+    from localm import instances
+    holder, pid = _hold(home)
+    try:
+        d = _part_lock_dir("m.gguf")
+        before = json.loads(_record(d))
+        # The injection took: the holder wrote its own record, pid space included.
+        assert before["pid"] == pid and before.get("space")
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        deadline = time.monotonic() + 30
+        while instances.pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not instances.pid_alive(pid), "the holder survived the kill"
+
+        with _part_lock("m.gguf"):
+            rec = json.loads(_record(d))
+        assert rec["pid"] == os.getpid(), (
+            "a killed holder's lock was not reclaimed")
+    finally:
+        _release(holder)
+
+
 @pytest.mark.parametrize("direction", ["forward", "back"])
 def test_a_live_holder_keeps_its_lock_across_a_clock_step(home, monkeypatch,
                                                           direction):

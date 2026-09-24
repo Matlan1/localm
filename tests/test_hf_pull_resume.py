@@ -219,6 +219,28 @@ class TestPartialOwnership:
         assert captured["resume_size"] == 0
         assert dest.read_bytes() == b"FRESH"
 
+    @pytest.mark.parametrize("whose", ["dead", "this-process"])
+    def test_a_partial_from_another_pid_space_is_left_alone_whatever_its_pid(
+            self, cache, tmp_path, monkeypatch, dead_pid, whose):
+        """A record from another pid space names a pid this process cannot
+        look up, whether that number is dead here or equal to this process's
+        own: the partial is neither adopted nor deleted."""
+        pid = dead_pid[0] if whose == "dead" else os.getpid()
+        inc_path = cache / "file.etag.incomplete"
+        other = cache / "file.etag.bbbb2222.incomplete"
+        other.write_bytes(b"OTHER-PID-SPACE")
+        _owner(other, pid, None, space="0123456789abcdef")
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b"FRESH")
+
+        _call(inc_path, dest, expected_size=5)
+
+        assert (other.read_bytes() if other.exists() else None) == (
+            b"OTHER-PID-SPACE"), "a partial of another pid space was touched"
+        assert _partial_owner_path(other).exists()
+        assert captured["resume_size"] == 0
+        assert dest.read_bytes() == b"FRESH"
+
     def test_the_owner_record_names_this_process_its_pid_space_and_start(
             self, cache):
         from localm.model_manager.pull import (
