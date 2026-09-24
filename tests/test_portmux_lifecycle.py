@@ -476,10 +476,12 @@ def _refuse_listening_socket(host, port):
 
 def _fake_uvicorn(outcome):
     """A stand-in for the uvicorn module. Its Server.run() records the config
-    kwargs and sockets it was called with, then starts (sets started), raises
+    kwargs and sockets it was called with in ``runs`` and the server's
+    should_exit at that moment in ``exits``, then starts (sets started), raises
     KeyboardInterrupt after starting, or returns without starting, as *outcome*
     ("started", "interrupted" or "failed") says."""
     runs = []
+    exits = []
 
     class Config:
         def __init__(self, **kwargs):
@@ -493,13 +495,14 @@ def _fake_uvicorn(outcome):
 
         def run(self, sockets=None):
             runs.append((self.config.kwargs, sockets))
+            exits.append(self.should_exit)
             if outcome == "failed":
                 return
             self.started = True
             if outcome == "interrupted":
                 raise KeyboardInterrupt
 
-    return types.SimpleNamespace(Config=Config, Server=Server, runs=runs)
+    return types.SimpleNamespace(Config=Config, Server=Server, runs=runs, exits=exits)
 
 
 def _record_own_bind(monkeypatch):
@@ -562,7 +565,7 @@ def test_run_server_plain_swallows_keyboard_interrupt(monkeypatch):
 
 
 def test_run_server_plain_falls_back_to_uvicorns_own_bind_on_unexpected_error(
-        monkeypatch):
+        monkeypatch, caplog):
     calls = _patch_bugreport(monkeypatch)
 
     async def fake_serve(app, host, port, log_level):
@@ -580,6 +583,10 @@ def test_run_server_plain_falls_back_to_uvicorns_own_bind_on_unexpected_error(
         "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
     }, None)]
     assert calls[-1] == ("disarmed", None)
+    assert ("portmux: could not build the listening socket for 127.0.0.1:8002 "
+            "(simulated: cannot build the listening socket); falling back to "
+            "uvicorn's own bind, which serves IPv6 only for a :: host"
+            in caplog.messages), caplog.messages
 
 
 def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypatch):
@@ -596,10 +603,15 @@ def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypa
         instances: list = []
         def __init__(self, config):
             self.config = config
+            self.should_exit = False
             self.run_sockets = None
+            self.should_exit_at_run = None
+            self.hooks_at_run = None
             _RecordingServer.instances.append(self)
         def run(self, sockets=None):
             self.run_sockets = sockets
+            self.should_exit_at_run = self.should_exit
+            self.hooks_at_run = list(portmux._stop_hooks)
 
     _RecordingServer.instances = []
     import uvicorn as uvicorn_mod
@@ -611,11 +623,57 @@ def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypa
     server = _RecordingServer.instances[0]
     try:
         assert server.run_sockets and len(server.run_sockets) == 1
-        assert server.run_sockets[0].getsockname()[1] == port
+        assert server.run_sockets[0].getsockname() == ("127.0.0.1", port)
     finally:
         for s in (server.run_sockets or []):
             s.close()
+    config = server.config
+    assert (config.host, config.port, config.app) == ("127.0.0.1", port, _bare_app)
+    assert config.timeout_graceful_shutdown == portmux.GRACEFUL_SHUTDOWN_TIMEOUT
+    assert server.should_exit_at_run is False, "served under a stop nobody requested"
+    assert len(server.hooks_at_run) == 1
+    server.hooks_at_run[0]()
+    assert server.should_exit is True, "the stop hook does not end this server"
+    assert portmux._stop_hooks == []
     assert calls[-1] == ("disarmed", None)
+
+
+def test_the_prepared_socket_bind_applies_an_earlier_stop(_stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_active_runs", 1)
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+    fake = _fake_uvicorn("started")
+
+    portmux._run_uvicorn_on_socket(fake, _bare_app, "127.0.0.1", _free_port(),
+                                   log_level="warning")
+
+    for _kwargs, sockets in fake.runs:
+        for sock in sockets or []:
+            sock.close()
+    assert fake.exits == [True], "a stop requested earlier in the run did not reach the server"
+    assert portmux._stop_hooks == []
+
+
+def test_a_stop_left_from_a_finished_run_does_not_stop_a_bind(_stop_state, monkeypatch):
+    """_stop_requested stays set after a run_server() call that was stopped; a
+    bind made outside a run_server() call still serves."""
+    monkeypatch.setattr(portmux, "_stop_requested", True)
+    on_socket = _fake_uvicorn("started")
+
+    portmux._run_uvicorn_on_socket(on_socket, _bare_app, "127.0.0.1", _free_port(),
+                                   log_level="warning")
+
+    for _kwargs, sockets in on_socket.runs:
+        for sock in sockets or []:
+            sock.close()
+    assert on_socket.exits == [False]
+    monkeypatch.setattr(portmux, "create_listen_socket", _refuse_listening_socket)
+    own_bind = _fake_uvicorn("started")
+
+    portmux._run_uvicorn_on_socket(own_bind, _bare_app, "127.0.0.1", 9010,
+                                   log_level="warning")
+
+    assert own_bind.exits == [False]
+    assert portmux._stop_hooks == []
 
 
 def test_run_server_tls_swallows_keyboard_interrupt(monkeypatch):
