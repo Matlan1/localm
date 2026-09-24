@@ -1707,7 +1707,7 @@ export const I18N_EN = {
   "settings.perf.ratioHint":
     "Optional relative weight per checked device (e.g. 3 and 1 gives the first card three times the second's share). Leave every weight blank to keep the automatic free-VRAM sizing above.",
   "settings.perf.indexSpaceHint":
-    "Device numbers are the Vulkan backend's own order (what a model load uses); other tools may number GPUs differently.",
+    "Device numbers are the installed GPU backend's own order (what a model load uses); other tools may number GPUs differently.",
   "settings.perf.splitPartialWarningToast":
     "Saved, but a weight is missing for one GPU - enter one for every checked device, or clear them all for automatic sizing",
   "settings.perf.splitDisabledToast": "Split disabled - applies on the next model load",
@@ -2235,6 +2235,12 @@ export const I18N_EN = {
   "video.title": "Video generation",
   "video.widthLabel": "Width",
   "video.widthPlaceholder": "default (1280, native)",
+
+  // ---- Browser tab (browser plugin, static/browser.js) ----
+  "browser.liveView.inputFailed": "Input did not reach the browser: {detail}",
+  "browser.liveView.inputRestored": "Input is reaching the browser again.",
+  "browser.liveView.keysHint":
+    "Keys go to the page · Esc releases the keyboard · Shift+Tab moves back",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
 };

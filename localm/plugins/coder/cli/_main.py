@@ -362,21 +362,31 @@ def main(
             _run_estimate(agent, task, output_format)
         if resume is not None:
             ckpt_id = resume.strip() or None
-            ckpt = agent.load_checkpoint(ckpt_id)
-            if ckpt is None:
-                if ckpt_id:
-                    print_warning(f"No saved session with id '{ckpt_id}'.")
-                else:
-                    print_warning("No interrupted session found to resume.")
+            from ..agent.checkpoint import is_valid_checkpoint_id
+            if ckpt_id and not is_valid_checkpoint_id(ckpt_id):
+                print_warning(
+                    f"--resume/-r took '{ckpt_id}' as a checkpoint id, not a task: a "
+                    "value right after --resume/-r is read as the id, not as TASK. To "
+                    "resume the latest session and give it a task, put the task first: "
+                    'localm coder "TASK" --resume. To resume one specific saved session '
+                    "with a task, name its id: --resume ID TASK."
+                )
             else:
-                agent.resume_checkpoint(ckpt)
-                agent.clear_checkpoint()
-                ts = ckpt.get("interrupted_at", "unknown time")
-                turns = ckpt.get("turns", "?")
-                title = ckpt.get("title")
-                label = f' "{title}"' if title else ""
-                print_success(
-                    f"Resumed session{label} ({turns} turns, interrupted {ts}) on {backend.model_id}.")
+                ckpt = agent.load_checkpoint(ckpt_id)
+                if ckpt is None:
+                    if ckpt_id:
+                        print_warning(f"No saved session with id '{ckpt_id}'.")
+                    else:
+                        print_warning("No interrupted session found to resume.")
+                else:
+                    agent.resume_checkpoint(ckpt)
+                    agent.clear_checkpoint()
+                    ts = ckpt.get("interrupted_at", "unknown time")
+                    turns = ckpt.get("turns", "?")
+                    title = ckpt.get("title")
+                    label = f' "{title}"' if title else ""
+                    print_success(
+                        f"Resumed session{label} ({turns} turns, interrupted {ts}) on {backend.model_id}.")
 
         if task:
             # Non-interactive single-task mode (optionally a verify-until-pass loop)

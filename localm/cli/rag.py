@@ -54,7 +54,7 @@ def rag_list():
                       "Create one:  localm rag add <name> <path>[/dim]")
         return
     for n in names:
-        s = Collection(n).stats()
+        s = Collection(n, cache=False).stats()
         retrieval = "hybrid" if s["has_vectors"] else "BM25"
         marker = ("  [yellow](corrupt index - run 'localm rag repair')[/yellow]"
                   if s.get("corrupt") else "")

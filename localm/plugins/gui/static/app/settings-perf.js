@@ -183,7 +183,7 @@ let _gpuIndexSpace = null;
 
 /** Show (or hide) the ONE native index-space note that covers both GPU rows:
  *  when /api/gpus says index_space "native", the device numbers are the
- *  active native (Vulkan) backend's own load-time order - the numbering
+ *  active native GPU backend's own load-time order - the numbering
  *  gpu_split_indices / main_gpu_index actually mean - which can differ from
  *  other tools' GPU numbering, so say so.
  *
@@ -2157,13 +2157,25 @@ export function parseMemoryHeader(resp) {
   } catch { return null; }
 }
 
+/** Runs one reply round (plus any web-loop rounds) and returns `{ stopped,
+ *  liveRow }`: `stopped` is true when Stop aborted the turn, `liveRow` is the
+ *  assistant bubble this round streamed into. Called outside a turn (no
+ *  chat.busy/chat.abort), it runs itself as a turn through runChatTurn; inside
+ *  one it uses the turn's AbortController (chat.abort) for compaction and the
+ *  request. */
 export async function runCompletion(conv, webDepth = 0, web = null) {
+  if (!chat.busy || !chat.abort) {
+    return runChatTurn(() => runCompletion(conv, webDepth, web));
+  }
+  const signal = chat.abort.signal;
+  if (signal.aborted) return { stopped: true, liveRow: null };
   // R36: per-send web state. `seen` dedupes already-issued queries so the model
   // cannot loop on the same search; `ask` caches the net policy so a transient
   // /v1/config blip mid-loop cannot silently flip approval off; `forced` ensures
   // we only inject the "limit reached, answer now" nudge once per send.
   if (!web) web = { seen: new Set(), ask: null, forced: false, repaired: false };
-  const contextRouting = await maybeCompactConversation(conv);
+  const contextRouting = await maybeCompactConversation(conv, signal);
+  if (signal.aborted) return { stopped: true, liveRow: null };
   const params = chatParams();
   const webEnabled = $("p-web").checked;
   const messages = [];
@@ -2269,15 +2281,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     m.content.some((p) => p.type === "image_url"));
 
   const box = $("chat-messages");
-  const { body: liveBody } = addMessageRow(box, "assistant", "");
+  const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
   mountStatusIndicator(liveBody, sentImage ? t("chat.status.encodingImage") : t("chat.status.processing"));
   chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
   box.scrollTop = box.scrollHeight;
 
-  const sendBtn = $("chat-send");
-  sendBtn.classList.add("stop");
-  sendBtn.replaceChildren(iconEl("stop", "ic"));
-  chat.abort = new AbortController();
   document.querySelectorAll(".message-actions button").forEach(b => b.disabled = true);
 
   let full = "";
@@ -2295,7 +2303,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify(reqBody),
-      signal: chat.abort.signal,
+      signal,
     });
     if (!r.ok) {
       // Same shape as every other fetch error site in the GUI (chat.js:1193,
@@ -2390,11 +2398,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     }
   } finally {
     removeStatusIndicator(liveBody);
-    chat.abort = null;
-    sendBtn.classList.remove("stop");
-    sendBtn.replaceChildren(iconEl("send", "ic"));
-    document.querySelectorAll(".message-actions button").forEach(b => b.disabled = false);
   }
+  const outcome = { stopped: aborted, liveRow };
 
   // User pressed Stop (BUG-13 / U-STOP). BUG-13's original bug was that the
   // AbortError catch only suppressed the error toast and then fell straight
@@ -2438,7 +2443,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       saveConversations(conv);
       renderChat();
     }
-    return;
+    return outcome;
   }
 
   // VIS-1: a vision reject must NOT persist an empty assistant turn - a blank
@@ -2447,7 +2452,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // here so the chat recovers.
   if (visionRejected) {
     renderChat();
-    return;
+    return outcome;
   }
   if (!full.trim() && !reasoning.trim()) {
     if (finishReason === "error") {
@@ -2455,7 +2460,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // leave a failure marker in the live bubble and persist nothing.
       renderMarkdown(liveBody, "*[generation failed]*");
       toast("The model's reply failed (inference error) - nothing was generated", true);
-      return;
+      return outcome;
     }
     if (requestFailed) {
       // A generic failure (e.g. a 400 before any token streamed) already
@@ -2464,12 +2469,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // received this failed turn - calling it here would silently wipe the
       // only visible trace of the error the moment the toast auto-dismisses.
       // Leave the rendered error bubble in place instead.
-      return;
+      return outcome;
     }
     // A successful-but-empty completion: no error to show, just drop the
     // stray empty live bubble by re-rendering from (unchanged) history.
     renderChat();
-    return;
+    return outcome;
   }
 
   // finish_reason "error": the server streamed what it had, then the visible
@@ -2489,7 +2494,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     saveConversations(conv);
     renderChat();
     toast("The model's reply failed partway (inference error) - see the message for details", true);
-    return;
+    return outcome;
   }
 
   // Persist content with <think> rebuilt (same shape as before this change), so
@@ -2541,8 +2546,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         "results and cite the sources, or say plainly if they are insufficient."));
       saveConversations(conv);
       renderChat();
-      await runCompletion(conv, WEB_MAX_ROUNDS, web);   // stop web; force an answer
-      return;
+      return runCompletion(conv, WEB_MAX_ROUNDS, web);   // stop web; force an answer
     }
     // net_mode=ask: approve each MODEL-INITIATED request before it runs (WEB-ask).
     // The explicit /web command is direct consent and is NOT routed through here.
@@ -2556,8 +2560,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         "plainly that you could not look it up."));
       saveConversations(conv);
       renderChat();
-      await runCompletion(conv, WEB_MAX_ROUNDS, web);   // no further web rounds this send
-      return;
+      return runCompletion(conv, WEB_MAX_ROUNDS, web);   // no further web rounds this send
     }
     web.seen.add(key);
     // The ignored-call notice rides on the RESULT message, and only here. The
@@ -2566,7 +2569,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // the web"), so nothing is dropped in silence there - and inviting it to
     // re-issue the extra call would contradict the instruction it just got.
     await runWebCall(conv, nextCall, ignoredCallsNote(webCalls));
-    await runCompletion(conv, webDepth + 1, web);
+    return runCompletion(conv, webDepth + 1, web);
   } else if (canWeb && looksLikeWebToolAttempt(full)) {
     // The model tried to call a web tool but emitted a block we could not
     // parse. Re-prompt for the exact format instead of letting the un-grounded
@@ -2579,7 +2582,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       "you accessed the web."));
     saveConversations(conv);
     renderChat();
-    await runCompletion(conv, webDepth + 1, web);
+    return runCompletion(conv, webDepth + 1, web);
   } else if (webEnabled && webDepth === WEB_MAX_ROUNDS && !web.forced &&
              (parseWebCall(full) || looksLikeWebToolAttempt(full))) {
     // R36: web rounds are used up but the model is STILL trying to search instead
@@ -2593,8 +2596,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       "say so plainly."));
     saveConversations(conv);
     renderChat();
-    await runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
-    return;
+    return runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
   } else if (canWeb && !web.repaired && finishReason === "stop" &&
              looksLikeActionAnnouncement(full)) {
     // The model announced a web action ("I will now search ...") and then
@@ -2610,7 +2612,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       "you actually emitted a tool call and received its result."));
     saveConversations(conv);
     renderChat();
-    await runCompletion(conv, webDepth + 1, web);
+    return runCompletion(conv, webDepth + 1, web);
   } else if ($("p-speak").checked && full) {
     speak(full);   // read the finished reply aloud (offline browser voices)
   } else if (full && ttsProvider && typeof ttsProvider.ready === "function") {
@@ -2620,6 +2622,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     ttsProvider.ready({ passive: true })
       .catch((e) => console.debug("[tts] passive warm-up skipped:", e));
   }
+  return outcome;
 }
 
 /** Query the selected knowledge collection and inject cited excerpts. */
@@ -2706,6 +2709,9 @@ export function renderQueuedIndicator() {
   if (chat.stick) box.scrollTop = box.scrollHeight;
 }
 
+/** Dispatches the oldest queued message of the active conversation when the
+ *  chat is idle. Messages queued for another conversation stay queued until
+ *  that conversation is active. */
 export async function processChatQueue() {
   renderQueuedIndicator();
   if (!chat.queue.length) return;
@@ -2717,6 +2723,51 @@ export async function processChatQueue() {
   const [item] = chat.queue.splice(idx, 1);
   renderQueuedIndicator();
   await dispatchChatTurn(conv, item.text, item.attachments, item.docs);
+}
+
+/** Runs one chat turn. The turn owns a single AbortController (chat.abort,
+ *  aborted by Stop) and chat.busy from the moment Stop is shown until
+ *  `work(signal)` settles; every phase (knowledge retrieval, compaction,
+ *  streaming, web rounds) uses that one signal. Afterwards it clears both,
+ *  restores Send and re-renders the transcript, keeping an unsaved live
+ *  bubble (an error or an empty stopped reply) on screen. A finished turn
+ *  then dispatches the next queued message; a stopped turn leaves the queue
+ *  as it is. Returns `{ stopped }`. */
+export async function runChatTurn(work) {
+  const ctrl = new AbortController();
+  chat.busy = true;
+  chat.abort = ctrl;
+  const sendBtn = $("chat-send");
+  if (sendBtn) {
+    sendBtn.classList.add("stop");
+    sendBtn.replaceChildren(iconEl("stop", "ic"));
+  }
+  document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
+  let stopped = false;
+  try {
+    const out = await work(ctrl.signal);
+    stopped = !!(out && out.stopped) || ctrl.signal.aborted;
+    const liveRow = out && out.liveRow;
+    const keep = liveRow && liveRow.isConnected ? liveRow : null;
+    chat.busy = false;
+    chat.abort = null;
+    renderChat();
+    if (keep) {
+      const box = $("chat-messages");
+      box.insertBefore(keep, box.querySelector(".msg-row.queued"));
+      if (chat.stick) box.scrollTop = box.scrollHeight;
+    }
+  } finally {
+    chat.busy = false;
+    chat.abort = null;
+    if (sendBtn) {
+      sendBtn.classList.remove("stop");
+      sendBtn.replaceChildren(iconEl("send", "ic"));
+    }
+    document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
+    if (!stopped) processChatQueue();
+  }
+  return { stopped };
 }
 
 export async function dispatchChatTurn(conv, text, attachments = [], docs = []) {
@@ -2748,50 +2799,24 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = []) 
   saveConversations(conv);
   renderChat();
 
-  chat.busy = true;
-  chat.abort = new AbortController();
-  const sendBtn = $("chat-send");
-  if (sendBtn) {
-    sendBtn.classList.add("stop");
-    sendBtn.replaceChildren(iconEl("stop", "ic"));
-  }
-  document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
-
-  const kb = $("p-kb") ? $("p-kb").value : "";
-  let kbAborted = false;
-  if (kb && text) {
-    const box = $("chat-messages");
-    const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
-    mountStatusIndicator(liveBody, t("chat.status.searchingKnowledge"));
-    chat.stick = true;
-    if (box) box.scrollTop = box.scrollHeight;
-    try {
-      await retrieveKnowledge(conv, text, { signal: chat.abort.signal });
-    } finally {
-      removeStatusIndicator(liveBody);
-      liveRow.remove();
+  return runChatTurn(async (signal) => {
+    const kb = $("p-kb") ? $("p-kb").value : "";
+    if (kb && text) {
+      const box = $("chat-messages");
+      const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
+      mountStatusIndicator(liveBody, t("chat.status.searchingKnowledge"));
+      chat.stick = true;
+      if (box) box.scrollTop = box.scrollHeight;
+      try {
+        await retrieveKnowledge(conv, text, { signal });
+      } finally {
+        removeStatusIndicator(liveBody);
+        liveRow.remove();
+      }
+      if (signal.aborted) return { stopped: true };
     }
-    if (chat.abort.signal.aborted) {
-      kbAborted = true;
-    }
-  }
-
-  try {
-    if (!kbAborted) {
-      await runCompletion(conv);
-    }
-  } finally {
-    chat.busy = false;
-    chat.abort = null;
-    if (sendBtn) {
-      sendBtn.classList.remove("stop");
-      sendBtn.replaceChildren(iconEl("send", "ic"));
-    }
-    document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
-    if (!kbAborted) {
-      processChatQueue();
-    }
-  }
+    return runCompletion(conv);
+  });
 }
 
 export async function sendChat() {
@@ -2827,27 +2852,12 @@ export async function sendChat() {
   if (!currentConv()) newConversation();
   const conv = currentConv();
 
-  if (chatBusy()) {
-    chat.queue.push({
-      text,
-      attachments: [...chat.attachments],
-      docs: [...chat.docs],
-      convId: conv.id,
-    });
-    chat.attachments = [];
-    chat.docs = [];
-    renderAttachChips();
-    if (input) {
-      input.value = "";
-      autoGrow(input);
-    }
-    toast(t("chat.queuedToast"));
-    renderQueuedIndicator();
-    return;
-  }
-
-  const attachments = [...chat.attachments];
-  const docs = [...chat.docs];
+  const item = {
+    text,
+    attachments: [...chat.attachments],
+    docs: [...chat.docs],
+    convId: conv.id,
+  };
   chat.attachments = [];
   chat.docs = [];
   renderAttachChips();
@@ -2856,7 +2866,21 @@ export async function sendChat() {
     autoGrow(input);
   }
 
-  await dispatchChatTurn(conv, text, attachments, docs);
+  if (chatBusy()) {
+    chat.queue.push(item);
+    toast(t("chat.queuedToast"));
+    renderQueuedIndicator();
+    return;
+  }
+
+  // Older queued messages of this conversation go first.
+  if (chat.queue.some((q) => !q.convId || q.convId === conv.id)) {
+    chat.queue.push(item);
+    await processChatQueue();
+    return;
+  }
+
+  await dispatchChatTurn(conv, item.text, item.attachments, item.docs);
 }
 
 /** The exported-transcript label for message *m*: noteLabel's override

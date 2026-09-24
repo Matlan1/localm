@@ -65,7 +65,8 @@ test("index_space native: the native-numbering hint is shown ONCE for both rows"
   const all = doc.querySelectorAll(".perf-index-space-hint");
   assert.equal(all.length, 1,
                `the note must exist once, found ${all.length} copies`);
-  assert.match(hint(doc).textContent, /Vulkan backend/);
+  assert.doesNotMatch(hint(doc).textContent, /Vulkan/,
+               "the hint must not claim Vulkan on a native reading that may be SYCL");
 
   // The note is not nested inside either row.
   assert.equal(selRow.querySelectorAll(".perf-index-space-hint").length, 0,

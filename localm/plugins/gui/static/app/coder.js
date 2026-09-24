@@ -1991,7 +1991,7 @@ export function openSessionControls() {
       for (const m of (modelCache.models || [])) {
         const opt = document.createElement("option");
         opt.value = m.name;
-        opt.textContent = m.name + (m.active ? " (active)" : "");
+        opt.textContent = m.name + (m.active ? ` (${t("models.tag.active")})` : "");
         if (m.name === curModel) {
           opt.selected = true;
           foundCur = true;
@@ -2009,7 +2009,7 @@ export function openSessionControls() {
     const modelBtn = el("button", "btn-secondary", t("coder.controls.switchModelBtn"));
     modelBtn.onclick = async () => {
       const chosen = modelInput.value.trim();
-      if (!chosen || chosen === info.model) return;
+      if (!chosen || chosen === activeSession()?.info?.model) return;
       modelBtn.disabled = true;
       try {
         await switchActiveSessionModel(chosen);

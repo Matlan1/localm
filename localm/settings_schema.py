@@ -1683,14 +1683,14 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
         if f.secret:
             from localm.model_source_credentials import (CREDENTIAL_KEYS,
                                                          get_credential_source)
-            if values is not None and f.key in values:
-                val = values[f.key]
-                d["is_set"] = bool(val)
-                d["env_set"] = False
-            elif f.key in CREDENTIAL_KEYS:
+            if f.key in CREDENTIAL_KEYS:
                 src = get_credential_source(f.key)
                 d["is_set"] = src is not None
                 d["env_set"] = (src == "env")
+            elif values is not None and f.key in values:
+                val = values[f.key]
+                d["is_set"] = bool(val)
+                d["env_set"] = False
             elif f.key in base:
                 d["is_set"] = bool(base[f.key])
                 d["env_set"] = False

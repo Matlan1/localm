@@ -162,6 +162,31 @@ class TestSetupEmbeddingsPreSwitchConfirm:
         assert result.exit_code == 0, result.output
         assert "may invalidate" not in result.output
 
+    def test_switch_to_model_matching_existing_collection_skips_reembed_note(
+            self, cli_runner, monkeypatch, tmp_path):
+        """A real switch (--model differs from the current config) whose OWN
+        collection_provenance_report(candidate_model=...) finds nothing
+        affected - because the one existing collection is already built with
+        the target model - must not still tell the user afterward that
+        existing collections stay lexical until re-embedded. That claim is
+        exactly what the report just disproved."""
+        from localm.cli.maintenance import setup_embeddings
+        from localm.rag.store import Collection, rag_dir
+        _stub_install(monkeypatch, tmp_path, name="new-model.gguf")
+
+        c = Collection("docs", base=rag_dir()).create()
+        c._chunks = [{"source": "doc0.txt", "pos": 0, "text": "alpha"}]
+        c._vectors = [[0.1] * 768]
+        c._meta["embedding_model"] = "new-model"
+        c._save()
+
+        result = cli_runner.invoke(setup_embeddings,
+                                   ["--model", "new-model", "--yes"])
+        assert result.exit_code == 0, result.output
+        low = result.output.lower()
+        assert "stay lexical" not in low
+        assert "until re-embedded" not in low
+
 
 # --------------------------------------------------------------------------- #
 #  An unreadable memory namespace must be NAMED in the banner, not silently   #

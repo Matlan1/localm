@@ -433,6 +433,49 @@ class TestPageFailures:
         assert b.sources[1].grounding == GROUNDING_PAGE_BACKED
 
 
+class TestStaleSnippetVsFreshPage:
+    """A provider snippet can be stale (the search index cached it before the
+    page changed). Acceptance: once a source's page is actually fetched, its
+    evidence comes from the FRESH page text only - the stale snippet is never
+    mixed in or left standing as evidence for that source. This is a property
+    of retrieve()'s per-source if/(page)/elif(snippet) wiring (retrieve.py),
+    not of chunking.select_evidence in isolation, so it is pinned here against
+    the real controller rather than by constructing inputs by hand."""
+
+    _STALE_SNIPPET = "Tickets are 12 EUR, on sale now through last spring."
+    _FRESH_ANSWER = ("Tickets now cost 18 EUR as of this year; the spring "
+                     "discount ended.")
+
+    def test_fresh_page_evidence_replaces_the_stale_snippet(self, monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        _search_route(t, [("Tickets", "https://tix.example/", self._STALE_SNIPPET)])
+        t.route("GET", "https://tix.example/",
+                html_response(_page(f"{_LONG} {self._FRESH_ANSWER}")))
+        b = retrieve(QUERY)
+        assert b.sources[0].grounding == GROUNDING_PAGE_BACKED
+        assert self._FRESH_ANSWER in b.evidence_text()
+        assert self._STALE_SNIPPET not in b.evidence_text()
+        assert [c.kind for c in b.chunks_for("S1")] == ["page"]
+
+    def test_stale_snippet_still_used_when_the_page_read_fails(self, monkeypatch):
+        # The same stale snippet is legitimate evidence once the fresh page
+        # could not be read at all - it is the ONLY thing left to show, not a
+        # preference over fresher text. The per-source label is "failed" (the
+        # read attempt failed, per mark_failed - see
+        # TestPageFailures.test_all_reads_fail_is_snippet_only for the same
+        # per-source/bundle-level split), while the bundle-level grounding is
+        # still snippet-only because the snippet did make it into evidence.
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        _search_route(t, [("Tickets", "https://tix.example/", self._STALE_SNIPPET)])
+        t.route("GET", "https://tix.example/", FakeResponse(status=503))
+        b = retrieve(QUERY)
+        assert b.sources[0].grounding == GROUNDING_FAILED
+        assert b.grounding == GROUNDING_SNIPPET_ONLY
+        assert self._STALE_SNIPPET in b.evidence_text()
+
+
 class TestConcurrencyAndOptions:
     def test_top_pages_are_read_concurrently(self, monkeypatch):
         allow_public(monkeypatch)

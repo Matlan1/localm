@@ -141,7 +141,7 @@ class TestCollectionCache:
         c2 = Collection("cache_test", base=base)
         cached_entry = _get_cached_collection_data(base / "cache_test")
         assert cached_entry is not None
-        assert len(cached_entry["chunks"]) == len(c2._chunks)
+        assert len(cached_entry.chunks) == len(c2._chunks)
 
         # Subsequent load reads from cache
         c3 = Collection("cache_test", base=base)
@@ -209,3 +209,44 @@ class TestRagPluginRoutes:
         res = await rag_query("to_query", body, req)
         assert res["collection"] == "to_query"
         assert len(res["hits"]) > 0
+
+    @pytest.mark.anyio
+    async def test_rag_query_loads_the_collection_off_the_event_loop_thread(
+            self, tmp_path, monkeypatch):
+        """test_rag_query_executes_in_executor above only asserts on the
+        result, so a regression that moved the collection LOAD itself back
+        onto the event loop thread would still pass it. This records which
+        thread Collection._load actually runs on."""
+        import threading
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "home_dir", lambda: tmp_path)
+        base = tmp_path / "rag"
+        coll = Collection("to_query_thread", base=base).create()
+        coll._chunks = [{"text": "renewable energy wind", "source": "f.txt", "pos": 0}]
+        coll._save()
+
+        load_thread_ids = []
+        orig_load = Collection._load
+
+        def tracked_load(self, *args, **kwargs):
+            load_thread_ids.append(threading.get_ident())
+            return orig_load(self, *args, **kwargs)
+
+        monkeypatch.setattr(Collection, "_load", tracked_load)
+
+        from localm.plugins.builtin.rag.plug import RagQueryRequest, rag_query
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        app = Starlette()
+        scope = {"type": "http", "headers": [], "app": app}
+        req = Request(scope)
+
+        loop_thread_id = threading.get_ident()
+        body = RagQueryRequest(query="wind", k=2)
+        res = await rag_query("to_query_thread", body, req)
+
+        assert res["hits"]
+        assert len(load_thread_ids) >= 1, "Collection._load was never called"
+        assert all(tid != loop_thread_id for tid in load_thread_ids), (
+            f"Collection._load ran on the event loop thread ({loop_thread_id}), "
+            f"not a worker thread: {load_thread_ids}")

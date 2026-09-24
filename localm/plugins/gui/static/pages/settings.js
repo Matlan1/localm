@@ -237,8 +237,8 @@ export function buildSettingControl(field) {
     const isConfigured = !!(field.is_set || field.is_override);
     statusTag = el("span", "secret-status-tag" + (isConfigured ? " is-set" : ""));
     statusTag.textContent = field.env_set
-      ? tOr("settings.field.secretEnvTag", "(from environment)")
-      : (isConfigured ? tOr("settings.field.secretConfiguredTag", "(configured)") : tOr("settings.field.secretNotSetTag", "(not set)"));
+      ? t("settings.field.secretEnvTag")
+      : (isConfigured ? t("settings.field.secretConfiguredTag") : t("settings.field.secretNotSetTag"));
     label.appendChild(statusTag);
   }
   wrap.appendChild(label);
@@ -315,10 +315,10 @@ export function buildSettingControl(field) {
       const isConfigured = !!(field.is_set || field.is_override);
       const isEnv = !!field.env_set;
 
-      const configuredPlaceholder = tOr("settings.field.secretConfiguredPlaceholder", "saved (enter new value to replace)");
-      const envPlaceholder = tOr("settings.field.secretEnvPlaceholder", "set via environment variable");
-      const notSetPlaceholder = tOr("settings.field.secretNotSetPlaceholder", "not set (optional)");
-      const willClearPlaceholder = tOr("settings.field.secretWillClearPlaceholder", "will be removed on save");
+      const configuredPlaceholder = t("settings.field.secretConfiguredPlaceholder");
+      const envPlaceholder = t("settings.field.secretEnvPlaceholder");
+      const notSetPlaceholder = t("settings.field.secretNotSetPlaceholder");
+      const willClearPlaceholder = t("settings.field.secretWillClearPlaceholder");
 
       if (isEnv) {
         input.placeholder = envPlaceholder;
@@ -329,26 +329,26 @@ export function buildSettingControl(field) {
       }
 
       if (isConfigured && !isEnv) {
-        secretClearBtn = el("button", "btn-secondary secret-clear-btn", tOr("settings.field.secretClearButton", "Clear"));
+        secretClearBtn = el("button", "btn-secondary secret-clear-btn", t("settings.field.secretClearButton"));
         secretClearBtn.type = "button";
-        secretClearBtn.title = tOr("settings.field.secretClearTitle", "Clear stored secret on save");
+        secretClearBtn.title = t("settings.field.secretClearTitle");
         secretClearBtn.onclick = () => {
           willClear = !willClear;
           if (willClear) {
             input.value = "";
             input.placeholder = willClearPlaceholder;
             if (statusTag) {
-              statusTag.textContent = tOr("settings.field.secretWillClearTag", "(will clear on save)");
+              statusTag.textContent = t("settings.field.secretWillClearTag");
               statusTag.className = "secret-status-tag is-clearing";
             }
-            secretClearBtn.textContent = tOr("settings.field.secretUndoButton", "Undo");
+            secretClearBtn.textContent = t("settings.field.secretUndoButton");
           } else {
             input.placeholder = configuredPlaceholder;
             if (statusTag) {
-              statusTag.textContent = tOr("settings.field.secretConfiguredTag", "(configured)");
+              statusTag.textContent = t("settings.field.secretConfiguredTag");
               statusTag.className = "secret-status-tag is-set";
             }
-            secretClearBtn.textContent = tOr("settings.field.secretClearButton", "Clear");
+            secretClearBtn.textContent = t("settings.field.secretClearButton");
           }
           markSettingDirty(input);
         };
@@ -358,14 +358,14 @@ export function buildSettingControl(field) {
         if (input.value.trim()) {
           willClear = false;
           if (statusTag) {
-            statusTag.textContent = tOr("settings.field.secretNewValueTag", "(new value)");
+            statusTag.textContent = t("settings.field.secretNewValueTag");
             statusTag.className = "secret-status-tag is-set";
           }
-          if (secretClearBtn) secretClearBtn.textContent = tOr("settings.field.secretClearButton", "Clear");
+          if (secretClearBtn) secretClearBtn.textContent = t("settings.field.secretClearButton");
         } else if (isConfigured && !isEnv) {
           if (!willClear) {
             if (statusTag) {
-              statusTag.textContent = tOr("settings.field.secretConfiguredTag", "(configured)");
+              statusTag.textContent = t("settings.field.secretConfiguredTag");
               statusTag.className = "secret-status-tag is-set";
             }
             input.placeholder = configuredPlaceholder;
@@ -373,8 +373,8 @@ export function buildSettingControl(field) {
         } else {
           if (statusTag) {
             statusTag.textContent = isEnv
-              ? tOr("settings.field.secretEnvTag", "(from environment)")
-              : tOr("settings.field.secretNotSetTag", "(not set)");
+              ? t("settings.field.secretEnvTag")
+              : t("settings.field.secretNotSetTag");
             statusTag.className = "secret-status-tag" + (isEnv ? " is-set" : "");
           }
           input.placeholder = isEnv ? envPlaceholder : notSetPlaceholder;
@@ -529,7 +529,7 @@ export function buildSettingControl(field) {
     else input.value = v == null ? "" : String(v);
     input.classList.remove("auto-detected");
     if (field.widget === "secret" && statusTag && input.value) {
-      statusTag.textContent = tOr("settings.field.secretNewValueTag", "(new value)");
+      statusTag.textContent = t("settings.field.secretNewValueTag");
       statusTag.className = "secret-status-tag is-set";
     }
     input.dispatchEvent(new Event("change", { bubbles: true }));

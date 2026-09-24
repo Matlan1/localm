@@ -8,8 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
-@pytest.fixture
-def app(tmp_path, monkeypatch):
+def _isolate_home(tmp_path, monkeypatch):
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -20,12 +19,39 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
     _cfg.ensure_dirs()
+
+
+@pytest.fixture
+def app(tmp_path, monkeypatch):
+    _isolate_home(tmp_path, monkeypatch)
     from localm.plugins.builtin.browser import plug
     from localm.plugins.engine import attach_engine
     application = FastAPI()
     attach_engine(application)
     application.include_router(plug._router)
     return application
+
+
+@pytest.fixture
+def served(tmp_path, monkeypatch):
+    """The browser routes on the real server app, so a refused request is
+    rendered by the same validation handler a live request meets."""
+    _isolate_home(tmp_path, monkeypatch)
+    from localm.inference.http_server import create_app
+    from localm.plugins.builtin.browser import plug
+    application = create_app(None)
+    application.include_router(plug._router)
+    return application
+
+
+def _post_raw(application, route: str, body: str):
+    """POST *body* verbatim as JSON, with the GUI shell token open mode asks for.
+    Server errors come back as responses rather than being re-raised."""
+    with TestClient(application, raise_server_exceptions=False) as c:
+        return c.post(route, content=body, headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {application.state.shell_token}",
+        })
 
 
 def _set(**values):
@@ -116,6 +142,58 @@ class TestInteractionRoutesDispatch:
                 assert r4.status_code == 200, r4.text
                 assert r4.json()["ok"] is True
                 assert fake.typed == ["localm"]
+        finally:
+            bsession.close("gui-owner")
+
+
+#: Bodies the click and scroll routes must refuse. 1e400 is valid JSON that
+#: parses to Infinity; the quoted words are what pydantic reads as NaN and inf.
+_REFUSED = [
+    ("/api/browser/click", '{"x": 1e400, "y": 0}'),
+    ("/api/browser/click", '{"x": "NaN", "y": 0}'),
+    ("/api/browser/click", '{"x": "Infinity", "y": 0}'),
+    ("/api/browser/click", '{"x": 0, "y": "-Infinity"}'),
+    ("/api/browser/click", '{"x": 10000000, "y": 0}'),
+    ("/api/browser/click", '{"x": 10, "y": 20, "button": "back"}'),
+    ("/api/browser/scroll", '{"delta_x": 0, "delta_y": 1e400}'),
+    ("/api/browser/scroll", '{"delta_x": 0, "delta_y": "NaN"}'),
+    ("/api/browser/scroll", '{"delta_x": "-Infinity", "delta_y": 0}'),
+]
+
+
+class TestPointerValuesAreBounded:
+    @pytest.mark.parametrize("route,body", _REFUSED)
+    def test_refused_before_it_reaches_the_session(self, served, route, body):
+        _set(browser_enabled=True)
+        from localm.browser import session as bsession
+
+        fake = _InteractiveFakeSession("gui-owner")
+        bsession.register(fake)
+        try:
+            r = _post_raw(served, route, body)
+            assert fake.clicks == [] and fake.scrolls == [], (
+                f"{body} reached the browser session as {fake.clicks or fake.scrolls}, "
+                "so a non-finite or out-of-range value goes on to Playwright's "
+                "driver pipe")
+            assert r.status_code == 422, r.text
+        finally:
+            bsession.close("gui-owner")
+
+    def test_a_finite_in_range_click_and_scroll_still_reach_the_session(self, served):
+        _set(browser_enabled=True)
+        from localm.browser import session as bsession
+
+        fake = _InteractiveFakeSession("gui-owner")
+        bsession.register(fake)
+        try:
+            r1 = _post_raw(served, "/api/browser/click",
+                           '{"x": 640.5, "y": 400, "button": "middle"}')
+            r2 = _post_raw(served, "/api/browser/scroll",
+                           '{"delta_x": -1000000, "delta_y": 1000000}')
+            assert fake.clicks == [(640.5, 400.0, "middle")]
+            assert fake.scrolls == [(-1000000.0, 1000000.0)]
+            assert r1.status_code == 200, r1.text
+            assert r2.status_code == 200, r2.text
         finally:
             bsession.close("gui-owner")
 

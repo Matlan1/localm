@@ -281,19 +281,22 @@ def _get_collection(name: str):
     return coll
 
 
-def _require_rag_confinement(name: str, request: Request) -> None:
+_CONFINED_DETAIL = ("This key's RAG access is confined to specific folders, "
+                    "and this collection includes documents from outside them.")
+
+
+def _require_rag_confinement(name: str, request: Request) -> list:
     """Raise 403 when the caller's key carries a per-key rag_roots allowlist
     and collection *name* holds any host-filesystem document indexed from
     outside those roots (``Collection.confined_to``). A no-op for a caller
     with no rag_roots allowlist (the owner, open mode, or a key that never
-    had one set)."""
+    had one set). Returns that allowlist, empty when there is none."""
     from localm.rag import Collection
     from localm.inference.http_server import effective_rag_roots
     key_roots = effective_rag_roots(request)
     if key_roots and not Collection.confined_to(name, key_roots):
-        raise HTTPException(
-            403, "This key's RAG access is confined to specific folders, "
-            "and this collection includes documents from outside them.")
+        raise HTTPException(403, _CONFINED_DETAIL)
+    return key_roots
 
 
 def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
@@ -347,7 +350,7 @@ def _collection_dim_report(target_dim: int) -> dict:
     unaffected = 0
     for name in collection_names():
         try:
-            coll = Collection(name)
+            coll = Collection(name, cache=False)
             stats = coll.stats()
             if not stats["has_vectors"]:
                 continue
@@ -625,10 +628,18 @@ async def rag_detail(name: str, request: Request):
 @_router.delete("/api/rag/collections/{name}")
 async def rag_delete(name: str, request: Request):
     from localm.rag import check_collection_name, delete_collection
+    from localm.rag.store import rag_dir
     try:
-        check_collection_name(name)
+        checked_name = check_collection_name(name)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # Existence (404) before confinement (403), same order rag_detail uses: a
+    # cheap meta.json-presence check, matching delete_collection's own, never
+    # a full Collection() load. See TestRagDeleteRouteKeyScopedRoots
+    # .test_delete_missing_collection_gets_404_not_403 (test_rag_confinement.py)
+    # and test_rag_delete_does_not_load_collection (test_rag_vector_acceleration.py).
+    if not (rag_dir() / checked_name / "meta.json").is_file():
+        raise HTTPException(404, f"No such collection: {name}")
     _require_rag_confinement(name, request)
     try:
         if not await _write_off_loop(lambda: delete_collection(name)):
@@ -842,7 +853,11 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         check_collection_name(name)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    _require_rag_confinement(name, request)
+    # Resolved (never raises) here; the raising confinement check is the
+    # in-executor recheck below. See
+    # TestRagQueryRouteKeyScopedRoots.test_query_missing_collection_gets_404_not_403.
+    from localm.inference.http_server import effective_rag_roots
+    key_roots = effective_rag_roots(request)
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     k = max(1, min(req.k, 20))
@@ -850,7 +865,14 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     loop = asyncio.get_running_loop()
 
     def _execute():
+        # Existence (404) before confinement (403), same order rag_detail
+        # uses. See TestRagQueryRouteKeyScopedRoots
+        # .test_query_missing_collection_gets_404_not_403.
         coll = _get_collection(name)
+        # Re-checks confinement on the loaded instance. See
+        # test_confinement_is_decided_on_the_chunks_that_would_be_served.
+        if key_roots and not coll.is_confined_to(key_roots):
+            raise HTTPException(403, _CONFINED_DETAIL)
         return _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed))
 
     # Defang control/frame tokens in the untrusted chunk text before it can be
@@ -1221,8 +1243,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
         from localm.config import load_config
         current_model = str(load_config().get("embedding_model") or "")
         from localm.rag import collection_provenance_note, collection_provenance_report
-        affected = [] if model == current_model else collection_provenance_report(candidate_model=model)
-        note = collection_provenance_note(model, affected)
+        unchanged = model == current_model
+        affected = [] if unchanged else collection_provenance_report(candidate_model=model)
+        note = collection_provenance_note(model, affected, unchanged=unchanged)
         return {"needs_confirm": True, "model": model,
                 "collections": affected, "note": note}
 

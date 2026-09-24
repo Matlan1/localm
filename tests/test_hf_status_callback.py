@@ -6,7 +6,7 @@ it to HFRunner.chat_stream, so a client of an HF (transformers) model never
 saw a status update advance past the initial guess - see gguf.py's chat_stream
 for the working GGUF twin these tests mirror.
 
-Five layers, each catching a different way this regresses:
+Six layers, each catching a different way this regresses:
   - HFBackend.chat_stream forwards on_status to self._runner.chat_stream (the
     exact line that was missing).
   - HFRunner.chat_stream (parent side) relays a "status" envelope from the
@@ -16,6 +16,9 @@ Five layers, each catching a different way this regresses:
   - A contract test enumerating every concrete BaseBackend subclass in
     localm.inference.backends, so a future backend that forgets to wire
     on_status through fails here instead of shipping silently.
+  - BaseBackend.chat_stream's own docstring documents on_status as an ABC
+    parameter, so a reader of the interface (not just an implementer chasing
+    a bug) can find it.
   - A real end-to-end round trip through an actual isolated worker process
     (no mocks), proving the dispatch-loop closure that glues the two mocked
     halves above together actually works.
@@ -446,7 +449,19 @@ class TestEveryBackendInvokesOnStatus:
 
 
 # --------------------------------------------------------------------------- #
-# 5. Real end-to-end round trip: an actual isolated worker process, no mocks.
+# 5. BaseBackend.chat_stream documents on_status as part of the ABC's contract.
+# --------------------------------------------------------------------------- #
+
+class TestOnStatusIsDocumented:
+    def test_base_backend_docstring_documents_on_status(self):
+        doc = BaseBackend.chat_stream.__doc__ or ""
+        assert "on_status" in doc, (
+            "BaseBackend.chat_stream's docstring does not document the "
+            "on_status parameter declared in its signature")
+
+
+# --------------------------------------------------------------------------- #
+# 6. Real end-to-end round trip: an actual isolated worker process, no mocks.
 #    Proves the dispatch-loop closure connecting HFWorker's on_status calls to
 #    HFRunner's status-envelope relay (layers 2 and 3 above, each mocked
 #    separately) actually works together. Marked @integration so the default
@@ -460,7 +475,8 @@ _TINY_CHAT_TEMPLATE = "{% for m in messages %}{{ m['content'] }}\n{% endfor %}"
 @pytest.mark.integration
 class TestRealWorkerRelaysStatusEndToEnd:
     @pytest.fixture(scope="class")
-    def hf_backend(self, tmp_path_factory):
+    @classmethod
+    def hf_backend(cls, tmp_path_factory):
         pytest.importorskip("torch", exc_type=ImportError)
         pytest.importorskip("transformers", exc_type=ImportError)
         import json

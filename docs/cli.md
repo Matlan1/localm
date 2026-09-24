@@ -176,9 +176,12 @@ localm config civitai_api_key <key>          # or the CIVITAI_API_KEY env var
 localm config hf_token <token>               # or the HF_TOKEN env var
 ```
 
-A stored value (via `localm config`, or Settings > Model > Library) takes
-precedence over the matching env var; setting either to a blank value clears
-it. Neither is ever echoed back by `localm info` or `localm config`.
+A stored value (via `localm config`, or Settings > Model > Model Library &
+Sources) takes precedence over the matching env var. `localm config
+civitai_api_key ""` (a blank value) clears the stored token; in Settings,
+leaving the box blank and saving leaves the existing token alone - use the
+field's **Clear** button to remove it. Neither is ever echoed back by `localm
+info` or `localm config`.
 
 ### Register existing models
 

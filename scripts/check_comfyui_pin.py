@@ -176,6 +176,103 @@ def release_date(tag: str, repo: str = _REPO, *, opener=None) -> "_dt.datetime |
 
 
 # --------------------------------------------------------------------------- #
+#  Resolving a tag to the commit it points at                                 #
+# --------------------------------------------------------------------------- #
+
+def _fetch_tag_ref_http(repo: str, tag: str):
+    """Real GitHub API call: GET the SINGULAR ref (an exact match on
+    refs/tags/<tag>), never the plural refs/ endpoint (a PREFIX match that
+    returns a list and would silently resolve "v0.3" against "v0.31.1").
+    Raises on any failure; see resolve_tag_commit(), which never lets that
+    propagate."""
+    url = f"https://api.github.com/repos/{repo}/git/ref/tags/{tag}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "localm-comfyui-pin-check",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _fetch_tag_object_http(repo: str, sha: str):
+    """Real GitHub API call: GET an annotated tag OBJECT by its own sha (as
+    opposed to the commit it points at) - only needed when the ref above
+    resolves to an annotated tag rather than directly to a commit. Raises on
+    any failure; see resolve_tag_commit()."""
+    url = f"https://api.github.com/repos/{repo}/git/tags/{sha}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "localm-comfyui-pin-check",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
+        return json.loads(r.read().decode("utf-8"))
+
+
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def resolve_tag_commit(tag: str, repo: str = _REPO, *,
+                       ref_opener=None, tag_opener=None) -> "str | None":
+    """The 40-hex commit sha *tag* actually points at, or None if it could not
+    be resolved for ANY reason (unparseable tag, network failure, malformed
+    response, a lightweight-vs-annotated mismatch that does not resolve to a
+    commit within one hop). Never raises.
+
+    Deliberately does NOT use a release's own ``target_commitish`` - that
+    field is the BRANCH the release was cut from (almost always master), not
+    the tag's own commit, and using it here would silently pin the wrong sha.
+
+    *ref_opener*/*tag_opener* are injectable for tests, resolved from the
+    module-level HTTP functions at call time (same convention as
+    _fetch_releases's *opener*)."""
+    if _parse_version(tag) is None:
+        return None
+    if ref_opener is None:
+        ref_opener = _fetch_tag_ref_http
+    if tag_opener is None:
+        tag_opener = _fetch_tag_object_http
+
+    try:
+        ref = ref_opener(repo, tag)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    if not isinstance(ref, dict) or ref.get("ref") != f"refs/tags/{tag}":
+        return None
+    obj = ref.get("object")
+    if not isinstance(obj, dict):
+        return None
+    sha, obj_type = obj.get("sha"), obj.get("type")
+
+    if obj_type == "tag":
+        # Annotated tag: the ref points at a tag OBJECT, not a commit - follow
+        # it exactly one hop to the commit it annotates.
+        if not isinstance(sha, str):
+            return None
+        try:
+            tag_obj = tag_opener(repo, sha)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            return None
+        if not isinstance(tag_obj, dict):
+            return None
+        inner = tag_obj.get("object")
+        if not isinstance(inner, dict) or inner.get("type") != "commit":
+            return None
+        sha = inner.get("sha")
+    elif obj_type != "commit":
+        return None
+
+    if isinstance(sha, str) and _COMMIT_SHA_RE.match(sha):
+        return sha
+    return None
+
+
+# --------------------------------------------------------------------------- #
 #  Comparison                                                                 #
 # --------------------------------------------------------------------------- #
 

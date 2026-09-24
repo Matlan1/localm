@@ -6,6 +6,7 @@ import localm.model_manager as _mm  # read package-patchable names at call time
 
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -49,18 +50,115 @@ def _partial_owner_path(partial: Path) -> Path:
     return partial.with_name(partial.name + _PARTIAL_OWNER_SUFFIX)
 
 
-def _own_create_time() -> "float | None":
-    """This process's psutil create_time, or None when it cannot be read."""
+_LINUX_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+_PID_SPACE: "str | None" = None
+
+
+def _machine_guid() -> str:
+    """This Windows installation's MachineGuid, or "" on other platforms and
+    when it cannot be read."""
+    if sys.platform != "win32":
+        return ""
     try:
-        import psutil
-        return float(psutil.Process(os.getpid()).create_time())
-    except Exception:
-        return None
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Cryptography", 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+            value, _ = winreg.QueryValueEx(k, "MachineGuid")
+    except (OSError, ImportError):
+        return ""
+    return str(value).strip()
+
+
+def _pid_space_id() -> str:
+    """An opaque id for the pid table this process's pids belong to: the
+    platform, the Windows MachineGuid (see :func:`_machine_guid`), the host
+    name and, on Linux, the pid namespace, hashed.
+
+    A process that can read none of the MachineGuid, the host name and the pid
+    namespace gets an id unique to itself, so no other process's record
+    matches it.
+    """
+    global _PID_SPACE
+    if _PID_SPACE is None:
+        import hashlib
+        import platform
+        import uuid
+        parts = [sys.platform, _machine_guid()]
+        try:
+            parts.append(platform.node() or "")
+        except Exception:
+            parts.append("")
+        try:
+            parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
+        except OSError:
+            pass
+        if not any(parts[1:]):
+            parts.append(uuid.uuid4().hex)
+        _PID_SPACE = hashlib.sha256(
+            "\x1f".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+    return _PID_SPACE
+
+
+def _process_start_identity(pid: int) -> "dict | None":
+    """When process *pid* started, in a form no later change of the system
+    clock alters, or None when it cannot be read.
+
+    Linux: ``{"boot": <boot id or None>, "ticks": <start time in clock ticks
+    since boot>}``, read from /proc. Windows: ``{"created": <psutil
+    create_time>}``, the creation timestamp Windows stores when the process
+    starts. Every other platform: None.
+    """
+    if sys.platform.startswith("linux"):
+        # Start ticks come from /proc, not psutil's create_time. See
+        # test_a_live_holder_keeps_its_lock_across_a_clock_step.
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_bytes()
+            ticks = int(stat[stat.rindex(b")") + 2:].split()[19])
+        except (OSError, ValueError, IndexError):
+            return None
+        try:
+            boot = _LINUX_BOOT_ID.read_text(encoding="ascii").strip() or None
+        except (OSError, ValueError):
+            boot = None
+        return {"boot": boot, "ticks": ticks}
+    if sys.platform == "win32":
+        try:
+            import psutil
+            return {"created": float(psutil.Process(pid).create_time())}
+        except Exception:
+            return None
+    return None
+
+
+def _start_identity_differs(recorded, current) -> bool:
+    """True only when *recorded* and *current* are start identities of the
+    same shape that name two different processes: a different start tick
+    under the same boot id, or creation times more than a second apart.
+
+    Anything missing, malformed, of different shapes, or ticks under different
+    or unknown boot ids returns False.
+    """
+    if not isinstance(recorded, dict) or not isinstance(current, dict):
+        return False
+    rt, ct = recorded.get("ticks"), current.get("ticks")
+    if type(rt) is int and type(ct) is int:
+        rb, cb = recorded.get("boot"), current.get("boot")
+        if not (isinstance(rb, str) and isinstance(cb, str) and rb == cb):
+            return False
+        return rt != ct
+    rc, cc = recorded.get("created"), current.get("created")
+    if type(rc) in (int, float) and type(cc) in (int, float):
+        if math.isfinite(rc) and math.isfinite(cc):
+            return abs(rc - cc) > 1.0
+    return False
 
 
 def _write_partial_owner(partial: Path) -> None:
-    """Record this process (pid and create_time) as the owner of *partial*."""
-    rec = {"pid": os.getpid(), "created": _own_create_time()}
+    """Record this process (pid, pid space and start identity) as the owner of
+    *partial*."""
+    rec = {"pid": os.getpid(), "space": _pid_space_id(),
+           "start": _process_start_identity(os.getpid())}
     _partial_owner_path(partial).write_text(json.dumps(rec), encoding="utf-8")
 
 
@@ -91,9 +189,11 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     """True only when the recorded owner of *partial* is PROVEN dead.
 
     Returns False for a missing or unreadable sidecar, an unparsable pid, a
-    live pid whose create_time matches the record, and any probe failure. A
-    pid that is this process's own is gone when no download in this process
-    currently holds the file.
+    record written in another pid space (see :func:`_pid_space_id`), a live
+    pid whose start identity matches the record or cannot be compared with it
+    (see :func:`_start_identity_differs`), a live pid in a record that names
+    no pid space, and any probe failure. A pid that is this process's own is
+    gone when no download in this process currently holds the file.
     """
     from localm import instances
     rec = _read_partial_owner(partial)
@@ -105,19 +205,15 @@ def _partial_owner_is_gone(partial: Path) -> bool:
         return False
     if pid <= 0:
         return False
+    space = rec.get("space")
+    if space is not None and space != _pid_space_id():
+        return False
     if pid == os.getpid():
         return not _partial_in_flight(partial)
     if not instances.pid_alive(pid):
         return True
-    created = rec.get("created")
-    try:
-        if created is not None:
-            import psutil
-            if abs(float(psutil.Process(pid).create_time()) - float(created)) > 1.0:
-                return True
-    except Exception:
-        pass
-    return False
+    return space is not None and _start_identity_differs(
+        rec.get("start"), _process_start_identity(pid))
 
 
 def _partial_candidates(incomplete_path: Path) -> "list[Path]":
@@ -1314,6 +1410,23 @@ def _pull_gguf_file(
     except Exception:
         total_size = 0
 
+    # Same-repo vision projector this pull would auto-attach (mirrors
+    # _mmproj_for_registration's own gating): HEAD it too and fold its size
+    # into the preflight total.
+    if (register and mmproj_spec is None and dest_dir is None
+            and model_type not in ("mmproj", "embedding")
+            and "mmproj" not in filename.lower()):
+        try:
+            import requests as _req
+            mmproj_name = _mm._hf_repo_mmproj_filename(repo_id, filename, base_dir)
+            if mmproj_name:
+                mmproj_head = _req.head(
+                    hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT),
+                    allow_redirects=True, timeout=10)
+                total_size += int(mmproj_head.headers.get("content-length", 0))
+        except Exception:
+            pass
+
     # Only bytes a resume will actually reuse count: a partial of the current
     # etag whose owner is proven gone. An unknown etag counts nothing.
     already_have = 0
@@ -1813,15 +1926,21 @@ def _part_lock_owner(d: Path):
 
 
 def _part_lock_holder_is_gone(d: Path) -> bool:
-    """True only when the recorded holder is PROVEN dead.
+    """True only when the recorded holder is PROVEN gone: its pid is dead, or
+    the record names this pid space (see :func:`_pid_space_id`) and the live
+    pid's start identity differs from the one the holder recorded (see
+    :func:`_process_start_identity`). A record from another pid space is never
+    gone; one that names no pid space is judged by pid liveness alone.
 
-    Staleness is decided by PID LIVENESS, never by elapsed time. Any fixed
-    timeout eventually reclaims a live holder's lock and recreates the exact
-    corruption this exists to prevent, and a large model on a slow link is
-    precisely the download that outlives a generous timeout.
+    Staleness is decided by PID LIVENESS and that identity, never by elapsed
+    time or the wall clock. Any fixed timeout eventually reclaims a live
+    holder's lock and recreates the exact corruption this exists to prevent,
+    and a large model on a slow link is precisely the download that outlives a
+    generous timeout.
 
     Every uncertainty KEEPS the lock: an owner record that cannot be read (a
-    half-written lock, a permission error) is not evidence its owner died.
+    half-written lock, a permission error) is not evidence its owner died, nor
+    is a start identity that is missing, unreadable or not comparable.
     ``instances.pid_alive`` is conservative in the same direction - it reports
     True when it genuinely cannot tell - so this composes rather than
     re-deciding.
@@ -1834,21 +1953,15 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
         pid = int(rec.get("pid", -1))
     except (TypeError, ValueError):
         return False
+    space = rec.get("space")
+    if space is not None and space != _pid_space_id():
+        return False
     if pid == os.getpid():
         return False
-    try:
-        import psutil
-        boot = psutil.boot_time()
-        started = float(rec.get("started", 0))
-        if started > 0 and started < boot:
-            return True
-        if instances.pid_alive(pid):
-            p = psutil.Process(pid)
-            if p.create_time() > started > 0:
-                return True
-    except Exception:
-        pass
-    return not instances.pid_alive(pid)
+    if not instances.pid_alive(pid):
+        return True
+    return space is not None and _start_identity_differs(
+        rec.get("start"), _process_start_identity(pid))
 
 
 @contextlib.contextmanager
@@ -1894,11 +2007,13 @@ def _part_lock(filename: str):
     except OSError as e:
         raise PullInFlight(f"could not take the download lock for {filename}: {e}")
 
-    # `started` is recorded for the MESSAGE a human reads, never for the
-    # staleness decision - see _part_lock_holder_is_gone.
+    # `space` and `start` are what _part_lock_holder_is_gone compares;
+    # `started` is only read by a human inspecting the lock.
     try:
         (d / "owner.json").write_text(
             json.dumps({"pid": os.getpid(), "filename": filename,
+                        "space": _pid_space_id(),
+                        "start": _process_start_identity(os.getpid()),
                         "started": time.time()}),
             encoding="utf-8")
     except OSError:

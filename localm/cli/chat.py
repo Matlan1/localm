@@ -11,7 +11,7 @@ from rich.panel import Panel
 from ..config import load_config
 from ..model_manager import get_model_info
 from ..console import show_url
-from ._core import console, main, _complete_model_name
+from ._core import console, err_console, main, _complete_model_name
 
 
 def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException],
@@ -676,7 +676,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     if "on_status" not in stream_kwargs:
         def _cli_status(s: str) -> None:
             if s == VISION_CPU_FALLBACK_STATUS:
-                console.print(f"\n[yellow]{escape(s)}[/yellow]")
+                err_console.print(f"\n[yellow]{escape(s)}[/yellow]")
         stream_kwargs["on_status"] = _cli_status
     try:
         for token in engine.chat_stream(messages, **stream_kwargs):
@@ -827,7 +827,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
             def _cli_interactive_status(s: str) -> None:
                 if s == VISION_CPU_FALLBACK_STATUS:
-                    console.print(f"\n[yellow]{escape(s)}[/yellow]")
+                    err_console.print(f"\n[yellow]{escape(s)}[/yellow]")
             interactive_opts["on_status"] = _cli_interactive_status
         try:
             for token in engine.chat_stream(messages, **interactive_opts):

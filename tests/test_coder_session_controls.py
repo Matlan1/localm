@@ -20,6 +20,7 @@ The properties pinned here are the ones that fail SILENTLY:
   * a memory write must RELOAD, or it silently takes effect only next session.
 """
 
+import socket
 import threading
 from pathlib import Path
 
@@ -122,6 +123,20 @@ def _stub(app, sid):
     sess = app.state.coder_sessions.get(sid)
     sess.agent.backend = _StubBackend()
     return sess
+
+
+def _no_netpolicy(monkeypatch):
+    """Neutralise the SSRF guard for a test that starts an off-machine backend
+    but is not about the guard itself - same pattern as
+    tests/test_coder_backend_selection.py's helper of the same name.
+
+    Patched on ``localm.netpolicy`` itself, which is where the create-session
+    route's function-local import resolves it from - patching a name imported
+    into some other module would leave the real one running and quietly make
+    this test dial DNS for api.openai.com.
+    """
+    import localm.netpolicy as np
+    monkeypatch.setattr(np, "check_url", lambda url: None)
 
 
 # --------------------------------------------------------------------------- #
@@ -1077,12 +1092,26 @@ def test_session_set_model_unknown_local_model_404(tmp_path, monkeypatch):
 
 def test_session_set_model_remote_backend(tmp_path, monkeypatch):
     """Off-machine sessions switch model without checking local registry."""
+    _no_netpolicy(monkeypatch)
+    resolved_hosts = []
+
+    def _spy_getaddrinfo(host, *a, **kw):
+        # Records the host and refuses to actually resolve anything: a real
+        # DNS dial in a test is exactly the defect under test, so this must
+        # never fall through to the real resolver even to prove its absence.
+        resolved_hosts.append(host)
+        raise socket.gaierror("test forbids real DNS resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _spy_getaddrinfo)
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = _start(client, owner, proj, backend="openai", backend_model="gpt-4o",
                      backend_api_key="sk-fake-key", mode="full")
         sess = _stub(app, sid)
         assert sess.backend_info.get("leaves_machine") is True
+        assert resolved_hosts == [], (
+            "starting an off-machine session must not dial DNS for the "
+            f"provider host: resolved {resolved_hosts}")
 
         r = client.post(f"/api/coder/sessions/{sid}/model", headers=owner,
                         json={"model": "gpt-4o-mini"})

@@ -635,8 +635,26 @@ def test_secret_fields_carry_is_set_and_env_set(tmp_path, monkeypatch):
     assert "default" not in fields["hf_token"]
 
 
-def test_secret_fields_values_override_sets_is_set():
+def test_secret_credential_keys_ignore_values_override(tmp_path, monkeypatch):
+    """CREDENTIAL_KEYS (hf_token, civitai_api_key) read is_set/env_set from the
+    credential store, never from *values* - a config.json entry (hand-edited or
+    from before the credential store existed) must not be able to claim a
+    token is set when get_credential does not see one, or the reverse."""
+    import localm.config as cfg
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+
     fields = {f["key"]: f for f in ss.schema_json(values={"hf_token": "hf_custom"})}
+    assert fields["hf_token"]["is_set"] is False
+    assert fields["hf_token"]["env_set"] is False
+
+    from localm.model_source_credentials import set_credentials
+    set_credentials({"hf_token": "hf_real"})
+    fields = {f["key"]: f for f in ss.schema_json(values={"hf_token": ""})}
     assert fields["hf_token"]["is_set"] is True
     assert fields["hf_token"]["env_set"] is False
     assert "default" not in fields["hf_token"]

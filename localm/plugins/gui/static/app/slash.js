@@ -290,7 +290,7 @@ export function execCoderCommand(cmd, arg = "") {
       const s = activeSession();
       if (!s) { toast(t("coder.session.startFirst"), true); return true; }
       if (!arg) {
-        toast(t("coder.controls.modelLabel") + ": " + (s.info.model || "none"));
+        toast(t("slash.coderCmd.currentModel", { model: s.info.model || t("chat.none") }));
       } else {
         switchActiveSessionModel(arg);
       }

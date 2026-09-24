@@ -10,7 +10,7 @@ import { $, applyChatBackground, authHeaders, autoGrow, confirmDanger, el, fetch
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
-import { openMemoryModal, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
+import { openMemoryModal, processChatQueue, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
 import { showView } from "./tabs.js";
 import { applyCoderRailSide } from "./coder.js";
 
@@ -240,7 +240,9 @@ export function archiveCopy(m) {
   return out;
 }
 
-export async function compactConversation(conv) {
+/** Summarises or trims the older part of *conv*. An aborted *signal* cancels
+ *  the summary request and leaves the conversation unchanged. */
+export async function compactConversation(conv, signal = null) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
   // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
   // of the ceiling (at least COMPACT_KEEP), summarising only what is older -
@@ -283,6 +285,7 @@ export async function compactConversation(conv) {
         temperature: 0.3,
         stream: false,
       }),
+      ...(signal ? { signal } : {}),
     });
     if (r.ok) {
       const data = await r.json();
@@ -296,6 +299,7 @@ export async function compactConversation(conv) {
       }
     }
   } catch { /* summarisation unavailable - fall back to a note below */ }
+  if (signal && signal.aborted) return false;
   // R44: sanitise the summary so leaked <think>/markers never re-enter context.
   summary = stripThink(scrubMarkers(summary)).trim();
 
@@ -347,14 +351,14 @@ export function contextRoutingNeed(conv, est) {
 
 /** Compacts *conv* when it has grown past COMPACT_RATIO of the context
  *  window, unless an installed model can hold it (see contextRoutingNeed).
- *  Returns that routing need, or null. */
-export async function maybeCompactConversation(conv) {
+ *  Returns that routing need, or null. *signal* aborts the summary request. */
+export async function maybeCompactConversation(conv, signal = null) {
   const est = estimateConvTokens(conv);
   const routing = contextRoutingNeed(conv, est);
   if (routing) return routing;
   if (!chat.ctxMax || chat.ctxMax <= 0) return null;
   if (est >= COMPACT_RATIO * chat.ctxMax) {
-    await compactConversation(conv);
+    await compactConversation(conv, signal);
   }
   return null;
 }
@@ -993,10 +997,12 @@ export function buildConvItem(conv, snippet) {
     e.stopPropagation();
     chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
     if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
+    chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
     deleteConversationRemote(conv.id);
     saveConversations();
     renderConvList();
     renderChat();
+    processChatQueue();
   };
   item.appendChild(del);
 
@@ -1006,6 +1012,7 @@ export function buildConvItem(conv, snippet) {
     if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
     renderChat();
     showView("chat");
+    processChatQueue();
   };
   return item;
 }

@@ -216,6 +216,11 @@ class ChoiceDelta(BaseModel):
     status_code: Optional[str] = None
 
 
+# Emitted by the SSE route (not a backend's on_status) while a request sits
+# behind the per-model semaphore, before the model has started on it.
+WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."
+
+
 # Stable ids for the status strings backends pass to on_status(), keyed by the
 # exact English text. `status` always carries the English text for CLI, MCP,
 # and any other client that does not know the code.
@@ -226,6 +231,7 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     "Encoding image (GPU)...": "encoding_image_gpu",
     "Encoding image (CPU)...": "encoding_image_cpu",
     VISION_CPU_FALLBACK_STATUS: "vision_cpu_retry",
+    WAITING_FOR_MODEL_STATUS: "waiting",
 }
 
 

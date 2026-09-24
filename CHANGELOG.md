@@ -30,22 +30,40 @@ permanent public record of what shipped and are never rewritten; the in-progress
   In the CLI, switch models in the REPL with `/model <name>` (or inspect with
   `/model`), and resume any past session with a specified model via `localm coder
   --resume [id] --model <name>`.
+  `/model` with no name, and the active-model tag in session controls, now
+  show in the interface's own language instead of always in English.
+  Switching to a different model and then back to the session's original
+  one in the same still-open session-controls dialog now actually applies
+  the second switch instead of silently doing nothing. `--resume` followed
+  by a task instead of a checkpoint id (`-r "some task"`, which is read as
+  the id, not as the task) now warns with the two ways to combine a resume
+  with a task instead of crashing.
 - **`localm setup-browser`** downloads the Chromium build the automated browser
   needs. Previously this required a separate, undocumented-in-app
   `python -m playwright install chromium` step after installing the browser
   extra; it is now a regular localm command that respects the network policy.
-- **Live inference status indicator and CPU fallback notifications in chat and CLI.**
-  Shows pulsing stage text (prompt processing, vision image encoding, generating)
-  with an elapsed timer during inference, and visibly warns when GPU vision
-  encoding fails and falls back to CPU.
+- **Live inference status indicator in chat, and a CPU fallback warning in
+  chat and the CLI.** Chat shows pulsing stage text (prompt processing,
+  vision image encoding, generating) with an elapsed timer during inference.
+  Both chat and `localm run` visibly warn when GPU vision encoding fails and
+  falls back to CPU; the CLI's warning goes to stderr, so a piped `-p` reply
+  stays clean.
 - **The automated browser can now mirror its live view directly inside the
   coder session driving it, in addition to the dedicated Browser tab.** Off by
   default; turn on "Show the agent's browser inline in the coder session" in
   Settings > Network.
+- **The Browser tab's live view is now interactive.** Click on the screenshot
+  to click the corresponding point in the open browser, scroll with the mouse
+  wheel to scroll its page, and type to send keystrokes to it, including Tab,
+  Enter, the arrow keys, Page Up/Down, Home, End, Backspace and Delete.
+  Clicking the frame gives it keyboard focus, and Tab is forwarded to the
+  browser. Esc releases the keyboard from the frame and Shift+Tab moves focus
+  back to the controls above it, as a hint under the focused frame says.
 - **Accelerated RAG vector queries, BM25 inverted index, and chat message queueing.**
   Vector search uses a normalized NumPy matrix dot product for fast vectorized
   cosine similarity, BM25 uses an inverted postings index for term lookups, and
-  collections maintain an in-memory cache validated against file fingerprints.
+  recently queried collections stay in memory (at most 256 MiB in total, least
+  recently used dropped first) and are re-read whenever their files change.
   Chat now displays an immediate search status indicator with elapsed timer and
   allows queueing follow-up messages while generation or retrieval is active.
 
@@ -127,11 +145,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   different model that shares a name is never offered; any model that instance has
   loaded counts, not only its active one; and forwarded requests name the model the
   way that instance does.
+- **The HuggingFace and CivitAI token fields in Settings now show whether a token is really configured.** A `HF_TOKEN`/`CIVITAI_API_KEY` environment variable that is blank or whitespace-only is now treated as not set, matching what downloads actually send, instead of disagreeing with the actual download code about whether a token is present. A stray `hf_token`/`civitai_api_key` entry in `config.json` (hand-edited, or left over from before these tokens moved to their own store) can no longer make Settings claim a token is configured, with a Clear button that has nothing to clear.
+- **Pulling `gemma3-4b` or `gemma3-12b` now checks free disk space for the vision projector too, and the curated shortcuts list says a projector comes with them.** The disk-space preflight for a plain HuggingFace model pull now also probes the same-repo vision projector it is about to auto-attach, so a pull with just enough room for the model alone no longer passes the check and then loses the projector download to insufficient disk space.
+- **Stop in chat now stops the whole turn, and messages queued while a reply is running are sent in order.** Pressing Stop while a long chat is being summarised no longer lets the reply stream anyway, and Stop no longer sends the next queued message: queued messages stay listed until you send or cancel them. A message typed during Regenerate or `/web` is now sent when that reply finishes instead of staying queued forever, and a new message goes after any older queued ones. Edit, Revert and Regenerate now appear on the transcript as soon as a reply finishes.
+- **Input in the Browser tab's live view now reaches the page in the order you made it, and the frame no longer traps the keyboard.** Each click, key and scroll waits for the one before it to land, so a character typed right after a click can no longer arrive first and end up in the wrong field, and characters typed while an input is still on its way are sent together. An input that does not reach the browser is now reported in the status line instead of being dropped silently. Esc now releases the keyboard from the frame instead of being sent to the page, and Shift+Tab moves focus back to the controls above it; a hint under the focused frame names both keys. `POST /api/browser/click` and `/api/browser/scroll` now refuse a position that is not a finite number, or is beyond a million pixels, with a 422 instead of passing it to the browser, and a click's `button` must be `left`, `right` or `middle`.
 - **A plugin's secret setting (an API key it registers via `add_settings()`) now correctly shows its configured status and a Clear button in Settings.** It previously always displayed as not set, and could never be cleared from the GUI, because the Settings page dropped the saved/environment status when rendering plugin, TTS, and per-plugin media secret fields.
 - **Resumed HuggingFace downloads are safe to run alongside another download, resume on Xet-backed repos, and are verified before they are registered.** A pull now writes its own temp file and only continues from a partial whose owning process is confirmed gone, so two pulls of the same file (or another program using the HuggingFace cache) can no longer be stitched into one corrupt file. A partial left by an earlier upload of the same file is no longer counted as "already downloaded" and is cleaned up. "Resuming ... (skipping first N MB)" is now only printed when those bytes are really reused, including on Xet-backed repos where the retry previously started over from zero. Every pull whose sha256 HuggingFace publishes is now hashed against it after download; a mismatch deletes the file and fails instead of registering it.
+- **On Linux and Windows, a download cut off by a crash no longer blocks the next pull of the same file once its process id belongs to another program; on Windows this also holds after a reboot.** A pull still refuses while the original download is running, including after the system clock jumps (sleep, NTP, a VM or WSL resync) and when that download runs in another container or pid namespace that shares the data folder.
 - **Curated model download shortcuts for Phi-4-mini and Gemma-3 now resolve to their correct HuggingFace repositories.** The curated shortcuts dropdown in the GUI and `localm pull <alias>` now use the `microsoft_` and `google_` upstream repo prefixes for `phi4-mini`, `gemma3-4b`, and `gemma3-12b`, resolving previous 401 download failures.
 - **HuggingFace backend loading no longer emits docstring lint errors, `torch_dtype` deprecation warnings, or offloaded buffer warnings.** `_hf_worker` dynamically passes `dtype` on modern Transformers, sets `offload_buffers=True` to offload layer buffers to CPU alongside parameters during partial offloading (preventing GPU VRAM contention on AWQ models), and filters upstream `@auto_docstring` stdout leaks.
-- **Ctrl+C and closing the console window no longer trigger automatic watchdog restarts on Windows.** Disarms the crash guard immediately on `CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, and `CTRL_CLOSE_EVENT` before teardown waits or OS process termination, and hardens `crash_recovery_watchdog.py` to recognize `STATUS_CONTROL_C_EXIT` (`0xC000013A`) and fast-exit on clean stops without waiting for the grace period.
+- **Ctrl+C and closing the console window no longer trigger automatic watchdog restarts on Windows.** The crash-recovery watchdog recognizes a console interrupt exit (`STATUS_CONTROL_C_EXIT`, `0xC000013A`) as an intentional stop, and no longer waits out its grace period after a clean stop.
+- **Closing the terminal (Linux, macOS), `kill`, or Ctrl+Break now stop the server cleanly instead of making the crash watchdog relaunch it.** Ctrl+C in app-window mode, which leaves the server running, no longer turns off crash recovery for the rest of that run, a crash while the console window is closing is still captured and reported on the next start, and app-window mode no longer hangs when the server stops before its window has opened.
 - **Restarting the server from Settings while running in standalone app-window mode
   (`localm[desktop]`) no longer opens a browser tab.** The native window is now
   correctly reopened after the restart; previously the restart flag that suppresses
@@ -139,6 +163,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   then a second read of the same flag (which had already been consumed) opened a
   browser tab regardless.
 - **`find_sibling_mmproj` no longer auto-attaches a lone vision projector to unrelated models sharing the folder.** Directory sibling detection now enforces stem matching for all candidate counts, preventing unrelated models from auto-attaching projectors or emitting misleading "looks like projector by filename" log messages.
+- **Adding a model with `--store move` or `--store copy` no longer leaves its vision projector behind.** Every projector next to the model that may belong to it now comes along, including generically named ones such as `mmproj-F16.gguf`, instead of only one localm recognises by name. A projector another model in the same folder may also use is copied rather than moved, so that model keeps its vision, and the projector the model is paired with is recorded on its entry, so vision still works in a models folder that holds several projectors. When projectors came along but none is attached, a note names them with the `--mmproj` path to use one. When a single file is added, a same-named projector already in the models folder is reused if identical and otherwise stored under a numbered name, instead of failing the import. A projector path recorded on another model's entry now follows the file when it moves. The same applies when a single file is added with `--on-duplicate copy` / `move`, and importing a folder with `--on-duplicate move` no longer registers a projector at the location it was just moved out of.
 - **Grammar-constrained generation no longer floods the console with repetitive "Grammar still awaiting trigger" messages.** Generation wrapped with grammar or lazy-grammar sampling restores `_quiet_stderr` during inference so per-token trigger status lines from the llama.cpp sampler do not spam stderr.
 - **Selecting the SYCL llama.cpp backend on an Intel GPU now correctly applies
   a configured Main GPU or GPU split.** The real device numbering on a Vulkan
@@ -147,6 +172,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   device. Vulkan already accounted for this; SYCL did not, so choosing a
   Main GPU or a multi-GPU split on a SYCL install could silently fall back to
   device 0 or drop a valid split device instead of using the GPU you picked.
+- **The Main GPU / Split across GPUs numbering hint no longer names Vulkan on
+  a SYCL install.** Settings > Live tuning explained the device numbers as
+  "the Vulkan backend's own order" even when the installed backend was SYCL,
+  since both share the same native numbering path. The hint now names no
+  specific backend.
 - **Stopping or restarting the server no longer leaves the coder plugin's
   background shell commands and sub-agents running.** They already stopped
   when the GUI's own background jobs and any localm-launched ComfyUI
@@ -555,6 +585,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   its official Windows ROCm preview wheels to a new location; the install command now resolves
   the current pinned build there, and a fresh ComfyUI install on this hardware picks up the
   same fix.
+- **A GGUF model load that fails while running CPU-only (`-g 0`) no longer pauses for several
+  extra seconds before reporting the error.** The failure message computed a "GPU is low on
+  memory" hint by probing VRAM even when the load never used the GPU, adding needless latency to
+  every CPU-only load failure; the probe is now skipped for a CPU-only load, matching the
+  preflight check's own behavior.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
@@ -634,6 +669,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm setup-llama --backend sycl` but was never listed in either setup wizard's menu. Both
   the console and graphical installers now offer it as an explicit choice. Vulkan remains the
   default recommendation on Intel, matching every comparable local-LLM tool.
+- **`localm setup-embeddings --model` and the RAG embedding-switch dry-run preview no longer
+  make false claims about existing collections' embeddings.** The CLI always ended with a
+  reminder to re-embed collections stuck on BM25, even when the switch it just ran found
+  nothing affected; the dry-run preview (used by the RAG picker and the Settings embedding
+  field) said "no existing collection currently has embeddings" even when collections had
+  embeddings that already matched the model being switched to. Both now reflect what the
+  switch actually found.
+- **Querying or deleting a RAG collection that does not exist, with an API key confined to
+  specific folders, now returns 404 like it does for every other caller**, instead of a 403
+  that implied the collection exists but is off-limits.
 
 ## [0.2.0] - 2026-09-04
 

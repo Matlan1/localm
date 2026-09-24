@@ -20,22 +20,35 @@ from localm.model_manager.pull import (
     _partial_owner_path,
     _resumable_download_to_tmp_and_move,
 )
+from tests._process_identity import (
+    a_forward_step_past_boot,
+    spawn_on_this_tree,
+    start_identity_of,
+    started_an_hour_earlier,
+    step_the_clock,
+    this_pid_space,
+)
 
 
-def _owner(path: Path, pid: int, created: float) -> None:
-    """Write the owner record for *path* naming *pid* / *created*."""
+def _owner(path: Path, pid: int, start, space: "str | None" = "this") -> None:
+    """Write the owner record for *path* naming *pid* / start identity *start*,
+    in this process's pid space unless *space* names another one."""
+    if space == "this":
+        space = this_pid_space()
     _partial_owner_path(path).write_text(
-        json.dumps({"pid": pid, "created": created}), encoding="utf-8")
+        json.dumps({"pid": pid, "space": space, "start": start}),
+        encoding="utf-8")
 
 
 @pytest.fixture()
 def live_child():
-    """A real child process that stays alive for the test."""
-    import psutil
+    """A real child process that stays alive for the test, with its start
+    identity."""
+    from localm.model_manager.pull import _process_start_identity
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        yield p.pid, psutil.Process(p.pid).create_time()
+        yield p.pid, _process_start_identity(p.pid)
     finally:
         p.kill()
         p.wait()
@@ -43,15 +56,27 @@ def live_child():
 
 @pytest.fixture()
 def dead_pid():
-    """The pid and create_time of a child that has already exited."""
-    import psutil
+    """The pid and start identity of a child that has already exited."""
+    from localm.model_manager.pull import _process_start_identity
     p = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
-    created = psutil.Process(p.pid).create_time()
+    start = _process_start_identity(p.pid)
     p.stdin.close()
     p.wait()
-    return p.pid, created
+    return p.pid, start
+
+
+OWN_PARTIAL = '''
+    import sys
+    from pathlib import Path
+    from localm.model_manager.pull import _write_partial_owner
+    p = Path(sys.argv[1])
+    p.write_bytes(b"LIVE-PROCESS-BYTES")
+    _write_partial_owner(p)
+    print("OWNED", flush=True)
+    sys.stdin.read()
+'''
 
 
 def _call(inc_path: Path, dest: Path, *, expected_size, force=False,
@@ -116,6 +141,116 @@ class TestPartialOwnership:
         assert captured["resume_size"] == 5
         assert not orphan.exists() and not _partial_owner_path(orphan).exists()
         assert _partials(cache) == [live.name], _partials(cache)
+
+    def test_a_live_owners_partial_survives_a_clock_step(
+            self, cache, tmp_path, monkeypatch):
+        """A clock step (NTP after sleep, a VM or WSL guest resyncing) does not
+        make a live download's temp file look orphaned."""
+        inc_path = cache / "file.etag.incomplete"
+        live = cache / "file.etag.aaaa1111.incomplete"
+        owner = spawn_on_this_tree(OWN_PARTIAL, tmp_path / ".localm", live,
+                                   stdin=subprocess.PIPE)
+        try:
+            ready = owner.stdout.readline().strip()
+            if ready != "OWNED":
+                owner.stdin.close()
+                owner.wait(timeout=60)
+                pytest.fail(f"the owner did not start: {ready!r} "
+                            f"{owner.stderr.read()}")
+            # The injection took: a live process recorded itself as the owner.
+            assert _partial_owner_path(live).exists()
+            dest = tmp_path / "dest.gguf"
+            captured = _wire_http(monkeypatch, b"HELLO")
+
+            with monkeypatch.context() as m:
+                step_the_clock(m, a_forward_step_past_boot())
+                _call(inc_path, dest, expected_size=5)
+
+            assert (live.read_bytes() if live.exists() else None) == (
+                b"LIVE-PROCESS-BYTES"), (
+                "another process's in-flight temp file was touched after a "
+                "clock step")
+            assert _partial_owner_path(live).exists()
+            assert captured["resume_size"] == 0
+            assert dest.read_bytes() == b"HELLO"
+        finally:
+            owner.stdin.close()
+            owner.wait(timeout=60)
+
+    def test_a_partial_whose_pid_now_names_another_process_is_adopted(
+            self, cache, tmp_path, monkeypatch, live_child):
+        """The recorded pid is alive but its start identity is not the
+        recorded one, so the partial's owner is gone and the partial is
+        resumed from."""
+        pid, _ = live_child
+        inc_path = cache / "file.etag.incomplete"
+        orphan = cache / "file.etag.bbbb2222.incomplete"
+        orphan.write_bytes(b"HELLO")
+        _owner(orphan, pid, started_an_hour_earlier(start_identity_of(pid)))
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b" WORLD")
+
+        _call(inc_path, dest, expected_size=11)
+
+        assert dest.read_bytes() == b"HELLO WORLD"
+        assert captured["resume_size"] == 5
+        assert not orphan.exists() and not _partial_owner_path(orphan).exists()
+
+    @pytest.mark.parametrize("space", ["0123456789abcdef", None])
+    def test_a_live_pid_from_another_or_no_pid_space_keeps_its_partial(
+            self, cache, tmp_path, monkeypatch, live_child, space):
+        """A record from another pid space, or one naming none, is not
+        evidence that its live pid is a different process: the partial is
+        neither adopted nor deleted."""
+        pid, _ = live_child
+        inc_path = cache / "file.etag.incomplete"
+        other = cache / "file.etag.bbbb2222.incomplete"
+        other.write_bytes(b"OTHER-PID-SPACE")
+        _owner(other, pid, started_an_hour_earlier(start_identity_of(pid)),
+               space=space)
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b"FRESH")
+
+        _call(inc_path, dest, expected_size=5)
+
+        assert (other.read_bytes() if other.exists() else None) == (
+            b"OTHER-PID-SPACE"), "a partial of another pid space was touched"
+        assert _partial_owner_path(other).exists()
+        assert captured["resume_size"] == 0
+        assert dest.read_bytes() == b"FRESH"
+
+    @pytest.mark.parametrize("whose", ["dead", "this-process"])
+    def test_a_partial_from_another_pid_space_is_left_alone_whatever_its_pid(
+            self, cache, tmp_path, monkeypatch, dead_pid, whose):
+        """A record from another pid space names a pid this process cannot
+        look up, whether that number is dead here or equal to this process's
+        own: the partial is neither adopted nor deleted."""
+        pid = dead_pid[0] if whose == "dead" else os.getpid()
+        inc_path = cache / "file.etag.incomplete"
+        other = cache / "file.etag.bbbb2222.incomplete"
+        other.write_bytes(b"OTHER-PID-SPACE")
+        _owner(other, pid, None, space="0123456789abcdef")
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b"FRESH")
+
+        _call(inc_path, dest, expected_size=5)
+
+        assert (other.read_bytes() if other.exists() else None) == (
+            b"OTHER-PID-SPACE"), "a partial of another pid space was touched"
+        assert _partial_owner_path(other).exists()
+        assert captured["resume_size"] == 0
+        assert dest.read_bytes() == b"FRESH"
+
+    def test_the_owner_record_names_this_process_its_pid_space_and_start(
+            self, cache):
+        from localm.model_manager.pull import (
+            _pid_space_id, _process_start_identity, _write_partial_owner)
+        p = cache / "file.etag.cccc3333.incomplete"
+        p.write_bytes(b"")
+        _write_partial_owner(p)
+        rec = json.loads(_partial_owner_path(p).read_text(encoding="utf-8"))
+        assert rec == {"pid": os.getpid(), "space": _pid_space_id(),
+                       "start": _process_start_identity(os.getpid())}
 
     def test_partial_without_owner_record_is_neither_adopted_nor_deleted(
             self, cache, tmp_path, monkeypatch):
@@ -410,6 +545,79 @@ class TestGgufPullPreflight:
         assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
         assert checked == [10]
         assert "Resuming" not in capsys.readouterr().out
+
+    def test_charges_for_a_same_repo_projector_it_will_auto_attach(
+            self, hf_env, monkeypatch):
+        import huggingface_hub
+
+        class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                return ["test.gguf", "mmproj-test-f16.gguf"]
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+
+        assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+        assert checked == [20], (
+            "the preflight must charge for the model AND the same-repo "
+            "projector it is about to auto-attach")
+
+    def test_does_not_charge_a_projector_when_the_repo_has_none(
+            self, hf_env, monkeypatch):
+        import huggingface_hub
+
+        class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                return ["test.gguf"]
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+
+        assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+        assert checked == [10]
+
+    def test_does_not_charge_a_projector_for_an_explicit_mmproj_spec(
+            self, hf_env, monkeypatch):
+        """An explicit --mmproj is a separate, user-named download path
+        (_fetch_explicit_mmproj) that this preflight does not probe, so the
+        same-repo listing must not even be consulted."""
+        import huggingface_hub
+
+        class _FailingHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                raise AssertionError("same-repo listing must not be probed")
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FailingHfApi)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+
+        assert mm._pull_gguf_file(
+            "owner/repo:test.gguf", name="test",
+            mmproj_spec="owner/repo:mmproj-test-f16.gguf") is True
+        assert checked == [10]
 
 
 class TestGgufPullVerifiesHfDigest:
