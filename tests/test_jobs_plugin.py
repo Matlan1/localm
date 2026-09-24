@@ -443,6 +443,69 @@ def test_runner_chat_no_engine_no_model_errors(home, monkeypatch):
     assert "engine" in result["error"].lower()
 
 
+def _install_routing_registry(monkeypatch):
+    """A default-model 'plain' (no tool calls) and an installed 'tooly' (tool
+    calls) registered chat model, for headless capability-routing tests."""
+    import localm.inference.http_server as hs
+    registry = {
+        "plain": {"model_type": "llm", "tool_use": False, "context_length": 4096},
+        "tooly": {"model_type": "llm", "tool_use": True, "context_length": 32768},
+    }
+    monkeypatch.setattr(hs, "_server_loop", None)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"default_model": "plain"})
+    monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+    monkeypatch.setattr("localm.model_manager.load_registry", lambda: registry)
+
+
+def test_headless_web_enabled_job_without_a_model_routes_to_a_tool_capable_model(
+        home, monkeypatch):
+    from localm.plugins.builtin.jobs import runner
+    _install_routing_registry(monkeypatch)
+    monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
+    calls = []
+    monkeypatch.setattr(runner, "_load_engine",
+                        lambda model: (calls.append(model) or _FakeEngine(["ok"]), False))
+
+    job = _make_job(task_kind="chat", prompt="hi")
+    result = runner.run_job(job, engine=None)
+
+    assert calls == ["tooly"]
+    assert result["status"] == "ok", result
+
+
+def test_headless_web_disabled_job_without_a_model_uses_the_default_model(
+        home, monkeypatch):
+    from localm.plugins.builtin.jobs import runner
+    _install_routing_registry(monkeypatch)
+    monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: False)
+    calls = []
+    monkeypatch.setattr(runner, "_load_engine",
+                        lambda model: (calls.append(model) or _FakeEngine(["ok"]), False))
+
+    job = _make_job(task_kind="chat", prompt="hi")
+    result = runner.run_job(job, engine=None)
+
+    assert calls == ["plain"]
+    assert result["status"] == "ok", result
+
+
+def test_headless_job_with_a_pinned_model_ignores_a_better_candidate(
+        home, monkeypatch):
+    from localm.plugins.builtin.jobs import runner
+    _install_routing_registry(monkeypatch)
+    monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
+    calls = []
+    monkeypatch.setattr(runner, "_load_engine",
+                        lambda model: (calls.append(model) or _FakeEngine(["ok"]), False))
+
+    job = _make_job(task_kind="chat", prompt="hi", model="plain")
+    result = runner.run_job(job, engine=None)
+
+    assert calls == ["plain"]
+    assert result["status"] == "ok", result
+
+
 def test_runner_coder_best_effort_mocked(home, tmp_path, monkeypatch):
     """Coder path: with the agent + backend mocked it runs the prompt and
     returns ok. (A real run needs the coder extra + a live server.)"""

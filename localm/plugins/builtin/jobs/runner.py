@@ -9,8 +9,10 @@ It NEVER raises - any failure is caught and reported as an ``error`` result, so
 a scheduler tick can safely run many jobs in a row.
 
 task_kind "chat":  the prompt is run against the inference engine. A passed-in
-    ``engine`` is reused; otherwise one is loaded via the model manager from the
-    job's ``model`` (or the active/first registered model).
+    ``engine`` is reused; a running server routes it through its own engine or
+    an accepted peer (``_served_engine``); headless, one is loaded via the
+    model manager from the job's ``model`` (or the routed/active/first
+    registered model, ``_headless_routed_model``).
 task_kind "coder": a coder Agent runs the prompt in the job's ``cwd`` with the
     job's ``scope`` and the current privacy mode. The coder path is best-effort:
     a full agentic run needs the coder extra installed and a working backend.
@@ -74,7 +76,7 @@ def run_job(job: Job, *, engine=None) -> dict:
             # owned (and unloaded in the finally); a reused shared engine belongs to
             # the host. The verdict is taken from _load_engine rather than re-read
             # from _engine.
-            eng, reused = _load_engine(job.model)   # may raise (model not found) -> caught below
+            eng, reused = _load_engine(_headless_routed_model(job))   # may raise (model not found) -> caught below
             if eng is not None and not reused:
                 owned_engine = eng          # we loaded it, so we unload it after the run
         if job.task_kind == "chat":
@@ -214,9 +216,10 @@ def _served_engine(job: Job, live):
     A job's own ``model`` is always the one used. Without one, the server's
     loaded model (*live*) runs it, unless a chat job needs structured tool calls
     (web access on) or a longer window than that model was trained for, and an
-    installed model has them: then that one does. Either load goes through the
-    server's own model management (``get_engine``) without changing the model
-    other requests use."""
+    installed model has them: then that one does. When the resolved model has
+    an accepted peer route, that peer answers it and nothing is loaded here.
+    Otherwise the load goes through the server's own model management
+    (``get_engine``) without changing the model other requests use."""
     import asyncio
     from localm.inference import http_server as hs
     loop = hs._server_loop
@@ -238,6 +241,12 @@ def _served_engine(job: Job, live):
     target = decision.resolved
     if not target:
         return live
+
+    from localm import peer_routing
+    peer = peer_routing.get_route(target)
+    if peer is not None:
+        return _peer_served_engine(peer)
+
     if (live is not None and getattr(live, "loaded", False)
             and getattr(live, "display_name", None) == target):
         return live
@@ -259,6 +268,54 @@ def _served_engine(job: Job, live):
     if live is not None:
         return live
     raise last_error or RuntimeError("no model could be loaded for this job")
+
+
+def _peer_served_engine(route):
+    """An engine that answers *route*'s model through its peer, loading
+    nothing here."""
+    from localm import peer_routing
+    from localm.inference.http_engine import HttpEngine
+    base = peer_routing._peer_url(route, "/v1")
+    eng = HttpEngine(base, token=route.api_key or None,
+                     model=route.peer_model or route.model,
+                     display_name=route.model, pin_model=True)
+    eng.active_requests = 0
+    eng.unloading = False
+    return eng
+
+
+def _default_chat_model() -> Optional[str]:
+    """The model an unnamed chat/memory job runs on absent any routing: the
+    configured default, else the first auto-chat-eligible registered model,
+    else None."""
+    from localm.config import load_config, load_registry
+    cfg = load_config()
+    name = cfg.get("default_model") or cfg.get("model")
+    if name:
+        return name
+    from localm.model_manager import is_auto_chat_eligible
+    reg = load_registry()
+    return next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+
+
+def _headless_routed_model(job: Job) -> Optional[str]:
+    """The model a headless (no server loop) chat/memory job loads: the same
+    capability routing ``_served_engine`` and an in-process ``localm run
+    --no-server`` apply. A chat job needing structured tool calls (web access
+    on), or a longer conversation than the current model was trained for, is
+    routed to an installed model that has it. A job's own ``model`` is always
+    the one used."""
+    from localm.inference import capability_routing as cr
+    current = job.model or _default_chat_model()
+    required = []
+    if job.task_kind == "chat":
+        from localm.plugins.builtin.jobs.webtool import web_enabled
+        if web_enabled():
+            required.append("tool_use")
+    needs = cr.request_needs(
+        [{"role": "user", "content": job.prompt or ""}], required=required)
+    decision = cr.plan_route(current, needs, pinned=bool(job.model))
+    return decision.resolved
 
 
 def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":

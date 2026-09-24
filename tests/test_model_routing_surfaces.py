@@ -259,6 +259,29 @@ class TestScheduledChatJobs:
         res = self._run()
         assert res["answered_by"] == "plain"
 
+    def test_a_resolved_model_with_an_accepted_peer_route_answers_through_the_peer(
+            self, live, monkeypatch):
+        from localm import peer_routing
+
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
+        base, engines, _ = live
+        route = peer_routing.PeerRoute(
+            model="tooly", instance_id="peer-1", host="127.0.0.1", port=9999,
+            scheme="http", api_key="peer-secret", peer_model="tooly-on-peer")
+        peer_routing.set_route(route)
+        try:
+            res = self._run()
+        finally:
+            peer_routing.clear_route("tooly")
+
+        # No peer is actually listening on :9999, so the request fails to
+        # reach it - proving the peer's own URL was dialled, not a local load.
+        assert res["status"] == "error", res
+        assert "127.0.0.1:9999" in res["error"], res
+        # The local "tooly" engine is never even constructed: no local load
+        # was attempted for it.
+        assert "tooly" not in engines
+
 
 # --------------------------------------------------------------------------- #
 #  Checking a key for another instance's loaded model                          #
