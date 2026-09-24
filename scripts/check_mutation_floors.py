@@ -19,9 +19,9 @@ source. This script compares those results against the committed baseline
   changed function's dispositions are stale), or its disposition is not one
   of ``killed`` / ``survived`` / ``{"equivalent": "<reason>"}`` /
   ``{"unstable": "<reason>"}``;
-* a control mutant (the ``controls`` section: one concrete mutant per
-  security-decision class that must stay killed) is missing, stale, recorded
-  as unstable or not killed;
+* a control mutant (the ``controls`` section: concrete mutants, at least one
+  per security-decision class, that must stay killed) is missing, stale,
+  recorded as unstable or not killed;
 * the run is incomplete (a mutant with no outcome), the baseline is missing
   or malformed, or an ``only_mutate`` module has no results or no baseline.
 
