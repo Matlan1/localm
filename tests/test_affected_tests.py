@@ -7,14 +7,20 @@ These tests pin each selection rule against a throwaway git checkout: a
 changed test file, a direct import, an importer N hops away (only with
 --depth), a route called by URL, a module named as a string, a script or a
 non-Python file named by file name, a route that only the committed version
-still registers, and the files that affect everything. The command line's
-output shape and its wide-selection exit status are pinned too. The last
-section binds the selector to the real tree: a change to the route whose
-dropped field motivated it selects the test that reads that route.
+still registers, and the files that affect everything. A dependency change in
+pyproject.toml and uv.lock is pinned against a small lock of its own: a locked
+bump, a transitive bump, a requirement change, a reordered table, the changes
+that still affect every test, a dev-only tool, and an installed distribution
+imported under another name. The command line's output shape and its
+wide-selection exit status are pinned too. The last section binds the selector
+to the real tree: a change to the route whose dropped field motivated it
+selects the test that reads that route, the real dependency files parse, and a
+locked uvicorn bump selects the tests that reach it and stays targeted.
 """
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -155,7 +161,7 @@ def test_a_route_only_the_committed_version_registers_still_matches(repo):
     assert "tests/test_url.py" in selected and "tests/test_param.py" in selected
 
 
-def test_conftest_pyproject_and_lock_affect_every_test(repo):
+def test_conftest_and_a_dependency_file_missing_on_either_side_affect_every_test(repo):
     mod, _ = repo
     for rel in ("tests/conftest.py", "pyproject.toml", "uv.lock"):
         selected = _select(mod, [rel])
@@ -273,6 +279,278 @@ def test_an_untracked_new_test_file_selects_itself(repo):
 
 
 # --------------------------------------------------------------------------- #
+#  Dependency changes: pyproject.toml and uv.lock                             #
+# --------------------------------------------------------------------------- #
+
+_PYPROJECT = """\
+[project]
+name = "demo"
+version = "1.0"
+dependencies = ["webkit-srv>=1.0", "runtimeonly>=1", "Fancy-Dist>=1"]
+
+[project.optional-dependencies]
+pdf = ["pdfkit2>=2"]
+dev = ["devtool>=1"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+"""
+
+_LOCK = """\
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[options.exclude-newer-package]
+alpha = false
+beta = false
+
+[[package]]
+name = "demo"
+version = "1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "fancy-dist" },
+    { name = "runtimeonly" },
+    { name = "webkit-srv" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "devtool" },
+]
+pdf = [
+    { name = "pdfkit2" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "devtool", marker = "extra == 'dev'", specifier = ">=1" },
+    { name = "fancy-dist", specifier = ">=1" },
+    { name = "pdfkit2", marker = "extra == 'pdf'", specifier = ">=2" },
+    { name = "runtimeonly", specifier = ">=1" },
+    { name = "webkit-srv", specifier = ">=1.0" },
+]
+provides-extras = ["pdf", "dev"]
+
+[[package]]
+name = "devtool"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "fancy-dist"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "lowlevel"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "pdfkit2"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "runtimeonly"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "webkit-srv"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lowlevel" },
+]
+"""
+
+_DEP_FILES = {
+    "pyproject.toml": _PYPROJECT,
+    "uv.lock": _LOCK,
+    "localm/server.py": "import webkit_srv\n",
+    "localm/app.py": "from localm import server\n",
+    "localm/fancy.py": "import fancymod\n",
+    "tests/test_server.py": "import localm.server\n\n\ndef test_server():\n    assert localm.server\n",
+    "tests/test_app.py": "import localm.app\n\n\ndef test_app():\n    assert localm.app\n",
+    "tests/test_fancy.py": "import localm.fancy\n\n\ndef test_fancy():\n    assert localm.fancy\n",
+    "tests/test_pdf.py": "import pdfkit2\n\n\ndef test_pdf():\n    assert pdfkit2\n",
+    "tests/test_pdf_skip.py": (
+        "import pytest\n\n\ndef test_pdf_skip():\n    pytest.importorskip(\"pdfkit2\")\n"),
+    "tests/test_reads_pyproject.py": "def test_reads():\n    assert 'pyproject.toml'\n",
+}
+
+
+@pytest.fixture
+def dep_repo(repo, monkeypatch):
+    """The throwaway checkout plus a pyproject.toml, a uv.lock, modules that
+    import (fake) third-party packages and tests that reach them, committed;
+    no installed distribution maps to an import name."""
+    mod, root = repo
+    for rel, src in _DEP_FILES.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "dependencies")
+    monkeypatch.setattr(mod, "_installed", lambda: {})
+    return mod, root
+
+
+def _edit(root: Path, rel: str, old: str, new: str) -> None:
+    p = root / rel
+    text = p.read_text(encoding="utf-8")
+    assert text.count(old) == 1, (rel, old)
+    p.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def _bump(root: Path, dist: str, old: str, new: str) -> None:
+    _edit(root, "uv.lock", f'name = "{dist}"\nversion = "{old}"', f'name = "{dist}"\nversion = "{new}"')
+
+
+def _everything(mod, selected, rel):
+    return (len(selected) == len(mod.Graph().test_files) == 16
+            and all(r == [f"every test file: {rel} changed"] for r in selected.values()))
+
+
+def test_a_locked_version_bump_selects_the_tests_reaching_that_dependency(dep_repo):
+    mod, root = dep_repo
+    _bump(root, "webkit-srv", "1.0.0", "1.1.0")
+    assert _select(mod, ["uv.lock"]) == {"tests/test_server.py": [
+        "imports localm.server, which imports webkit-srv: changed dependency webkit-srv"]}
+    deeper = _select(mod, ["uv.lock"], depth=1)
+    assert deeper["tests/test_app.py"] == [
+        "imports localm.app (1 hop(s) from a module importing webkit-srv): "
+        "changed dependency webkit-srv"]
+    assert set(deeper) == {"tests/test_server.py", "tests/test_app.py"}
+
+
+def test_a_transitive_bump_reaches_the_dependency_that_pulls_it_in(dep_repo):
+    mod, root = dep_repo
+    _bump(root, "lowlevel", "0.5.0", "0.6.0")
+    assert _select(mod, ["uv.lock"]) == {"tests/test_server.py": [
+        "imports localm.server, which imports webkit-srv: "
+        "dependency webkit-srv (it depends on a changed package)"]}
+
+
+def test_a_requirement_change_selects_its_dependency_and_the_tests_naming_pyproject(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", 'pdf = ["pdfkit2>=2"]', 'pdf = ["pdfkit2>=2,<4"]')
+    _edit(root, "uv.lock", 'specifier = ">=2" }', 'specifier = ">=2,<4" }')
+    assert _select(mod, ["pyproject.toml", "uv.lock"]) == {
+        "tests/test_pdf.py": ["imports pdfkit2: changed dependency pdfkit2"],
+        "tests/test_pdf_skip.py": ["names pdfkit2: changed dependency pdfkit2"],
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"],
+    }
+
+
+def test_reordering_a_lock_table_changes_no_dependency(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "uv.lock", "alpha = false\nbeta = false", "beta = false\nalpha = false")
+    assert _select(mod, ["uv.lock"]) == {}
+
+
+def test_a_pyproject_change_outside_the_requirement_lists_affects_every_test(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", 'addopts = "-q"', 'addopts = "-q -x"')
+    assert _everything(mod, _select(mod, ["pyproject.toml"]), "pyproject.toml")
+
+
+def test_a_lock_change_outside_the_packages_affects_every_test(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "uv.lock", 'requires-python = ">=3.12"', 'requires-python = ">=3.13"')
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+
+
+def test_the_projects_own_locked_entry_outside_its_declarations_affects_every_test(dep_repo):
+    mod, root = dep_repo
+    _bump(root, "demo", "1.0", "1.1")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+
+
+def test_an_unparsable_lock_affects_every_test(dep_repo):
+    mod, root = dep_repo
+    (root / "uv.lock").write_text("[[package\n", encoding="utf-8")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+
+
+def test_a_runtime_dependency_nothing_imports_or_names_affects_every_test(dep_repo):
+    mod, root = dep_repo
+    _bump(root, "runtimeonly", "1.0.0", "1.0.1")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+
+
+def test_a_dev_only_dependency_nothing_imports_or_names_selects_no_test(dep_repo):
+    mod, root = dep_repo
+    _bump(root, "devtool", "1.0.0", "1.0.1")
+    assert _select(mod, ["uv.lock"]) == {}
+
+
+def test_a_committed_dependency_change_is_seen_from_its_base_not_from_head(dep_repo):
+    mod, root = dep_repo
+    base = _git(root, "rev-parse", "HEAD").strip()
+    _bump(root, "webkit-srv", "1.0.0", "1.1.0")
+    _git(root, "commit", "-qam", "bump webkit-srv")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+    assert set(_select(mod, ["uv.lock"], base_ref=base)) == {"tests/test_server.py"}
+    out = _run_cli(root, "--files", "uv.lock")
+    assert out.returncode == 3, out.stderr
+    assert "16 of 16 test files affected" in out.stderr
+
+
+def test_a_dependency_a_conftest_imports_selects_every_test_under_its_folder(dep_repo):
+    mod, root = dep_repo
+    (root / "tests" / "sub" / "conftest.py").write_text("import devtool\n", encoding="utf-8")
+    _git(root, "commit", "-qam", "sub conftest imports devtool")
+    _bump(root, "devtool", "1.0.0", "1.0.1")
+    assert _select(mod, ["uv.lock"]) == {"tests/sub/test_sub.py": [
+        "every test file under tests/sub/: its conftest.py imports devtool: "
+        "changed dependency devtool"]}
+
+
+def test_a_runtime_dependency_only_the_root_conftest_imports_reaches_every_test(dep_repo):
+    mod, root = dep_repo
+    (root / "tests" / "conftest.py").write_text("import runtimeonly\n", encoding="utf-8")
+    _git(root, "commit", "-qam", "root conftest imports runtimeonly")
+    _bump(root, "runtimeonly", "1.0.0", "1.0.1")
+    selected = _select(mod, ["uv.lock"])
+    assert len(selected) == len(mod.Graph().test_files) == 16
+    assert all(r == ["every test file under tests/: its conftest.py imports runtimeonly: "
+                     "changed dependency runtimeonly"] for r in selected.values())
+
+
+def test_a_runtime_dependency_only_a_script_imports_affects_every_test(dep_repo):
+    mod, root = dep_repo
+    (root / "scripts" / "tool.py").write_text("import runtimeonly\nprint('tool')\n",
+                                               encoding="utf-8")
+    _git(root, "commit", "-qam", "tool imports runtimeonly")
+    _bump(root, "runtimeonly", "1.0.0", "1.0.1")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+
+
+def test_an_installed_distributions_import_name_finds_its_importers(dep_repo, monkeypatch):
+    mod, root = dep_repo
+    _bump(root, "fancy-dist", "1.0.0", "2.0.0")
+    assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
+    monkeypatch.setattr(mod, "_installed", lambda: {"fancymod": ["Fancy-Dist"], "other": ["x"]})
+    assert _select(mod, ["uv.lock"]) == {"tests/test_fancy.py": [
+        "imports localm.fancy, which imports fancy-dist: changed dependency fancy-dist"]}
+
+
+def test_cli_a_locked_bump_is_a_targeted_selection(dep_repo):
+    _, root = dep_repo
+    _bump(root, "webkit-srv", "1.0.0", "1.1.0")
+    out = _run_cli(root, "--files", "uv.lock", "--why")
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines() == [
+        "tests/test_server.py  # imports localm.server, which imports webkit-srv: "
+        "changed dependency webkit-srv"]
+    assert "1 of 16 test files affected by 1 changed file(s)" in out.stderr
+
+
+# --------------------------------------------------------------------------- #
 #  The real tree                                                              #
 # --------------------------------------------------------------------------- #
 
@@ -286,3 +564,28 @@ def test_real_tree_changed_files_answers():
     mod = _load()
     changed, base = mod.changed_files("origin/master")
     assert isinstance(changed, list) and base
+
+
+def test_real_tree_dependency_files_parse_and_the_dev_extra_is_not_runtime():
+    mod = _load()
+    py = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
+    changed, affected, runtime = mod.dependency_change(py, py, lock, lock)
+    assert changed == set() and affected == set()
+    assert {"uvicorn", "fastapi", "pypdf", "playwright"} <= runtime
+    assert "ruff" not in runtime and "zizmor" not in runtime
+
+
+def test_real_tree_a_locked_uvicorn_bump_is_a_targeted_selection(monkeypatch):
+    mod = _load()
+    lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
+    entry = re.search(r'name = "uvicorn"\nversion = "[^"]+"', lock).group(0)
+    bumped = lock.replace(entry, 'name = "uvicorn"\nversion = "999.0.0"')
+    real_read = mod._read
+    monkeypatch.setattr(mod, "_read", lambda rel: bumped if rel == "uv.lock" else real_read(rel))
+    monkeypatch.setattr(mod, "_read_at", lambda ref, rel: real_read(rel))
+    graph = mod.Graph()
+    selected = mod.select(["uv.lock"], graph)
+    assert "imports localm.portmux, which imports uvicorn: changed dependency uvicorn" in \
+        selected["tests/test_portmux_redirect.py"]
+    assert len(selected) <= 0.25 * len(graph.test_files)
