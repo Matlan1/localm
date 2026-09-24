@@ -130,6 +130,18 @@ function el(tag, cls, text) {
   return n;
 }
 
+/** The GUI's translation of key through window.tOr (app/i18n.js, bridged onto
+ *  window by app/main.js), or the English fallback with its {name} params
+ *  filled in when this module runs without the GUI shell. */
+function tr(key, fallback, params) {
+  if (typeof window !== "undefined" && typeof window.tOr === "function") {
+    return window.tOr(key, fallback, params);
+  }
+  return fallback.replace(/\{(\w+)\}/g, (whole, name) =>
+    (params && Object.prototype.hasOwnProperty.call(params, name)
+      ? String(params[name]) : whole));
+}
+
 /** Load this plugin's own stylesheet, once.
  *
  *  The tab builds itself into the SPA's #main, and the host stylesheet has no
@@ -176,10 +188,22 @@ export function register(ctx) {
   shot.alt = "Live view of the automated browser";
   shot.hidden = true;
   shot.tabIndex = 0;
+  // Names the keys that leave the frame. Shown while the frame holds focus
+  // and its keys go to the page.
+  const keysHint = el("div", "browser-keys-hint");
+  keysHint.id = "browser-keys-hint";
+  keysHint.hidden = true;
+  shot.setAttribute("aria-describedby", keysHint.id);
+  function paintKeysHint() {
+    keysHint.textContent = tr("browser.liveView.keysHint",
+      "Keys go to the page · Esc releases the keyboard · Shift+Tab moves back");
+  }
+  paintKeysHint();
+  document.addEventListener("localm:language", paintKeysHint);
   const status = el("div", "browser-status", "No browser open.");
   const refused = el("ul", "browser-refused");
 
-  view.append(el("h2", "", "Browser"), bar, status, shot, refused);
+  view.append(el("h2", "", "Browser"), bar, status, shot, keysHint, refused);
 
   let jobId = null;
   let abort = null;
@@ -195,6 +219,19 @@ export function register(ctx) {
   let wheelTimer = null;
   let pendingDx = 0;
   let pendingDy = 0;
+
+  // Clicks, keys, typed text and wheel deltas for the page, oldest first.
+  // pumpInput() sends the head and waits for its answer before it sends the
+  // next, so one input request is in flight at a time and requests reach the
+  // browser in the order they were made. Typed text and wheel deltas merge into
+  // an entry of the same kind waiting at the tail.
+  const inputQueue = [];
+  let inputBusy = false;
+  // Incremented, and inputQueue emptied, whenever the view leaves "own" mode.
+  // A request answered after that changes nothing on screen.
+  let inputEpoch = 0;
+  // True from a failed input request until one succeeds again.
+  let inputFailing = false;
 
   function applyControls() {
     const idle = mode === "idle";
@@ -217,9 +254,16 @@ export function register(ctx) {
     if (next === "idle") {
       shot.hidden = true;
       shot.removeAttribute("src");
+    }
+    if (next !== "own") {
       if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
       pendingDx = 0;
       pendingDy = 0;
+      inputQueue.length = 0;
+      inputEpoch++;
+      inputBusy = false;
+      inputFailing = false;
+      keysHint.hidden = true;
     }
     applyControls();
   }
@@ -405,29 +449,89 @@ export function register(ctx) {
     }
   }
 
+  /** Put one input for the page on inputQueue, after any wheel deltas gathered
+   *  before it, and start sending if nothing is in flight. Input made outside
+   *  "own" mode is dropped. */
+  function sendInput(path, body) {
+    if (mode !== "own") return;
+    if (path !== "/scroll") flushWheel();
+    const tail = inputQueue[inputQueue.length - 1];
+    if (tail && tail.path === path && path === "/type") {
+      tail.body.text += body.text;
+    } else if (tail && tail.path === path && path === "/scroll") {
+      tail.body.delta_x += body.delta_x;
+      tail.body.delta_y += body.delta_y;
+    } else {
+      inputQueue.push({ path, body });
+    }
+    pumpInput();
+  }
+
+  /** Send the head of inputQueue unless an input request is already in flight,
+   *  then the next one once it is answered. */
+  async function pumpInput() {
+    if (inputBusy || !inputQueue.length) return;
+    inputBusy = true;
+    const epoch = inputEpoch;
+    const { path, body } = inputQueue.shift();
+    try {
+      await deliverInput(path, body, epoch);
+    } finally {
+      if (epoch === inputEpoch) {
+        inputBusy = false;
+        pumpInput();
+      }
+    }
+  }
+
+  /** POST one input to the page. A failure is shown on the status line, and
+   *  toasted when it follows a success, and never thrown: the inputs queued
+   *  behind it are still sent. */
+  async function deliverInput(path, body, epoch) {
+    let problem = null;
+    try {
+      const r = await fetch(API + path, {
+        method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        problem = typeof data.detail === "string" && data.detail
+          ? data.detail : "HTTP " + r.status;
+      } else if (data && data.ok === false) {
+        problem = data.error || "HTTP " + r.status;
+      }
+    } catch (err) {
+      problem = (err && err.message) || String(err);
+    }
+    if (epoch !== inputEpoch) return;
+    if (problem) {
+      status.textContent = tr("browser.liveView.inputFailed",
+        "Input did not reach the browser: {detail}", { detail: problem });
+      if (!inputFailing) toast(status.textContent, true);
+      inputFailing = true;
+    } else if (inputFailing) {
+      inputFailing = false;
+      status.textContent = tr("browser.liveView.inputRestored",
+        "Input is reaching the browser again.");
+    }
+  }
+
   function flushWheel() {
+    if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
     if (!pendingDx && !pendingDy) return;
     const dx = pendingDx;
     const dy = pendingDy;
     pendingDx = 0;
     pendingDy = 0;
-    fetch(API + "/scroll", {
-      method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ delta_x: dx, delta_y: dy }),
-    }).catch(() => {});
+    sendInput("/scroll", { delta_x: dx, delta_y: dy });
   }
 
-  shot.onclick = async (e) => {
+  shot.onclick = (e) => {
     if (mode !== "own") return;
     if (typeof shot.focus === "function") shot.focus();
     const coords = frameCoords(shot, e.clientX, e.clientY);
     if (!coords) return;
-    try {
-      await fetch(API + "/click", {
-        method: "POST", headers: authHeaders(),
-        body: JSON.stringify({ x: coords.x, y: coords.y, button: "left" }),
-      });
-    } catch (err) { /* quiet on interaction drop */ }
+    sendInput("/click", { x: coords.x, y: coords.y, button: "left" });
   };
 
   shot.addEventListener("wheel", (e) => {
@@ -443,31 +547,32 @@ export function register(ctx) {
     }
   }, { passive: false });
 
-  shot.onkeydown = async (e) => {
+  shot.addEventListener("focus", () => { keysHint.hidden = mode !== "own"; });
+  shot.addEventListener("blur", () => { keysHint.hidden = true; });
+
+  shot.onkeydown = (e) => {
     if (mode !== "own") return;
+    // Esc takes keyboard focus off the frame and is not sent to the page.
+    // Shift+Tab keeps its default, moving focus to the control before it.
+    if (e.key === "Escape") {
+      e.preventDefault();
+      shot.blur();
+      return;
+    }
+    if (e.key === "Tab" && e.shiftKey) return;
     const navKeys = [
-      "Backspace", "Enter", "Tab", "Escape",
+      "Backspace", "Enter", "Tab",
       "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
       "PageUp", "PageDown", "Home", "End", "Delete",
     ];
     if (navKeys.includes(e.key)) {
       e.preventDefault();
-      try {
-        await fetch(API + "/key", {
-          method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ key: e.key }),
-        });
-      } catch (err) { /* quiet on interaction drop */ }
+      sendInput("/key", { key: e.key });
       return;
     }
     if (!e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.length === 1) {
       e.preventDefault();
-      try {
-        await fetch(API + "/type", {
-          method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ text: e.key }),
-        });
-      } catch (err) { /* quiet on interaction drop */ }
+      sendInput("/type", { text: e.key });
     }
   };
 

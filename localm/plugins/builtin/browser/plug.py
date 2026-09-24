@@ -30,9 +30,10 @@ capability is not on its own enough to drive a browser.
 from __future__ import annotations
 
 import time
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.browser import session as bsession
 from localm.inference.http_server import principal_id
@@ -42,6 +43,14 @@ _router = APIRouter()
 
 #: How often the worker checks whether it has been asked to stop.
 _TICK = 0.25
+
+#: The largest magnitude, in CSS pixels, of a click coordinate or wheel delta.
+_MAX_PIXELS = 1_000_000.0
+
+#: A click coordinate or wheel delta: a finite number within +/- _MAX_PIXELS.
+#: Anything else, NaN and Infinity included, is refused with a 422.
+_Pixels = Annotated[float, Field(allow_inf_nan=False,
+                                 ge=-_MAX_PIXELS, le=_MAX_PIXELS)]
 
 
 class OpenRequest(BaseModel):
@@ -53,14 +62,14 @@ class NavigateRequest(BaseModel):
 
 
 class ClickRequest(BaseModel):
-    x: float
-    y: float
-    button: str = "left"
+    x: _Pixels
+    y: _Pixels
+    button: Literal["left", "right", "middle"] = "left"
 
 
 class ScrollRequest(BaseModel):
-    delta_x: float = 0.0
-    delta_y: float = 0.0
+    delta_x: _Pixels = 0.0
+    delta_y: _Pixels = 0.0
 
 
 class KeyRequest(BaseModel):
