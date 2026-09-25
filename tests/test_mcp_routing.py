@@ -323,6 +323,29 @@ class TestCoderRouting:
         assert engines.resident == []
 
 
+class TestPullModel:
+    def test_a_pulled_model_that_fails_to_load_is_not_kept_as_resident(self, reg):
+        made = {}
+        engines = EngineCache("plain", engine_factory=lambda n: made.setdefault(
+            n, _LazyEngine(n, fails_to_load=True)))
+        with patch("localm.model_manager.pull.pull_model", return_value=True):
+            res = _call(engines, "pull_model",
+                        {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "name": "tooly"})
+        assert engines.resident == [], "a model that failed to load is listed as resident"
+        assert made["tooly"].released
+        assert res["isError"] is True
+        assert "loading it failed: tooly could not be loaded" in res["content"][0]["text"]
+
+    def test_a_pulled_model_is_loaded(self, reg):
+        engines = _cache(lazy=True)
+        with patch("localm.model_manager.pull.pull_model", return_value=True):
+            res = _call(engines, "pull_model",
+                        {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "name": "tooly"})
+        assert engines.made["tooly"].loaded and engines.resident == ["tooly"]
+        assert res["isError"] is False
+        assert "loaded 'tooly' - ready to use" in res["content"][0]["text"]
+
+
 @pytest.fixture
 def coder_project(tmp_path, monkeypatch):
     """A project directory for run_coder_task, with the coder plugin active and

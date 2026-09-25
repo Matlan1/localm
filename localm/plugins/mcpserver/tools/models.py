@@ -163,19 +163,12 @@ def build(engines: EngineCache) -> Dict[str, dict]:
             return _text_result(f"pulled and registered as {name!r} (not loaded)")
 
         try:
-            # This load, like chat()/embed()'s, can print native sizing
-            # diagnostics straight to stdout.
-            #
-            # engines.get() only constructs/registers the Engine and runs the
-            # VRAM-eviction gate - it does NOT call Engine.load(), so the
-            # backend stays unloaded until some later caller (normally
-            # chat_stream()'s lazy-load path) touches it. The tool's own
-            # description promises "load it - blocks until ready", so pull_model
-            # calls .load() itself rather than leaving a resident-but-unloaded
-            # engine parked in the cache.
+            # Output printed while loading goes to stderr, not to the JSON-RPC
+            # stream on stdout. get_loaded() builds the engine and loads it
+            # before returning; one that fails to load is removed from the
+            # cache.
             with _quiet_stdout():
-                engine = engines.get(name)
-                engine.load()
+                engine = engines.get_loaded(name)
         except Exception as e:
             return _text_result(
                 f"pulled and registered as {name!r}, but loading it failed: {e}",
