@@ -56,7 +56,9 @@ dependencies = [
     # this guard absent precisely where nobody would think to look for it. See
     # localm/plugins/coder/tools/files.py _compile_model_pattern.
     "regex>=2026.8.31",
-    "huggingface-hub>=1.29.0",
+    # Below 2: tokenizers 0.22 (faster-whisper, transformers) requires
+    # huggingface-hub<2.0. See test_huggingface_hub_stays_below_what_tokenizers_accepts.
+    "huggingface-hub>=1.29.0,<2",
     "pydantic>=2.13.5",
     "fastapi>=0.141.1",
     # fastapi's own requirement is only starlette>=0.46.0, too weak to rely on:
