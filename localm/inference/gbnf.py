@@ -18,6 +18,7 @@ All grammars use ``root`` as the entry rule, which is what
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 #  JSON grammars
 
@@ -63,7 +64,9 @@ ws     ::= ([ \t\n\r])*
 # separated by optional whitespace. Alone it forces tool-only output from the
 # first token; with grammar_lazy=True and TOOL_CALL_TRIGGER, free text and
 # <think> flow unconstrained until the model starts a <tool_call>, from where
-# the call must be valid JSON.
+# the call must be valid JSON. A <tool_call> started inside <think> also ends
+# the reasoning, since the grammar then allows nothing else, </think> included
+# (see think_exit_marker).
 TOOL_CALLS_ONLY = r"""
 root       ::= opt-ws tool-block+ opt-ws
 tool-block ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>" opt-ws
@@ -111,6 +114,21 @@ opt-ws      ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 # capture group 1, so the tag must stay INSIDE group 1 or enforcement never
 # matches. The pattern must not begin with a lazy wildcard.
 TOOL_CALL_TRIGGER = r"(<tool_call>[\s\S]*)"
+
+
+def think_exit_marker(grammar_lazy, grammar_triggers) -> Optional[str]:
+    """``"<tool_call>"`` when a request's lazy grammar is triggered by
+    TOOL_CALL_TRIGGER, else None: the ``exit_marker`` for textnorm's think
+    splitting.
+
+    llama.cpp matches the trigger anywhere in the generated text, a <think>
+    block included, and from the trigger on the grammar allows only tool calls
+    and the end of generation. A call started while thinking therefore ends
+    the reply with the think block still open, and without the marker the
+    whole call is split off as reasoning instead of reaching the content."""
+    if grammar_lazy and TOOL_CALL_TRIGGER in (grammar_triggers or ()):
+        return "<tool_call>"
+    return None
 
 
 #  Structural pre-validation

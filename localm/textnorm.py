@@ -20,7 +20,7 @@ no-op, so a backend that also scrubs internally is safe.
 from __future__ import annotations
 
 import re
-from typing import Iterator
+from typing import Iterator, Optional
 
 # Reasoning-channel openers/closers -> canonical think tags. Whitespace inside
 # the tag is tolerated.
@@ -90,11 +90,13 @@ _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 
 
-def split_think(text: str) -> tuple[str, str]:
+def split_think(text: str, exit_marker: Optional[str] = None) -> tuple[str, str]:
     """Split *text* (already scrubbed to canonical ``<think>...</think>``) into
     ``(content, reasoning)``: the visible answer with the think block(s) removed,
     and the concatenated reasoning with the tags removed. An unclosed ``<think>``
-    runs to the end. Multiple blocks are concatenated.
+    runs to the end, except that with *exit_marker* set, an unclosed block that
+    contains the marker ends where the marker begins and the rest is content
+    (see ``gbnf.think_exit_marker``). Multiple blocks are concatenated.
 
     Linear single pass: scans with ``str.find`` and slices each segment exactly
     once, so it stays O(n) even on pathologically interleaved tags.
@@ -107,6 +109,11 @@ def split_think(text: str) -> tuple[str, str]:
         if in_think:
             j = text.find(_THINK_CLOSE, i)
             if j == -1:
+                m = text.find(exit_marker, i) if exit_marker else -1
+                if m != -1:
+                    reasoning.append(text[i:m])
+                    content.append(text[m:])
+                    break
                 reasoning.append(text[i:])          # unclosed think runs to the end
                 break
             reasoning.append(text[i:j])
@@ -157,21 +164,47 @@ class ThinkSplitter:
     visible content. Tags split across pieces are handled by holding back a short
     tail until the next piece arrives; call :meth:`flush` at end of stream to
     release any held tail (an unterminated think block flushes as reasoning).
+
+    With *exit_marker* set, the marker inside a think block starts a held
+    stretch: if the block then closes, the stretch was reasoning; if the stream
+    ends with the block still open, it flushes as content. The result always
+    equals ``split_think(text, exit_marker)`` over the whole stream.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, exit_marker: Optional[str] = None) -> None:
         self._buf = ""
         self._in_think = False
+        self._exit_marker = exit_marker or None
+        self._marked = False     # holding from exit_marker until </think> or the end
+        self._scan = 0           # where the next </think> search in a held stretch starts
 
     def feed(self, piece: str) -> tuple[str, str]:
         self._buf += piece
         out_c: list[str] = []
         out_r: list[str] = []
         while True:
-            if self._in_think:
+            if self._in_think and self._marked:
+                i = self._buf.find(_THINK_CLOSE, self._scan)
+                if i == -1:
+                    self._scan = max(0, len(self._buf) - len(_THINK_CLOSE) + 1)
+                    break
+                out_r.append(self._buf[:i])
+                self._buf = self._buf[i + len(_THINK_CLOSE):]
+                self._in_think = self._marked = False
+                self._scan = 0
+            elif self._in_think:
                 i = self._buf.find(_THINK_CLOSE)
+                m = self._buf.find(self._exit_marker) if self._exit_marker else -1
+                if m != -1 and (i == -1 or m < i):
+                    out_r.append(self._buf[:m])
+                    self._buf = self._buf[m:]
+                    self._marked = True
+                    self._scan = 0
+                    continue
                 if i == -1:
                     hold = _held_tag_suffix(self._buf, _THINK_CLOSE)
+                    if self._exit_marker:
+                        hold = max(hold, _held_tag_suffix(self._buf, self._exit_marker))
                     cut = len(self._buf) - hold
                     out_r.append(self._buf[:cut])
                     self._buf = self._buf[cut:]
@@ -194,9 +227,10 @@ class ThinkSplitter:
 
     def flush(self) -> tuple[str, str]:
         """Release the held tail at end of stream. A still-open think block
-        flushes its remainder as reasoning; otherwise as content."""
+        flushes its remainder as reasoning, unless it is held from the exit
+        marker; otherwise as content."""
         buf, self._buf = self._buf, ""
-        if self._in_think:
+        if self._in_think and not self._marked:
             return "", buf
         return buf, ""
 

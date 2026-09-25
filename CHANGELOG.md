@@ -287,6 +287,32 @@ permanent public record of what shipped and are never rewritten; the in-progress
   then stops is no longer accepted as the final answer.** With web access on,
   the chat asks the model once to either make the call or answer now; this
   happens at most once per message.
+  A reply that only offers a lookup ("I can search for current prices if
+  that's helpful") or ends on a question is left for you to answer.
+- **With web access on, a reply that stops after the model's thoughts no
+  longer ends the turn with "(no reply text)".** When a thinking model writes
+  its web search inside its thoughts, the search now runs; when it only plans
+  one there and stops, the chat asks it once to make the call or answer.
+- **Tool calls written the Llama 3 way, with `"parameters"` instead of
+  `"args"`, now keep their arguments** in the chat, scheduled jobs and the
+  coder. Before, such a web search ran with an empty query and a coder tool
+  call arrived with no arguments at all.
+- **The coder no longer passes off invented code as a file's content.** When
+  a final answer shows a code block for a file in the project and the code
+  defines functions or classes that file does not contain, the coder asks
+  the model once to read the file and answer from it. If the answer still
+  does not match, it is marked `[unverified code: ... not found in ...]`.
+- **A tool call that a thinking model starts inside its thoughts now arrives
+  as its reply.** With the tool-call grammar on (the chat with web access, and
+  the coder by default), such a call used to be delivered as part of the
+  thoughts, because the grammar lets nothing follow the call, not even the
+  end of the thoughts. The call was never run and the reply was empty, which
+  the coder then accepted as its final answer.
+- **When the coder reads a file too large to show in full, it is now told
+  exactly which lines it did not get** (`lines 103-990 of 1085 are
+  missing...`), with the `offset` to read them from. Before, it only saw a
+  character count, and a slice read that was cut short carried no notice at
+  all.
 - **Chat plugins no longer treat a failed generation as a completed turn.**
   Memory consolidation is not scheduled after a failed reply, and the audit
   log and transcript record that the generation ended in an error or a
