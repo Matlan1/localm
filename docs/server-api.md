@@ -49,16 +49,21 @@ optional and additive: omit it and the request behaves exactly as before. A
 range can only disable special-token parsing over your own prompt, never
 enable it, and out-of-range values are clamped to the content length.
 
-A `user` message may also carry `origin` to say the user did not type it. The
-one accepted value is `"client"`: text the client generated itself, such as the
-GUI's "Summarise the following conversation ..." prompt when it compacts a long
-chat. The model still receives a marked message, but localm leaves it out of
-the long-term-memory recall query and does not log it as the user's line in
-the audit/session log. So it cannot pull in or reinforce memories, and memory
-consolidation never learns from it as if you had said it. A request whose only
-user messages are marked recalls no memories. The field is optional and
-request-only: omit it (or send `null`) and the request behaves exactly as
-before. Any other value is rejected with a 422.
+A message may also carry `origin` to say the client, not the user, wrote it.
+Two values are accepted:
+
+- `"tool"`: a tool result or a client note sent as a `user` message only
+  because some chat templates require user/assistant alternation.
+- `"client"`: text the client generated itself, such as the GUI's "Summarise
+  the following conversation ..." prompt when it compacts a long chat.
+
+localm then leaves that message out of what it treats as the user's own words:
+the long-term-memory recall query and the user line of the audit/session log
+(which memory consolidation learns from). A request whose only user messages
+are marked recalls no memories. The model still sees the message. The field is
+optional and additive: omit it (or send `null`) and the request behaves exactly
+as before. Any other value is rejected with a 422, and a response message never
+carries it.
 
 The response's assistant message (and, for a stream, the delta) also carries
 `reasoning_content`: the model's `<think>` reasoning, split out of the

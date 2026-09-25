@@ -1255,10 +1255,11 @@ def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) ->
     turn's topic. Newest-first and truncated to max_chars so the latest turn is
     never dropped. Only steers
     relevance ranking + the eligibility gate; recalled memories are neutralised before
-    injection. A user-role message the client marked with an ``origin`` (text it
-    generated itself, e.g. the GUI's compaction prompt) is not the user's words: it
-    is skipped and does not count toward the window, so a request holding only
-    marked messages gets an empty query and recalls nothing."""
+    injection. A user-role row the client marked with an ``origin`` (a GUI web
+    tool event: search results, a page read, a control note; or a prompt the
+    client wrote itself, such as the compaction summarise request) is not the
+    user's words and neither enters the query nor counts toward max_user_turns.
+    A request holding only marked rows gets an empty query and recalls nothing."""
     texts = []
     for m in reversed(messages):
         if m.get("role") != "user" or m.get("origin"):

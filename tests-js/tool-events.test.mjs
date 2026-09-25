@@ -276,6 +276,92 @@ test("runCompletion: failed, denied, duplicate, note and running events render t
     "an error that may quote a response is marked untrusted");
 });
 
+// A tool event is user-role on the wire only for chat-template alternation, so
+// it is marked origin "tool": the server then keeps it out of the memory
+// recall query and the audit's user line. A row the user typed is never marked.
+test("runCompletion: every tool-event row is marked origin \"tool\"; a typed user row and an assistant row are not", async () => {
+  const { completions } = await assemble([
+    { role: "user", content: "u1", id: "m1" },
+    { role: "assistant", content: "a1", id: "m2" },
+    searchEvent("alpha", TWO_SOURCES, { id: "m3" }),
+    { role: "assistant", content: "a2", id: "m4" },
+    { kind: "tool", tool: "fetch", status: "done", url: "https://f.example/",
+      page: { url: "https://f.example/", text: "PAGE", truncated: false }, id: "m5" },
+    { role: "assistant", content: "a3", id: "m6" },
+    { kind: "tool", tool: "fetch", status: "failed", url: "https://f.example/", error: "HTTP 500", id: "m7" },
+    { role: "assistant", content: "a4", id: "m8" },
+    { kind: "tool", tool: "search", status: "denied", query: "d", note: "[web access denied] no.", id: "m9" },
+    { role: "assistant", content: "a5", id: "m10" },
+    { kind: "tool", tool: "search", status: "duplicate", query: "d", note: "[duplicate web request] again.", id: "m11" },
+    { role: "assistant", content: "a6", id: "m12" },
+    { kind: "tool", tool: "note", status: "done", reason: "pending", note: "[pending action] do it.", id: "m13" },
+    { role: "assistant", content: "a7", id: "m14" },
+    { kind: "tool", tool: "note", status: "done", reason: "limit", note: "[web search limit reached] answer.", id: "m15" },
+  ]);
+  const sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.deepEqual(sent.map((m) => [m.role, m.origin]), [
+    ["user", undefined],
+    ["assistant", undefined], ["user", "tool"],
+    ["assistant", undefined], ["user", "tool"],
+    ["assistant", undefined], ["user", "tool"],
+    ["assistant", undefined], ["user", "tool"],
+    ["assistant", undefined], ["user", "tool"],
+    ["assistant", undefined], ["user", "tool"],
+    ["assistant", undefined], ["user", "tool"],
+  ]);
+  assert.ok(!("origin" in sent[0]), "a typed user row carries no origin key at all");
+  assert.ok(sent.filter((m) => m.role === "assistant").every((m) => !("origin" in m)));
+});
+
+test("runCompletion: a merged row keeps origin \"tool\" only when every part of it is a tool event", async () => {
+  // User text, then a tool event: merged, and the merged row holds user text.
+  let { completions } = await assemble([
+    { role: "user", content: "read this", id: "m1" },
+    searchEvent("q", [{ title: "T", url: "https://t.example/", snippet: "s" }], { id: "m2" }),
+  ]);
+  let sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].content, /^read this\n\n\[Results of web_search "q"\]/);
+  assert.ok(!("origin" in sent[0]), "user text first: the merged row is not marked");
+
+  // A tool event, then user text: merged, and still not marked.
+  ({ completions } = await assemble([
+    { role: "user", content: "u1", id: "m1" },
+    { role: "assistant", content: "a1", id: "m2" },
+    { kind: "tool", tool: "note", status: "done", reason: "pending", note: "[pending action] do it.", id: "m3" },
+    { role: "user", content: "never mind, just answer", id: "m4" },
+  ]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].content, "[pending action] do it.\n\nnever mind, just answer");
+  assert.ok(!("origin" in sent[2]), "user text last: the merged row is not marked");
+
+  // Two tool events in a row: merged, and nothing in it is user text.
+  ({ completions } = await assemble([
+    { role: "user", content: "u1", id: "m1" },
+    { role: "assistant", content: "a1", id: "m2" },
+    searchEvent("q", [{ title: "T", url: "https://t.example/", snippet: "s" }], { id: "m3" }),
+    { kind: "tool", tool: "note", status: "done", reason: "format", note: "[tool-call format] fix it.", id: "m4" },
+  ]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.equal(sent.length, 3);
+  assert.match(sent[2].content, /\n\n\[tool-call format\] fix it\.$/);
+  assert.equal(sent[2].origin, "tool", "only tool events merged: the row stays marked");
+
+  // Tool, tool, user: the user text clears the mark the first merge kept.
+  ({ completions } = await assemble([
+    { role: "user", content: "u1", id: "m1" },
+    { role: "assistant", content: "a1", id: "m2" },
+    { kind: "tool", tool: "search", status: "denied", query: "d", note: "[web access denied] no.", id: "m3" },
+    { kind: "tool", tool: "note", status: "done", reason: "limit", note: "[web search limit reached] answer.", id: "m4" },
+    { role: "user", content: "ok", id: "m5" },
+  ]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.equal(sent.length, 3);
+  assert.match(sent[2].content, /\n\nok$/);
+  assert.ok(!("origin" in sent[2]), "a user row merged after two tool events clears the mark");
+});
+
 test("lastTurnHasWebResults: only a completed search or read counts, and a migrated row by its text", () => {
   const { window } = loadApp();
   const f = window.lastTurnHasWebResults;

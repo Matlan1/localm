@@ -65,14 +65,16 @@ class Message(BaseModel):
     # request's own output and cannot weaken anyone else's. Values are clamped
     # to the content length when applied.
     untrusted_spans: Optional[List[List[int]]] = None
-    # Who wrote a user-role message when it was not the user. "client": text the
-    # client generated itself, such as the GUI's compaction "Summarise the
-    # following conversation ..." prompt. A marked message still reaches the
-    # model, but the memory recall query and the audit log's user line skip it,
-    # so it is never recalled for or logged as something the user typed.
-    # Request-only (never in a response) and optional: a client that omits it
-    # gets exactly the previous behaviour.
-    origin: Optional[Literal["client"]] = Field(None, exclude=True)
+    # Set when the client, not the user, wrote this message. "tool": a web tool
+    # event (a search result, a page read, a control note) the GUI sends as
+    # user-role text only so strict chat templates keep user/assistant
+    # alternation. "client": text the client generated itself, such as the
+    # GUI's compaction "Summarise the following conversation ..." prompt. The
+    # server leaves a marked row out of what it treats as the user's own words:
+    # the memory recall query and the audit user line.
+    # Optional and additive: a client that omits it gets exactly the previous
+    # behaviour. Request-only, so a response message never carries it.
+    origin: Optional[Literal["tool", "client"]] = Field(None, exclude=True)
 
     def text_only(self) -> str:
         """Flatten content to plain text (discards media)."""

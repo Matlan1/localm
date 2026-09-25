@@ -2218,11 +2218,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // Server-generated images (/api/ URLs from /generate-image) must not be sent
   // to the model as image parts - replace those messages with a text note.
   // A tool event is rendered to fenced user-role text here and nowhere else;
-  // its untrusted spans then take the same alternation-merge path below.
+  // its untrusted spans then take the same alternation-merge path below. It is
+  // marked origin "tool" so the server keeps it out of what it treats as the
+  // user's own words (the memory recall query, the audit's user line).
   const mapped = conv.messages.map((m) => {
     if (isToolEvent(m)) {
       const { content, untrusted_spans } = toolEventPrompt(m);
-      return { role: "user", content,
+      return { role: "user", content, origin: "tool",
                untrusted_spans: untrusted_spans.length ? untrusted_spans : undefined };
     }
     if (Array.isArray(m.content) &&
@@ -2248,6 +2250,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // consecutive plain-text same-role messages are merged before sending. A
   // merged message's untrusted_spans (LM-DA-014, web/plug.py) are shifted by
   // the length of what now precedes them and folded into the surviving entry.
+  // A merged message keeps origin "tool" only while every part of it is a tool
+  // event: one that holds any text the user wrote is theirs.
   for (const m of mapped) {
     const prev = messages[messages.length - 1];
     if (prev && prev.role === m.role && prev.role !== "system" &&
@@ -2258,9 +2262,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
           .push(...m.untrusted_spans.map(([a, b]) => [a + shift, b + shift]));
       }
       prev.content += "\n\n" + m.content;
+      if (prev.origin !== m.origin) delete prev.origin;
     } else {
       const entry = { role: m.role, content: m.content };
       if (m.untrusted_spans && m.untrusted_spans.length) entry.untrusted_spans = m.untrusted_spans;
+      if (m.origin) entry.origin = m.origin;
       messages.push(entry);
     }
   }

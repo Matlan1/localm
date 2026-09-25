@@ -118,6 +118,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A web search or page read in the GUI chat no longer pulls unrelated long-term
+  memories into the reply, and the session log no longer records the GUI's web
+  notes as something you said.** Search results, page text and notes such as
+  "[pending action] ..." reach the model as user-role messages, and their common
+  words ("answer", "results", "source") made loosely related facts count as
+  relevant; one web turn could go from 1 recalled memory to 6. The GUI now marks
+  those messages `origin: "tool"` (a new optional field on a chat message), and
+  the server builds the recall query and the logged user line only from what you
+  typed. API clients that do not send the field behave exactly as before.
 - **On Windows with an Intel GPU, HuggingFace models now load instead of failing
   with `[WinError 126]` and `Error loading "...\torch\lib\c10_xpu.dll" or one of
   its dependencies`.** The process that loads a HuggingFace model could not find
@@ -130,10 +139,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   excerpt of earlier turns inside it, as your own message: it could pull in and
   reinforce loosely related memories, and it was written to the session log as
   your line, so memory consolidation later re-learned those turns as if you had
-  typed them again. The GUI now marks that message with `origin: "client"` (a new
-  optional `/v1/chat/completions` message field, see `docs/server-api.md`), and
-  the server leaves a marked message out of memory recall and the log's user line.
-  Clients that do not send the field are unaffected.
+  typed them again. The GUI now marks that message with `origin: "client"` (a
+  second value for the optional `origin` message field of `/v1/chat/completions`,
+  see `docs/server-api.md`), and the server leaves a marked message out of memory
+  recall and the log's user line. Clients that do not send the field are
+  unaffected.
 - **Setup no longer fails with "Failed to build `tokenizers`" on a computer
   without a Rust compiler.** A new huggingface-hub release (2.0) made setup
   pick an old version of tokenizers that has to be compiled from source.
