@@ -118,6 +118,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A web search or page read in the GUI chat no longer pulls unrelated long-term
+  memories into the reply, and the session log no longer records the GUI's web
+  notes as something you said.** Search results, page text and notes such as
+  "[pending action] ..." reach the model as user-role messages, and their common
+  words ("answer", "results", "source") made loosely related facts count as
+  relevant; one web turn could go from 1 recalled memory to 6. The GUI now marks
+  those messages `origin: "tool"` (a new optional field on a chat message), and
+  the server builds the recall query and the logged user line only from what you
+  typed. API clients that do not send the field behave exactly as before.
 - **On Windows with an Intel GPU, HuggingFace models now load instead of failing
   with `[WinError 126]` and `Error loading "...\torch\lib\c10_xpu.dll" or one of
   its dependencies`.** The process that loads a HuggingFace model could not find
