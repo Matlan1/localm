@@ -181,18 +181,25 @@ class TestFindSiblingMmproj:
         assert find_sibling_mmproj(cydonia) == proj
         assert find_sibling_mmproj(mistral) is None
 
-    def test_projector_named_for_a_present_model_is_not_taken_by_another_architecture(
+    def test_a_vision_fine_tune_keeps_its_base_projector_beside_a_text_sibling(
             self, tmp_path):
-        """The projector names ``Mistral`` and the Mistral model in the folder has
-        another width; a model of another architecture still does not take it."""
-        qwen = _real_text_model_gguf(
-            tmp_path / "Qwen2.5-32B-Instruct-Q4_K_M.gguf", "qwen2", 5120)
-        mistral = _real_text_model_gguf(
-            tmp_path / "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", "llama", 4096)
-        _real_mmproj_gguf(
-            tmp_path / "mmproj-Mistral-Small-3.2-24B-Instruct-2506-f16.gguf", 5120)
-        assert find_sibling_mmproj(qwen) is None
-        assert find_sibling_mmproj(mistral) is None
+        """A Qwen2.5-VL fine-tune stored with the base model's projector, next to
+        a Qwen2.5 text model of another width and another architecture."""
+        ocr = _real_text_model_gguf(tmp_path / "olmOCR-7B-0725-Q4_K_M.gguf", "qwen2vl", 3584)
+        text = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-14B-Instruct-Q4_K_M.gguf", "qwen2", 5120)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf", 3584)
+        assert find_sibling_mmproj(ocr) == proj
+        assert find_sibling_mmproj(text) is None
+
+    def test_a_gemma_fine_tune_keeps_its_base_projector_beside_a_gemma_3n(self, tmp_path):
+        tiger = _real_text_model_gguf(
+            tmp_path / "Big-Tiger-Gemma-27B-v3-Q4_K_M.gguf", "gemma3", 5376)
+        gemma3n = _real_text_model_gguf(
+            tmp_path / "google_gemma-3n-E4B-it-Q4_K_M.gguf", "gemma3n", 2048)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-google_gemma-3-27b-it-f16.gguf", 5376)
+        assert find_sibling_mmproj(tiger) == proj
+        assert find_sibling_mmproj(gemma3n) is None
 
     def test_a_projector_is_never_paired_with_another_projector(self, tmp_path):
         first = _real_mmproj_gguf(tmp_path / "LLaMA3-8B_mmproj-Q4_1.gguf", 4096)
@@ -285,6 +292,16 @@ class TestGenericallyNamedProjector:
         proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
         assert find_sibling_mmproj(q4) == proj
         assert find_sibling_mmproj(q8) == proj
+
+    def test_quants_with_extended_quant_tags_get_it(self, tmp_path):
+        """IQ3_XXS, TQ1_0 and MXFP4_MOE are quantisation tags, not model names."""
+        q4 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q4_K_M.gguf", "llama", 4096)
+        iq3 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-IQ3_XXS.gguf", "llama", 4096)
+        tq1 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-TQ1_0.gguf", "llama", 4096)
+        mx = _real_text_model_gguf(tmp_path / "Yi-VL-6B-MXFP4_MOE.gguf", "llama", 4096)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        for model in (q4, iq3, tq1, mx):
+            assert find_sibling_mmproj(model) == proj, model.name
 
     def test_a_base_model_and_its_vision_variant_are_different_models(self, tmp_path):
         """``Yi-6B`` and ``Yi-VL-6B`` carry no name token of three characters and
@@ -460,6 +477,11 @@ _MODEL_NAMES = [
     ("llava-v1.6-mistral-7b.Q4_K_M.gguf", "llava"),
     ("Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf", "tiel"),
     ("mtp-Tiel-Coder-35B-A3B.gguf", "mtp"),
+    ("Yi-VL-6B-IQ3_XXS.gguf", ""),
+    ("ggml-model-IQ2_XXS.gguf", ""),
+    ("model-TQ1_0.gguf", ""),
+    ("ggml-model-MXFP4_MOE.gguf", ""),
+    ("gpt-oss-20b-MXFP4.gguf", "gpt"),
 ]
 
 
@@ -478,6 +500,9 @@ def test_name_identity_of_real_model_names(name, identity):
     ("gemma-3-4b-it-UD-Q4_K_XL.gguf", "gemmait"),
     ("Qwen2.5-VL-7B-Instruct.i1-Q4_K_M.gguf", "qwen2vlinstruct"),
     ("big-model-Q4_K_M-00001-of-00003.gguf", "big"),
+    ("Yi-VL-6B-IQ3_XXS.gguf", "yivl"),
+    ("Yi-VL-6B-TQ1_0.gguf", "yivl"),
+    ("Yi-VL-6B-MXFP4_MOE.gguf", "yivl"),
 ])
 def test_name_residue(name, residue):
     from localm.model_manager.registry import _name_residue

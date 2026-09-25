@@ -447,15 +447,24 @@ _GENERIC_NAME_WORDS = frozenset({
     "image"})
 
 
+# A quantisation or precision tag as a whole name segment, with an unsloth
+# "ud-" or mradermacher "i1-" prefix.
+_QUANT_TAG_RE = re.compile(
+    r"(?<![a-z0-9])(?:ud-|i1-)?"
+    r"(?:t?i?q\d+(?:_[a-z0-9]+)*|mxfp\d+(?:_[a-z0-9]+)*|b?f\d+|fp\d+)(?![a-z0-9])")
+
+
 def _name_identity(name: str) -> str:
     """The first token of the GGUF file name *name* that can name a model, or
     ``""`` when it has none: ``"qwen3"`` for ``mmproj-Qwen3.8-27B-F16.gguf``,
     ``""`` for ``mmproj-F16.gguf``, ``mmproj-model-f16.gguf`` and
-    ``q4_k_m.gguf``. A token counts when it is at least
+    ``q4_k_m.gguf``. Quantisation and precision tags (``_QUANT_TAG_RE``) are
+    removed first; a token then counts when it is at least
     ``_MIN_SIBLING_TOKEN_LEN`` characters long, is not in
     ``_GENERIC_NAME_WORDS`` and does not fully match
     ``_GENERIC_NAME_TOKEN_RE``."""
-    for token in re.split(r"[^a-z0-9]+", name.lower().replace("mmproj", " ")):
+    text = _QUANT_TAG_RE.sub(" ", name.lower().replace("mmproj", " "))
+    for token in re.split(r"[^a-z0-9]+", text):
         if (len(token) >= _MIN_SIBLING_TOKEN_LEN and token not in _GENERIC_NAME_WORDS
                 and not _GENERIC_NAME_TOKEN_RE.fullmatch(token)):
             return token
@@ -467,10 +476,6 @@ def _squashed(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-# A quantisation or precision tag as a whole name segment, with an unsloth
-# "ud-" or mradermacher "i1-" prefix; and a split GGUF part suffix.
-_QUANT_TAG_RE = re.compile(
-    r"(?<![a-z0-9])(?:ud-|i1-)?(?:t?i?q\d+(?:_[a-z0-9]+)*|b?f\d+|fp\d+)(?![a-z0-9])")
 _SPLIT_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}")
 
 
@@ -541,9 +546,8 @@ def _pick_mmproj_candidate(model_name: str, names: List[str], *,
     (:func:`_name_token`) is empty, never pairs. Among candidates containing
     that token, the only one is picked, and two or more give None. Otherwise a
     lone candidate is picked when its model name (:func:`_name_identity`) occurs
-    in *model_name*, and refused when that name occurs in one of *others*,
-    unless the width of every such model rules it out (:func:`_may_use`) and
-    one of them has *model_name*'s architecture. A lone candidate still
+    in *model_name*, and refused when that name occurs in one of *others* whose
+    width does not rule it out (:func:`_may_use`). A lone candidate still
     unpaired, one named for no model at hand or for none at all, is picked
     unless one of *others* could use it: a model with a readable architecture
     that its width does not rule out, and that is not the same model, meaning
@@ -567,9 +571,7 @@ def _pick_mmproj_candidate(model_name: str, names: List[str], *,
     fit = fit or (lambda _name: _GgufFit())
     proj, model = fit(lone), fit(model_name)
     named = [fit(other) for other in others if identity and identity in _squashed(other)]
-    if named and (any(_may_use(o, proj) for o in named)
-                  or not any(model.architecture and o.architecture == model.architecture
-                             for o in named)):
+    if any(_may_use(o, proj) for o in named):
         return None
     if not _may_use(model, proj):
         return lone
