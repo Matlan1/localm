@@ -41,8 +41,11 @@ class PeerCoderBackend:
     ``_peer_unusable`` accepts; then the instance is dropped from *engines*,
     the model is loaded here and pinned until ``release()``, and that call and
     every later one are answered by this server's own copy. No switch happens
-    after ``cancel()`` or ``release()``. Any other attribute is the current
+    after ``cancel()`` or ``release()``. A sub-agent cannot ask for a
+    different model on this backend. Any other attribute is the current
     backend's."""
+
+    supports_model_override = False
 
     def __init__(self, engines: EngineCache, name: str, peer, http) -> None:
         self._engines = engines

@@ -584,6 +584,35 @@ class TestCoderTaskOnAPeer:
             backend.chat([{"role": "user", "content": "hi"}])
         assert engines.made == {} and backend.local_engine is None
 
+    def test_a_sub_agent_cannot_point_this_installs_key_at_the_peer(
+            self, reg, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from localm.plugins.coder.backends.http import HTTPBackend
+        from localm.plugins.coder.tools import agents
+        from localm.plugins.mcpserver.tools.media_coder import PeerCoderBackend
+        p = _Peer()
+        _advertise(reg, tmp_path, monkeypatch, p)
+        engines = _cache(lazy=True, share_loaded=True)
+        peer_engine = engines.get_chat("plain")
+        backend = PeerCoderBackend(engines, "plain", peer_engine, HTTPBackend(
+            peer_engine._base, model="their-plain", localm_server=True))
+        built = []
+
+        def make_localm_backend(model, port=8642, **kw):
+            built.append((model, port))
+            raise RuntimeError("no backend is built in this test")
+        monkeypatch.setattr("localm.plugins.coder.backends.http.make_localm_backend",
+                            make_localm_backend)
+        try:
+            child, result = agents._prepare_child(
+                tmp_path, "task", "child", None, "other-model", 5, None,
+                SimpleNamespace(backend=backend), confirm_handler=None, tool="spawn_agent")
+        except Exception as e:
+            child, result = None, e
+        assert built == [], "a backend carrying this install's key was aimed at the peer's port"
+        assert child is None and "not available" in result.output
+
     def test_a_stream_that_cannot_reach_the_peer_is_answered_here(
             self, reg, tmp_path, monkeypatch):
         from localm.plugins.coder.backends.http import HTTPBackend
