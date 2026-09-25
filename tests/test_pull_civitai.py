@@ -456,6 +456,26 @@ class TestPullCivitaiFileResume:
         assert ok is True
         assert store["char"]["sha256"] == _digest(body)
 
+    def test_a_restart_over_another_files_partial_reports_progress_from_zero(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        import json
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        _interrupt_pull(monkeypatch, self._resolved(source_tag="civitai:111"),
+                        dest_dir, _V1, 12, version_id="111")
+        capsys.readouterr()
+        monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
+
+        ok = _civitai_pull(monkeypatch, self._resolved(), dest_dir, _RangeServer(_V2),
+                           version_id="222")
+
+        out = capsys.readouterr().out
+        events = [json.loads(line.split(mm.PROGRESS_SENTINEL, 1)[1])
+                  for line in out.splitlines() if mm.PROGRESS_SENTINEL in line]
+        downloads = [e for e in events if e.get("phase") == "download"]
+        assert downloads, f"no download progress was reported: {out!r}"
+        assert downloads[0]["downloaded"] == 0, downloads
+        assert ok is True
+
     def test_a_restart_that_cannot_truncate_leaves_no_record_beside_the_old_bytes(
             self, fake_registry, tmp_path, monkeypatch):
         dest_dir = tmp_path / "comfyui-models" / "loras"

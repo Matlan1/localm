@@ -2674,9 +2674,13 @@ def _pull_civitai_file_locked(
         except OSError:
             return 0
 
+    try:
+        f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
+    except OSError as e:
+        console.print(f"[red]Download failed:[/red] {escape(str(e))}")
+        return False
     with _snapshot_progress(_part_bytes, total_display) as _prog:
         try:
-            f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
             with f:
                 for chunk in r.iter_content(65536):
                     f.write(chunk)
