@@ -817,11 +817,12 @@ export function* _topLevelObjects(text) {
 }
 
 /** Normalise a parsed object to a {name, args} web call, or null. Accepts the
- *  OpenAI "arguments" alias for "args". */
+ *  OpenAI "arguments" and the Llama 3 "parameters" aliases for "args". */
 export function _asWebCall(obj) {
   if (!obj || typeof obj.name !== "string" || !_WEB_TOOLS.has(obj.name)) return null;
   const args = (obj.args && typeof obj.args === "object") ? obj.args
              : (obj.arguments && typeof obj.arguments === "object") ? obj.arguments
+             : (obj.parameters && typeof obj.parameters === "object") ? obj.parameters
              : {};
   return { name: obj.name, args };
 }

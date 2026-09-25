@@ -293,6 +293,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   longer ends the turn with "(no reply text)".** When a thinking model writes
   its web search inside its thoughts, the search now runs; when it only plans
   one there and stops, the chat asks it once to make the call or answer.
+- **Tool calls written the Llama 3 way, with `"parameters"` instead of
+  `"args"`, now keep their arguments** in the chat, scheduled jobs and the
+  coder. Before, such a web search ran with an empty query and a coder tool
+  call arrived with no arguments at all.
 - **Chat plugins no longer treat a failed generation as a completed turn.**
   Memory consolidation is not scheduled after a failed reply, and the audit
   log and transcript record that the generation ended in an error or a
