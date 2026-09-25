@@ -771,16 +771,38 @@ def _data_dirs(root: Path, m: Optional[dict]) -> list:
     portable = root / PORTABLE_HOME
     if portable.is_dir():
         add(str(portable), "owned", None, [], False)
-    cfg = root / HOME_CFG_NAME
-    if cfg.is_file():
-        try:
-            line = cfg.read_text(encoding="utf-8").strip().splitlines()
-            line = line[0].strip() if line else ""
-        except (OSError, ValueError):
-            line = ""
-        if line and os.path.isabs(os.path.expanduser(line)):
-            add(_plain_abs(line), "entries", None, [], False)
+    line = _cfg_data_dir(root)
+    if line and os.path.isabs(os.path.expanduser(line)):
+        add(_plain_abs(line), "entries", None, [], False)
     return out
+
+
+def _read_cfg_line(path: Path) -> str:
+    """The first line of a ``localm-home.cfg``: UTF-8 (with or without a BOM),
+    or on Windows, when that fails, the console (OEM) code page that cmd.exe's
+    ``echo`` writes. Raises OSError or ValueError when it cannot be read."""
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        if sys.platform != "win32":
+            raise
+        import ctypes
+        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
+    lines = text.strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _cfg_data_dir(root: Path) -> str:
+    """The data folder ``localm-home.cfg`` names, or "" when there is none or
+    it cannot be read (_plan reports the unreadable case)."""
+    cfg = root / HOME_CFG_NAME
+    if not cfg.is_file():
+        return ""
+    try:
+        return _read_cfg_line(cfg)
+    except (OSError, ValueError, LookupError):
+        return ""
 
 
 def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
@@ -890,6 +912,14 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
         items.append(_Item(desktop, "file", "warn", "not in the install record"))
 
     # The user's saved data.
+    cfg = root / HOME_CFG_NAME
+    if cfg.is_file():
+        try:
+            _read_cfg_line(cfg)
+        except (OSError, ValueError, LookupError) as e:
+            items.append(_Item(cfg, "data", "warn",
+                               f"cannot read it ({e}); the data folder it names "
+                               "was not checked"))
     for d, mode, pre, parents, recorded in _data_dirs(root, m):
         dp = Path(d)
         if not dp.exists():

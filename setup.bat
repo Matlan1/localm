@@ -390,6 +390,32 @@ setlocal DisableDelayedExpansion
 endlocal
 :venv_done
 
+rem ---- choose where data lives ----------------------------------------------
+rem  Asked before anything writes data: setup-llama records its builds in this
+rem  folder. See test_data_folder_is_chosen_before_the_runtime_is_provisioned.
+rem  Default is CONTAINED (.\home): there is NO silent ~/.localm fallback. Anyone
+rem  who wants a shared / other location picks Custom, and it is recorded
+rem  explicitly in localm-home.cfg (asked + recorded, never guessed).
+echo.
+echo  Where should localm keep its data (models, config, logs, images)?
+echo    [1] Portable (.\home) - self-contained; delete this folder and it is all gone
+echo    [2] Custom path       - a folder you choose (e.g. a shared models drive)
+rem  set /p (type a number, then Enter), NOT `choice`: `choice` returns on a single
+rem  keypress, so the user's habitual confirming Enter used to leak into the custom
+rem  path's set /p below and be read as an empty path (SETUP-2). With set /p the
+rem  Enter belongs to THIS prompt, so the path prompt starts clean.
+set "DATAPICK="
+call :flush
+set /p "DATAPICK=  Pick 1 or 2 [1]: "
+if not defined DATAPICK set "DATAPICK=1"
+rem  Single-line `if ... call` into goto/label subroutines (defined at the end):
+rem  a `call` plus nested if/else INSIDE an `if (...)` block trips cmd.exe's
+rem  parenthesis parser ("The syntax of the command is incorrect."), so keep the
+rem  data-folder flow out of blocks entirely. Both subroutines create the folder
+rem  through install_manifest prepare-data, which records it for uninstall.
+if "%DATAPICK%"=="2" call :do_custom_home
+if not "%DATAPICK%"=="2" call :portable_home
+
 rem ---- browser tab or standalone app window? ---------------------------------
 rem  Decides whether the `desktop` extra (pywebview) gets installed at all - a
 rem  NEW dependency (pythonnet) every fresh install would otherwise take on
@@ -583,30 +609,6 @@ if /i "%BACKEND%"=="own" (
         exit /b 1
     )
 )
-
-rem ---- choose where data lives ----------------------------------------------
-rem  Default is CONTAINED (.\home): there is NO silent ~/.localm fallback. Anyone
-rem  who wants a shared / other location picks Custom, and it is recorded
-rem  explicitly in localm-home.cfg (asked + recorded, never guessed).
-echo.
-echo  Where should localm keep its data (models, config, logs, images)?
-echo    [1] Portable (.\home) - self-contained; delete this folder and it is all gone
-echo    [2] Custom path       - a folder you choose (e.g. a shared models drive)
-rem  set /p (type a number, then Enter), NOT `choice`: `choice` returns on a single
-rem  keypress, so the user's habitual confirming Enter used to leak into the custom
-rem  path's set /p below and be read as an empty path (SETUP-2). With set /p the
-rem  Enter belongs to THIS prompt, so the path prompt starts clean.
-set "DATAPICK="
-call :flush
-set /p "DATAPICK=  Pick 1 or 2 [1]: "
-if not defined DATAPICK set "DATAPICK=1"
-rem  Single-line `if ... call` into goto/label subroutines (defined at the end):
-rem  a `call` plus nested if/else INSIDE an `if (...)` block trips cmd.exe's
-rem  parenthesis parser ("The syntax of the command is incorrect."), so keep the
-rem  data-folder flow out of blocks entirely. Both subroutines create the folder
-rem  through install_manifest prepare-data, which records it for uninstall.
-if "%DATAPICK%"=="2" call :do_custom_home
-if not "%DATAPICK%"=="2" call :portable_home
 
 rem ---- build the native LocaLM.exe launcher ---------------------------------
 rem  So the running server shows as LocaLM.exe in Task Manager (not python.exe)

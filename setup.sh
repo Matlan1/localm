@@ -544,6 +544,51 @@ else
   create_venv
 fi
 
+# ---- data directory ---------------------------------------------------------
+# Asked before anything writes data: setup-llama records its builds in this
+# folder. See test_data_folder_is_chosen_before_the_runtime_is_provisioned.
+# Default is CONTAINED (./home): NO silent ~/.localm fallback. A shared / other
+# location is an explicit Custom choice, recorded in localm-home.cfg.
+say ""
+say "  Where should localm keep its data (models, config, logs, images)?"
+say "    [1] Portable (./home) - self-contained; delete this folder and it is all gone"
+say "    [2] Custom path       - a folder you choose (e.g. a shared models drive)"
+dpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+# install_manifest prepare-data creates the folder, points localm-home.cfg at it
+# (or removes that file for ./home) and records it for uninstall, noting what
+# was already in a folder that existed.
+portable_home() {
+  if ! .venv/bin/python -m localm.install_manifest prepare-data --root . --portable; then
+    mkdir -p home; rm -f localm-home.cfg
+    say "  [!] Could not record the data folder; created ./home anyway."
+  fi
+}
+if [ "$dpick" = 2 ]; then
+  # Custom path: ask, then confirm (re-ask until confirmed, or until prepare-data
+  # accepts it). In --yes mode there is no prompt, so an unconfirmed path is never
+  # recorded - fall back to portable.
+  CUSTOMHOME=""
+  if [ "$YES" != 1 ]; then
+    while : ; do
+      CUSTOMHOME="$(ask "  Enter the data directory path (blank = portable ./home): " "")"
+      if [ -z "$CUSTOMHOME" ]; then break; fi
+      ok="$(ask "  Use '$CUSTOMHOME'? [Y/n]: " Y)"
+      case "$ok" in [Nn]*) continue ;; esac
+      if .venv/bin/python -m localm.install_manifest prepare-data --root . \
+          --data-dir "$CUSTOMHOME"; then
+        say "  (recorded in localm-home.cfg)"
+        break
+      fi
+    done
+  fi
+  if [ -z "$CUSTOMHOME" ]; then
+    say "  No path given - using the portable ./home."
+    portable_home
+  fi
+else
+  portable_home
+fi
+
 # ---- browser tab or standalone app window? -----------------------------------
 # Decides whether the `desktop` extra (pywebview) gets installed at all - a NEW
 # dependency every fresh install would otherwise take on unasked (pythonnet on
@@ -763,49 +808,6 @@ else
   say "    NVIDIA CUDA:       uv pip install -p .venv ${cudaspec:-torch torchvision --torch-backend=cu126}"
   say "    AMD ROCm (Linux):  uv pip install -p .venv torch torchvision --torch-backend=rocm6.2"
   say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --torch-backend=xpu"
-fi
-
-# ---- data directory ---------------------------------------------------------
-# Default is CONTAINED (./home): NO silent ~/.localm fallback. A shared / other
-# location is an explicit Custom choice, recorded in localm-home.cfg.
-say ""
-say "  Where should localm keep its data (models, config, logs, images)?"
-say "    [1] Portable (./home) - self-contained; delete this folder and it is all gone"
-say "    [2] Custom path       - a folder you choose (e.g. a shared models drive)"
-dpick="$(ask "  Pick 1 or 2 [1]: " 1)"
-# install_manifest prepare-data creates the folder, points localm-home.cfg at it
-# (or removes that file for ./home) and records it for uninstall, noting what
-# was already in a folder that existed.
-portable_home() {
-  if ! .venv/bin/python -m localm.install_manifest prepare-data --root . --portable; then
-    mkdir -p home; rm -f localm-home.cfg
-    say "  [!] Could not record the data folder; created ./home anyway."
-  fi
-}
-if [ "$dpick" = 2 ]; then
-  # Custom path: ask, then confirm (re-ask until confirmed, or until prepare-data
-  # accepts it). In --yes mode there is no prompt, so an unconfirmed path is never
-  # recorded - fall back to portable.
-  CUSTOMHOME=""
-  if [ "$YES" != 1 ]; then
-    while : ; do
-      CUSTOMHOME="$(ask "  Enter the data directory path (blank = portable ./home): " "")"
-      if [ -z "$CUSTOMHOME" ]; then break; fi
-      ok="$(ask "  Use '$CUSTOMHOME'? [Y/n]: " Y)"
-      case "$ok" in [Nn]*) continue ;; esac
-      if .venv/bin/python -m localm.install_manifest prepare-data --root . \
-          --data-dir "$CUSTOMHOME"; then
-        say "  (recorded in localm-home.cfg)"
-        break
-      fi
-    done
-  fi
-  if [ -z "$CUSTOMHOME" ]; then
-    say "  No path given - using the portable ./home."
-    portable_home
-  fi
-else
-  portable_home
 fi
 
 # ---- build the native LocaLM launcher ---------------------------------------

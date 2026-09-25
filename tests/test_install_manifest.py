@@ -321,6 +321,32 @@ def test_pointer_file_names_a_data_folder_the_record_does_not(tmp_path):
     assert not (other / "registry.json").exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the console code page is Windows-only")
+def test_pointer_file_in_the_console_code_page_is_read(tmp_path):
+    """An older setup.bat wrote localm-home.cfg with cmd's echo, in the OEM
+    code page, so a non-ASCII folder name is not valid UTF-8 there."""
+    import ctypes
+    oem = f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    other = tmp_path / "données"
+    other.mkdir()
+    (other / "registry.json").write_text("{}", encoding="utf-8")
+    (other / "family.mp4").write_text("x", encoding="utf-8")
+    raw = (str(other) + "\r\n").encode(oem)
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+    (tmp_path / "localm-home.cfg").write_bytes(raw)
+    im.uninstall(tmp_path, purge_data=True, force=True)
+    assert (other / "family.mp4").exists()
+    assert not (other / "registry.json").exists()
+
+
+def test_an_unreadable_pointer_file_is_reported(tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    (tmp_path / "localm-home.cfg").write_bytes(b"/data/\xff\xfe\n")
+    rep = im.uninstall(tmp_path, purge_data=True, dry_run=True)
+    assert any("cannot read it" in why for _, why in rep["warned"]), rep["warned"]
+
+
 def test_kept_data_is_reported_with_its_size(tmp_path):
     im.prepare_data(tmp_path, portable=True)
     (tmp_path / "home" / "big.bin").write_bytes(b"x" * 2048)

@@ -338,6 +338,22 @@ def build_steps(plan: Plan) -> List[Step]:
             emit(f"[!] could not record the environment yet: {e}")
     steps.append(Step("Creating the Python environment", venv))
 
+    # Runs before anything writes data: setup-llama records its builds in this
+    # folder. See test_data_folder_is_chosen_before_the_runtime_is_provisioned.
+    def data_dir(emit):
+        # prepare_data creates the folder before writing localm-home.cfg, and
+        # records it for uninstall with what was already in it.
+        try:
+            if plan.portable_data:
+                target = install_manifest().prepare_data(ROOT, portable=True)
+            else:
+                target = install_manifest().prepare_data(ROOT, data_dir=plan.data_path)
+        except (OSError, ValueError) as e:
+            raise StepFailed(f"could not use that data folder: {e}")
+        state["data_dir"] = str(target)
+        emit(f"Data directory: {target}" + (" (portable)" if plan.portable_data else ""))
+    steps.append(Step("Recording where data lives", data_dir))
+
     def install_localm(emit):
         _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
              emit, plan)
@@ -377,20 +393,6 @@ def build_steps(plan: Plan) -> List[Step]:
             _run([str(venv_bin(ROOT) / "localm"), "setup-llama",
                   "--backend", plan.backend, "--yes"], emit, plan)
         steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision))
-
-    def data_dir(emit):
-        # prepare_data creates the folder before writing localm-home.cfg, and
-        # records it for uninstall with what was already in it.
-        try:
-            if plan.portable_data:
-                target = install_manifest().prepare_data(ROOT, portable=True)
-            else:
-                target = install_manifest().prepare_data(ROOT, data_dir=plan.data_path)
-        except (OSError, ValueError) as e:
-            raise StepFailed(f"could not use that data folder: {e}")
-        state["data_dir"] = str(target)
-        emit(f"Data directory: {target}" + (" (portable)" if plan.portable_data else ""))
-    steps.append(Step("Recording where data lives", data_dir))
 
     def launcher(emit):
         _run([str(venv_python(ROOT)), "-m", "localm", "make-launcher",
