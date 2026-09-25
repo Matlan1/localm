@@ -61,6 +61,44 @@ class TestReadFileSlicing:
         assert r.ok and "hello" in r.output and not r.truncated
 
 
+class TestReadFileTruncationNamesTheMissingLines:
+    """A read cut to its head and tail says exactly which lines did not
+    arrive, so the next read can go straight to them instead of the model
+    filling the gap in from memory."""
+
+    @pytest.fixture
+    def forty(self, tmp_path):
+        # 1000 lines of exactly 40 characters: the 4000-character head and
+        # tail _truncate keeps end and start exactly on line boundaries.
+        text = "".join(f"line {i:04d}".ljust(39, ".") + "\n" for i in range(1, 1001))
+        (tmp_path / "f.txt").write_text(text, encoding="utf-8")
+        return tmp_path
+
+    def test_full_read_names_the_missing_range(self, forty):
+        r = tool_read_file(forty, "f.txt")
+        assert r.truncated
+        assert "line 0100" in r.output and "line 0901" in r.output
+        assert "line 0101" not in r.output.split("[file truncated")[0]
+        assert "lines 101-900 of 1001 are missing" in r.output
+        assert "offset=101" in r.output
+        assert "re-read specific parts" in r.output
+
+    def test_a_cut_inside_a_line_counts_that_line_as_missing(self, tmp_path):
+        text = "".join(f"line {i:04d}".ljust(47, ".") + "\n" for i in range(1, 1001))
+        (tmp_path / "g.txt").write_text(text, encoding="utf-8")
+        r = tool_read_file(tmp_path, "g.txt")
+        # 48-character lines: the 4000-character head stops 16 characters into
+        # line 84, and the tail (from character 44000) starts 32 characters
+        # into line 917, so both of those lines are cut short.
+        assert "lines 84-917 of 1001 are missing" in r.output
+
+    def test_a_truncated_slice_names_file_line_numbers(self, forty):
+        r = tool_read_file(forty, "f.txt", offset=200, limit=400)
+        assert r.truncated
+        assert "lines 300-499 of 1001 are missing" in r.output
+        assert "offset=300" in r.output
+
+
 # ---------------------------------------------------------------------------
 #  grep truncation markers
 # ---------------------------------------------------------------------------

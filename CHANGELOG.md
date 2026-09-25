@@ -308,6 +308,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   thoughts, because the grammar lets nothing follow the call, not even the
   end of the thoughts. The call was never run and the reply was empty, which
   the coder then accepted as its final answer.
+- **When the coder reads a file too large to show in full, it is now told
+  exactly which lines it did not get** (`lines 103-990 of 1085 are
+  missing...`), with the `offset` to read them from. Before, it only saw a
+  character count, and a slice read that was cut short carried no notice at
+  all.
 - **Chat plugins no longer treat a failed generation as a completed turn.**
   Memory consolidation is not scheduled after a failed reply, and the audit
   log and transcript record that the generation ended in an error or a
