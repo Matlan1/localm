@@ -315,6 +315,13 @@ class EngineCache:
                 self.drop_peer(name)
             return self._loaded(name, self.get_chat(name))
 
+    def get_loaded(self, name: str):
+        """This server's own engine for *name* (see get), loaded before it is
+        returned; one that fails to load is removed from the cache and the
+        load error raised."""
+        with self._lock:
+            return self._loaded(name, self.get(name))
+
     def load_here_instead_of(self, name: str, peer):
         """This server's own engine for *name*, loaded and pinned (release it
         with unpin()), in place of *peer*, another instance's copy that can no
@@ -323,7 +330,7 @@ class EngineCache:
         with self._lock:
             if self._peers.get(name) is peer:
                 self.drop_peer(name)
-            engine = self._loaded(name, self.get(name))
+            engine = self.get_loaded(name)
             self.pin(engine)
             return engine
 

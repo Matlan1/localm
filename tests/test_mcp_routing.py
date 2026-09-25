@@ -99,6 +99,18 @@ def reg(tmp_path, monkeypatch):
     return registry, img, tmp_path
 
 
+def _add_seer2(reg, **extra):
+    """A second vision model, seer2, with its own recorded projector."""
+    registry, _, tmp_path = reg
+    (tmp_path / "seer2").mkdir()
+    (tmp_path / "seer2" / "seer2.gguf").write_bytes(b"GGUF" + b"seer2" * 8)
+    proj = tmp_path / "seer2" / "seer2-mmproj.gguf"
+    proj.write_bytes(b"GGUF")
+    registry["seer2"] = {"path": str(tmp_path / "seer2" / "seer2.gguf"),
+                         "source": "local", "model_type": "llm", "mmproj": str(proj),
+                         **extra}
+
+
 def _cache(lazy=False, **kw):
     made = {}
     kind = _LazyEngine if lazy else _Engine
@@ -164,6 +176,28 @@ class TestChatRouting:
         f.write_text("hi")
         res = _call(_cache(), "chat", {"prompt": "x", "images": [str(f)]})
         assert res["isError"] is True
+
+    def test_a_candidate_that_fails_to_load_is_not_kept_as_resident(self, reg):
+        _, img, _ = reg
+        _add_seer2(reg)
+        loads = []
+
+        class Counted(_LazyEngine):
+            def load(self):
+                loads.append(self.display_name)
+                super().load()
+
+        made = {}
+
+        def factory(name):
+            return made.setdefault(name, Counted(
+                name, images=name.startswith("seer"), fails_to_load=(name == "seer")))
+        engines = EngineCache("plain", engine_factory=factory)
+        for _ in range(3):
+            res = _call(engines, "chat", {"prompt": "what is this?", "images": [str(img)]})
+            assert res["content"][0]["text"] == "reply-from-seer2"
+        assert engines.resident == ["seer2"], "a model that failed to load is listed as resident"
+        assert loads == ["seer", "seer2"], "the model that failed to load was loaded again"
 
 
 class TestCoderRouting:
@@ -261,14 +295,7 @@ class TestCoderRouting:
 
     def test_a_fallback_names_what_the_candidate_that_answers_lacks(self, reg):
         from localm.plugins.mcpserver.tools.media_coder import coder_engine
-        registry, img, tmp_path = reg
-        (tmp_path / "seer2").mkdir()
-        (tmp_path / "seer2" / "seer2.gguf").write_bytes(b"GGUF" + b"seer2" * 8)
-        proj = tmp_path / "seer2" / "seer2-mmproj.gguf"
-        proj.write_bytes(b"GGUF")
-        registry["seer2"] = {"path": str(tmp_path / "seer2" / "seer2.gguf"),
-                             "source": "local", "model_type": "llm",
-                             "mmproj": str(proj), "tool_use": True}
+        _add_seer2(reg, tool_use=True)
         made = {}
 
         def factory(name):
