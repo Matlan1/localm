@@ -327,6 +327,36 @@ class TestAmbiguityNeverCrossAttaches:
         assert ok is True
         assert "mmproj" not in store["main"]
 
+    def test_lone_projector_named_for_another_model_in_the_repo_stays_unattached(
+            self, fake_registry, monkeypatch):
+        store, _ = fake_registry
+        _wire_repo_listing(monkeypatch, [
+            "modelA.gguf", "modelB.gguf", "mmproj-modelB-f16.gguf"])
+        downloaded = _wire_download(monkeypatch, {"mmproj-modelB-f16.gguf": _CLIP_BYTES})
+
+        ok = mm._pull_gguf_file("o/r:modelA.gguf", None)
+
+        assert ok is True
+        assert "mmproj" not in store["modelA"]
+        assert "mmproj-modelB-f16.gguf" not in downloaded
+
+
+class TestGenericallyNamedRepoProjector:
+    def test_generic_projector_beside_several_quants_is_attached(
+            self, fake_registry, monkeypatch):
+        """The lmstudio-community layout: quants of one model and a lone
+        mmproj-model-f16.gguf."""
+        store, models_dir = fake_registry
+        _wire_repo_listing(monkeypatch, [
+            "gemma-3-4b-it-Q4_K_M.gguf", "gemma-3-4b-it-Q8_0.gguf", "mmproj-model-f16.gguf"])
+        _wire_download(monkeypatch, {"mmproj-model-f16.gguf": _CLIP_BYTES})
+
+        ok = mm._pull_gguf_file("o/r:gemma-3-4b-it-Q4_K_M.gguf", None)
+
+        assert ok is True
+        assert store["gemma-3-4b-it-Q4_K_M"]["mmproj"] == str(
+            (models_dir / "mmproj-model-f16.gguf").resolve())
+
 
 class TestVerificationRejectsBadCandidate:
     def test_non_clip_candidate_is_not_attached(self, fake_registry, monkeypatch, capsys):
@@ -643,8 +673,18 @@ class TestSyncModelsDirBackfillsExistingEntry:
         store, models_dir = fake_registry
         for i in range(5):
             self._preexisting_entry(store, models_dir, name=f"m{i}", source=f"hf:o/r{i}")
-        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
-        _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
+
+        class _PerRepoHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                i = repo_id[len("o/r"):]
+                return [f"m{i}.gguf", f"mmproj-m{i}-f16.gguf"]
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _PerRepoHfApi)
+        _wire_download(monkeypatch, {f"mmproj-m{i}-f16.gguf": _CLIP_BYTES for i in range(5)})
 
         result = mm.sync_models_dir()
 
