@@ -160,8 +160,7 @@ def coder_engine(engines: EngineCache, decision):
     load_errors = []
     for name in names:
         try:
-            with _quiet_stdout():
-                engine = engines.get_loaded_chat(name)
+            engine = engines.get_loaded_chat(name)
         except Exception as e:
             load_errors.append(f"{name}: {e}")
             _srv._log(f"warning: could not load {name} for a coder task: {e}")
@@ -169,11 +168,47 @@ def coder_engine(engines: EngineCache, decision):
         if name != decision.resolved:
             decision = decision.answered_by(name)
         return engine, name, decision
-    with _quiet_stdout():
-        engine = engines.get_loaded_chat(decision.current)
+    engine = engines.get_loaded_chat(decision.current)
     if decision.routed:
         decision = decision.without_route(load_errors)
     return engine, decision.current, decision
+
+
+class _OutOfBudget(Exception):
+    """A step of a coder task was still running when its budget ran out."""
+
+
+def _within(budget: float, fn, *args):
+    """``fn(*args)`` run on a worker thread for at most *budget* seconds:
+    its result, or what it raised. Raises _OutOfBudget when it is still
+    running at the deadline; it then runs to completion on its own, and a
+    failure it raises after that is logged."""
+    box: dict = {}
+    lock = threading.Lock()
+
+    def _work():
+        try:
+            result = fn(*args)
+        except BaseException as e:     # noqa: BLE001
+            with lock:
+                box["error"] = e
+                late = box.get("abandoned", False)
+            if late:
+                _srv._log(f"warning: a coder task step failed after its budget ran out: {e}")
+            return
+        with lock:
+            box["result"] = result
+
+    worker = threading.Thread(target=_work, name="coder-task-load", daemon=True)
+    worker.start()
+    worker.join(max(0.0, budget))
+    with lock:
+        if "result" not in box and "error" not in box:
+            box["abandoned"] = True
+            raise _OutOfBudget()
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def build(engines: EngineCache) -> Dict[str, dict]:
@@ -326,7 +361,16 @@ def build(engines: EngineCache) -> Dict[str, dict]:
         except ValueError as e:
             return _text_result(str(e), is_error=True)
         try:
-            engine, model_name, decision = coder_engine(engines, decision)
+            # Output printed while loading goes to stderr, not to the JSON-RPC
+            # stream on stdout.
+            with _quiet_stdout():
+                engine, model_name, decision = _within(
+                    timeout - (time.monotonic() - started), coder_engine, engines, decision)
+        except _OutOfBudget:
+            return _text_result(
+                f"coder task timed out after {timeout:g}s before it could start: "
+                "loading the model used the whole budget; it goes on loading",
+                is_error=True)
         except ValueError as e:
             return _text_result(str(e), is_error=True)
         except Exception as e:
