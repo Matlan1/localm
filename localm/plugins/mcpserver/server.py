@@ -228,9 +228,11 @@ class EngineCache:
                              f"Run 'localm list' to see registered models.")
         path, _hint = info
         from localm.model_manager import get_model_mmproj
-        return Engine(str(path), display_name=model_name,
-                      mmproj_path=get_model_mmproj(model_name,
-                                                   allow_direct_path=trusted))
+        from localm.model_manager.registry import get_operator_model_mmproj
+        mmproj = (get_operator_model_mmproj(self.default_model)
+                  if self._operator_supplied(model_name)
+                  else get_model_mmproj(model_name))
+        return Engine(str(path), display_name=model_name, mmproj_path=mmproj)
 
     def resolve_model(self, requested: Optional[str]) -> str:
         # A client-supplied name must be a registered one; the operator's own
