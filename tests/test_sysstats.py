@@ -59,6 +59,11 @@ def _reset_vram_cache(monkeypatch):
     monkeypatch.setattr(sysstats, "_vram_last_at", None)
     monkeypatch.setattr(sysstats, "_vram_inflight", False)
     monkeypatch.setattr(sysstats, "_vram_ready", threading.Event())
+    # Keeps _compute_vram()'s per-device native fallback a no-op for these
+    # aggregate-only tests. See TestPerDeviceVramAnyBackend below for the tests
+    # that exercise that fallback deliberately, with their own fake data.
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "native_device_inventory", lambda: [])
 
 
 def _wait_for_vram_cache(timeout=2.0):

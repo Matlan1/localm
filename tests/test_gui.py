@@ -742,7 +742,10 @@ class TestStatsEndpoint:
 
     def test_system_stats_never_raises_and_is_a_dict(self):
         from localm.sysstats import system_stats
-        stats = system_stats()                 # must not raise on any box
+        # wait_first_vram=True: blocks for the real probe (incl. its native
+        # per-device fallback) to actually land, so it cannot outlive this
+        # test as a background straggler - see _reset_vram_probe_cache.
+        stats = system_stats(wait_first_vram=True)  # must not raise on any box
         assert isinstance(stats, dict)
         # Whatever sections are present must have a sane shape.
         if "vram" in stats:
@@ -1142,8 +1145,13 @@ class TestStatsVramTrust:
         monkeypatch.setattr(sysstats, "_vram_last", None)
         monkeypatch.setattr(sysstats, "_vram_last_at", None)
         monkeypatch.setattr(sysstats, "_vram_inflight", False)
+        # Keeps _compute_vram()'s per-device native fallback a no-op here - see
+        # tests/test_sysstats.py's TestPerDeviceVramAnyBackend for the tests
+        # that exercise that fallback deliberately, with their own fake data.
         with patch("localm.discover.list_gpus",
-                   side_effect=_list_gpus_double([reading], status)):
+                   side_effect=_list_gpus_double([reading], status)), \
+             patch("localm.inference.backends.llamacpp._loader."
+                   "native_device_inventory", return_value=[]):
             with TestClient(app) as client:
                 r = client.get("/api/stats")           # kicks off the probe
                 assert r.status_code == 200
