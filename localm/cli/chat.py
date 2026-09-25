@@ -181,23 +181,22 @@ class _TurnRouter:
 
 def _build_cli_engine(name: str, *, n_ctx=None, n_gpu_layers=None, device=None,
                       mmproj=None):
-    """An unloaded in-process Engine for registered or direct-path model *name*,
-    with its recorded or sibling projector unless *mmproj* is given."""
+    """An unloaded in-process Engine for the registered model *name*, with its
+    recorded or sibling projector unless *mmproj* is given. Registry names
+    only: raises ValueError when *name* is not registered or its file is
+    gone."""
     from ..inference.engine import Engine
-    from ..model_manager import get_model_mmproj
-    from ..model_manager import load_registry as _reg
-    info = get_model_info(name, allow_direct_path=True)
+    from ..model_manager import get_model_info, get_model_mmproj
+    info = get_model_info(name)
     if info is None:
         raise ValueError(f"Model not found: {name}")
-    model_path, display_hint = info
-    display_name = name if name in _reg() else display_hint
     return Engine(
-        str(model_path),
-        mmproj_path=mmproj or get_model_mmproj(name, allow_direct_path=True),
+        str(info[0]),
+        mmproj_path=mmproj or get_model_mmproj(name),
         n_ctx=n_ctx,
         n_gpu_layers=n_gpu_layers,
         device=device,
-        display_name=display_name,
+        display_name=name,
     )
 
 

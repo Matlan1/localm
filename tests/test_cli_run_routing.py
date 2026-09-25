@@ -498,3 +498,24 @@ class TestLoadFailures:
         assert not engines["seer"].loaded
         assert plain.seen[-1][-1] == {"role": "user", "content": "ok"}
 
+
+class TestBuildCliEngine:
+    def test_a_routed_name_resolves_through_the_registry_only(self, reg, monkeypatch):
+        from pathlib import Path
+        registry, _ = reg
+        made = []
+        monkeypatch.setattr("localm.inference.engine.Engine",
+                            lambda path, **kw: made.append((path, kw)) or "engine")
+        assert chat_mod._build_cli_engine("seer") == "engine"
+        path, kw = made[0]
+        assert Path(path) == Path(registry["seer"]["path"])
+        assert Path(kw["mmproj_path"]) == Path(registry["seer"]["mmproj"])
+        assert kw["display_name"] == "seer"
+        refused = None
+        try:
+            chat_mod._build_cli_engine(registry["plain"]["path"])
+        except ValueError as e:
+            refused = e
+        assert made[1:] == [], "a path on disk that is not a registry name builds nothing"
+        assert refused is not None and "Model not found" in str(refused)
+
