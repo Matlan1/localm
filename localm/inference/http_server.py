@@ -4281,9 +4281,12 @@ def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> 
 
 
 def _last_user_text(messages: list) -> str:
-    """Text of the most recent user message (for the audit trail)."""
+    """Text of the most recent user message (for the audit trail). A row the
+    client marked with an ``origin`` (a GUI web tool event sent as user-role
+    text) is skipped: the audit line, and the session log memory consolidation
+    learns from, record only what the user wrote."""
     for m in reversed(messages):
-        if m.get("role") == "user":
+        if m.get("role") == "user" and not m.get("origin"):
             content = m.get("content")
             if isinstance(content, str):
                 return content
@@ -5311,7 +5314,9 @@ async def _complete(
 
 
 def _protocol_messages_to_dicts(messages: List[Message]) -> list:
-    """Convert Pydantic Message objects to plain dicts for backends."""
+    """Convert Pydantic Message objects to plain dicts for backends. A message's
+    ``origin`` marker, when set, is kept as an ``"origin"`` key; an unmarked
+    message has no such key."""
     result = []
     for msg in messages:
         if isinstance(msg.content, str):
@@ -5341,6 +5346,9 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
                         },
                     })
             result.append({"role": msg.role, "content": parts})
+        origin = getattr(msg, "origin", None)
+        if origin:
+            result[-1]["origin"] = origin
     return result
 
 

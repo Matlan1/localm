@@ -49,6 +49,15 @@ optional and additive: omit it and the request behaves exactly as before. A
 range can only disable special-token parsing over your own prompt, never
 enable it, and out-of-range values are clamped to the content length.
 
+A message may also carry `origin: "tool"` to say the client, not the user,
+wrote it: a tool result or a client note sent as a `user` message only because
+some chat templates require user/assistant alternation. localm then leaves that
+message out of what it treats as the user's own words: the long-term-memory
+recall query and the user line of the audit/session log (which memory
+consolidation learns from). The model still sees the message. The field is
+optional and additive: omit it and the request behaves exactly as before.
+"tool" is the only accepted value, and a response message never carries it.
+
 The response's assistant message (and, for a stream, the delta) also carries
 `reasoning_content`: the model's `<think>` reasoning, split out of the
 visible `content` when the model emitted one. Present only when there was

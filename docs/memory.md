@@ -190,7 +190,10 @@ In privacy mode, consolidation returns "skipped" and never calls the model.
 On each chat turn the memory plugin builds a recall query from your most recent
 message plus a short window of prior user turns (so an anaphoric follow-up like
 "yes, do that" still carries the earlier topic), ranks the store, and injects the
-top matches into the system message. Recalled facts are neutralised and wrapped
+top matches into the system message. Web search results, page reads and the
+GUI's notes to the model are sent as user-role messages marked `origin: "tool"`
+and are left out of that query, so a fetched page's wording does not pull in
+unrelated facts. Recalled facts are neutralised and wrapped
 in a fenced, labelled block marked as data, not instructions, so a memory that
 reads like a command is treated as context.
 
