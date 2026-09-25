@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Text-to-speech and speech-to-text offer a one-time download prompt instead of a
+  hard refusal when network access is off.** Settings also gained direct "download
+  the voice/speech model now" controls for both, so first-time setup no longer
+  depends on triggering a fetch some other way. If the voice model fails to load,
+  playback now falls back to the browser's own built-in voice instead of going
+  silent.
 - **The MCP `chat` tool takes `images`** (local image files or `data:image/...`
   URIs), and **`localm mcp --share-loaded-models`** lets the MCP server use a model
   another localm instance on this machine already has loaded instead of loading a
@@ -112,6 +118,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Setup no longer fails with "Failed to build `tokenizers`" on a computer
+  without a Rust compiler.** A new huggingface-hub release (2.0) made setup
+  pick an old version of tokenizers that has to be compiled from source.
+  Setup now keeps huggingface-hub below 2.0.
 - **`localm add`/`pull <folder> --store copy|move` no longer aborts partway through
   and leaves earlier models moved but unregistered when a vision projector's name
   collides with a file already in the models folder.** A byte-identical projector
@@ -608,6 +618,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   could keep; `pip install -U 'localm[grammar]'` now upgrades it. If xgrammar still fails to
   load, a grammar request on a HuggingFace-format model is refused with a message saying so
   instead of failing with an unexplained error.
+- **Re-downloading a CivitAI file that is already there now works on Windows, and a
+  re-download that fails its checksum keeps the copy you had.** `localm pull civitai:...
+  --redownload` used to stop with "Cannot create a file when that file already exists" on
+  Windows, and on Linux and macOS a re-download that failed checksum verification deleted
+  the file that was already in place. A pull of a CivitAI file that another pull finished
+  moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role

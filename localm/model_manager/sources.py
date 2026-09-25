@@ -21,7 +21,8 @@ class ResolvedDownload:
     should file it. *comfy_subfolder* is None for a flat MODELS_DIR
     destination (HF's current layout); a source that routes into the
     ComfyUI-subfoldered tree (CivitAI) sets it to a managed_comfy.py
-    _MODEL_FOLDER_TYPES name."""
+    _MODEL_FOLDER_TYPES name. *file_id* is the provider's own id for the
+    picked file, when it has one."""
 
     url: str
     filename: str
@@ -30,6 +31,7 @@ class ResolvedDownload:
     size_bytes: Optional[int] = None
     sha256: Optional[str] = None
     comfy_subfolder: Optional[str] = None
+    file_id: Optional[str] = None
 
 
 @runtime_checkable
@@ -348,6 +350,7 @@ class CivitAISource:
         sha256 = ((picked.get("hashes") or {}).get("SHA256") or "").lower() or None
         size_kb = picked.get("sizeKB")
         size_bytes = int(size_kb * 1024) if isinstance(size_kb, (int, float)) else None
+        picked_id = picked.get("id")
 
         return ResolvedDownload(
             url=download_url,
@@ -357,6 +360,7 @@ class CivitAISource:
             size_bytes=size_bytes,
             sha256=sha256,
             comfy_subfolder=subfolder,
+            file_id=str(picked_id) if picked_id is not None else None,
         )
 
 
