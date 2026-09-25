@@ -64,10 +64,17 @@ class _TurnRouter:
         self.current = model_name
         self.min_context: Optional[int] = None
         self.last_decision = None
+        self.failed_to_load: tuple = ()
 
     @property
     def in_process(self) -> bool:
         return self._build is not None
+
+    @property
+    def engine(self):
+        """The engine of ``current``: the model this router last selected,
+        unloaded when that selection's load failed."""
+        return self._engines[self.current]
 
     def plan(self, messages: list):
         """The routing decision for a turn with *messages*, without acting on
@@ -97,23 +104,27 @@ class _TurnRouter:
     def engine_for(self, messages: list):
         """The engine to answer a turn with *messages*: MODEL's, or in this
         process the routed model's, loaded in its place. A routed model that
-        fails to load is skipped for the next capable one, then MODEL. Raises
-        what MODEL's own load raised when that fails too."""
+        fails to load is skipped for the next capable one, then MODEL. Each
+        failure is printed; ``failed_to_load`` names the routed models MODEL
+        answers in place of, else is empty. Raises what MODEL's own load raised
+        when that fails too."""
         decision = self.plan(messages)
+        self.failed_to_load = ()
         if not self.in_process:
             return self.primary
         names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
+        failed = []
         for name in names:
             try:
                 return self._use(name)
             except Exception as e:
                 from rich.markup import escape
                 console.print(f"[yellow]Could not load {escape(name)}: "
-                              f"{escape(str(e))}; answering with "
-                              f"{escape(self.model_name)}.[/yellow]")
-        # MODEL answers, so its own context window applies.
-        self.min_context = None
-        return self._use(self.model_name)
+                              f"{escape(str(e))}[/yellow]")
+                failed.append(name)
+        eng = self._use(self.model_name)
+        self.failed_to_load = tuple(failed)
+        return eng
 
     def _use(self, name: str):
         if name == self.current:
@@ -138,9 +149,15 @@ class _TurnRouter:
 
     def note(self, engine) -> Optional[str]:
         """One line naming the model that answered and why, when it was not
-        MODEL; else None."""
+        MODEL or MODEL answered in place of routed models that failed to load;
+        else None."""
         answered = self.answered_by(engine)
-        if not answered or answered == self.model_name:
+        if not answered:
+            return None
+        if answered == self.model_name:
+            if self.in_process and self.failed_to_load:
+                return (f"answered by {answered}: could not load "
+                        f"{', '.join(self.failed_to_load)}")
             return None
         gaps = sorted((self.last_decision.gaps if self.last_decision else {}) or {})
         why = {"vision": "reading images", "tool_use": "structured tool calls",
@@ -527,7 +544,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                         stream_opts["min_context"] = router.min_context
                 response = _stream_once(engine, messages, **stream_opts)
                 note = _routed_note or router.note(engine)
-                if note:
+                if note and response:
                     console.print(f"[dim]({escape(note)})[/dim]")
                 # The JSONL audit log is an INTERNAL consumer (see
                 # textnorm.strip_think's docstring), so it gets the visible
@@ -777,11 +794,12 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             audit.user(user_input)
 
         # The engine that answers this turn: MODEL's, or one that has what the
-        # turn needs (see _TurnRouter). A turn answered by a model routed for
-        # context is not compacted.
+        # turn needs (see _TurnRouter). After a failed load it is the router's
+        # current engine.
         try:
             engine = router.engine_for(messages)
         except Exception as e:
+            engine = router.engine
             console.print(f"\n[red]Could not load {escape(router.model_name)}: "
                           f"{escape(str(e))}[/red]")
             if messages and messages[-1] is msg:
@@ -797,8 +815,9 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         # small-window model and under-protects a large one. Fall back to the
         # config only when the engine cannot report a capacity (not loaded).
         limit = engine.context_capacity() or load_config().get("n_ctx_max", 16384) or 0
-        if router.min_context or (router.in_process and router.current != router.model_name
-                                  and "context_length" in (router.last_decision.gaps or {})):
+        if router.min_context and not router.in_process:
+            # Attached, a turn routed for context is sent whole, with
+            # min_context naming the window it needs.
             compacted_msgs, did_compact = messages, False
         else:
             compacted_msgs, did_compact = maybe_compact(
