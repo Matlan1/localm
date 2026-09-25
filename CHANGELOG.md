@@ -118,6 +118,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Setup no longer fails with "Failed to build `tokenizers`" on a computer
+  without a Rust compiler.** A new huggingface-hub release (2.0) made setup
+  pick an old version of tokenizers that has to be compiled from source.
+  Setup now keeps huggingface-hub below 2.0.
 - **A request that needs something the loaded model lacks is now answered by an
   installed model that has it from every part of localm, not only from API clients
   that leave `model` empty.** An image attached in the GUI chat or `localm run`, web
