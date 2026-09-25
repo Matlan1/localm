@@ -47,13 +47,18 @@ def _image_part(ref: str) -> dict:
 
 
 def routing_note(decision) -> Optional[str]:
-    """One line naming the model that answered and why, for a routed
+    """One line naming the model that answered and why, and what that model
+    still lacks when no installed model had every need, for a routed
     *decision*; None when it was not routed."""
     if decision is None or not decision.routed:
         return None
     needs = ", ".join(_CAPABILITY_WORDS.get(g, g) for g in sorted(decision.gaps))
-    return (f"[answered by {decision.resolved}: {decision.current} lacks "
-            f"{needs or 'what this request needed'}]")
+    note = (f"answered by {decision.resolved}: {decision.current} lacks "
+            f"{needs or 'what this request needed'}")
+    if decision.unmet:
+        lacking = ", ".join(_CAPABILITY_WORDS.get(u, u) for u in decision.unmet)
+        note += f"; {decision.resolved} lacks {lacking}"
+    return f"[{note}]"
 
 
 def answer_with(engines: EngineCache, decision, run):

@@ -390,6 +390,23 @@ class TestCoderTaskRuns:
         assert "reply-from-tooly" in text
         assert "[answered by tooly: plain lacks a longer conversation]" in text
 
+    def test_a_task_moved_to_a_model_without_tool_calls_says_so(self, reg, coder_project):
+        registry, _, tmp_path = reg
+        TestCoderTaskRuns._small_default(reg)
+        del registry["tooly"]["context_length"]
+        (tmp_path / "roomy").mkdir()
+        (tmp_path / "roomy" / "roomy.gguf").write_bytes(b"GGUF" + b"roomy" * 8)
+        registry["roomy"] = {"path": str(tmp_path / "roomy" / "roomy.gguf"),
+                             "source": "local", "model_type": "llm",
+                             "context_length": 131072}
+        engines = _cache(lazy=True)
+        task = "Refactor the parser as this log shows. " + "trace line " * 2400
+        res = _run_coder_task(engines, coder_project, task=task)
+        text = res["content"][0]["text"]
+        assert list(engines.made) == ["roomy"]
+        assert ("[answered by roomy: plain lacks a longer conversation; "
+                "roomy lacks structured tool calls]") in text
+
     def test_the_budget_covers_loading_the_model(self, reg, coder_project):
         import time
         release = threading.Event()
