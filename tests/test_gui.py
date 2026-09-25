@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from localm.plugins.coder.sessions import CoderSession, SessionManager
 from localm.plugins.gui.web import attach_gui
 from tests.conftest import final_answer as _final_answer, free_loopback_port, probe_double
+from tests.test_sysstats import VRAM_POLL_DEADLINE
 
 
 # ------------------------------------------------------------------ #
@@ -1135,7 +1136,9 @@ class TestStatsVramTrust:
     after a cache reset returns before it lands. So _stats_vram resets the
     cache, polls once to kick the probe off, waits for it to land, then polls
     again to read the now-cached reading - same wait-then-read idiom
-    test_sysstats.py's _wait_for_vram_cache uses."""
+    test_sysstats.py's _wait_for_vram_cache uses, including its poll deadline
+    (VRAM_POLL_DEADLINE, imported from there so the two can never drift
+    apart)."""
 
     def _stats_vram(self, app, reading, status, monkeypatch):
         from localm import sysstats
@@ -1147,7 +1150,7 @@ class TestStatsVramTrust:
             with TestClient(app) as client:
                 r = client.get("/api/stats")           # kicks off the probe
                 assert r.status_code == 200
-                deadline = time.monotonic() + 2
+                deadline = time.monotonic() + VRAM_POLL_DEADLINE
                 while sysstats._vram_last is None and time.monotonic() < deadline:
                     time.sleep(0.01)
                 r = client.get("/api/stats")            # now served from cache
