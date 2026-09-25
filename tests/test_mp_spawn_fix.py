@@ -222,6 +222,30 @@ class TestInterpreterForLocalmChildren:
 
         assert _mp_spawn.interpreter_for_localm_children() == str(venv_py)
 
+    def test_venv_without_an_interpreter_falls_through_to_the_next(
+            self, monkeypatch, tmp_path):
+        """A venv root with no interpreter is passed over for the next
+        site-packages entry on sys.path rather than ending the search."""
+        broken = tmp_path / "broken"
+        broken_sp = broken / "Lib" / "site-packages"
+        broken_sp.mkdir(parents=True)
+        (broken / "pyvenv.cfg").write_text("home = elsewhere\n", encoding="utf-8")
+        venv = tmp_path / "venv"
+        sp = venv / "Lib" / "site-packages"
+        sp.mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = elsewhere\n", encoding="utf-8")
+        scripts = venv / "Scripts"
+        scripts.mkdir()
+        venv_py = scripts / "python.exe"
+        venv_py.write_bytes(b"")
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "path", [str(broken_sp), str(sp)])
+
+        assert _mp_spawn.interpreter_for_localm_children() == str(venv_py)
+
     def test_no_venv_on_sys_path_falls_back_to_sys_executable(
             self, monkeypatch, tmp_path):
         """A genuinely venv-less setup (system python + PYTHONPATH): keep

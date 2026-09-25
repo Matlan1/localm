@@ -118,6 +118,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **On Windows with an Intel GPU, HuggingFace models now load instead of failing
+  with `[WinError 126]` and `Error loading "...\torch\lib\c10_xpu.dll" or one of
+  its dependencies`.** The process that loads a HuggingFace model could not find
+  the Intel GPU runtime that the Intel (XPU) build of PyTorch installs into
+  localm's environment, so every HuggingFace model failed to load with that
+  build, although PyTorch itself was installed correctly.
 - **Setup no longer fails with "Failed to build `tokenizers`" on a computer
   without a Rust compiler.** A new huggingface-hub release (2.0) made setup
   pick an old version of tokenizers that has to be compiled from source.
