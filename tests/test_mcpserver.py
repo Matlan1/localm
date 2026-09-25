@@ -1547,10 +1547,13 @@ class TestModelDiscoveryTools:
     def test_pull_model_load_step_failure_is_distinguished_from_pull_failure(self):
         """Distinct from the case above, where get() itself raises. Here get()
         succeeds (construction plus cache registration) and the .load() call is
-        what fails."""
+        what fails; the engine that failed to load is not left in the cache."""
+        built = {}
+
         def failing_load_factory(name):
             engine = _stub_engine_factory(name)
             engine.load.side_effect = RuntimeError("no GPU memory")
+            built[name] = engine
             return engine
 
         engines = EngineCache(default_model=None, engine_factory=failing_load_factory)
@@ -1561,7 +1564,8 @@ class TestModelDiscoveryTools:
         assert r["result"]["isError"] is True
         assert "loading it failed" in r["result"]["content"][0]["text"]
         assert "no GPU memory" in r["result"]["content"][0]["text"]
-        engines._engines["m"].load.assert_called_once()
+        built["m"].load.assert_called_once()
+        assert "m" not in engines.resident
 
     def test_pull_model_rejects_repo_not_known_or_registered(self):
         server, _ = _server()

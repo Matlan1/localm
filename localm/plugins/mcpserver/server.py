@@ -343,7 +343,7 @@ class EngineCache:
         instance's copy as it is, this server's own after ``load()``. An
         engine that fails to load is removed from the cache and the load error
         raised."""
-        if self.is_peer(engine) or getattr(engine, "loaded", True):
+        if self.is_peer(engine) or getattr(engine, "loaded", False) is True:
             return engine
         try:
             engine.load()
