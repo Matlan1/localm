@@ -190,12 +190,15 @@ In privacy mode, consolidation returns "skipped" and never calls the model.
 On each chat turn the memory plugin builds a recall query from your most recent
 message plus a short window of prior user turns (so an anaphoric follow-up like
 "yes, do that" still carries the earlier topic), ranks the store, and injects the
-top matches into the system message. Web search results, page reads and the
-GUI's notes to the model are sent as user-role messages marked `origin: "tool"`
-and are left out of that query, so a fetched page's wording does not pull in
-unrelated facts. Recalled facts are neutralised and wrapped
-in a fenced, labelled block marked as data, not instructions, so a memory that
-reads like a command is treated as context.
+top matches into the system message. Messages the client marks with `origin`
+(see [server-api.md](server-api.md)) are left out of that query, because you
+did not type them. Web search results, page reads and the GUI's notes to the
+model are marked `origin: "tool"`, so a fetched page's wording does not pull in
+unrelated facts. The summarise prompt the GUI sends when it compacts a long
+chat is marked `origin: "client"`, so compaction neither recalls nor reinforces
+memories. Recalled facts are neutralised and wrapped in a fenced, labelled
+block marked as data, not instructions, so a memory that reads like a command
+is treated as context.
 
 - Ranking blends **relevance** (0.5), **recency** (0.3), and **importance**
   (0.2). Up to 6 facts are injected, within a bounded block.

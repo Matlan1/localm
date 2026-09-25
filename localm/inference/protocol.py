@@ -68,11 +68,13 @@ class Message(BaseModel):
     # Set when the client, not the user, wrote this message. "tool": a web tool
     # event (a search result, a page read, a control note) the GUI sends as
     # user-role text only so strict chat templates keep user/assistant
-    # alternation. The server leaves a marked row out of what it treats as the
-    # user's own words: the memory recall query and the audit user line.
+    # alternation. "client": text the client generated itself, such as the
+    # GUI's compaction "Summarise the following conversation ..." prompt. The
+    # server leaves a marked row out of what it treats as the user's own words:
+    # the memory recall query and the audit user line.
     # Optional and additive: a client that omits it gets exactly the previous
     # behaviour. Request-only, so a response message never carries it.
-    origin: Optional[Literal["tool"]] = Field(None, exclude=True)
+    origin: Optional[Literal["tool", "client"]] = Field(None, exclude=True)
 
     def text_only(self) -> str:
         """Flatten content to plain text (discards media)."""

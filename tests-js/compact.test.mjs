@@ -74,6 +74,23 @@ test("R44: reasoning blocks are stripped from the summariser input", async () =>
   assert.match(sent, /The visible answer/, "the visible content is summarised");
 });
 
+test("the summarise request's one message is marked origin \"client\", not the user's words", async () => {
+  // The server leaves a row the client wrote itself out of the memory recall
+  // query and the audit log's user line; unmarked, the summarise prompt plus
+  // the excerpt of older turns would be recalled for and logged as if typed.
+  const { impl, calls } = summFetch("ok");
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 160;");
+  await window.compactConversation(makeConv(20));
+  const summReq = calls.find((c) => c.url === "/v1/chat/completions");
+  assert.ok(summReq, "compaction asked the server for a summary");
+  assert.equal(summReq.body.messages.length, 1);
+  const [msg] = summReq.body.messages;
+  assert.equal(msg.role, "user");
+  assert.match(msg.content, /^Summarise the following conversation/);
+  assert.equal(msg.origin, "client");
+});
+
 test("R44: a failed summary keeps the recent turns rather than nuking history", async () => {
   const { impl } = summFetch("");   // empty content = summarisation failed
   const { window } = loadApp({ fetchImpl: impl });

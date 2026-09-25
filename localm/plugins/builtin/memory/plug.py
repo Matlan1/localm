@@ -1256,8 +1256,10 @@ def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) ->
     never dropped. Only steers
     relevance ranking + the eligibility gate; recalled memories are neutralised before
     injection. A user-role row the client marked with an ``origin`` (a GUI web
-    tool event: search results, a page read, a control note) is not the user's
-    words and neither enters the query nor counts toward max_user_turns."""
+    tool event: search results, a page read, a control note; or a prompt the
+    client wrote itself, such as the compaction summarise request) is not the
+    user's words and neither enters the query nor counts toward max_user_turns.
+    A request holding only marked rows gets an empty query and recalls nothing."""
     texts = []
     for m in reversed(messages):
         if m.get("role") != "user" or m.get("origin"):

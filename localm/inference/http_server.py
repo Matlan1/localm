@@ -4283,8 +4283,9 @@ def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> 
 def _last_user_text(messages: list) -> str:
     """Text of the most recent user message (for the audit trail). A row the
     client marked with an ``origin`` (a GUI web tool event sent as user-role
-    text) is skipped: the audit line, and the session log memory consolidation
-    learns from, record only what the user wrote."""
+    text, or a prompt the client wrote itself such as the compaction summarise
+    request) is skipped: the audit line, and the session log memory
+    consolidation learns from, record only what the user wrote."""
     for m in reversed(messages):
         if m.get("role") == "user" and not m.get("origin"):
             content = m.get("content")
