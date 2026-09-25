@@ -119,6 +119,22 @@ def _warn_unconfigured_home(path: Path) -> None:
           "or set LOCALM_HOME to choose where data lives.", file=sys.stderr)
 
 
+def _read_home_cfg(path: Path) -> str:
+    """The first line of ``localm-home.cfg``: read as UTF-8 (with or without a
+    BOM), or on Windows, when that fails, in the console (OEM) code page that
+    cmd.exe's ``echo`` writes. Raises ValueError when neither decodes."""
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        if sys.platform != "win32":
+            raise
+        import ctypes
+        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
+    lines = text.strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
 def _detect_home() -> Path:
     """
     Resolve the localm data directory (config, registry, models, logs,
@@ -146,10 +162,10 @@ def _detect_home() -> Path:
         cfg_marker = repo_root / "localm-home.cfg"
         if cfg_marker.is_file():
             try:
-                line = cfg_marker.read_text(encoding="utf-8").strip()
+                line = _read_home_cfg(cfg_marker)
                 if line:
                     return Path(line).expanduser()
-            except OSError as e:
+            except (OSError, ValueError, LookupError) as e:
                 # The marker EXISTS but could not be read: warn and fall back to
                 # the default data dir rather than silently switching. stderr
                 # rather than the logger - this runs at import time, before

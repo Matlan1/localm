@@ -13,12 +13,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export LOCALM_SETUP=1
 
-YES=0; UNINSTALL=0; PURGE=0; RUNTIME_OK=1
+#   --uninstall (or uninstall / --rollback)  remove LocaLM from this folder
+#   --purge-data        with --uninstall: also delete the saved data
+#   --finish-uninstall  remove the folders an uninstall left for later
+YES=0; UNINSTALL=0; PURGE=0; FINISH=0; RUNTIME_OK=1
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) YES=1 ;;
-    --uninstall|--rollback) UNINSTALL=1 ;;
+    --uninstall|--rollback|uninstall) UNINSTALL=1 ;;
     --purge-data) PURGE=1 ;;
+    --finish-uninstall|finish-uninstall) FINISH=1 ;;
   esac
 done
 
@@ -90,10 +94,12 @@ heartbeat_start() {
         [ -e "$HB_FLAG" ] || say "$msg"
       fi
     done
+    rm -f "$HB_FLAG"
   ) &
 }
 heartbeat_stop() {
   [ -n "$HB_FLAG" ] && : > "$HB_FLAG"
+  HB_FLAG=""
   return 0
 }
 handle_provision_failure() {  # handle_provision_failure "retry-cmd-hint" "detail"
@@ -133,56 +139,151 @@ offer_report() {  # offer_report "summary" "detail"
   bash "$here/report-issue.sh" --summary "$1" --detail "$2" || true
 }
 
+# ---- uninstall ----------------------------------------------------------------
+# localm.install_manifest does the removal: what setup recorded
+# (.localm-install.json) plus LocaLM's own fixed folders here, the saved data
+# only when asked, and never a path it has no record or rule for. It leaves the
+# Python runtime it runs on (.venv .python .cache .uv) named in
+# .localm-uninstall-pending; finish_pending removes those once it has exited.
+find_python() {  # sets PYBIN: this clone's .venv, its own .python, then python3 >= 3.9
+  PYBIN=""
+  local c
+  for c in .venv/bin/python .python/*/bin/python3; do
+    if [ -x "$c" ] && "$c" -c "import sys" >/dev/null 2>&1; then PYBIN="$c"; return 0; fi
+  done
+  for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1 \
+        && "$c" -c "import sys; sys.exit(sys.version_info < (3, 9))" >/dev/null 2>&1; then
+      PYBIN="$c"; return 0
+    fi
+  done
+  return 0
+}
+finish_pending() {  # sets LEFTOVER=1 when a folder could not be removed
+  LEFTOVER=0
+  [ -f .localm-uninstall-pending ] || return 0
+  local name
+  while IFS= read -r name || [ -n "$name" ]; do
+    name="${name%$'\r'}"
+    case "$name" in .venv|.python|.cache|.uv) ;; *) continue ;; esac
+    [ -e "$name" ] || continue
+    rm -rf -- "$name" 2>/dev/null || { chmod -R u+w -- "$name" 2>/dev/null; rm -rf -- "$name" 2>/dev/null; } || true
+    if [ -e "$name" ]; then
+      say "  [!] Could not remove ./$name - delete it by hand."
+      LEFTOVER=1
+    else
+      say "    Removed ./$name"
+    fi
+  done < .localm-uninstall-pending
+  if [ "$LEFTOVER" = 0 ]; then
+    rm -f .localm-uninstall-pending
+    if [ "${KEEPREC:-0}" != 1 ]; then rm -f .localm-install.json; fi
+  fi
+  return 0
+}
+write_fixed_pending() {  # the fixed runtime folders, for an uninstall with no Python
+  {
+    if [ -f .venv/.localm-venv ] || [ -e .venv/bin/localm ]; then echo .venv; fi
+    echo .python; echo .cache; echo .uv
+  } > .localm-uninstall-pending
+}
+do_uninstall() {
+  say "  LocaLM uninstall for this folder:"
+  say "    $(pwd)"
+  say ""
+  find_python
+  if [ -z "$PYBIN" ]; then
+    say "  [!] No Python was found to run the uninstaller, so only LocaLM's own"
+    say "      folders here can be removed: .venv .python .cache .uv"
+    say "      Run the uninstall again once Python is back to remove the rest."
+    if [ "$YES" != 1 ]; then
+      local go; go="$(ask "  Remove those folders now? [y/N]: " N)"
+      case "$go" in [Yy]*) ;; *) say "  Nothing changed."; return 0 ;; esac
+    fi
+    KEEPREC=1
+    [ -f .localm-uninstall-pending ] || write_fixed_pending
+    finish_pending
+    return "$LEFTOVER"
+  fi
+  local pflag="" rc=0
+  if [ "$PURGE" = 1 ]; then pflag="--purge-data"; fi
+  # $pflag is a flag or empty; unquoted on purpose (empty -> no argument).
+  # shellcheck disable=SC2086
+  "$PYBIN" -m localm.install_manifest uninstall --root . $pflag --defer-runtime --dry-run || rc=$?
+  case "$rc" in 0|2) ;; *) say "  [!] Uninstall stopped - see the messages above."; return 1 ;; esac
+  if [ "$YES" != 1 ] && [ "$PURGE" != 1 ]; then
+    say ""
+    say "  Your saved data - chats, settings, downloaded models, generated images -"
+    say "  is kept unless you choose to delete it now."
+    local del; del="$(ask "  Also delete your saved data? [y/N]: " N)"
+    case "$del" in
+      [Yy]*)
+        pflag="--purge-data"
+        say ""
+        rc=0
+        "$PYBIN" -m localm.install_manifest uninstall --root . --purge-data --defer-runtime --dry-run || rc=$?
+        case "$rc" in 0|2) ;; *) say "  [!] Uninstall stopped - see the messages above."; return 1 ;; esac
+        ;;
+    esac
+  fi
+  if [ "$YES" != 1 ]; then
+    say ""
+    local ok; ok="$(ask "  Uninstall LocaLM now? [y/N]: " N)"
+    case "$ok" in [Yy]*) ;; *) say "  Nothing changed."; return 0 ;; esac
+  fi
+  say ""
+  rc=0
+  # shellcheck disable=SC2086
+  "$PYBIN" -m localm.install_manifest uninstall --root . $pflag --force --stop-running --defer-runtime || rc=$?
+  case "$rc" in
+    0|2) ;;
+    *)
+      say ""
+      say "  [!] Uninstall stopped - see the messages above. Close any LocaLM window"
+      say "      and run  bash setup.sh --uninstall  again to retry."
+      return 1
+      ;;
+  esac
+  finish_pending
+  say ""
+  if [ "$LEFTOVER" = 1 ]; then
+    say "  LocaLM was removed, except for the folders listed above."
+  elif [ "$rc" = 2 ]; then
+    say "  LocaLM was removed, but some things you asked to delete were not deleted - see REFUSED above."
+  else
+    say "  LocaLM was removed from this folder."
+  fi
+  say "  To install it again, run  bash setup.sh. If you kept your saved data inside"
+  say "  this folder (./home), deleting the folder deletes that data too."
+  if [ "$LEFTOVER" = 1 ]; then return 1; fi
+  return "$rc"
+}
+
+if [ "$FINISH" = 1 ]; then
+  finish_pending
+  exit "$LEFTOVER"
+fi
+
 say ""
 say "  LocaLM setup - self-contained install in: $(pwd)"
 say ""
 
-# ---- uninstall / rollback (report first, then remove) -----------------------
-# Removes ONLY what this installer created: our .venv (marker-checked), the
-# provisioned native binaries, the home.cfg, and the menu entry. Your data is
-# kept unless --purge-data, and even then unsafe target paths are refused.
-do_uninstall() {
-  say "  Uninstall / rollback for this clone:"
-  say "    $(pwd)"
-  say ""
-  local py=".venv/bin/python"
-  [ -x "$py" ] || py="$(command -v python3 || command -v python || echo "")"
-  local pflag=""
-  if [ "$PURGE" = 1 ]; then pflag="--purge-data"; fi
-
-  # The manifest module removes ONLY what install recorded (binaries, home.cfg,
-  # shortcut, and the data dir only when WE created it and --purge-data is set,
-  # with hard guards on the single rm -rf). It never derives or globs a path -
-  # so an empty/relative/symlinked value cannot point a delete somewhere else.
-  if [ -n "$py" ]; then
-    say "  Planned removals (from the install manifest .localm-install.json):"
-    "$py" -m localm.install_manifest uninstall --root . $pflag --dry-run \
-      || say "  [!] No usable install manifest - only the marked ./.venv will be removed."
-  else
-    say "  [!] No Python found - only the marked ./.venv will be removed."
-  fi
-  say ""
-  local ok; ok="$(ask "  Proceed? [y/N]: " N)"
-  case "$ok" in [Yy]*) ;; *) say "  Aborted - nothing changed."; return 0 ;; esac
-
-  if [ -n "$py" ]; then
-    # --force: the dry-run above already showed any unrecorded items and the
-    # at-your-own-risk warning; the user chose to continue. The catastrophic-path
-    # guard inside the module still refuses root/$HOME/repo regardless.
-    "$py" -m localm.install_manifest uninstall --root . $pflag --force || true
-  fi
-  # The manifest never deletes the running venv; remove it here, marker-checked.
-  if [ -f .venv/.localm-venv ]; then
-    if rm -rf .venv 2>/dev/null; then say "  Removed ./.venv"
-    else say "  [!] Could not remove ./.venv (check permissions)."; fi
-  fi
-  say ""
-  say "  Done. To reinstall:  bash setup.sh"
-}
-
 if [ "$UNINSTALL" = 1 ]; then
-  do_uninstall
-  exit 0
+  rc=0; do_uninstall || rc=$?
+  exit "$rc"
+fi
+
+# ---- LocaLM is already set up here: install again, uninstall, or cancel -------
+if [ "$YES" != 1 ] && { [ -f .localm-install.json ] || [ -f .venv/.localm-venv ]; }; then
+  say "  LocaLM is already set up in this folder. What would you like to do?"
+  say "    [1] Install again / repair - your chats, settings and models are kept"
+  say "    [2] Uninstall              - remove LocaLM from this computer"
+  say "    [3] Cancel"
+  expick="$(ask "  Pick 1, 2 or 3 [1]: " 1)"
+  case "$expick" in
+    2) rc=0; do_uninstall || rc=$?; exit "$rc" ;;
+    3) say "  Nothing changed."; exit 0 ;;
+  esac
 fi
 
 # ---- point at the graphical installer ---------------------------------------
@@ -223,6 +324,13 @@ if [ "$spick" = 1 ]; then
 else
   say "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
 fi
+# What the install manifest records about this choice. install.sh exports
+# LOCALM_UV_BOOTSTRAPPED=1 when it installed uv into the user profile itself.
+RCFLAG=""; PYDIR=""; CACHEDIR=""; UVSHARED=""
+if [ "$CONTAINED" = 1 ]; then
+  RCFLAG="--runtime-contained"; PYDIR="$(pwd)/.python"; CACHEDIR="$(pwd)/.cache"
+fi
+if [ "${LOCALM_UV_BOOTSTRAPPED:-0}" = 1 ]; then UVSHARED="--uv-shared-installed"; fi
 
 # 1 = verify against the platform's NATIVE certificate store - the same trust a
 # browser, or an IT-provisioned corporate/security-product proxy's injected
@@ -278,10 +386,15 @@ if [ "$uv_present" != 1 ]; then
   if [ "$CONTAINED" = 1 ]; then
     # Portable was picked: confine uv's OWN binary to this folder too, not just the
     # Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
-    # override for the installer's target dir.
+    # override for the installer's target dir. UV_UNMANAGED_INSTALL also stops it
+    # adding a line to your shell startup files and writing an install receipt
+    # under ~/.config/uv.
     export UV_INSTALL_DIR="$(pwd)/.uv"
+    export UV_UNMANAGED_INSTALL="$(pwd)/.uv"
     UVDIR="$(pwd)/.uv"
     say "  Portable: installing uv itself under ./.uv"
+  else
+    UVSHARED="--uv-shared-installed"
   fi
   # || true so a curl/install failure does not trip set -e before our own check;
   # the re-check below decides honestly whether the bootstrap actually worked.
@@ -352,6 +465,13 @@ fi
 is_our_venv() {  # a venv we created carries the marker / the localm console script
   [ -f .venv/.localm-venv ] || [ -x .venv/bin/localm ]
 }
+record_runtime() {  # record the environment now; the record at the end repeats it
+  # $RCFLAG / $UVSHARED are flags or empty; unquoted on purpose.
+  # shellcheck disable=SC2086
+  .venv/bin/python -m localm.install_manifest record --root . --venv "$(pwd)/.venv" \
+    $RCFLAG --python-dir "$PYDIR" --cache-dir "$CACHEDIR" --uv-dir "${UVDIR:-}" $UVSHARED \
+    >/dev/null 2>&1 || true
+}
 create_venv() {
   say ""
   say "  Creating .venv (Python 3.12) ..."
@@ -375,6 +495,7 @@ create_venv() {
     if errtext="$(uv venv --python 3.12 $PYPREF --clear .venv 2>&1)"; then
       heartbeat_stop
       : > .venv/.localm-venv   # marker: this venv was created by localm setup
+      record_runtime
       break
     fi
     heartbeat_stop
@@ -424,6 +545,68 @@ if [ -d .venv ]; then
   esac
 else
   create_venv
+fi
+
+# ---- data directory ---------------------------------------------------------
+# Asked before anything writes data: setup-llama records its builds in this
+# folder. See test_data_folder_is_chosen_before_the_runtime_is_provisioned.
+# Default is CONTAINED (./home): NO silent ~/.localm fallback. A shared / other
+# location is an explicit Custom choice, recorded in localm-home.cfg.
+# install_manifest prepare-data creates the folder, points localm-home.cfg at it
+# (or removes that file for ./home) and records it for uninstall, noting what
+# was already in a folder that existed.
+portable_home() {
+  if ! .venv/bin/python -m localm.install_manifest prepare-data --root . --portable; then
+    mkdir -p home; rm -f localm-home.cfg
+    say "  [!] Could not record the data folder; created ./home anyway."
+  fi
+}
+# A repair offers the data folder this install already uses first.
+KEPT_DATA=0
+if cur="$(.venv/bin/python -m localm.install_manifest current-data --root . 2>/dev/null)" \
+    && [ -n "$cur" ]; then
+  say ""
+  say "  LocaLM's data for this folder is in:"
+  say "    $cur"
+  keep="$(ask "  Keep using it? [Y/n]: " Y)"
+  case "$keep" in
+    [Nn]*) ;;
+    *) if .venv/bin/python -m localm.install_manifest prepare-data --root . --keep-current; then
+         KEPT_DATA=1
+       fi ;;
+  esac
+fi
+if [ "$KEPT_DATA" != 1 ]; then
+say ""
+say "  Where should localm keep its data (models, config, logs, images)?"
+say "    [1] Portable (./home) - self-contained; delete this folder and it is all gone"
+say "    [2] Custom path       - a folder you choose (e.g. a shared models drive)"
+dpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+if [ "$dpick" = 2 ]; then
+  # Custom path: ask, then confirm (re-ask until confirmed, or until prepare-data
+  # accepts it). In --yes mode there is no prompt, so an unconfirmed path is never
+  # recorded - fall back to portable.
+  CUSTOMHOME=""
+  if [ "$YES" != 1 ]; then
+    while : ; do
+      CUSTOMHOME="$(ask "  Enter the data directory path (blank = portable ./home): " "")"
+      if [ -z "$CUSTOMHOME" ]; then break; fi
+      ok="$(ask "  Use '$CUSTOMHOME'? [Y/n]: " Y)"
+      case "$ok" in [Nn]*) continue ;; esac
+      if .venv/bin/python -m localm.install_manifest prepare-data --root . \
+          --data-dir "$CUSTOMHOME"; then
+        say "  (recorded in localm-home.cfg)"
+        break
+      fi
+    done
+  fi
+  if [ -z "$CUSTOMHOME" ]; then
+    say "  No path given - using the portable ./home."
+    portable_home
+  fi
+else
+  portable_home
+fi
 fi
 
 # ---- browser tab or standalone app window? -----------------------------------
@@ -647,52 +830,19 @@ else
   say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --torch-backend=xpu"
 fi
 
-# ---- data directory ---------------------------------------------------------
-# Default is CONTAINED (./home): NO silent ~/.localm fallback. A shared / other
-# location is an explicit Custom choice, recorded in localm-home.cfg.
-say ""
-say "  Where should localm keep its data (models, config, logs, images)?"
-say "    [1] Portable (./home) - self-contained; delete this folder and it is all gone"
-say "    [2] Custom path       - a folder you choose (e.g. a shared models drive)"
-dpick="$(ask "  Pick 1 or 2 [1]: " 1)"
-if [ "$dpick" = 2 ]; then
-  # Custom path: ask, then confirm (re-ask until confirmed). In --yes mode there is
-  # no prompt, so an unconfirmed path is never recorded - fall back to portable.
-  CUSTOMHOME=""
-  if [ "$YES" != 1 ]; then
-    while : ; do
-      CUSTOMHOME="$(ask "  Enter the data directory path (blank = portable ./home): " "")"
-      if [ -z "$CUSTOMHOME" ]; then break; fi
-      ok="$(ask "  Use '$CUSTOMHOME'? [Y/n]: " Y)"
-      case "$ok" in [Nn]*) continue ;; *) break ;; esac
-    done
-  fi
-  if [ -z "$CUSTOMHOME" ]; then
-    say "  No path given - using the portable ./home."
-    mkdir -p home; rm -f localm-home.cfg
-    DATA_DIR="$(pwd)/home"; DATA_CREATED=1
-  else
-    printf '%s\n' "$CUSTOMHOME" > localm-home.cfg
-    mkdir -p "$CUSTOMHOME"
-    DATA_DIR="$CUSTOMHOME"; DATA_CREATED=1
-    say "  Data directory: $CUSTOMHOME (recorded in localm-home.cfg)"
-  fi
-else
-  mkdir -p home; rm -f localm-home.cfg
-  DATA_DIR="$(pwd)/home"; DATA_CREATED=1        # we created ./home
-  say "  Data directory: $DATA_DIR"
-fi
-
 # ---- build the native LocaLM launcher ---------------------------------------
 # So a process monitor shows LocaLM, not python. It is a copy of the venv
 # interpreter in .venv/bin/LocaLM, self-contained in this clone; if the copy
 # cannot run standalone (non-relocatable interpreter) the menu entry below falls
 # back to the venv python. `localm gui` always works; this never blocks install.
 say ""
+LAUNCHER_FILE=""
 if [ "$LOCALM_BIN_OK" = 1 ]; then
   say "  Building the LocaLM app launcher ..."
   .venv/bin/localm make-launcher --force \
     || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
+  # make-launcher writes ./LocaLM.desktop on Linux; uninstall removes it.
+  if [ -f LocaLM.desktop ]; then LAUNCHER_FILE="$(pwd)/LocaLM.desktop"; fi
 else
   say "  Skipping the LocaLM app launcher (.venv/bin/localm is missing)."
 fi
@@ -727,6 +877,8 @@ Terminal=false
 Categories=Utility;Development;Science;
 EOF
     say "  Created $apps/localm.desktop"
+    .venv/bin/python -m localm.install_manifest record --root . --shortcut "$SHORTCUT" \
+      >/dev/null 2>&1 || true
     ;;
 esac
 
@@ -747,6 +899,9 @@ case "$gmk" in
     if [ "$gcrc" = 0 ] || [ "$gcrc" = 20 ]; then
       PATH_DIR="$HOME/.local/bin"; CMD_SHIM="$HOME/.local/bin/localm"
       if [ "$gcrc" = 0 ]; then PATH_MOD="--path-modified"; fi
+      # shellcheck disable=SC2086
+      .venv/bin/python -m localm.install_manifest record --root . --path-dir "$PATH_DIR" \
+        --command-shim "$CMD_SHIM" ${PATH_MOD:-} >/dev/null 2>&1 || true
     fi
     ;;
 esac
@@ -764,19 +919,14 @@ else
 fi
 
 # ---- record what we installed (so uninstall removes ONLY what we created) ----
-crd=""; if [ "${DATA_CREATED:-0}" = 1 ]; then crd="--data-created"; fi
-rcflag=""; pydir=""; cachedir=""
-if [ "${CONTAINED:-0}" = 1 ]; then
-  rcflag="--runtime-contained"; pydir="$(pwd)/.python"; cachedir="$(pwd)/.cache"
-fi
-# $crd / $rcflag are flags or empty; left unquoted on purpose (empty -> no arg).
+# The data folder was recorded when it was chosen (prepare-data).
+# $RCFLAG / $UVSHARED / $PATH_MOD are flags or empty; unquoted on purpose.
 # shellcheck disable=SC2086
 .venv/bin/python -m localm.install_manifest record --root . \
   --venv "$(pwd)/.venv" \
   --lib-dir "$(pwd)/runtime/localm_llama_runtime/lib" \
-  --data-dir "${DATA_DIR:-}" $crd \
-  --shortcut "${SHORTCUT:-}" \
-  $rcflag --python-dir "$pydir" --cache-dir "$cachedir" --uv-dir "${UVDIR:-}" \
+  --shortcut "${SHORTCUT:-}" --file "${LAUNCHER_FILE:-}" \
+  $RCFLAG --python-dir "$PYDIR" --cache-dir "$CACHEDIR" --uv-dir "${UVDIR:-}" $UVSHARED \
   --path-dir "${PATH_DIR:-}" --command-shim "${CMD_SHIM:-}" ${PATH_MOD:-} \
   --stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")" \
   >/dev/null 2>&1 || say "  [!] Could not record the install manifest (uninstall will be conservative)."
@@ -809,4 +959,6 @@ say "  The GUI launcher uses Tk; localm's bundled Python includes it, so it"
 say "  normally works out of the box. If the launcher ever reports Tk missing"
 say "  (e.g. a system Python without it), install your distro's python3-tk."
 say "  The web GUI itself needs only a browser."
+say ""
+say "  To uninstall later:  bash setup.sh --uninstall"
 say ""

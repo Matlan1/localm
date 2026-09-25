@@ -44,6 +44,11 @@ def gui(tmp_path, monkeypatch):
     return mod
 
 
+def _record(root):
+    import json
+    return json.loads((root / ".localm-install.json").read_text(encoding="utf-8"))
+
+
 def _step(gui, plan, prefix):
     matches = [s for s in gui.build_steps(plan) if s.label.startswith(prefix)]
     assert len(matches) == 1, f"expected one {prefix!r} step, got {len(matches)}"
@@ -112,7 +117,21 @@ def test_custom_path_is_created_and_recorded(gui, tmp_path):
     _step(gui, gui.Plan(portable_data=False, data_path=str(target)),
           "Recording").run(lambda _l: None)
     assert target.is_dir()
-    assert (tmp_path / "localm-home.cfg").read_text(encoding="utf-8") == str(target)
+    assert (tmp_path / "localm-home.cfg").read_text(encoding="utf-8").strip() == str(target)
+    rec = _record(tmp_path)
+    assert Path(rec["data_dir"]) == target and rec["data_created"] is True
+
+
+def test_an_existing_custom_folder_is_recorded_as_existing(gui, tmp_path):
+    """A folder that was already there is not the install's to delete; only
+    the entries LocaLM adds to it are."""
+    shared = tmp_path / "Shared models"
+    (shared / "models").mkdir(parents=True)
+    _step(gui, gui.Plan(portable_data=False, data_path=str(shared)),
+          "Recording").run(lambda _l: None)
+    rec = _record(tmp_path)
+    assert rec["data_created"] is False
+    assert rec["data_preexisting"] == ["models"]
 
 
 def test_a_relative_path_is_refused_and_writes_no_marker(gui, tmp_path):
@@ -461,7 +480,30 @@ class TestInstallParity:
         assert len(rec) == 1, "nothing records what was installed"
         assert "record" in rec[0]
         assert str(tmp_path / ".venv") in rec[0]
-        assert rec[0][rec[0].index("--data-dir") + 1] == str(tmp_path / "home")
+        # The data step recorded the folder itself; the final record must not
+        # overwrite what it found.
+        assert "--data-dir" not in rec[0] and "--data-created" not in rec[0]
+        assert Path(_record(tmp_path)["data_dir"]) == tmp_path / "home"
+
+    def test_the_environment_is_recorded_as_soon_as_it_exists(
+            self, gui, tmp_path, monkeypatch):
+        """An install that stops later can then still be uninstalled."""
+        (tmp_path / ".venv").mkdir()
+        (tmp_path / ".python").mkdir()
+        monkeypatch.setattr(gui, "_run", lambda *a, **k: 0)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        _step(gui, gui.Plan(), "Creating the Python environment").run(lambda s: None)
+        rec = _record(tmp_path)
+        assert Path(rec["venv"]) == (tmp_path / ".venv").resolve()
+        assert rec["runtime_contained"] is True
+        assert Path(rec["python_dir"]) == (tmp_path / ".python").resolve()
+
+    def test_the_linux_launcher_entry_is_recorded(self, gui, tmp_path, monkeypatch):
+        """make-launcher writes LocaLM.desktop into the folder on Linux."""
+        (tmp_path / "LocaLM.desktop").write_text("[Desktop Entry]\n", encoding="utf-8")
+        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own"))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert rec[rec.index("--file") + 1] == str(tmp_path / "LocaLM.desktop")
 
     def test_the_recorded_shortcut_is_the_one_created(
             self, gui, tmp_path, monkeypatch):
@@ -472,14 +514,14 @@ class TestInstallParity:
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert rec[rec.index("--shortcut") + 1] == str(tmp_path / "LocaLM.lnk")
 
-    def test_the_data_directory_is_recorded_as_created_by_setup(
+    def test_the_portable_home_is_recorded_even_when_it_already_existed(
             self, gui, tmp_path, monkeypatch):
-        """setup.sh marks it created whenever it makes one. An earlier step can
-        create ./home first, so asking the filesystem here answers differently."""
+        """An earlier step can create ./home first; ./home is the install's own
+        folder either way."""
         (tmp_path / "home").mkdir()
-        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own"))
-        rec = [c for c in cmds if "localm.install_manifest" in c][0]
-        assert "--data-created" in rec
+        _commands_for(gui, monkeypatch, gui.Plan(backend="own"))
+        assert Path(_record(tmp_path)["data_dir"]) == tmp_path / "home"
+        assert (tmp_path / "home" / ".localm-data").is_file()
 
     def test_the_tooling_inside_the_folder_is_recorded(
             self, gui, tmp_path, monkeypatch):
@@ -913,3 +955,166 @@ class TestWizard:
 
     def test_the_default_plan_matches_the_console_recommendation(self, wizard, gui):
         assert set(wizard.current_plan().plugins) == set(gui.RECOMMENDED_PLUGINS)
+
+    def test_a_fresh_folder_opens_on_the_install_questions(self, wizard):
+        assert wizard.mode == "install" and wizard.index == 0
+
+
+# --------------------------------------------------------------------------- #
+#  Uninstalling from the window                                                #
+# --------------------------------------------------------------------------- #
+
+class _Answer:
+    """A messagebox stand-in that records the question and answers it."""
+
+    def __init__(self, yes=True):
+        self.yes = yes
+        self.asked = []
+
+    def askyesno(self, title, message):
+        self.asked.append(message)
+        return self.yes
+
+
+@pytest.fixture()
+def installed(gui, tmp_path, monkeypatch):
+    """A recorded Portable install in the throwaway ROOT, with the machine
+    (home folder, user PATH, process list) kept out of reach."""
+    from localm import globalcmd
+    from localm import install_manifest as im
+    home = tmp_path / "userhome"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for var in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"):
+        monkeypatch.setenv(var, str(home))
+    monkeypatch.setattr(globalcmd, "_win_read_user_path", lambda: ("", 2))
+    monkeypatch.setattr(globalcmd, "_win_write_user_path", lambda v, t: None)
+    monkeypatch.setattr(im, "list_processes", lambda: [])
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
+    for name in (".python", ".cache", ".uv"):
+        (tmp_path / name).mkdir()
+    lib = tmp_path / "runtime" / "localm_llama_runtime" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "llama.dll").write_bytes(b"x")
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              runtime_contained=True, python_dir=str(tmp_path / ".python"),
+              cache_dir=str(tmp_path / ".cache"), uv_dir=str(tmp_path / ".uv"))
+    data = im.prepare_data(tmp_path, portable=True)
+    (data / "chats").mkdir()
+    return {"lib": lib, "data": data}
+
+
+@pytest.fixture()
+def uninstall_wizard(gui, installed):
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    root.withdraw()
+    answer = _Answer()
+    try:
+        yield gui.Wizard(root, tk, ttk, filedialog, messagebox=answer), answer, root
+    finally:
+        root.destroy()
+
+
+def _wait(wizard, root, timeout=60):
+    import time
+    deadline = time.monotonic() + timeout
+    while wizard.installing and time.monotonic() < deadline:
+        root.update()
+        time.sleep(0.05)
+    root.update()
+    assert not wizard.installing, "the uninstall never finished"
+
+
+def test_a_repair_offers_the_data_folder_in_use(gui, installed, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    from localm import install_manifest as im
+    custom = tmp_path / "my data"
+    im.prepare_data(tmp_path, data_dir=str(custom))
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    root.withdraw()
+    try:
+        wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=_Answer())
+        assert wizard.portable_var.get() is False
+        assert wizard.current_plan().data_path == str(custom)
+    finally:
+        root.destroy()
+
+
+def test_a_repair_of_a_portable_install_stays_portable(uninstall_wizard, tmp_path):
+    wizard, _, _ = uninstall_wizard
+    assert wizard.portable_var.get() is True
+    assert wizard.current_plan().portable_data is True
+
+
+class TestUninstallFromTheWindow:
+    def test_an_existing_install_opens_on_repair_or_uninstall(self, uninstall_wizard):
+        wizard, _, _ = uninstall_wizard
+        assert wizard.mode == "choose"
+        assert wizard.choice_var.get() == "repair"
+
+    def test_repair_goes_to_the_install_questions_and_back_returns(self, uninstall_wizard):
+        wizard, _, _ = uninstall_wizard
+        wizard.next_page()
+        assert wizard.mode == "install" and wizard.index == 0
+        wizard.prev_page()
+        assert wizard.mode == "choose"
+
+    def test_the_uninstall_page_shows_what_will_go(self, uninstall_wizard, installed, tmp_path):
+        wizard, _, _ = uninstall_wizard
+        wizard.choice_var.set("uninstall")
+        wizard.next_page()
+        assert wizard.mode == "uninstall"
+        plan = wizard.plan_text.get("1.0", "end")
+        assert "Will be removed:" in plan
+        assert str(installed["lib"] / "llama.dll") in plan
+        assert "KEPT:" in plan
+        wizard.purge_var.set(True)
+        wizard._refresh_plan()
+        assert "WILL BE DELETED:" in wizard.plan_text.get("1.0", "end")
+        wizard.prev_page()
+        assert wizard.mode == "choose"
+
+    def test_uninstall_removes_the_install_and_leaves_the_runtime_for_the_script(
+            self, uninstall_wizard, installed, tmp_path, gui):
+        wizard, answer, root = uninstall_wizard
+        wizard.choice_var.set("uninstall")
+        wizard.next_page()
+        wizard.next_page()                              # the Uninstall button
+        _wait(wizard, root)
+        assert answer.asked and "saved data is kept" in answer.asked[0]
+        assert wizard.exit_code == gui.EXIT_FINISH_UNINSTALL
+        assert not (installed["lib"] / "llama.dll").exists()
+        assert (installed["data"] / "chats").is_dir()
+        assert (tmp_path / ".python").is_dir()          # still running the window
+        names = (tmp_path / ".localm-uninstall-pending").read_text(encoding="ascii").split()
+        assert sorted(names) == [".cache", ".python", ".uv", ".venv"]
+
+    def test_deleting_the_saved_data_too(self, uninstall_wizard, installed):
+        wizard, answer, root = uninstall_wizard
+        wizard.choice_var.set("uninstall")
+        wizard.next_page()
+        wizard.purge_var.set(True)
+        wizard.next_page()
+        _wait(wizard, root)
+        assert "DELETED" in answer.asked[0]
+        assert not installed["data"].exists()
+
+    def test_saying_no_changes_nothing(self, uninstall_wizard, installed):
+        wizard, answer, _ = uninstall_wizard
+        answer.yes = False
+        wizard.choice_var.set("uninstall")
+        wizard.next_page()
+        wizard.next_page()
+        assert not wizard.installing and wizard.mode == "uninstall"
+        assert (installed["lib"] / "llama.dll").exists()
+        assert wizard.exit_code == 0
