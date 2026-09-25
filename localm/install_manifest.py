@@ -1394,12 +1394,11 @@ def format_report(rep: dict) -> List[str]:
         section("LocaLM is running from this folder - it will be stopped first:", running)
     section("Stopped:", rep.get("stopped", []))
     data_paths = [d["path"] for d in rep.get("data", [])]
-    section("Will be removed:" if dry else "Removed:",
-            [x for x in rep.get("removed", [])
-             if not any(_inside(x, d) for d in data_paths)])
-    section("Removed once this program has closed:" if dry else
-            "Left for setup to remove once this program has closed:",
-            rep.get("deferred", []))
+    removed = [x for x in rep.get("removed", [])
+               if not any(_inside(x, d) for d in data_paths)]
+    if dry:
+        removed = list(rep.get("deferred", [])) + removed
+    section("Will be removed:" if dry else "Removed:", removed)
     if rep.get("data"):
         failed = [x for x, _ in rep.get("failed", [])]
         out.append("  Your saved data (chats, settings, downloaded models, generated images):")

@@ -13,9 +13,10 @@ def test_setup_bat_never_uses_localm_as_data_dir():
     text = (ROOT / "setup.bat").read_text(encoding="utf-8")
     # No data-dir assignment to the per-user ~/.localm.
     assert "%USERPROFILE%\\.localm" not in text
-    # The default data dir is the contained ./home. See
-    # TestCdDerivedVarsSurviveBangInInstallPath.
-    assert 'set "DATADIR=%CD:!=^!%\\home"' in text
+    # The default data dir is the contained ./home, created and recorded by
+    # prepare-data. See TestDataFolderSubroutinesThroughCmd.
+    assert "prepare-data --root . --portable" in text
+    assert 'if not "%DATAPICK%"=="2" call :portable_home' in text
 
 
 def test_setup_sh_never_uses_localm_as_data_dir():

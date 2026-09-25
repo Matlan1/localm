@@ -19,18 +19,52 @@ set LOCALM_SETUP=1
 title LocaLM setup
 set "HBSEQ=0"
 
+rem ---- command-line options ---------------------------------------------------
+rem    uninstall  (or --uninstall / --rollback)  remove LocaLM from this folder
+rem    --purge-data   with uninstall: also delete the saved data
+rem    --yes          with uninstall: do not ask
+rem    finish-uninstall   remove the folders an uninstall left for later
+set "UNINSTALL=0"
+set "PURGE=0"
+set "UNYES=0"
+set "FINISHONLY=0"
+for %%a in (%*) do (
+    if /i "%%~a"=="uninstall" set "UNINSTALL=1"
+    if /i "%%~a"=="--uninstall" set "UNINSTALL=1"
+    if /i "%%~a"=="--rollback" set "UNINSTALL=1"
+    if /i "%%~a"=="--purge-data" set "PURGE=1"
+    if /i "%%~a"=="--yes" set "UNYES=1"
+    if /i "%%~a"=="finish-uninstall" set "FINISHONLY=1"
+)
+if "%FINISHONLY%"=="1" goto finish_only
+
 echo.
 setlocal DisableDelayedExpansion
 echo  LocaLM setup - self-contained install in: %CD%
 endlocal
 echo.
 
-rem ---- uninstall / rollback (report first, then remove) ---------------------
-set "PURGE=0"
-if /i "%~2"=="--purge-data" set "PURGE=1"
-if /i "%~1"=="uninstall"   goto uninstall
-if /i "%~1"=="--uninstall" goto uninstall
-if /i "%~1"=="--rollback"  goto uninstall
+if "%UNINSTALL%"=="1" goto uninstall
+
+rem ---- LocaLM is already set up here: install again, uninstall, or cancel ------
+set "HAVEINSTALL=0"
+if exist ".localm-install.json" set "HAVEINSTALL=1"
+if exist ".venv\.localm-venv" set "HAVEINSTALL=1"
+if "%HAVEINSTALL%"=="0" goto fresh_install
+echo  LocaLM is already set up in this folder. What would you like to do?
+echo    [1] Install again / repair - your chats, settings and models are kept
+echo    [2] Uninstall              - remove LocaLM from this computer
+echo    [3] Cancel
+set "EXPICK="
+call :flush
+set /p "EXPICK=  Pick 1, 2 or 3 [1]: "
+if not defined EXPICK set "EXPICK=1"
+if "%EXPICK%"=="2" goto uninstall
+if not "%EXPICK%"=="3" goto fresh_install
+echo  Nothing changed.
+pause
+exit /b 0
+:fresh_install
 
 rem ---- point at the graphical installer -------------------------------------
 rem  Same install, same questions, in a window. Mentioned here rather than only
@@ -75,6 +109,16 @@ if "%STOREPICK%"=="1" (
 ) else (
     echo  Shared: reusing/installing uv and its Python + cache ^(outside this folder^).
 )
+rem  What the install manifest records about this choice.
+set "UVSHARED="
+set "RCFLAG="
+set "PYDIR="
+set "CACHEDIR="
+if "%CONTAINED%"=="1" (
+    set "RCFLAG=--runtime-contained"
+    set "PYDIR=%CD:!=^!%\.python"
+    set "CACHEDIR=%CD:!=^!%\.cache"
+)
 
 rem ---- uv is required; bootstrap it ourselves if it is missing --------------
 rem  uv (Astral's fast Python package manager) drives the whole install: it builds
@@ -116,12 +160,16 @@ echo  Installing uv ...
 if "%CONTAINED%"=="1" (
     rem  Portable was picked: confine uv's OWN binary to this folder too, not just
     rem  the Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
-    rem  override for the installer's target dir.
+    rem  override for the installer's target dir. UV_UNMANAGED_INSTALL also
+    rem  stops it adding .\.uv to the user PATH and writing an install receipt
+    rem  under %LOCALAPPDATA%\uv.
     set "UV_INSTALL_DIR=%CD:!=^!%\.uv"
+    set "UV_UNMANAGED_INSTALL=%CD:!=^!%\.uv"
     set "UVDIR=%CD:!=^!%\.uv"
     echo  Portable: installing uv itself under .\.uv
 )
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+if not "%CONTAINED%"=="1" set "UVSHARED=--uv-shared-installed"
 rem  Make the freshly installed uv callable for the rest of THIS run (the installer
 rem  updates the persistent USER PATH, not this already-running shell). Prepend every
 rem  dir Astral's installer might have used: an explicit %UV_INSTALL_DIR%, its
@@ -336,6 +384,10 @@ goto venv_retry
 :venv_create_ok
 echo  Environment ready.
 type nul > ".venv\.localm-venv"
+rem  Record the environment now; the record at the end of setup repeats it.
+setlocal DisableDelayedExpansion
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% >nul 2>nul
+endlocal
 :venv_done
 
 rem ---- browser tab or standalone app window? ---------------------------------
@@ -548,22 +600,13 @@ set "DATAPICK="
 call :flush
 set /p "DATAPICK=  Pick 1 or 2 [1]: "
 if not defined DATAPICK set "DATAPICK=1"
-rem DATADIR + DATACREATED feed the install manifest (DATACREATED=1 only when WE
-rem made the dir, so uninstall --purge-data never removes a pre-existing folder).
-set "DATADIR=%CD:!=^!%\home"
-set "DATACREATED=0"
-if "%DATAPICK%"=="1" (
-    if not exist "home" mkdir "home"
-    if exist "localm-home.cfg" del "localm-home.cfg"
-    set "DATADIR=%CD:!=^!%\home"
-    set "DATACREATED=1"
-    echo  Data directory: !DATADIR!
-)
-rem  Single-line `if ... call` into a goto/label subroutine (defined at the end):
-rem  a `call` plus nested if/else INSIDE this `if (...)` block trips cmd.exe's
+rem  Single-line `if ... call` into goto/label subroutines (defined at the end):
+rem  a `call` plus nested if/else INSIDE an `if (...)` block trips cmd.exe's
 rem  parenthesis parser ("The syntax of the command is incorrect."), so keep the
-rem  custom-path flow out of the block entirely.
+rem  data-folder flow out of blocks entirely. Both subroutines create the folder
+rem  through install_manifest prepare-data, which records it for uninstall.
 if "%DATAPICK%"=="2" call :do_custom_home
+if not "%DATAPICK%"=="2" call :portable_home
 
 rem ---- build the native LocaLM.exe launcher ---------------------------------
 rem  So the running server shows as LocaLM.exe in Task Manager (not python.exe)
@@ -663,18 +706,9 @@ echo  Optional features (plugins):
 .venv\Scripts\localm plugin setup
 
 rem ---- record what we installed (uninstall removes ONLY what we created) -----
-set "CRD="
-if "%DATACREATED%"=="1" set "CRD=--data-created"
-set "RCFLAG="
-set "PYDIR="
-set "CACHEDIR="
-if "%CONTAINED%"=="1" (
-    set "RCFLAG=--runtime-contained"
-    set "PYDIR=%CD:!=^!%\.python"
-    set "CACHEDIR=%CD:!=^!%\.cache"
-)
+rem  The data folder was recorded when it was chosen (prepare-data).
 setlocal DisableDelayedExpansion
-.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 endlocal
 if errorlevel 1 echo  [^^!] Could not record the install manifest (uninstall will be conservative).
 
@@ -688,54 +722,175 @@ if defined SCMADE if "%SCPICK%"=="2" echo  Start it from the LocaLM shortcut on 
 if not defined SCMADE echo  Run localm-launcher.bat to start.
 if defined SCMADE if "%SCPICK%"=="1" echo  Or run localm-launcher.bat from this folder.
 if defined SCMADE if "%SCPICK%"=="2" echo  For chat / server / coder mode, run localm-launcher.bat from this folder.
+echo  To uninstall later, run setup.bat again and pick Uninstall.
 echo.
 pause
 exit /b 0
 
 rem ===========================================================================
-rem  Uninstall / rollback. The actual removal is delegated to the tested
-rem  localm.install_manifest module, which removes ONLY what install recorded
-rem  (never a derived/globbed/empty path) and hard-guards the one rm. The shell
-rem  only removes the marker-checked .venv afterwards (a running interpreter
-rem  cannot delete its own venv).
+rem  Uninstall. localm.install_manifest does the removal: what setup recorded
+rem  (.localm-install.json) plus LocaLM's own fixed folders here, the saved data
+rem  only when asked, and never a path it has no record or rule for. It leaves
+rem  the Python runtime it runs on (.venv .python .cache .uv) named in
+rem  .localm-uninstall-pending; :finish_pending removes those once it has exited.
 rem ===========================================================================
 :uninstall
 echo.
-echo  LocaLM uninstall / rollback for this clone:
+echo  LocaLM uninstall for this folder:
 setlocal DisableDelayedExpansion
 echo    %CD%
 endlocal
 echo.
-set "PYBIN=.venv\Scripts\python.exe"
+call :find_python
+if not defined PYBIN goto uninstall_nopython
 set "PFLAG="
 if "%PURGE%"=="1" set "PFLAG=--purge-data"
-if exist "%PYBIN%" (
-    echo  Planned removals ^(from the install manifest .localm-install.json^):
-    "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG% --dry-run
-) else (
-    echo  [^^!] No venv Python found - only the marked .venv will be removed.
-)
+"%PYBIN%" %PYARGS% -m localm.install_manifest uninstall --root . %PFLAG% --defer-runtime --dry-run
+set "UNRC=!errorlevel!"
+if not "!UNRC!"=="0" if not "!UNRC!"=="2" goto uninstall_stop
+if "%UNYES%"=="1" goto uninstall_go
+if "%PURGE%"=="1" goto uninstall_confirm
 echo.
+echo  Your saved data - chats, settings, downloaded models, generated images -
+echo  is kept unless you choose to delete it now.
+set "DELDATA="
 call :flush
-choice /c YN /n /m "  Proceed? [y/N]: "
-if errorlevel 2 (
-    echo  Aborted - nothing changed.
-    pause
-    exit /b 0
-)
-rem --force: the dry-run above showed any unrecorded items + the at-your-own-risk
-rem warning and the user chose to continue; the module still refuses catastrophic
-rem paths (root/%USERPROFILE%/repo) regardless.
-if exist "%PYBIN%" "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG% --force
-rem The manifest never deletes the running venv; remove it here, marker-checked.
-if exist ".venv\.localm-venv" (
-    rmdir /s /q .venv
-    echo  Removed .\.venv
-)
+set /p "DELDATA=  Also delete your saved data? [y/N]: "
+if not defined DELDATA set "DELDATA=N"
+if /i not "!DELDATA:~0,1!"=="Y" goto uninstall_confirm
+set "PFLAG=--purge-data"
 echo.
-echo  Done. To reinstall: setup.bat
+"%PYBIN%" %PYARGS% -m localm.install_manifest uninstall --root . --purge-data --defer-runtime --dry-run
+set "UNRC=!errorlevel!"
+if not "!UNRC!"=="0" if not "!UNRC!"=="2" goto uninstall_stop
+:uninstall_confirm
+echo.
+set "GOON="
+call :flush
+set /p "GOON=  Uninstall LocaLM now? [y/N]: "
+if not defined GOON set "GOON=N"
+if /i "!GOON:~0,1!"=="Y" goto uninstall_go
+echo  Nothing changed.
 pause
 exit /b 0
+:uninstall_go
+echo.
+"%PYBIN%" %PYARGS% -m localm.install_manifest uninstall --root . %PFLAG% --force --stop-running --defer-runtime
+set "UNRC=!errorlevel!"
+if "!UNRC!"=="0" goto uninstall_finish
+if "!UNRC!"=="2" goto uninstall_finish
+:uninstall_stop
+echo.
+echo  [^^!] Uninstall stopped - see the messages above. Close any LocaLM window
+echo      and run setup.bat again to retry.
+if not "%UNYES%"=="1" pause
+exit /b 1
+:uninstall_finish
+call :finish_pending
+echo.
+if defined LEFTOVER echo  LocaLM was removed, except for the folders listed above.
+if not defined LEFTOVER echo  LocaLM was removed from this folder.
+echo  To install it again, run setup.bat. If you kept your saved data inside this
+echo  folder (.\home), deleting the folder deletes that data too.
+if not "%UNYES%"=="1" pause
+if defined LEFTOVER exit /b 1
+exit /b 0
+
+:uninstall_nopython
+echo  [^^!] No Python was found to run the uninstaller, so only LocaLM's own
+echo      folders here can be removed: .venv .python .cache .uv
+echo      Run setup.bat again once Python is back to remove the rest.
+if "%UNYES%"=="1" goto uninstall_nopython_go
+set "GOON="
+call :flush
+set /p "GOON=  Remove those folders now? [y/N]: "
+if not defined GOON set "GOON=N"
+if /i "!GOON:~0,1!"=="Y" goto uninstall_nopython_go
+echo  Nothing changed.
+pause
+exit /b 0
+:uninstall_nopython_go
+set "KEEPREC=1"
+if not exist ".localm-uninstall-pending" call :write_fixed_pending
+call :finish_pending
+if not "%UNYES%"=="1" pause
+if defined LEFTOVER exit /b 1
+exit /b 0
+
+:finish_only
+call :finish_pending
+if defined LEFTOVER exit /b 1
+exit /b 0
+
+rem ===========================================================================
+rem  :find_python - a Python that can run install_manifest: the clone's .venv,
+rem  then the clone's own .python, then the py launcher. Sets PYBIN (and
+rem  PYARGS for the launcher), or leaves PYBIN undefined.
+rem ===========================================================================
+:find_python
+set "PYBIN="
+set "PYARGS="
+if exist ".venv\Scripts\python.exe" call :try_python ".venv\Scripts\python.exe"
+if defined PYBIN goto :eof
+for /d %%p in (".python\cpython-3*") do if not defined PYBIN if exist "%%~p\python.exe" call :try_python "%%~p\python.exe"
+if defined PYBIN goto :eof
+where py >nul 2>nul
+if not errorlevel 1 call :try_python py -3
+goto :eof
+
+:try_python
+"%~1" %2 -c "import sys" >nul 2>nul
+if errorlevel 1 goto :eof
+set "PYBIN=%~1"
+set "PYARGS=%~2"
+goto :eof
+
+rem ===========================================================================
+rem  :finish_pending - remove each folder named in .localm-uninstall-pending
+rem  (only .venv .python .cache .uv are accepted), retrying while a closing
+rem  program still holds files. When all are gone, delete the pending file and,
+rem  unless KEEPREC is set, the install manifest. Sets LEFTOVER when a folder
+rem  could not be removed.
+rem ===========================================================================
+:finish_pending
+set "LEFTOVER="
+if not exist ".localm-uninstall-pending" goto :eof
+for /f "usebackq delims=" %%d in (".localm-uninstall-pending") do call :remove_deferred "%%d"
+if defined LEFTOVER goto :eof
+del ".localm-uninstall-pending" >nul 2>nul
+if not defined KEEPREC del ".localm-install.json" >nul 2>nul
+goto :eof
+
+:remove_deferred
+set "DNAME=%~1"
+if /i not "%DNAME%"==".venv" if /i not "%DNAME%"==".python" if /i not "%DNAME%"==".cache" if /i not "%DNAME%"==".uv" goto :eof
+if not exist "%DNAME%\" goto :eof
+set "DTRIES=0"
+:remove_deferred_retry
+attrib -R "%DNAME%\*" /S /D >nul 2>nul
+rmdir /s /q "%DNAME%" >nul 2>nul
+if not exist "%DNAME%\" (
+    echo    Removed .\%DNAME%
+    goto :eof
+)
+set /a DTRIES+=1
+if %DTRIES% lss 5 (
+    ping -n 2 127.0.0.1 >nul
+    goto remove_deferred_retry
+)
+echo  [^^!] Could not remove .\%DNAME% - close any LocaLM window and delete it by hand.
+set "LEFTOVER=1"
+goto :eof
+
+:write_fixed_pending
+(
+    if exist ".venv\.localm-venv" echo .venv
+    if not exist ".venv\.localm-venv" if exist ".venv\Scripts\localm.exe" echo .venv
+    echo .python
+    echo .cache
+    echo .uv
+) > ".localm-uninstall-pending"
+goto :eof
 
 rem ===========================================================================
 rem  :heartbeat_start SECS "MESSAGE" / :heartbeat_stop - print MESSAGE every
@@ -818,9 +973,10 @@ rem  :do_custom_home - prompt for a custom data directory and confirm it.
 rem  goto/label flow (NO parenthesised blocks) so it is robust under cmd.exe, and
 rem  every prompt is set /p: a habitual confirming Enter is consumed by the prompt
 rem  it belongs to instead of leaking into the next one (the SETUP-2 bug, where
-rem  `choice` auto-advanced and the stray Enter became an empty path). Records the
-rem  path (DATADIR/DATACREATED + localm-home.cfg), or falls back to the shared
-rem  default when left blank.
+rem  `choice` auto-advanced and the stray Enter became an empty path).
+rem  install_manifest prepare-data creates the folder, writes localm-home.cfg
+rem  (UTF-8) and records the folder for uninstall, noting what was already in
+rem  it; a path it refuses (relative, a file) is asked again. Blank = .\home.
 rem ===========================================================================
 :do_custom_home
 set "CUSTOMHOME="
@@ -832,18 +988,26 @@ call :flush
 set /p "OKHOME=  Use '!CUSTOMHOME!'? [Y/n]: "
 if not defined OKHOME set "OKHOME=Y"
 if /i "!OKHOME:~0,1!"=="N" goto do_custom_home
-> "localm-home.cfg" echo !CUSTOMHOME!
-if not exist "!CUSTOMHOME!" mkdir "!CUSTOMHOME!"
-set "DATADIR=!CUSTOMHOME!"
-set "DATACREATED=1"
-echo  Data directory: !CUSTOMHOME!  ^(recorded in localm-home.cfg^)
+.venv\Scripts\python -m localm.install_manifest prepare-data --root . --data-dir "!CUSTOMHOME!"
+if errorlevel 1 goto do_custom_home
+echo  ^(recorded in localm-home.cfg^)
 exit /b 0
 :custom_home_blank
 echo  [^^!] No path given - using the portable .\home instead.
+goto portable_home
+
+rem ===========================================================================
+rem  :portable_home - keep the data in .\home. install_manifest prepare-data
+rem  creates it, removes localm-home.cfg and records the folder for uninstall;
+rem  if that cannot run, the folder is created here and uninstall still finds
+rem  .\home by its fixed name.
+rem ===========================================================================
+:portable_home
+.venv\Scripts\python -m localm.install_manifest prepare-data --root . --portable
+if not errorlevel 1 exit /b 0
 if exist "localm-home.cfg" del "localm-home.cfg"
 if not exist "home" mkdir "home"
-set "DATADIR=%CD:!=^!%\home"
-set "DATACREATED=1"
+echo  [^^!] Could not record the data folder; created .\home anyway.
 exit /b 0
 
 rem ===========================================================================
