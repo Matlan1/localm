@@ -310,16 +310,9 @@ def resolve_spec(spec: str) -> str:
 
 
 
-def get_model_path(name: str, *, allow_direct_path: bool = False) -> Optional[Path]:
-    """Resolve a model name/alias/path to the model file or directory.
-
-    Returns the resolved Path, or None if not found.
-    To also get a display name hint, use get_model_info().
-
-    See get_model_info() for what ``allow_direct_path`` opts into; it defaults to
-    off.
-    """
-    result = get_model_info(name, allow_direct_path=allow_direct_path)
+def get_model_path(name: str) -> Optional[Path]:
+    """The file or directory of the registered model *name*, or None."""
+    result = get_model_info(name)
     return result[0] if result else None
 
 
@@ -330,10 +323,11 @@ def unregistered_model_error(name) -> Optional[str]:
     ready-to-show message explaining the refusal.
 
     This is layer 2 of the model-name gate, and it exists for the error message.
-    Layer 1 is get_model_info's ``allow_direct_path``, which is unconditional and
-    is what actually stops a path from resolving. Layer 2 replaces the bare
-    "model not found" a caller naming a path would otherwise get, telling them
-    the name must be registered and which command lists the names that exist.
+    Layer 1 is get_model_info resolving registered names only, which is
+    unconditional and is what actually stops a path from resolving. Layer 2
+    replaces the bare "model not found" a caller naming a path would otherwise
+    get, telling them the name must be registered and which command lists the
+    names that exist.
 
     Returns None (allowed) in two non-name cases:
 
@@ -367,35 +361,18 @@ def unregistered_model_error(name) -> Optional[str]:
             "accepted here: only a command-line run may name a model by path.")
 
 
-def get_model_info(name: str, *, allow_direct_path: bool = False,
-                   reg: Optional[dict] = None):
-    """Like get_model_path(), but returns (path, display_hint) or None.
+def get_model_info(name: str, *, reg: Optional[dict] = None):
+    """``(path, display_hint)`` for the REGISTERED model *name*, or None when it
+    is not registered, its entry is malformed, or its file is gone.
+    display_hint is always None here.
 
-    display_hint is a human-readable name when the original arg was an Ollama
-    manifest path; otherwise it's None (the engine derives its own name).
+    Resolves registry names only; a filesystem path is never accepted. A name
+    the operator typed on the command line, which may also be a path, goes
+    through get_operator_model_info() instead.
 
-    ``allow_direct_path`` opts into resolving *name* as a PATH ON DISK when it is
-    not a registry entry (`localm run D:/models/foo.gguf`, an Ollama store, a
-    HuggingFace directory). That is a documented CLI feature, so it is kept - but
-    it is OFF by default, because the caller decides whether the name it holds is
-    operator-typed or came off the wire, and only the caller can know that.
-
-    With it on, ANY path on disk resolves, and every downstream sink then runs on
-    a caller-named path: stat, an unbounded rglob, read_text of a whole
-    directory, and for a directory create_backend picks HFBackend, which imports
-    and EXECUTES the directory's own .py when ``hf_trust_remote_code`` is on.
-    That setting is off by default, and load() refuses such a model while it is.
-
-    Pass True ONLY where *name* is operator-typed on the command line. The audited
-    set is localm/cli/*, the `localm gui <model>` startup resolution, and the MCP
-    server's own --model default. Anything reachable over HTTP or MCP keeps the
-    default, and enforces registry membership on top (see http_server's
-    registration check, jobs' _check_model_name, and MCPEngines.resolve_model).
-
-    ``reg`` lets a caller that has ALREADY loaded the registry pass its own
-    snapshot instead of forcing another file read. Same lookup either way; it
-    exists so a multi-model caller reads registry.json once and every answer it
-    gets describes ONE state of that file rather than a mix of several.
+    ``reg`` is a registry snapshot the caller already loaded; without it the
+    registry is read here. A caller looking up several models passes one
+    snapshot so every answer describes one state of registry.json.
     """
     reg = _mm.load_registry() if reg is None else reg
     if name in reg:
@@ -404,9 +381,29 @@ def get_model_info(name: str, *, allow_direct_path: bool = False,
             p = Path(epath)
             if p.exists():
                 return p, None
+    return None
 
-    if not allow_direct_path:
-        return None
+
+def get_operator_model_info(name: str, *, reg: Optional[dict] = None):
+    """get_model_info(), falling back to *name* as a PATH ON DISK when it is not
+    registered: a HuggingFace model directory, a GGUF file (a split GGUF resolves
+    to its first part), an Ollama blob, or an Ollama manifest directory.
+
+    ``(path, display_hint)`` or None. display_hint is the suggested name when
+    *name* is an Ollama manifest path; otherwise None (the engine derives its
+    own name).
+
+    Only for a name the operator typed on the command line (the ``localm`` CLI,
+    the ``localm gui <model>`` startup model, the MCP server's own ``--model``
+    default) or the ``coder_reviewer_model`` setting. Every downstream sink then
+    runs on that path, including
+    create_backend importing an HF directory's own .py when
+    ``hf_trust_remote_code`` is on. A name received over HTTP or MCP goes
+    through get_model_info().
+    """
+    info = get_model_info(name, reg=reg)
+    if info is not None:
+        return info
 
     direct = Path(name)
     if not direct.exists():
@@ -519,45 +516,64 @@ def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Opti
 
 
 
-def get_model_mmproj(name: str, *, allow_direct_path: bool = False,
-                     reg: Optional[dict] = None,
-                     dir_cache: Optional[dict] = None) -> Optional[str]:
-    """The mmproj (vision projector) path for a model, if one is known.
-
-    Priority: an explicit 'mmproj' recorded in the registry entry, else a sibling
-    mmproj GGUF auto-detected next to the model file. Returns an absolute path
-    string, or None when no projector is associated. This is what lets a GGUF keep
-    vision after a GUI/registry model switch, the same way the CLI --mmproj flag
-    does on a direct run.
-
-    ``allow_direct_path`` is threaded through to get_model_info for the same reason
-    it exists there: without it, the sibling-projector scan would glob a directory
-    named by an unregistered, caller-supplied path.
-
-    ``reg`` is the same caller-supplied registry snapshot get_model_info takes,
-    and is threaded down to it so BOTH lookups here describe one state of
-    registry.json rather than two reads a moment apart. ``dir_cache`` is passed
-    straight to find_sibling_mmproj - see its docstring for why it is
-    caller-owned and per-operation."""
-    reg = _mm.load_registry() if reg is None else reg
+def _recorded_mmproj(name: str, reg) -> Optional[str]:
+    """The projector recorded on *name*'s registry entry when that file exists,
+    else None. The recorded path goes through _entry_path like the model path."""
     entry = reg.get(name) if isinstance(reg, dict) else None
-    # Through the choke point, not a raw read: the recorded projector is a stored
-    # path from the same hand-editable file as ``path``, and it goes to the same
-    # native mtmd loader, so it gets the same type check and ``..`` rejection. A
-    # malformed projector falls through to the auto-detect below, which is the
-    # same recovery a recorded-but-missing one already gets.
     recorded = _entry_path(entry, "mmproj")
     if recorded:
         mmp = Path(recorded)
         if mmp.exists():
             return str(mmp)
-        # Recorded but gone: fall through to auto-detect rather than handing the
-        # backend a dead path that would just fail the mtmd load.
-    info = get_model_info(name, allow_direct_path=allow_direct_path, reg=reg)
+    return None
+
+
+def _sibling_mmproj(info, dir_cache: Optional[dict]) -> Optional[str]:
+    """The projector find_sibling_mmproj detects next to ``info[0]``, or None
+    when *info* is None or there is no single candidate."""
     if info is None:
         return None
     sib = find_sibling_mmproj(info[0], dir_cache=dir_cache)
     return str(sib) if sib else None
+
+
+def get_model_mmproj(name: str, *, reg: Optional[dict] = None,
+                     dir_cache: Optional[dict] = None) -> Optional[str]:
+    """The mmproj (vision projector) path for the registered model *name*, if
+    one is known.
+
+    Priority: an explicit 'mmproj' recorded in the registry entry, else a sibling
+    mmproj GGUF auto-detected next to the model file (a recorded projector whose
+    file is gone falls through to the auto-detect). Returns an absolute path
+    string, or None when no projector is associated. This is what lets a GGUF
+    keep vision after a GUI/registry model switch, the same way the CLI --mmproj
+    flag does on a direct run.
+
+    Resolves registry names only, like get_model_info();
+    get_operator_model_mmproj() is the operator-typed counterpart.
+
+    ``reg`` is the same caller-supplied registry snapshot get_model_info takes,
+    and is used for BOTH lookups here. ``dir_cache`` is passed straight to
+    find_sibling_mmproj - see its docstring for why it is caller-owned and
+    per-operation."""
+    reg = _mm.load_registry() if reg is None else reg
+    recorded = _recorded_mmproj(name, reg)
+    if recorded:
+        return recorded
+    return _sibling_mmproj(get_model_info(name, reg=reg), dir_cache)
+
+
+def get_operator_model_mmproj(name: str, *, reg: Optional[dict] = None,
+                              dir_cache: Optional[dict] = None) -> Optional[str]:
+    """get_model_mmproj() for a name resolved by get_operator_model_info(): the
+    recorded projector of a registered name, else a sibling projector next to
+    the registered model or the path on disk *name* names. Same precondition as
+    get_operator_model_info()."""
+    reg = _mm.load_registry() if reg is None else reg
+    recorded = _recorded_mmproj(name, reg)
+    if recorded:
+        return recorded
+    return _sibling_mmproj(get_operator_model_info(name, reg=reg), dir_cache)
 
 
 

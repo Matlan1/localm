@@ -200,6 +200,17 @@ GRAMMAR_UNSUPPORTED_MESSAGE = (
 )
 
 
+# Shown when the grammar extra is installed but xgrammar fails to load. A
+# distinct string from GRAMMAR_UNSUPPORTED_MESSAGE above, which names a
+# different recovery.
+GRAMMAR_LOAD_FAILED_MESSAGE = (
+    "The grammar extra is installed but xgrammar failed to load, so the "
+    "requested grammar would be ignored and the reply would not match it. "
+    "Update the extra with: pip install -U 'localm[grammar]', or use a "
+    "GGUF-format model (grammar support is built in)."
+)
+
+
 # Shown when a LAZY grammar is requested of a backend that can constrain
 # generation but cannot do it lazily. A distinct string from
 # GRAMMAR_UNSUPPORTED_MESSAGE above, which names a different recovery.

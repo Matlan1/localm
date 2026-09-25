@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -494,16 +495,104 @@ def test_concurrent_threads_in_one_process_still_serialise(base, docs):
 #  4. How each surface reports a refusal                                      #
 # --------------------------------------------------------------------------- #
 
-def _run_cli(args, home, *, wait: str = "0.5"):
-    """Run a real `localm` CLI command in its own OS process."""
+def _cli_env(home, wait: str) -> dict:
+    """The environment a real `localm` CLI subprocess needs for these tests."""
     env = dict(os.environ)
     env["LOCALM_HOME"] = str(home)
     env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
     env[cl.ENV_WAIT] = wait
     env["COLUMNS"] = "400"          # keep rich from wrapping the message we assert on
+    return env
+
+
+def _run_cli(args, home, *, wait: str = "0.5"):
+    """Run a real `localm` CLI command in its own OS process."""
     return subprocess.run(
         [sys.executable, "-c", "from localm.cli import main; main()", *args],
-        env=env, capture_output=True, text=True, timeout=180)
+        env=_cli_env(home, wait), capture_output=True, text=True, timeout=180)
+
+
+def _run_cli_until(args, home, *, wait: str, ready_needle: str,
+                    ready_timeout: float = 120.0):
+    """Start a real `localm` CLI subprocess; return once it has printed
+    *ready_needle* to its output (stdout and stderr merged).
+
+    Returns the live ``subprocess.Popen``, the ``queue.Queue`` a background
+    thread keeps feeding with output lines for the rest of the process's
+    life (``None`` marks end of output), and the lines read so far. Collect
+    the remainder with ``_drain_cli`` - the background thread is the sole
+    reader of the process's stdout for its whole life, so nothing else may
+    read from ``proc.stdout`` or call ``proc.communicate()``.
+
+    Raises AssertionError if *ready_needle* does not appear within
+    *ready_timeout* seconds, whether because the child exited first or
+    because it produced no more output.
+    """
+    env = _cli_env(home, wait)
+    env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "from localm.cli import main; main()", *args],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    q: queue.Queue = queue.Queue()
+
+    def _pump():
+        for line in iter(proc.stdout.readline, ""):
+            q.put(line)
+        q.put(None)
+
+    threading.Thread(target=_pump, daemon=True).start()
+
+    seen = []
+    deadline = time.time() + ready_timeout
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AssertionError(
+                f"CLI child never printed {ready_needle!r} within "
+                f"{ready_timeout}s:\n{''.join(seen)}")
+        try:
+            line = q.get(timeout=remaining)
+        except queue.Empty:
+            continue
+        if line is None:
+            proc.wait(timeout=10)
+            raise AssertionError(
+                f"CLI child exited (code {proc.returncode}) without "
+                f"printing {ready_needle!r}:\n{''.join(seen)}")
+        seen.append(line)
+        if ready_needle in line:
+            return proc, q, seen
+
+
+def _drain_cli(proc, q, seen, *, timeout: float = 60.0):
+    """Collect the rest of a ``_run_cli_until`` subprocess's output from *q*
+    and wait for it to exit.
+
+    Returns ``(returncode, combined_output)``, where *combined_output* is
+    every line read from the process, including the lines already in
+    *seen*. Raises AssertionError if the process does not finish within
+    *timeout* seconds.
+    """
+    deadline = time.time() + timeout
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AssertionError(
+                f"CLI child did not finish within {timeout}s:\n{''.join(seen)}")
+        try:
+            line = q.get(timeout=remaining)
+        except queue.Empty:
+            continue
+        if line is None:
+            break
+        seen.append(line)
+    proc.wait(timeout=10)
+    return proc.returncode, "".join(seen)
 
 
 def test_cli_waits_then_refuses_naming_the_holder(heavy_slot, tmp_path, docs):
@@ -549,25 +638,30 @@ def test_cli_succeeds_once_the_holder_releases(heavy_slot, tmp_path, docs):
     coll.add_paths([docs])
     (docs / "gamma.txt").write_text("gamma content about bearings", encoding="utf-8")
 
+    release = threading.Event()
     released = threading.Event()
 
-    def _hold_briefly():
+    def _hold_until_released():
         with collection_write_lock(lock_path_for(rag / "kb"),
                                    collection="kb", op="a re-sync"):
-            time.sleep(4.0)         # comfortably longer than the child's start-up
+            release.wait(timeout=120)
         released.set()
 
-    t = threading.Thread(target=_hold_briefly)
+    t = threading.Thread(target=_hold_until_released)
     t.start()
     time.sleep(0.2)                 # make sure the holder got there first
     try:
-        r = _run_cli(["rag", "resync", "kb"], home, wait="120")
+        proc, q, seen = _run_cli_until(
+            ["rag", "resync", "kb"], home, wait="120",
+            ready_needle="waiting for the write lock")
     finally:
+        release.set()
         t.join(timeout=60)
 
+    returncode, stdout_all = _drain_cli(proc, q, seen)
     assert released.is_set()
-    assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
-    assert "waiting for the write lock" in _flat(r.stdout), r.stdout
+    assert returncode == 0, stdout_all
+    assert "waiting for the write lock" in _flat(stdout_all), stdout_all
     meta = json.loads((rag / "kb" / "meta.json").read_text(encoding="utf-8"))
     assert any(k.endswith("gamma.txt") for k in meta["docs"]), (
         "the CLI acquired the lock but did not do the re-sync")

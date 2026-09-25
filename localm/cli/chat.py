@@ -9,7 +9,7 @@ import click
 from rich.panel import Panel
 
 from ..config import load_config
-from ..model_manager import get_model_info
+from ..model_manager.registry import get_operator_model_info
 from ..console import show_url
 from ._core import console, err_console, main, _complete_model_name
 
@@ -436,10 +436,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         _note = _attach_fallback_note(no_server, attach_error, autostart_attempted)
         if _note:
             console.print(f"[dim]{escape(_note)}[/dim]")
-        # allow_direct_path: `localm run /full/path` is a documented feature (the
-        # help text right below advertises it), and *model* here is typed by the
-        # operator on their own command line, not received over the wire.
-        info = get_model_info(model, allow_direct_path=True)
+        # A registered name or a path on disk (`localm run /full/path`).
+        info = get_operator_model_info(model)
         if info is None:
             console.print(f"[red]Model not found:[/red] {escape(model)}")
             console.print("  [dim]localm list[/dim]              - downloaded models")
@@ -453,8 +451,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         model_path, _display_hint = info
 
         from ..inference.engine import Engine
-        from ..model_manager import get_model_mmproj
-        from ..model_manager import load_registry as _reg
+        from ..model_manager.registry import get_operator_model_mmproj
+        from localm.model_manager import load_registry as _reg
 
         # Priority: registered alias > Ollama manifest hint > engine auto-derive
         is_registered = model in _reg()
@@ -466,9 +464,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         # An explicit --mmproj always wins; otherwise fall back to the model's
         # own recorded/sibling projector, or a pulled vision GGUF run straight
         # from the CLI (no --mmproj flag given) silently loses image support.
-        # allow_direct_path=True matches the get_model_info call above: *model*
-        # is operator-typed on this command line.
-        mmproj_path = mmproj or get_model_mmproj(model, allow_direct_path=True)
+        mmproj_path = mmproj or get_operator_model_mmproj(model)
 
         engine = Engine(
             str(model_path),

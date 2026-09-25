@@ -2743,10 +2743,8 @@ def _patched_without_leaking(module, name, replacement):
     ``from ..model_manager import X`` against the patched package and binds
     ``replacement`` into its own globals; monkeypatch has no knowledge of that
     second reference, so it outlives teardown and poisons the rest of the pytest
-    process. ``get_model_info`` leaks that way into localm.cli, localm.cli.chat
-    and localm.cli.models, and localm/cli/chat.py then calls it with
-    ``allow_direct_path=True``, failing unrelated tests with a TypeError in any
-    selection that collected this file first.
+    process. ``get_model_info`` leaks that way into localm.cli, which re-exports
+    it, failing unrelated tests in any selection that collected this file first.
 
     The sweep matches by object IDENTITY rather than against a list of known
     consumers, so a module that grows the same ``from``-import later is repaired
@@ -2798,8 +2796,11 @@ class TestGuiNoModel:
         def _must_not_auto_select(name):
             raise AssertionError("auto-selected a model")
 
+        import localm.model_manager.registry as registry_mod
         with _patched_without_leaking(
-                model_manager, "get_model_info", _must_not_auto_select):
+                model_manager, "get_model_info", _must_not_auto_select), \
+             _patched_without_leaking(
+                registry_mod, "get_operator_model_info", _must_not_auto_select):
             result = CliRunner().invoke(guicli.main, ["--no-model", "--no-browser"])
         assert result.exit_code == 0, result.output
         assert "no model loaded" in result.output.lower()

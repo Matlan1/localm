@@ -122,8 +122,8 @@ def build(engines: EngineCache) -> Dict[str, dict]:
         # A LOCAL PATH IS NOT A PULL. pull_model treats an existing path as a
         # local add, registering an arbitrary directory under a client-chosen
         # name; that name is then a registered model, so it passes the
-        # membership check and resolves via the REGISTRY branch of
-        # get_model_info rather than the direct-path gate. A refused add still
+        # membership check and resolves through get_model_info's registry
+        # lookup. A refused add still
         # probes the path (config.json read, rglob, sha256). An MCP client pulls
         # from HuggingFace; registering something already on this disk is
         # `localm add`.

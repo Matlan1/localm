@@ -244,7 +244,7 @@ def _setup_tls_or_exit(host, *, no_tls, tls_cert, tls_key):
 def _complete_model_name(ctx, param, incomplete):
     """Shell-completion callback: registered model names matching the prefix."""
     try:
-        from ..config import load_registry as _lr
+        from localm.config import load_registry as _lr
         return sorted(n for n in _lr() if n.startswith(incomplete))
     except Exception:
         return []

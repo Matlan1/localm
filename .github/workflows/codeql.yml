@@ -7,7 +7,7 @@ name: CodeQL
 # only available noise control was narrowing the threat model itself, which threw
 # away 80 real product-code findings to silence 25 test-harness ones. Advanced
 # setup keeps the wider threat model AND drops the test noise. The two settings
-# are in .github/codeql/codeql-config.yml, with the measurements behind them.
+# are in .github/codeql/codeql-config.yml.
 
 on:
   # Mirrors ci.yml: push only on master (post-merge verification), branch work

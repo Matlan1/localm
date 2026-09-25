@@ -44,11 +44,11 @@ def _owner(path: Path, pid: int, start, space: "str | None" = "this") -> None:
 def live_child():
     """A real child process that stays alive for the test, with its start
     identity."""
-    from localm.model_manager.pull import _process_start_identity
+    from localm.instances import process_start_identity
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        yield p.pid, _process_start_identity(p.pid)
+        yield p.pid, process_start_identity(p.pid)
     finally:
         p.kill()
         p.wait()
@@ -57,11 +57,11 @@ def live_child():
 @pytest.fixture()
 def dead_pid():
     """The pid and start identity of a child that has already exited."""
-    from localm.model_manager.pull import _process_start_identity
+    from localm.instances import process_start_identity
     p = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
-    start = _process_start_identity(p.pid)
+    start = process_start_identity(p.pid)
     p.stdin.close()
     p.wait()
     return p.pid, start
@@ -243,14 +243,14 @@ class TestPartialOwnership:
 
     def test_the_owner_record_names_this_process_its_pid_space_and_start(
             self, cache):
-        from localm.model_manager.pull import (
-            _pid_space_id, _process_start_identity, _write_partial_owner)
+        from localm.instances import process_start_identity
+        from localm.model_manager.pull import _pid_space_id, _write_partial_owner
         p = cache / "file.etag.cccc3333.incomplete"
         p.write_bytes(b"")
         _write_partial_owner(p)
         rec = json.loads(_partial_owner_path(p).read_text(encoding="utf-8"))
         assert rec == {"pid": os.getpid(), "space": _pid_space_id(),
-                       "start": _process_start_identity(os.getpid())}
+                       "start": process_start_identity(os.getpid())}
 
     def test_partial_without_owner_record_is_neither_adopted_nor_deleted(
             self, cache, tmp_path, monkeypatch):
