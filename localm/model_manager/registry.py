@@ -2171,10 +2171,12 @@ def _store_with_projector(path: Path, action: str, *,
 
     Refuses (raises RuntimeError, does not touch anything) when a name inside
     MODELS_DIR is already occupied by a genuinely different file - the same
-    path-identity guard the duplicate-content prompt applies inline. Without
-    *attached_projector_only*, a projector is exempt: a byte-identical file
-    already under its name is reused as is, and a different one makes it land
-    as ``<projector stem>-<n>.gguf`` instead (see :func:`_projector_dest`).
+    path-identity guard the duplicate-content prompt applies inline. A
+    projector is exempt, whether or not *attached_projector_only* is set: a
+    byte-identical file already under its name is reused as is, and a
+    different one makes it land as ``<projector stem>-<n>.gguf`` instead (see
+    :func:`_projector_dest`). *attached_projector_only* only ever narrows
+    WHICH projectors travel, never how a name collision for one is resolved.
     Preflights free disk space before copying (a copy needs room for both the
     original and the new copy at once); a same-name/no-op destination (already
     in place) contributes nothing to that check. After each copy the
@@ -2241,13 +2243,7 @@ def _store_with_projector(path: Path, action: str, *,
     arrived: set = set()       # projector srcs now present at their placed path
     reused: List[Path] = []
     for t in transfers:
-        if attached_projector_only:
-            dest = _mm.MODELS_DIR / t.src.name
-            if dest.exists() and dest.resolve() != t.src.resolve():
-                raise RuntimeError(f"Cannot {action}: {dest} already exists")
-            reuse = False
-        else:
-            dest, reuse = _projector_dest(t.src, taken)
+        dest, reuse = _projector_dest(t.src, taken)
         taken.add(dest.name.lower())
         placed[t.src] = dest
         if reuse:
@@ -2978,6 +2974,69 @@ def _resolve_ollama_manifest(p: Path):
 
 
 
+def _primary_name_collision(gguf: Path) -> Optional[str]:
+    """The conflicting path in MODELS_DIR, if *gguf*'s own name (or any split
+    part) is already occupied there by a genuinely different file; None when
+    every part's destination is free or already *gguf* itself.
+
+    Read-only (stats and path comparisons, no transfer): mirrors the check
+    ``_store_with_projector``'s own primary-item construction makes for the
+    same file, so a caller can preflight a whole batch of independent
+    transfers before starting any of them.
+    """
+    for part in (split_gguf_parts(gguf.name) or [gguf.name]):
+        src = gguf.parent / part
+        dest = _mm.MODELS_DIR / part
+        if dest.exists() and dest.resolve() != src.resolve():
+            return str(dest)
+    return None
+
+
+def _store_standalone_projector(src: Path, action: str) -> Path:
+    """Bring a projector-shaped GGUF that is its own ``first_parts`` entry -
+    nobody else in the folder claims it as their attached sibling - into
+    MODELS_DIR, with the same collision leniency ``_projector_dest`` already
+    gives an attached projector: reuse a byte-identical file already under
+    its name, or land under the first free ``<stem>-<n>.gguf``. Unlike an
+    owner or an independent model, this never raises on a same-name
+    collision, so it can never be the reason an earlier transfer in the same
+    folder is left stranded.
+    """
+    from rich.markup import escape
+
+    _mm.ensure_dirs()
+    src = src.resolve()
+    dest, reuse = _projector_dest(src, set())
+    if reuse:
+        console.print(f"[dim]{escape(dest.name)} is already in the models folder "
+                      "with the same content; using that copy and leaving the "
+                      "original where it is.[/dim]")
+        return dest
+    size = src.stat().st_size
+    if not _mm._check_disk_space(_mm.MODELS_DIR, _space_needed(src.parent, action, size)):
+        raise RuntimeError(f"Not enough disk space to {action} {src.name} into {_mm.MODELS_DIR}")
+    verb = "Copying" if action == "copy" else "Moving"
+    # src.name/dest: a filename from the caller's own filesystem - not
+    # restricted to a safe charset.
+    console.print(f"[dim]{verb} {escape(src.name)} to {escape(str(dest))}…[/dim]")
+    if action == "copy":
+        pre_digest = _verify_digest(src, purpose="to check the source before copying")
+        shutil.copy2(src, dest)
+        post_digest = _verify_digest(dest, purpose="to confirm the copy")
+        if post_digest != pre_digest:
+            try:
+                dest.unlink()
+            except OSError:
+                pass  # best-effort cleanup; the mismatch itself still raises
+            raise RuntimeError(
+                f"Copy verification failed for {src.name}: sha256 mismatch "
+                f"after copy to {dest} (source left untouched, bad copy removed)"
+            )
+    else:
+        shutil.move(str(src), str(dest))
+    return dest
+
+
 def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[Path]]:
     """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
     before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
@@ -2986,18 +3045,34 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
     list also includes any mmproj vision-projector file sitting in the same
     folder (``_gguf_first_parts`` does not filter those out, since they are
     registered as their own model too). A projector is auto-attached to its
-    model by _store_into_models_dir (find_sibling_mmproj), so calling the helper
+    model by _store_with_projector (find_sibling_mmproj), so calling the helper
     again on the projector's OWN entry would either re-move a file that is
     already gone (crash) or hit a false "already exists" collision against the
     copy that just landed next to its model (same name, different source
     directory). So: precompute, from the ORIGINAL on-disk layout, which entries
     are an unambiguous sibling of some OTHER entry in this same folder, and only
-    "claim" a final path for those (they ride along with their model) instead of
-    transferring them a second time.
+    "claim" a final path for those (they ride along with their model, at
+    wherever their owner's call actually placed them) instead of transferring
+    them a second time.
+
+    Every OTHER entry falls into one of two buckets, resolved before any of
+    them transfer:
+
+      - An owner model, or an independent model nobody claims as anyone's
+        projector: refuses (returns None) on a genuine name collision - a
+        different file already using that name - exactly as before. That
+        refusal is now checked for the WHOLE folder up front, so it can never
+        strand an earlier entry already moved into MODELS_DIR and left
+        unregistered.
+      - A projector-shaped file (``"mmproj"`` in its own name) that nobody in
+        the folder claims as their attached sibling: never refuses at all,
+        via :func:`_store_standalone_projector` - the same reuse-or-rename
+        leniency an attached projector gets from :func:`_projector_dest`.
 
     Returns the new first_parts list (paths now under MODELS_DIR), or None if
-    any transfer failed (name collision, disk space, or a copy that verified
-    corrupt) - the caller reports the printed error and aborts the whole import.
+    a genuine collision, a disk-space shortfall, or a copy that verified
+    corrupt means some transfer failed - the caller reports the printed error
+    and aborts the whole import.
     """
     from rich.markup import escape
 
@@ -3010,24 +3085,55 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
         if any(sib_r == g.resolve() for g in first_parts):
             claimed_sibling_of[sib_r] = owner
 
-    new_parts: List[Path] = []
+    def is_unclaimed_projector(gguf: Path) -> bool:
+        return gguf.resolve() not in claimed_sibling_of and "mmproj" in gguf.name.lower()
+
+    # Preflight every owner/independent-model entry against the WHOLE folder
+    # before transferring any of them - a claimed sibling always rides with
+    # its owner (resolved below once every owner has run) and an unclaimed
+    # projector never refuses, so neither needs preflighting here.
     for gguf in first_parts:
-        if gguf.resolve() in claimed_sibling_of:
-            # Transferred as a side effect of its owning model's own call below
-            # (whichever order that happens in) - just point at its new home.
-            new_parts.append(_mm.MODELS_DIR / gguf.name if _mm.is_external_path(gguf) else gguf)
+        if gguf.resolve() in claimed_sibling_of or not _mm.is_external_path(gguf):
             continue
+        if is_unclaimed_projector(gguf):
+            continue
+        conflict = _primary_name_collision(gguf)
+        if conflict is not None:
+            console.print(f"[red]Cannot {store}: {escape(conflict)} already exists[/red]")
+            return None
+
+    new_parts: List[Optional[Path]] = [None] * len(first_parts)
+    owner_result: dict = {}   # owner's resolved path -> its StoredModel
+
+    for i, gguf in enumerate(first_parts):
+        if gguf.resolve() in claimed_sibling_of:
+            continue   # resolved below, once every owner in the folder has run
         if not _mm.is_external_path(gguf):
-            new_parts.append(gguf)
+            new_parts[i] = gguf
             continue
         try:
-            new_parts.append(_mm._store_into_models_dir(gguf, store,
-                                                        attached_projector_only=True))
+            if is_unclaimed_projector(gguf):
+                new_parts[i] = _store_standalone_projector(gguf, store)
+            else:
+                stored = _mm._store_with_projector(gguf, store, attached_projector_only=True)
+                new_parts[i] = stored.path
+                owner_result[gguf.resolve()] = stored
         except RuntimeError as e:
             # e: built from Path objects derived from the caller's own
             # filesystem paths - not restricted to a safe charset.
             console.print(f"[red]{escape(str(e))}[/red]")
             return None
+
+    for i, gguf in enumerate(first_parts):
+        owner = claimed_sibling_of.get(gguf.resolve())
+        if owner is None:
+            continue
+        stored = owner_result.get(owner.resolve())
+        if stored is not None and stored.mmproj is not None:
+            new_parts[i] = stored.mmproj
+        else:
+            new_parts[i] = _mm.MODELS_DIR / gguf.name if _mm.is_external_path(gguf) else gguf
+
     return new_parts
 
 

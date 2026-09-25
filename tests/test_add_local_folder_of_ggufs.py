@@ -28,11 +28,14 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
-def _gguf(d, name):
-    """Write a .gguf with content unique to its name so two files never collide
-    on the sha256 content-dedup path."""
+def _gguf(d, name, content=None):
+    """Write a .gguf. Default content is unique to its name so two files
+    never collide on the sha256 content-dedup path; pass *content* explicitly
+    to control that (e.g. two same-named files at different paths that must
+    compare byte-identical, or differ, on purpose)."""
+    d.mkdir(parents=True, exist_ok=True)
     p = d / name
-    p.write_bytes(b"GGUF\x00\x00\x00\x00" + name.encode())
+    p.write_bytes(content if content is not None else b"GGUF\x00\x00\x00\x00" + name.encode())
     return p
 
 
@@ -194,3 +197,96 @@ class TestPullFolder:
         assert pull_model(str(d)) is True
         reg = load_registry()
         assert {"one", "two"} <= set(reg)
+
+
+# ---------------------------------------------------------------------------
+#  --store move/copy over a folder: a projector name collision must not
+#  abort the whole import mid-walk.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def isolated_home_for_store(tmp_path, monkeypatch):
+    # _store_into_models_dir / _store_loose_gguf_dir read MODELS_DIR/HOME_DIR
+    # through the localm.model_manager PACKAGE attribute (a plain-value copy
+    # taken at import time), so that has to be patched too, on top of the
+    # config.py module-level values isolated_home already redirects.
+    import localm.config as cfg
+    import localm.model_manager as mm
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    models_dir = home / "models"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", models_dir)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(mm, "MODELS_DIR", models_dir)
+    monkeypatch.setattr(mm, "HOME_DIR", home)
+    mm.ensure_dirs()
+    return models_dir
+
+
+class TestFolderStoreProjectorCollision:
+    def test_byte_identical_projector_is_reused_not_aborted(
+            self, tmp_path, isolated_home_for_store):
+        models_dir = isolated_home_for_store
+        projector_bytes = b"GGUF identical projector bytes"
+        _gguf(models_dir, "mmproj-F16.gguf", projector_bytes)
+
+        d = tmp_path / "downloads"
+        _gguf(d, "gemma-3-4b-it-Q4_K_M.gguf", b"GGUF gemma model bytes")
+        _gguf(d, "mmproj-F16.gguf", projector_bytes)   # byte-identical to the one already there
+
+        assert add_local(str(d), store="move") is True
+        reg = load_registry()
+        assert {"gemma-3-4b-it-Q4_K_M", "mmproj-F16"} <= set(reg)
+        # Reused in place: the pre-existing file is untouched and the
+        # incoming duplicate is never deleted, even under --store move.
+        assert (models_dir / "mmproj-F16.gguf").read_bytes() == projector_bytes
+        assert not (d / "gemma-3-4b-it-Q4_K_M.gguf").exists()
+        assert (d / "mmproj-F16.gguf").exists()
+
+    def test_different_content_projector_lands_under_a_free_name(
+            self, tmp_path, isolated_home_for_store):
+        models_dir = isolated_home_for_store
+        _gguf(models_dir, "mmproj-F16.gguf", b"GGUF pre-existing DIFFERENT projector bytes")
+
+        d = tmp_path / "downloads"
+        _gguf(d, "gemma-3-4b-it-Q4_K_M.gguf", b"GGUF gemma model bytes")
+        _gguf(d, "mmproj-F16.gguf", b"GGUF incoming NEW projector bytes")
+
+        assert add_local(str(d), store="move") is True
+        reg = load_registry()
+        assert "gemma-3-4b-it-Q4_K_M" in reg
+        # A free <stem>-<n>.gguf name, not a silently dropped/overwritten file.
+        renamed = [n for n in reg if n != "gemma-3-4b-it-Q4_K_M"]
+        assert len(renamed) == 1
+        assert reg[renamed[0]]["path"].endswith("mmproj-F16-2.gguf")
+        assert (models_dir / "mmproj-F16.gguf").read_bytes() == \
+            b"GGUF pre-existing DIFFERENT projector bytes"
+        assert (models_dir / "mmproj-F16-2.gguf").read_bytes() == \
+            b"GGUF incoming NEW projector bytes"
+        # --store move: both incoming files are gone from the source folder.
+        assert not (d / "gemma-3-4b-it-Q4_K_M.gguf").exists()
+        assert not (d / "mmproj-F16.gguf").exists()
+
+    def test_genuine_model_collision_still_refuses_and_leaves_folder_untouched(
+            self, tmp_path, isolated_home_for_store):
+        models_dir = isolated_home_for_store
+        _gguf(models_dir, "shared-model.gguf", b"GGUF existing DIFFERENT model content")
+
+        d = tmp_path / "downloads"
+        # alpha sorts first and would transfer cleanly on its own - it must
+        # NOT be moved before the later, colliding file is discovered.
+        _gguf(d, "alpha.gguf", b"GGUF alpha content")
+        _gguf(d, "shared-model.gguf", b"GGUF incoming NEW model content")
+
+        assert add_local(str(d), store="move") is False
+        assert load_registry() == {}
+        # Preflighted: nothing in the folder transferred, not even the file
+        # that would otherwise have succeeded.
+        assert (d / "alpha.gguf").exists()
+        assert (d / "shared-model.gguf").exists()
+        assert not (models_dir / "alpha.gguf").exists()
+        assert (models_dir / "shared-model.gguf").read_bytes() == \
+            b"GGUF existing DIFFERENT model content"
