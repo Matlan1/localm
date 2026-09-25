@@ -243,3 +243,46 @@ test("looksLikeActionAnnouncement: positives and negatives", () => {
   for (const s of yes) assert.equal(w.looksLikeActionAnnouncement(s), true, `should match: ${s}`);
   for (const s of no) assert.equal(w.looksLikeActionAnnouncement(s), false, `should not match: ${s.slice(0, 40)}`);
 });
+
+const FISH_OFFER =
+  "I don't have any information about fish prices. You didn't tell me what " +
+  "kind of fish or where you're looking. I can search for current prices if " +
+  "that's helpful, but it would just give you a number from the internet - " +
+  "not something I actually know.";
+
+test("looksLikeActionAnnouncement: an offer or a question is not an announcement", () => {
+  const { window: w } = loadApp();
+  const offers = [
+    FISH_OFFER,
+    "I could look that up for you.",
+    "I can check the current price for you.",
+    "I'll look it up if you want.",
+    "If you'd like, I will search for the latest figures.",
+    "Let me search for that. Which city are you in?",
+    "I'll search for it now, okay?",
+    "Ich kann das gerne im Internet nachschauen.",
+    "Ich werde das nachschauen, wenn du möchtest.",
+  ];
+  for (const s of offers) {
+    assert.equal(w.looksLikeActionAnnouncement(s), false, `offer, not a promise: ${s.slice(-50)}`);
+  }
+  const promises = [
+    "Prices vary a lot. Let me search for the current price of sea bass.",
+    "I can check that. Let me look it up now.",
+    "I will do the following:\n- search the web\n- summarise it",
+  ];
+  for (const s of promises) {
+    assert.equal(w.looksLikeActionAnnouncement(s), true, `still a promise: ${s.slice(-50)}`);
+  }
+});
+
+test("announcement: an offer ends the turn with no repair round and no note", async () => {
+  const d = driver({ web: true, rounds: [
+    { deltas: [content(FISH_OFFER), done("stop")] },
+  ] });
+  await d.window.runCompletion(d.conv);
+  assert.equal(d.completions().length, 1, "the offer waits for the user's answer");
+  assert.ok(!d.conv.messages.some((m) => m.kind === "tool" && m.reason === "pending"),
+    "no [pending action] note is added for an offer");
+  assert.equal(d.conv.messages[d.conv.messages.length - 1].content, FISH_OFFER);
+});

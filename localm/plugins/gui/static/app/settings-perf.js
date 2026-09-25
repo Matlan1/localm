@@ -923,8 +923,8 @@ const _ACTION_VERBS =
   "read (?:the|that|this) page|open (?:the|that) (?:page|link|url)|" +
   "suche|nachschauen|nachsehen|recherchiere|schaue? (?:im internet|online) nach";
 const _ACTION_ANNOUNCE_RE = new RegExp(
-  "(?:\\b(?:I will|I'll|I am going to|I'm going to|I can|I could|let me|" +
-  "allow me to|I will now|I'll now|ich werde|ich kann|lass mich|" +
+  "(?:\\b(?:I will|I'll|I am going to|I'm going to|let me|" +
+  "allow me to|I will now|I'll now|ich werde|lass mich|" +
   "lassen sie mich)\\s+(?:now\\s+|just\\s+|quickly\\s+|jetzt\\s+|mal\\s+|" +
   "kurz\\s+|gleich\\s+)?(?:" + _ACTION_VERBS + ")\\b)|" +
   "(?:\\b(?:will|and) (?:then )?(?:report|get) back\\b)|" +
@@ -934,6 +934,16 @@ const _ACTION_ANNOUNCE_RE = new RegExp(
   "(?:\\bich werde\\b[^.!?\\n]{0,80}\\b(?:nachschauen|nachsehen|suchen|" +
   "recherchieren|nachschlagen|abrufen)\\b)",
   "i");
+// A sentence that makes the action depend on the user ("if you like", "if
+// that's helpful", "shall I", "wenn du möchtest") offers it instead of
+// promising it.
+const _ACTION_OFFER_RE = new RegExp(
+  "\\bif (?:you|that|this|it|so|needed|necessary|helpful|wanted|desired|required)\\b|" +
+  "\\bin case\\b|\\b(?:once|when) you\\b|\\b(?:would|do) you (?:like|want|prefer)\\b|" +
+  "\\b(?:shall|should) I\\b|\\bwant me to\\b|\\blet me know\\b|" +
+  "\\b(?:wenn|falls|sobald) (?:du|sie|ihr)\\b|\\bsoll ich\\b|" +
+  "\\b(?:möchtest|willst) du\\b|\\bmöchten sie\\b|\\bbescheid\\b",
+  "i");
 const _ACTION_ANNOUNCE_MAX_CHARS = 600;
 
 const _ACTION_ANNOUNCE_TAIL_CHARS = 240;
@@ -941,13 +951,18 @@ const _ACTION_ANNOUNCE_TAIL_CHARS = 240;
 /** True when a reply only ANNOUNCES a web action instead of performing one: a
  *  short, plain-prose reply with no tool call and no URL whose closing
  *  sentences promise a lookup ("I will now search ...", "let me look that
- *  up", "... and report back"). */
+ *  up", "... and report back"). A reply that ends on a question, and a
+ *  sentence that offers the lookup ("I can search if that's helpful", "I'll
+ *  look it up if you want"), hand the turn to the user and do not count. */
 export function looksLikeActionAnnouncement(text) {
   const clean = stripThink(text || "").trim();
   if (!clean || clean.length > _ACTION_ANNOUNCE_MAX_CHARS) return false;
   if (/https?:\/\//i.test(clean)) return false;
   if (looksLikeWebToolAttempt(clean) || parseWebCalls(clean, 1).length) return false;
-  return _ACTION_ANNOUNCE_RE.test(clean.slice(-_ACTION_ANNOUNCE_TAIL_CHARS));
+  if (/\?[\s"'*_)\]]*$/.test(clean)) return false;
+  const sentences = clean.slice(-_ACTION_ANNOUNCE_TAIL_CHARS).match(/[^.!?\n]+[.!?]*/g) || [];
+  return sentences.some((s) => _ACTION_ANNOUNCE_RE.test(s) && !_ACTION_OFFER_RE.test(s) &&
+                               !/\?\s*$/.test(s));
 }
 
 /** The grounding states an evidence bundle can carry (web_retrieval). */

@@ -287,6 +287,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   then stops is no longer accepted as the final answer.** With web access on,
   the chat asks the model once to either make the call or answer now; this
   happens at most once per message.
+  A reply that only offers a lookup ("I can search for current prices if
+  that's helpful") or ends on a question is left for you to answer.
 - **Chat plugins no longer treat a failed generation as a completed turn.**
   Memory consolidation is not scheduled after a failed reply, and the audit
   log and transcript record that the generation ended in an error or a
