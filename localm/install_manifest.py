@@ -777,6 +777,24 @@ def _data_dirs(root: Path, m: Optional[dict]) -> list:
     return out
 
 
+def _app_window_profile(root: Path) -> Optional[Path]:
+    """The folder pywebview keeps the app window's cookies and page storage in
+    (its default, shared by every pywebview app), when this install has the
+    app-window extra and that folder exists. None on other platforms."""
+    venv = root / ".venv"
+    if not (any(venv.glob("Lib/site-packages/webview"))
+            or any(venv.glob("lib/python*/site-packages/webview"))):
+        return None
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", "")
+        profile = Path(base) / "pywebview" if base else None
+    elif sys.platform.startswith("linux"):
+        profile = Path.home() / ".pywebview"
+    else:
+        return None
+    return profile if profile is not None and profile.is_dir() else None
+
+
 def _read_cfg_line(path: Path) -> str:
     """The first line of a ``localm-home.cfg``: UTF-8 (with or without a BOM),
     or on Windows, when that fails, the console (OEM) code page that cmd.exe's
@@ -917,9 +935,19 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
         try:
             _read_cfg_line(cfg)
         except (OSError, ValueError, LookupError) as e:
-            items.append(_Item(cfg, "data", "warn",
+            items.append(_Item(cfg, "note", "note",
                                f"cannot read it ({e}); the data folder it names "
                                "was not checked"))
+    if purge_data:
+        profile = _app_window_profile(root)
+        if profile is not None:
+            items.append(_Item(profile, "note", "note",
+                               "the app window's saved login and copies of recent "
+                               "chats; shared by every app built on pywebview, so "
+                               "delete it by hand if nothing else uses it"))
+        items.append(_Item("Your web browser", "note", "note",
+                           "it may keep copies of recent chats until you clear its "
+                           "site data for the address LocaLM ran on"))
     for d, mode, pre, parents, recorded in _data_dirs(root, m):
         dp = Path(d)
         if not dp.exists():
@@ -1159,7 +1187,7 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
     The report's ``exit`` is one of the EXIT_* codes."""
     root = Path(root).resolve()
     report = {"removed": [], "skipped": [], "warned": [], "refused": [],
-              "failed": [], "deferred": [], "running": [], "stopped": [],
+              "failed": [], "deferred": [], "running": [], "stopped": [], "notes": [],
               "data": [], "venv": "", "ok": True, "no_manifest": False,
               "dry_run": bool(dry_run), "exit": EXIT_OK}
 
@@ -1276,6 +1304,9 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
         return
     if st == "refuse":
         report["refused"].append((it.path, it.reason))
+        return
+    if st == "note":
+        report["notes"].append((it.path, it.reason))
         return
     if st in ("warn", "warn-defer"):
         report["warned"].append((it.path, it.reason))
@@ -1479,6 +1510,7 @@ def format_report(rep: dict) -> List[str]:
             [f"{x}  ({why})" for x, why in rep.get("warned", [])])
     section("REFUSED - never removed:", [f"{x}  ({why})" for x, why in rep.get("refused", [])])
     section("Could not remove:", [f"{x}  ({why})" for x, why in rep.get("failed", [])])
+    section("Not removed by uninstall:", [f"{x}  ({why})" for x, why in rep.get("notes", [])])
     if rep.get("no_manifest"):
         out.append("  [!] No install record (.localm-install.json) was found, so the")
         out.append("      items above are LocaLM's usual locations, not a record.")

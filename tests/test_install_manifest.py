@@ -344,7 +344,54 @@ def test_an_unreadable_pointer_file_is_reported(tmp_path, isolated, monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "localm-home.cfg").write_bytes(b"/data/\xff\xfe\n")
     rep = im.uninstall(tmp_path, purge_data=True, dry_run=True)
-    assert any("cannot read it" in why for _, why in rep["warned"]), rep["warned"]
+    assert any("cannot read it" in why for _, why in rep["notes"]), rep["notes"]
+
+
+def _app_window_install(tmp_path, isolated, monkeypatch, platform):
+    """A portable install with the app-window extra, and pywebview's shared
+    profile folder holding something."""
+    monkeypatch.setattr(sys, "platform", platform)
+    clone = tmp_path / "clone"
+    site = (clone / ".venv" / "Lib" / "site-packages" if platform == "win32"
+            else clone / ".venv" / "lib" / "python3.12" / "site-packages")
+    (site / "webview").mkdir(parents=True)
+    profile = (Path(os.environ["APPDATA"]) / "pywebview" if platform == "win32"
+               else isolated["home"] / ".pywebview")
+    (profile / "EBWebView").mkdir(parents=True)
+    (profile / "EBWebView" / "Local State").write_text("{}", encoding="utf-8")
+    im.prepare_data(clone, portable=True)
+    return clone, profile
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_deleting_data_names_what_it_cannot_reach(tmp_path, isolated, monkeypatch, platform):
+    """The app window's profile is pywebview's shared default folder, and a
+    browser keeps its own copy of recent chats: both are named."""
+    clone, profile = _app_window_install(tmp_path, isolated, monkeypatch, platform)
+    kept = im.uninstall(clone, purge_data=False, dry_run=True)
+    assert kept["notes"] == []
+    plan = im.uninstall(clone, purge_data=True, dry_run=True)
+    names = [str(x) for x, _ in plan["notes"]]
+    assert str(profile) in names and "Your web browser" in names, plan["notes"]
+    assert "Not removed by uninstall:" in "\n".join(im.format_report(plan))
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_deleting_data_never_touches_the_app_window_profile(tmp_path, isolated, monkeypatch,
+                                                           platform):
+    clone, profile = _app_window_install(tmp_path, isolated, monkeypatch, platform)
+    im.uninstall(clone, purge_data=True, force=True)
+    assert (profile / "EBWebView" / "Local State").is_file()
+    assert not (clone / "home").exists()
+
+
+def test_no_app_window_profile_note_without_the_app_window_extra(tmp_path, isolated,
+                                                                 monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    (Path(os.environ["APPDATA"]) / "pywebview").mkdir()
+    im.prepare_data(tmp_path, portable=True)
+    plan = im.uninstall(tmp_path, purge_data=True, dry_run=True)
+    assert [str(x) for x, _ in plan["notes"]] == ["Your web browser"]
 
 
 def test_kept_data_is_reported_with_its_size(tmp_path):
