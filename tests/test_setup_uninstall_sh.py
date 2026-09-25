@@ -171,6 +171,30 @@ def test_without_any_python_only_the_fixed_folders_go(tmp_path, venv_template):
     assert (p["lib"] / "libllama.so").exists()
 
 
+def test_setup_gui_finishes_an_uninstall_the_window_left_pending(tmp_path):
+    """setup-gui.sh hands exit code 42 from the window to setup.sh
+    --finish-uninstall. The window is stood in for by a uv that exits 42."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    for name in ("setup.sh", "setup-gui.sh"):
+        shutil.copy2(ROOT / name, clone / name)
+    (clone / ".uv").mkdir()
+    fake_uv = clone / ".uv" / "uv"
+    fake_uv.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    fake_uv.chmod(0o755)
+    (clone / ".venv").mkdir()
+    (clone / ".python").mkdir()
+    (clone / im.PENDING_NAME).write_text(".venv\n.python\n.uv\n", encoding="ascii")
+    (clone / im.MANIFEST_NAME).write_text("{}", encoding="utf-8")
+    env = dict(os.environ, DISPLAY=os.environ.get("DISPLAY", ":0"))
+    out = subprocess.run([shutil.which("bash"), str(clone / "setup-gui.sh")], cwd=str(clone),
+                         capture_output=True, text=True, timeout=120, env=env,
+                         stdin=subprocess.DEVNULL)
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert _runtime_gone(clone)
+    assert not (clone / im.MANIFEST_NAME).exists()
+
+
 def test_finish_uninstall_removes_only_allowlisted_names(tmp_path):
     clone = tmp_path / "clone"
     clone.mkdir()

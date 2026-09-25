@@ -59,7 +59,7 @@ if not defined UVEXE (
 
 if not defined UVEXE (
     echo.
-    echo   [!] uv still is not callable, so the graphical setup cannot start.
+    echo   [^^!] uv still is not callable, so the graphical setup cannot start.
     echo       Open a NEW terminal and run setup.bat instead.
     pause
     exit /b 1
@@ -80,20 +80,29 @@ set "RC=!errorlevel!"
 
 rem  42: an uninstall finished in the window; the Python runtime it ran on is
 rem  removed now that it has closed.
-if "!RC!"=="42" (
-    echo   Removing the last LocaLM folders ...
-    call "%~dp0setup.bat" finish-uninstall
-    echo.
-    echo   LocaLM was uninstalled.
-    pause
-    exit /b 0
-)
+if "!RC!"=="42" goto finish_uninstall
 
 if not "!RC!"=="0" (
     echo.
-    echo   [!] The setup window could not run ^(exit !RC!^).
+    echo   [^^!] The setup window could not run ^(exit !RC!^).
     echo       Use the console installer instead:  setup.bat
     pause
     exit /b !RC!
 )
 endlocal
+exit /b 0
+
+:finish_uninstall
+echo   Removing the last LocaLM folders ...
+call ".\setup.bat" finish-uninstall
+if errorlevel 1 goto finish_uninstall_left
+echo.
+echo   LocaLM was uninstalled.
+pause
+exit /b 0
+:finish_uninstall_left
+echo.
+echo   [^^!] Some LocaLM folders could not be removed - close any LocaLM window
+echo       and delete them by hand, or run  setup.bat finish-uninstall  again.
+pause
+exit /b 1

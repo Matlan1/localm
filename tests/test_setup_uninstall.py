@@ -208,6 +208,58 @@ def test_finish_uninstall_removes_only_allowlisted_pending_names(tmp_path):
     assert not (clone / im.MANIFEST_NAME).exists()
 
 
+def _gui_finish(clone: Path):
+    """Run setup-gui.bat's exit-42 path (the `if "!RC!"=="42"` jump and the
+    :finish_uninstall section, verbatim) in *clone*."""
+    gui_bat = (ROOT / "setup-gui.bat").read_text(encoding="utf-8")
+    jump = 'if "!RC!"=="42" goto finish_uninstall'
+    assert jump in gui_bat, "the exit-42 jump moved"
+    section = gui_bat[gui_bat.index("\n:finish_uninstall\n"):]
+    probe = clone / "probe.bat"
+    probe.write_text(("@echo off\nsetlocal EnableExtensions EnableDelayedExpansion\n"
+                      'set "RC=42"\n' + jump + "\necho NOT_REACHED\nexit /b 9\n"
+                      + section).replace("\n", "\r\n"), encoding="utf-8")
+    return subprocess.run(["cmd", "/c", str(probe)], cwd=str(clone), capture_output=True,
+                          text=True, timeout=120, stdin=subprocess.DEVNULL)
+
+
+def _pending_layout(clone: Path) -> None:
+    clone.mkdir()
+    shutil.copy2(ROOT / "setup.bat", clone / "setup.bat")
+    for name in (".venv", ".python", ".uv"):
+        (clone / name).mkdir()
+        (clone / name / "f").write_bytes(b"x")
+    (clone / im.PENDING_NAME).write_text(".venv\n.python\n.uv\n", encoding="ascii")
+    (clone / im.MANIFEST_NAME).write_text("{}", encoding="utf-8")
+
+
+def test_setup_gui_finishes_an_uninstall_the_window_left_pending(tmp_path):
+    """setup-gui.bat hands exit code 42 from the window to setup.bat
+    finish-uninstall, which removes the runtime folders the window ran on."""
+    clone = tmp_path / "clone"
+    _pending_layout(clone)
+    out = _gui_finish(clone)
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert "LocaLM was uninstalled." in out.stdout, out.stdout
+    assert "NOT_REACHED" not in out.stdout
+    assert _runtime_gone(clone)
+    assert not (clone / im.MANIFEST_NAME).exists()
+
+
+def test_setup_gui_reports_folders_it_could_not_remove(tmp_path):
+    clone = tmp_path / "clone"
+    _pending_layout(clone)
+    held = open(clone / ".python" / "f", "rb")
+    try:
+        out = _gui_finish(clone)
+    finally:
+        held.close()
+    assert out.returncode == 1, (out.stdout, out.stderr)
+    assert "LocaLM was uninstalled." not in out.stdout
+    assert "Some LocaLM folders could not be removed" in out.stdout
+    assert (clone / im.PENDING_NAME).exists()
+
+
 def test_a_folder_held_open_is_reported_and_the_record_kept(tmp_path, venv_template):
     clone = tmp_path / "clone"
     _install(clone, venv_template)
