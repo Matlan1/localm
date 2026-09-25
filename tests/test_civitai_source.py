@@ -176,6 +176,7 @@ class TestResolveDownload:
         assert resolved.filename == "add-detail-xl.safetensors"
         assert resolved.size_bytes == int(223097.99 * 1024)
         assert resolved.sha256 == "0d9bd1b873a7863e128b4672e3e245838858f71469a3cec58123c16c06f83bd7"
+        assert resolved.file_id == "99264"
 
     def test_refuses_an_unmapped_type(self, monkeypatch):
         version = _version_detail()
@@ -202,6 +203,7 @@ class TestResolveDownload:
         self._wire(monkeypatch, version=version)
         resolved = sources.CivitAISource().resolve_download(135867, None)
         assert resolved.filename == "sibling-safe.safetensors"
+        assert resolved.file_id == "2"
 
     def test_explicit_file_id_on_legacy_format_refused_without_the_flag(self, monkeypatch):
         version = _version_detail()
