@@ -5,12 +5,14 @@ right source/model_type, the SSRF-guarded redirect treatment, and SHA256
 verification. No real network - CivitAISource.resolve_download and the HTTP
 layer are mocked."""
 
+import contextlib
 import hashlib
 from pathlib import Path
 
 import pytest
 
 from localm import model_manager as mm
+from localm.model_manager import pull
 from localm.model_manager.pull import _pull_civitai_file
 from localm.model_manager.sources import ResolvedDownload
 
@@ -64,6 +66,46 @@ class _FakeStreamResponse:
             yield self.body[i:i + chunk_size]
 
 
+class _DroppedStream(_FakeStreamResponse):
+    """A 200 response whose body stops with a connection error after *keep*
+    bytes."""
+
+    def __init__(self, body: bytes, keep: int):
+        super().__init__(body)
+        self.keep = keep
+
+    def iter_content(self, chunk_size):
+        import requests
+        yield self.body[:self.keep]
+        raise requests.ConnectionError("connection reset by peer")
+
+
+class _RangeServer:
+    """A fake ``pinned_request`` serving *body*: a ``Range: bytes=N-`` GET gets
+    the tail from byte N as a 206 (a 416 past the end), any other GET the whole
+    body. ``gets`` records every GET's headers."""
+
+    def __init__(self, body: bytes):
+        self.body = body
+        self.gets: list = []
+
+    def __call__(self, method, url, **kw):
+        assert method == "GET", f"unexpected {method} {url}"
+        headers = dict(kw.get("headers") or {})
+        self.gets.append(headers)
+        rng = headers.get("Range")
+        if rng is None:
+            return _FakeStreamResponse(self.body)
+        start = int(rng.removeprefix("bytes=").removesuffix("-"))
+        if start >= len(self.body):
+            return _FakeStreamResponse(b"", status_code=416)
+        return _FakeStreamResponse(self.body[start:], status_code=206)
+
+
+def _digest(body: bytes) -> str:
+    return hashlib.sha256(body).hexdigest()
+
+
 def _resolved(**over) -> ResolvedDownload:
     body = b"fake-lora-bytes"
     base = dict(
@@ -74,9 +116,39 @@ def _resolved(**over) -> ResolvedDownload:
         size_bytes=len(body),
         sha256=hashlib.sha256(body).hexdigest(),
         comfy_subfolder="loras",
+        file_id="99264",
     )
     base.update(over)
     return ResolvedDownload(**base)
+
+
+def _civitai_pull(monkeypatch, resolved: ResolvedDownload, dest_dir: Path, fetch,
+                  version_id: str = "135867", **kw):
+    """Run _pull_civitai_file for *resolved* into *dest_dir*, with *fetch* as
+    the HTTP layer and the redirect resolver passing URLs through."""
+    monkeypatch.setattr(
+        "localm.model_manager.sources.CivitAISource.resolve_download",
+        lambda self, ref, file, **k: resolved)
+    monkeypatch.setattr(
+        "localm.media.managed_comfy.comfy_models_dest_dir",
+        lambda subfolder, cfg=None, plugin=None: dest_dir)
+    monkeypatch.setattr(
+        "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
+    monkeypatch.setattr("localm.netpolicy.pinned_request", fetch)
+    return _pull_civitai_file(version_id, None, **kw)
+
+
+def _interrupt_pull(monkeypatch, resolved: ResolvedDownload, dest_dir: Path,
+                    body: bytes, keep: int, version_id: str = "135867") -> Path:
+    """Run a pull of *resolved* whose transfer of *body* drops after *keep*
+    bytes, and return the partial file it leaves behind."""
+    ok = _civitai_pull(monkeypatch, resolved, dest_dir,
+                       lambda method, url, **kw: _DroppedStream(body, keep),
+                       version_id=version_id)
+    part = dest_dir / (resolved.filename + ".part")
+    assert ok is False
+    assert part.read_bytes() == body[:keep], "the interrupted pull left no partial"
+    return part
 
 
 def _wire_happy_path(monkeypatch, resolved: ResolvedDownload, dest_dir: Path,
@@ -108,6 +180,7 @@ class TestPullCivitaiFile:
         landed = dest_dir / "add-detail-xl.safetensors"
         assert landed.is_file()
         assert landed.read_bytes() == b"fake-lora-bytes"
+        assert sorted(p.name for p in dest_dir.iterdir()) == ["add-detail-xl.safetensors"]
         assert not (fake_registry[1] / "add-detail-xl.safetensors").exists()
         entry = store["add-detail-xl"]
         assert entry["source"] == "civitai:135867"
@@ -174,6 +247,7 @@ class TestPullCivitaiFile:
 
         assert ok is False
         assert not (dest_dir / "add-detail-xl.safetensors").exists()
+        assert list(dest_dir.iterdir()) == []
         assert store == {}
 
     def test_no_comfy_folder_configured_refuses_cleanly(
@@ -296,101 +370,315 @@ class TestPullCivitaiFileSSRF:
         assert not dest_dir.exists() or list(dest_dir.iterdir()) == []
         assert store == {}
 
-    def test_resume_appends_from_part_file(self, fake_registry, tmp_path, monkeypatch):
+
+_V1 = b"version-111-weights!"
+_V2 = b"VERSION-222-WEIGHTS?"
+
+
+class TestPullCivitaiFileResume:
+    """An interrupted pull leaves ``<file>.part`` plus a ``<file>.part.json``
+    record of which file it holds, and a later pull appends to that partial
+    only when the record matches the file it is pulling."""
+
+    FILE = "char.safetensors"
+
+    def _resolved(self, **over) -> ResolvedDownload:
+        base = dict(filename=self.FILE, source_tag="civitai:222", file_id="2",
+                    sha256=None, size_bytes=len(_V2))
+        base.update(over)
+        return _resolved(**base)
+
+    def test_an_interrupted_pull_keeps_the_partial_and_its_record(
+            self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+
+        _interrupt_pull(monkeypatch, self._resolved(), dest_dir, _V2, 12,
+                        version_id="222")
+
+        assert sorted(p.name for p in dest_dir.iterdir()) == [
+            self.FILE + ".part", self.FILE + ".part.json"]
+
+    @pytest.mark.parametrize("digest", [None, _digest(_V2)], ids=["no-digest", "digest"])
+    def test_the_same_file_resumes_from_its_partial(
+            self, digest, fake_registry, tmp_path, monkeypatch):
         store, _ = fake_registry
         dest_dir = tmp_path / "comfyui-models" / "loras"
-        dest_dir.mkdir(parents=True)
-        part_file = dest_dir / "add-detail-xl.safetensors.part"
-        part_file.write_bytes(b"fake-")  # 5 bytes already downloaded
+        resolved = self._resolved(sha256=digest)
+        _interrupt_pull(monkeypatch, resolved, dest_dir, _V2, 12, version_id="222")
+        server = _RangeServer(_V2)
 
-        resolved = _resolved()
-        captured = {}
+        ok = _civitai_pull(monkeypatch, resolved, dest_dir, server, version_id="222")
 
-        def _pinned_req(method, url, **kw):
-            captured["headers"] = dict(kw.get("headers") or {})
-            return _FakeStreamResponse(b"lora-bytes", status_code=206,
-                                       headers={"content-length": "10"})
-
-        monkeypatch.setattr(
-            "localm.model_manager.sources.CivitAISource.resolve_download",
-            lambda self, ref, file, **kw: resolved)
-        monkeypatch.setattr(
-            "localm.media.managed_comfy.comfy_models_dest_dir",
-            lambda subfolder, cfg=None, plugin=None: dest_dir)
-        monkeypatch.setattr(
-            "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
-        monkeypatch.setattr("localm.netpolicy.pinned_request", _pinned_req)
-
-        ok = _pull_civitai_file("135867", None)
+        dest = dest_dir / self.FILE
+        assert dest.is_file() and dest.read_bytes() == _V2
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert [g.get("Range") for g in server.gets] == ["bytes=12-"]
         assert ok is True
-        assert captured["headers"].get("Range") == "bytes=5-"
-        dest = dest_dir / "add-detail-xl.safetensors"
-        assert dest.read_bytes() == b"fake-lora-bytes"
-        assert not part_file.exists()
+        assert store["char"]["sha256"] == _digest(_V2)
+
+    @pytest.mark.parametrize("first, second, body", [
+        pytest.param({"version_id": "111"}, {"version_id": "222"}, _V2,
+                     id="other-version"),
+        pytest.param({"file_id": "1"}, {"file_id": "2"}, _V2, id="other-file"),
+        pytest.param({"sha256": _digest(_V1)}, {"sha256": _digest(_V2)}, _V2,
+                     id="other-digest"),
+        pytest.param({"size_bytes": len(_V1)}, {"size_bytes": len(_V2) + 1},
+                     _V2 + b"+", id="other-size"),
+    ])
+    def test_a_partial_of_another_file_is_not_resumed(
+            self, first, second, body, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+
+        def _pick(over):
+            over = dict(over)
+            version = over.pop("version_id", "222")
+            return version, self._resolved(source_tag=f"civitai:{version}", **over)
+
+        version, resolved = _pick(first)
+        _interrupt_pull(monkeypatch, resolved, dest_dir, _V1, 12, version_id=version)
+        version, resolved = _pick(second)
+        server = _RangeServer(body)
+
+        exc = None
+        try:
+            ok = _civitai_pull(monkeypatch, resolved, dest_dir, server,
+                               version_id=version)
+        except Exception as e:
+            ok, exc = None, e
+
+        dest = dest_dir / self.FILE
+        assert dest.is_file() and dest.read_bytes() == body, (
+            "the new file was not downloaded whole: "
+            f"{dest.read_bytes() if dest.is_file() else None!r}")
+        assert [g.get("Range") for g in server.gets] == [None]
+        assert exc is None, f"the pull raised {exc!r}"
+        assert ok is True
+        assert store["char"]["sha256"] == _digest(body)
+
+    def test_a_restart_that_cannot_truncate_leaves_no_record_beside_the_old_bytes(
+            self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        _interrupt_pull(monkeypatch, self._resolved(source_tag="civitai:111"),
+                        dest_dir, _V1, 12, version_id="111")
+        part = dest_dir / (self.FILE + ".part")
+        refused = []
+
+        def _open_refusing_truncate(path, mode="r", *a, **kw):
+            if Path(path) == part and "w" in mode:
+                refused.append(mode)
+                raise PermissionError(13, "file is in use", str(path))
+            return open(path, mode, *a, **kw)
+
+        monkeypatch.setattr(pull, "open", _open_refusing_truncate, raising=False)
+        ok = _civitai_pull(monkeypatch, self._resolved(), dest_dir, _RangeServer(_V2),
+                           version_id="222")
+        monkeypatch.delattr(pull, "open")
+        assert refused == ["wb"], "the truncate was never refused"
+        assert ok is False
+        server = _RangeServer(_V2)
+
+        ok = _civitai_pull(monkeypatch, self._resolved(), dest_dir, server,
+                           version_id="222")
+
+        dest = dest_dir / self.FILE
+        assert dest.is_file() and dest.read_bytes() == _V2
+        assert [g.get("Range") for g in server.gets] == [None]
+        assert ok is True
+
+    def test_a_record_with_no_partial_beside_it_is_ignored(
+            self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        resolved = self._resolved()
+        _interrupt_pull(monkeypatch, resolved, dest_dir, _V2, 12, version_id="222")
+        (dest_dir / (self.FILE + ".part")).unlink()
+        server = _RangeServer(_V2)
+
+        ok = _civitai_pull(monkeypatch, resolved, dest_dir, server, version_id="222")
+
+        dest = dest_dir / self.FILE
+        assert dest.is_file() and dest.read_bytes() == _V2
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert [g.get("Range") for g in server.gets] == [None]
+        assert ok is True
+
+    @pytest.mark.parametrize("record", [None, b"{not json", b"[]"],
+                             ids=["no-record", "unreadable-record", "not-an-object"])
+    def test_a_partial_without_a_usable_record_is_not_resumed(
+            self, record, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest_dir.mkdir(parents=True)
+        (dest_dir / (self.FILE + ".part")).write_bytes(b"GARBAGE")
+        if record is not None:
+            (dest_dir / (self.FILE + ".part.json")).write_bytes(record)
+        server = _RangeServer(_V2)
+
+        ok = _civitai_pull(monkeypatch, self._resolved(), dest_dir, server,
+                           version_id="222")
+
+        dest = dest_dir / self.FILE
+        assert dest.is_file() and dest.read_bytes() == _V2
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert [g.get("Range") for g in server.gets] == [None]
+        assert ok is True
 
     def test_server_ignoring_range_restarts_clean(self, fake_registry, tmp_path, monkeypatch):
         dest_dir = tmp_path / "comfyui-models" / "loras"
-        dest_dir.mkdir(parents=True)
-        part_file = dest_dir / "add-detail-xl.safetensors.part"
-        part_file.write_bytes(b"GARBAGE")
-
         resolved = _resolved()
-        captured = {}
+        _interrupt_pull(monkeypatch, resolved, dest_dir, b"fake-lora-bytes", 7)
+        gets = []
 
-        def _pinned_req(method, url, **kw):
-            captured["headers"] = dict(kw.get("headers") or {})
-            return _FakeStreamResponse(b"fake-lora-bytes", status_code=200,
-                                       headers={"content-length": str(len(b"fake-lora-bytes"))})
+        def _ignores_range(method, url, **kw):
+            gets.append(dict(kw.get("headers") or {}))
+            return _FakeStreamResponse(b"fake-lora-bytes")
 
-        monkeypatch.setattr(
-            "localm.model_manager.sources.CivitAISource.resolve_download",
-            lambda self, ref, file, **kw: resolved)
-        monkeypatch.setattr(
-            "localm.media.managed_comfy.comfy_models_dest_dir",
-            lambda subfolder, cfg=None, plugin=None: dest_dir)
-        monkeypatch.setattr(
-            "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
-        monkeypatch.setattr("localm.netpolicy.pinned_request", _pinned_req)
+        ok = _civitai_pull(monkeypatch, resolved, dest_dir, _ignores_range)
 
-        ok = _pull_civitai_file("135867", None)
-        assert ok is True
-        assert captured["headers"].get("Range") == "bytes=7-"
         dest = dest_dir / "add-detail-xl.safetensors"
         assert dest.read_bytes() == b"fake-lora-bytes"
+        assert [g.get("Range") for g in gets] == ["bytes=7-"]
+        assert ok is True
 
     def test_range_not_satisfiable_resets_and_retries(self, fake_registry, tmp_path, monkeypatch):
         dest_dir = tmp_path / "comfyui-models" / "loras"
-        dest_dir.mkdir(parents=True)
-        part_file = dest_dir / "add-detail-xl.safetensors.part"
-        part_file.write_bytes(b"TOO_MANY_BYTES_THAT_EXCEED_REMOTE")
-
         resolved = _resolved()
+        _interrupt_pull(monkeypatch, resolved, dest_dir, b"fake-lora-bytes", 5)
         calls = []
 
         def _pinned_req(method, url, **kw):
             calls.append(dict(kw.get("headers") or {}))
             if len(calls) == 1:
                 return _FakeStreamResponse(b"", status_code=416)
-            return _FakeStreamResponse(b"fake-lora-bytes", status_code=200,
-                                       headers={"content-length": str(len(b"fake-lora-bytes"))})
+            return _FakeStreamResponse(b"fake-lora-bytes")
 
-        monkeypatch.setattr(
-            "localm.model_manager.sources.CivitAISource.resolve_download",
-            lambda self, ref, file, **kw: resolved)
-        monkeypatch.setattr(
-            "localm.media.managed_comfy.comfy_models_dest_dir",
-            lambda subfolder, cfg=None, plugin=None: dest_dir)
-        monkeypatch.setattr(
-            "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
-        monkeypatch.setattr("localm.netpolicy.pinned_request", _pinned_req)
+        ok = _civitai_pull(monkeypatch, resolved, dest_dir, _pinned_req)
 
-        ok = _pull_civitai_file("135867", None)
-        assert ok is True
-        assert len(calls) == 2
-        assert "Range" in calls[0]
-        assert "Range" not in calls[1]
         dest = dest_dir / "add-detail-xl.safetensors"
         assert dest.read_bytes() == b"fake-lora-bytes"
+        assert sorted(p.name for p in dest_dir.iterdir()) == ["add-detail-xl.safetensors"]
+        assert [c.get("Range") for c in calls] == ["bytes=5-", None]
+        assert ok is True
+
+
+class TestPullCivitaiFileUnderThePartLock:
+    """What a pull decides from its partial and its destination file is read
+    after it takes the part lock, and a finished file already in place is never
+    replaced by one that failed verification."""
+
+    FILE = "add-detail-xl.safetensors"
+    BODY = b"0123456789ABCDEFGHIJ"
+
+    def _resolved(self) -> ResolvedDownload:
+        return _resolved(sha256=_digest(self.BODY), size_bytes=len(self.BODY))
+
+    def _before_the_lock(self, monkeypatch, action) -> list:
+        """Run *action* immediately before the pull takes the real part lock;
+        returns the filenames the hook fired for."""
+        real = pull._part_lock
+        fired = []
+
+        @contextlib.contextmanager
+        def _hooked(filename):
+            fired.append(filename)
+            action()
+            with real(filename):
+                yield
+
+        monkeypatch.setattr(pull, "_part_lock", _hooked)
+        return fired
+
+    def test_a_file_another_pull_finished_first_is_kept(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        resolved = self._resolved()
+        part = _interrupt_pull(monkeypatch, resolved, dest_dir, self.BODY, 10)
+        dest = dest_dir / self.FILE
+
+        def _other_pull_finishes():
+            dest.write_bytes(self.BODY)
+            for p in dest_dir.glob(self.FILE + ".part*"):
+                p.unlink()
+
+        fired = self._before_the_lock(monkeypatch, _other_pull_finishes)
+        server = _RangeServer(self.BODY)
+
+        exc = None
+        try:
+            ok = _civitai_pull(monkeypatch, resolved, dest_dir, server)
+        except Exception as e:
+            ok, exc = None, e
+
+        assert fired == [self.FILE], "the other pull was never simulated"
+        assert dest.is_file() and dest.read_bytes() == self.BODY, (
+            "the finished model file was lost")
+        assert not part.exists(), f"a tail-only partial was left: {part.read_bytes()!r}"
+        assert exc is None, f"the pull raised {exc!r}"
+        assert ok is True
+        assert server.gets == [], "a file already in place was downloaded again"
+        assert store["add-detail-xl"]["sha256"] == _digest(self.BODY)
+
+    def test_a_partial_that_grew_before_the_lock_resumes_from_its_new_end(
+            self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        resolved = self._resolved()
+        part = _interrupt_pull(monkeypatch, resolved, dest_dir, self.BODY, 10)
+
+        def _other_pull_adds_bytes():
+            with open(part, "ab") as f:
+                f.write(self.BODY[10:15])
+
+        fired = self._before_the_lock(monkeypatch, _other_pull_adds_bytes)
+        server = _RangeServer(self.BODY)
+
+        ok = _civitai_pull(monkeypatch, resolved, dest_dir, server)
+
+        dest = dest_dir / self.FILE
+        assert fired == [self.FILE], "the other pull was never simulated"
+        assert dest.is_file() and dest.read_bytes() == self.BODY
+        assert [g.get("Range") for g in server.gets] == ["bytes=15-"]
+        assert ok is True
+
+    def test_a_redownload_that_fails_verification_keeps_the_file_already_there(
+            self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest_dir.mkdir(parents=True)
+        dest = dest_dir / self.FILE
+        dest.write_bytes(self.BODY)
+        server = _RangeServer(b"corrupted-in-transit")
+
+        exc = None
+        try:
+            ok = _civitai_pull(monkeypatch, self._resolved(), dest_dir, server,
+                               redownload=True)
+        except Exception as e:
+            ok, exc = None, e
+
+        assert dest.is_file() and dest.read_bytes() == self.BODY, (
+            "the verified copy already in place was destroyed")
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert exc is None, f"the pull raised {exc!r}"
+        assert ok is False
+
+    def test_a_redownload_replaces_the_file_already_there(
+            self, fake_registry, tmp_path, monkeypatch):
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest_dir.mkdir(parents=True)
+        dest = dest_dir / self.FILE
+        dest.write_bytes(b"an-older-copy-of-it!")
+        server = _RangeServer(self.BODY)
+
+        exc = None
+        try:
+            ok = _civitai_pull(monkeypatch, self._resolved(), dest_dir, server,
+                               redownload=True)
+        except Exception as e:
+            ok, exc = None, e
+
+        assert dest.read_bytes() == self.BODY
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert exc is None, f"the pull raised {exc!r}"
+        assert ok is True
 
 
 class TestPullModelCivitaiDispatch:

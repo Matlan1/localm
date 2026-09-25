@@ -2517,6 +2517,210 @@ def _pull_url_locked(
     return True
 
 
+def _part_record_path(part_file: Path) -> Path:
+    """The record of which file *part_file* holds: ``<name>.part.json`` beside
+    it."""
+    return part_file.with_name(part_file.name + ".json")
+
+
+def _part_is_resumable(part_file: Path, identity: dict) -> bool:
+    """True when *part_file* exists and the record beside it equals
+    *identity*. A missing, unreadable or malformed record never matches."""
+    if not part_file.is_file():
+        return False
+    try:
+        rec = json.loads(_part_record_path(part_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return rec == identity
+
+
+def _discard_part(part_file: Path) -> None:
+    """Remove the record beside *part_file*, then *part_file* itself."""
+    _unlink_quiet(_part_record_path(part_file))
+    _unlink_quiet(part_file)
+
+
+def _start_part(part_file: Path, identity: dict):
+    """Open *part_file* empty for writing and record *identity* beside it.
+
+    The earlier record is removed before the file is truncated and the new one
+    is written after it (see
+    test_a_restart_that_cannot_truncate_leaves_no_record_beside_the_old_bytes).
+    Raises OSError when the earlier record cannot be removed or the file cannot
+    be opened. A new record that cannot be written is logged and left absent,
+    which makes the partial unresumable. Returns the open file.
+    """
+    rec = _part_record_path(part_file)
+    rec.unlink(missing_ok=True)
+    f = open(part_file, "wb")
+    try:
+        rec.write_text(json.dumps(identity), encoding="utf-8")
+    except OSError as e:
+        _unlink_quiet(rec)
+        logger.warning("could not record which file %s holds (%s); if this "
+                       "download is interrupted it restarts from the beginning",
+                       part_file, e)
+    except BaseException:
+        f.close()
+        raise
+    return f
+
+
+def _civitai_part_identity(version_id: object, resolved: Any,
+                           digest: Optional[str]) -> dict:
+    """The record a CivitAI ``.part`` is resumed against: the model version,
+    the file CivitAI resolved, its expected SHA256 and its size."""
+    return {"source": "civitai", "version_id": str(version_id),
+            "file_id": resolved.file_id,
+            "sha256": digest.lower() if digest else None,
+            "size": resolved.size_bytes}
+
+
+def _pull_civitai_file_locked(
+    version_id: str,
+    resolved: Any,
+    dest: Path,
+    *,
+    verify_digest: Optional[str],
+    register: bool,
+    model_name: str,
+    reg_type: str,
+) -> bool:
+    """The transfer half of :func:`_pull_civitai_file`, run holding the part
+    lock on ``dest.name``.
+
+    The download goes to ``<dest>.part``; ``<dest>.part.json`` beside it
+    records which file that partial holds (see :func:`_civitai_part_identity`).
+    A partial is appended to only when its record matches this pull, and is
+    truncated otherwise. The finished partial is verified against
+    *verify_digest* before it replaces *dest*; one that fails is deleted with
+    its record and *dest* is left as it was. A transfer that stops early keeps
+    both for the next pull.
+    """
+    import requests
+    from rich.markup import escape
+
+    from localm import netpolicy
+
+    filename = dest.name
+    dest_dir = dest.parent
+    part_file = dest_dir / (filename + ".part")
+    identity = _civitai_part_identity(version_id, resolved, verify_digest)
+    # Read under the part lock. See
+    # test_a_partial_that_grew_before_the_lock_resumes_from_its_new_end.
+    already_have = (part_file.stat().st_size
+                    if _part_is_resumable(part_file, identity) else 0)
+
+    remaining = max(0, (resolved.size_bytes or 0) - already_have)
+    if not _mm._check_disk_space(dest_dir, remaining):
+        return False
+
+    try:
+        dl_url = _ssrf_resolve_final_url(resolved.url)
+    except netpolicy.NetworkPolicyError as e:
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
+        return False
+
+    headers: dict = {}
+    if already_have:
+        headers["Range"] = f"bytes={already_have}-"
+        console.print(
+            f"Resuming [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
+            f"[bold]{escape(filename)}[/bold] "
+            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
+        )
+    else:
+        console.print(f"Pulling [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
+                      f"[bold]{escape(filename)}[/bold]")
+
+    try:
+        netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
+        r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
+                                     timeout=30, allow_redirects=False)
+        if already_have and r.status_code == 416:
+            already_have = 0
+            headers.pop("Range", None)
+            _discard_part(part_file)
+            r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
+                                         timeout=30, allow_redirects=False)
+        if r.status_code in (301, 302, 303, 307, 308):
+            console.print(f"[red]Refused:[/red] unexpected redirect from "
+                          f"{escape(dl_url)}")
+            return False
+        r.raise_for_status()
+    except netpolicy.NetworkPolicyError as e:
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
+        return False
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", "?")
+        console.print(f"[red]Download failed[/red] (HTTP {code}): "
+                      f"{escape(dl_url)}")
+        return False
+    except requests.RequestException as e:
+        console.print(f"[red]Could not reach[/red] {escape(dl_url)}: "
+                      f"{escape(str(e))}")
+        return False
+
+    if already_have and r.status_code == 200:
+        already_have = 0
+
+    content_length = int(r.headers.get("content-length", 0))
+    total_display = (already_have + content_length) if content_length else resolved.size_bytes or 0
+
+    def _part_bytes() -> int:
+        try:
+            return part_file.stat().st_size
+        except OSError:
+            return 0
+
+    with _snapshot_progress(_part_bytes, total_display) as _prog:
+        try:
+            f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
+            with f:
+                for chunk in r.iter_content(65536):
+                    f.write(chunk)
+        except Exception as e:
+            console.print(f"[red]Download failed:[/red] {escape(str(e))}")
+            return False
+        _prog.ok()
+
+    actual = _verify_digest(part_file)
+    if verify_digest and actual.lower() != verify_digest.lower():
+        console.print(
+            f"[red]SHA256 mismatch![/red] Expected {escape(verify_digest[:16])}…, "
+            f"got {escape(actual[:16])}… - deleting corrupted file"
+        )
+        _discard_part(part_file)
+        return False
+
+    try:
+        os.replace(part_file, dest)
+    except OSError as e:
+        console.print(f"[red]Could not move the download into place:[/red] "
+                      f"{escape(str(e))}")
+        return False
+    # A record left with no partial beside it is never resumed. See
+    # test_a_record_with_no_partial_beside_it_is_ignored.
+    _unlink_quiet(_part_record_path(part_file))
+
+    if verify_digest:
+        _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                        f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
+    else:
+        console.print(f"[dim]SHA256: {escape(actual)}[/dim]")
+
+    if register:
+        _mm._register_with_dedup(model_name, dest, resolved.source_tag,
+                                 digest=actual, model_type=reg_type)
+    _report_success(
+        f"[green]✓[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}",
+        f"[green]OK[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}")
+    return True
+
+
 def _pull_civitai_file(
     version_id: str,
     name: Optional[str],
@@ -2543,12 +2747,15 @@ def _pull_civitai_file(
     The download redirect (a time-boxed pre-signed URL) is resolved and
     fetched through the same per-hop SSRF-guarded path _pull_url uses
     (_ssrf_resolve_final_url), never a hardcoded-trusted-host shortcut.
+
+    A file already at the destination is checked again after the part lock on
+    its name is taken; the transfer itself runs in
+    :func:`_pull_civitai_file_locked` under that lock.
     """
     from rich.markup import escape
 
     from . import sources as _sources
     from localm.media.managed_comfy import comfy_models_dest_dir
-    from localm import netpolicy
 
     try:
         resolved = _sources.CivitAISource().resolve_download(
@@ -2589,7 +2796,7 @@ def _pull_civitai_file(
 
     model_name = _sanitize_name(name or Path(filename).stem)
 
-    if dest.exists() and not redownload:
+    def _already_here() -> bool:
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         if verify_digest:
             on_disk = _verify_digest(dest, purpose="to check the file already here")
@@ -2605,118 +2812,24 @@ def _pull_civitai_file(
                                      digest=verify_digest, model_type=reg_type)
         return True
 
+    if dest.exists() and not redownload:
+        return _already_here()
+
     from ..config import _mkdir_or_explain
     _mkdir_or_explain(dest_dir, is_home=False)
 
-    part_file = dest_dir / (filename + ".part")
-    already_have = part_file.stat().st_size if part_file.exists() else 0
-    remaining = max(0, (resolved.size_bytes or 0) - already_have)
-    if not _mm._check_disk_space(dest_dir, remaining):
-        return False
-
-    try:
-        dl_url = _ssrf_resolve_final_url(resolved.url)
-    except netpolicy.NetworkPolicyError as e:
-        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
-        return False
-
-    headers: dict = {}
-    if already_have:
-        headers["Range"] = f"bytes={already_have}-"
-        console.print(
-            f"Resuming [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
-            f"[bold]{escape(filename)}[/bold] "
-            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
-        )
-    else:
-        console.print(f"Pulling [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
-                      f"[bold]{escape(filename)}[/bold]")
-
     try:
         with _part_lock(filename):
-            import requests
-            try:
-                netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
-                r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                             timeout=30, allow_redirects=False)
-                if already_have and r.status_code == 416:
-                    already_have = 0
-                    headers.pop("Range", None)
-                    try:
-                        part_file.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                                 timeout=30, allow_redirects=False)
-                if r.status_code in (301, 302, 303, 307, 308):
-                    console.print(f"[red]Refused:[/red] unexpected redirect from "
-                                  f"{escape(dl_url)}")
-                    return False
-                r.raise_for_status()
-            except netpolicy.NetworkPolicyError as e:
-                console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
-                return False
-            except requests.HTTPError as e:
-                code = getattr(e.response, "status_code", "?")
-                console.print(f"[red]Download failed[/red] (HTTP {code}): "
-                              f"{escape(dl_url)}")
-                return False
-            except requests.RequestException as e:
-                console.print(f"[red]Could not reach[/red] {escape(dl_url)}: "
-                              f"{escape(str(e))}")
-                return False
-
-            if already_have and r.status_code == 200:
-                already_have = 0
-
-            content_length = int(r.headers.get("content-length", 0))
-            total_display = (already_have + content_length) if content_length else resolved.size_bytes or 0
-
-            def _part_bytes() -> int:
-                try:
-                    return part_file.stat().st_size
-                except OSError:
-                    return 0
-
-            mode = "ab" if already_have else "wb"
-            with _snapshot_progress(_part_bytes, total_display) as _prog:
-                try:
-                    with open(part_file, mode) as f:
-                        for chunk in r.iter_content(65536):
-                            f.write(chunk)
-                except Exception as e:
-                    console.print(f"[red]Download failed:[/red] {escape(str(e))}")
-                    return False
-                _prog.ok()
-
-            part_file.rename(dest)
+            # Checked again under the lock. See
+            # test_a_file_another_pull_finished_first_is_kept.
+            if dest.exists() and not redownload:
+                return _already_here()
+            return _pull_civitai_file_locked(
+                version_id, resolved, dest, verify_digest=verify_digest,
+                register=register, model_name=model_name, reg_type=reg_type)
     except PullInFlight as e:
         console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
         return False
-
-    actual = _verify_digest(dest)
-    if verify_digest:
-        if actual.lower() != verify_digest.lower():
-            console.print(
-                f"[red]SHA256 mismatch![/red] Expected {escape(verify_digest[:16])}…, "
-                f"got {escape(actual[:16])}… - deleting corrupted file"
-            )
-            dest.unlink()
-            return False
-        _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
-                        f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
-    else:
-        console.print(f"[dim]SHA256: {escape(actual)}[/dim]")
-
-    if register:
-        _mm._register_with_dedup(model_name, dest, resolved.source_tag,
-                                 digest=actual, model_type=reg_type)
-    _report_success(
-        f"[green]✓[/green] [bold]{escape(model_name)}[/bold] downloaded to "
-        f"{escape(str(dest))}",
-        f"[green]OK[/green] [bold]{escape(model_name)}[/bold] downloaded to "
-        f"{escape(str(dest))}")
-    return True
 
 
 def _hf_pipeline_tag_to_type(repo_id: str) -> str:

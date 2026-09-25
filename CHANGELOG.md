@@ -602,6 +602,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   could keep; `pip install -U 'localm[grammar]'` now upgrades it. If xgrammar still fails to
   load, a grammar request on a HuggingFace-format model is refused with a message saying so
   instead of failing with an unexplained error.
+- **Re-downloading a CivitAI file that is already there now works on Windows, and a
+  re-download that fails its checksum keeps the copy you had.** `localm pull civitai:...
+  --redownload` used to stop with "Cannot create a file when that file already exists" on
+  Windows, and on Linux and macOS a re-download that failed checksum verification deleted
+  the file that was already in place. A pull of a CivitAI file that another pull finished
+  moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
 - **A malicious search result or fetched web page could still attempt to forge a model role
