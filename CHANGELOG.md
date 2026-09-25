@@ -112,6 +112,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`localm add`/`pull <folder> --store copy|move` no longer aborts partway through
+  and leaves earlier models moved but unregistered when a vision projector's name
+  collides with a file already in the models folder.** A byte-identical projector
+  is reused in place, a different one lands under a free name, and any other name
+  collision is checked for the whole folder before the first file is moved or
+  copied, so a genuine refusal never strands an earlier model.
 - **A request that needs something the loaded model lacks is now answered by an
   installed model that has it from every part of localm, not only from API clients
   that leave `model` empty.** An image attached in the GUI chat or `localm run`, web
