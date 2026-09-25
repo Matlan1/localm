@@ -302,6 +302,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   defines functions or classes that file does not contain, the coder asks
   the model once to read the file and answer from it. If the answer still
   does not match, it is marked `[unverified code: ... not found in ...]`.
+- **A tool call that a thinking model starts inside its thoughts now arrives
+  as its reply.** With the tool-call grammar on (the chat with web access, and
+  the coder by default), such a call used to be delivered as part of the
+  thoughts, because the grammar lets nothing follow the call, not even the
+  end of the thoughts. The call was never run and the reply was empty, which
+  the coder then accepted as its final answer.
 - **Chat plugins no longer treat a failed generation as a completed turn.**
   Memory consolidation is not scheduled after a failed reply, and the audit
   log and transcript record that the generation ended in an error or a
