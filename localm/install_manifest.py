@@ -42,7 +42,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
@@ -568,6 +568,8 @@ def _proc_processes() -> Optional[list]:
             ppid, start = int(fields[1]), int(fields[19])
         except (OSError, ValueError, IndexError):
             continue
+        if fields[0] in ("Z", "X"):                 # exited, not yet reaped
+            continue
         try:
             exe = os.readlink(f"/proc/{pid}/exe")
         except OSError:
@@ -708,16 +710,30 @@ def _stop(pid: int, timeout: float = 8.0) -> bool:
 
 
 def _alive(pid: int) -> bool:
+    """Whether *pid* is still running. An exited process its parent has not
+    reaped yet (a zombie) counts as gone."""
     if sys.platform == "win32":
         procs = list_processes()
         return bool(procs) and any(p[0] == pid for p in procs)
+    if os.path.isdir("/proc"):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                raw = fh.read().decode("utf-8", "replace")
+            return raw[raw.rindex(")") + 2:].split()[0] not in ("Z", "X")
+        except (OSError, ValueError, IndexError):
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except OSError:
         return True
-    return True
+    try:
+        res = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10)
+        return not res.stdout.strip().startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        return True
 
 
 # --------------------------------------------------------------------------- #

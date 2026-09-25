@@ -2,6 +2,7 @@
 """Tests for localm.audit - mode resolution and per-surface enforcement."""
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -484,6 +485,43 @@ class TestDetectHome:
         fake_file.write_text("# stub")
         monkeypatch.setattr(cfg, "__file__", str(fake_file))
         assert cfg._detect_home() == tmp_path / "data"
+
+    def _checkout(self, tmp_path, monkeypatch, cfg_bytes):
+        from localm import config as cfg
+        monkeypatch.delenv("LOCALM_HOME", raising=False)
+        (tmp_path / "pyproject.toml").write_text("[project]\n")
+        (tmp_path / "localm-home.cfg").write_bytes(cfg_bytes)
+        fake_file = tmp_path / "localm" / "config.py"
+        fake_file.parent.mkdir()
+        fake_file.write_text("# stub")
+        monkeypatch.setattr(cfg, "__file__", str(fake_file))
+        return cfg
+
+    def test_marker_with_a_non_ascii_path_in_utf8_and_a_bom(self, tmp_path, monkeypatch):
+        target = tmp_path / "Données"
+        cfg = self._checkout(tmp_path, monkeypatch,
+                             b"\xef\xbb\xbf" + str(target).encode("utf-8") + b"\r\n")
+        assert cfg._detect_home() == target
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe writes the OEM code page")
+    def test_marker_written_by_cmd_echo_in_the_oem_code_page(self, tmp_path, monkeypatch):
+        import ctypes
+        oem = f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+        target = tmp_path / "Données"
+        try:
+            raw = str(target).encode(oem) + b"\r\n"
+        except UnicodeEncodeError:
+            pytest.skip(f"{oem} has no e-acute")
+        if raw.decode("utf-8", errors="replace") == raw.decode("utf-8", errors="ignore"):
+            pytest.skip(f"{oem} bytes happen to be valid UTF-8 here")
+        cfg = self._checkout(tmp_path, monkeypatch, raw)
+        assert cfg._detect_home() == target
+
+    def test_an_undecodable_marker_warns_instead_of_crashing(self, tmp_path, monkeypatch, capsys):
+        cfg = self._checkout(tmp_path, monkeypatch, b"\xff\xfe\xfd not text")
+        monkeypatch.setattr(cfg.sys, "platform", "linux")
+        cfg._detect_home()
+        assert "cannot read" in capsys.readouterr().err
 
     def test_portable_home_dir(self, tmp_path, monkeypatch):
         from localm import config as cfg

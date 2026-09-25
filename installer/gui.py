@@ -24,6 +24,11 @@ the venv, install localm and the native-runtime wheel, install the PyTorch
 stack that matches the chosen backend, provision llama.cpp, record where data
 lives, build the launcher, optionally create a desktop shortcut, and
 optionally put `localm` on PATH.
+
+When setup has run in the folder before, it first offers to repair the
+install or uninstall it. Uninstall runs localm.install_manifest in the window
+and leaves the Python runtime the window runs on to setup-gui.bat /
+setup-gui.sh, which remove it after the window closes (exit code 42).
 """
 
 from __future__ import annotations
@@ -40,8 +45,14 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
+_SRC = Path(__file__).resolve().parents[1]
 APP_NAME = "LocaLM"
 PYVER = "3.12"
+
+# Exit code telling setup-gui.bat / setup-gui.sh that an uninstall finished in
+# the window and the Python runtime folders named in .localm-uninstall-pending
+# are theirs to remove now that the window has closed.
+EXIT_FINISH_UNINSTALL = 42
 
 # The extras setup.bat installs. `desktop` is added only when the user asks for
 # an app window, because it pulls pythonnet in and no install should take on a
@@ -129,6 +140,35 @@ def find_uv(root: Path) -> Optional[str]:
         if candidate.is_file():
             return str(candidate)
     return shutil.which("uv")
+
+
+def install_manifest():
+    """localm.install_manifest from this source tree (stdlib only, so it
+    imports on the window's own interpreter)."""
+    if str(_SRC) not in sys.path:
+        sys.path.insert(0, str(_SRC))
+    from localm import install_manifest as im
+    return im
+
+
+def existing_install(root: Path) -> bool:
+    """Whether setup has run in *root* before: an install record, or an
+    environment carrying setup's marker."""
+    return ((root / ".localm-install.json").is_file()
+            or (root / ".venv" / ".localm-venv").is_file())
+
+
+def _tooling_fields(root: Path) -> dict:
+    """install_manifest.record() keywords for the tooling folders inside
+    *root*; empty when there are none."""
+    fields = {}
+    for key, name in (("python_dir", ".python"), ("cache_dir", ".cache"),
+                      ("uv_dir", ".uv")):
+        if (root / name).exists():
+            fields[key] = str(root / name)
+    if fields:
+        fields["runtime_contained"] = True
+    return fields
 
 
 def detect_recommendation() -> tuple:
@@ -290,6 +330,12 @@ def build_steps(plan: Plan) -> List[Step]:
         except OSError as e:
             raise StepFailed(f"the environment was not created where it was "
                              f"expected: {e}")
+        # Recorded now; the manifest step at the end records again.
+        try:
+            install_manifest().record(ROOT, venv=str(ROOT / ".venv"),
+                                      **_tooling_fields(ROOT))
+        except Exception as e:
+            emit(f"[!] could not record the environment yet: {e}")
     steps.append(Step("Creating the Python environment", venv))
 
     def install_localm(emit):
@@ -333,32 +379,17 @@ def build_steps(plan: Plan) -> List[Step]:
         steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision))
 
     def data_dir(emit):
-        marker = ROOT / "localm-home.cfg"
-        if plan.portable_data:
-            (ROOT / "home").mkdir(parents=True, exist_ok=True)
-            if marker.exists():
-                marker.unlink()
-            state["data_dir"] = str(ROOT / "home")
-            state["data_created"] = True
-            emit(f"Data directory: {ROOT / 'home'} (portable)")
-            return
-        target = Path(plan.data_path).expanduser()
-        if not target.is_absolute():
-            raise StepFailed(f"{target} is not an absolute path")
-        # Directory first, marker second: a marker must never point at
-        # something that could not be created.
+        # prepare_data creates the folder before writing localm-home.cfg, and
+        # records it for uninstall with what was already in it.
         try:
-            target.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise StepFailed(f"could not use {target}: {e}")
-        try:
-            marker.write_text(str(target), encoding="utf-8")
-        except OSError as e:
-            raise StepFailed(f"could not record the data directory: {e}")
+            if plan.portable_data:
+                target = install_manifest().prepare_data(ROOT, portable=True)
+            else:
+                target = install_manifest().prepare_data(ROOT, data_dir=plan.data_path)
+        except (OSError, ValueError) as e:
+            raise StepFailed(f"could not use that data folder: {e}")
         state["data_dir"] = str(target)
-        state["data_created"] = True
-        state["home_cfg"] = str(marker)
-        emit(f"Data directory: {target}")
+        emit(f"Data directory: {target}" + (" (portable)" if plan.portable_data else ""))
     steps.append(Step("Recording where data lives", data_dir))
 
     def launcher(emit):
@@ -400,19 +431,18 @@ def build_steps(plan: Plan) -> List[Step]:
                           plugins, fatal=False))
 
     def manifest(emit):
+        # The data folder was recorded by the data step (prepare_data).
         args = [str(venv_python(ROOT)), "-m", "localm.install_manifest",
                 "record", "--root", ".",
                 "--venv", str(ROOT / ".venv"),
                 "--lib-dir", str(ROOT / "runtime" / "localm_llama_runtime" / "lib"),
-                "--data-dir", state.get("data_dir", ""),
                 "--shortcut", state.get("shortcut", ""),
-                "--home-cfg", state.get("home_cfg", ""),
                 "--path-dir", state.get("path_dir", ""),
                 "--command-shim", state.get("command_shim", ""),
                 "--stamp",
                 datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
-        if state.get("data_created"):
-            args.append("--data-created")
+        if (ROOT / "LocaLM.desktop").is_file():
+            args += ["--file", str(ROOT / "LocaLM.desktop")]
         if state.get("path_modified"):
             args.append("--path-modified")
         # These sit inside the folder whichever way the tooling question was
@@ -513,17 +543,28 @@ class Wizard:
 
     next_page/prev_page and current_plan are the whole navigation surface, so a
     test can drive the dialogue without a person clicking. See
-    tests/test_installer_gui.py TestWizard."""
+    tests/test_installer_gui.py TestWizard.
 
-    def __init__(self, root, tk, ttk, filedialog):
+    When setup has run in this folder before, the dialogue opens on a choice
+    between repairing the install and uninstalling it. The uninstall page
+    shows exactly what will be removed, with an option to delete the saved
+    data too; exit_code is EXIT_FINISH_UNINSTALL when the runtime folders are
+    left for the launcher script to remove after the window closes."""
+
+    def __init__(self, root, tk, ttk, filedialog, *, existing=None,
+                 messagebox=None):
         self.root = root
         self.tk = tk
         self.ttk = ttk
         self.filedialog = filedialog
+        self.messagebox = messagebox
         self.vendor, self.recommended = detect_recommendation()
         self.plugin_rows = plugin_choices()
         self.index = 0
         self.installing = False
+        self.existing = existing_install(ROOT) if existing is None else bool(existing)
+        self.mode = "choose" if self.existing else "install"
+        self.exit_code = 0
 
         root.title(f"{APP_NAME} Setup")
         root.geometry("660x600")
@@ -545,6 +586,8 @@ class Wizard:
             name: tk.BooleanVar(value=name in RECOMMENDED_PLUGINS)
             for name, _ in self.plugin_rows
         }
+        self.choice_var = tk.StringVar(value="repair")
+        self.purge_var = tk.BooleanVar(value=False)
 
         self.pages = []
         self._build_runtime_page()
@@ -552,8 +595,13 @@ class Wizard:
         self._build_features_page()
         self._build_options_page()
         self._build_install_page()
+        self._build_choice_frame()
+        self._build_uninstall_frame()
         self._build_footer()
-        self._show(0)
+        if self.existing:
+            self._show_choice()
+        else:
+            self._show(0)
 
     # -- pages --------------------------------------------------------------
 
@@ -661,6 +709,46 @@ class Wizard:
         self.log_scroll = ttk.Scrollbar(page, command=self.log.yview)
         self.log.configure(yscrollcommand=self.log_scroll.set, state="disabled")
 
+    def _build_choice_frame(self):
+        ttk = self.ttk
+        frame = self.choice_frame = ttk.Frame(self.container)
+        self._heading(frame, f"{APP_NAME} is already set up here",
+                      f"{ROOT}\nWhat would you like to do?")
+        ttk.Radiobutton(frame, text="Repair or reinstall - your chats, settings "
+                                    "and models are kept",
+                        value="repair", variable=self.choice_var).pack(anchor="w")
+        ttk.Radiobutton(frame, text=f"Uninstall {APP_NAME} from this computer",
+                        value="uninstall", variable=self.choice_var).pack(anchor="w")
+
+    def _build_uninstall_frame(self):
+        ttk = self.ttk
+        tk = self.tk
+        frame = self.uninstall_frame = ttk.Frame(self.container)
+        self._heading(frame, f"Uninstall {APP_NAME}",
+                      "This removes what setup installed in this folder and "
+                      "anything it added elsewhere (shortcut, PATH entry).")
+        ttk.Checkbutton(frame, text="Also delete my saved data - chats, settings, "
+                                    "downloaded models, generated images",
+                        variable=self.purge_var,
+                        command=self._refresh_plan).pack(anchor="w", pady=(0, 8))
+        self.plan_text = tk.Text(frame, height=16, wrap="none", font=("Consolas", 9))
+        self.plan_text.pack(fill="both", expand=True)
+        self.plan_text.configure(state="disabled")
+
+    def _refresh_plan(self) -> None:
+        """Show what uninstall would do with the current choices."""
+        try:
+            im = install_manifest()
+            rep = im.uninstall(ROOT, purge_data=bool(self.purge_var.get()),
+                               dry_run=True, defer_runtime=True)
+            lines = im.format_report(rep)
+        except Exception as e:
+            lines = [f"[!] Could not work out what to remove: {e}"]
+        self.plan_text.configure(state="normal")
+        self.plan_text.delete("1.0", "end")
+        self.plan_text.insert("end", "\n".join(lines) + "\n")
+        self.plan_text.configure(state="disabled")
+
     def _build_footer(self):
         ttk = self.ttk
         footer = ttk.Frame(self.container)
@@ -678,15 +766,38 @@ class Wizard:
     def last_question_page(self) -> int:
         return len(self.pages) - 2
 
-    def _show(self, i: int) -> None:
+    def _hide_all(self) -> None:
         for _, frame in self.pages:
             frame.pack_forget()
+        self.choice_frame.pack_forget()
+        self.uninstall_frame.pack_forget()
+
+    def _show(self, i: int) -> None:
+        self._hide_all()
         self.pages[i][1].pack(fill="both", expand=True)
         self.index = i
         self.status.configure(text="")
-        self.back.configure(state="disabled" if i == 0 else "normal")
+        self.back.configure(state="disabled" if i == 0 and not self.existing
+                            else "normal")
         self.action.configure(
             text="Install" if i == self.last_question_page else "Next")
+
+    def _show_choice(self) -> None:
+        self._hide_all()
+        self.mode = "choose"
+        self.choice_frame.pack(fill="both", expand=True)
+        self.status.configure(text="")
+        self.back.configure(state="disabled")
+        self.action.configure(text="Next")
+
+    def _show_uninstall(self) -> None:
+        self._hide_all()
+        self.mode = "uninstall"
+        self.uninstall_frame.pack(fill="both", expand=True)
+        self.status.configure(text="")
+        self.back.configure(state="normal")
+        self.action.configure(text="Uninstall")
+        self._refresh_plan()
 
     def _problem(self) -> str:
         """Why the current page cannot be left, or empty."""
@@ -698,6 +809,16 @@ class Wizard:
     def next_page(self) -> None:
         if self.installing:
             return
+        if self.mode == "choose":
+            if self.choice_var.get() == "uninstall":
+                self._show_uninstall()
+            else:
+                self.mode = "install"
+                self._show(0)
+            return
+        if self.mode == "uninstall":
+            self.start_uninstall()
+            return
         problem = self._problem()
         if problem:
             self.status.configure(text=problem)
@@ -708,7 +829,13 @@ class Wizard:
         self._show(self.index + 1)
 
     def prev_page(self) -> None:
-        if self.installing or self.index == 0:
+        if self.installing:
+            return
+        if self.mode == "uninstall" or (self.mode == "install" and self.index == 0
+                                        and self.existing):
+            self._show_choice()
+            return
+        if self.mode != "install" or self.index == 0:
             return
         self._show(self.index - 1)
 
@@ -796,9 +923,68 @@ class Wizard:
                 elif kind == "done":
                     self._finish(payload)
                     return
+                elif kind == "uninstalled":
+                    self._finish_uninstall(payload)
+                    return
         except queue.Empty:
             pass
         self.root.after(80, self._pump)
+
+    # -- running the uninstall ----------------------------------------------
+
+    def start_uninstall(self) -> None:
+        purge = bool(self.purge_var.get())
+        if self.messagebox is not None:
+            question = (f"Remove {APP_NAME} from this folder?\n\n"
+                        + ("Your saved data will be DELETED too."
+                           if purge else "Your saved data is kept."))
+            if not self.messagebox.askyesno(f"Uninstall {APP_NAME}", question):
+                return
+        self.installing = True
+        self.mode = "uninstalling"
+        self._hide_all()
+        self.pages[-1][1].pack(fill="both", expand=True)
+        self.step_label.configure(text=f"Uninstalling {APP_NAME} ...")
+        self.step_label.pack(anchor="w")
+        self.log.pack(side="left", fill="both", expand=True)
+        self.log_scroll.pack(side="right", fill="y")
+        self.back.configure(state="disabled")
+        self.action.configure(state="disabled", text="Uninstalling...")
+        self.lines = queue.Queue()
+        threading.Thread(target=self._uninstall_worker, args=(purge,),
+                         daemon=True).start()
+        self.root.after(80, self._pump)
+
+    def _uninstall_worker(self, purge: bool) -> None:
+        try:
+            im = install_manifest()
+            rep = im.uninstall(ROOT, purge_data=purge, force=True,
+                               stop_running=True, defer_runtime=True)
+            for line in im.format_report(rep):
+                self.lines.put(("log", line))
+        except Exception as e:                  # never leave the UI hanging
+            rep = {"exit": 1, "error": str(e)}
+            self.lines.put(("log", f"[!] Uninstall failed: {e}"))
+        self.lines.put(("uninstalled", rep))
+
+    def _finish_uninstall(self, rep: dict) -> None:
+        self.installing = False
+        self.action.configure(text="Close", state="normal", command=self.root.destroy)
+        if rep.get("exit") not in (0, 2):
+            self.exit_code = 1
+            self.step_label.configure(text="Uninstall could not finish.")
+            self.status.configure(text=(rep.get("error") or
+                                        f"See above. Close any {APP_NAME} window "
+                                        "and try again.")[:90])
+            return
+        pending = (ROOT / ".localm-uninstall-pending").is_file()
+        self.exit_code = EXIT_FINISH_UNINSTALL if pending else 0
+        self.step_label.configure(
+            text=f"{APP_NAME} is removed." + (" Close this window to finish."
+                                             if pending else ""))
+        self.status.configure(
+            text="The Python runtime this window runs on is removed after it "
+                 "closes." if pending else "Done.")
 
     def _finish(self, error: Optional[str]) -> None:
         self.bar.configure(value=self.bar["maximum"])
@@ -832,12 +1018,12 @@ class Wizard:
 
 def main() -> int:
     import tkinter as tk
-    from tkinter import filedialog, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
-    Wizard(root, tk, ttk, filedialog)
+    wizard = Wizard(root, tk, ttk, filedialog, messagebox=messagebox)
     root.mainloop()
-    return 0
+    return wizard.exit_code
 
 
 if __name__ == "__main__":

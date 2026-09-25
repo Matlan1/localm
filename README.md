@@ -224,6 +224,12 @@ The recommended `git clone` install path above is unaffected by any of this: it 
 
 On a fresh install the launcher's **Import** row gets you a first model three ways: *from file...* / *from folder...* register a GGUF or a HuggingFace directory already on disk, and *from URL...* opens the Web GUI on its Models page and downloads the model there with a live progress bar. You can also launch the Web GUI with no models (`localm gui --no-model`); it opens straight to the Models page.
 
+### Uninstalling
+
+Run the setup again (`setup.bat`, `bash setup.sh`, or the graphical installer) and pick **Uninstall**, or run `setup.bat uninstall` / `bash setup.sh --uninstall`. It lists what it will remove before anything happens, and stops LocaLM first if it is still running. It removes what setup installed in the folder (the Python environment, the downloaded runtime, the portable Python tooling) and what it added elsewhere (the desktop shortcut or menu entry, the `localm` command and its PATH entry).
+
+Your saved data (chats, settings, downloaded models, generated images) is kept unless you choose to delete it when asked, or pass `--purge-data`. If your data folder already existed before you installed LocaLM, only LocaLM's own files are deleted from it. `--yes` skips the questions. Afterwards you can delete the folder itself; if your data is kept inside it (`home`), that deletes the data too.
+
 ---
 
 ## First success

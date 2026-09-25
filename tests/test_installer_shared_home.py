@@ -22,7 +22,7 @@ def test_setup_bat_never_uses_localm_as_data_dir():
 def test_setup_sh_never_uses_localm_as_data_dir():
     text = (ROOT / "setup.sh").read_text(encoding="utf-8")
     assert "$HOME/.localm" not in text
-    assert 'DATA_DIR="$(pwd)/home"' in text
+    assert "prepare-data --root . --portable" in text
 
 
 def test_installers_offer_portable_default_and_custom_only():

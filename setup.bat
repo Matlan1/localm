@@ -916,7 +916,7 @@ set /a HBSEQ+=1
 set "HBFLAG=%TEMP%\localm_setup_hb.%HBSEQ%.flag"
 if exist "%HBFLAG%" del "%HBFLAG%" >nul 2>nul
 start "" /b powershell -NoProfile -Command ^
-  "while (-not (Test-Path -LiteralPath '%HBFLAG%')) { Start-Sleep -Seconds %~1; if (-not (Test-Path -LiteralPath '%HBFLAG%')) { Write-Host '%~2' } }"
+  "while (-not (Test-Path -LiteralPath '%HBFLAG%')) { Start-Sleep -Seconds %~1; if (-not (Test-Path -LiteralPath '%HBFLAG%')) { Write-Host '%~2' } }; Remove-Item -LiteralPath '%HBFLAG%' -ErrorAction SilentlyContinue"
 goto :eof
 
 :heartbeat_stop
@@ -1036,6 +1036,7 @@ powershell -NoProfile -Command ^
     "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($root) } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.Name }" ^
     >"%TEMP%\localm_lockers.txt" 2>nul
 for %%s in ("%TEMP%\localm_lockers.txt") do if %%~zs GTR 0 set "LOCKERS=1"
+if not defined LOCKERS del "%TEMP%\localm_lockers.txt" >nul 2>nul
 exit /b 0
 
 rem ===========================================================================

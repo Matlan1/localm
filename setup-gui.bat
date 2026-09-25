@@ -40,7 +40,10 @@ if not defined UVEXE (
         exit /b 1
     )
     echo   Installing uv ...
+    rem  UV_UNMANAGED_INSTALL keeps it in .\.uv without adding that folder to
+    rem  the user PATH or writing an install receipt under %LOCALAPPDATA%\uv.
     set "UV_INSTALL_DIR=%CD%\.uv"
+    set "UV_UNMANAGED_INSTALL=%CD%\.uv"
     powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
     rem  Astral's installer updates the persistent user PATH, which this already
     rem  running shell does not see. Prepend every directory it may have used, in
@@ -74,6 +77,17 @@ set "UV_CACHE_DIR=%CD%\.cache"
 set "UV_SYSTEM_CERTS=1"
 "%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
 set "RC=!errorlevel!"
+
+rem  42: an uninstall finished in the window; the Python runtime it ran on is
+rem  removed now that it has closed.
+if "!RC!"=="42" (
+    echo   Removing the last LocaLM folders ...
+    call "%~dp0setup.bat" finish-uninstall
+    echo.
+    echo   LocaLM was uninstalled.
+    pause
+    exit /b 0
+)
 
 if not "!RC!"=="0" (
     echo.
