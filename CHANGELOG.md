@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Text-to-speech and speech-to-text offer a one-time download prompt instead of a
+  hard refusal when network access is off.** Settings also gained direct "download
+  the voice/speech model now" controls for both, so first-time setup no longer
+  depends on triggering a fetch some other way. If the voice model fails to load,
+  playback now falls back to the browser's own built-in voice instead of going
+  silent.
 - **The MCP `chat` tool takes `images`** (local image files or `data:image/...`
   URIs), and **`localm mcp --share-loaded-models`** lets the MCP server use a model
   another localm instance on this machine already has loaded instead of loading a
