@@ -467,16 +467,36 @@ def _squashed(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+# A quantisation or precision tag as a whole name segment, with an unsloth
+# "ud-" or mradermacher "i1-" prefix; and a split GGUF part suffix.
+_QUANT_TAG_RE = re.compile(
+    r"(?<![a-z0-9])(?:ud-|i1-)?(?:t?i?q\d+(?:_[a-z0-9]+)*|b?f\d+|fp\d+)(?![a-z0-9])")
+_SPLIT_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}")
+
+
+def _name_residue(name: str) -> str:
+    """*name* lower-cased without its split-part suffix, its quantisation and
+    precision tags, its separators, and the tokens :func:`_name_identity` skips
+    as naming no model, at any length: ``"yivl"`` for ``Yi-VL-6B-Q4_K_M.gguf``,
+    ``""`` for ``q4_k_m.gguf`` and ``main.bf16.gguf``. Letters outside a-z are
+    kept."""
+    text = _QUANT_TAG_RE.sub(" ", _SPLIT_SUFFIX_RE.sub("", name.lower()))
+    return "".join(token for token in re.split(r"[\W_]+", text)
+                   if token and token not in _GENERIC_NAME_WORDS
+                   and not _GENERIC_NAME_TOKEN_RE.fullmatch(token))
+
+
 def _same_family(a: str, b: str) -> bool:
     """Whether the GGUF file names *a* and *b* can name the same model: the
     :func:`_name_identity` of one occurs in the other with separators removed
     (``mtp-Tiel-Coder-35B-A3B.gguf`` and ``Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf``),
-    or neither name has one (``q4_k_m.gguf`` and ``main.bf16.gguf``)."""
+    or neither name has one and their :func:`_name_residue` is equal
+    (``q4_k_m.gguf`` and ``main.bf16.gguf``; ``Yi-VL-6B-Q4_K_M.gguf`` and
+    ``Yi-VL-6B-Q8_0.gguf``, but not ``Yi-6B-Q4_K_M.gguf``)."""
     identity_a, identity_b = _name_identity(a), _name_identity(b)
-    if not identity_a and not identity_b:
-        return True
-    return bool(identity_a and identity_b) and (
-        identity_a in _squashed(b) or identity_b in _squashed(a))
+    if identity_a and identity_b:
+        return identity_a in _squashed(b) or identity_b in _squashed(a)
+    return not identity_a and not identity_b and _name_residue(a) == _name_residue(b)
 
 
 class _GgufFit(NamedTuple):
@@ -521,8 +541,9 @@ def _pick_mmproj_candidate(model_name: str, names: List[str], *,
     (:func:`_name_token`) is empty, never pairs. Among candidates containing
     that token, the only one is picked, and two or more give None. Otherwise a
     lone candidate is picked when its model name (:func:`_name_identity`) occurs
-    in *model_name*, and refused when that name occurs in one of *others* whose
-    width does not rule it out (:func:`_may_use`). A lone candidate still
+    in *model_name*, and refused when that name occurs in one of *others*,
+    unless the width of every such model rules it out (:func:`_may_use`) and
+    one of them has *model_name*'s architecture. A lone candidate still
     unpaired, one named for no model at hand or for none at all, is picked
     unless one of *others* could use it: a model with a readable architecture
     that its width does not rule out, and that is not the same model, meaning
@@ -544,11 +565,12 @@ def _pick_mmproj_candidate(model_name: str, names: List[str], *,
     if identity and identity in _squashed(model_name):
         return lone
     fit = fit or (lambda _name: _GgufFit())
-    proj = fit(lone)
-    if identity and any(identity in _squashed(other) and _may_use(fit(other), proj)
-                        for other in others):
+    proj, model = fit(lone), fit(model_name)
+    named = [fit(other) for other in others if identity and identity in _squashed(other)]
+    if named and (any(_may_use(o, proj) for o in named)
+                  or not any(model.architecture and o.architecture == model.architecture
+                             for o in named)):
         return None
-    model = fit(model_name)
     if not _may_use(model, proj):
         return lone
     for other in others:

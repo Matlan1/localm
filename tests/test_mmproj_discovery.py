@@ -181,6 +181,19 @@ class TestFindSiblingMmproj:
         assert find_sibling_mmproj(cydonia) == proj
         assert find_sibling_mmproj(mistral) is None
 
+    def test_projector_named_for_a_present_model_is_not_taken_by_another_architecture(
+            self, tmp_path):
+        """The projector names ``Mistral`` and the Mistral model in the folder has
+        another width; a model of another architecture still does not take it."""
+        qwen = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-32B-Instruct-Q4_K_M.gguf", "qwen2", 5120)
+        mistral = _real_text_model_gguf(
+            tmp_path / "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", "llama", 4096)
+        _real_mmproj_gguf(
+            tmp_path / "mmproj-Mistral-Small-3.2-24B-Instruct-2506-f16.gguf", 5120)
+        assert find_sibling_mmproj(qwen) is None
+        assert find_sibling_mmproj(mistral) is None
+
     def test_a_projector_is_never_paired_with_another_projector(self, tmp_path):
         first = _real_mmproj_gguf(tmp_path / "LLaMA3-8B_mmproj-Q4_1.gguf", 4096)
         _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
@@ -272,6 +285,22 @@ class TestGenericallyNamedProjector:
         proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
         assert find_sibling_mmproj(q4) == proj
         assert find_sibling_mmproj(q8) == proj
+
+    def test_a_base_model_and_its_vision_variant_are_different_models(self, tmp_path):
+        """``Yi-6B`` and ``Yi-VL-6B`` carry no name token of three characters and
+        still differ once their quantisation tags are removed."""
+        base = _real_text_model_gguf(tmp_path / "Yi-6B-Q4_K_M.gguf", "llama", 4096)
+        vl = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q4_K_M.gguf", "llama", 4096)
+        _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        assert find_sibling_mmproj(base) is None
+        assert find_sibling_mmproj(vl) is None
+
+    def test_models_named_outside_latin_letters_are_told_apart_by_name(self, tmp_path):
+        first = _real_text_model_gguf(tmp_path / "千问-7B-Q4_K_M.gguf", "qwen2", 3584)
+        second = _real_text_model_gguf(tmp_path / "深度求索-7B-Q4_K_M.gguf", "qwen2", 3584)
+        _real_mmproj_gguf(tmp_path / "mmproj.f16.gguf", 3584)
+        assert find_sibling_mmproj(first) is None
+        assert find_sibling_mmproj(second) is None
 
     def test_a_generically_named_model_and_a_named_one_are_different_models(
             self, tmp_path):
@@ -438,6 +467,21 @@ _MODEL_NAMES = [
 def test_name_identity_of_real_model_names(name, identity):
     from localm.model_manager.registry import _name_identity
     assert _name_identity(name) == identity
+
+
+@pytest.mark.parametrize("name,residue", [
+    ("Yi-VL-6B-Q4_K_M.gguf", "yivl"),
+    ("Yi-VL-6B-Q8_0.gguf", "yivl"),
+    ("Yi-6B-Q4_K_M.gguf", "yi"),
+    ("q4_k_m.gguf", ""),
+    ("main.bf16.gguf", ""),
+    ("gemma-3-4b-it-UD-Q4_K_XL.gguf", "gemmait"),
+    ("Qwen2.5-VL-7B-Instruct.i1-Q4_K_M.gguf", "qwen2vlinstruct"),
+    ("big-model-Q4_K_M-00001-of-00003.gguf", "big"),
+])
+def test_name_residue(name, residue):
+    from localm.model_manager.registry import _name_residue
+    assert _name_residue(name) == residue
 
 
 class TestGetModelMmproj:
