@@ -440,17 +440,19 @@ def get_operator_model_info(name: str, *, reg: Optional[dict] = None):
 
 
 # Name tokens that name no model: quantisation, precision, size, date and
-# counter tags, and the words generically named projector files use.
+# counter tags, and the words generically named projector and model files use.
 _GENERIC_NAME_TOKEN_RE = re.compile(r"i?q\d+|b?f\d+|fp\d+|int\d+|[a-z]?\d+[bkm]?")
 _GENERIC_NAME_WORDS = frozenset({
-    "model", "ggml", "gguf", "vision", "clip", "proj", "projector", "encoder", "image"})
+    "model", "main", "ggml", "gguf", "vision", "clip", "proj", "projector", "encoder",
+    "image"})
 
 
 def _name_identity(name: str) -> str:
     """The first token of the GGUF file name *name* that can name a model, or
     ``""`` when it has none: ``"qwen3"`` for ``mmproj-Qwen3.8-27B-F16.gguf``,
-    ``""`` for ``mmproj-F16.gguf`` and ``mmproj-model-f16.gguf``. A token counts
-    when it is at least ``_MIN_SIBLING_TOKEN_LEN`` characters long, is not in
+    ``""`` for ``mmproj-F16.gguf``, ``mmproj-model-f16.gguf`` and
+    ``q4_k_m.gguf``. A token counts when it is at least
+    ``_MIN_SIBLING_TOKEN_LEN`` characters long, is not in
     ``_GENERIC_NAME_WORDS`` and does not fully match
     ``_GENERIC_NAME_TOKEN_RE``."""
     for token in re.split(r"[^a-z0-9]+", name.lower().replace("mmproj", " ")):
@@ -466,14 +468,15 @@ def _squashed(name: str) -> str:
 
 
 def _same_family(a: str, b: str) -> bool:
-    """Whether the GGUF file names *a* and *b* share a leading name token: the
-    :func:`_name_token` of one, at least ``_MIN_SIBLING_TOKEN_LEN`` characters
-    once squashed, occurs in the other with separators removed
-    (``mtp-Tiel-Coder-35B-A3B.gguf`` and ``Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf``)."""
-    token_a, token_b = _squashed(_name_token(a)), _squashed(_name_token(b))
-    if len(token_a) < _MIN_SIBLING_TOKEN_LEN or len(token_b) < _MIN_SIBLING_TOKEN_LEN:
-        return False
-    return token_a in _squashed(b) or token_b in _squashed(a)
+    """Whether the GGUF file names *a* and *b* can name the same model: the
+    :func:`_name_identity` of one occurs in the other with separators removed
+    (``mtp-Tiel-Coder-35B-A3B.gguf`` and ``Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf``),
+    or neither name has one (``q4_k_m.gguf`` and ``main.bf16.gguf``)."""
+    identity_a, identity_b = _name_identity(a), _name_identity(b)
+    if not identity_a and not identity_b:
+        return True
+    return bool(identity_a and identity_b) and (
+        identity_a in _squashed(b) or identity_b in _squashed(a))
 
 
 class _GgufFit(NamedTuple):
@@ -486,6 +489,19 @@ class _GgufFit(NamedTuple):
 def _gguf_fit(path: Path) -> _GgufFit:
     """The :class:`_GgufFit` read from *path*'s GGUF header."""
     return _GgufFit(_gguf_metadata_probe(path).get("architecture"), gguf_n_embd(path))
+
+
+def _may_use(model: _GgufFit, proj: _GgufFit) -> bool:
+    """False when the widths of *model* and the projector *proj* are both known
+    and differ."""
+    return not (model.width and proj.width and model.width != proj.width)
+
+
+def _told_apart(a: _GgufFit, b: _GgufFit) -> bool:
+    """True when the architectures, or the widths, of *a* and *b* are both known
+    and differ."""
+    return bool((a.architecture and b.architecture and a.architecture != b.architecture)
+                or (a.width and b.width and a.width != b.width))
 
 
 def _pick_mmproj_candidate(model_name: str, names: List[str], *,
@@ -501,19 +517,19 @@ def _pick_mmproj_candidate(model_name: str, names: List[str], *,
     returns the :class:`_GgufFit` of a name from *names*, *others* or
     *model_name*; without it every header is unknown.
 
-    A model whose leading name token (:func:`_name_token`) is empty never pairs.
-    Among candidates containing that token, the only one is picked, and two or
-    more give None. Otherwise a lone candidate is picked when its model name
-    (:func:`_name_identity`) occurs in *model_name*, and refused when that name
-    occurs in one of *others* instead. A lone candidate still unpaired, one
-    named for no model at hand or for none at all, is picked unless one of
-    *others* could use it: a model with a readable architecture that is not
-    ruled out by a known width different from the candidate's, and that is not
-    *model_name*'s own family (:func:`_same_family`) with an architecture and a
-    width no different from *model_name*'s. A known width mismatch between the
-    lone candidate and *model_name* returns the candidate without that check;
-    comparing those two widths is the caller's."""
-    if not names:
+    A model file whose name contains "mmproj", or whose leading name token
+    (:func:`_name_token`) is empty, never pairs. Among candidates containing
+    that token, the only one is picked, and two or more give None. Otherwise a
+    lone candidate is picked when its model name (:func:`_name_identity`) occurs
+    in *model_name*, and refused when that name occurs in one of *others* whose
+    width does not rule it out (:func:`_may_use`). A lone candidate still
+    unpaired, one named for no model at hand or for none at all, is picked
+    unless one of *others* could use it: a model with a readable architecture
+    that its width does not rule out, and that is not the same model, meaning
+    :func:`_same_family` by name and not :func:`_told_apart` by header. A known
+    width mismatch between the lone candidate and *model_name* returns the
+    candidate without that check; comparing those two widths is the caller's."""
+    if not names or "mmproj" in model_name.lower():
         return None
     token = _name_token(model_name)
     if not token:
@@ -525,24 +541,20 @@ def _pick_mmproj_candidate(model_name: str, names: List[str], *,
         return None
     lone = names[0]
     identity = _name_identity(lone)
-    if identity:
-        if identity in _squashed(model_name):
-            return lone
-        if any(identity in _squashed(other) for other in others):
-            return None
+    if identity and identity in _squashed(model_name):
+        return lone
     fit = fit or (lambda _name: _GgufFit())
-    model, proj = fit(model_name), fit(lone)
-    if model.width and proj.width and model.width != proj.width:
+    proj = fit(lone)
+    if identity and any(identity in _squashed(other) and _may_use(fit(other), proj)
+                        for other in others):
+        return None
+    model = fit(model_name)
+    if not _may_use(model, proj):
         return lone
     for other in others:
         o = fit(other)
-        if not o.architecture:
-            continue
-        if o.width and proj.width and o.width != proj.width:
-            continue
-        if (_same_family(model_name, other)
-                and not (model.architecture and model.architecture != o.architecture)
-                and not (model.width and o.width and model.width != o.width)):
+        if (not o.architecture or not _may_use(o, proj)
+                or (_same_family(model_name, other) and not _told_apart(model, o))):
             continue
         return None
     return lone

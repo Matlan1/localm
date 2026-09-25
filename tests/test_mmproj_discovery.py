@@ -168,6 +168,24 @@ class TestFindSiblingMmproj:
             tmp_path / "mmproj-Mistral-Small-3.2-24B-Instruct-2506-f16.gguf", 5120)
         assert find_sibling_mmproj(model) == proj
 
+    def test_projector_named_for_a_model_whose_width_rules_it_out_is_attached_to_its_fit(
+            self, tmp_path):
+        """The projector names ``Mistral``, and a Mistral model is in the folder,
+        but at another width: the model whose width fits gets it."""
+        cydonia = _real_text_model_gguf(
+            tmp_path / "Cydonia-24B-v4.1-Q4_K_M.gguf", "llama", 5120)
+        mistral = _real_text_model_gguf(
+            tmp_path / "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", "llama", 4096)
+        proj = _real_mmproj_gguf(
+            tmp_path / "mmproj-Mistral-Small-3.2-24B-Instruct-2506-f16.gguf", 5120)
+        assert find_sibling_mmproj(cydonia) == proj
+        assert find_sibling_mmproj(mistral) is None
+
+    def test_a_projector_is_never_paired_with_another_projector(self, tmp_path):
+        first = _real_mmproj_gguf(tmp_path / "LLaMA3-8B_mmproj-Q4_1.gguf", 4096)
+        _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        assert find_sibling_mmproj(first) is None
+
     def test_projector_carrying_the_models_base_name_is_attached(self, tmp_path):
         """koboldcpp's projector names (``LLaMA3-8B_mmproj-Q4_1.gguf``) do not
         contain the leading token of ``Meta-Llama-3-8B-Instruct``, but the model's
@@ -235,6 +253,36 @@ class TestGenericallyNamedProjector:
         _real_imatrix_gguf(tmp_path / "Tiel-Coder-35B-A3B.imatrix.gguf")
         proj = _real_mmproj_gguf(tmp_path / "mmproj-BF16.gguf", 2048)
         assert find_sibling_mmproj(model) == proj
+
+    def test_quants_with_generic_names_get_it(self, tmp_path):
+        """The Hcompany/Holo-3.1-35B-A3B-GGUF layout: model files named only by
+        their quantisation, an imatrix file and a lone mmproj.f16.gguf."""
+        q4 = _real_text_model_gguf(tmp_path / "q4_k_m.gguf", "qwen35moe", 2048)
+        bf16 = _real_text_model_gguf(tmp_path / "main.bf16.gguf", "qwen35moe", 2048)
+        _real_imatrix_gguf(tmp_path / "imatrix.gguf")
+        proj = _real_mmproj_gguf(tmp_path / "mmproj.f16.gguf", 2048)
+        assert find_sibling_mmproj(q4) == proj
+        assert find_sibling_mmproj(bf16) == proj
+
+    def test_quants_with_a_short_name_get_it(self, tmp_path):
+        """Name tokens shorter than three characters (``Yi``, ``VL``, ``6B``)
+        identify no model, so the headers decide."""
+        q4 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q4_K_M.gguf", "llama", 4096)
+        q8 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q8_0.gguf", "llama", 4096)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        assert find_sibling_mmproj(q4) == proj
+        assert find_sibling_mmproj(q8) == proj
+
+    def test_a_generically_named_model_and_a_named_one_are_different_models(
+            self, tmp_path):
+        """``ggml-model-Q4_K_M.gguf`` names no model, so it is not taken for the
+        same model as ``Qwen2.5-Coder-7B`` despite equal architecture and width."""
+        generic = _real_text_model_gguf(tmp_path / "ggml-model-Q4_K_M.gguf", "qwen2", 3584)
+        coder = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-Coder-7B-Instruct-Q6_K.gguf", "qwen2", 3584)
+        _real_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf", 3584)
+        assert find_sibling_mmproj(generic) is None
+        assert find_sibling_mmproj(coder) is None
 
     def test_not_attached_when_a_different_model_in_the_folder_could_use_it(
             self, tmp_path):
@@ -325,6 +373,24 @@ class TestPickMmprojCandidate:
     def test_a_projector_never_gets_a_projector(self):
         from localm.model_manager.registry import _pick_mmproj_candidate
         assert _pick_mmproj_candidate("mmproj-model-f16", ["mmproj-F16.gguf"]) is None
+        assert _pick_mmproj_candidate(
+            "LLaMA3-8B_mmproj-Q4_1.gguf", ["mmproj-F16.gguf"]) is None
+
+
+    def test_multiple_candidates_single_stem_match(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        cands = ["mmproj-qwen-f16.gguf", "mmproj-gemma-f16.gguf", "mmproj-llava-f16.gguf"]
+        assert _pick_mmproj_candidate("gemma-3-4b", cands) == "mmproj-gemma-f16.gguf"
+
+    def test_multiple_candidates_no_stem_match(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        cands = ["mmproj-qwen-f16.gguf", "mmproj-llava-f16.gguf"]
+        assert _pick_mmproj_candidate("gemma-3-4b", cands) is None
+
+    def test_multiple_candidates_ambiguous_stem_matches_returns_none(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        cands = ["mmproj-gemma-f16.gguf", "mmproj-gemma-q4.gguf"]
+        assert _pick_mmproj_candidate("gemma-3-4b", cands) is None
 
 
 # Projector file names seen on HuggingFace, and the one localm itself gives a
@@ -355,20 +421,23 @@ def test_name_identity_of_real_projector_names(name, identity):
     from localm.model_manager.registry import _name_identity
     assert _name_identity(name) == identity
 
-    def test_multiple_candidates_single_stem_match(self):
-        from localm.model_manager.registry import _pick_mmproj_candidate
-        cands = ["mmproj-qwen-f16.gguf", "mmproj-gemma-f16.gguf", "mmproj-llava-f16.gguf"]
-        assert _pick_mmproj_candidate("gemma-3-4b", cands) == "mmproj-gemma-f16.gguf"
 
-    def test_multiple_candidates_no_stem_match(self):
-        from localm.model_manager.registry import _pick_mmproj_candidate
-        cands = ["mmproj-qwen-f16.gguf", "mmproj-llava-f16.gguf"]
-        assert _pick_mmproj_candidate("gemma-3-4b", cands) is None
+# Model file names from the same repos.
+_MODEL_NAMES = [
+    ("q4_k_m.gguf", ""),
+    ("main.bf16.gguf", ""),
+    ("ggml-model-Q4_K_M.gguf", ""),
+    ("gemma-3-4b-it-Q4_K_M.gguf", "gemma"),
+    ("llava-v1.6-mistral-7b.Q4_K_M.gguf", "llava"),
+    ("Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf", "tiel"),
+    ("mtp-Tiel-Coder-35B-A3B.gguf", "mtp"),
+]
 
-    def test_multiple_candidates_ambiguous_stem_matches_returns_none(self):
-        from localm.model_manager.registry import _pick_mmproj_candidate
-        cands = ["mmproj-gemma-f16.gguf", "mmproj-gemma-q4.gguf"]
-        assert _pick_mmproj_candidate("gemma-3-4b", cands) is None
+
+@pytest.mark.parametrize("name,identity", _MODEL_NAMES)
+def test_name_identity_of_real_model_names(name, identity):
+    from localm.model_manager.registry import _name_identity
+    assert _name_identity(name) == identity
 
 
 class TestGetModelMmproj:
