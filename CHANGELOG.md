@@ -297,6 +297,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `"args"`, now keep their arguments** in the chat, scheduled jobs and the
   coder. Before, such a web search ran with an empty query and a coder tool
   call arrived with no arguments at all.
+- **The coder no longer passes off invented code as a file's content.** When
+  a final answer shows a code block for a file in the project and the code
+  defines functions or classes that file does not contain, the coder asks
+  the model once to read the file and answer from it. If the answer still
+  does not match, it is marked `[unverified code: ... not found in ...]`.
 - **Chat plugins no longer treat a failed generation as a completed turn.**
   Memory consolidation is not scheduled after a failed reply, and the audit
   log and transcript record that the generation ended in an error or a
