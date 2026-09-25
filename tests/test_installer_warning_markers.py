@@ -85,7 +85,7 @@ def _own_backend_block(bat_text):
     3 levels of nested parens deep at the site under test, the highest-risk
     shape in the file."""
     start = bat_text.index('if /i "%BACKEND%"=="own" (')
-    end = bat_text.index("rem ---- choose where data lives", start)
+    end = bat_text.index("rem ---- build the native LocaLM.exe launcher", start)
     return bat_text[start:end]
 
 
