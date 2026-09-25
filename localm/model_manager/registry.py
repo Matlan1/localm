@@ -14,9 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
 from pathlib import PureWindowsPath
+from typing import Callable
 from typing import List
 from typing import NamedTuple
 from typing import Optional
+from typing import Sequence
 from rich.table import Table
 from ..config import REGISTRY_FILE
 from ..config import load_config
@@ -437,37 +439,153 @@ def get_operator_model_info(name: str, *, reg: Optional[dict] = None):
 
 
 
-def _pick_mmproj_candidate(model_stem: str, names: List[str]) -> Optional[str]:
-    """Disambiguate a single mmproj (vision projector) filename out of *names*
-    (already filtered to mmproj-looking GGUF filenames) for a model named
-    *model_stem*. Requires the candidate name to share the model's leading stem
-    token. Returns the single match, or None when none match or the choice is
-    ambiguous (>1 matches) - never silently attach an unrelated projector."""
+# Name tokens that name no model: quantisation, precision, size, date and
+# counter tags, and the words generically named projector files use.
+_GENERIC_NAME_TOKEN_RE = re.compile(r"i?q\d+|b?f\d+|fp\d+|int\d+|[a-z]?\d+[bkm]?")
+_GENERIC_NAME_WORDS = frozenset({
+    "model", "ggml", "gguf", "vision", "clip", "proj", "projector", "encoder", "image"})
+
+
+def _name_identity(name: str) -> str:
+    """The first token of the GGUF file name *name* that can name a model, or
+    ``""`` when it has none: ``"qwen3"`` for ``mmproj-Qwen3.8-27B-F16.gguf``,
+    ``""`` for ``mmproj-F16.gguf`` and ``mmproj-model-f16.gguf``. A token counts
+    when it is at least ``_MIN_SIBLING_TOKEN_LEN`` characters long, is not in
+    ``_GENERIC_NAME_WORDS`` and does not fully match
+    ``_GENERIC_NAME_TOKEN_RE``."""
+    for token in re.split(r"[^a-z0-9]+", name.lower().replace("mmproj", " ")):
+        if (len(token) >= _MIN_SIBLING_TOKEN_LEN and token not in _GENERIC_NAME_WORDS
+                and not _GENERIC_NAME_TOKEN_RE.fullmatch(token)):
+            return token
+    return ""
+
+
+def _squashed(name: str) -> str:
+    """*name* lower-cased, keeping only the characters a-z and 0-9."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _same_family(a: str, b: str) -> bool:
+    """Whether the GGUF file names *a* and *b* share a leading name token: the
+    :func:`_name_token` of one, at least ``_MIN_SIBLING_TOKEN_LEN`` characters
+    once squashed, occurs in the other with separators removed
+    (``mtp-Tiel-Coder-35B-A3B.gguf`` and ``Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf``)."""
+    token_a, token_b = _squashed(_name_token(a)), _squashed(_name_token(b))
+    if len(token_a) < _MIN_SIBLING_TOKEN_LEN or len(token_b) < _MIN_SIBLING_TOKEN_LEN:
+        return False
+    return token_a in _squashed(b) or token_b in _squashed(a)
+
+
+class _GgufFit(NamedTuple):
+    """A GGUF file's ``general.architecture`` and :func:`gguf_n_embd` width,
+    each None when its header does not say."""
+    architecture: Optional[str] = None
+    width: Optional[int] = None
+
+
+def _gguf_fit(path: Path) -> _GgufFit:
+    """The :class:`_GgufFit` read from *path*'s GGUF header."""
+    return _GgufFit(_gguf_metadata_probe(path).get("architecture"), gguf_n_embd(path))
+
+
+def _pick_mmproj_candidate(model_name: str, names: List[str], *,
+                           others: Sequence[str] = (),
+                           fit: Optional[Callable[[str], _GgufFit]] = None,
+                           ) -> Optional[str]:
+    """The mmproj (vision projector) file name among *names* that pairs with the
+    model file *model_name* (a file name or stem), or None.
+
+    *names* are the mmproj-looking GGUF file names beside the model, the model's
+    own excluded. *others* are the file names of the other models there (the
+    folder or the repo listing), the model's own split parts excluded. *fit*
+    returns the :class:`_GgufFit` of a name from *names*, *others* or
+    *model_name*; without it every header is unknown.
+
+    A model whose leading name token (:func:`_name_token`) is empty never pairs.
+    Among candidates containing that token, the only one is picked, and two or
+    more give None. Otherwise a lone candidate is picked when its model name
+    (:func:`_name_identity`) occurs in *model_name*, and refused when that name
+    occurs in one of *others* instead. A lone candidate still unpaired, one
+    named for no model at hand or for none at all, is picked unless one of
+    *others* could use it: a model with a readable architecture that is not
+    ruled out by a known width different from the candidate's, and that is not
+    *model_name*'s own family (:func:`_same_family`) with an architecture and a
+    width no different from *model_name*'s. A known width mismatch between the
+    lone candidate and *model_name* returns the candidate without that check;
+    comparing those two widths is the caller's."""
     if not names:
         return None
-    stem = model_stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
-    if not stem:
+    token = _name_token(model_name)
+    if not token:
         return None
-    matches = [n for n in names if stem in n.lower()]
-    return matches[0] if len(matches) == 1 else None
+    matches = [n for n in names if token in n.lower()]
+    if matches:
+        return matches[0] if len(matches) == 1 else None
+    if len(names) != 1:
+        return None
+    lone = names[0]
+    identity = _name_identity(lone)
+    if identity:
+        if identity in _squashed(model_name):
+            return lone
+        if any(identity in _squashed(other) for other in others):
+            return None
+    fit = fit or (lambda _name: _GgufFit())
+    model, proj = fit(model_name), fit(lone)
+    if model.width and proj.width and model.width != proj.width:
+        return lone
+    for other in others:
+        o = fit(other)
+        if not o.architecture:
+            continue
+        if o.width and proj.width and o.width != proj.width:
+            continue
+        if (_same_family(model_name, other)
+                and not (model.architecture and model.architecture != o.architecture)
+                and not (model.width and o.width and model.width != o.width)):
+            continue
+        return None
+    return lone
+
+
+class _FolderGgufs(NamedTuple):
+    """One listing of a folder's GGUF files: the mmproj-named ``projectors``,
+    the other ``models``, and ``fits``, the :class:`_GgufFit` read so far per
+    file path."""
+    projectors: List[Path]
+    models: List[Path]
+    fits: dict
+
+
+def _folder_ggufs(parent: Path) -> _FolderGgufs:
+    """List *parent*'s ``*.gguf`` files into a :class:`_FolderGgufs`; empty when
+    *parent* is not a directory."""
+    files = list(parent.glob("*.gguf")) if parent.is_dir() else []
+    return _FolderGgufs([f for f in files if "mmproj" in f.name.lower()],
+                        [f for f in files if "mmproj" not in f.name.lower()], {})
 
 
 def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Optional[Path]:
     """Auto-detect a vision projector (mmproj) GGUF sitting next to a GGUF model.
 
     Vision GGUFs ship a separate 'mmproj' projector file in the same folder
-    (e.g. 'gemma-3-4b-it-Q8_0.gguf' + 'mmproj-gemma-3-4b-it-f16.gguf'), so picking
-    it up lets a GUI/registry load get vision without a CLI --mmproj flag. Only a
-    GGUF model qualifies and the model file itself is excluded. Returns the single
-    candidate, or None when there are none, or the choice is ambiguous (>1 with no
-    clear stem match) - never silently load the wrong projector.
+    (e.g. 'gemma-3-4b-it-Q8_0.gguf' + 'mmproj-gemma-3-4b-it-f16.gguf', or a
+    generically named 'mmproj-F16.gguf'), so picking it up lets a GUI/registry
+    load get vision without a CLI --mmproj flag. Only a GGUF model qualifies and
+    the model file itself is excluded. The candidate is chosen by
+    :func:`_pick_mmproj_candidate` from the folder's mmproj files, with the
+    folder's other models (split parts collapsed to their first part) and the
+    GGUF headers of the files involved. Returns that candidate, or None when
+    there is none, when the choice is ambiguous, or when the candidate's and the
+    model's embedding widths are both known and differ - never silently load the
+    wrong projector.
 
-    ``dir_cache`` is a caller-owned dict memoising the per-DIRECTORY projector
-    listing for the duration of ONE operation. A single load asks about one
-    model and does not need it; /api/models asks about every registered model,
-    and models overwhelmingly live in one folder, so without it each row globs a
-    directory whose size grows with the number of rows, which is quadratic in the
-    row count for an identical listing.
+    ``dir_cache`` is a caller-owned dict memoising, per DIRECTORY, the GGUF
+    listing and the headers read from it for the duration of ONE operation. A
+    single load asks about one model and does not need it; /api/models asks
+    about every registered model, and models overwhelmingly live in one folder,
+    so without it each row globs a directory whose size grows with the number of
+    rows, which is quadratic in the row count for an identical listing.
 
     Caller-owned and NOT a module-level cache: this reads a directory a user can
     add a projector to at any moment, and a process-lifetime cache would keep
@@ -480,23 +598,30 @@ def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Opti
     if dir_cache is None:
         if not parent.is_dir():
             return None
-        pool = [f for f in parent.glob("*.gguf") if "mmproj" in f.name.lower()]
+        folder = _folder_ggufs(parent)
     else:
         key = str(parent)
         if key not in dir_cache:
-            dir_cache[key] = ([f for f in parent.glob("*.gguf")
-                               if "mmproj" in f.name.lower()]
-                              if parent.is_dir() else [])
-        pool = dir_cache[key]
+            dir_cache[key] = _folder_ggufs(parent)
+        folder = dir_cache[key]
     # The model file itself is excluded HERE rather than in the listing above,
     # because the listing is shared by every model in the folder and only this
     # step is per-model. A standalone mmproj entry is its own row, and it must
     # not resolve itself as its own projector.
-    cands = [f for f in pool if f.name != p.name]
+    cands = [f for f in folder.projectors if f.name != p.name]
     if not cands:
         return None
     by_name = {f.name: f for f in cands}
-    picked = _pick_mmproj_candidate(p.stem, list(by_name.keys()))
+    others = sorted({first_split_part(f.name) for f in folder.models}
+                    - {first_split_part(p.name)})
+
+    def fit(name: str) -> _GgufFit:
+        path = parent / name
+        if path not in folder.fits:
+            folder.fits[path] = _gguf_fit(path)
+        return folder.fits[path]
+
+    picked = _pick_mmproj_candidate(p.name, list(by_name.keys()), others=others, fit=fit)
     if not picked:
         return None
     candidate_path = by_name[picked]
@@ -506,9 +631,9 @@ def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Opti
     mmproj_n_embd = gguf_n_embd(candidate_path)
     if model_n_embd and mmproj_n_embd and model_n_embd != mmproj_n_embd:
         logger.debug(
-            "find_sibling_mmproj: %r looks like the projector for %r by "
-            "filename, but its embedding width (%d) does not match the "
-            "model's (%d) - not auto-attaching it",
+            "find_sibling_mmproj: %r is the projector candidate for %r, but "
+            "its embedding width (%d) does not match the model's (%d) - not "
+            "auto-attaching it",
             candidate_path.name, p.name, mmproj_n_embd, model_n_embd)
         return None
     return candidate_path
