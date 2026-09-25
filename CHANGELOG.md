@@ -118,6 +118,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **On Windows with an Intel GPU, HuggingFace models now load instead of failing
+  with `[WinError 126]` and `Error loading "...\torch\lib\c10_xpu.dll" or one of
+  its dependencies`.** The process that loads a HuggingFace model could not find
+  the Intel GPU runtime that the Intel (XPU) build of PyTorch installs into
+  localm's environment, so every HuggingFace model failed to load with that
+  build, although PyTorch itself was installed correctly.
 - **Compacting a long chat in the GUI no longer recalls memories for the summary
   request or logs it as something you said.** To compact a chat, the GUI asks the
   model to summarise the older turns. The server treated that prompt, and the
