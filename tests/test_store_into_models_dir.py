@@ -617,9 +617,13 @@ class TestProjectorTravel:
 
     def test_folder_duplicate_move_keeps_a_generic_projector_registered_in_place(
             self, tmp_path, isolated_home):
+        """Two generic projectors beside one model: neither is attached, so the
+        duplicate move carries neither."""
         d = tmp_path / "downloads"
         model = _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
         proj = _projector(d / "mmproj-F16.gguf", 2560)
+        _projector(d / "mmproj-BF16.gguf", 2560)
+        assert mm.find_sibling_mmproj(model) is None
         assert add_local(str(model)) is True
 
         assert add_local(str(d), on_duplicate="move") is True
@@ -627,6 +631,21 @@ class TestProjectorTravel:
         entry = load_registry()["mmproj-F16"]
         assert Path(entry["path"]).is_file(), f"dangling registry entry: {entry['path']}"
         assert proj.is_file()
+
+    def test_folder_duplicate_move_carries_a_lone_generic_projector(
+            self, tmp_path, isolated_home):
+        d = tmp_path / "downloads"
+        model = _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(d / "mmproj-F16.gguf", 2560)
+        assert mm.find_sibling_mmproj(model) == proj
+        assert add_local(str(model)) is True
+
+        assert add_local(str(d), on_duplicate="move") is True
+
+        entry = load_registry()["mmproj-F16"]
+        assert Path(entry["path"]).is_file(), f"dangling registry entry: {entry['path']}"
+        assert Path(entry["path"]).resolve().parent == _models_dir().resolve()
+        assert not proj.exists()
 
     def test_folder_duplicate_move_repoints_a_projector_registered_before_its_model(
             self, tmp_path, isolated_home):

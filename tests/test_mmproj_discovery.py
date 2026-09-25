@@ -171,11 +171,15 @@ class TestFindSiblingMmproj:
     def test_projector_carrying_the_models_base_name_is_attached(self, tmp_path):
         """koboldcpp's projector names (``LLaMA3-8B_mmproj-Q4_1.gguf``) do not
         contain the leading token of ``Meta-Llama-3-8B-Instruct``, but the model's
-        name contains the projector's."""
+        name contains the projector's. A same-width model of another family in
+        the folder does not take it."""
         model = _real_text_model_gguf(
             tmp_path / "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "llama", 4096)
+        mistral = _real_text_model_gguf(
+            tmp_path / "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", "llama", 4096)
         proj = _real_mmproj_gguf(tmp_path / "LLaMA3-8B_mmproj-Q4_1.gguf", 4096)
         assert find_sibling_mmproj(model) == proj
+        assert find_sibling_mmproj(mistral) is None
 
 
 class TestGenericallyNamedProjector:
@@ -300,10 +304,14 @@ class TestPickMmprojCandidate:
             "gemma-3-4b-it", ["mmproj-F16.gguf"]) == "mmproj-F16.gguf"
 
     def test_lone_candidate_carrying_the_models_base_name_is_returned(self):
-        from localm.model_manager.registry import _pick_mmproj_candidate
+        from localm.model_manager.registry import _GgufFit, _pick_mmproj_candidate
+        fits = {"Meta-Llama-3-8B-Instruct-Q4_K_M.gguf": _GgufFit("llama", 4096),
+                "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf": _GgufFit("llama", 4096),
+                "LLaMA3-8B_mmproj-Q4_1.gguf": _GgufFit("clip", 4096)}
         assert _pick_mmproj_candidate(
-            "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf",
-            ["LLaMA3-8B_mmproj-Q4_1.gguf"]) == "LLaMA3-8B_mmproj-Q4_1.gguf"
+            "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", ["LLaMA3-8B_mmproj-Q4_1.gguf"],
+            others=["Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"],
+            fit=fits.__getitem__) == "LLaMA3-8B_mmproj-Q4_1.gguf"
 
     def test_lone_generic_candidate_a_listed_model_could_use_returns_none(self):
         from localm.model_manager.registry import _GgufFit, _pick_mmproj_candidate
@@ -317,6 +325,35 @@ class TestPickMmprojCandidate:
     def test_a_projector_never_gets_a_projector(self):
         from localm.model_manager.registry import _pick_mmproj_candidate
         assert _pick_mmproj_candidate("mmproj-model-f16", ["mmproj-F16.gguf"]) is None
+
+
+# Projector file names seen on HuggingFace, and the one localm itself gives a
+# second same-named projector (mmproj-model-f16-2.gguf).
+_PROJECTOR_NAMES = [
+    ("mmproj-F16.gguf", ""),
+    ("mmproj-BF16.gguf", ""),
+    ("mmproj-F32.gguf", ""),
+    ("mmproj-model-f16.gguf", ""),
+    ("mmproj-model-f32.gguf", ""),
+    ("mmproj.f16.gguf", ""),
+    ("mmproj-model-f16-2.gguf", ""),
+    ("mmproj-google_gemma-3-4b-it-f16.gguf", "google"),
+    ("mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf", "qwen2"),
+    ("Qwen2.5-VL-7B-Instruct.mmproj-Q8_0.gguf", "qwen2"),
+    ("llava-v1.5-7b-mmproj-model-f16.gguf", "llava"),
+    ("LLaMA3-8B_mmproj-Q4_1.gguf", "llama3"),
+    ("moondream2-mmproj-f16-20250414.gguf", "moondream2"),
+    ("mmproj-Qwen3VL-8B-Instruct-F16.gguf", "qwen3vl"),
+    ("Ministral-3-3B-Instruct-2512-mmproj-Q8_0.gguf", "ministral"),
+    ("mmproj-SmolVLM-500M-Instruct-f16.gguf", "smolvlm"),
+    ("mmproj-Qwen3.8-27B-Uncensored-F16.gguf", "qwen3"),
+]
+
+
+@pytest.mark.parametrize("name,identity", _PROJECTOR_NAMES)
+def test_name_identity_of_real_projector_names(name, identity):
+    from localm.model_manager.registry import _name_identity
+    assert _name_identity(name) == identity
 
     def test_multiple_candidates_single_stem_match(self):
         from localm.model_manager.registry import _pick_mmproj_candidate

@@ -673,8 +673,18 @@ class TestSyncModelsDirBackfillsExistingEntry:
         store, models_dir = fake_registry
         for i in range(5):
             self._preexisting_entry(store, models_dir, name=f"m{i}", source=f"hf:o/r{i}")
-        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
-        _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
+
+        class _PerRepoHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                i = repo_id[len("o/r"):]
+                return [f"m{i}.gguf", f"mmproj-m{i}-f16.gguf"]
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _PerRepoHfApi)
+        _wire_download(monkeypatch, {f"mmproj-m{i}-f16.gguf": _CLIP_BYTES for i in range(5)})
 
         result = mm.sync_models_dir()
 
