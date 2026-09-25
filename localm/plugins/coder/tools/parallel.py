@@ -312,6 +312,33 @@ class _ChildOutcome:
         )
 
 
+def _child_backend(backend: Any, model: Any) -> tuple:
+    """The backend a child asked to run on *model* uses, and a detail line
+    (empty when nothing needs saying).
+
+    The parent's *backend* when no other model is asked for, when the backend
+    declares ``supports_model_override = False`` (a session answered by another
+    instance: a new backend would go to that instance's port with this
+    install's credential), or when the new backend cannot be built. Otherwise a
+    new local backend for *model* on the parent's port."""
+    if not model or model == getattr(backend, "model_id", None):
+        return backend, ""
+    if not getattr(backend, "supports_model_override", True):
+        return backend, (f"requested model '{model}' is not available to this "
+                         "session's sub-agents; ran on the parent's model instead")
+    from ..backends.http import make_localm_backend
+    raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
+    try:
+        port = int(raw_url.split(":")[-1].split("/")[0])
+    except Exception:
+        port = 8642
+    try:
+        return make_localm_backend(model, port=port), ""
+    except Exception as exc:
+        return backend, (f"requested model '{model}' unavailable ({exc}); "
+                         "ran on the parent's model instead")
+
+
 def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
                    max_turns: int, outcome: _ChildOutcome) -> None:
     """Run one child agent to completion inside its own worktree.
@@ -331,25 +358,7 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     from ..agent import Agent
     from .agents import _isolated_verify_cmd, inherited_child_kwargs
 
-    detail = ""
-    backend = parent.backend
-    model = spec.get("model")
-    if model and model != getattr(backend, "model_id", None):
-        # A second model only helps when the server can hold both resident. When
-        # it cannot, the child falls back to the parent's backend and the detail
-        # says so.
-        from ..backends.http import make_localm_backend
-        raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
-        try:
-            port = int(raw_url.split(":")[-1].split("/")[0])
-        except Exception:
-            port = 8642
-        try:
-            backend = make_localm_backend(model, port=port)
-        except Exception as exc:
-            detail = (f"requested model '{model}' unavailable ({exc}); "
-                      "ran on the parent's model instead")
-            backend = parent.backend
+    backend, detail = _child_backend(parent.backend, spec.get("model"))
 
     # Published before the run so an abandoned child still reports which model it
     # was on. The deadline cannot realistically have passed this early, and if it
