@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages, updateStatusIndicator } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, setConversationPin, stripUserImages, syncPinModelToggle, updateStatusIndicator } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -2113,6 +2113,31 @@ $("persona-delete").onclick = () => {
 
 /* sending */
 
+/** The server's capability-routing note for one reply (the
+ *  `X-Localm-Model-Routing` response header): which model answered, which
+ *  model the request asked for, which capabilities drove the choice (`gaps`,
+ *  the ones the answering model provides) and which it still lacks (`unmet`).
+ *  Returns null when the header is absent or unparseable. */
+export function parseRoutingHeader(resp) {
+  try {
+    const raw = resp && resp.headers && resp.headers.get
+      ? resp.headers.get("X-Localm-Model-Routing") : null;
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object") return null;
+    const unmet = Array.isArray(data.unmet) ? data.unmet : [];
+    return {
+      resolved: data.resolved || null,
+      requested: data.requested || null,
+      routed: data.routed === true,
+      pinned: data.pinned === true,
+      gaps: data.gaps && typeof data.gaps === "object"
+        ? Object.keys(data.gaps).filter((g) => !unmet.includes(g)) : [],
+      unmet,
+    };
+  } catch { return null; }
+}
+
 /** F11 observability: read the per-turn memory-recall summary the server attaches
  *  to a chat completion (the `X-Localm-Memory` response header) so the UI can show
  *  a "used N memories" chip and the recall degrade reason. Returns null when the
@@ -2149,7 +2174,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // /v1/config blip mid-loop cannot silently flip approval off; `forced` ensures
   // we only inject the "limit reached, answer now" nudge once per send.
   if (!web) web = { seen: new Set(), ask: null, forced: false, repaired: false };
-  await maybeCompactConversation(conv, signal);
+  const contextRouting = await maybeCompactConversation(conv, signal);
   if (signal.aborted) return { stopped: true, liveRow: null };
   const params = chatParams();
   const webEnabled = $("p-web").checked;
@@ -2229,8 +2254,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // immediately on a sidebar load, see switchModel's REG-471 fix - already
   // reflects the real model): fall back to it so a send never posts a literal
   // empty model string and draws a needless, hard-to-recover-from 400.
-  const modelName = modelSelect.value || modelCache.active;
-  const body = { model: modelName, messages, stream: true };
+  // A conversation pinned to a model is always answered by it. Otherwise the
+  // selected model is only the preferred one: the server answers with an
+  // installed model that has what this request needs when it lacks it.
+  const pinnedModel = conv.pinnedModel || "";
+  const modelName = pinnedModel || modelSelect.value || modelCache.active;
+  const body = { model: modelName, messages, stream: true, pin_model: !!pinnedModel };
+  if (webEnabled) body.required_capabilities = ["tool_use"];
+  if (contextRouting && contextRouting.minContext) body.min_context = contextRouting.minContext;
   for (const k of ["temperature", "top_p", "top_k", "repeat_penalty",
                    "max_tokens", "seed"]) {
     if (params[k] !== null && !Number.isNaN(params[k])) body[k] = params[k];
@@ -2265,6 +2296,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let visionRejected = false;
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
+  let routing = null;   // which model answered, when not the one asked for
 
   async function postChatCompletions(reqBody) {
     const r = await fetch("/v1/chat/completions", {
@@ -2315,6 +2347,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       }
     }
     memUsed = parseMemoryHeader(r);   // F11: read before the body stream
+    routing = parseRoutingHeader(r);
+    if (r.headers && typeof r.headers.get === "function"
+        && r.headers.get("X-Localm-Context-Compacted")) {
+      conv.serverCompacted = true;
+    }
     await readSSE(r, (payload) => {
       if (payload === "[DONE]") return;
       let chunk;
@@ -2355,8 +2392,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const n = stripUserImages(conv);
       saveConversations(conv);
       toast(n
-        ? "This model cannot read images - removed the image. You can keep " +
-          "chatting (text only)."
+        ? t(pinnedModel ? "chat.vision.rejectedPinned" : "chat.vision.rejectedNoModel",
+            { model: modelName })
         : "Chat request failed: " + e.message, true);
     } else {
       requestFailed = true;
@@ -2389,6 +2426,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // flag: inert metadata, content stays the raw text (the "*[stopped]*"
   // marker is added at render time only, in chat.js, so the model never sees
   // that literal marker in its own prior turn on the next request).
+  const answeredBy = (routing && routing.routed && routing.resolved) || modelName;
+  const routedNote = routing && routing.routed
+    ? { from: routing.requested || modelName, gaps: routing.gaps } : null;
   if (aborted) {
     renderMarkdown(liveBody,
       (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +
@@ -2398,9 +2438,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const reply = {
         role: "assistant",
         content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
-        model: modelName || undefined,
+        model: answeredBy || undefined,
         stopped: true,
       };
+      if (routedNote) reply.routed = routedNote;
       if (memUsed && memUsed.n > 0) reply.memory = memUsed;
       conv.messages.push(reply);
       saveConversations(conv);
@@ -2448,9 +2489,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     const failedReply = {
       role: "assistant",
       content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
-      model: modelName || undefined,
+      model: answeredBy || undefined,
       failed: true,
     };
+    if (routedNote) failedReply.routed = routedNote;
     if (usage) failedReply.usage = usage;
     conv.messages.push(failedReply);
     saveConversations(conv);
@@ -2467,8 +2509,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
     // NEW-1: record which model produced this turn so the transcript can show a
     // divider when the active model changes between turns (model-switch-indication).
-    model: modelName || undefined,
+    model: answeredBy || undefined,
   };
+  if (routedNote) reply.routed = routedNote;
   if (finishReason === "length") {
     // The reply was cut by the max-tokens budget, not finished by the model.
     reply.truncated = true;
@@ -2946,6 +2989,12 @@ $("chat-messages").addEventListener("scroll", () => {
 });
 // R34: persist the Web-access and Speak-aloud toggles so they survive a reload
 // (privacy mode leaves no trace). hydrateChatToggles restores them on boot.
+$("p-pin-model").addEventListener("change", () => {
+  setConversationPin($("p-pin-model").checked);
+});
+window.addEventListener("localm:model-switched", () => syncPinModelToggle(currentConv()));
+$("model-select").addEventListener("change", () => syncPinModelToggle(currentConv()));
+
 $("p-web").addEventListener("change", () => {
   lsSetScoped("localm.webAccess", $("p-web").checked ? "1" : "0");
 });

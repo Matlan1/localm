@@ -18,7 +18,7 @@ registry file itself uses the same atomic temp-file + ``os.replace`` +
 
 Entry schema (one JSON file per instance, ``<dir>/<instance_id>.json``)::
 
-    {instance_id, pid, port, host, scheme, model, vram_estimate_bytes,
+    {instance_id, pid, port, host, scheme, model, models, vram_estimate_bytes,
      gpu_index, updated_at, coordination_token}
 
 ``coordination_token`` is a per-instance secret (``secrets.token_urlsafe(32)``,
@@ -107,9 +107,15 @@ def _lock_down_dir(path: Path) -> None:
 def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
                 host: str, scheme: str, model: Optional[str],
                 vram_estimate_bytes: Optional[int], gpu_index: int,
-                coordination_token: str) -> Optional[Path]:
+                coordination_token: str,
+                models: Optional[list] = None) -> Optional[Path]:
     """Atomically write/update this instance's coordination entry (temp file +
     ``os.replace``, 0600 - same pattern as ``instances.register_instance``).
+
+    *models* lists every model this instance has loaded, each as
+    ``{"name", "path", "size", "sha256"}`` (any of the last three may be None),
+    so a sibling can match one by file identity rather than by name alone.
+    *model* is the active model, or a loaded one when none is active.
 
     Best-effort: a write failure is logged and returns None rather than
     raising, so it never breaks the model load/unload it piggybacks on."""
@@ -128,6 +134,8 @@ def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
             "updated_at": _now_iso(),
             "coordination_token": coordination_token,
         }
+        if models is not None:
+            entry["models"] = models
         path = entry_path(d, instance_id)
         # The entry carries the coordination token, so it gets the same
         # Windows-aware restriction as instances.register_instance.

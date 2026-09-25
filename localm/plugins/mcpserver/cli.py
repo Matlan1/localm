@@ -23,9 +23,14 @@ import click
               help="Also expose memory_append, letting the client write to your "
                    "durable memory. Off by default: enabling the memory plugin is "
                    "not consent for an external client to write into it.")
+@click.option("--share-loaded-models", "share_loaded", is_flag=True,
+              help="Answer chat with a model another localm instance on this "
+                   "machine already has loaded, instead of loading a second copy "
+                   "into VRAM. Another install's instance is used only when it "
+                   "needs no API key.")
 @click.option("--print-config", is_flag=True,
               help="Print the mcpServers JSON block for your MCP client and exit.")
-def main(model, no_images, no_coder, no_memory, memory_write,
+def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
          print_config):
     """Run localm as an MCP server (stdio transport).
 
@@ -64,6 +69,8 @@ def main(model, no_images, no_coder, no_memory, memory_write,
             args += ["--no-memory"]
         if memory_write:
             args += ["--memory-write"]
+        if share_loaded:
+            args += ["--share-loaded-models"]
         block = {
             "mcpServers": {
                 "localm": {
@@ -112,4 +119,4 @@ def main(model, no_images, no_coder, no_memory, memory_write,
     from .server import serve_stdio
     serve_stdio(model=model, enable_images=not no_images,
                 enable_coder=not no_coder, enable_memory=not no_memory,
-                enable_memory_write=memory_write)
+                enable_memory_write=memory_write, share_loaded=share_loaded)

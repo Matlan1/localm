@@ -44,11 +44,17 @@ class HttpEngine:
     """Engine stand-in that routes chat through a remote localm server's ``/v1`` API."""
 
     def __init__(self, base_url: str, *, token: Optional[str] = None,
-                 model: Optional[str] = None, display_name: Optional[str] = None):
+                 model: Optional[str] = None, display_name: Optional[str] = None,
+                 pin_model: bool = True):
         self._base = base_url.rstrip("/")
         self._token = token
         self._model = model
         self.display_name = display_name or model or "remote model"
+        # False: *model* is only the preferred model, and the server answers a
+        # request it cannot serve with an installed model that can.
+        self.pin_model = bool(pin_model)
+        # The model the server reported answering the most recent request.
+        self.answered_model: Optional[str] = None
 
     # --- lifecycle (no-ops: the server owns the model) ---------------------- #
     @property
@@ -116,8 +122,11 @@ class HttpEngine:
                     repeat_penalty: Optional[float] = None,
                     grammar: Optional[str] = None,
                     seed: Optional[int] = None,
+                    min_context: Optional[int] = None,
                     on_status: Optional[Callable[[str], None]] = None) -> Iterator[str]:
         """Stream assistant tokens from the server's ``/v1/chat/completions``.
+        *min_context* asks for a model whose trained window holds that many
+        tokens; it only has an effect when ``pin_model`` is False.
 
         Raises :class:`UnsupportedInputError` when the server refuses image input on
         a text-only model (so the REPL shows the same vision guidance as in-process),
@@ -138,6 +147,11 @@ class HttpEngine:
                          ("grammar", grammar)):
             if val is not None:
                 body[key] = val
+        if not self.pin_model:
+            body["pin_model"] = False
+            if min_context:
+                body["min_context"] = int(min_context)
+        self.answered_model = None
 
         try:
             resp = requests.post(f"{self._base}/chat/completions",
@@ -167,6 +181,8 @@ class HttpEngine:
                 chunk = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(chunk.get("model"), str) and chunk["model"]:
+                self.answered_model = chunk["model"]
             choices = chunk.get("choices") or [{}]
             delta = (choices[0] or {}).get("delta") or {}
             status = delta.get("status")

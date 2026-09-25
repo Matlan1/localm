@@ -261,14 +261,19 @@ semaphore per display name), not globally - two concurrently loaded models
 can generate at once. Endpoints are documented in
 [server-api.md](server-api.md).
 
-`inference/capability_routing.py` decides, for a chat request that did not
-pin a model by name, whether the loaded model can actually serve it (vision,
-tool use, reasoning, context length) and picks an installed one that can when
-it cannot; `http_server.plan_capability_route()` builds the request's
-`CapabilityNeeds` and `routes/chat.py` applies the decision. `peer_routing.py`
-is a separate, unrelated mechanism: it forwards a chat request straight to
+`inference/capability_routing.py` decides, for a chat request that is not
+pinned, whether the model that would answer can actually serve it (vision,
+tool use, reasoning, context length) and picks an installed chat model that
+can when it cannot; `http_server.plan_capability_route()` builds the
+request's `CapabilityNeeds` and `routes/chat.py` applies the decision, loading
+a routed model with `get_engine(..., activate=False)` so it does not become
+the model unnamed requests resolve to. The same planner serves the clients
+that choose a model themselves: `cli/chat.py`'s `_TurnRouter` for `localm
+run`, the MCP server's `EngineCache.route`, and the jobs runner's
+`_served_engine`. `peer_routing.py` forwards a chat request straight to
 another localm instance on this machine that already has the model loaded,
-after verifying the forward target resolves to loopback.
+matched by model file through `gpu_registry`'s per-instance list of loaded
+models, after verifying the forward target resolves to loopback.
 
 ## Conversation compaction
 

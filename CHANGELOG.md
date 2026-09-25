@@ -12,11 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The MCP `chat` tool takes `images`** (local image files or `data:image/...`
+  URIs), and **`localm mcp --share-loaded-models`** lets the MCP server use a model
+  another localm instance on this machine already has loaded instead of loading a
+  second copy.
 - **Switch models in running coder sessions and resume any session with any model.**
   You can now change the model powering an active coder session in place without
   starting a new session or losing history. In the GUI, click the session model
   badge in the session bar or use the Model section in session controls; switching
-  the active model in the sidebar also updates local coder sessions automatically.
+  the active model in the sidebar also updates local coder sessions that were not
+  started with a chosen model.
   When loading the chosen model would evict a model that is in use, or would only
   partly fit in VRAM, the coder asks first, as the sidebar model picker does. If
   the load does not complete, starting a session reports why instead of starting
@@ -107,6 +112,39 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A request that needs something the loaded model lacks is now answered by an
+  installed model that has it from every part of localm, not only from API clients
+  that leave `model` empty.** An image attached in the GUI chat or `localm run`, web
+  access or the coding agent with a model that cannot format structured tool calls,
+  a conversation that outgrows the window the model was trained for, a Knowledge
+  image being described, and an MCP `chat` or `run_coder_task` call without a model
+  are now answered by an installed model that can, and the reply names it. A model
+  answering one such request no longer becomes the loaded model for everything
+  after it, and only chat models whose file is present are chosen, never an
+  embedding, diffusion or other component model. Pinning is always honored: pin a
+  GUI chat to a model in its parameters, pass `--pin-model` to `localm run` or
+  `localcoder`, name the model in an API request, an MCP call or a coder session,
+  or set it on a scheduled job. A scheduled chat job now runs on its own model even
+  while a different one is loaded, where it used to run on whichever was loaded.
+  When no installed model has everything a message needs, an attached image still
+  goes to a model that can read it, for example with web access on and no model
+  that both reads images and makes tool calls.
+- **`localm run`: an image the model could not read no longer makes every later
+  message fail.** That message is withdrawn from the conversation with an
+  explanation, as is a message that failed for another reason, instead of being
+  sent again ahead of the next one.
+- **The message for an image a model cannot read no longer calls any text model
+  downloaded from HuggingFace "a vision-capable model" missing its projector.** It
+  says the model has no projector recorded, and names a model in your library that
+  can read images when there is one.
+- **Using a model another localm instance on this machine already has loaded now
+  works.** An instance with no API key can be used without inventing a key; a key
+  is checked before the route is kept, and one that stops being accepted clears the
+  route instead of failing every request; the chosen model no longer snaps back to
+  the local one in the sidebar within 30 seconds; models are matched by file, so a
+  different model that shares a name is never offered; any model that instance has
+  loaded counts, not only its active one; and forwarded requests name the model the
+  way that instance does.
 - **The HuggingFace and CivitAI token fields in Settings now show whether a token is really configured.** A `HF_TOKEN`/`CIVITAI_API_KEY` environment variable that is blank or whitespace-only is now treated as not set, matching what downloads actually send, instead of disagreeing with the actual download code about whether a token is present. A stray `hf_token`/`civitai_api_key` entry in `config.json` (hand-edited, or left over from before these tokens moved to their own store) can no longer make Settings claim a token is configured, with a Clear button that has nothing to clear.
 - **Pulling `gemma3-4b` or `gemma3-12b` now checks free disk space for the vision projector too, and the curated shortcuts list says a projector comes with them.** The disk-space preflight for a plain HuggingFace model pull now also probes the same-repo vision projector it is about to auto-attach, so a pull with just enough room for the model alone no longer passes the check and then loses the projector download to insufficient disk space.
 - **Stop in chat now stops the whole turn, and messages queued while a reply is running are sent in order.** Pressing Stop while a long chat is being summarised no longer lets the reply stream anyway, and Stop no longer sends the next queued message: queued messages stay listed until you send or cancel them. A message typed during Regenerate or `/web` is now sent when that reply finishes instead of staying queued forever, and a new message goes after any older queued ones. Edit, Revert and Regenerate now appear on the transcript as soon as a reply finishes.

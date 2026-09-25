@@ -7,6 +7,7 @@ model loaded, and let the caller accept or clear a route to it. See
 
 from __future__ import annotations
 
+import requests
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -24,9 +25,22 @@ _PEER_LOOKUP_TIMEOUT_S = 20.0
 class PeerRouteAccept(BaseModel):
     """Body of ``POST /v1/models/{model_id}/peer-route`` - a JSON body, not
     query parameters, because ``api_key`` is a real credential and query
-    strings end up in access logs."""
+    strings end up in access logs. ``api_key`` is empty for a peer in open
+    mode, which has no key."""
     instance_id: str
-    api_key: str
+    api_key: str = ""
+
+
+def _requires_key(peer: dict) -> bool:
+    """Whether *peer* needs its own API key: False only when it answers an
+    unauthenticated request, i.e. it is in open mode. Unreachable or refusing
+    counts as needing one."""
+    from localm import peer_routing
+    try:
+        peer_routing.verify_peer_credential(peer, None)
+    except (peer_routing.PeerCredentialError, requests.RequestException):
+        return True
+    return False
 
 
 def _resolve_requested_name(model_id: str) -> str:
@@ -57,10 +71,15 @@ def register(app: FastAPI, ctx) -> None:
         def _lookup():
             registry = load_registry()
             canonical, aliases = peer_routing.registry_name_and_aliases(registry, name)
-            return peer_routing.find_offer(canonical, aliases, exclude_self_id=self_id)
+            peer = peer_routing.find_offer(
+                canonical, aliases, exclude_self_id=self_id,
+                identity=peer_routing.local_identity(registry, canonical))
+            if peer is None:
+                return None, None
+            return peer, _requires_key(peer)
 
         try:
-            peer = await run_in_threadpool_bounded(
+            peer, requires_key = await run_in_threadpool_bounded(
                 _lookup, timeout=_PEER_LOOKUP_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Looking for a peer with '{name}' loaded timed out: {e}")
@@ -71,7 +90,8 @@ def register(app: FastAPI, ctx) -> None:
             "host": peer.get("host"),
             "port": peer.get("port"),
             "scheme": peer.get("scheme") or "http",
-            "model": peer.get("model"),
+            "model": peer.get("matched_model") or peer.get("model"),
+            "requires_key": requires_key,
         }}
 
     @app.post("/v1/models/{model_id}/peer-route",
@@ -87,8 +107,8 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "No model specified or configured to route")
         instance_id = body.instance_id
         api_key = body.api_key.strip()
-        if not instance_id or not api_key:
-            raise HTTPException(400, "instance_id and api_key are required")
+        if not instance_id:
+            raise HTTPException(400, "instance_id is required")
         self_id = (_hs._gpu_coord or {}).get("instance_id") if _hs._gpu_coord else None
 
         # Verification only. run_in_threadpool_bounded ABANDONS the awaiting
@@ -99,19 +119,32 @@ def register(app: FastAPI, ctx) -> None:
         def _verify():
             registry = load_registry()
             canonical, aliases = peer_routing.registry_name_and_aliases(registry, name)
-            peer = peer_routing.find_offer(canonical, aliases, exclude_self_id=self_id)
+            peer = peer_routing.find_offer(
+                canonical, aliases, exclude_self_id=self_id,
+                identity=peer_routing.local_identity(registry, canonical),
+                instance_id=instance_id)
             if peer is None or peer.get("instance_id") != instance_id:
-                return None
+                return None, None
+            try:
+                peer_routing.verify_peer_credential(peer, api_key)
+            except peer_routing.PeerCredentialError as e:
+                return None, str(e)
+            except requests.RequestException as e:
+                return None, f"the peer could not be reached ({e})"
             return peer_routing.PeerRoute(
                 model=name, instance_id=peer.get("instance_id"),
                 host=peer.get("host"), port=int(peer.get("port")),
-                scheme=peer.get("scheme") or "http", api_key=api_key)
+                scheme=peer.get("scheme") or "http", api_key=api_key,
+                peer_model=peer.get("matched_model") or None), None
 
         try:
-            route = await run_in_threadpool_bounded(
+            route, refused = await run_in_threadpool_bounded(
                 _verify, timeout=_PEER_LOOKUP_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Verifying peer '{instance_id}' timed out: {e}")
+        if refused is not None:
+            raise HTTPException(
+                403, f"Peer instance '{instance_id}' refused the route: {refused}.")
         if route is None:
             raise HTTPException(
                 409, f"Peer instance '{instance_id}' is no longer live, no "

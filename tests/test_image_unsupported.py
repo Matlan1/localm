@@ -420,6 +420,28 @@ class TestVisionGuidanceActiveModelBackfillPending:
         # Distinct from the no-vision-model-registered case:
         assert "no vision model is registered" not in msg.lower()
 
+    def test_it_does_not_claim_the_model_is_a_vision_model(self, tmp_path, monkeypatch):
+        """A text-only model pulled from HF also has no projector recorded, so
+        the message must not assert the model can see."""
+        import localm.model_manager as mm
+        self.gguf_path = str(tmp_path / "m.gguf")
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"my-text-model": self._entry()})
+        msg = mm.vision_input_guidance(active_model_path=self.gguf_path)
+        assert "is a vision-capable model" not in msg
+        assert "If it is a vision model" in msg
+
+    def test_it_names_an_installed_vision_model(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        self.gguf_path = str(tmp_path / "m.gguf")
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"my-text-model": self._entry()})
+        monkeypatch.setattr(mm.registry, "vision_capable_models", lambda: ["seer"])
+        msg = mm.vision_input_guidance(active_model_path=self.gguf_path)
+        assert "seer" in msg
+
     def test_entry_already_carrying_mmproj_falls_through(self, tmp_path, monkeypatch):
         import localm.model_manager as mm
         self.gguf_path = str(tmp_path / "m.gguf")

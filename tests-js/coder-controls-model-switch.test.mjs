@@ -87,12 +87,12 @@ test("session controls: switching back to the original model in the same open mo
   select.value = "model-b";
   await btn.onclick();
   assert.equal(calls.length, 1, "the first switch posts");
-  assert.deepEqual(calls[0].body, { model: "model-b" });
+  assert.deepEqual(calls[0].body, { model: "model-b", pin: true });
 
   select.value = "model-a";
   await btn.onclick();
   assert.equal(calls.length, 2, "switching back must also post, not silently return");
-  assert.deepEqual(calls[1].body, { model: "model-a" });
+  assert.deepEqual(calls[1].body, { model: "model-a", pin: true });
 });
 
 test("slash /model with no arg reports the live model through i18n", async () => {

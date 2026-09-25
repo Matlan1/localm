@@ -143,6 +143,31 @@ class TestPlanRoute:
                           pinned=False, reg=reg)
         assert d.resolved == "big"
 
+    def test_a_conversation_too_long_for_every_tool_model_goes_to_the_roomy_one(self):
+        """Nothing has both, and the current model cannot hold the conversation
+        at all: the roomy model answers and the reply says what it lacks."""
+        reg = _reg(plain={"tool_use": False, "context_length": 4096},
+                   toolsmall={"tool_use": True, "context_length": 4096},
+                   roomy={"tool_use": False, "context_length": 131072})
+        d = cr.plan_route(
+            "plain", cr.CapabilityNeeds(capabilities=("tool_use",),
+                                        min_context=100000),
+            pinned=False, reg=reg)
+        assert d.resolved == "roomy"
+        assert d.unmet == ("tool_use",)
+        assert "no installed model also provides tool_use" in d.describe()
+
+    def test_a_missing_tool_capability_alone_never_picks_a_partial_model(self):
+        """The current model can take the request, so a model that lacks the
+        requested capability too is no better and nothing moves."""
+        reg = _reg(plain={"tool_use": False, "context_length": 131072},
+                   other={"tool_use": False, "context_length": 131072})
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",),
+                                                      min_context=100000),
+                          pinned=False, reg=reg)
+        assert d.resolved == "plain"
+        assert d.unmet == ("tool_use",)
+
     def test_multiple_needs_must_all_be_met_by_one_model(self):
         reg = _reg(plain={"tool_use": False, "context_length": 4096},
                    toolsonly={"tool_use": True, "context_length": 4096},
@@ -448,6 +473,22 @@ class TestVisionMismatchReconciliation:
         assert "cannot accept image" in r.json()["detail"]
         assert _answering_model(engines) == []
 
+    def test_an_image_with_web_access_on_is_read_by_the_vision_model(
+            self, vision_server):
+        """The GUI with Web access on asks for tool calls on every message. No
+        installed model has both, so the one that can read the image answers,
+        and the routing header names tool calls as what it lacks."""
+        client, engines, _ = vision_server
+        r = client.post("/v1/chat/completions",
+                        json={"model": "plain", "pin_model": False,
+                              "required_capabilities": ["tool_use"],
+                              "messages": _IMAGE_MSG, "stream": False})
+        assert _answering_model(engines) == ["seer"]
+        assert r.status_code == 200
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["routed"] is True and blob["resolved"] == "seer"
+        assert blob["unmet"] == ["tool_use"]
+
     def test_unpinned_image_request_with_no_capable_model_still_400s(
             self, vision_server, monkeypatch):
         """The honest fallback: with nowhere to route, the shipped refusal
@@ -513,3 +554,311 @@ class TestNoCurrentModel:
                           reg=TOOLS_ONLY)
         assert d.resolved is None
         assert d.routed is False
+
+
+# --------------------------------------------------------------------------- #
+#  Only loadable chat models are routing targets                               #
+# --------------------------------------------------------------------------- #
+
+class TestOnlyChatModelsAreTargets:
+    def test_an_embedding_model_is_never_a_target_however_roomy(self):
+        reg = _reg(
+            small={"tool_use": True, "context_length": 4096},
+            embedder={"tool_use": True, "context_length": 131072,
+                      "model_type": "embedding"},
+        )
+        d = cr.plan_route("small", cr.CapabilityNeeds(min_context=20000),
+                          pinned=False, reg=reg)
+        assert d.routed is False
+        assert d.unmet == ("context_length",)
+
+    def test_component_types_are_never_targets(self):
+        reg = _reg(plain={"tool_use": False})
+        for mtype in ("mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
+                      "unknown"):
+            reg[f"x-{mtype}"] = {"path": f"Z:/m/{mtype}.gguf", "source": "local",
+                                 "model_type": mtype, "tool_use": True}
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=False, reg=reg)
+        assert d.routed is False
+
+    def test_a_model_whose_file_is_missing_is_never_a_target(self):
+        reg = _reg(plain={"tool_use": False},
+                   gone={"tool_use": True, "missing": True},
+                   here={"tool_use": True})
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=False, reg=reg)
+        assert d.resolved == "here"
+        assert d.candidates == ("here",)
+
+    def test_a_legacy_entry_with_no_type_is_a_chat_model(self):
+        reg = _reg(plain={"tool_use": False}, legacy={"tool_use": True})
+        del reg["legacy"]["model_type"]
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=False, reg=reg)
+        assert d.resolved == "legacy"
+
+    def test_a_live_capability_the_registry_does_not_record_is_no_gap(self):
+        reg = _reg(plain={}, seer={})
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("vision",)),
+                          pinned=False, reg=reg, current_known={"vision": True})
+        assert d.has_gap is False
+        assert d.resolved == "plain"
+
+
+# --------------------------------------------------------------------------- #
+#  pin_model / min_context, and what a routed request leaves behind            #
+# --------------------------------------------------------------------------- #
+
+class TestPreferredModelIsNotAPin:
+    def test_a_named_model_with_pin_model_false_is_routed(self, server):
+        client, engines = server
+        r = _ask(client, model="plain", pin_model=False,
+                 required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+        assert r.json()["model"] == "tooly"
+
+    def test_pin_model_true_keeps_an_unnamed_request_where_it_is(self, server):
+        client, engines = server
+        r = _ask(client, pin_model=True, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert r.status_code == 200
+        assert json.loads(r.headers["X-Localm-Model-Routing"])["pinned"] is True
+
+    def test_a_named_pin_is_still_honored_by_default(self, server):
+        client, engines = server
+        r = _ask(client, model="plain", required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert r.json()["model"] == "plain"
+
+    def test_min_context_routes_to_a_roomier_model(self, server):
+        client, engines = server
+        r = _ask(client, min_context=20000)
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+        assert json.loads(r.headers["X-Localm-Model-Routing"])["gaps"] == {
+            "context_length": "absent"}
+
+    def test_a_long_conversation_routes_on_its_own(self, server):
+        client, engines = server
+        long_text = "word " * 9000
+        r = _ask(client, messages=[{"role": "user", "content": long_text}])
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+
+
+class TestRoutingDoesNotChangeTheLoadedModel:
+    def test_the_next_unnamed_request_is_answered_by_the_loaded_model(self, server):
+        client, engines = server
+        routed = _ask(client, required_capabilities=["tool_use"])
+        assert routed.json()["model"] == "tooly"
+        assert hs._resolve_unnamed_model_name() == "plain"
+        engines["tooly"].answered = 0
+        plain = _ask(client)
+        assert engines["plain"].answered == 1
+        assert engines["tooly"].answered == 0
+        assert plain.json()["model"] == "plain"
+
+    def test_the_routed_model_stays_resident_for_the_next_routed_request(self, server):
+        client, engines = server
+        _ask(client, required_capabilities=["tool_use"])
+        assert engines["tooly"].loaded is True
+        _ask(client, required_capabilities=["tool_use"])
+        assert engines["tooly"].answered == 2
+
+
+class TestTheRegistryEntryShowsARoutedModel:
+    """The machine-wide coordination entry names a model and its VRAM while a
+    model is loaded here, including one loaded for a routed request that is
+    not the active model, so a sibling that needs the VRAM asks this instance."""
+
+    def _written(self, monkeypatch, engines, active, sizes):
+        written = {}
+        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me", "token": "t", "port": 1})
+        monkeypatch.setattr(hs, "_engines", engines)
+        monkeypatch.setattr(hs, "_active_model_name", active)
+        monkeypatch.setattr(hs, "_model_file_size", lambda n: sizes.get(n))
+        monkeypatch.setattr(hs, "_loaded_model_identities", lambda: [])
+        monkeypatch.setattr(hs, "_current_gpu_index", lambda: 0)
+        monkeypatch.setattr("localm.gpu_registry.registry_dir", lambda: "unused")
+        monkeypatch.setattr("localm.gpu_registry.write_entry",
+                            lambda d, **kw: written.update(kw))
+        hs._gpu_registry_sync()
+        return written
+
+    def test_a_routed_model_with_no_active_model_is_advertised(self, monkeypatch):
+        w = self._written(monkeypatch, {"routed": _Loaded()}, None, {"routed": 1000})
+        assert w["model"] == "routed"
+        assert w["vram_estimate_bytes"] == 1200
+
+    def test_every_loaded_model_counts_toward_the_estimate(self, monkeypatch):
+        w = self._written(monkeypatch, {"main": _Loaded(), "routed": _Loaded()},
+                          "main", {"main": 1000, "routed": 500})
+        assert w["model"] == "main"
+        assert w["vram_estimate_bytes"] == 1800
+
+    def test_nothing_loaded_is_nothing_advertised(self, monkeypatch):
+        w = self._written(monkeypatch, {"gone": _Loaded(False)}, None, {"gone": 1000})
+        assert w["model"] is None and w["vram_estimate_bytes"] is None
+
+
+class _Loaded:
+    def __init__(self, loaded=True):
+        self.loaded = loaded
+
+
+class TestAFailedRoutedLoadFallsBack:
+    @pytest.fixture
+    def flaky(self, monkeypatch):
+        registry = _reg(
+            plain={"tool_use": False, "context_length": 8192},
+            broken={"tool_use": True, "context_length": 65536},
+            tooly={"tool_use": True, "context_length": 32768},
+        )
+        engines: dict = {}
+
+        class Broken(FakeEngine):
+            def load(self):
+                raise RuntimeError("out of VRAM")
+
+        def factory(name):
+            if name not in engines:
+                engines[name] = (Broken if name == "broken" else FakeEngine)(name)
+            return engines[name]
+
+        monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+        monkeypatch.setattr("localm.model_manager.load_registry", lambda: registry)
+        monkeypatch.setattr("localm.model_manager.get_model_info",
+                            lambda name: (f"Z:/models/{name}.gguf", "hint"))
+        monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+        monkeypatch.setattr(hs, "_engine_factory", factory)
+        hs._engines.clear()
+        hs._engines_lru.clear()
+        hs._inference_sems.clear()
+        hs._last_activity_per_model.clear()
+        hs._active_model_name = None
+        hs._engine = None
+        hs._inference_sem = None
+        startup = factory("plain")
+        startup.load()
+        with TestClient(hs.create_app(startup)) as client:
+            yield client, engines, registry
+
+    def test_the_next_capable_model_answers(self, flaky):
+        client, engines, _ = flaky
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["tooly"]
+        assert r.status_code == 200
+        assert json.loads(r.headers["X-Localm-Model-Routing"])["resolved"] == "tooly"
+
+    def test_a_fallback_reports_what_the_model_that_answered_lacks(self, flaky):
+        """No model has every need; the roomier models are chosen for the
+        context. The first fails to load, the second answers, and `unmet` names
+        what the second lacks, not what the first lacked."""
+        client, engines, registry = flaky
+        registry["roomy"] = {"path": "Z:/models/roomy.gguf", "source": "local",
+                             "model_type": "llm", "tool_use": False,
+                             "context_length": 65536}
+        r = _ask(client, required_capabilities=["tool_use", "reasoning"],
+                 min_context=60000)
+        assert _answering_model(engines) == ["roomy"]
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["resolved"] == "roomy"
+        assert blob["unmet"] == ["reasoning", "tool_use"]
+
+    def test_with_no_loadable_candidate_the_loaded_model_answers_and_says_why(
+            self, flaky):
+        client, engines, registry = flaky
+        registry.pop("tooly")
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert r.status_code == 200
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["routed"] is False
+        assert blob["unmet"] == ["tool_use"]
+        assert "out of VRAM" in blob["load_errors"][0]
+
+
+class TestAPeerRoutedModelIsARoutingTarget:
+    def test_an_unnamed_request_needing_it_is_forwarded(self, server, monkeypatch):
+        from localm import peer_routing
+        client, engines = server
+        sent = []
+
+        class Resp:
+            status_code = 200
+            headers = {"content-type": "application/json"}
+
+            def iter_content(self, chunk_size=None):
+                return iter([b'{"model": "tooly", "choices": []}'])
+
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None,
+                      verify=None):
+            sent.append(json.loads(data))
+            return Resp()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        peer_routing.set_route(peer_routing.PeerRoute(
+            model="tooly", instance_id="p", host="127.0.0.1", port=1,
+            scheme="http", api_key=""))
+        try:
+            r = _ask(client, required_capabilities=["tool_use"])
+        finally:
+            peer_routing._ROUTES.clear()
+        assert sent and sent[0]["model"] == "tooly"
+        assert r.status_code == 200
+        assert _answering_model(engines) == []
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["routed"] is True and blob["resolved"] == "tooly"
+
+
+class TestCoderRoutingNote:
+    """An unpinned coder session is told which model answers its requests."""
+
+    def test_an_unpinned_session_is_told_which_model_answers(self, server):
+        from localm.plugins.builtin.coder import plug
+        note = plug._tool_capability_note("plain", pinned=False)
+        assert "tooly" in note
+        assert "answered by" in note
+
+    def test_silent_when_its_model_has_tool_calls(self, server):
+        from localm.plugins.builtin.coder import plug
+        assert plug._tool_capability_note("tooly", pinned=False) == ""
+
+
+class TestServerCompactionHeader:
+    """A reply whose history the server had to compact to fit the answering
+    model says so, so a client that deferred its own compaction stops
+    deferring."""
+
+    LONG = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+            for i in range(7)]
+
+    def _force_compaction(self, monkeypatch, changed):
+        import localm.inference.compact as compact
+        monkeypatch.setattr(FakeEngine, "count_messages_tokens",
+                            lambda self, ms: 7000 if len(ms) > 3 else 100)
+        monkeypatch.setattr(compact, "compact_messages",
+                            lambda ms, gen: (ms[-2:], True) if changed else (ms, False))
+
+    def test_a_compacted_reply_carries_the_header(self, server, monkeypatch):
+        client, _engines = server
+        self._force_compaction(monkeypatch, changed=True)
+        r = _ask(client, messages=self.LONG)
+        assert r.status_code == 200
+        assert r.headers.get("X-Localm-Context-Compacted") == "1"
+
+    def test_a_compacted_stream_carries_the_header(self, server, monkeypatch):
+        client, _engines = server
+        self._force_compaction(monkeypatch, changed=True)
+        r = _ask(client, messages=self.LONG, stream=True)
+        assert r.status_code == 200
+        assert r.headers.get("X-Localm-Context-Compacted") == "1"
+
+    def test_an_uncompacted_reply_has_no_header(self, server, monkeypatch):
+        client, _engines = server
+        self._force_compaction(monkeypatch, changed=False)
+        r = _ask(client, messages=self.LONG)
+        assert r.status_code == 200
+        assert "X-Localm-Context-Compacted" not in r.headers

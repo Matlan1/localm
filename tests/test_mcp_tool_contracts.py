@@ -49,8 +49,8 @@ _DESTRUCTIVE = {"destructiveHint": True}
 #          annotations (dict of the hint keys, or None when none are declared))
 CONTRACTS = {
     "chat": (
-        {"prompt": _STR, "system": _STR, "model": _MODEL, "max_tokens": _INT,
-         "temperature": _NUM, "seed": _INT},
+        {"prompt": _STR, "system": _STR, "images": _STR_ARRAY, "model": _MODEL,
+         "max_tokens": _INT, "temperature": _NUM, "seed": _INT},
         ("prompt",), None),
     "embed": (
         {"texts": _STR_ARRAY, "model": _MODEL},

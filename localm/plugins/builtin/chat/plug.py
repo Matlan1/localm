@@ -35,7 +35,7 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 _router = APIRouter()
 
@@ -49,6 +49,9 @@ class ConversationUpsert(BaseModel):
     updated_at: float = 0
     pinned: bool = False
     folder: str | None = None
+    # The model every turn of this conversation is answered by, whatever it
+    # needs; None when the conversation is not pinned to one.
+    pinned_model: str | None = Field(None, max_length=256)
     branches: list = []           # parked message-branch tails (fork points)
     messages: list = []
 
@@ -189,6 +192,7 @@ async def conversation_upsert(conv_id: str, req: ConversationUpsert):
         {"id": conv_id, "title": req.title,
          "updated_at": req.updated_at,
          "pinned": req.pinned, "folder": req.folder,
+         "pinned_model": req.pinned_model,
          "branches": req.branches,
          "messages": req.messages},
         ensure_ascii=False)

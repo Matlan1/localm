@@ -93,7 +93,8 @@ test("model switch: a confirm_required 409 asks, and a confirmed retry carries f
 
   const updated = await win.postSessionModel("s1", "model-b");
 
-  assert.deepEqual(calls.map((c) => c.body), [{ model: "model-b" }, { model: "model-b", force: true }]);
+  assert.deepEqual(calls.map((c) => c.body),
+    [{ model: "model-b", pin: true }, { model: "model-b", pin: true, force: true }]);
   assert.equal(updated.model, "model-b");
 });
 
@@ -154,7 +155,7 @@ test("resume onto an open session: declining the model confirm keeps it as it wa
   const info = sessionInfo(win);
   assert.ok(info, "the session keeps its info");
   assert.equal(info.model, "model-a");
-  assert.deepEqual(calls.map((c) => c.body), [{ model: "model-b" }]);
+  assert.deepEqual(calls.map((c) => c.body), [{ model: "model-b", pin: true }]);
   assert.doesNotMatch(win.document.getElementById("toast").textContent, /Could not switch model/);
 });
 

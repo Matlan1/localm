@@ -49,6 +49,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -126,7 +127,8 @@ class EngineCache:
     """
 
     def __init__(self, default_model: Optional[str] = None,
-                 engine_factory: Optional[Callable] = None) -> None:
+                 engine_factory: Optional[Callable] = None,
+                 share_loaded: bool = False) -> None:
         self.default_model = default_model
         # Display name -> engine, plus usage order (least-recently-used FIRST,
         # MRU last).
@@ -134,6 +136,18 @@ class EngineCache:
         self._lru: list = []
         # Injection point for tests - real factory builds a localm Engine
         self._factory = engine_factory or self._build_engine
+        # When True, get_chat() answers with a model another localm instance on
+        # this machine already has loaded instead of loading a second copy.
+        self.share_loaded = bool(share_loaded)
+        # Display name -> a client for another instance's loaded copy.
+        self._peers: Dict[str, Any] = {}
+        # Display name -> (endpoint, credential) that copy was verified with.
+        self._peer_targets: Dict[str, tuple] = {}
+        # Held by every method that reads or changes the engines and peers to
+        # pick or load one, on the protocol thread and on a coder run's worker
+        # thread alike. Never acquired while holding a generation lock
+        # (generation_lock), Engine's load lock or the residency pin lock.
+        self._lock = threading.RLock()
 
     # ---- back-compat views over the multi-resident state -------------------
     # _engine and _loaded_name read the most-recently-used resident.
@@ -213,7 +227,12 @@ class EngineCache:
             raise ValueError(f"Model not found: {model_name!r}. "
                              f"Run 'localm list' to see registered models.")
         path, _hint = info
-        return Engine(str(path), display_name=model_name)
+        from localm.model_manager import get_model_mmproj
+        from localm.model_manager.registry import get_operator_model_mmproj
+        mmproj = (get_operator_model_mmproj(self.default_model)
+                  if self._operator_supplied(model_name)
+                  else get_model_mmproj(model_name))
+        return Engine(str(path), display_name=model_name, mmproj_path=mmproj)
 
     def resolve_model(self, requested: Optional[str]) -> str:
         # A client-supplied name must be a registered one; the operator's own
@@ -240,27 +259,218 @@ class EngineCache:
                 "Name one explicitly, or set a model's type with 'localm set-type'.")
         return name
 
+    def route(self, requested: Optional[str], messages: list, *,
+              required: tuple = (), pinned: Optional[bool] = None):
+        """The capability-routing decision for a request with *messages*,
+        without loading anything: which model should answer it.
+
+        A model the client named is pinned unless *pinned* says otherwise;
+        the server's default model is not. A request that needs something the
+        model it would use lacks (an image, structured tool calls, a longer
+        conversation than it was trained for) resolves to an installed model
+        that has it. Raises ValueError for a name that is not registered."""
+        from localm.inference import capability_routing as cr
+        from localm.model_manager import capabilities as caps
+        current = self.resolve_model(requested)
+        pinned = bool(requested) if pinned is None else bool(pinned)
+        needs = cr.request_needs(messages or [], required=required)
+        known = {}
+        with self._lock:
+            eng = self._engines.get(current)
+            resident = list(self._lru) + list(self._peers)
+        if (eng is not None and getattr(eng, "loaded", False)
+                and getattr(eng, "supports_images", False) is True):
+            known[caps.VISION] = True
+        return cr.plan_route(current, needs, pinned=pinned, resident=resident,
+                             current_known=known)
+
+    def get_chat(self, name: str):
+        """The engine to answer a chat with model *name*: this server's own
+        copy when it has one loaded; otherwise, when ``share_loaded``, another
+        localm instance's already-loaded copy if one is available; else this
+        server's own (see get)."""
+        with self._lock:
+            own = self._engines.get(name)
+            own_loaded = (own is not None and getattr(own, "loaded", False) is True
+                          and getattr(own, "unloading", False) is not True)
+            if self.share_loaded and not own_loaded:
+                peer = self._peers.get(name) or self._peer_engine(name)
+                if peer is not None:
+                    return peer
+            return self.get(name)
+
+    def is_peer(self, engine) -> bool:
+        """True when *engine* is another instance's copy, not one loaded here."""
+        return any(e is engine for e in list(self._peers.values()))
+
+    def drop_peer(self, name: str) -> None:
+        """Stop using another instance's copy of *name*, e.g. after it stopped
+        answering; the next get_chat() looks again or loads it here."""
+        with self._lock:
+            self._peers.pop(name, None)
+            self._peer_targets.pop(name, None)
+
+    def get_loaded_chat(self, name: str):
+        """get_chat() with the model ready to answer. Another instance's copy
+        found by an earlier call is used only while that instance still
+        answers and accepts the credential it was verified with; otherwise it
+        is dropped, and another instance's copy is looked for or the model is
+        loaded here. This server's own engine is loaded before it is returned;
+        one that fails to load is removed from the cache and the load error
+        raised."""
+        with self._lock:
+            if name in self._peers and not self._peer_still_answers(name):
+                self.drop_peer(name)
+            return self._loaded(name, self.get_chat(name))
+
+    def get_loaded(self, name: str):
+        """This server's own engine for *name* (see get), loaded before it is
+        returned; one that fails to load is removed from the cache and the
+        load error raised."""
+        with self._lock:
+            return self._loaded(name, self.get(name))
+
+    def load_here_instead_of(self, name: str, peer):
+        """This server's own engine for *name*, loaded and pinned (release it
+        with unpin()), in place of *peer*, another instance's copy that can no
+        longer be used; *peer* is dropped. Raises what building or loading the
+        engine raised."""
+        with self._lock:
+            if self._peers.get(name) is peer:
+                self.drop_peer(name)
+            engine = self.get_loaded(name)
+            self.pin(engine)
+            return engine
+
+    def _loaded(self, name: str, engine):
+        """*engine*, the cache's engine for *name*, ready to answer: another
+        instance's copy as it is, this server's own after ``load()``. An
+        engine that fails to load is removed from the cache and the load error
+        raised."""
+        if self.is_peer(engine) or getattr(engine, "loaded", False) is True:
+            return engine
+        try:
+            engine.load()
+        except Exception:
+            self._discard(name, engine)
+            raise
+        return engine
+
+    def _peer_still_answers(self, name: str) -> bool:
+        """True while the instance behind the cached copy of *name* answers and
+        accepts the credential that copy was verified with. A failed check is
+        logged."""
+        target, token = self._peer_targets.get(name, (None, None))
+        if target is None:
+            _log(f"not using the cached copy of {name}: no endpoint is recorded for it")
+            return False
+        from localm import peer_routing
+        try:
+            peer_routing.verify_peer_credential(target, token)
+        except Exception as e:
+            _log(f"not using {name} loaded by the localm instance on port "
+                 f"{target.get('port')} any more: {e}")
+            return False
+        return True
+
+    def _discard(self, name: str, engine) -> None:
+        """Remove *engine*, the cache's engine for *name* whose load failed,
+        and release whatever the failed load left behind."""
+        if self._engines.get(name) is engine:
+            self._engines.pop(name, None)
+            if name in self._lru:
+                self._lru.remove(name)
+        try:
+            engine.unload()
+        except Exception as e:
+            _log(f"warning: failed to release {name} after its load failed: {e}")
+
+    def _peer_engine(self, name: str):
+        """A client for another localm instance on this machine that has
+        *name* loaded (matched by model file), or None.
+
+        An instance of this same install is reached at the address in this
+        install's own instance file and authenticated with this install's
+        credential; an entry claiming such an instance at any other port is
+        not used. Any other instance is used only when it needs no credential
+        (open mode). Best-effort: a failed lookup is logged and answers None."""
+        try:
+            from localm import instances, peer_routing
+            from localm.auth import resolve_bearer_token
+            from localm.bindhost import self_connect_host
+            from localm.config import home_dir, load_registry
+            from localm.inference.http_engine import HttpEngine
+            reg = load_registry()
+            canonical, aliases = peer_routing.registry_name_and_aliases(reg, name)
+            peer = peer_routing.find_offer(
+                canonical, aliases,
+                identity=peer_routing.local_identity(reg, canonical))
+            if peer is None:
+                return None
+            own = {str(e.get("instance_id")): e for e in instances.list_entries(home_dir())}
+            same_install = own.get(str(peer.get("instance_id")))
+            token = None
+            target = peer
+            if same_install is not None:
+                if str(same_install.get("port")) != str(peer.get("port")):
+                    _log(f"not using {name}: the machine-wide registry names this "
+                         f"install's instance {peer.get('instance_id')} at port "
+                         f"{peer.get('port')}, but it serves port "
+                         f"{same_install.get('port')}")
+                    return None
+                target = {**peer,
+                          "host": self_connect_host(same_install.get("host")),
+                          "port": same_install.get("port"),
+                          "scheme": same_install.get("scheme") or "http"}
+                token = resolve_bearer_token(same_install.get("token"))
+            try:
+                peer_routing.verify_peer_credential(target, token)
+            except Exception as e:
+                _log(f"not using {name} loaded by the localm instance on port "
+                     f"{target.get('port')}: {e}")
+                return None
+            route = peer_routing.PeerRoute(
+                model=name, instance_id=str(target.get("instance_id")),
+                host=target.get("host"), port=int(target.get("port")),
+                scheme=target.get("scheme") or "http", api_key=token or "")
+            base = peer_routing._peer_url(route, "/v1")
+            eng = HttpEngine(base, token=token,
+                             model=peer.get("matched_model") or name,
+                             display_name=name, pin_model=True)
+            eng.active_requests = 0
+            eng.unloading = False
+            self._peers[name] = eng
+            self._peer_targets[name] = (target, token)
+            _log(f"using {name} already loaded by the localm instance on port "
+                 f"{target.get('port')} (no second copy loaded)")
+            return eng
+        except Exception as e:
+            _log(f"warning: looking for another instance with {name} loaded "
+                 f"failed: {e}")
+            return None
+
     def get(self, requested: Optional[str]):
         name = self.resolve_model(requested)
-        engine = self._engines.get(name)
-        if engine is not None:
-            if (getattr(engine, "loaded", True)
-                    and getattr(engine, "unloading", False) is not True):
-                self._touch(name)      # already resident: never evict to reuse
+        with self._lock:
+            engine = self._engines.get(name)
+            if engine is not None:
+                if (getattr(engine, "loaded", True)
+                        and getattr(engine, "unloading", False) is not True):
+                    self._touch(name)      # already resident: never evict to reuse
+                    return engine
+                # Resident but NOT loaded, so it holds no VRAM yet and the
+                # free-VRAM probe cannot see it. Run the gate, then hand back the
+                # SAME object so the pulled engine is reused rather than silently
+                # replaced.
+                self._make_room_for(name)
+                self._touch(name)
                 return engine
-            # Resident but NOT loaded, so it holds no VRAM yet and the
-            # free-VRAM probe cannot see it. Run the gate, then hand back the
-            # SAME object so the pulled engine is reused rather than silently
-            # replaced.
             self._make_room_for(name)
+            _log(f"loading model {name}")
+            engine = self._factory(name)
+            self._engines[name] = engine
             self._touch(name)
             return engine
-        self._make_room_for(name)
-        _log(f"loading model {name}")
-        engine = self._factory(name)
-        self._engines[name] = engine
-        self._touch(name)
-        return engine
 
     def _touch(self, name: str) -> None:
         """Mark ``name`` most-recently-used."""
@@ -489,18 +699,19 @@ class EngineCache:
 
     def unload_all(self) -> None:
         """Free every resident engine (shutdown). N resident means N to free."""
-        for name in list(self._lru):
-            engine = self._engines.pop(name, None)
-            self._lru.remove(name)
-            if engine is None:
-                continue
-            try:
-                engine.unload()
-            except Exception as e:
-                # Process teardown, so nothing downstream can act on this, but a
-                # native free that failed leaves VRAM pinned after exit. stderr
-                # only; stdout belongs to the protocol.
-                _log(f"warning: failed to unload {name} at shutdown: {e}")
+        with self._lock:
+            for name in list(self._lru):
+                engine = self._engines.pop(name, None)
+                self._lru.remove(name)
+                if engine is None:
+                    continue
+                try:
+                    engine.unload()
+                except Exception as e:
+                    # Process teardown, so nothing downstream can act on this,
+                    # but a native free that failed leaves VRAM pinned after
+                    # exit. stderr only; stdout belongs to the protocol.
+                    _log(f"warning: failed to unload {name} at shutdown: {e}")
 
 
 def _text_result(text: str, is_error: bool = False) -> dict:
@@ -760,10 +971,11 @@ class MCPStdioServer:
 
 def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
                  enable_coder: bool = True, enable_memory: bool = True,
-                 enable_memory_write: bool = False) -> None:
+                 enable_memory_write: bool = False,
+                 share_loaded: bool = False) -> None:
     """Entry point used by the CLI: build everything and block on stdio."""
     _redirect_consoles_to_stderr()
-    engines = EngineCache(default_model=model)
+    engines = EngineCache(default_model=model, share_loaded=share_loaded)
     server = MCPStdioServer(build_tools(
         engines, enable_images=enable_images, enable_coder=enable_coder,
         enable_memory=enable_memory,

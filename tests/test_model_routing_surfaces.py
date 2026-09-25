@@ -1,0 +1,330 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Capability routing reached from each client surface, against a REAL uvicorn
+server: the coder's HTTP backend, the terminal chat's attach engine, and the
+Knowledge plugin's image description. Each asserts on the engine that actually
+generated the reply, never on a status code alone.
+
+The loaded model ("plain") cannot emit structured tool calls or read images;
+"tooly" can emit tool calls and "seer" can read images. A request that is not
+pinned and needs one of those is answered by the model that has it; a pinned
+one is answered by the model it names."""
+
+from __future__ import annotations
+
+import asyncio
+import socket as _socket
+import threading
+import time
+
+import pytest
+import uvicorn
+
+import localm.inference.http_server as hs
+
+
+class _Engine:
+    def __init__(self, name, *, images=False):
+        self.display_name = name
+        self.loaded = False
+        self.supports_images = images
+        self.can_be_multimodal = images
+        self.last_finish_reason = "stop"
+        self.unloading = False
+        self.answered = 0
+
+    def load(self):
+        self.loaded = True
+
+    def unload(self):
+        self.loaded = False
+
+    def chat_stream(self, messages, **kw):
+        self.answered += 1
+        yield f"answered-by-{self.display_name}"
+
+    def count_tokens(self, text):
+        return 3
+
+    def count_messages_tokens(self, messages):
+        return 5
+
+    def context_capacity(self):
+        return {"plain": 4096, "tooly": 32768, "seer": 8192}.get(self.display_name, 4096)
+
+    def validate_grammar(self, grammar, lazy=False):
+        return None
+
+
+def _wait(cond, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+@pytest.fixture
+def live(tmp_path, monkeypatch):
+    """A real server with "plain" loaded and "tooly"/"seer" installed.
+
+    "seer" is vision-capable for real: a model file plus a recorded projector
+    that exists on disk, which is what the shipped vision probe reads."""
+    for n in ("plain", "tooly", "seer"):
+        (tmp_path / n).mkdir()
+        (tmp_path / n / f"{n}.gguf").write_bytes(b"GGUF")
+    proj = tmp_path / "seer" / "seer-mmproj.gguf"
+    proj.write_bytes(b"GGUF")
+    registry = {
+        "plain": {"path": str(tmp_path / "plain" / "plain.gguf"), "source": "local",
+                  "model_type": "llm", "tool_use": False, "context_length": 4096},
+        "tooly": {"path": str(tmp_path / "tooly" / "tooly.gguf"), "source": "local",
+                  "model_type": "llm", "tool_use": True, "context_length": 32768},
+        "seer": {"path": str(tmp_path / "seer" / "seer.gguf"), "source": "local",
+                 "model_type": "llm", "tool_use": False, "context_length": 8192,
+                 "mmproj": str(proj)},
+    }
+    engines: dict = {}
+
+    def factory(name):
+        return engines.setdefault(name, _Engine(name, images=(name == "seer")))
+
+    monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+    monkeypatch.setattr("localm.model_manager.load_registry", lambda: registry)
+    monkeypatch.setattr("localm.model_manager.get_model_info",
+                        lambda name, **kw: (registry[name]["path"], "hint")
+                        if name in registry else None)
+    monkeypatch.setattr("localm.model_manager.get_model_mmproj",
+                        lambda name, **kw: str(proj) if name == "seer" else None)
+    monkeypatch.setattr(hs, "_engine_factory", factory)
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._inference_sems.clear()
+    hs._last_activity_per_model.clear()
+    hs._active_model_name = None
+    hs._last_active_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+
+    startup = factory("plain")
+    startup.load()
+    app = hs.create_app(startup)
+    lsock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    lsock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    lsock.bind(("127.0.0.1", 0))
+    port = lsock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
+    th = threading.Thread(target=lambda: asyncio.run(server.serve(sockets=[lsock])),
+                          daemon=True)
+    th.start()
+    assert _wait(lambda: server.started), "uvicorn did not start"
+    try:
+        yield f"http://127.0.0.1:{port}/v1", engines, app
+    finally:
+        server.should_exit = True
+        th.join(timeout=5.0)
+
+
+def _answering(engines):
+    return sorted(n for n, e in engines.items() if e.answered)
+
+
+# --------------------------------------------------------------------------- #
+#  The coder's HTTP backend                                                    #
+# --------------------------------------------------------------------------- #
+
+class TestCoderBackend:
+    def _backend(self, base, *, pinned):
+        from localm.plugins.coder.backends.http import HTTPBackend
+        return HTTPBackend(base, model="plain", api_key="localm", localm_server=True,
+                           model_pinned=pinned, required_capabilities=("tool_use",))
+
+    def test_an_unpinned_session_is_answered_by_a_model_with_tool_calls(self, live):
+        base, engines, _ = live
+        be = self._backend(base, pinned=False)
+        text = be.chat([{"role": "user", "content": "list files"}])
+        assert _answering(engines) == ["tooly"]
+        assert text == "answered-by-tooly"
+        assert be.answered_model == "tooly"
+
+    def test_streaming_is_routed_the_same_way(self, live):
+        base, engines, _ = live
+        be = self._backend(base, pinned=False)
+        text = "".join(be.chat_stream([{"role": "user", "content": "list files"}]))
+        assert text == "answered-by-tooly"
+        assert _answering(engines) == ["tooly"]
+
+    def test_a_pinned_session_is_answered_by_its_model(self, live):
+        base, engines, _ = live
+        be = self._backend(base, pinned=True)
+        be.chat([{"role": "user", "content": "list files"}])
+        assert _answering(engines) == ["plain"]
+        assert be.answered_model == "plain"
+
+    def test_the_context_budget_follows_the_model_that_answered(self, live):
+        base, engines, _ = live
+        be = self._backend(base, pinned=False)
+        be.chat([{"role": "user", "content": "list files"}])
+        assert be.context_capacity() == 32768
+
+    def test_routing_leaves_the_loaded_model_loaded_for_everyone_else(self, live):
+        base, engines, _ = live
+        self._backend(base, pinned=False).chat([{"role": "user", "content": "x"}])
+        assert hs._resolve_unnamed_model_name() == "plain"
+
+
+# --------------------------------------------------------------------------- #
+#  `localm run MODEL` attached to a server (HttpEngine)                        #
+# --------------------------------------------------------------------------- #
+
+_IMAGE = [{"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+    {"type": "text", "text": "what is this?"}]}]
+
+
+class TestTerminalChatAttached:
+    def _engine(self, base, *, pinned):
+        from localm.inference.http_engine import HttpEngine
+        return HttpEngine(base, model="plain", display_name="plain", pin_model=pinned)
+
+    def test_an_image_is_answered_by_the_vision_model(self, live):
+        base, engines, _ = live
+        eng = self._engine(base, pinned=False)
+        text = "".join(eng.chat_stream(_IMAGE))
+        assert _answering(engines) == ["seer"]
+        assert text == "answered-by-seer"
+        assert eng.answered_model == "seer"
+
+    def test_pinned_the_image_is_refused_as_before(self, live):
+        from localm.inference.backends.base import UnsupportedInputError
+        base, engines, _ = live
+        eng = self._engine(base, pinned=True)
+        with pytest.raises(UnsupportedInputError):
+            "".join(eng.chat_stream(_IMAGE))
+        assert _answering(engines) == []
+
+    def test_min_context_is_answered_by_a_roomier_model(self, live):
+        base, engines, _ = live
+        eng = self._engine(base, pinned=False)
+        "".join(eng.chat_stream([{"role": "user", "content": "hi"}], min_context=20000))
+        assert _answering(engines) == ["tooly"]
+
+
+# --------------------------------------------------------------------------- #
+#  Knowledge: describing an indexed image                                      #
+# --------------------------------------------------------------------------- #
+
+class TestKnowledgeImageDescription:
+    def test_an_image_is_described_by_the_vision_model_not_the_loaded_one(
+            self, live, monkeypatch):
+        import localm.selfclient as selfclient
+        from localm.plugins.builtin.rag import plug as ragplug
+        base, engines, _ = live
+        monkeypatch.setattr(selfclient, "get_api_key", lambda: None, raising=False)
+        describe = ragplug._make_self_describe_image(base, lambda: "plain")
+        text = describe(b"\x89PNG\r\n\x1a\n" + b"0" * 16, "image/png")
+        assert text == "answered-by-seer"
+        assert _answering(engines) == ["seer"]
+
+
+# --------------------------------------------------------------------------- #
+#  Scheduled chat jobs run by the server                                       #
+# --------------------------------------------------------------------------- #
+
+class TestScheduledChatJobs:
+    def _run(self, **job_kw):
+        from localm.plugins.builtin.jobs import runner
+        from localm.plugins.builtin.jobs.store import Job
+        return runner.run_job(Job(name="j", task_kind="chat", prompt="hello", **job_kw),
+                              engine=hs._engine)
+
+    def test_a_jobs_own_model_is_used_even_with_another_loaded(self, live, monkeypatch):
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: False)
+        base, engines, _ = live
+        res = self._run(model="seer")
+        assert res["status"] == "ok", res
+        assert res["output"] == "answered-by-seer"
+        assert res["answered_by"] == "seer"
+        assert hs._resolve_unnamed_model_name() == "plain"
+
+    def test_with_web_access_a_job_without_a_model_gets_tool_calls(self, live, monkeypatch):
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
+        base, engines, _ = live
+        res = self._run()
+        assert res["status"] == "ok", res
+        assert res["answered_by"] == "tooly"
+
+    def test_without_web_access_the_loaded_model_runs_it(self, live, monkeypatch):
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: False)
+        res = self._run()
+        assert res["answered_by"] == "plain"
+
+    def test_a_resolved_model_with_an_accepted_peer_route_answers_through_the_peer(
+            self, live, monkeypatch):
+        from localm import peer_routing
+
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
+        base, engines, _ = live
+        route = peer_routing.PeerRoute(
+            model="tooly", instance_id="peer-1", host="127.0.0.1", port=9999,
+            scheme="http", api_key="peer-secret", peer_model="tooly-on-peer")
+        peer_routing.set_route(route)
+        try:
+            res = self._run()
+        finally:
+            peer_routing.clear_route("tooly")
+
+        # No peer is actually listening on :9999, so the request fails to
+        # reach it - proving the peer's own URL was dialled, not a local load.
+        assert res["status"] == "error", res
+        assert "127.0.0.1:9999" in res["error"], res
+        # The local "tooly" engine is never even constructed: no local load
+        # was attempted for it.
+        assert "tooly" not in engines
+
+
+# --------------------------------------------------------------------------- #
+#  Checking a key for another instance's loaded model                          #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def keyed_home(tmp_path, monkeypatch):
+    """This process's localm home, isolated, so keys minted here reach only
+    the server started by the test."""
+    from pathlib import Path
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    return home
+
+
+class TestPeerKeyCheck:
+    def _peer(self, base):
+        port = int(base.rsplit(":", 1)[1].split("/")[0])
+        return {"host": "127.0.0.1", "port": port, "scheme": "http", "instance_id": "x"}
+
+    def test_a_key_that_may_chat_is_accepted(self, keyed_home, live):
+        from localm import auth, peer_routing
+        from localm import scopes as S
+        base, _, _ = live
+        chat_only = auth.create_key("chat-only", [S.CHAT])["key"]
+        peer_routing.verify_peer_credential(self._peer(base), chat_only)
+
+    def test_a_wrong_key_and_a_missing_key_are_refused(self, keyed_home, live):
+        from localm import auth, peer_routing
+        from localm import scopes as S
+        base, _, _ = live
+        auth.create_key("someone", [S.CHAT])
+        for key in ("not-a-real-key", ""):
+            with pytest.raises(peer_routing.PeerCredentialError):
+                peer_routing.verify_peer_credential(self._peer(base), key)
+
+    def test_an_open_mode_peer_needs_no_key(self, keyed_home, live):
+        from localm import peer_routing
+        base, _, _ = live
+        peer_routing.verify_peer_credential(self._peer(base), "")
+

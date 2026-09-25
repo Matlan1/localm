@@ -741,7 +741,7 @@ export function handleCoderEvent(s, ev) {
     }
     case "info": {
       flushAssistantBlock(s);
-      feedAppend(s, el("div", "feed-info", ev.text));
+      feedAppend(s, el("div", "feed-info", ev.text || ""));
       break;
     }
     case "episodes_recalled": {
@@ -1906,24 +1906,26 @@ export async function postSessionSettings(body) {
 }
 
 /** POST a model switch for a session and return the updated session info, or
- *  null when loading the model needed confirmation and the user declined. */
-export async function postSessionModel(sessionId, model) {
+ *  null when loading the model needed confirmation and the user declined.
+ *  *pin* false makes *model* the session's preferred model, not its pin. */
+export async function postSessionModel(sessionId, model, pin = true) {
   const post = (body) => fetch(`/api/coder/sessions/${sessionId}/model`, {
     method: "POST", headers: authHeaders(), body: JSON.stringify(body),
   });
-  let r = await post({ model });
+  let r = await post({ model, pin });
   let data = await r.json().catch(() => ({}));
   if (_needsModelConfirm(r, data)) {
     if (!(await _confirmModelLoad(data.detail))) return null;
-    r = await post({ model, force: true });
+    r = await post({ model, pin, force: true });
     data = await r.json().catch(() => ({}));
   }
   if (!r.ok) throw new Error(_detailText(data) || r.statusText);
   return data;
 }
 
-/** Switch the active session's model, updating bar and indicators. */
-export async function switchActiveSessionModel(model) {
+/** Switch the active session's model, updating bar and indicators. *pin*
+ *  false makes it the session's preferred model rather than its pin. */
+export async function switchActiveSessionModel(model, pin = true) {
   const s = activeSession();
   if (!s) { toast(t("coder.session.none"), true); return; }
   if (s.busy) {
@@ -1931,7 +1933,7 @@ export async function switchActiveSessionModel(model) {
     return;
   }
   try {
-    const updated = await postSessionModel(s.info.id, model);
+    const updated = await postSessionModel(s.info.id, model, pin);
     if (!updated) return;
     s.info = updated;
     const modelBtn = $("coder-model");
@@ -2343,9 +2345,10 @@ window.addEventListener("localm:model-switched", (e) => {
   const model = e.detail && e.detail.model;
   if (!model) return;
   const s = activeSession();
-  if (s && (!s.info.backend_info || !s.info.backend_info.leaves_machine)) {
+  if (s && !s.info.model_pinned &&
+      (!s.info.backend_info || !s.info.backend_info.leaves_machine)) {
     if (s.info.model !== model) {
-      switchActiveSessionModel(model);
+      switchActiveSessionModel(model, false);
     }
   }
 });

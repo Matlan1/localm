@@ -9,6 +9,7 @@ binds.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Dict
@@ -19,6 +20,160 @@ from localm.pathsafe import is_unc_or_device_path
 from .. import server as _srv
 from ..server import EngineCache, _quiet_stdout, _text_result
 from ._common import MODEL_PARAM
+
+
+def _peer_unusable(error: BaseException) -> bool:
+    """True for a failure that means another instance's copy of a model cannot
+    be used: that instance could not be reached or did not answer, or it
+    refused the credential. An HTTP error it answered with is not one."""
+    import requests
+    from localm.plugins.coder.backends.http import CoderAuthError
+    if isinstance(error, CoderAuthError):
+        return True
+    return (isinstance(error, requests.RequestException)
+            and not isinstance(error, requests.HTTPError))
+
+
+class PeerCoderBackend:
+    """The coder backend for a model another localm instance has loaded.
+
+    Every call goes to that instance through *http* until one fails in a way
+    ``_peer_unusable`` accepts; then the instance is dropped from *engines*,
+    the model is loaded here and pinned until ``release()``, and that call and
+    every later one are answered by this server's own copy. No switch happens
+    after ``cancel()`` or ``release()``. A sub-agent cannot ask for a
+    different model on this backend. Any other attribute is the current
+    backend's."""
+
+    supports_model_override = False
+
+    def __init__(self, engines: EngineCache, name: str, peer, http) -> None:
+        self._engines = engines
+        self._name = name
+        self._peer = peer
+        self._http = http
+        self._current = http
+        self._local = None
+        self._released = False
+        self._cancel_reason = None
+        self._switch_lock = threading.Lock()
+
+    def __getattr__(self, attr):
+        current = self.__dict__.get("_current")
+        if current is None:
+            raise AttributeError(attr)
+        return getattr(current, attr)
+
+    @property
+    def local_engine(self):
+        """This server's engine the run moved to, or None while it has not."""
+        return self._local[0] if self._local else None
+
+    def chat(self, messages: list, **kwargs) -> str:
+        backend = self._current
+        try:
+            return backend.chat(messages, **kwargs)
+        except Exception as e:
+            if not self._switch(backend, e):
+                raise
+        return self._current.chat(messages, **kwargs)
+
+    def chat_stream(self, messages: list, on_reasoning=None, **kwargs):
+        backend = self._current
+        started = False
+
+        def _reasoning(piece):
+            nonlocal started
+            started = True
+            if on_reasoning is not None:
+                on_reasoning(piece)
+
+        try:
+            for piece in backend.chat_stream(messages, on_reasoning=_reasoning, **kwargs):
+                started = True
+                yield piece
+            return
+        except Exception as e:
+            if started or not self._switch(backend, e):
+                raise
+        yield from self._current.chat_stream(messages, on_reasoning=on_reasoning, **kwargs)
+
+    def _switch(self, failed, error: BaseException) -> bool:
+        """Move the run to a copy loaded here when *error*, raised by *failed*,
+        means the peer can no longer be used. Returns whether later calls go
+        to that copy. Raises when loading it here failed."""
+        if failed is not self._http or not _peer_unusable(error):
+            return False
+        with self._switch_lock:
+            if self._local is not None:
+                return True
+            if self._released or self._cancel_reason is not None:
+                return False
+            _srv._log(f"the localm instance answering {self._name} for a coder "
+                      f"task failed ({error}); loading it here")
+            try:
+                engine = self._engines.load_here_instead_of(self._name, self._peer)
+            except Exception as e:
+                raise RuntimeError(
+                    f"the localm instance answering {self._name} failed ({error}), "
+                    f"and loading {self._name} here failed: {e}") from e
+            try:
+                from localm.plugins.coder.backends.shared_engine import SharedEngineBackend
+                local = SharedEngineBackend(
+                    engine, self._name, lock=self._engines.generation_lock(engine),
+                    still_resident=lambda: self._engines.is_resident(self._name, engine))
+            except Exception:
+                self._engines.unpin(engine)
+                raise
+            self._local = (engine, local)
+            self._current = local
+        if self._cancel_reason is not None:
+            local.cancel(self._cancel_reason)
+        return True
+
+    def cancel(self, reason: str = "cancelled") -> None:
+        """Refuse any later switch, and cancel the current backend when it can
+        be cancelled."""
+        self._cancel_reason = reason or "cancelled"
+        abort = getattr(self._current, "cancel", None)
+        if callable(abort):
+            abort(self._cancel_reason)
+
+    def release(self) -> None:
+        """Refuse any later switch, and unpin the copy loaded here, if any."""
+        with self._switch_lock:
+            if self._released:
+                return
+            self._released = True
+            local = self._local
+        if local is not None:
+            self._engines.unpin(local[0])
+
+
+def coder_engine(engines: EngineCache, decision):
+    """The loaded engine for a coder task under *decision*: each routed
+    candidate in order, then the model the task would otherwise use. A
+    candidate that cannot be built or loaded is skipped. Returns
+    ``(engine, name, decision)``, the decision rewritten to name the model
+    whose engine is returned. Raises what getting that last model raised."""
+    names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
+    load_errors = []
+    for name in names:
+        try:
+            with _quiet_stdout():
+                engine = engines.get_loaded_chat(name)
+        except Exception as e:
+            load_errors.append(f"{name}: {e}")
+            _srv._log(f"warning: could not load {name} for a coder task: {e}")
+            continue
+        if name != decision.resolved:
+            decision = decision.answered_by(name)
+        return engine, name, decision
+    with _quiet_stdout():
+        engine = engines.get_loaded_chat(decision.current)
+    if decision.routed:
+        decision = decision.without_route(load_errors)
+    return engine, decision.current, decision
 
 
 def build(engines: EngineCache) -> Dict[str, dict]:
@@ -161,22 +316,45 @@ def build(engines: EngineCache) -> Dict[str, dict]:
 
         # A model name from the client or the project config is registry-gated
         # by resolve_model; the operator's own --model default is the only path
-        # allowed through.
+        # allowed through. A named model is used as named; without one, a
+        # default model that cannot emit structured tool calls, or whose
+        # trained window is too small for the task text, gives way to an
+        # installed model that has what it lacks.
         try:
-            with _quiet_stdout():
-                model_name = engines.resolve_model(cfg.model)
-                engine = engines.get(model_name)
+            decision = engines.route(cfg.model, [{"role": "user", "content": task}],
+                                     required=("tool_use",), pinned=bool(cfg.model))
         except ValueError as e:
             return _text_result(str(e), is_error=True)
-        backend = SharedEngineBackend(
-            engine, model_name, lock=engines.generation_lock(engine),
-            still_resident=lambda: engines.is_resident(model_name, engine))
+        try:
+            engine, model_name, decision = coder_engine(engines, decision)
+        except ValueError as e:
+            return _text_result(str(e), is_error=True)
+        except Exception as e:
+            return _text_result(f"coder task failed to start: {e}", is_error=True)
+        peer_backend = None
+        if engines.is_peer(engine):
+            # Another localm instance's loaded copy, reached over its own API;
+            # the model is loaded here if that instance stops answering.
+            from localm.plugins.coder.backends.http import HTTPBackend
+            backend = peer_backend = PeerCoderBackend(engines, model_name, engine, HTTPBackend(
+                getattr(engine, "_base"), model=getattr(engine, "_model", None) or model_name,
+                api_key=getattr(engine, "_token", None) or "localm",
+                localm_server=True))
+        else:
+            backend = SharedEngineBackend(
+                engine, model_name, lock=engines.generation_lock(engine),
+                still_resident=lambda: engines.is_resident(model_name, engine))
 
         # Default OFF, matching the CLI's own fail-closed default: without
         # `yes` file writes still happen but run_shell is denied, since there
         # is nobody to confirm it.
         if coder_runner.unattended_shell_gated(task, cfg.auto_approve):
             _srv._log("coder task: run_shell is denied for this run (no 'yes')")
+
+        def _release():
+            engines.unpin(engine)
+            if peer_backend is not None:
+                peer_backend.release()
 
         # Pinned for the whole run; released on the worker thread when the run
         # ends, even after a timeout has abandoned it.
@@ -191,7 +369,7 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                     browser_enabled=coder_runner.browser_enabled(),
                     max_tokens_explicit=cfg.max_tokens_explicit)
         except Exception as e:
-            engines.unpin(engine)
+            _release()
             return _text_result(f"coder task failed to start: {e}", is_error=True)
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
@@ -199,7 +377,7 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                 with _quiet_stdout():
                     coder_runner.finish_agent(agent)
             finally:
-                engines.unpin(engine)
+                _release()
             return _text_result(
                 f"coder task timed out after {timeout:g}s before it could start: "
                 "loading the model and preparing the agent used the whole budget",
@@ -207,14 +385,17 @@ def build(engines: EngineCache) -> Dict[str, dict]:
         try:
             with _quiet_stdout():
                 result = coder_runner.run_task_with_timeout(
-                    agent, task, remaining,
-                    on_finished=lambda: engines.unpin(engine))
+                    agent, task, remaining, on_finished=_release)
         except Exception as e:
             return _text_result(f"coder task failed to run: {e}", is_error=True)
 
         denied = coder_runner.describe_denied(result.denied)
         meta = (f"\n\n[turns={result.turns} tokens={result.total_tokens} "
                 f"success={result.success} denied={len(result.denied)}]")
+        from .chat import routing_note
+        note = routing_note(decision)
+        if note:
+            meta += "\n" + note
         text = result.response + ("\n\n[denied] " + denied if denied else "") + meta
         return _text_result(text, is_error=not result.success)
 
@@ -264,10 +445,11 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                                              "them)")},
                     "timeout_seconds": {"type": "integer",
                                         "description": ("Give up after this long (default 900, "
-                                                        "at most 3600). Covers loading the "
-                                                        "model and preparing the agent as "
-                                                        "well as the run; on expiry the run is "
-                                                        "cancelled")},
+                                                        "at most 3600). Loading the model and "
+                                                        "preparing the agent count against it: "
+                                                        "a load that outlasts it ends the call "
+                                                        "as soon as the load finishes. On expiry "
+                                                        "during the run, the run is cancelled")},
                 },
                 "required": ["task", "cwd"],
             },

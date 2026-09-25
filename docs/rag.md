@@ -124,9 +124,11 @@ host path to confine. Only the owner key may set `rag_roots` on another key
 - **Archives** `.zip` / `.tar` (and `.gz .bz2 .xz .tgz .tbz .txz`) are unpacked in
   memory and each text member is indexed.
 - **Images** `.png .jpg .jpeg .webp .gif` are indexed by their description: localm
-  asks the active model to describe the image, so a vision-capable model (or a
-  chat model with an mmproj projector) must be loaded. Without one, the image is
-  skipped with a message telling you to load a vision model.
+  asks the active model to describe the image, and routes to an installed
+  vision-capable model (or one with an mmproj projector) when the active one
+  cannot read images. Only when no installed model can read images is the
+  image skipped, with a message to pull a vision model or give a model its
+  projector.
 - A file with an unfamiliar extension is content-sniffed: if its bytes decode as
   text it is indexed as text, otherwise a genuinely binary file is refused rather
   than indexed as mojibake.

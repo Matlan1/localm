@@ -58,6 +58,7 @@ import json
 import os
 import queue
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -171,6 +172,10 @@ class SetModelRequest(BaseModel):
     model: str
     # Proceed with a model switch that answered 409 confirm_required.
     force: bool = False
+    # True: the session is always answered by this model. False: it is the
+    # preferred model (the GUI's follow-the-loaded-model repoint), and a
+    # request it cannot serve is answered by an installed model that can.
+    pin: bool = True
 
 
 class SessionSettingsRequest(BaseModel):
@@ -323,29 +328,43 @@ def _url_leaves_machine(url: str) -> bool:
         return True
 
 
-def _tool_capability_note(model_name: str) -> str:
-    """A suggestion when the model this coder session will use is not confirmed
-    to emit structured tool calls and an installed one is, else "".
+def _tool_capability_note(model_name: str, pinned: bool = True) -> str:
+    """A note when the model this coder session names is not confirmed to emit
+    structured tool calls and an installed chat model is, else "".
+
+    Pinned: a suggestion naming the capable models, since the pin is honored.
+    Not pinned: says which installed model answers the session's requests
+    instead (the server routes each request that needs tool calls to it).
 
     Blocking (registry read plus a probe per candidate); callers run it off the
     event loop.
 
     Says nothing when the model is confirmed tool-capable, when nothing better is
-    installed, or when the answer is UNKNOWN. That last case is the point: an
-    unmeasured model is not a model known to lack tool support, and advising a
-    switch away from one on no evidence is exactly the wrong advice. The coder's
-    tool calls are PROMPTED rather than template-driven, so a model without a
-    tool-calling template still works - this reports a fitness difference, never
-    a blocker."""
+    installed, or when the answer is UNKNOWN for the pinned case: an unmeasured
+    model is not a model known to lack tool support. The coder's tool calls are
+    PROMPTED rather than template-driven, so a model without a tool-calling
+    template still works - this reports a fitness difference, never a
+    blocker."""
     from localm.model_manager import capabilities as _caps
     try:
         if not model_name:
             return ""
         reg = _caps._registry._mm.load_registry()
+        if not pinned:
+            from localm.inference import http_server as _hs
+            decision = _hs.plan_capability_route(
+                model_name, [], [_caps.TOOL_USE], pin_model=False)
+            if not decision.routed:
+                return ""
+            return (f"{model_name} is not confirmed to format structured tool "
+                    f"calls, so this session's requests are answered by "
+                    f"{decision.resolved}, an installed model that is. Pick a "
+                    f"model for the session to always use that one instead.")
         if _caps.model_tool_use_capability(model_name, reg=reg) is not False:
             return ""
-        better = [n for n in _caps.models_with_capability(_caps.TOOL_USE, reg=reg)
-                  if n != model_name]
+        from localm.inference.capability_routing import CapabilityNeeds, plan_route
+        better = list(plan_route(model_name, CapabilityNeeds(capabilities=(_caps.TOOL_USE,)),
+                                 pinned=False, reg=reg).candidates)
         if not better:
             return ""
         return (f"{model_name} has no tool-call formatting in its chat template. "
@@ -357,7 +376,8 @@ def _tool_capability_note(model_name: str) -> str:
 
 
 def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
-                     model_name: str, restricted: bool, session_mode: str):
+                     model_name: str, restricted: bool, session_mode: str,
+                     model_pinned: bool = True):
     """Build this session's LLM backend and describe it honestly.
 
     Returns ``(backend, descriptor, notes)``. The descriptor is what
@@ -388,6 +408,8 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
             api_key=get_api_key() or "localm",
             localm_server=True,   # self-connection: grammar sampling available
             native_tools=req.native_tools,
+            model_pinned=model_pinned,
+            required_capabilities=("tool_use",),
         )
         return backend, {"backend": "local", "leaves_machine": False,
                          "target": "this localm", "model": model_name}, notes
@@ -517,11 +539,14 @@ async def _ensure_model_loaded(request: Request, model: str, *,
                                force: bool = False) -> None:
     """Load *model* as the shared engine through ``app.state.switch_model``.
 
-    Returns only when the switch reports ``loaded`` or ``already_active``, or
-    reports no status at all (a minimal switch callable). ``force`` is passed
-    to the switch only when True.
+    Returns without loading anything, and without raising, when *model* has an
+    accepted peer route (``localm.peer_routing.get_route``).
 
-    Raises HTTPException:
+    Otherwise returns only when the switch reports ``loaded`` or
+    ``already_active``, or reports no status at all (a minimal switch
+    callable). ``force`` is passed to the switch only when True.
+
+    Raises HTTPException, only for a model without a peer route:
       503  no switch_model is wired, or the load was superseded, cancelled or
            reported any other status;
       409  the load needs confirmation; ``detail`` is
@@ -530,6 +555,9 @@ async def _ensure_model_loaded(request: Request, model: str, *,
       500  the switch raised; an HTTPException it raised passes through
            unchanged.
     """
+    from localm import peer_routing
+    if peer_routing.get_route(model) is not None:
+        return
     switch_model = getattr(request.app.state, "switch_model", None)
     if switch_model is None:
         raise HTTPException(503, "Model switching needs the localm GUI server.")
@@ -555,11 +583,13 @@ async def _ensure_model_loaded(request: Request, model: str, *,
     raise HTTPException(503, f"Model load of {model} did not complete: {status}")
 
 
-def _set_session_model(session: CoderSession, model: str) -> None:
+def _set_session_model(session: CoderSession, model: str,
+                       pinned: Optional[bool] = None) -> None:
     """Repoint *session* at *model*, or raise HTTPException 409 when the
-    session is busy or its backend cannot switch models in place."""
+    session is busy or its backend cannot switch models in place. *pinned*
+    is passed to ``CoderSession.set_model``."""
     try:
-        switched = session.set_model(model)
+        switched = session.set_model(model, pinned=pinned)
     except ModelSwitchUnsupported as e:
         raise HTTPException(409, str(e))
     if not switched:
@@ -663,7 +693,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
                         if req.model not in load_registry():
                             raise HTTPException(404, f"Model not registered: {req.model}")
                         await _ensure_model_loaded(request, req.model, force=req.force)
-                    _set_session_model(existing, req.model)
+                    _set_session_model(existing, req.model, pinned=True)
                 return {**existing.info(), "resumed": False,
                         "notes": ["Already open - joined the session already "
                                   "running for this folder instead of starting "
@@ -718,7 +748,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
         lambda: _resolve_backend(req, self_url=self_url,
                                  model_name=req.model or active_model(),
                                  restricted=restricted,
-                                 session_mode=session_mode))
+                                 session_mode=session_mode,
+                                 model_pinned=bool(req.model)))
     # The request is wired to the backend for real; whether the SERVER honours
     # it is a separate question and the caller is told the answer rather than
     # left to assume. A localm self-connection does NOT implement the OpenAI
@@ -740,10 +771,11 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # candidate and leaves the choice with the user. Local backend only: the
     # capability registry describes THIS install's models and says nothing about
     # a remote endpoint's.
-    if backend_info.get("backend") == "local" and not req.model:
+    if backend_info.get("backend") == "local":
         _cap_note = await loop.run_in_executor(
             get_plugin_executor(),
-            lambda: _tool_capability_note(backend_info.get("model") or ""))
+            lambda: _tool_capability_note(backend_info.get("model") or "",
+                                          pinned=bool(req.model)))
         if _cap_note:
             notes.append(_cap_note)
 
@@ -1099,7 +1131,7 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
             403, "Switching models needs the owner key; a scoped key uses the "
             "active model.")
 
-    _set_session_model(session, req.model)
+    _set_session_model(session, req.model, pinned=req.pin)
     return session.info()
 
 

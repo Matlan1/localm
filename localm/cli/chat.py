@@ -40,6 +40,166 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
             "single load.")
 
 
+class _TurnRouter:
+    """Picks the engine that answers each turn of ``localm run MODEL``.
+
+    MODEL is the loaded model. A turn that needs something it does not provide
+    (reading an image, a longer conversation than it was trained for) is
+    answered by an installed model that has it, unless *pinned*.
+
+    Attached to a server (*build* is None) the server routes the request
+    itself; this only works out the context window to ask for, so the
+    conversation is not compacted when a roomier model can hold it. Loaded in
+    this process, it swaps engines: the current one is unloaded before another
+    is loaded."""
+
+    def __init__(self, engine, model_name: str, *, pinned: bool, build=None,
+                 known: Optional[dict] = None):
+        self.primary = engine
+        self._known = dict(known or {})
+        self.model_name = model_name
+        self.pinned = pinned
+        self._build = build
+        self._engines = {model_name: engine}
+        self.current = model_name
+        self.min_context: Optional[int] = None
+        self.last_decision = None
+        self.failed_to_load: tuple = ()
+
+    @property
+    def in_process(self) -> bool:
+        return self._build is not None
+
+    @property
+    def engine(self):
+        """The engine of ``current``: the model this router last selected,
+        unloaded when that selection's load failed."""
+        return self._engines[self.current]
+
+    def plan(self, messages: list):
+        """The routing decision for a turn with *messages*, without acting on
+        it. Sets ``min_context`` to the window to ask the server for when the
+        decision routes for context, else None."""
+        from localm.config import load_registry
+        from localm.inference import capability_routing as cr
+        from localm.inference.compact import COMPACT_RATIO
+        from localm.model_manager import capabilities as caps
+        reg = load_registry()
+        trained = caps.model_context_length(self.model_name, reg=reg)
+        comp = cr.compaction_context_need(messages, trained, COMPACT_RATIO)
+        needs = cr.request_needs(messages, min_context=comp)
+        known = dict(self._known)
+        cur = self._engines.get(self.model_name)
+        if (cur is not None and getattr(cur, "loaded", False)
+                and getattr(cur, "supports_images", False) is True):
+            known[caps.VISION] = True
+        decision = cr.plan_route(self.model_name, needs, pinned=self.pinned,
+                                 resident=[self.current], reg=reg,
+                                 current_known=known)
+        self.last_decision = decision
+        self.min_context = (comp if decision.routed
+                            and caps.CONTEXT_LENGTH in decision.gaps else None)
+        return decision
+
+    def engine_for(self, messages: list):
+        """The engine to answer a turn with *messages*: MODEL's, or in this
+        process the routed model's, loaded in its place. A routed model that
+        fails to load is skipped for the next capable one, then MODEL. Each
+        failure is printed; ``failed_to_load`` names the routed models MODEL
+        answers in place of, else is empty. Raises what MODEL's own load raised
+        when that fails too."""
+        decision = self.plan(messages)
+        self.failed_to_load = ()
+        if not self.in_process:
+            return self.primary
+        names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
+        failed = []
+        for name in names:
+            try:
+                return self._use(name)
+            except Exception as e:
+                from rich.markup import escape
+                console.print(f"[yellow]Could not load {escape(name)}: "
+                              f"{escape(str(e))}[/yellow]")
+                failed.append(name)
+        eng = self._use(self.model_name)
+        self.failed_to_load = tuple(failed)
+        return eng
+
+    def _use(self, name: str):
+        if name == self.current:
+            eng = self._engines[name]
+            if not getattr(eng, "loaded", True):
+                eng.load()
+            return eng
+        prev = self._engines[self.current]
+        if getattr(prev, "loaded", True):
+            prev.unload()
+        eng = self._engines.get(name) or self._build(name)
+        self._engines[name] = eng
+        self.current = name
+        eng.load()
+        return eng
+
+    def answered_by(self, engine) -> str:
+        """The model that answered the last turn on *engine*."""
+        if self.in_process:
+            return self.current
+        return getattr(engine, "answered_model", None) or self.model_name
+
+    def note(self, engine) -> Optional[str]:
+        """One line naming the model that answered and why, when it was not
+        MODEL or MODEL answered in place of routed models that failed to load;
+        else None."""
+        answered = self.answered_by(engine)
+        if not answered:
+            return None
+        if answered == self.model_name:
+            if self.in_process and self.failed_to_load:
+                return (f"answered by {answered}: could not load "
+                        f"{', '.join(self.failed_to_load)}")
+            return None
+        gaps = sorted((self.last_decision.gaps if self.last_decision else {}) or {})
+        why = {"vision": "reading images", "tool_use": "structured tool calls",
+               "reasoning": "reasoning",
+               "context_length": "a longer conversation"}
+        needs = ", ".join(why.get(g, g) for g in gaps) or "this request"
+        return (f"answered by {answered}: {self.model_name} lacks {needs} "
+                f"(--pin-model always answers with {self.model_name})")
+
+    def close(self) -> None:
+        """Unload every engine this router loaded besides the one the session
+        opened with, which its own ``with`` block unloads."""
+        for name, eng in self._engines.items():
+            if eng is not self.primary and getattr(eng, "loaded", False):
+                try:
+                    eng.unload()
+                except Exception as e:
+                    from localm.debuglog import logger as _dbg
+                    _dbg.warning("unloading %s after the session failed: %s", name, e)
+
+
+def _build_cli_engine(name: str, *, n_ctx=None, n_gpu_layers=None, device=None,
+                      mmproj=None):
+    """An unloaded in-process Engine for the registered model *name*, with its
+    recorded or sibling projector unless *mmproj* is given. Registry names
+    only: raises ValueError when *name* is not registered or its file is
+    gone."""
+    from ..inference.engine import Engine
+    from ..model_manager import get_model_info, get_model_mmproj
+    info = get_model_info(name)
+    if info is None:
+        raise ValueError(f"Model not found: {name}")
+    return Engine(
+        str(info[0]),
+        mmproj_path=mmproj or get_model_mmproj(name),
+        n_ctx=n_ctx,
+        n_gpu_layers=n_gpu_layers,
+        device=device,
+        display_name=name,
+    )
+
+
 def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
                               is_registered: bool, engine) -> None:
     """Record an explicit --mmproj onto the registry entry once the backend has
@@ -97,8 +257,13 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
               help="Load the model in THIS process instead of attaching to a localm "
                    "server already serving this directory (default: attach, like the "
                    "GUI, so you do not load a second copy).")
+@click.option("--pin-model", "pin_model", is_flag=True,
+              help="Always answer with MODEL. Without it, a message MODEL cannot "
+                   "handle (an attached image it cannot read, a longer "
+                   "conversation than it was trained for) is answered by an "
+                   "installed model that can, and says so.")
 def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
-        mmproj, device, images, debug, mode, no_server):
+        mmproj, device, images, debug, mode, no_server, pin_model):
     """Run a model - interactive chat or single prompt.
 
     \b
@@ -212,7 +377,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             # attach quietly and let the reply come from whatever it serves.
             engine = HttpEngine(
                 target["base_url"], token=attach_token,
-                model=active or model, display_name=active or model)
+                model=active or model, display_name=active or model,
+                pin_model=pin_model)
             # show_url(): target["base_url"] can carry a bracketed IPv6 host
             # (RFC 3986), which show_url()'s own docstring documents.
             console.print(
@@ -259,7 +425,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     engine = HttpEngine(
                         target["base_url"],
                         token=resolve_bearer_token(target.get("token")),
-                        model=model, display_name=model)
+                        model=model, display_name=model, pin_model=pin_model)
                     console.print(f"[dim]connected to newly started server at "
                                   f"{show_url(target['base_url'])}[/dim]")
                     break
@@ -308,6 +474,14 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             device=device,
             display_name=display_name,
         )
+        router = _TurnRouter(
+            engine, model, pinned=pin_model,
+            build=lambda name: _build_cli_engine(
+                name, n_gpu_layers=gpu_layers, device=device),
+            known={"vision": True} if mmproj_path else None)
+    else:
+        router = _TurnRouter(engine, getattr(engine, "_model", None) or model,
+                             pinned=pin_model)
 
     cfg = load_config()
     # settings_schema calls chat_system_prompt 'the system prompt every new chat
@@ -332,6 +506,23 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     audit = make_audit_log(session_mode, label="chat")
     transcript = make_transcript(session_mode, label="chat")
 
+    if prompt is not None and router.in_process:
+        # A single prompt is known before anything loads: when it routes, the
+        # routed model is the only one loaded.
+        _first = []
+        if system:
+            _first.append({"role": "system", "content": system})
+        _first.append(_build_user_message(prompt, list(images)))
+        if router.plan(_first).routed:
+            engine = router.engine_for(_first)
+            if router.current != model:
+                is_registered = False
+            _routed_note = router.note(engine)
+        else:
+            _routed_note = None
+    else:
+        _routed_note = None
+
     try:
         with engine:
             _maybe_persist_cli_mmproj(model, mmproj, is_registered, engine)
@@ -341,7 +532,15 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     messages.append({"role": "system", "content": system})
                 messages.append(_build_user_message(prompt, list(images)))
                 audit.user(prompt)
-                response = _stream_once(engine, messages, **gen_opts)
+                stream_opts = dict(gen_opts)
+                if not router.in_process:
+                    router.plan(messages)
+                    if router.min_context:
+                        stream_opts["min_context"] = router.min_context
+                response = _stream_once(engine, messages, **stream_opts)
+                note = _routed_note or router.note(engine)
+                if note and response:
+                    console.print(f"[dim]({escape(note)})[/dim]")
                 # The JSONL audit log is an INTERNAL consumer (see
                 # textnorm.strip_think's docstring), so it gets the visible
                 # answer only, not the raw <think> scratchpad - matching what
@@ -352,11 +551,20 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     transcript.exchange(prompt, response)
             else:
                 _interactive(engine, system, gen_opts,
-                             audit=audit, transcript=transcript)
+                             audit=audit, transcript=transcript, router=router)
     finally:
+        router.close()
         audit.close()
 
 
+
+
+def _withdraw(messages: list, msg: dict) -> None:
+    """Remove the unanswered turn *msg* from the end of *messages* and say so."""
+    if messages and messages[-1] is msg:
+        messages.pop()
+        console.print("[dim](that message was withdrawn from the conversation; "
+                      "you can keep chatting)[/dim]")
 
 
 def _build_user_message(text: str, image_paths: list) -> dict:
@@ -528,8 +736,12 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
 
 
 def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
-                 audit=None, transcript=None) -> None:  # noqa: C901
+                 audit=None, transcript=None, router=None) -> None:  # noqa: C901
     from rich.markup import escape
+    from localm.inference.backends.base import (ImageDecodeUnavailable,
+                                                UnsupportedInputError)
+    if router is None:
+        router = _TurnRouter(engine, engine.display_name, pinned=True)
 
     console.print(Panel(
         f"[bold cyan]localm[/bold cyan] - {escape(engine.display_name)}\n"
@@ -576,6 +788,19 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         if audit:
             audit.user(user_input)
 
+        # The engine that answers this turn: MODEL's, or one that has what the
+        # turn needs (see _TurnRouter). After a failed load it is the router's
+        # current engine.
+        try:
+            engine = router.engine_for(messages)
+        except Exception as e:
+            engine = router.engine
+            console.print(f"\n[red]Could not load {escape(router.model_name)}: "
+                          f"{escape(str(e))}[/red]")
+            if messages and messages[-1] is msg:
+                messages.pop()
+            continue
+
         # Seamless compaction: summarise older turns before the history
         # collides with the context ceiling. Never fails - falls back to a
         # visible hard trim when summarisation is unavailable.
@@ -585,13 +810,18 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         # small-window model and under-protects a large one. Fall back to the
         # config only when the engine cannot report a capacity (not loaded).
         limit = engine.context_capacity() or load_config().get("n_ctx_max", 16384) or 0
-        compacted_msgs, did_compact = maybe_compact(
-            messages,
-            limit_tokens=limit,
-            count_tokens=engine.count_tokens,
-            generate=lambda m, max_tok: "".join(
-                engine.chat_stream(m, max_tokens=max_tok, temperature=0.3)),
-        )
+        if router.min_context and not router.in_process:
+            # Attached, a turn routed for context is sent whole, with
+            # min_context naming the window it needs.
+            compacted_msgs, did_compact = messages, False
+        else:
+            compacted_msgs, did_compact = maybe_compact(
+                messages,
+                limit_tokens=limit,
+                count_tokens=engine.count_tokens,
+                generate=lambda m, max_tok: "".join(
+                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3)),
+            )
         if did_compact:
             messages[:] = compacted_msgs
             console.print("[dim](older conversation summarised to free context)[/dim]")
@@ -604,6 +834,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         t0 = _time.monotonic()
         first_at: Optional[float] = None
         interactive_opts = dict(gen_opts)
+        if router.min_context and not router.in_process:
+            interactive_opts["min_context"] = router.min_context
         if "on_status" not in interactive_opts:
             from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
 
@@ -621,8 +853,29 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         except KeyboardInterrupt:
             printer.flush()
             console.print("\n[dim](interrupted)[/dim]")
+        except ImageDecodeUnavailable as e:
+            # The model can read images but this environment cannot decode
+            # them. The message is withdrawn from the conversation.
+            console.print(f"\n[red]{escape(str(e))}[/red]")
+            _withdraw(messages, msg)
+            continue
+        except UnsupportedInputError:
+            # The answering model cannot read the attached image. The message is
+            # withdrawn from the conversation.
+            from localm.model_manager import vision_input_guidance
+            backend = getattr(engine, "_backend", None)
+            console.print("\n[yellow]" + escape(vision_input_guidance(
+                mmproj_failed=bool(getattr(backend, "mmproj_path", None)),
+                active_model_path=getattr(backend, "model_path", None)))
+                + "[/yellow]")
+            _withdraw(messages, msg)
+            continue
         except Exception as e:
             console.print(f"\n[red]Inference error: {escape(str(e))}[/red]")
+            # The failed message is withdrawn so the next one is not sent after
+            # an unanswered turn.
+            if messages and messages[-1] is msg:
+                messages.pop()
             continue
 
         response = "".join(parts) or "(interrupted)"
@@ -632,6 +885,9 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             line = _perf_line(engine.count_tokens(response), t0, first_at, end)
             if line:
                 console.print(f"[dim]{line}[/dim]")
+            note = router.note(engine)
+            if note:
+                console.print(f"[dim]({escape(note)})[/dim]")
         if response:
             # Resend and log only the visible answer, never the raw <think>
             # scratchpad (textnorm.strip_think's docstring: "the one helper every
