@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, setConversationPin, stripUserImages, syncPinModelToggle, updateStatusIndicator } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -817,11 +817,12 @@ export function* _topLevelObjects(text) {
 }
 
 /** Normalise a parsed object to a {name, args} web call, or null. Accepts the
- *  OpenAI "arguments" alias for "args". */
+ *  OpenAI "arguments" and the Llama 3 "parameters" aliases for "args". */
 export function _asWebCall(obj) {
   if (!obj || typeof obj.name !== "string" || !_WEB_TOOLS.has(obj.name)) return null;
   const args = (obj.args && typeof obj.args === "object") ? obj.args
              : (obj.arguments && typeof obj.arguments === "object") ? obj.arguments
+             : (obj.parameters && typeof obj.parameters === "object") ? obj.parameters
              : {};
   return { name: obj.name, args };
 }
@@ -923,8 +924,8 @@ const _ACTION_VERBS =
   "read (?:the|that|this) page|open (?:the|that) (?:page|link|url)|" +
   "suche|nachschauen|nachsehen|recherchiere|schaue? (?:im internet|online) nach";
 const _ACTION_ANNOUNCE_RE = new RegExp(
-  "(?:\\b(?:I will|I'll|I am going to|I'm going to|I can|I could|let me|" +
-  "allow me to|I will now|I'll now|ich werde|ich kann|lass mich|" +
+  "(?:\\b(?:I will|I'll|I am going to|I'm going to|let me|" +
+  "allow me to|I will now|I'll now|ich werde|lass mich|" +
   "lassen sie mich)\\s+(?:now\\s+|just\\s+|quickly\\s+|jetzt\\s+|mal\\s+|" +
   "kurz\\s+|gleich\\s+)?(?:" + _ACTION_VERBS + ")\\b)|" +
   "(?:\\b(?:will|and) (?:then )?(?:report|get) back\\b)|" +
@@ -934,6 +935,16 @@ const _ACTION_ANNOUNCE_RE = new RegExp(
   "(?:\\bich werde\\b[^.!?\\n]{0,80}\\b(?:nachschauen|nachsehen|suchen|" +
   "recherchieren|nachschlagen|abrufen)\\b)",
   "i");
+// A sentence that makes the action depend on the user ("if you like", "if
+// that's helpful", "shall I", "wenn du möchtest") offers it instead of
+// promising it.
+const _ACTION_OFFER_RE = new RegExp(
+  "\\bif (?:you|that|this|it|so|needed|necessary|helpful|wanted|desired|required)\\b|" +
+  "\\bin case\\b|\\b(?:once|when) you\\b|\\b(?:would|do) you (?:like|want|prefer)\\b|" +
+  "\\b(?:shall|should) I\\b|\\bwant me to\\b|\\blet me know\\b|" +
+  "\\b(?:wenn|falls|sobald) (?:du|sie|ihr)\\b|\\bsoll ich\\b|" +
+  "\\b(?:möchtest|willst) du\\b|\\bmöchten sie\\b|\\bbescheid\\b",
+  "i");
 const _ACTION_ANNOUNCE_MAX_CHARS = 600;
 
 const _ACTION_ANNOUNCE_TAIL_CHARS = 240;
@@ -941,13 +952,18 @@ const _ACTION_ANNOUNCE_TAIL_CHARS = 240;
 /** True when a reply only ANNOUNCES a web action instead of performing one: a
  *  short, plain-prose reply with no tool call and no URL whose closing
  *  sentences promise a lookup ("I will now search ...", "let me look that
- *  up", "... and report back"). */
+ *  up", "... and report back"). A reply that ends on a question, and a
+ *  sentence that offers the lookup ("I can search if that's helpful", "I'll
+ *  look it up if you want"), hand the turn to the user and do not count. */
 export function looksLikeActionAnnouncement(text) {
   const clean = stripThink(text || "").trim();
   if (!clean || clean.length > _ACTION_ANNOUNCE_MAX_CHARS) return false;
   if (/https?:\/\//i.test(clean)) return false;
   if (looksLikeWebToolAttempt(clean) || parseWebCalls(clean, 1).length) return false;
-  return _ACTION_ANNOUNCE_RE.test(clean.slice(-_ACTION_ANNOUNCE_TAIL_CHARS));
+  if (/\?[\s"'*_)\]]*$/.test(clean)) return false;
+  const sentences = clean.slice(-_ACTION_ANNOUNCE_TAIL_CHARS).match(/[^.!?\n]+[.!?]*/g) || [];
+  return sentences.some((s) => _ACTION_ANNOUNCE_RE.test(s) && !_ACTION_OFFER_RE.test(s) &&
+                               !/\?\s*$/.test(s));
 }
 
 /** The grounding states an evidence bundle can carry (web_retrieval). */
@@ -2538,9 +2554,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // Web-access loop: when the model requested a search/page and the toggle
   // is on, run it and let the model continue - bounded rounds per send.
   const canWeb = webEnabled && webDepth < WEB_MAX_ROUNDS;
+  // A reply with reasoning but no visible text ended inside its reasoning, so
+  // a call it wrote there is read from the reasoning instead.
+  const thought = reasoning || splitThink(full).think || "";
+  const onlyThought = !stripThink(full).trim() && !!thought.trim();
+  const callText = onlyThought ? thought : full;
   // Limit 2: the loop runs the first call and only needs to know whether ANY
   // further call was present, so it never pays to enumerate the rest.
-  const webCalls = canWeb ? parseWebCalls(full, 2) : [];
+  const webCalls = canWeb ? parseWebCalls(callText, 2) : [];
   const nextCall = webCalls[0] || null;
   if (nextCall) {
     // R36: dedupe - the model re-issuing a search it already ran this send is the
@@ -2580,7 +2601,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // re-issue the extra call would contradict the instruction it just got.
     await runWebCall(conv, nextCall, ignoredCallsNote(webCalls));
     return runCompletion(conv, webDepth + 1, web);
-  } else if (canWeb && looksLikeWebToolAttempt(full)) {
+  } else if (canWeb && looksLikeWebToolAttempt(callText)) {
     // The model tried to call a web tool but emitted a block we could not
     // parse. Re-prompt for the exact format instead of letting the un-grounded
     // reply stand (it would otherwise read as a confident, un-searched answer).
@@ -2594,7 +2615,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     renderChat();
     return runCompletion(conv, webDepth + 1, web);
   } else if (webEnabled && webDepth === WEB_MAX_ROUNDS && !web.forced &&
-             (parseWebCall(full) || looksLikeWebToolAttempt(full))) {
+             (parseWebCall(callText) || looksLikeWebToolAttempt(callText))) {
     // R36: web rounds are used up but the model is STILL trying to search instead
     // of answering (the "never synthesizes an answer" symptom). Force exactly one
     // synthesizing turn from the results already gathered, then accept its answer.
@@ -2608,18 +2629,24 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     renderChat();
     return runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
   } else if (canWeb && !web.repaired && finishReason === "stop" &&
-             looksLikeActionAnnouncement(full)) {
+             (onlyThought || looksLikeActionAnnouncement(full))) {
     // The model announced a web action ("I will now search ...") and then
-    // stopped without emitting a call. One repair round per send: `web.repaired`
-    // is set before the recursive call and gates this branch, so the repair
-    // reply cannot enter it again.
+    // stopped without emitting a call, or stopped after its reasoning with no
+    // reply and no call. One repair round per send: `web.repaired` is set
+    // before the recursive call and gates this branch, so the repair reply
+    // cannot enter it again.
     web.repaired = true;
-    conv.messages.push(webNoteEvent("pending",
-      "[pending action] Your last reply announced an action but did not " +
-      "perform it. Do exactly ONE of these now: emit exactly one tool call in " +
-      "the required format, or give your final answer now without promising " +
-      "further work. Never say you searched or looked something up unless " +
-      "you actually emitted a tool call and received its result."));
+    conv.messages.push(webNoteEvent("pending", onlyThought
+      ? "[pending action] Your last reply ended in your reasoning, with no " +
+        "answer and no tool call. Do exactly ONE of these now, after your " +
+        "reasoning: emit exactly one tool call in the required format, or " +
+        "give your final answer. Never say you searched or looked something " +
+        "up unless you actually emitted a tool call and received its result."
+      : "[pending action] Your last reply announced an action but did not " +
+        "perform it. Do exactly ONE of these now: emit exactly one tool call in " +
+        "the required format, or give your final answer now without promising " +
+        "further work. Never say you searched or looked something up unless " +
+        "you actually emitted a tool call and received its result."));
     saveConversations(conv);
     renderChat();
     return runCompletion(conv, webDepth + 1, web);

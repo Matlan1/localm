@@ -248,3 +248,57 @@ class TestTurnOpenMarkers:
         for marker in _TURN_MARKERS:
             once = scrub_text(f"{marker}reply")
             assert scrub_text(once) == once
+
+
+class TestThinkExitMarker:
+    """With a lazy <tool_call> grammar, llama.cpp matches the trigger inside a
+    think block too, and from there the grammar allows only the call and the
+    end of generation, so </think> never comes. Given the marker, a think block
+    still open at the end hands everything from the marker on to the content;
+    a block that does close stays reasoning, marker included."""
+
+    CALL = '<tool_call>{"name": "web_search", "args": {"query": "q"}}</tool_call>'
+    MARK = "<tool_call>"
+
+    def _texts(self):
+        return [
+            "<think>I should search. " + self.CALL,
+            "<think>plan " + self.CALL + " no, wrong.</think>Answer.",
+            "<think>plan</think>\n" + self.CALL,
+            "Pre <think>a " + self.CALL,
+            "<think>" + self.MARK[:5],
+            "no think at all " + self.CALL,
+        ]
+
+    def test_an_open_block_ends_at_the_marker(self):
+        c, r = split_think("<think>I should search. " + self.CALL, exit_marker=self.MARK)
+        assert (c, r) == (self.CALL, "I should search. ")
+
+    def test_without_the_marker_an_open_block_is_all_reasoning(self):
+        c, r = split_think("<think>I should search. " + self.CALL)
+        assert c == "" and r.endswith(self.CALL)
+
+    def test_a_block_that_closes_stays_reasoning(self):
+        text = "<think>plan " + self.CALL + " no, wrong.</think>Answer."
+        assert split_think(text, exit_marker=self.MARK) == split_think(text)
+        assert split_think(text, exit_marker=self.MARK)[0] == "Answer."
+
+    def test_a_marker_outside_a_think_block_is_untouched(self):
+        text = "<think>plan</think>\n" + self.CALL
+        assert split_think(text, exit_marker=self.MARK) == ("\n" + self.CALL, "plan")
+
+    def test_streaming_matches_the_one_shot_split_at_every_cut(self):
+        for text in self._texts():
+            want = split_think(text, exit_marker=self.MARK)
+            for cut in range(len(text) + 1):
+                sp = ThinkSplitter(exit_marker=self.MARK)
+                parts = [sp.feed(text[:cut]), sp.feed(text[cut:]), sp.flush()]
+                got = ("".join(p[0] for p in parts), "".join(p[1] for p in parts))
+                assert got == want, (text, cut)
+
+    def test_streaming_one_character_at_a_time(self):
+        for text in self._texts():
+            sp = ThinkSplitter(exit_marker=self.MARK)
+            parts = [sp.feed(ch) for ch in text] + [sp.flush()]
+            got = ("".join(p[0] for p in parts), "".join(p[1] for p in parts))
+            assert got == split_think(text, exit_marker=self.MARK), text

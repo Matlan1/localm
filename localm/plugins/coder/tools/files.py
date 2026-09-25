@@ -16,7 +16,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from .base import ToolResult, _confine, _truncate
+from .base import _MAX_OUTPUT, ToolResult, _confine, _truncate
 # The indexer's skip and file-type tables, shared so grep and the project map
 # classify files the same way.
 from ..indexer import _SKIP_DIRS, _SYMBOL_LANGS, _TEXT_EXTS
@@ -108,6 +108,19 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
     return None
 
 
+def _truncation_note(text: str, first_line: int, total_lines: int) -> str:
+    """The notice after *text*, read from line *first_line* on, was cut to its
+    head and tail by _truncate: the lines that did not arrive in full, so the
+    next read can go straight to them."""
+    half = _MAX_OUTPUT // 2
+    tail = len(text) - half
+    first = first_line + text.count("\n", 0, half)
+    last = first_line - 1 + text.count("\n", 0, tail) + (text[tail - 1] != "\n")
+    return (f"\n[file truncated - lines {first}-{last} of {total_lines} are missing "
+            "or cut short above; re-read specific parts with read_file(path, "
+            f"offset={first}, limit=<lines>), or grep for what you need]")
+
+
 def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> ToolResult:
     """Read a file. *offset* (1-based start line) and *limit* (max lines)
     slice big files so a truncated first read can be followed by targeted
@@ -156,7 +169,10 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
         all_lines = raw.splitlines(keepends=True) or [""]
         sliced = all_lines[start - 1:start - 1 + count]
         end = start + len(sliced) - 1
-        output, trunc = _truncate("".join(sliced))
+        text = "".join(sliced)
+        output, trunc = _truncate(text)
+        if trunc:
+            output += _truncation_note(text, start, total_lines)
         range_label = f"{start}-{end} of {total_lines}"
         return ToolResult(
             ok=True,
@@ -167,8 +183,7 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
 
     output, trunc = _truncate(raw)
     if trunc:
-        output += ("\n[file truncated - re-read specific parts with "
-                   "read_file(path, offset=<start line>, limit=<lines>)]")
+        output += _truncation_note(raw, 1, total_lines)
     return ToolResult(
         ok=True,
         output=f"<path>{rel}</path>\n<lines>{total_lines}</lines>\n<content>\n{output}\n</content>",

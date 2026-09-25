@@ -34,6 +34,14 @@ from .local_engine import _ENGINE_GEN_KWARGS
 # coder sends with its tool-call grammar on every turn.
 _GEN_KWARGS = frozenset(_ENGINE_GEN_KWARGS | {"grammar_lazy", "grammar_triggers"})
 
+
+def _exit_marker(gen: dict):
+    """The think-split exit marker for these engine kwargs (see
+    ``gbnf.think_exit_marker``): a call the lazy tool grammar forced inside an
+    open think block is the answer, as it is on the server."""
+    from localm.inference.gbnf import think_exit_marker
+    return think_exit_marker(gen.get("grammar_lazy"), gen.get("grammar_triggers"))
+
 # LOCK ORDER: engine_lock(engine) is the OUTERMOST lock of the process. A
 # generation under it takes engine._LOAD_LOCK (auto-reload) and, below that,
 # embedder._LOCK; residency._PIN_LOCK is a leaf. Never acquire engine_lock while
@@ -197,7 +205,7 @@ class SharedEngineBackend(BaseLLMBackend):
                     self._record_usage(messages, "".join(parts))
                 finally:
                     unpin_engine(self._engine)
-        answer, reasoning = split_think("".join(parts))
+        answer, reasoning = split_think("".join(parts), exit_marker=_exit_marker(gen))
         self._local.reasoning = reasoning
         return answer
 
@@ -210,7 +218,7 @@ class SharedEngineBackend(BaseLLMBackend):
         gen = self._gen(kwargs)
         parts: list[str] = []
         reasoning_parts: list[str] = []
-        splitter = ThinkSplitter()
+        splitter = ThinkSplitter(exit_marker=_exit_marker(gen))
 
         def _split(piece: str) -> str:
             content, reasoning = splitter.feed(piece)

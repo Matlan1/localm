@@ -7,6 +7,8 @@ vision path is covered separately.
 
 import struct
 
+import pytest
+
 import localm.model_manager as mm
 from localm.model_manager import find_sibling_mmproj, get_model_mmproj
 
@@ -25,13 +27,8 @@ def _s(text: str) -> bytes:
     return struct.pack("<Q", len(raw)) + raw
 
 
-def _real_text_model_gguf(path, architecture: str, embedding_length: int):
-    """A minimal but REAL GGUF header for a text model: general.architecture
-    plus its embedding_length, the exact two keys gguf_n_embd reads. Ground-
-    truthed against a real Qwen2.5-Coder-7B-Instruct GGUF, which reports
-    general.architecture='qwen2' and qwen2.embedding_length=3584."""
-    kv = [("general.architecture", _T_STRING, architecture),
-         (f"{architecture}.embedding_length", _T_UINT32, embedding_length)]
+def _write_gguf(path, kv):
+    """Write a GGUF v3 header carrying the metadata *kv* and no tensors."""
     out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, len(kv))]
     for key, vtype, val in kv:
         out.append(_s(key))
@@ -39,22 +36,37 @@ def _real_text_model_gguf(path, architecture: str, embedding_length: int):
         out.append(_s(val) if vtype == _T_STRING else struct.pack("<I", val))
     path.write_bytes(b"".join(out))
     return path
+
+
+def _real_text_model_gguf(path, architecture: str, embedding_length: int):
+    """A minimal but REAL GGUF header for a text model: general.architecture
+    plus its embedding_length, the exact two keys gguf_n_embd reads. Ground-
+    truthed against a real Qwen2.5-Coder-7B-Instruct GGUF, which reports
+    general.architecture='qwen2' and qwen2.embedding_length=3584."""
+    return _write_gguf(path, [
+        ("general.architecture", _T_STRING, architecture),
+        (f"{architecture}.embedding_length", _T_UINT32, embedding_length)])
 
 
 def _real_mmproj_gguf(path, projection_dim: int):
     """A minimal but REAL GGUF header for a clip mmproj: general.architecture
     plus clip.vision.projection_dim, the exact two keys gguf_n_embd reads for
     a clip file. Ground-truthed against a real mmproj-*-F16.gguf, which
-    reports general.architecture='clip' and clip.vision.projection_dim=5120."""
-    kv = [("general.architecture", _T_STRING, "clip"),
-         ("clip.vision.projection_dim", _T_UINT32, projection_dim)]
-    out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, len(kv))]
-    for key, vtype, val in kv:
-        out.append(_s(key))
-        out.append(struct.pack("<I", vtype))
-        out.append(_s(val) if vtype == _T_STRING else struct.pack("<I", val))
-    path.write_bytes(b"".join(out))
-    return path
+    reports general.architecture='clip' and clip.vision.projection_dim=5120.
+    openbmb's MiniCPM-V-2_6 mmproj-model-f16.gguf reports projection_dim=0,
+    which gguf_n_embd reads as unknown."""
+    return _write_gguf(path, [
+        ("general.architecture", _T_STRING, "clip"),
+        ("clip.vision.projection_dim", _T_UINT32, projection_dim)])
+
+
+def _real_imatrix_gguf(path):
+    """A minimal but REAL GGUF header for a llama.cpp importance-matrix file.
+    Ground-truthed against a real imatrix.gguf, which reports
+    general.type='imatrix' and carries no general.architecture."""
+    return _write_gguf(path, [
+        ("general.type", _T_STRING, "imatrix"),
+        ("imatrix.chunk_count", _T_UINT32, 934)])
 
 
 class TestFindSiblingMmproj:
@@ -128,19 +140,240 @@ class TestFindSiblingMmproj:
         proj = _gguf(tmp_path / "mmproj-gemma-3-4b-it-f16.gguf")
         assert find_sibling_mmproj(model) == proj
 
-    def test_lone_sibling_without_stem_match_returns_none(self, tmp_path):
-        """A lone mmproj for an unrelated model family is not attached."""
-        model = _gguf(tmp_path / "Llama3.3-8B-Instruct-Thinking.gguf")
-        _gguf(tmp_path / "mmproj-Qwen3.8-27B-Uncensored-F16.gguf")
+    def test_matching_stem_with_mismatched_embedding_width_is_not_attached(self, tmp_path):
+        """A projector whose name carries the model's own name is still refused
+        when its projection_dim differs from the model's embedding_length."""
+        model = _real_text_model_gguf(
+            tmp_path / "some-vl-model-Q8.gguf", "qwen2", 3584)
+        _real_mmproj_gguf(tmp_path / "mmproj-some-vl-model-f16.gguf", 5120)
         assert find_sibling_mmproj(model) is None
 
-    def test_lone_sibling_matching_width_differing_stem_not_attached(self, tmp_path):
-        """Identical embedding widths do not attach an unrelated model's projector."""
+    def test_projector_named_for_another_model_in_the_folder_is_not_attached(self, tmp_path):
+        """A lone projector named after a different model that sits in the same
+        folder belongs to that model, not to its neighbour."""
+        llama = _gguf(tmp_path / "Llama3.3-8B-Instruct-Thinking.gguf")
+        qwen = _gguf(tmp_path / "Qwen3.8-27B-Uncensored-Q4_K_M.gguf")
+        proj = _gguf(tmp_path / "mmproj-Qwen3.8-27B-Uncensored-F16.gguf")
+        assert find_sibling_mmproj(llama) is None
+        assert find_sibling_mmproj(qwen) == proj
+
+    def test_projector_named_for_an_absent_model_is_attached_when_widths_match(
+            self, tmp_path):
+        """A projector named after a model that is not in the folder, such as a
+        fine-tune stored next to its base model's projector, pairs like a
+        generically named one."""
         model = _real_text_model_gguf(
-            tmp_path / "Llama3-27B-Instruct.gguf", "llama", 5120)
-        _real_mmproj_gguf(
-            tmp_path / "mmproj-Qwen3.8-27B-Uncensored-F16.gguf", 5120)
+            tmp_path / "Cydonia-24B-v4.1-Q4_K_M.gguf", "llama", 5120)
+        proj = _real_mmproj_gguf(
+            tmp_path / "mmproj-Mistral-Small-3.2-24B-Instruct-2506-f16.gguf", 5120)
+        assert find_sibling_mmproj(model) == proj
+
+    def test_projector_named_for_a_model_whose_width_rules_it_out_is_attached_to_its_fit(
+            self, tmp_path):
+        """The projector names ``Mistral``, and a Mistral model is in the folder,
+        but at another width: the model whose width fits gets it."""
+        cydonia = _real_text_model_gguf(
+            tmp_path / "Cydonia-24B-v4.1-Q4_K_M.gguf", "llama", 5120)
+        mistral = _real_text_model_gguf(
+            tmp_path / "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", "llama", 4096)
+        proj = _real_mmproj_gguf(
+            tmp_path / "mmproj-Mistral-Small-3.2-24B-Instruct-2506-f16.gguf", 5120)
+        assert find_sibling_mmproj(cydonia) == proj
+        assert find_sibling_mmproj(mistral) is None
+
+    def test_a_vision_fine_tune_keeps_its_base_projector_beside_a_text_sibling(
+            self, tmp_path):
+        """A Qwen2.5-VL fine-tune stored with the base model's projector, next to
+        a Qwen2.5 text model of another width and another architecture."""
+        ocr = _real_text_model_gguf(tmp_path / "olmOCR-7B-0725-Q4_K_M.gguf", "qwen2vl", 3584)
+        text = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-14B-Instruct-Q4_K_M.gguf", "qwen2", 5120)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf", 3584)
+        assert find_sibling_mmproj(ocr) == proj
+        assert find_sibling_mmproj(text) is None
+
+    def test_a_gemma_fine_tune_keeps_its_base_projector_beside_a_gemma_3n(self, tmp_path):
+        tiger = _real_text_model_gguf(
+            tmp_path / "Big-Tiger-Gemma-27B-v3-Q4_K_M.gguf", "gemma3", 5376)
+        gemma3n = _real_text_model_gguf(
+            tmp_path / "google_gemma-3n-E4B-it-Q4_K_M.gguf", "gemma3n", 2048)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-google_gemma-3-27b-it-f16.gguf", 5376)
+        assert find_sibling_mmproj(tiger) == proj
+        assert find_sibling_mmproj(gemma3n) is None
+
+    def test_a_projector_is_never_paired_with_another_projector(self, tmp_path):
+        first = _real_mmproj_gguf(tmp_path / "LLaMA3-8B_mmproj-Q4_1.gguf", 4096)
+        _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        assert find_sibling_mmproj(first) is None
+
+    def test_projector_carrying_the_models_base_name_is_attached(self, tmp_path):
+        """koboldcpp's projector names (``LLaMA3-8B_mmproj-Q4_1.gguf``) do not
+        contain the leading token of ``Meta-Llama-3-8B-Instruct``, but the model's
+        name contains the projector's. A same-width model of another family in
+        the folder does not take it."""
+        model = _real_text_model_gguf(
+            tmp_path / "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "llama", 4096)
+        mistral = _real_text_model_gguf(
+            tmp_path / "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", "llama", 4096)
+        proj = _real_mmproj_gguf(tmp_path / "LLaMA3-8B_mmproj-Q4_1.gguf", 4096)
+        assert find_sibling_mmproj(model) == proj
+        assert find_sibling_mmproj(mistral) is None
+
+
+class TestGenericallyNamedProjector:
+    """A projector whose name carries no model name (``mmproj-F16.gguf``,
+    ``mmproj-model-f16.gguf``) pairs by the models it sits with."""
+
+    def test_alone_with_its_model_is_attached(self, tmp_path):
+        model = _real_text_model_gguf(
+            tmp_path / "gemma-3-4b-it-Q4_K_M.gguf", "gemma3", 2560)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 2560)
+        assert find_sibling_mmproj(model) == proj
+
+    def test_attached_to_minicpm_whose_projector_width_is_unknown(self, tmp_path):
+        model = _real_text_model_gguf(
+            tmp_path / "MiniCPM-V-2_6-Q4_K_M.gguf", "qwen2", 3584)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf", 0)
+        assert find_sibling_mmproj(model) == proj
+
+    def test_attached_only_to_the_model_whose_width_matches(self, tmp_path):
+        gemma = _real_text_model_gguf(
+            tmp_path / "gemma-3-4b-it-Q4_K_M.gguf", "gemma3", 2560)
+        qwen = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-7B-Instruct-Q4_K_M.gguf", "qwen2", 3584)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 2560)
+        assert find_sibling_mmproj(gemma) == proj
+        assert find_sibling_mmproj(qwen) is None
+
+    def test_mismatched_width_is_not_attached(self, tmp_path):
+        model = _real_text_model_gguf(
+            tmp_path / "gemma-3-4b-it-Q4_K_M.gguf", "gemma3", 2560)
+        _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 5120)
         assert find_sibling_mmproj(model) is None
+
+    def test_every_quant_of_the_model_gets_it(self, tmp_path):
+        q4 = _real_text_model_gguf(
+            tmp_path / "gemma-3-4b-it-Q4_K_M.gguf", "gemma3", 2560)
+        q8 = _real_text_model_gguf(
+            tmp_path / "gemma-3-4b-it-Q8_0.gguf", "gemma3", 2560)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf", 2560)
+        assert find_sibling_mmproj(q4) == proj
+        assert find_sibling_mmproj(q8) == proj
+
+    def test_mtp_head_and_imatrix_file_do_not_block_it(self, tmp_path):
+        """The peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF layout: an MTP head that
+        carries the model's architecture and width, and an imatrix GGUF that has
+        no architecture, next to the quants and a lone mmproj-BF16.gguf."""
+        model = _real_text_model_gguf(
+            tmp_path / "Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf", "qwen35moe", 2048)
+        _real_text_model_gguf(
+            tmp_path / "Tiel-Coder-35B-A3B-UD-Q8_K_XL.gguf", "qwen35moe", 2048)
+        _real_text_model_gguf(
+            tmp_path / "mtp-Tiel-Coder-35B-A3B.gguf", "qwen35moe", 2048)
+        _real_imatrix_gguf(tmp_path / "Tiel-Coder-35B-A3B.imatrix.gguf")
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-BF16.gguf", 2048)
+        assert find_sibling_mmproj(model) == proj
+
+    def test_quants_with_generic_names_get_it(self, tmp_path):
+        """The Hcompany/Holo-3.1-35B-A3B-GGUF layout: model files named only by
+        their quantisation, an imatrix file and a lone mmproj.f16.gguf."""
+        q4 = _real_text_model_gguf(tmp_path / "q4_k_m.gguf", "qwen35moe", 2048)
+        bf16 = _real_text_model_gguf(tmp_path / "main.bf16.gguf", "qwen35moe", 2048)
+        _real_imatrix_gguf(tmp_path / "imatrix.gguf")
+        proj = _real_mmproj_gguf(tmp_path / "mmproj.f16.gguf", 2048)
+        assert find_sibling_mmproj(q4) == proj
+        assert find_sibling_mmproj(bf16) == proj
+
+    def test_quants_with_a_short_name_get_it(self, tmp_path):
+        """Name tokens shorter than three characters (``Yi``, ``VL``, ``6B``)
+        identify no model, so the headers decide."""
+        q4 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q4_K_M.gguf", "llama", 4096)
+        q8 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q8_0.gguf", "llama", 4096)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        assert find_sibling_mmproj(q4) == proj
+        assert find_sibling_mmproj(q8) == proj
+
+    def test_quants_with_extended_quant_tags_get_it(self, tmp_path):
+        """IQ3_XXS, TQ1_0 and MXFP4_MOE are quantisation tags, not model names."""
+        q4 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q4_K_M.gguf", "llama", 4096)
+        iq3 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-IQ3_XXS.gguf", "llama", 4096)
+        tq1 = _real_text_model_gguf(tmp_path / "Yi-VL-6B-TQ1_0.gguf", "llama", 4096)
+        mx = _real_text_model_gguf(tmp_path / "Yi-VL-6B-MXFP4_MOE.gguf", "llama", 4096)
+        proj = _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        for model in (q4, iq3, tq1, mx):
+            assert find_sibling_mmproj(model) == proj, model.name
+
+    def test_a_base_model_and_its_vision_variant_are_different_models(self, tmp_path):
+        """``Yi-6B`` and ``Yi-VL-6B`` carry no name token of three characters and
+        still differ once their quantisation tags are removed."""
+        base = _real_text_model_gguf(tmp_path / "Yi-6B-Q4_K_M.gguf", "llama", 4096)
+        vl = _real_text_model_gguf(tmp_path / "Yi-VL-6B-Q4_K_M.gguf", "llama", 4096)
+        _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 4096)
+        assert find_sibling_mmproj(base) is None
+        assert find_sibling_mmproj(vl) is None
+
+    def test_models_named_outside_latin_letters_are_told_apart_by_name(self, tmp_path):
+        first = _real_text_model_gguf(tmp_path / "千问-7B-Q4_K_M.gguf", "qwen2", 3584)
+        second = _real_text_model_gguf(tmp_path / "深度求索-7B-Q4_K_M.gguf", "qwen2", 3584)
+        _real_mmproj_gguf(tmp_path / "mmproj.f16.gguf", 3584)
+        assert find_sibling_mmproj(first) is None
+        assert find_sibling_mmproj(second) is None
+
+    def test_a_generically_named_model_and_a_named_one_are_different_models(
+            self, tmp_path):
+        """``ggml-model-Q4_K_M.gguf`` names no model, so it is not taken for the
+        same model as ``Qwen2.5-Coder-7B`` despite equal architecture and width."""
+        generic = _real_text_model_gguf(tmp_path / "ggml-model-Q4_K_M.gguf", "qwen2", 3584)
+        coder = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-Coder-7B-Instruct-Q6_K.gguf", "qwen2", 3584)
+        _real_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf", 3584)
+        assert find_sibling_mmproj(generic) is None
+        assert find_sibling_mmproj(coder) is None
+
+    def test_not_attached_when_a_different_model_in_the_folder_could_use_it(
+            self, tmp_path):
+        """Same family, same width, different architecture: the projector could
+        be either model's, so neither gets it automatically."""
+        coder = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-Coder-7B-Instruct-Q6_K.gguf", "qwen2", 3584)
+        vl = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", "qwen2vl", 3584)
+        _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 3584)
+        assert find_sibling_mmproj(coder) is None
+        assert find_sibling_mmproj(vl) is None
+
+    def test_a_model_of_another_width_reads_no_other_models_header(
+            self, tmp_path, monkeypatch):
+        """A model whose width differs from the projector's is refused on those
+        two headers; the folder's other models are not read."""
+        from localm.model_manager import registry
+        qwen = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-7B-Instruct-Q4_K_M.gguf", "qwen2", 3584)
+        _real_text_model_gguf(tmp_path / "gemma-3-4b-it-Q4_K_M.gguf", "gemma3", 2560)
+        _real_text_model_gguf(tmp_path / "Phi-2-Q4_K_M.gguf", "phi2", 2560)
+        _real_mmproj_gguf(tmp_path / "mmproj-F16.gguf", 2560)
+        read = []
+        real_fit = registry._gguf_fit
+
+        def counting_fit(path):
+            read.append(path.name)
+            return real_fit(path)
+
+        monkeypatch.setattr(registry, "_gguf_fit", counting_fit)
+
+        assert find_sibling_mmproj(qwen) is None
+        assert sorted(read) == ["Qwen2.5-7B-Instruct-Q4_K_M.gguf", "mmproj-F16.gguf"]
+
+    def test_unknown_projector_width_with_another_model_is_not_attached(self, tmp_path):
+        """A projector whose width cannot be read cannot rule any other model
+        in the folder out."""
+        minicpm = _real_text_model_gguf(
+            tmp_path / "MiniCPM-V-2_6-Q4_K_M.gguf", "qwen2", 3584)
+        coder = _real_text_model_gguf(
+            tmp_path / "Qwen2.5-Coder-7B-Instruct-Q6_K.gguf", "qwen2", 3584)
+        _real_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf", 0)
+        assert find_sibling_mmproj(minicpm) is None
+        assert find_sibling_mmproj(coder) is None
 
 
 class TestPickMmprojCandidate:
@@ -153,10 +386,42 @@ class TestPickMmprojCandidate:
         assert _pick_mmproj_candidate(
             "gemma-3-4b-it", ["mmproj-gemma-3-4b-it-f16.gguf"]) == "mmproj-gemma-3-4b-it-f16.gguf"
 
-    def test_lone_candidate_differing_stem_returns_none(self):
+    def test_lone_candidate_named_for_another_listed_model_returns_none(self):
         from localm.model_manager.registry import _pick_mmproj_candidate
         assert _pick_mmproj_candidate(
-            "Llama3.3-8B-Instruct", ["mmproj-Qwen3.8-27B-Uncensored-F16.gguf"]) is None
+            "Llama3.3-8B-Instruct", ["mmproj-Qwen3.8-27B-Uncensored-F16.gguf"],
+            others=["Qwen3.8-27B-Uncensored-Q4_K_M.gguf"]) is None
+
+    def test_lone_generic_candidate_is_returned(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        assert _pick_mmproj_candidate(
+            "gemma-3-4b-it", ["mmproj-F16.gguf"]) == "mmproj-F16.gguf"
+
+    def test_lone_candidate_carrying_the_models_base_name_is_returned(self):
+        from localm.model_manager.registry import _GgufFit, _pick_mmproj_candidate
+        fits = {"Meta-Llama-3-8B-Instruct-Q4_K_M.gguf": _GgufFit("llama", 4096),
+                "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf": _GgufFit("llama", 4096),
+                "LLaMA3-8B_mmproj-Q4_1.gguf": _GgufFit("clip", 4096)}
+        assert _pick_mmproj_candidate(
+            "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", ["LLaMA3-8B_mmproj-Q4_1.gguf"],
+            others=["Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"],
+            fit=fits.__getitem__) == "LLaMA3-8B_mmproj-Q4_1.gguf"
+
+    def test_lone_generic_candidate_a_listed_model_could_use_returns_none(self):
+        from localm.model_manager.registry import _GgufFit, _pick_mmproj_candidate
+        fits = {"gemma-3-4b-it-Q4_K_M.gguf": _GgufFit("gemma3", 2560),
+                "Phi-2-Q4_K_M.gguf": _GgufFit("phi2", 2560),
+                "mmproj-F16.gguf": _GgufFit("clip", 2560)}
+        assert _pick_mmproj_candidate(
+            "Phi-2-Q4_K_M.gguf", ["mmproj-F16.gguf"],
+            others=["gemma-3-4b-it-Q4_K_M.gguf"], fit=fits.__getitem__) is None
+
+    def test_a_projector_never_gets_a_projector(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        assert _pick_mmproj_candidate("mmproj-model-f16", ["mmproj-F16.gguf"]) is None
+        assert _pick_mmproj_candidate(
+            "LLaMA3-8B_mmproj-Q4_1.gguf", ["mmproj-F16.gguf"]) is None
+
 
     def test_multiple_candidates_single_stem_match(self):
         from localm.model_manager.registry import _pick_mmproj_candidate
@@ -172,6 +437,77 @@ class TestPickMmprojCandidate:
         from localm.model_manager.registry import _pick_mmproj_candidate
         cands = ["mmproj-gemma-f16.gguf", "mmproj-gemma-q4.gguf"]
         assert _pick_mmproj_candidate("gemma-3-4b", cands) is None
+
+
+# Projector file names seen on HuggingFace, and the one localm itself gives a
+# second same-named projector (mmproj-model-f16-2.gguf).
+_PROJECTOR_NAMES = [
+    ("mmproj-F16.gguf", ""),
+    ("mmproj-BF16.gguf", ""),
+    ("mmproj-F32.gguf", ""),
+    ("mmproj-model-f16.gguf", ""),
+    ("mmproj-model-f32.gguf", ""),
+    ("mmproj.f16.gguf", ""),
+    ("mmproj-model-f16-2.gguf", ""),
+    ("mmproj-google_gemma-3-4b-it-f16.gguf", "google"),
+    ("mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf", "qwen2"),
+    ("Qwen2.5-VL-7B-Instruct.mmproj-Q8_0.gguf", "qwen2"),
+    ("llava-v1.5-7b-mmproj-model-f16.gguf", "llava"),
+    ("LLaMA3-8B_mmproj-Q4_1.gguf", "llama3"),
+    ("moondream2-mmproj-f16-20250414.gguf", "moondream2"),
+    ("mmproj-Qwen3VL-8B-Instruct-F16.gguf", "qwen3vl"),
+    ("Ministral-3-3B-Instruct-2512-mmproj-Q8_0.gguf", "ministral"),
+    ("mmproj-SmolVLM-500M-Instruct-f16.gguf", "smolvlm"),
+    ("mmproj-Qwen3.8-27B-Uncensored-F16.gguf", "qwen3"),
+]
+
+
+@pytest.mark.parametrize("name,identity", _PROJECTOR_NAMES)
+def test_name_identity_of_real_projector_names(name, identity):
+    from localm.model_manager.registry import _name_identity
+    assert _name_identity(name) == identity
+
+
+# Model file names from the same repos.
+_MODEL_NAMES = [
+    ("q4_k_m.gguf", ""),
+    ("main.bf16.gguf", ""),
+    ("ggml-model-Q4_K_M.gguf", ""),
+    ("gemma-3-4b-it-Q4_K_M.gguf", "gemma"),
+    ("llava-v1.6-mistral-7b.Q4_K_M.gguf", "llava"),
+    ("Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf", "tiel"),
+    ("mtp-Tiel-Coder-35B-A3B.gguf", "mtp"),
+    ("Yi-VL-6B-IQ3_XXS.gguf", ""),
+    ("ggml-model-IQ2_XXS.gguf", ""),
+    ("model-TQ1_0.gguf", ""),
+    ("ggml-model-MXFP4_MOE.gguf", ""),
+    ("gpt-oss-20b-MXFP4.gguf", "gpt"),
+]
+
+
+@pytest.mark.parametrize("name,identity", _MODEL_NAMES)
+def test_name_identity_of_real_model_names(name, identity):
+    from localm.model_manager.registry import _name_identity
+    assert _name_identity(name) == identity
+
+
+@pytest.mark.parametrize("name,residue", [
+    ("Yi-VL-6B-Q4_K_M.gguf", "yivl"),
+    ("Yi-VL-6B-Q8_0.gguf", "yivl"),
+    ("Yi-6B-Q4_K_M.gguf", "yi"),
+    ("q4_k_m.gguf", ""),
+    ("main.bf16.gguf", ""),
+    ("gemma-3-4b-it-UD-Q4_K_XL.gguf", "gemmait"),
+    ("Qwen2.5-VL-7B-Instruct.i1-Q4_K_M.gguf", "qwen2vlinstruct"),
+    ("big-model-Q4_K_M-00001-of-00003.gguf", "big"),
+    ("Yi-VL-6B-IQ3_XXS.gguf", "yivl"),
+    ("Yi-VL-6B-TQ1_0.gguf", "yivl"),
+    ("Yi-VL-6B-MXFP4_MOE.gguf", "yivl"),
+])
+def test_name_residue(name, residue):
+    from localm.model_manager.registry import _name_residue
+    assert _name_residue(name) == residue
+
 
 
 class TestGetModelMmproj:
@@ -206,3 +542,81 @@ class TestGetModelMmproj:
     def test_unknown_model_returns_none(self, monkeypatch):
         monkeypatch.setattr(mm, "load_registry", lambda: {})
         assert get_model_mmproj("does-not-exist") is None
+
+
+_PAIRING_CASES = [
+    (["gemma-3-4b-it-Q4_K_M.gguf", "mmproj-F16.gguf"],
+     "gemma-3-4b-it-Q4_K_M.gguf", "mmproj-F16.gguf"),
+    (["MiniCPM-V-2_6-Q4_K_M.gguf", "mmproj-model-f16.gguf"],
+     "MiniCPM-V-2_6-Q4_K_M.gguf", "mmproj-model-f16.gguf"),
+    (["gemma-3-4b-it-Q8_0.gguf", "mmproj-gemma-3-4b-it-f16.gguf"],
+     "gemma-3-4b-it-Q8_0.gguf", "mmproj-gemma-3-4b-it-f16.gguf"),
+    (["Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "LLaMA3-8B_mmproj-Q4_1.gguf"],
+     "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "LLaMA3-8B_mmproj-Q4_1.gguf"),
+    (["Llama3.3-8B-Instruct.gguf", "Qwen3.8-27B-Uncensored-Q4_K_M.gguf",
+      "mmproj-Qwen3.8-27B-Uncensored-F16.gguf"],
+     "Llama3.3-8B-Instruct.gguf", None),
+    (["modelA.gguf", "modelB.gguf", "mmproj-modelB-f16.gguf"], "modelA.gguf", None),
+]
+
+
+class TestListingAndFolderAgree:
+    """`localm pull` picks from a repo's file listing and the folder scan picks
+    from a directory, through the same policy. With no readable GGUF header on
+    either side, the same file names give the same answer."""
+
+    @pytest.mark.parametrize("files,model,expected", _PAIRING_CASES)
+    def test_same_names_same_pick(self, tmp_path, files, model, expected):
+        from localm.model_manager.pull import _pick_mmproj_from_listing
+        folder = tmp_path / "folder"
+        folder.mkdir()
+        for name in files:
+            _gguf(folder / name)
+        base = tmp_path / "models"
+        base.mkdir()
+
+        from_folder = find_sibling_mmproj(folder / model)
+        from_listing = _pick_mmproj_from_listing(files, model, base)
+
+        assert (from_folder.name if from_folder else None) == expected
+        assert from_listing == expected
+
+
+# GGUF file names of real HuggingFace repos, from the HF API on 2026-09-25.
+_REAL_LISTINGS = [
+    (["gemma-3-4b-it-Q3_K_L.gguf", "gemma-3-4b-it-Q4_K_M.gguf", "gemma-3-4b-it-Q6_K.gguf",
+      "gemma-3-4b-it-Q8_0.gguf", "mmproj-model-f16.gguf"],
+     "gemma-3-4b-it-Q4_K_M.gguf", "mmproj-model-f16.gguf"),
+    (["gemma-3-4b-it-Q4_K_M.gguf", "gemma-3-4b-it-Q8_0.gguf", "gemma-3-4b-it-f16.gguf",
+      "mmproj-model-f16.gguf"],
+     "gemma-3-4b-it-Q8_0.gguf", "mmproj-model-f16.gguf"),
+    (["ggml-model-IQ3_M.gguf", "ggml-model-IQ4_XS.gguf", "ggml-model-Q4_K_M.gguf",
+      "ggml-model-Q8_0.gguf", "ggml-model-f16.gguf", "mmproj-model-f16.gguf"],
+     "ggml-model-Q4_K_M.gguf", "mmproj-model-f16.gguf"),
+    (["llava-1.6-mistral-7b.Q6_K.gguf", "llava-1.6-mistral-7b.Q8_0.gguf",
+      "llava-v1.6-mistral-7b.Q3_K.gguf", "llava-v1.6-mistral-7b.Q4_K_M.gguf",
+      "llava-v1.6-mistral-7b.Q8_0.gguf", "mmproj-model-f16.gguf"],
+     "llava-v1.6-mistral-7b.Q4_K_M.gguf", "mmproj-model-f16.gguf"),
+    (["Tiel-Coder-35B-A3B-UD-IQ3_XXS.gguf", "Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf",
+      "Tiel-Coder-35B-A3B-UD-Q8_K_XL.gguf", "Tiel-Coder-35B-A3B.imatrix.gguf",
+      "mmproj-BF16.gguf", "mtp-Tiel-Coder-35B-A3B.gguf"],
+     "Tiel-Coder-35B-A3B-UD-Q4_K_XL.gguf", "mmproj-BF16.gguf"),
+    (["imatrix.gguf", "main.bf16.gguf", "mmproj.f16.gguf", "q4_k_m.gguf"],
+     "q4_k_m.gguf", "mmproj.f16.gguf"),
+    (["Tess-4-27B-Q4_K_M.gguf", "Tess-4-27B-Q6_K.gguf", "Tess-4-27B-Q8_0.gguf",
+      "mmproj-Tess-4-27B-F16.gguf", "mtp-Tess-4-27B-Q4_K_M.gguf",
+      "mtp-Tess-4-27B-Q8_0.gguf"],
+     "Tess-4-27B-Q4_K_M.gguf", "mmproj-Tess-4-27B-F16.gguf"),
+]
+
+
+class TestRealRepoListings:
+    """The projector `localm pull` picks from real repo layouts: generic names
+    (lmstudio-community, ggml-org, openbmb, cjpais), an MTP head and an imatrix
+    file beside the quants (peculiar-ragdoll), generic model names (Hcompany),
+    and a named projector beside MTP heads (migtissera)."""
+
+    @pytest.mark.parametrize("files,model,expected", _REAL_LISTINGS)
+    def test_pick(self, tmp_path, files, model, expected):
+        from localm.model_manager.pull import _pick_mmproj_from_listing
+        assert _pick_mmproj_from_listing(files, model, tmp_path) == expected

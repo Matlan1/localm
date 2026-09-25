@@ -32,8 +32,8 @@ Supported formats (in priority order):
    These are LENIENT (ToolCall.lenient is True), with one exception that is
    trusted like the explicit forms: when every name-gated call in the
    response is an EXACT call object (one JSON object that decodes with no
-   repair and carries only a string "name" plus an object "args" or
-   "arguments") AND the whole response consists of nothing but recognised
+   repair and carries only a string "name" plus an object "args",
+   "arguments" or "parameters") AND the whole response consists of nothing but recognised
    calls and whitespace. Prose, a heading, a wrapper tag or a thinking block
    around the call keeps it lenient.
 
@@ -100,7 +100,8 @@ _RE_FENCE_CLOSE = re.compile(r"\r?\n[ \t]*```")
 _EXPLICIT_FENCE_LANGS = frozenset({"tool_call", "tool_code", "tool"})
 
 # The only key sets an exact call object may carry (see _exact_call_object).
-_EXACT_CALL_KEY_SETS = (frozenset({"name", "args"}), frozenset({"name", "arguments"}))
+_EXACT_CALL_KEY_SETS = (frozenset({"name", "args"}), frozenset({"name", "arguments"}),
+                        frozenset({"name", "parameters"}))
 
 # Signals that the model TRIED to call a tool even when nothing parsed. Fires a
 # one-shot repair turn instead of printing the broken call as the final answer.
@@ -109,7 +110,7 @@ _RE_TOOL_MARKER = re.compile(r"<\|?/?tool_call\|?>", re.IGNORECASE)
 _RE_CALL_PREFIX = re.compile(r"call:(\w+)")
 _RE_TOOL_FENCE = re.compile(r"```[ \t]*(?:tool_call|tool_code)\b", re.IGNORECASE)
 _RE_NAME_KEY = re.compile(r"""["']name["']\s*:""")
-_RE_ARGS_KEY = re.compile(r"""["'](?:args|arguments)["']\s*:""")
+_RE_ARGS_KEY = re.compile(r"""["'](?:args|arguments|parameters)["']\s*:""")
 
 
 def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool:
@@ -223,8 +224,8 @@ def _parse_gemma_args(body: str) -> Optional[dict]:
 def _exact_call_object(body: str) -> Optional[tuple[str, dict]]:
     """``(name, args)`` when *body* is exactly one JSON object that decodes
     with no repair transform (plain ``json.loads``, control characters allowed
-    inside strings) and whose keys are exactly ``name`` plus ``args`` or
-    ``arguments``, with a string name and an object of args. None for
+    inside strings) and whose keys are exactly ``name`` plus ``args``,
+    ``arguments`` or ``parameters``, with a string name and an object of args. None for
     anything else, including every body only :func:`_lenient_json` recovers.
     See test_json_fence_needing_a_repair_is_lenient."""
     try:
@@ -234,7 +235,7 @@ def _exact_call_object(body: str) -> Optional[tuple[str, dict]]:
     if not isinstance(obj, dict) or frozenset(obj) not in _EXACT_CALL_KEY_SETS:
         return None
     name = obj["name"]
-    args = obj["args"] if "args" in obj else obj["arguments"]
+    args = next(obj[k] for k in ("args", "arguments", "parameters") if k in obj)
     if not isinstance(name, str) or not isinstance(args, dict):
         return None
     return name, args
@@ -260,13 +261,12 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
     if obj is None:
         return None
 
-    # Full format: {"name": "...", "args": {...}}, with "arguments" accepted as an
-    # alias for "args".
+    # Full format: {"name": "...", "args": {...}}, with "arguments" (OpenAI) and
+    # "parameters" (Llama 3) accepted as aliases for "args".
     if "name" in obj:
         name = obj["name"]
-        args = obj.get("args")
-        if args is None:
-            args = obj.get("arguments", {})
+        args = next((obj[k] for k in ("args", "arguments", "parameters")
+                     if obj.get(k) is not None), {})
         # A non-string name is a malformed call, treated like malformed JSON. An
         # unhashable one would raise TypeError at the set/dict lookups downstream.
         if not isinstance(name, str) or not isinstance(args, dict):

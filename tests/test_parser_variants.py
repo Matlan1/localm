@@ -163,6 +163,15 @@ class TestNameGatedLenientFormats:
         text = '<tool_call>{"name": "read_file", "arguments": {"path": "a"}}</tool_call>'
         assert parse_tool_calls(text)[0].args == {"path": "a"}
 
+    def test_llama3_parameters_alias(self):
+        text = '<tool_call>{"name": "read_file", "parameters": {"path": "a"}}</tool_call>'
+        assert parse_tool_calls(text)[0].args == {"path": "a"}
+
+    def test_bare_llama3_parameters_call(self):
+        text = '{"name": "read_file", "parameters": {"path": "a"}}'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert [(c.name, c.args) for c in calls] == [("read_file", {"path": "a"})]
+
     def test_prose_with_braces_ignored_even_gated(self):
         assert parse_tool_calls("normal answer with {braces}",
                                 tool_names=self.TOOLS) == []
@@ -308,6 +317,11 @@ class TestLenientFlag:
 
     def test_json_fence_with_the_arguments_alias_is_not_lenient(self):
         text = self.F + 'json\n{"name": "tree", "arguments": {}}\n' + self.F
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_json_fence_with_the_parameters_alias_is_not_lenient(self):
+        text = self.F + 'json\n{"name": "tree", "parameters": {}}\n' + self.F
         calls = parse_tool_calls(text, tool_names=self.TOOLS)
         assert calls[0].lenient is False
 
