@@ -550,6 +550,38 @@ class TestShareLoadedModels:
         assert res["content"][0]["text"] == "reply-from-plain"
         assert "plain" in engines.made
 
+    def test_a_peer_that_fails_the_request_itself_is_replaced_by_a_local_load(
+            self, reg, tmp_path, monkeypatch):
+        p = _Peer(answers=0, then="drop")
+        _advertise(reg, tmp_path, monkeypatch, p)
+        engines = _cache(lazy=True, share_loaded=True)
+        res = _call(engines, "chat", {"prompt": "hi"})
+        assert len(p.bodies) == 1, "the request went to the peer first"
+        assert res["content"][0]["text"] == "reply-from-plain"
+        assert engines.made["plain"].loaded and engines.resident == ["plain"]
+        assert engines.get_chat("plain") is engines.made["plain"]
+
+    def test_a_local_load_that_fails_after_the_peer_failed_leaves_nothing_resident(
+            self, reg, tmp_path, monkeypatch):
+        p = _Peer(answers=0, then="drop")
+        _advertise(reg, tmp_path, monkeypatch, p)
+        made = {}
+        engines = EngineCache("plain", share_loaded=True, engine_factory=lambda n: made.setdefault(
+            n, _LazyEngine(n, fails_to_load=True)))
+        res = _call(engines, "chat", {"prompt": "hi"})
+        assert engines.resident == [], "a model that failed to load is listed as resident"
+        assert res["isError"] is True
+        assert "plain could not be loaded" in res["content"][0]["text"]
+
+    def test_a_copy_loaded_here_in_place_of_a_peer_is_loaded_and_pinned(self, peer):
+        engines = _cache(lazy=True, share_loaded=True)
+        peer_engine = engines.get_chat("plain")
+        assert engines.is_peer(peer_engine)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            local = engines.load_here_instead_of("plain", peer_engine)
+        assert local.loaded and local.active_requests == 1
+        assert not engines.is_peer(peer_engine) and engines.resident == ["plain"]
+
 
 def _tool_call(name, **args):
     return "<tool_call>" + json.dumps({"name": name, "args": args}) + "</tool_call>"

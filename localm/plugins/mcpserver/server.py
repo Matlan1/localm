@@ -281,11 +281,15 @@ class EngineCache:
                              current_known=known)
 
     def get_chat(self, name: str):
-        """The engine to answer a chat with model *name*: another localm
-        instance's already-loaded copy when ``share_loaded`` and one is
-        available, else this server's own (see get)."""
+        """The engine to answer a chat with model *name*: this server's own
+        copy when it has one loaded; otherwise, when ``share_loaded``, another
+        localm instance's already-loaded copy if one is available; else this
+        server's own (see get)."""
         with self._lock:
-            if self.share_loaded:
+            own = self._engines.get(name)
+            own_loaded = (own is not None and getattr(own, "loaded", False) is True
+                          and getattr(own, "unloading", False) is not True)
+            if self.share_loaded and not own_loaded:
                 peer = self._peers.get(name) or self._peer_engine(name)
                 if peer is not None:
                     return peer
