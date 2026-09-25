@@ -8,7 +8,7 @@ import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDange
 import { t, tOr } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
-import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, syncIndexSpaceHint, syncPerfCtxHelp } from "../app/settings-perf.js";
+import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -1633,6 +1633,73 @@ export async function refreshSettingsPage() {
     const grid = el("div", "settings-fields");
     for (const c of sec.ctrls) grid.appendChild(c.node);
     panel.appendChild(grid);
+
+    if (sec.label === "Voice") {
+      const sttBox = el("div", "media-comfy-box voice-model-setup-box");
+      sttBox.appendChild(subCardHead("Speech model setup", "mic", "cat-violet"));
+      const sttStatus = el("div", "sub voice-setup-status", "Checking speech model status...");
+      const sttActions = el("div", "actions");
+      sttActions.style.marginTop = "0.5rem";
+      const sttBtn = el("button", "btn-secondary voice-download-model-btn", "Download speech model");
+      sttBtn.type = "button";
+      sttBtn.style.display = "none";
+      sttActions.appendChild(sttBtn);
+      sttBox.appendChild(sttStatus);
+      sttBox.appendChild(sttActions);
+      panel.appendChild(sttBox);
+
+      const updateSttStatus = async () => {
+        try {
+          const r = await fetch("/api/voice/status", { headers: authHeaders() });
+          if (!r.ok) {
+            sttStatus.textContent = "Speech-to-text plugin is not active.";
+            sttBtn.style.display = "none";
+            return;
+          }
+          const data = await r.json();
+          if (data.model_cached) {
+            sttStatus.textContent = "Speech model (" + (data.model || "Whisper") + ") is downloaded and ready.";
+            sttBtn.textContent = "Re-download speech model";
+            sttBtn.style.display = "";
+          } else {
+            sttStatus.textContent = "Speech model (" + (data.model || "Whisper") + ") is not downloaded yet." +
+              (data.reason ? " " + data.reason : "");
+            sttBtn.textContent = "Download speech model now";
+            sttBtn.style.display = "";
+          }
+        } catch {
+          sttStatus.textContent = "Could not check speech model status.";
+        }
+      };
+      updateSttStatus();
+
+      sttBtn.onclick = async () => {
+        sttBtn.disabled = true;
+        sttBtn.textContent = "Downloading speech model...";
+        try {
+          const r = await fetch("/api/voice/model/download", {
+            method: "POST", headers: authHeaders(),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.detail || r.statusText);
+          if (d.job_id) {
+            toast("Downloading the speech model...");
+            let lastLine = "";
+            const end = await streamJob(d.job_id, (line) => { lastLine = line; });
+            if (end.status !== "done" || /^error:/i.test(lastLine)) {
+              throw new Error(lastLine.replace(/^error:\s*/i, "") || "download did not complete");
+            }
+          }
+          toast("Speech model ready");
+        } catch (err) {
+          toast("Speech model download failed: " + (err.message || err), true);
+        } finally {
+          sttBtn.disabled = false;
+          await updateSttStatus();
+        }
+      };
+    }
+
     const actions = el("div", "actions");
     const save = el("button", "btn-primary settings-section-save", "Save " + (heading || sec.label));
     save.dataset.sec = sec.id;
@@ -2381,6 +2448,78 @@ export async function buildTtsSection(form) {
     box.appendChild(advGrid);
     panel.appendChild(box);
   }
+
+  const modelField = fields.find(f => f.key === "model") || {};
+  const currentModel = modelField.value || "onnx-community/Kokoro-82M-v1.0-ONNX";
+  const setupBox = el("div", "media-comfy-box tts-model-setup-box");
+  setupBox.appendChild(subCardHead("Voice model setup", "voice", "cat-violet"));
+  const setupStatus = el("div", "sub tts-setup-status", "Checking voice model cache...");
+  const setupActions = el("div", "actions");
+  setupActions.style.marginTop = "0.5rem";
+  const setupBtn = el("button", "btn-secondary tts-download-model-btn", "Download voice model");
+  setupBtn.type = "button";
+  setupBtn.style.display = "none";
+  setupActions.appendChild(setupBtn);
+  setupBox.appendChild(setupStatus);
+  setupBox.appendChild(setupActions);
+  panel.appendChild(setupBox);
+
+  const updateKokoroStatus = async () => {
+    if (typeof caches === "undefined") {
+      setupStatus.textContent = "Voice model caching is unavailable in an insecure context (plain HTTP). Use HTTPS or localhost to cache models.";
+      setupBtn.style.display = "none";
+      return;
+    }
+    try {
+      const c = await caches.open("transformers-cache");
+      const keys = await c.keys();
+      const cached = keys.some((req) => req.url && req.url.includes(currentModel));
+      if (cached) {
+        setupStatus.textContent = "Voice model (" + currentModel + ") is downloaded and cached in this browser.";
+        setupBtn.textContent = "Re-download / Verify model";
+        setupBtn.style.display = "";
+      } else {
+        setupStatus.textContent = "Voice model (" + currentModel + ") is not downloaded yet (~86 MB).";
+        setupBtn.textContent = "Download voice model now";
+        setupBtn.style.display = "";
+      }
+    } catch (e) {
+      setupStatus.textContent = "Could not check voice model cache: " + e.message;
+      setupBtn.style.display = "";
+    }
+  };
+  updateKokoroStatus();
+
+  setupBtn.onclick = async () => {
+    setupBtn.disabled = true;
+    setupBtn.textContent = "Downloading voice model...";
+    try {
+      if (ttsProvider && typeof ttsProvider.ready === "function") {
+        await ttsProvider.ready();
+      } else {
+        const cfgRes = await fetch("/api/tts/config", { headers: authHeaders() });
+        const cfg = cfgRes.ok ? await cfgRes.json() : {};
+        const mode = cfg.net_mode || "ask";
+        const allowOff = !!cfg.net_allow_model_downloads;
+        if (mode !== "allow" && !(mode === "off" && allowOff)) {
+          throw new Error(
+            "Voice model download needs network access (Settings -> Network) " +
+            "- the TTS plugin has not finished starting up to offer its own confirmation.");
+        }
+        const libUrl = new URL(cfg.library || "vendor/kokoro.min.js", window.location.origin + "/plugins/tts/");
+        const mod = await import(libUrl.href);
+        const dev = cfg.device && cfg.device !== "auto" ? cfg.device : "wasm";
+        const dt = cfg.dtype && cfg.dtype !== "auto" ? cfg.dtype : "fp32";
+        await mod.KokoroTTS.from_pretrained(currentModel, { dtype: dt, device: dev });
+      }
+      toast("Voice model ready in browser");
+    } catch (err) {
+      toast("Voice model setup failed: " + (err.message || err), true);
+    } finally {
+      setupBtn.disabled = false;
+      await updateKokoroStatus();
+    }
+  };
 
   const actions = el("div", "actions");
   const save = el("button", "btn-primary settings-section-save", "Save Text-to-speech");
