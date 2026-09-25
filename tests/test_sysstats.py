@@ -313,6 +313,51 @@ def test_wait_first_gives_up_at_the_probe_deadline_not_forever(monkeypatch):
         f"on a wedged driver")
 
 
+def test_stale_probe_write_discarded_after_epoch_reset(monkeypatch):
+    """A probe abandoned mid-flight (its caller moved on without waiting for
+    it) must not be able to write its reading into a LATER caller's cache.
+
+    This is the race that let tests/test_gui.py::TestStatsVramTrust
+    intermittently read a real GPU's VRAM total instead of its mock: a probe
+    started by an earlier, unmocked call can still be running when a later
+    test resets the cache and starts its own mocked probe, and an unguarded
+    write lets whichever probe finishes last win regardless of which one the
+    later test actually asked for.
+
+    Simulates the hazard directly rather than relying on real hardware
+    timing: drive _vram_probe() on an explicit thread this test can JOIN (so
+    the assertion runs only once the probe has genuinely finished, never on a
+    timing guess), block it mid-flight, call _reset_vram_probe_cache() (what
+    every test's autouse conftest fixture does) while it is still running,
+    then release it and confirm its stale reading never lands."""
+    _reset_vram_cache(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    stale_info = {"total": 999 * GB, "free": 1 * GB, "free_scope": FREE_SCOPE_DEVICE}
+
+    def _slow_stale_probe(*args, return_status=False, **kwargs):
+        entered.set()
+        release.wait(5)
+        return (stale_info, GPU_PROBE_OK) if return_status else stale_info
+
+    my_epoch = sysstats._vram_probe_epoch
+    with patch("localm.discover.vram_capacity", side_effect=_slow_stale_probe):
+        t = threading.Thread(target=sysstats._vram_probe, args=(my_epoch,),
+                             name="test-stale-vram-probe", daemon=True)
+        t.start()
+        try:
+            assert entered.wait(2), "probe never started"
+            sysstats._reset_vram_probe_cache()
+        finally:
+            release.set()
+        t.join(5)
+        assert not t.is_alive(), "stale probe thread never finished"
+
+    assert sysstats._vram_last is None, (
+        "a probe retired by _reset_vram_probe_cache still wrote its stale "
+        "reading into the cache - the epoch guard did not fence it out")
+
+
 def test_vram_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch):
     """If the OS cannot spawn the probe thread at all (e.g. thread exhaustion),
     _vram() must still never raise AND must reset the in-flight guard so a

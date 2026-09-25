@@ -167,6 +167,29 @@ _vram_last_at: float | None = None  # monotonic time of the last COMPLETED attem
 _vram_ready = threading.Event()     # set once, after the first completed attempt
                                     # lands; never cleared. Lets a one-shot caller
                                     # block for a real reading.
+_vram_probe_epoch = 0               # bumped by _reset_vram_probe_cache() to
+                                    # retire an in-flight probe; read (never
+                                    # assigned) by _vram_probe. See that
+                                    # function and _reset_vram_probe_cache.
+
+
+def _reset_vram_probe_cache() -> None:
+    """Test hook: drop the cached VRAM reading and in-flight flag, and retire
+    any probe still in flight so a late write cannot land in a later test.
+
+    Mirrors :func:`localm.discover._reset_gpu_probe_cache` for the identical
+    hazard one layer up: :func:`_vram_probe` runs on an abandoned-not-cancelled
+    background thread, so clearing the globals alone does not stop a slow
+    unmocked probe from writing its reading afterwards. Bumping the epoch makes
+    that write a no-op - see :func:`_vram_probe`."""
+    global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
+    global _vram_ready
+    with _vram_lock:
+        _vram_last = None
+        _vram_last_at = None
+        _vram_inflight = False
+        _vram_probe_epoch += 1
+        _vram_ready = threading.Event()
 
 
 def _compute_vram() -> dict:
@@ -257,7 +280,7 @@ def _compute_vram() -> dict:
     return {"vram": vram}
 
 
-def _vram_probe() -> None:
+def _vram_probe(my_epoch: int) -> None:
     """The actual (blocking) vram_capacity() call, which drives list_gpus()'s
     out-of-process torch probe. Runs on its OWN single-flighted daemon thread,
     started by :func:`_vram` - never call this directly.
@@ -271,11 +294,12 @@ def _vram_probe() -> None:
     advances on a raised exception too, so a persistently erroring probe backs
     off at the same cadence as a healthy one.
 
-    This has no epoch/retirement guard against a straggler thread writing late,
-    and needs none: it calls vram_capacity() and blocks on IT, and
-    vram_capacity() is guaranteed by list_gpus()'s own deadline to return within
-    that bounded deadline, so this thread can never become an abandoned
-    straggler."""
+    list_gpus()'s own deadline bounds this call so it can never HANG - but
+    bounded is not fast, and a cold or contended probe can still land well
+    after its caller has moved on. *my_epoch* is the :data:`_vram_probe_epoch`
+    this probe claimed when :func:`_vram` started it; a mismatch at write time
+    means :func:`_reset_vram_probe_cache` retired it in the meantime, so its
+    reading is discarded instead of racing whatever probe holds the slot now."""
     global _vram_inflight, _vram_last, _vram_last_at
     computed = None
     try:
@@ -284,6 +308,11 @@ def _vram_probe() -> None:
         from localm.debuglog import logger
         logger.debug("_vram: probe raised unexpectedly: %s", e)
     with _vram_lock:
+        if _vram_probe_epoch != my_epoch:
+            from localm.debuglog import logger
+            logger.debug("_vram: discarding probe result from retired epoch "
+                         "%s (current %s)", my_epoch, _vram_probe_epoch)
+            return
         if computed is not None:
             _vram_last = computed
         _vram_last_at = time.monotonic()
@@ -312,6 +341,7 @@ def _vram(wait_first: bool = False) -> dict:
     global _vram_inflight
     now = time.monotonic()
     start_probe = False
+    my_epoch = 0
     with _vram_lock:
         stale = (_vram_last_at is None
                  or now - _vram_last_at >= _VRAM_REFRESH_INTERVAL_S)
@@ -319,11 +349,12 @@ def _vram(wait_first: bool = False) -> dict:
         if stale and not _vram_inflight:
             _vram_inflight = True
             start_probe = True
+            my_epoch = _vram_probe_epoch
         last = _vram_last
     if start_probe:
         try:
-            threading.Thread(target=_vram_probe, name="localm-vram-probe",
-                             daemon=True).start()
+            threading.Thread(target=_vram_probe, args=(my_epoch,),
+                             name="localm-vram-probe", daemon=True).start()
             probe_running = True
         except Exception as e:
             # Could not spawn the probe thread: clear the in-flight guard so a

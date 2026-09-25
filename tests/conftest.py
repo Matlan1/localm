@@ -835,6 +835,21 @@ def _reset_gpu_probe_cache():
 
 
 @pytest.fixture(autouse=True)
+def _reset_vram_probe_cache():
+    """sysstats._vram() keeps its own last-completed-reading cache one layer
+    above discover.list_gpus()'s (see ``_reset_gpu_probe_cache`` above), with
+    the identical abandoned-not-cancelled hazard: a probe a test never waited
+    on can still write its reading into a later test's window.
+    ``sysstats._reset_vram_probe_cache()`` clears the cache and bumps its own
+    probe epoch so that late write is a no-op. Runs before and after every
+    test so each starts from a cold probe."""
+    from localm import sysstats
+    sysstats._reset_vram_probe_cache()
+    yield
+    sysstats._reset_vram_probe_cache()
+
+
+@pytest.fixture(autouse=True)
 def _neutralise_backend_vram_query():
     """loader.gpu_memory() reads the ACTIVE ggml backend's free VRAM (the signal
     GgufBackend._free_vram_bytes prefers). Once a real_gguf-gated test has RUN
