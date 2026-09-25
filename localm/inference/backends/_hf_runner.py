@@ -263,11 +263,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
     ``llamacpp/_runner.py``'s ``_control_loop``, minus the load-cancel
     message HF does not support (``spawn_and_load`` below takes no
     ``cancel_event``)."""
-    from localm.debuglog import attach_child_logging
+    from localm.debuglog import attach_child_logging, logger
     attach_child_logging()   # native/tokenizer failure diagnostics land in
                               # the shared debug log from this process too.
 
-    from localm._mp_spawn import (ignore_interrupt_signals,
+    from localm._mp_spawn import (add_venv_dll_directories,
+                                   ignore_interrupt_signals,
                                    install_parent_death_watchdog,
                                    suppress_native_error_dialogs)
     install_parent_death_watchdog()   # die with the parent even on a hard kill
@@ -281,6 +282,13 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
     suppress_native_error_dialogs()   # a native DLL failure here (torch/CUDA/
                                        # ROCm init) must degrade to a catchable
                                        # exception, never a blocking modal dialog.
+    # Before anything below can import torch: this worker runs as the BASE
+    # interpreter, so torch would look for the venv's Library/bin, where an Intel
+    # XPU torch's oneAPI runtime DLLs live, under the base install (#1989).
+    dll_dirs = add_venv_dll_directories()
+    if dll_dirs:
+        logger.debug("hf worker: added the venv's DLL directories: %s",
+                     ", ".join(dll_dirs))
 
     from localm.inference.backends._hf_worker import HFWorker
     from localm.inference.backends.base import (

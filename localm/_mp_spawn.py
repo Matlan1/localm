@@ -45,6 +45,18 @@ directly-duplicated handle lands in the same process that actually uses it.
 bug above; only ``sys._base_executable`` (which also assumes a basename) is
 wrong. Calling this when NOT running under a renamed launcher is a harmless
 no-op: it repoints at the interpreter that is already running, one hop earlier.
+
+The cost of the redirect: a worker started this way IS the base interpreter,
+not the venv. Its ``sys.prefix``/``sys.exec_prefix`` name the base install and
+the venv reaches it only as the ``sys.path`` multiprocessing hands it, so
+anything that locates the venv through the interpreter looks in the wrong
+place. (CPython's own route to a venv child sets ``__PYVENV_LAUNCHER__`` for
+it, but only when multiprocessing launches ``sys._base_executable`` itself,
+which this redirect bypasses. Nor does the worker inherit the variable from
+its parent: an interpreter clears it from its own environment at startup.)
+Below, ``interpreter_for_localm_children`` picks the interpreter for a
+worker's own subprocesses and ``add_venv_dll_directories`` registers the
+venv's DLL directories for it.
 """
 
 from __future__ import annotations
@@ -54,7 +66,7 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 # Set inside a worker process once the parent-death watchdog thread is running,
 # so a second call in the same process is a no-op.
@@ -67,6 +79,11 @@ _native_error_dialogs_suppressed = False
 # Set once console interrupts have been made harmless in this process. Same
 # per-process scoping rationale as the watchdog flag above.
 _interrupts_ignored = False
+
+# The os.add_dll_directory handles add_venv_dll_directories registered in this
+# process, keyed by normalised directory. Held for the life of the process:
+# closing a handle takes its directory off the search path again.
+_venv_dll_directories: dict = {}
 
 
 # NTSTATUS exit codes a native crash produces on Windows, where there are no
@@ -256,6 +273,21 @@ def interpreter_for_localm_children() -> str:
     venv is found (a system-python setup with localm on ``PYTHONPATH``)."""
     if sys.prefix != sys.base_prefix:
         return sys.executable
+    for root in _venv_roots_on_sys_path():
+        cand = (root / "Scripts" / "python.exe"
+                if sys.platform == "win32" else root / "bin" / "python")
+        if cand.is_file():
+            return str(cand)
+    return sys.executable
+
+
+def _venv_roots_on_sys_path() -> Iterator[Path]:
+    """Each venv root (the directory holding ``pyvenv.cfg``) that a
+    ``site-packages`` entry of ``sys.path`` belongs to, in ``sys.path`` order.
+
+    This is how a spawned worker finds the venv it serves: it runs as the base
+    interpreter (see the module docstring), so the venv is visible only in the
+    ``sys.path`` multiprocessing hands it, never in its own ``sys.prefix``."""
     for entry in sys.path:
         p = Path(entry)
         if p.name.lower() != "site-packages":
@@ -264,11 +296,66 @@ def interpreter_for_localm_children() -> str:
         # <venv>/lib/pythonX.Y/site-packages (3 levels up). pyvenv.cfg marks the root.
         for root in list(p.parents)[:3]:
             if (root / "pyvenv.cfg").is_file():
-                cand = (root / "Scripts" / "python.exe"
-                        if sys.platform == "win32" else root / "bin" / "python")
-                if cand.is_file():
-                    return str(cand)
-    return sys.executable
+                yield root
+
+
+def add_venv_dll_directories() -> list[str]:
+    """Register the venv's DLL directories in THIS worker, the ones torch
+    registers in a process started from the venv. Returns the directories this
+    call added.
+
+    torch finds them through the interpreter: on Windows, before loading its own
+    DLLs, it registers ``<sys.exec_prefix>/Library/bin`` and
+    ``<sys.exec_prefix>/bin`` with ``os.add_dll_directory``. ``Library/bin`` is
+    where wheels that ship DLLs as data files install them, and that is the
+    whole Intel oneAPI runtime a ``+xpu`` torch depends on (``intel-sycl-rt``'s
+    ``sycl*.dll``, ``umf``, ``tcmlib``, the Unified Runtime loader and its
+    Level Zero adapter, oneMKL). In a worker, ``sys.exec_prefix`` is the base
+    install (see the module docstring), so ``import torch`` on an Intel XPU
+    install failed there with ``[WinError 126] ... Error loading
+    "...c10_xpu.dll" or one of its dependencies``, while the same import worked
+    in the server process (GitHub issue #1989).
+
+    This registers the same two directories under the venv found on
+    ``sys.path`` (:func:`_venv_roots_on_sys_path`), and nothing else: ``PATH``
+    is left alone, as torch leaves it in a process started from the venv.
+
+    Call at the top of a worker's process-main, before anything imports torch.
+    Only the HF worker calls it: it is the worker that runs torch. The GGUF
+    worker in particular keeps its search path as it is, because these
+    directories would put the oneAPI runtime an XPU torch installs on the
+    search path of the SYCL llama.cpp runtime, which ships its own copies of
+    many of the same DLLs (see ``discover._torch_gpu_probe_known_doomed``).
+
+    Windows-only. A no-op in a process already running from the venv (torch
+    registers these itself there), when no venv is on ``sys.path``, and for a
+    directory that does not exist. Idempotent, and never raises: a directory
+    that cannot be registered is skipped, and the import then fails as it did
+    without this call."""
+    if sys.platform != "win32" or sys.prefix != sys.base_prefix:
+        return []
+    add = getattr(os, "add_dll_directory", None)
+    if add is None:
+        return []
+    try:
+        root = next(_venv_roots_on_sys_path(), None)
+    except Exception:
+        return []   # an unreadable or odd sys.path entry: leave the worker as it was
+    if root is None:
+        return []
+    added = []
+    for d in (root / "Library" / "bin", root / "bin"):
+        key = os.path.normcase(str(d))
+        if key in _venv_dll_directories:
+            continue
+        try:
+            if not d.is_dir():
+                continue
+            _venv_dll_directories[key] = add(str(d))
+        except OSError:
+            continue
+        added.append(str(d))
+    return added
 
 
 def install_parent_death_watchdog() -> bool:
