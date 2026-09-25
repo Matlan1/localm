@@ -16,8 +16,10 @@ The five:
   worker_spawn   a real multiprocessing "spawn" round trip (a plain subprocess
                  probe passes when this is broken)
   venv           a real ``-m venv`` plus a pip-landed check
-  hf_backend     transformers' lazy classes really resolve (`import
-                 transformers` can succeed while every model load dies)
+  hf_backend     torch and transformers import and transformers' lazy classes
+                 really resolve (`import transformers` can succeed while every
+                 model load dies), in a worker spawned the way a model load
+                 spawns one
 
 The narrower reads a surface already has - VRAM, the GPU list, the installed
 backend, plugin pip extras, the Python version, package versions - are NOT here.
@@ -30,13 +32,18 @@ have to strip it. Findings carry plain text plus the two decorations the
 terminal renderer needs (an inline ``note``, indented ``hints``), so the CLI
 renders markup and the GUI shows the same sentences without it.
 
-RUNNING THIS IN A SERVER PROCESS IS NOT THE SAME AS RUNNING IT IN A FRESH ONE.
-``check_hf_backend`` imports torch and transformers, which on this project's
-Windows + AMD ROCm build is the known-doomed DLL-identity conflict once
-llama.cpp's native runtime is already loaded in the same process (see
-VramSizingMixin._free_total_vram_bytes). ``run_report_isolated`` therefore runs
-the whole set in a child interpreter, which is also what makes a GUI answer
-comparable to a terminal ``localm doctor`` run - that is a fresh process too.
+NOTHING HERE IMPORTS TORCH IN THE CALLING PROCESS. ``check_hf_backend`` imports
+torch and transformers in a worker spawned the way an HF model load spawns one,
+the only place the answer means anything: an import that works in the caller
+can fail in that worker (GitHub issue #1989). That also keeps the import out of
+a process holding llama.cpp's native runtime, where on this project's Windows +
+AMD ROCm build it is the known-doomed DLL-identity conflict (see
+VramSizingMixin._free_total_vram_bytes).
+
+A server still runs the set through ``run_report_isolated``, in a child
+interpreter: the checks spawn processes and can take minutes, and a terminal
+``localm doctor`` run is a fresh process too, which keeps the two answers
+comparable.
 """
 
 from __future__ import annotations
@@ -198,9 +205,14 @@ PROBE_TIMEOUT_S = 120.0        # the ABI probe's own subprocess
 VENV_TIMEOUT_S = 60.0          # `-m venv`
 VENV_PIP_TIMEOUT_S = 30.0      # the follow-up `-m pip --version`
 SPAWN_REPLY_TIMEOUT_S = 20.0   # waiting for the spawned child's one message
-SPAWN_JOIN_TIMEOUT_S = 5.0     # joining it, twice (once after terminate)
-# Headroom for everything with no timeout of its own: interpreter startup, the
-# localm import, and `import torch` + `import transformers` on a cold filesystem.
+SPAWN_JOIN_TIMEOUT_S = 5.0     # one join of a spawned child: the spawn check
+                               # joins twice (once after terminate), the HF
+                               # probe up to three times (once more after kill)
+HF_PROBE_TIMEOUT_S = 120.0     # the HF probe's worker, start to verdict: its
+                               # startup, `import torch` + `import transformers`
+                               # and the lazy classes, on a cold filesystem
+# Headroom for everything with no timeout of its own: interpreter startup and
+# the localm import.
 UNBOUNDED_HEADROOM_S = 120.0
 
 
@@ -208,6 +220,7 @@ def worst_case_run_seconds() -> float:
     """Every bounded step's ceiling, plus headroom for the unbounded ones."""
     return (PROBE_TIMEOUT_S + VENV_TIMEOUT_S + VENV_PIP_TIMEOUT_S
             + SPAWN_REPLY_TIMEOUT_S + 2 * SPAWN_JOIN_TIMEOUT_S
+            + HF_PROBE_TIMEOUT_S + 3 * SPAWN_JOIN_TIMEOUT_S
             + UNBOUNDED_HEADROOM_S)
 
 
@@ -527,55 +540,241 @@ def check_venv_creation() -> CheckResult:
 
 _HF_LABEL = "HF (transformers) backend"
 
+# What an HF model load imports, in the order it imports them.
+_HF_PACKAGES = ("torch", "transformers")
 
-def _import_hf_modules():
-    """Import torch and transformers for ``check_hf_backend``, or report why not.
+# The lazily imported classes hf.py loads models through. Resolving them is the
+# test, not importing transformers; see check_hf_backend.
+_HF_LAZY_CLASSES = ("AutoTokenizer", "AutoProcessor", "AutoModelForCausalLM")
 
-    Returns ``(torch_mod, transformers_mod, reason)``; a None module always comes
-    with a reason, because "the optional backend is not installed" and "importing
-    it would crash this process" are different facts and only the second is
-    something to act on.
+# The longest root-cause message the probe sends back. Real ones are a line or
+# two; this keeps a pathological one from swamping the report.
+_HF_PROBE_MESSAGE_MAX = 1000
 
-    The native_lib_loaded() guard is the same one doctor applies at its own torch
-    call sites: once llama.cpp's native runtime is resident, ``import torch`` on
-    this project's Windows + AMD ROCm build reliably hits
-    STATUS_ENTRYPOINT_NOT_FOUND. A torch ALREADY in sys.modules is a plain cache
-    hit and cannot trigger it, so that case is kept."""
-    torch_mod = None
-    reason = ""
-    if "torch" in sys.modules:
-        torch_mod = sys.modules["torch"]
-    else:
+# How often the wait for the probe's next message checks whether the worker is
+# still alive.
+_HF_PROBE_POLL_S = 0.25
+
+# Where every HF-backend finding was established. It is the point of the check:
+# a model loads in such a worker, never in the process that runs doctor.
+_HF_WHERE = "in a spawned model worker"
+
+
+def _hf_packages_missing() -> str:
+    """Why the HF backend counts as absent, or "" when both of its packages are
+    present.
+
+    Looked up, never imported: importing them in this process is what
+    ``check_hf_backend`` exists not to do. A package this process already holds
+    counts as present, and a None entry in ``sys.modules`` (import blocked)
+    counts as absent. A lookup that raises is no evidence of absence, so the
+    worker gets to say what is wrong."""
+    import importlib.util
+    for name in _HF_PACKAGES:
         try:
-            from localm.inference.backends.llamacpp import _loader
-            native_loaded = _loader.native_lib_loaded()
+            found = importlib.util.find_spec(name) is not None
         except Exception:
-            native_loaded = False
-        if native_loaded:
-            return (None, None,
-                    "skipped - llama.cpp's native runtime is already loaded in "
-                    "this process, so importing torch here is the known-doomed "
-                    "DLL-identity conflict")
-        try:
-            import torch as _torch
-            torch_mod = _torch
-        except Exception as e:
-            reason = f"torch is not usable here ({type(e).__name__}: {e})"
-    if torch_mod is None:
-        return None, None, reason or "torch is not installed"
+            found = True
+        if not found:
+            return (f"{name} is not installed - the HF backend is optional "
+                    "(torch + transformers)")
+    return ""
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    """The bottom of *exc*'s ``__cause__``/``__context__`` chain.
+
+    transformers' lazy loader re-raises a failed submodule import as a generic
+    ModuleNotFoundError chained onto the real cause, and that can repeat several
+    layers deep, so what a caller catches names a wrapper rather than the fault.
+    A chain that loops back on itself ends at its last new link."""
+    root = exc
+    seen = {id(root)}
+    while True:
+        nxt = root.__cause__ or root.__context__
+        if nxt is None or id(nxt) in seen:
+            return root
+        root = nxt
+        seen.add(id(root))
+
+
+def _hf_backend_probe(conn) -> None:
+    """Target of ``check_hf_backend``'s worker - runs ONLY in the spawned child,
+    and module-level for the same reason as ``_worker_spawn_probe``.
+
+    Starts the way the real HF worker starts (the shared
+    ``_hf_runner.prepare_worker_process``), then does what a model load does
+    first: import torch, import transformers, resolve the lazy classes.
+
+    Sends ``("step", name)`` before each step, so a parent that never hears back
+    can still say where the worker hung or died, then one verdict: ``("ok",)``
+    or ``("error", step, type name, message)`` naming the root cause. Only
+    strings cross the pipe: an exception from torch or transformers need not
+    survive pickling."""
+    import importlib
+
+    step = ""
+
+    def begin(name: str) -> None:
+        nonlocal step
+        step = name
+        conn.send(("step", name))
+
     try:
-        import transformers as _tf
+        begin("worker startup")
+        from localm.inference.backends._hf_runner import prepare_worker_process
+        prepare_worker_process()
+        begin("import torch")
+        importlib.import_module("torch")
+        begin("import transformers")
+        transformers = importlib.import_module("transformers")
+        for name in _HF_LAZY_CLASSES:
+            begin(f"transformers.{name}")
+            getattr(transformers, name)
     except Exception as e:
-        return torch_mod, None, (f"transformers is not usable here "
-                                 f"({type(e).__name__}: {e})")
-    return torch_mod, _tf, ""
+        root = _root_cause(e)
+        conn.send(("error", step, type(root).__name__,
+                   str(root)[:_HF_PROBE_MESSAGE_MAX]))
+    else:
+        conn.send(("ok",))
+    finally:
+        conn.close()
+
+
+def _reap(proc, *, grace: float) -> None:
+    """See *proc* gone: *grace* seconds to exit by itself, then terminate, then
+    kill, each followed by a bounded join. Never raises: it runs on the way out
+    of a check that must still report."""
+    try:
+        if grace > 0:
+            proc.join(grace)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(SPAWN_JOIN_TIMEOUT_S)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(SPAWN_JOIN_TIMEOUT_S)
+    except Exception:
+        pass
+
+
+def _run_hf_backend_probe(timeout: float) -> dict:
+    """Run ``_hf_backend_probe`` in a worker spawned the way the HF backend
+    spawns its own (``ensure_spawn_uses_venv_python`` and the "spawn" context,
+    as in ``HFRunner._spawn``), and say what came of it.
+
+    Returns ``{"outcome": ..., "step": ...}``, where ``step`` is the last step
+    the worker announced ("" if none), plus, per outcome:
+
+      ok         nothing more
+      error      ``type`` and ``message``: the root cause of the failed step
+      died       ``exitcode``: the worker exited without a verdict
+      timeout    nothing more: no verdict within *timeout*, and it was killed
+      unstarted  ``message``: the worker could not be started
+
+    Waits at most *timeout* for the verdict and then reaps the worker in bounded
+    joins, so a hung import costs doctor a bounded wait, never a hang. This
+    process holds both ends of the pipe throughout, so a dead worker shows up
+    through ``is_alive()`` and never as a read that blocks."""
+    import time
+
+    from localm._mp_spawn import ensure_spawn_uses_venv_python
+
+    parent_conn = child_conn = None
+    try:
+        ensure_spawn_uses_venv_python()
+        ctx = mp.get_context("spawn")
+        parent_conn, child_conn = mp.Pipe(duplex=False)
+        proc = ctx.Process(target=_hf_backend_probe, args=(child_conn,),
+                           name="localm-doctor-hf-probe", daemon=True)
+        proc.start()
+    except Exception as e:
+        for conn in (parent_conn, child_conn):
+            if conn is not None:
+                conn.close()
+        return {"outcome": "unstarted", "step": "",
+                "message": f"{type(e).__name__}: {e}"}
+
+    step = ""
+    verdict = None
+    timed_out = False
+    deadline = time.monotonic() + timeout
+    try:
+        while verdict is None:
+            wait = min(max(deadline - time.monotonic(), 0.0), _HF_PROBE_POLL_S)
+            if parent_conn.poll(wait):
+                msg = parent_conn.recv()
+                if msg[0] == "step":
+                    step = msg[1]
+                else:
+                    verdict = msg
+            elif not proc.is_alive():
+                # Whatever it sent before exiting is still in the pipe.
+                if not parent_conn.poll():
+                    break
+            elif time.monotonic() >= deadline:
+                timed_out = True
+                break
+    finally:
+        # Only a worker that has answered is left to exit by itself. Any other
+        # one, hung or abandoned by an interrupted wait, is stopped at once.
+        _reap(proc, grace=SPAWN_JOIN_TIMEOUT_S if verdict is not None else 0.0)
+        parent_conn.close()
+        child_conn.close()
+
+    if verdict is not None and verdict[0] == "ok":
+        return {"outcome": "ok", "step": step}
+    if verdict is not None:
+        _, step, type_name, message = verdict
+        return {"outcome": "error", "step": step, "type": type_name,
+                "message": message}
+    if timed_out:
+        return {"outcome": "timeout", "step": step}
+    return {"outcome": "died", "step": step, "exitcode": proc.exitcode}
+
+
+def _hf_probe_findings(probe: dict, timeout: float) -> list:
+    """What ``_run_hf_backend_probe``'s report says about the backend."""
+    outcome = probe.get("outcome")
+    step = probe.get("step") or ""
+    unusable = ("HF backend (transformers) is installed but UNUSABLE - every HF "
+                "model load will fail: ")
+    if outcome == "ok":
+        return [Finding(OK, "HF backend (transformers): AutoTokenizer / "
+                            "AutoProcessor / AutoModelForCausalLM load OK",
+                        note=_HF_WHERE)]
+    if outcome == "error":
+        hints = ()
+        if step.startswith("import "):
+            # Where someone will check next, and where it works (#1989).
+            hints = (f"HF models load in a separate worker process, so this can "
+                     f"fail even where `{step}` works in a terminal",)
+        return [Finding(FAIL, unusable + f"{probe.get('type')}: "
+                                          f"{probe.get('message')}",
+                        note=f"{step}, {_HF_WHERE}", hints=hints)]
+    if outcome == "died":
+        from localm._mp_spawn import describe_exit_code
+        where = f"during {step}" if step else "while starting"
+        return [Finding(FAIL, unusable + f"a spawned model worker died {where} "
+                                         f"(exit code "
+                                         f"{describe_exit_code(probe.get('exitcode'))})")]
+    if outcome == "timeout":
+        what = f"get past {step}" if step else "start"
+        return [Finding(WARN, "HF backend (transformers) not verified - a "
+                              f"spawned model worker did not {what} within "
+                              f"{int(timeout)}s and was stopped",
+                        hints=("an HF model load may hang at the same point",))]
+    return [Finding(FAIL, unusable + "a model worker could not be started "
+                                     f"({probe.get('message')})")]
 
 
 def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
                      skip_reason: str = "", resolved: bool = False
                      ) -> CheckResult:
     """Prove the HF (transformers) backend is actually USABLE, not merely
-    importable. ``localm/inference/backends/hf.py`` loads models through
+    importable, in the process a model actually loads in.
+
+    ``localm/inference/backends/hf.py`` loads models through
     ``transformers.AutoTokenizer`` / ``AutoProcessor`` / ``AutoModelForCausalLM``,
     which transformers resolves through a LAZY module: ``import transformers``
     only sets up that machinery, and a heavy submodule (e.g. distributed/fsdp)
@@ -590,44 +789,45 @@ def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
     tests/test_gpu_extra_pins.py for the version-pin guard this backs up with a
     functional one).
 
-    *resolved* says the caller already resolved the two modules and a None means
-    absent, so this must not go importing them itself. ``doctor`` passes the
-    handles its own package check produced; a standalone run leaves it False and
-    lets ``_import_hf_modules`` do the work.
+    NOT IN THIS PROCESS. A model loads in an isolated worker (``_hf_runner``),
+    which on Windows runs as the BASE interpreter with the venv handed over only
+    as ``sys.path`` (see ``localm/_mp_spawn.py``), so an import that works here
+    can fail there: an Intel XPU torch imported fine in the server and died in
+    every worker with ``[WinError 126]`` (GitHub issue #1989). The imports and
+    the class lookups therefore run in a worker spawned the same way and started
+    by the same code (``_hf_runner.prepare_worker_process``), with a bounded wait
+    and the worker killed past it (``_run_hf_backend_probe``).
+
+    *resolved* says the caller already knows whether the two packages are there,
+    and a None handle means absent. ``doctor`` passes the handles its own package
+    check produced. They count only as presence: nothing is resolved on them,
+    because this process is not where a model loads. A standalone run leaves
+    *resolved* False, and presence is looked up without importing anything.
 
     Produces NO findings when the backend is absent: an optional backend that is
     not installed is not a fault, and the terminal has always stayed silent about
     it. The reason still reaches ``summary`` for a surface that shows a row per
     check."""
     if not resolved and torch_mod is None and transformers_mod is None:
-        torch_mod, transformers_mod, skip_reason = _import_hf_modules()
-    if torch_mod is None or transformers_mod is None:
+        skip_reason = _hf_packages_missing()
+        present = not skip_reason
+    else:
+        present = torch_mod is not None and transformers_mod is not None
+    if not present:
         return CheckResult(
             key="hf_backend", label=_HF_LABEL, status=SKIPPED,
             summary=skip_reason or ("not installed - the HF backend is optional "
                                     "(torch + transformers)"),
             findings=())
+    # One read, so the wait and the finding that reports it agree.
+    timeout = HF_PROBE_TIMEOUT_S
     try:
-        for name in ("AutoTokenizer", "AutoProcessor", "AutoModelForCausalLM"):
-            getattr(transformers_mod, name)
-    except Exception as e:
-        # transformers' lazy loader re-raises a failed submodule import as a
-        # generic ModuleNotFoundError chained onto the real cause, and that can
-        # repeat several layers deep. Walk the chain to the true root.
-        root = e
-        seen = {id(root)}
-        while True:
-            nxt = root.__cause__ or root.__context__
-            if nxt is None or id(nxt) in seen:
-                break
-            root = nxt
-            seen.add(id(root))
+        probe = _run_hf_backend_probe(timeout)
+    except Exception as e:  # noqa: BLE001 - a check that errors still reports
         return _result("hf_backend", _HF_LABEL, [Finding(
-            FAIL, "HF backend (transformers) is installed but UNUSABLE "
-                  f"- every HF model load will fail: {type(root).__name__}: {root}")])
-    return _result("hf_backend", _HF_LABEL, [Finding(
-        OK, "HF backend (transformers): AutoTokenizer / AutoProcessor / "
-            "AutoModelForCausalLM load OK")])
+            WARN, "HF backend (transformers) not verified - the check itself "
+                  "errored", note=f"{type(e).__name__}: {e}")])
+    return _result("hf_backend", _HF_LABEL, _hf_probe_findings(probe, timeout))
 
 
 # ------------------------------------------------------------------ #
@@ -677,7 +877,7 @@ def run_checks(on_check_start: Optional[Callable] = None) -> list:
     logged rather than swallowed.
 
     See the module docstring before calling this from a long-lived process: it
-    imports torch and transformers.
+    spawns processes and can take minutes.
     """
     results: list = []
     total = len(CHECK_KEYS)
@@ -741,14 +941,11 @@ def run_report_isolated(*, timeout: Optional[float] = None,
                         ) -> DiagnosticsReport:
     """Run the checks in a FRESH child interpreter and parse its one JSON line.
 
-    This is what a server surface must use, for three reasons:
+    This is what a server surface must use, for two reasons:
 
-      * ``check_hf_backend`` imports torch and transformers. In a process that
-        has already loaded llama.cpp's native runtime that is the known-doomed
-        DLL-identity conflict, and the alternative (skip it) would mean the GUI
-        can never answer the question the check exists to answer.
-      * ``check_venv_creation`` takes up to 90 seconds and ``check_worker_spawn``
-        starts a process; neither belongs on a request path.
+      * ``check_venv_creation`` takes up to 90 seconds, and ``check_worker_spawn``
+        and ``check_hf_backend`` start processes; none of that belongs on a
+        request path.
       * a terminal ``localm doctor`` is itself a fresh process, so this is the
         only way the two surfaces can be expected to agree.
 
@@ -766,7 +963,8 @@ def run_report_isolated(*, timeout: Optional[float] = None,
     its stdout closes. NOTE what the kill does NOT reach: the child's own
     grandchildren (the ABI probe, the venv probe). Each of those carries its own
     shorter timeout (120s, 60s, 30s), so they self-terminate rather than leak
-    indefinitely.
+    indefinitely. The HF probe's worker also dies with the child, through the
+    parent-death watchdog every HF worker installs.
     """
     import threading
 
