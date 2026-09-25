@@ -55,6 +55,12 @@ def register(app: FastAPI, ctx) -> None:
     _memory_used_header = _hs._memory_used_header
     _capability_route_header = _hs._capability_route_header
 
+    def _compacted_header(compacted: bool) -> dict:
+        """``{"X-Localm-Context-Compacted": "1"}`` when this request's history
+        was compacted to fit the answering model's context window, else ``{}``.
+        The client's own copy of the history is unchanged."""
+        return {"X-Localm-Context-Compacted": "1"} if compacted else {}
+
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
         from localm import peer_routing
@@ -264,6 +270,7 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(400, str(e))
 
             capacity = engine.context_capacity()
+            compacted_here = False
             if (isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and len(messages) > 3):
                 buffer = max(2048, int(capacity * 0.10))
@@ -275,6 +282,7 @@ def register(app: FastAPI, ctx) -> None:
                         None, compact_messages, messages, _gen_for_compact)
                     if changed:
                         messages = list(new_messages)
+                        compacted_here = True
                         try:
                             prompt_tokens = await loop.run_in_executor(
                                 None, engine.count_messages_tokens, messages)
@@ -312,6 +320,7 @@ def register(app: FastAPI, ctx) -> None:
                         # Which model answered and why, when the choice needed
                         # explaining. No-op otherwise.
                         **_capability_route_header(route),
+                        **_compacted_header(compacted_here),
                     },
                 )
             resp = await _complete(engine, messages, reported_model, sem,
@@ -321,6 +330,8 @@ def register(app: FastAPI, ctx) -> None:
             for _hk, _hv in _memory_used_header(ctx).items():
                 resp.headers[_hk] = _hv          # same surface, non-streaming
             for _hk, _hv in _capability_route_header(route).items():
+                resp.headers[_hk] = _hv
+            for _hk, _hv in _compacted_header(compacted_here).items():
                 resp.headers[_hk] = _hv
             return resp
         finally:

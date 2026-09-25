@@ -16,7 +16,7 @@ function activateConv(window, conv) {
   runScript(window, "chat.conversations = [window.__testConv]; chat.activeId = window.__testConv.id;");
 }
 
-function setup({ routingHeader = null, models = null, active = "plain" } = {}) {
+function setup({ routingHeader = null, models = null, active = "plain", headers: extra = {} } = {}) {
   const calls = [];
   const impl = async (url, opts = {}) => {
     let body;
@@ -24,7 +24,7 @@ function setup({ routingHeader = null, models = null, active = "plain" } = {}) {
     calls.push({ url: String(url), body });
     const headers = {
       get: (k) => (k === "X-Localm-Model-Routing" && routingHeader
-        ? JSON.stringify(routingHeader) : null),
+        ? JSON.stringify(routingHeader) : (extra[k] ?? null)),
     };
     return { ok: true, status: 200, headers, json: async () => ({}), text: async () => "" };
   };
@@ -207,6 +207,39 @@ test("a conversation that outgrows the selected model asks for a roomier one ins
     "the request states the window it needs, above the selected model's");
   assert.equal(posts[0].body.pin_model, false);
   assert.equal(conv.messages[0].content, LONG, "the history is intact");
+});
+
+test("after the server compacts a conversation, the GUI compacts it itself instead of deferring again", async () => {
+  const { window, calls } = setup({ models: [
+    { name: "plain", model_type: "llm", context_length: 4096 },
+    { name: "roomy", model_type: "llm", context_length: 32768 },
+  ], headers: { "X-Localm-Context-Compacted": "1" } });
+  runScript(window, "chat.ctxMax = 4096;");
+  const conv = longConv();
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(chatPosts(calls).length, 1, "the first turn defers to the roomier model");
+  assert.equal(conv.serverCompacted, true, "the reply said the server compacted");
+  await window.runCompletion(conv);
+  const posts = chatPosts(calls);
+  assert.equal(posts.length, 3, "the second turn compacts first: summary request, then the reply");
+  assert.equal(posts[2].body.min_context, undefined, "the reply no longer asks for a roomier model");
+});
+
+test("without that header a long conversation keeps deferring to the roomier model", async () => {
+  const { window, calls } = setup({ models: [
+    { name: "plain", model_type: "llm", context_length: 4096 },
+    { name: "roomy", model_type: "llm", context_length: 32768 },
+  ] });
+  runScript(window, "chat.ctxMax = 4096;");
+  const conv = longConv();
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  await window.runCompletion(conv);
+  const posts = chatPosts(calls);
+  assert.equal(posts.length, 2, "no summarisation request on either turn");
+  assert.ok(posts[1].body.min_context > 4096);
+  assert.equal(conv.serverCompacted, undefined);
 });
 
 test("with no roomier model installed it still compacts", async () => {

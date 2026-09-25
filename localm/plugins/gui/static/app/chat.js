@@ -350,11 +350,13 @@ function convSendsImage(conv) {
  *  { minContext } for the request's `min_context`, so the server answers with
  *  that roomier model instead of the conversation being compacted. A
  *  conversation that sends an image counts only a roomier model confirmed to
- *  read images (`vision: true`). Null when the chat is pinned, when the
- *  answering model's window is unknown or big enough, or when no installed
- *  model qualifies. */
+ *  read images (`vision: true`). Null when the chat is pinned, when the server
+ *  has already compacted this conversation to fit the model that answered it
+ *  (`conv.serverCompacted`, set from the X-Localm-Context-Compacted reply
+ *  header), when the answering model's window is unknown or big enough, or when
+ *  no installed model qualifies. */
 export function contextRoutingNeed(conv, est) {
-  if (!conv || conv.pinnedModel) return null;
+  if (!conv || conv.pinnedModel || conv.serverCompacted) return null;
   const current = modelSelect.value || modelCache.active;
   const models = (modelCache && modelCache.models) || [];
   const cur = models.find((m) => m.name === current);

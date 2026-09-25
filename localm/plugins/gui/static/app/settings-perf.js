@@ -2348,6 +2348,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     }
     memUsed = parseMemoryHeader(r);   // F11: read before the body stream
     routing = parseRoutingHeader(r);
+    if (r.headers && typeof r.headers.get === "function"
+        && r.headers.get("X-Localm-Context-Compacted")) {
+      conv.serverCompacted = true;
+    }
     await readSSE(r, (payload) => {
       if (payload === "[DONE]") return;
       let chunk;

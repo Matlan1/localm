@@ -825,3 +825,40 @@ class TestCoderRoutingNote:
     def test_silent_when_its_model_has_tool_calls(self, server):
         from localm.plugins.builtin.coder import plug
         assert plug._tool_capability_note("tooly", pinned=False) == ""
+
+
+class TestServerCompactionHeader:
+    """A reply whose history the server had to compact to fit the answering
+    model says so, so a client that deferred its own compaction stops
+    deferring."""
+
+    LONG = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+            for i in range(7)]
+
+    def _force_compaction(self, monkeypatch, changed):
+        import localm.inference.compact as compact
+        monkeypatch.setattr(FakeEngine, "count_messages_tokens",
+                            lambda self, ms: 7000 if len(ms) > 3 else 100)
+        monkeypatch.setattr(compact, "compact_messages",
+                            lambda ms, gen: (ms[-2:], True) if changed else (ms, False))
+
+    def test_a_compacted_reply_carries_the_header(self, server, monkeypatch):
+        client, _engines = server
+        self._force_compaction(monkeypatch, changed=True)
+        r = _ask(client, messages=self.LONG)
+        assert r.status_code == 200
+        assert r.headers.get("X-Localm-Context-Compacted") == "1"
+
+    def test_a_compacted_stream_carries_the_header(self, server, monkeypatch):
+        client, _engines = server
+        self._force_compaction(monkeypatch, changed=True)
+        r = _ask(client, messages=self.LONG, stream=True)
+        assert r.status_code == 200
+        assert r.headers.get("X-Localm-Context-Compacted") == "1"
+
+    def test_an_uncompacted_reply_has_no_header(self, server, monkeypatch):
+        client, _engines = server
+        self._force_compaction(monkeypatch, changed=False)
+        r = _ask(client, messages=self.LONG)
+        assert r.status_code == 200
+        assert "X-Localm-Context-Compacted" not in r.headers
