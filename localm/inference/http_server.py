@@ -28,11 +28,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import AsyncIterator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
-    JSONResponse,
-    RedirectResponse,
-)
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 
 from localm import scopes
@@ -49,7 +45,6 @@ from localm.inference.backends.base import (
     UnsupportedInputError,
     VisionInputError,
 )
-from localm.inference.chat_pipeline import ChatPipeline
 from localm.inference import residency
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
@@ -3824,8 +3819,12 @@ def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = N
     threading.Thread(target=_run, daemon=True).start()
 
 
-def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAPI:
-    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _last_active_model_name, _inference_sems, _last_activity_per_model, _audit, _embedder_sem
+def _init_engine_state(engine: Optional[Engine]) -> None:
+    """Reset the engine registry for a fresh app, then publish *engine*, when
+    given, as the default and active model with its own inference semaphore.
+    First step of create_app(): every name here is a module global the route
+    groups and the model-lifecycle functions read live."""
+    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _last_active_model_name, _inference_sems, _last_activity_per_model, _embedder_sem
 
     _engines.clear()
     _engines_lru.clear()
@@ -3852,17 +3851,41 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         _engine = None
         _inference_sem = None
 
+
+def _init_session_audit():
+    """Open the server's audit log and transcript for the "server" session mode,
+    publish the audit log as the module global _audit, and return all three as
+    the AppContext create_app() hands to the route groups."""
+    global _audit
+
     # Session-persistence mode for this server (privacy -> no traces). One audit
     # log / transcript covers the server lifetime; GUI + API chat traffic flows
     # through /v1/chat/completions and lands here. _audit is published as a
-    # module global (unlike _mode/_transcript, kept local and closure-shared
-    # with the nested handlers below) because _do_restart is a separate
-    # top-level function with no closure access into this frame - without
+    # module global (unlike _mode/_transcript, which reach the route groups
+    # only on the AppContext returned below) because _do_restart is a
+    # separate top-level function with no other way to reach it - without
     # `global _audit` here, its cleanup could never reach the real object.
+    # The lifespan's shutdown closes it through the same global.
     from localm.audit import effective_mode, make_audit_log, make_transcript
     _mode = effective_mode("server")
     _audit = make_audit_log(_mode, label="server")
     _transcript = make_transcript(_mode, label="server")
+    from localm.inference.app_assembly.context import AppContext
+    return AppContext(audit=_audit, transcript=_transcript, mode=_mode)
+
+
+def _make_lifespan():
+    """The app's lifespan. Startup publishes the running loop (_server_loop),
+    sweeps expired browser sessions, installs the asyncio exception handler,
+    runs the plugins' startup callbacks and starts the background services: the
+    idle-unload loop, the heartbeat, the stack-dump watchdog, the executor
+    saturation watch, the hang alarm, the cross-install GPU registry and the
+    mmproj backfill. Most of those stay off under pytest; each guard says which.
+    Shutdown stops them, leaves the GPU registry, clears _server_loop and closes
+    the module global _audit.
+
+    It lives here, not in app_assembly, because every process-lifetime global
+    it writes belongs to this module (ADR-0023)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -4155,731 +4178,51 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             _server_loop = None
             _audit.close()
 
+    return lifespan
+
+
+def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAPI:
+    """Assemble the app. The body is the boot order; each step is one
+    app-assembly component (localm/inference/app_assembly/, ADR-0023).
+
+    Middleware is added innermost first: every add wraps what was added before
+    it, so a request passes the steps of phase 4 bottom-up.
+    tests/test_create_app_characterization.py and tests/test_app_assembly.py
+    pin the resulting stack."""
+    from localm.inference.app_assembly import (
+        context, diagnostics, errors, mounting, security, transport)
+
+    # 1. Process state: the engine registry and the server's session audit.
+    _init_engine_state(engine)
+    ctx = _init_session_audit()
+
+    # 2. The app, with the lifespan that runs the background services.
     app = FastAPI(
         title="localm inference server",
         version="0.2.0",
-        lifespan=lifespan,
+        lifespan=_make_lifespan(),
     )
 
-    # One backstop so an unexpected error in ANY route returns a consistent
-    # JSON 500 and is logged, instead of leaking a traceback or bare body. This
-    # standardises the response shape and logging so a failing request is a clean
-    # 500, never a crash or info leak. (A native fault - a C-extension segfault -
-    # cannot be caught in-process; those are prevented at the source, e.g. voice
-    # audio is validated before the native path, and surfaced via the crash marker.)
-    @app.exception_handler(Exception)
-    async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
-        from localm.debuglog import logger as _dbg
-        _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
-        return JSONResponse(status_code=500,
-                            content={"detail": "Internal server error"})
+    # 3. Exception handlers, then the app.state the middleware and routes read.
+    errors.register_exception_handlers(app)
+    context.init_app_state(app)
 
-    # A refusal carries its REASON in the HTTPException detail, and that detail
-    # is logged next to the status so a refusal is self-diagnosing from the debug
-    # log alone rather than leaving only a status and a timing.
-    #
-    # Gated on debug_enabled() like the request/timing lines it sits beside, NOT
-    # on debug_content_enabled(): an HTTPException detail is server-authored
-    # operational text (which validation refused, which capability is missing),
-    # never chat content. Nothing here reads the request body. See
-    # docs/privacy.md and the debuglog gating note in the middleware below.
-    #
-    # Registered for starlette's HTTPException (fastapi's subclasses it, and
-    # fastapi registers the starlette class as its own key), then DELEGATED to
-    # fastapi's own handler so the response - status, body shape, and any
-    # WWW-Authenticate / Retry-After headers - stays byte-identical. This is a
-    # logging seam, not a response change.
-    from starlette.exceptions import HTTPException as _StarletteHTTPException
-
-    @app.exception_handler(_StarletteHTTPException)
-    async def _log_http_exception(request, exc):  # noqa: ANN001 - framework signature
-        from fastapi.exception_handlers import http_exception_handler
-        from localm.debuglog import debug_enabled, logger as _dbg
-        if debug_enabled():
-            # Truncated: a detail can be long by design (the VRAM-overflow 503
-            # carries a multi-line "Options:" list), and the point here is to
-            # name the cause, not to mirror the whole body into the log.
-            detail = str(getattr(exc, "detail", "") or "")
-            if len(detail) > 500:
-                detail = detail[:500] + " ...[truncated]"
-            _dbg.debug("%s %s refused %d: %s", request.method,
-                       request.url.path, exc.status_code, detail)
-        return await http_exception_handler(request, exc)
-
-    from fastapi.exceptions import RequestValidationError
-
-    @app.exception_handler(RequestValidationError)
-    async def _validation_error(request, exc):  # noqa: ANN001 - framework signature
-        # A 422 body must stay serializable. pydantic records the offending value
-        # under `input`; when a client sends a NON-FINITE number (NaN / Infinity),
-        # Starlette's JSONResponse serializes the error with allow_nan=False and
-        # CRASHES into a 500 - so a bad numeric param turned a clean 422 into an
-        # unhandled 500 (live-confirmed: `top_k: NaN`, `seed: NaN`, and any float
-        # field once allow_inf_nan=False rejects it). Replace non-finite floats in
-        # the error detail so the 422 always renders. Same shape as FastAPI's
-        # default handler for every other (finite) validation error.
-        # The 422 body must also stay BOUNDED. pydantic records the offending
-        # value under `input` verbatim, so a deeply-nested body puts that nesting
-        # in the error object - and `jsonable_encoder` walks it recursively. A
-        # ~2 KB body of `[[[[...]]]]` therefore raised RecursionError INSIDE this
-        # handler, so FastAPI could not build a response at all and the documented
-        # 422 became an opaque 500. Measured: a window around 961 to ~2900 levels
-        # (shallower parses and validates cleanly; deeper is refused by the JSON
-        # parser's own depth limit first), ~0.25 s of event-loop CPU per request,
-        # and a 147x latency rise on unrelated requests under four connections.
-        # Same failure the NaN note above describes, by a different route.
-        import math
-
-        from fastapi.encoders import jsonable_encoder
-
-        _MAX_ERR_DEPTH = 20     # far past anything a real API request nests
-        _ELIDED = "...[nested value elided]"
-
-        def _depth_capped(v, depth: int = 0):
-            """Prune the error object BEFORE `jsonable_encoder` ever sees it.
-
-            The ORDER is the fix. Pruning afterwards cannot work, because the
-            encoder is what recurses: it would blow the stack before any depth
-            limit downstream of it got the chance to apply."""
-            if depth >= _MAX_ERR_DEPTH:
-                return _ELIDED
-            if isinstance(v, dict):
-                return {k: _depth_capped(x, depth + 1) for k, x in v.items()}
-            if isinstance(v, (list, tuple)):
-                return [_depth_capped(x, depth + 1) for x in v]
-            return v
-
-        def _finite_safe(v, depth: int = 0):
-            if depth >= _MAX_ERR_DEPTH:
-                return _ELIDED
-            if isinstance(v, float) and not math.isfinite(v):
-                return repr(v)      # "nan" / "inf" / "-inf"
-            if isinstance(v, dict):
-                return {k: _finite_safe(x, depth + 1) for k, x in v.items()}
-            if isinstance(v, (list, tuple)):
-                return [_finite_safe(x, depth + 1) for x in v]
-            return v
-
-        # _finite_safe runs AFTER the encoder: the encoder itself can PRODUCE a
-        # non-finite float (a Decimal("NaN") becomes float("nan")), so running it
-        # before would let a NaN reach the response and 500. Only the DEPTH prune
-        # runs ahead of the encoder.
-        try:
-            safe = _finite_safe(jsonable_encoder(_depth_capped(exc.errors())))
-        except RecursionError:
-            # SAFETY NET, not the fix: it catches a shape the prune above cannot
-            # reach (a deeply nested object that is not a dict/list/tuple, which
-            # passes through untouched and the encoder then recurses into). The
-            # prune stays: this catch still pays the full CPU cost of the
-            # recursion. Warned rather than silenced, since reaching it means a
-            # shape got past the prune.
-            from localm.debuglog import logger as _dbg
-            _dbg.warning("validation error for %s was too deeply nested to "
-                         "encode even after depth-capping; returned a 422 "
-                         "without the structured detail", request.url.path)
-            safe = []
-
-        def _field(err) -> str:
-            # Drop the "body"/"query" container so the user sees the name they
-            # actually typed ("max_tokens"), not pydantic's full path.
-            parts = [str(p) for p in (err.get("loc") or ())
-                     if p not in ("body", "query", "path", "header")]
-            return ".".join(parts) or "request"
-
-        def _one(err) -> str:
-            name = _field(err)
-            msg = (err.get("msg") or "is invalid").strip()
-            # pydantic phrases these as "Input should be X", which reads as
-            # "max_tokens input should be X" once the field name is prepended.
-            # "max_tokens must be X" is the same information, in English.
-            if msg.lower().startswith("input should be "):
-                msg = "must be " + msg[len("input should be "):]
-            elif msg[:1].isupper():
-                msg = msg[0].lower() + msg[1:]
-            # On a MISSING field pydantic reports the whole request body as
-            # `input`, so echoing it back is noise, not evidence.
-            got = ("" if err.get("type") == "missing" or "input" not in err
-                   else f" (got {err.get('input')!r})")
-            # max_tokens=0 gets its own message: it reads as a legitimate "no
-            # limit" but collides with the engine's internal unlimited sentinel,
-            # which would turn it into an unbounded generation.
-            if name == "max_tokens" and err.get("input") in (0, "0"):
-                return ("max_tokens must be 1 or more - 0 is not 'no limit'. "
-                        "Omit max_tokens entirely to use the model's default")
-            return f"{name} {msg}{got}"
-
-        # `detail` is the human sentence, because every client in this repo does
-        # `data.detail || r.statusText` and stringifying pydantic's error LIST
-        # there is what produced the unreadable dump users were shown. The
-        # structured form is preserved verbatim under `errors` for anything that
-        # wants to parse it - nothing is lost, it just stops being the thing a
-        # person reads.
-        try:
-            summary = "; ".join(_one(e) for e in (safe or []))
-        except Exception:   # never let error FORMATTING turn a 422 into a 500
-            summary = ""
-        return JSONResponse(
-            status_code=422,
-            content={"detail": summary or "Request validation failed",
-                     "errors": safe})
-
-    # Chat-pipeline hooks: plugins register inlet/stream/outlet transforms that
-    # run on every /v1/chat/completions turn. Created here so it exists before
-    # plugins load (attach_engine, below) and stays reachable as
-    # request.app.state.chat_pipeline. A pipeline with no hooks is a no-op.
-    app.state.chat_pipeline = ChatPipeline()
-
-    # Per-process "shell token": in open mode the management routes require
-    # this token, which the loopback GUI shell injects into the SPA (web.py
-    # _gui_index). It gates the no-Origin local-client path that bearer auth /
-    # the Origin guard alone do not cover. Per-process so it dies on restart;
-    # never persisted.
-    app.state.shell_token = secrets.token_urlsafe(32)
-
-    # Per-process CSRF secret. The CSRF token is a deterministic HMAC of the session
-    # id (below), so it is present exactly when the session is and CANNOT desync
-    # (the old design used a SEPARATE readable cookie a client reset could clear
-    # while the HttpOnly session survived, 403-ing every write). Per-process so it
-    # dies on restart (client re-fetches from /api/session); never persisted.
-    app.state.csrf_secret = secrets.token_urlsafe(32)
-
-    # api-mode landing: a bare `localm serve` has no GUI shell, so GET / would
-    # 404. Redirect it to the auto-generated API docs. Only on the api path so
-    # it never collides with the GUI's own "/" handler + StaticFiles catch-all.
+    # 4. Kernel routes and middleware, innermost middleware first.
     if api_landing:
-        @app.get("/", include_in_schema=False)
-        async def _api_root() -> RedirectResponse:
-            return RedirectResponse(url="/docs", status_code=307)
+        mounting.add_api_landing(app)
+    diagnostics.add_request_logging(app)     # debug mode only
+    diagnostics.add_debug_stacks(app)
+    cors_cfg = security.add_cors(app)
+    security.add_origin_guard(app, cors_cfg)
+    security.add_security_headers(app)
+    security.add_docs_loopback_gate(app)
+    transport.add_transport_middleware(app)  # outermost
 
-    # Debug mode: log every request with timing to the debug log file
-    from localm.debuglog import debug_enabled, logger as _dbg
-    if debug_enabled():
-        @app.middleware("http")
-        async def _log_requests(request, call_next):
-            start = time.perf_counter()
-            response = await call_next(request)
-            # loop_lag = real scheduling delay (_loop_lag_seconds, see the
-            # comment above _hb_monotonic) - ~0 on a healthy server, and only
-            # positive when a preceding event-loop stall pushed the last
-            # heartbeat tick late. This is NOT time-since-last-tick, which
-            # saws 0..1s even when nothing is wrong. Resolution limit: a stall
-            # shorter than _HEARTBEAT_INTERVAL_S also reads 0.0 (see
-            # _loop_lag_seconds' docstring) - 0.0 means "no stall LONGER than the
-            # interval", not "no stall at all". None (cold start, before the
-            # heartbeat's first tick) renders as "n/a", never as 0.0, so a request
-            # served during startup is not reported as identically healthy to one
-            # with a real lag measurement behind it.
-            lag = _loop_lag_seconds()
-            lag_str = f"{lag:.2f}s" if lag is not None else "n/a"
-            _dbg.debug(
-                "%s %s -> %d (%.0f ms, loop_lag=%s)",
-                request.method, request.url.path,
-                response.status_code,
-                (time.perf_counter() - start) * 1000,
-                lag_str,
-            )
-            return response
+    # 5. Route groups (localm/inference/routes/*.py).
+    mounting.mount_route_groups(app, ctx)
 
-    # Loopback-only debug endpoint: every thread's stack + the asyncio task list,
-    # for diagnosing a hang/slowdown from the SAME machine on demand. 404'd off
-    # loopback. NOTE: served ON the event loop, so it answers only while the loop
-    # is alive (a partial stall, a task backlog). A FULLY wedged loop cannot
-    # respond here at all - that case is captured by the off-loop watchdog file
-    # (LOCALM_HANG_WATCHDOG); this endpoint complements it.
-    #
-    # THREE gates, because the first one alone is not enough:
-    #   1. Depends(require_fs_host) - meaningful in PROTECTED mode (a key's
-    #      fs_access dial), but in DEFAULT KEYLESS mode effective_fs_access
-    #      returns "host" for EVERY caller, so on its own it is a tautology.
-    #   2. the open-mode shell-token gate, via _SHELL_TOKEN_GETS below - that is
-    #      what makes gate 1 non-vacuous in keyless mode.
-    #   3. the bind_host loopback check below, on app.state.bind_host (what the
-    #      server actually BOUND to) and never request.client.host: behind
-    #      portmux the request peer is always 127.0.0.1, so the peer address
-    #      cannot distinguish a loopback client from a LAN one.
-    # Frame text is path-scrubbed on the way out (see below).
-    @app.get("/debug/stacks", include_in_schema=False,
-             dependencies=[Depends(require_fs_host)])
-    async def _debug_stacks(request: Request):
-        host = getattr(request.app.state, "bind_host", "127.0.0.1")
-        if not _is_loopback_host(host):
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        import traceback
-
-        from localm.pathscrub import path_scrubber
-        # traceback.format_stack emits absolute paths ('File "<install>/localm/
-        # inference/http_server.py", line N') which name the install dir and, on
-        # a per-user install, the OS account. Redact the DIRECTORY only: the file
-        # name, line number, function and source line all survive, so this stays
-        # a usable hang diagnosis: scrubbed, not muted. Bound once
-        # rather than per string: a dump is hundreds of frames and each prefix
-        # resolve is a filesystem call.
-        scrub = path_scrubber()
-        threads = {str(tid): [scrub(line) for line in traceback.format_stack(frame)]
-                   for tid, frame in sys._current_frames().items()}
-        tasks = []
-        try:
-            for task in asyncio.all_tasks():
-                tasks.append({
-                    "name": task.get_name(),
-                    "done": task.done(),
-                    "stack": [scrub(str(f)) for f in task.get_stack(limit=20)],
-                })
-        except RuntimeError:
-            pass   # no running loop (should not happen inside an async handler)
-        # Thread-pool saturation numbers, live here too and not just in the
-        # periodic warning log, so a diagnosis in progress does not have to wait
-        # for the threshold to trip a line.
-        # This handler IS async with a running loop, so unlike the background
-        # saturation watch it can fetch anyio's default thread limiter fresh
-        # on every call - no captured reference needed for THIS consumer.
-        try:
-            from localm.inference._executor_health import executors_snapshot
-            import anyio.to_thread
-            executors = executors_snapshot(
-                asyncio.get_running_loop(),
-                anyio_limiter=anyio.to_thread.current_default_thread_limiter())
-        except Exception:
-            executors = {}
-        # None (cold start, before the heartbeat's first tick) renders as
-        # JSON null, never as 0.0, so a stack dump taken during startup is not
-        # reported as identically healthy to one taken with a real lag
-        # measurement behind it.
-        lag = _loop_lag_seconds()
-        return {"pid": os.getpid(),
-                "loop_lag_s": round(lag, 2) if lag is not None else None,
-                "threads": threads, "tasks": tasks, "executors": executors}
-
-    # CORS: localhost-only by default. A wildcard here would let ANY website
-    # the user visits call this API from browser JS and read the responses
-    # (drive-by GPU use, response exfiltration, /v1/models/unload abuse).
-    # Override with config "cors_origins": ["https://app.example"] or "*".
-    from localm.config import load_config
-    cors_cfg = load_config().get("cors_origins")
-    cors_kwargs: dict
-    if cors_cfg == "*":
-        cors_kwargs = {"allow_origins": ["*"]}
-    elif isinstance(cors_cfg, list) and cors_cfg:
-        cors_kwargs = {"allow_origins": cors_cfg}
-    else:
-        cors_kwargs = {
-            "allow_origin_regex": r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
-        }
-    app.add_middleware(
-        CORSMiddleware,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        **cors_kwargs,
-    )
-
-    # CSRF / drive-by guard. The default CORS policy admits ANY localhost:PORT
-    # origin, so without this a malicious local web page (a dev server, an npm
-    # postinstall server) could drive state-changing endpoints from the user's
-    # browser - mint a key, flip require_auth, install a plugin, load/unload the
-    # model, browse the filesystem, read files via a plugin route like /api/rag,
-    # or drive the coder via /api/coder - even keyless (open-mode scope collapse).
-    # So every unsafe-method request must be same-origin (or a configured CORS
-    # origin), EXCEPT the OpenAI-compatible inference API, left cross-origin
-    # callable for local apps. Allowlist-by-default means a new plugin route is
-    # protected the moment it is added. Non-browser clients (CLI / SDK) send no
-    # Origin; "cors_origins": "*" opts out entirely.
-    _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-    # Every entry below is a full route path, not a directory prefix - matched
-    # with str.startswith(), so a prefix entry would silently exempt every
-    # FUTURE route added under it too. Exempting a new sibling route must be a
-    # deliberate addition here, not an inheritance. Keep in sync with
-    # _BESPOKE_GATED_ROUTES. See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
-    _CROSS_ORIGIN_OK = (
-        "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
-        # Surface management (phase 5 on-demand GUI mount) is driven by a local
-        # process (the attaching `localm gui`), not the browser shell: no Origin,
-        # no shell_token. The route does its OWN strict auth (this instance's
-        # attach token, or an owner API key) - that, not the same-origin gate, is
-        # the real credential, so it is exempt. A cross-origin page still cannot
-        # set Authorization without a secret it cannot read, so no CSRF surface.
-        # Also listed in _BESPOKE_GATED_ROUTES - keep both in sync.
-        # See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
-        "/v1/surfaces/gui",
-        # Multi-instance GPU coordination (localm.gpu_registry): a SIBLING localm
-        # instance calls this loopback-only, like surface-management above - no
-        # Origin, no shell_token (different process). Its own coordination_token
-        # (never the API key/shell token) is the real credential, checked in the
-        # route, so the same-origin gate is exempt for the same reason.
-        # Also listed in _BESPOKE_GATED_ROUTES - keep both in sync.
-        # See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
-        "/v1/instances/cooperate-unload",
-    )
-    _cors_allowlist = frozenset(cors_cfg) if isinstance(cors_cfg, list) else frozenset()
-    _cors_wildcard = cors_cfg == "*"
-
-    # CWE-200: a short list of UNAUTHENTICATED GETs that disclose host
-    # detail and, unlike the /api,/v1 metadata reads below, have NO route-level
-    # auth to fall back on. The default CORS policy hands an ACAO to any
-    # http(s)://localhost:PORT origin, so without an explicit refusal a drive-by
-    # local page could read them cross-origin: /whoami leaks root_dir (an absolute
-    # path -> the OS username) on a loopback bind, and /debug/stacks leaks thread
-    # stacks. They sit OUTSIDE the /api,/v1 metadata-GET gate, so they are refused
-    # here instead - cross-origin, in EVERY mode (they are unauthenticated in
-    # protected mode too, so an open-mode-only refusal would miss them).
-    _CROSS_ORIGIN_GET_REFUSED = ("/whoami", "/debug/stacks")
-
-    # Same refusal, matched by PREFIX rather than exact path. /api/fs/* is the
-    # host filesystem browser: it enumerates the user's disk, which is host
-    # detail of exactly the kind above, and it is a GET, so it is exempt from
-    # both the CSRF gate (unsafe methods only) and the open-mode shell-token
-    # gate. The generic /api,/v1 metadata-GET gate below does cover it, but only
-    # inside the `not any_key_configured()` branch - so in PROTECTED mode a
-    # cookie-authenticated cross-origin GET would execute. SameSite=strict does
-    # not close it either: "site" ignores port, so any other page on a loopback
-    # port is same-site, which is the precise actor the comment above at the
-    # _cross_origin_refused definition names. Refused in EVERY mode instead.
-    _CROSS_ORIGIN_GET_REFUSED_PREFIXES = ("/api/fs/",)
-    # Sensitive GETs that sit OUTSIDE the /api,/v1 prefixes the open-mode
-    # shell-token gate below keys on, and so are not covered by it.
-    # /debug/stacks' own Depends(require_fs_host) is a TAUTOLOGY in keyless mode
-    # - effective_fs_access returns "host" for everyone when no key is
-    # configured - so without this list it is reachable with no credential at
-    # all. Listing it here routes it through the same shell-token + cross-origin
-    # check as a management read, which is what makes its fs-host gate mean
-    # something. /whoami is NOT here: it is the endpoint the GUI
-    # shell calls to discover whether it needs a key at all, so requiring the
-    # token to read it would be circular. Its disclosure is handled by the
-    # cross-origin refusal above and is a separate, narrower surface.
-    # NOTE: enforced only on a LOOPBACK bind - see the comment at token_gated_get
-    # below for why answering 403 off loopback would open a new oracle.
-    _SHELL_TOKEN_GETS = ("/debug/stacks",)
-
-    def _cross_origin_refused(request) -> bool:
-        """True when this request carries an Origin header that is neither
-        same-origin nor CORS-allow-listed. Shared by the CSRF check (unsafe
-        methods) and the open-mode shell-token gate: the default
-        CORS policy lets any http(s)://localhost:PORT / 127.0.0.1:PORT origin
-        READ a matching response, so a hostile local page can steal the shell
-        token from a plain cross-origin ``GET /`` and replay it - token
-        possession alone does not prove the caller IS the loopback GUI shell.
-        "cors_origins": "*" opts OUT of this specific check, same
-        as it already did for the CSRF check; it does not waive the shell-token
-        requirement itself."""
-        if _cors_wildcard:
-            return False
-        origin = request.headers.get("origin")
-        if not origin:
-            return False
-        allowlisted = origin in _cors_allowlist
-        host = request.headers.get("host", "")
-        same_origin = origin.split("://", 1)[-1] == host
-        return not (same_origin or allowlisted)
-
-    @app.middleware("http")
-    async def _origin_guard(request, call_next):
-        _path = request.url.path
-        # Cross-origin refusal (every mode): every state-changing method (CSRF),
-        # plus the sensitive GETs in _CROSS_ORIGIN_GET_REFUSED (exact) and
-        # _CROSS_ORIGIN_GET_REFUSED_PREFIXES (prefix) - host-detail disclosure,
-        # All are subject to the same same-origin / CORS-allowlist
-        # check.
-        if ((request.method in _UNSAFE_METHODS
-             or (request.method == "GET"
-                 and (_path in _CROSS_ORIGIN_GET_REFUSED
-                      or _path.startswith(_CROSS_ORIGIN_GET_REFUSED_PREFIXES))))
-                and not _path.startswith(_CROSS_ORIGIN_OK)):
-            if _cross_origin_refused(request):
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "Cross-origin request refused "
-                             "(only same-origin requests or a configured "
-                             "'cors_origins' may use this endpoint)."},
-                )
-            # Open-mode management gate. With no key configured, management
-            # routes still require the per-process shell token (injected into the
-            # loopback GUI shell), so a no-Origin local client (curl, a script)
-            # can no longer mint a key, flip config, install a plugin, load a
-            # model, or browse the filesystem unauthenticated. Protected mode (a
-            # key exists) is bearer-auth'd on the route. The token is required even
-            # for an allowlisted CORS origin: an Origin header is forgeable, so
-            # it is not a management credential - a configured external origin must
-            # use an API key for state changes.
-        is_unsafe = request.method in _UNSAFE_METHODS
-        # A _SHELL_TOKEN_GETS path is token-gated only where it is actually
-        # SERVED. /debug/stacks 404s off a loopback bind, and returning 403
-        # there instead would tell an unauthenticated NETWORK
-        # caller that the endpoint exists - a brand new existence oracle opened
-        # in the middle of closing a disclosure, since an unknown path under
-        # /debug/ 404s. So off loopback, fall through to the handler's own 404.
-        # The handler does the loopback check before computing anything, so
-        # nothing is spent serving it.
-        token_gated_get = (
-            request.method == "GET"
-            and request.url.path in _SHELL_TOKEN_GETS
-            and _is_loopback_host(
-                getattr(request.app.state, "bind_host", "127.0.0.1")))
-        is_metadata_get = token_gated_get or (
-            request.method == "GET"
-            and (request.url.path.startswith("/api/")
-                 or request.url.path.startswith("/v1/"))
-            and request.url.path != "/api/session"
-            and not request.url.path.startswith("/v1/models")
-        )
-        if (is_unsafe or is_metadata_get) and not request.url.path.startswith(_CROSS_ORIGIN_OK):
-            from localm.auth import (any_key_configured, ct_equal,
-                                     require_auth_enabled)
-            if not any_key_configured() and not require_auth_enabled():
-                token = getattr(request.app.state, "shell_token", None)
-                # A keyless LOCAL process (`localm status`, the MCP
-                # server_activity tool) has no way to obtain shell_token - it is
-                # per-process, never persisted, and only ever injected into the
-                # browser-served SPA. It DOES already have this instance's own
-                # attach token (instances.py's per-instance registry file,
-                # 0600/owner-only, read via instances.attach_target/snapshot) -
-                # the exact credential /v1/surfaces/gui's mount_gui route
-                # already accepts for the same "local process, not a browser"
-                # distinction. Accepting it here too turns keyless CLI/MCP
-                # activity reads on, without touching what a browser can do:
-                # a browser has no filesystem access to the registry file and
-                # so can never present this token, unlike shell_token (which
-                # DOES reach the browser and needs the cross-origin check
-                # below as its own defence).
-                #
-                # This gate covers every open-mode management route (minting a
-                # key, changing config, unloading a model), not just activity -
-                # so accepting inst_token here is NOT scoped to /api/activity,
-                # it authorizes all of them. That is not an escalation: the
-                # PRINCIPAL, not the credential, is what decides this. Anything
-                # that can read a 0600 file under the user's own home IS that
-                # OS user, and that user can already read the keystore, the
-                # config file, and the models directory directly on disk - the
-                # token grants a local process nothing it did not already have
-                # by other means.
-                inst_token = getattr(request.app.state, "instance_token", None)
-                presented = _bearer_token(request)
-                token_ok = ct_equal(presented, token) or (
-                    bool(inst_token) and ct_equal(presented, inst_token))
-                # An unsafe-method request already passed the
-                # same-origin check above (or is exempt as _CROSS_ORIGIN_OK,
-                # which never reaches here); a metadata GET never went through
-                # that block at all, so it must pass the identical check here -
-                # otherwise a token stolen via CORS (the default policy trusts
-                # every localhost:PORT origin to READ a response) is directly
-                # replayable cross-origin against every /api/*, /v1/* read.
-                # Applies uniformly to both token kinds: a real CLI/MCP client
-                # never sends an Origin header at all (that is a browser-only
-                # header), so this costs the legitimate case nothing, and it is
-                # defence-in-depth against a caller that somehow obtained the
-                # (never-served) instance token some other way.
-                cross_origin = is_metadata_get and _cross_origin_refused(request)
-                if not token_ok or cross_origin:
-                    return JSONResponse(
-                        status_code=403,
-                        content={"detail": "Open-mode management requires the "
-                                 "localm GUI shell on this machine, or an API key "
-                                 "(run 'localm key generate')."},
-                    )
-        return await call_next(request)
-
-    # Security response headers. The user-content render path is XSS-safe via
-    # DOMPurify; this is the Content-Security-Policy backstop behind it on the
-    # GUI shell. nosniff is enforced everywhere (blocks MIME-sniff into
-    # executable HTML), and the CSP is ENFORCING, not report-only.
-    #
-    # script-src carries a PER-REQUEST nonce rather than 'unsafe-inline', so the
-    # shell's own inline scripts run and an injected one cannot. Adding
-    # 'unsafe-inline' alongside would have no effect: a policy containing a nonce
-    # makes browsers IGNORE 'unsafe-inline' entirely.
-    #
-    # style-src keeps 'unsafe-inline', and the NONCE CANNOT REPLACE IT: CSP3's
-    # "is element nonceable" algorithm covers <script>, <style> and <link>
-    # ELEMENTS only, while an inline style ATTRIBUTE is reachable only by
-    # 'unsafe-inline' or by 'unsafe-hashes' plus a hash per distinct attribute
-    # value. index.html relies on such attributes, most of them display:none on
-    # elements that must start hidden; under style-src 'self' they stop applying
-    # and those elements paint. Unaffected either way: KaTeX styles via CSSOM,
-    # which CSP does not govern, as do the app's own el.style.x = y writes. The
-    # cost is bounded: DOMPurify passes a model-authored style ATTRIBUTE through,
-    # so a reply can restyle its own subtree. That is presentation, not
-    # execution, and img-src/connect-src still deny the CSS url() exfiltration
-    # path.
-    #
-    # form-action 'none' because NOTHING in this GUI submits a form - there is
-    # not one <form> element in static/, and every mutation goes through fetch().
-    # It is not covered by default-src: form-action is a NAVIGATION directive
-    # with no fallback, so omitting it allows submission ANYWHERE. DOMPurify's
-    # default ALLOWED_TAGS includes <form>, so a model reply rendering
-    # <form action="https://elsewhere/" method="post"><input ...> survives
-    # sanitisation and its action resolves to that remote origin, with no script
-    # involved - neither DOMPurify nor the script-src nonce is in that path.
-    # 'none' rather than 'self', since there is no legitimate same-origin
-    # submission either, which also closes the same-origin CSRF shape against
-    # localm's own /api.
-    #
-    # NO CDN ORIGIN IS LISTED, AND NOTHING NEEDS ONE. The tts plugin's Kokoro
-    # bundle pulls the onnxruntime-web backend with a dynamic import()
-    # (ort-wasm-simd-threaded.jsep.mjs), and a dynamic import is a MODULE SCRIPT,
-    # so it is governed by script-src rather than connect-src. That runtime is
-    # vendored and served from 'self'
-    # (localm/plugins/builtin/tts/static/vendor/onnxruntime/, pointed at by the
-    # plugin's own wasm_paths default). A TTS load error means the vendored
-    # runtime did not resolve; widening the policy hides that fault rather than
-    # fixing it.
-    #
-    # The 'wasm-unsafe-eval' token is REQUIRED and is a SECOND, INDEPENDENT
-    # block: allowing an origin only gets the backend DOWNLOADED, while
-    # compiling ANY WebAssembly needs its own grant, and onnxruntime-web is
-    # WebAssembly on BOTH its wasm and webgpu paths, so without this no backend
-    # can start at all. That token is the narrow CSP3 source for exactly this
-    # case: it permits WebAssembly compilation only, and does NOT permit dynamic
-    # evaluation of JavaScript, so it is strictly tighter than the broader token
-    # a browser error text names.
-    #
-    # `blob:` in script-src is REQUIRED once the page is cross-origin isolated.
-    # Isolation gives onnxruntime-web SharedArrayBuffer, so it switches to its
-    # THREADED build, which loads its worker as a blob: module, and the load
-    # otherwise dies with
-    #     no available backend found. ERR: [wasm] TypeError: Failed to fetch
-    #     dynamically imported module: blob:http://.../<uuid>
-    # `worker-src 'self' blob:` is NOT sufficient for it: the dynamic import of
-    # the blob module is governed by script-src. A blob: URL can only be minted
-    # by same-origin script that is already executing, so this gives an INJECTED
-    # script no new way in - the nonce still gates what may execute at all.
-    _CSP_PREFIX = ("default-src 'self'; "
-                   "script-src 'self' blob: 'wasm-unsafe-eval' 'nonce-")
-    _CSP_SUFFIX = (
-        "'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: blob:; "
-        "font-src 'self' data:; "
-        # blob: here for the same reason it is in img-src/script-src/worker-src:
-        # the GUI mints these with its OWN URL.createObjectURL and then reads
-        # them back (fetch for "send to chat" / "copy image", and the <video>
-        # and <audio> players). A blob: URL is same-origin-scoped and cannot be
-        # pointed at a remote origin, so this grants no exfiltration path -
-        # connect-src still names every third-party origin explicitly.
-        #
-        # media-src MUST be spelled out. Without it, media falls back to
-        # default-src 'self', which has no blob:, and the failure is SILENT:
-        # assigning a blocked src fires an error EVENT on the element rather
-        # than throwing, so a try/catch around it cannot see it and the player
-        # just sits there dead. That is how this survived unnoticed.
-        # huggingface.co / *.hf.co are the MODEL weights (chat models are
-        # server-side, but the tts plugin fetches Kokoro's ~86 MB ONNX in the
-        # browser and caches it there). The onnxruntime RUNTIME is vendored and
-        # same-origin, so no CDN origin belongs here either.
-        "connect-src 'self' blob: https://huggingface.co https://*.hf.co; "
-        "media-src 'self' blob:; "
-        "worker-src 'self' blob:; "
-        "frame-src 'self'; "
-        "object-src 'none'; "
-        "base-uri 'none'; "
-        # See the form-action note above: a NAVIGATION directive, no default-src
-        # fallback, so leaving it out allowed a sanitiser-surviving model-authored
-        # <form> to post off-box. Nothing in the GUI submits a form.
-        "form-action 'none'; "
-        "frame-ancestors 'none'"
-    )
-
-    @app.middleware("http")
-    async def _security_headers(request, call_next):
-        # The nonce is minted BEFORE call_next, not after, because the shell
-        # route has to stamp this exact value onto its inline <script> tags while
-        # it builds the body - so the value must already exist when the handler
-        # runs. Setting the header afterwards from a value the handler never saw
-        # would ship a nonce matching nothing and white-screen the GUI.
-        nonce = secrets.token_urlsafe(16)
-        request.state.csp_nonce = nonce
-        resp = await call_next(request)
-        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-        resp.headers.setdefault(
-            "Content-Security-Policy", _CSP_PREFIX + nonce + _CSP_SUFFIX)
-        # CROSS-ORIGIN ISOLATION, so onnxruntime-web can use more than one
-        # thread. Without both of these the document is not isolated,
-        # SharedArrayBuffer is unavailable, and onnxruntime falls back to
-        # numThreads=1, which makes neural TTS synthesis slower than playback so
-        # a long reply stutters.
-        #
-        # 'credentialless' rather than 'require-corp': require-corp demands a CORP
-        # header on EVERY cross-origin subresource, which we do not control for
-        # huggingface.co or the onnx CDN. credentialless instead sends those
-        # requests WITHOUT credentials, which is both sufficient for isolation and
-        # correct here - none of localm's cross-origin fetches are authenticated,
-        # they are public model and library downloads.
-        resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
-        resp.headers.setdefault("Cross-Origin-Embedder-Policy", "credentialless")
-        return resp
-
-    # API-surface disclosure guard. FastAPI's built-in docs (/docs, /redoc,
-    # /openapi.json) enumerate every route + schema. Fine on a loopback bind, but
-    # on a NETWORK bind it hands an unauthenticated remote a full attack-surface
-    # map (every endpoint stays scope-gated, so no access is granted, but it is
-    # needless disclosure). Serve docs only on a loopback bind, keyed on the
-    # CONFIGURED bind host (never the peer - portmux makes the peer always look
-    # loopback). 404 not 403, so they simply do not exist off-loopback. bind_host
-    # unset in tests / standalone mount -> default loopback -> docs stay available.
-    _DOCS_PATHS = frozenset(
-        {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"})
-
-    @app.middleware("http")
-    async def _docs_loopback_only(request, call_next):
-        if request.url.path in _DOCS_PATHS:
-            host = getattr(request.app.state, "bind_host", "127.0.0.1")
-            if not _is_loopback_host(host):
-                return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        return await call_next(request)
-
-    # Outside every BaseHTTPMiddleware handler above (none of which touch the
-    # body), so it sees the raw ASGI receive() for its body-size accounting. The
-    # _DisconnectSignalMiddleware added right after passes receive() through
-    # untouched, so this still gets the raw stream.
-    app.add_middleware(_BodyStreamCapMiddleware)
-    # Added LAST (== outermost) so its disconnect poll is bound to the raw receive,
-    # OUTSIDE the BaseHTTPMiddleware handlers that otherwise mask http.disconnect
-    # from the non-streaming inference path (see the class + _generate_full).
-    app.add_middleware(_DisconnectSignalMiddleware)
-    # Outermost of all: in-flight/progress bookkeeping for the hang alarm's
-    # starvation detector. Pure ASGI and content-free (counts and
-    # clocks only); sits outside everything so a request wedged in ANY inner
-    # layer still shows as in flight.
-    from localm.inference._hang_alarm import RequestProgressMiddleware
-    app.add_middleware(RequestProgressMiddleware)
-
-    # Route groups (extracted to localm/inference/routes/*.py).
-    # The engine + inference semaphore are module globals read live by the route
-    # modules (via `import localm.inference.http_server as _hs`), so a model swap
-    # that reassigns them is seen there. Only these session-scoped objects are
-    # create_app locals, so they travel to the route groups on ctx. Registration
-    # order is irrelevant: FastAPI matches exact path templates by method, and no
-    # group has a same-method literal-vs-param path collision.
-    from types import SimpleNamespace
-    ctx = SimpleNamespace(audit=_audit, transcript=_transcript, mode=_mode)
-    from localm.inference.routes import models as _routes_models
-    _routes_models.register(app, ctx)
-    from localm.inference.routes import system as _routes_system
-    _routes_system.register(app, ctx)
-    from localm.inference.routes import session as _routes_session
-    _routes_session.register(app, ctx)
-    from localm.inference.routes import config as _routes_config
-    _routes_config.register(app, ctx)
-    from localm.inference.routes import keys as _routes_keys
-    _routes_keys.register(app, ctx)
-    from localm.inference.routes import gpu as _routes_gpu
-    _routes_gpu.register(app, ctx)
-    from localm.inference.routes import peer_routing as _routes_peer_routing
-    _routes_peer_routing.register(app, ctx)
-    from localm.inference.routes import admin as _routes_admin
-    _routes_admin.register(app, ctx)
-    from localm.inference.routes import chat as _routes_chat
-    _routes_chat.register(app, ctx)
-
-    # Plugin engine: load enabled plugins + management API.
-    # Wrapped so a plugin-engine failure can never stop the server starting.
-    try:
-        from localm.plugins.engine import attach_engine
-        attach_engine(app, _engine)
-    except Exception as e:
-        # Server must still start, but make the loss visible: WARNING (not a buried
-        # debug line) plus a sentinel so plugin_manager being unset is diagnosable.
-        from localm.debuglog import logger as _dbg
-        _dbg.warning("plugins unavailable: %s", e)
-        _dbg.exception("plugin engine attach failed")
-        app.state.plugin_engine_error = str(e)
+    # 6. Plugins, last: a failure here still leaves the kernel serving.
+    mounting.attach_plugins(app, engine)
 
     return app
 

@@ -3,9 +3,10 @@
 
 Each module exposes ``register(app, ctx)`` which defines that group's routes on
 the FastAPI ``app``. ``create_app`` (in ``localm.inference.http_server``) builds
-the app, installs middleware + the lifespan + the 500 backstop, constructs the
-shared ``ctx`` (audit log / transcript / session mode), and calls each group's
-``register``.
+the app: it installs the lifespan, the exception handlers and the middleware
+(``localm.inference.app_assembly``), constructs the shared ``ctx`` (an
+``AppContext``: audit log / transcript / session mode), and calls each group's
+``register`` through ``app_assembly.mounting.mount_route_groups``.
 
 The shared engine state (``_engine``, ``_inference_sem``) lives as module globals
 in ``http_server``; route modules read the live values via

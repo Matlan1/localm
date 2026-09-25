@@ -31,7 +31,7 @@ latter would flag these two as violations:
 
   localm/cli/rag.py, _cli_rag_embed_fn._embed()
                                  POSTs /v1/embeddings, which IS listed in
-                                 http_server.py's _CROSS_ORIGIN_OK - the
+                                 app_assembly's _CROSS_ORIGIN_OK - the
                                  open-mode gate never applies, so get_api_key()
                                  alone (no instance_token fallback) is correct,
                                  the same classification as coder/plug.py and

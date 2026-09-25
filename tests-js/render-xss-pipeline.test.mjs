@@ -200,7 +200,7 @@ test("a model-authored <form> survives sanitisation, so the CSP must confine it"
     + '<input name="apikey"><button>Verify</button></form>');
   const f = t.querySelector("form");
   assert.ok(f, "DOMPurify no longer passes <form> through - re-read the "
-    + "form-action 'none' rationale in http_server.py's _CSP_SUFFIX and in "
+    + "form-action 'none' rationale in app_assembly/security.py's _CSP_SUFFIX and in "
     + "helpers.js artifactSrcdoc, which both cite this as their reason.");
   assert.equal(f.getAttribute("action"), "https://example.invalid/collect",
     "a remote form action no longer survives sanitisation - same note as above");
