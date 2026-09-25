@@ -430,29 +430,24 @@ class TestCoderTaskRuns:
         assert ("[answered by roomy: plain lacks a longer conversation; "
                 "roomy lacks structured tool calls]") in text
 
-    def test_the_budget_covers_loading_the_model(self, reg, coder_project):
+    def test_a_load_that_outlasts_the_budget_ends_the_call_once_it_finishes(
+            self, reg, coder_project):
         import time
-        release = threading.Event()
 
         class Slow(_LazyEngine):
             def load(self):
-                release.wait(15)
+                time.sleep(0.8)
                 super().load()
         made = {}
         engines = EngineCache("plain", engine_factory=lambda n: made.setdefault(n, Slow(n)))
-        try:
-            res = _run_coder_task(engines, coder_project, model="plain", timeout_seconds=0.5)
-            assert not made["plain"].loaded, \
-                "the call waited for a load its 0.5s budget does not cover"
-        finally:
-            release.set()
+        res = _run_coder_task(engines, coder_project, model="plain", timeout_seconds=0.5)
+        assert made["plain"].loaded and engines.resident == ["plain"], \
+            "the call returned while the load was still running"
+        assert made["plain"].active_requests == 0
         assert res["isError"] is True
         assert "timed out after 0.5s before it could start" in res["content"][0]["text"]
-        deadline = time.monotonic() + 10
-        while not made["plain"].loaded and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert made["plain"].loaded, "the load goes on after the call has returned"
-        assert engines.resident == ["plain"]
+        again = _run_coder_task(engines, coder_project, model="plain")
+        assert again["isError"] is False, again["content"][0]["text"]
 
     def test_a_short_task_stays_on_the_default_model(self, reg, coder_project):
         TestCoderTaskRuns._small_default(reg)
