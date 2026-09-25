@@ -118,6 +118,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Compacting a long chat in the GUI no longer recalls memories for the summary
+  request or logs it as something you said.** To compact a chat, the GUI asks the
+  model to summarise the older turns. The server treated that prompt, and the
+  excerpt of earlier turns inside it, as your own message: it could pull in and
+  reinforce loosely related memories, and it was written to the session log as
+  your line, so memory consolidation later re-learned those turns as if you had
+  typed them again. The GUI now marks that message with `origin: "client"` (a new
+  optional `/v1/chat/completions` message field, see `docs/server-api.md`), and
+  the server leaves a marked message out of memory recall and the log's user line.
+  Clients that do not send the field are unaffected.
 - **Setup no longer fails with "Failed to build `tokenizers`" on a computer
   without a Rust compiler.** A new huggingface-hub release (2.0) made setup
   pick an old version of tokenizers that has to be compiled from source.
