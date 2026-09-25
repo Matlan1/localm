@@ -571,7 +571,8 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
 
     # Network-policy gate for the one-time model download, decided in the parent;
     # the worker only executes the decision via local_files_only. A cached model
-    # loads offline; a missing one downloads only under net_mode=allow.
+    # loads offline; a missing one downloads under net_mode=allow, or under
+    # net_mode=off when downloads are explicitly allowed while off.
     cached, _ = stt_model_cached()
     local_files_only = True
     blocked_reason = None

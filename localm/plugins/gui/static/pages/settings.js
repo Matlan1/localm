@@ -2499,6 +2499,13 @@ export async function buildTtsSection(form) {
       } else {
         const cfgRes = await fetch("/api/tts/config", { headers: authHeaders() });
         const cfg = cfgRes.ok ? await cfgRes.json() : {};
+        const mode = cfg.net_mode || "ask";
+        const allowOff = !!cfg.net_allow_model_downloads;
+        if (mode !== "allow" && !(mode === "off" && allowOff)) {
+          throw new Error(
+            "Voice model download needs network access (Settings -> Network) " +
+            "- the TTS plugin has not finished starting up to offer its own confirmation.");
+        }
         const libUrl = new URL(cfg.library || "vendor/kokoro.min.js", window.location.origin + "/plugins/tts/");
         const mod = await import(libUrl.href);
         const dev = cfg.device && cfg.device !== "auto" ? cfg.device : "wasm";

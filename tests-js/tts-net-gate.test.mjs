@@ -37,9 +37,12 @@ test("planModelFetch: net_mode=off confirms by default so user is asked", () => 
   assert.equal(planModelFetch("off", false, false), "confirm");
 });
 
-test("planModelFetch: net_mode=off or ask proceeds when allowDownloadsWhenOff is set", () => {
+test("planModelFetch: net_mode=off proceeds when allowDownloadsWhenOff is set", () => {
   assert.equal(planModelFetch("off", false, true), "allow");
-  assert.equal(planModelFetch("ask", false, true), "allow");
+});
+
+test("planModelFetch: allowDownloadsWhenOff does NOT bypass the net_mode=ask confirmation - it is an off-only override", () => {
+  assert.equal(planModelFetch("ask", false, true), "confirm");
 });
 
 test("planModelFetch: net_mode=ask requires a one-time confirmation", () => {
@@ -77,9 +80,9 @@ test("shouldWarmPassively: net_mode=ask/off must NOT warm uncached - that needs 
   assert.equal(shouldWarmPassively(false, undefined), false);
 });
 
-test("shouldWarmPassively: allowDownloadsWhenOff allows warming uncached even under off/ask", () => {
+test("shouldWarmPassively: allowDownloadsWhenOff allows warming uncached under off, but not under ask", () => {
   assert.equal(shouldWarmPassively(false, "off", true), true);
-  assert.equal(shouldWarmPassively(false, "ask", true), true);
+  assert.equal(shouldWarmPassively(false, "ask", true), false);
 });
 
 // ---- requestDownloadConsent: the confirmation dialog itself ------------ //
@@ -118,9 +121,13 @@ function installModalShell() {
   global.document = win.document;
   delete global.confirm;                 // force the with-shell path
   // register() unconditionally builds its playback queue's `new Audio()`,
-  // which jsdom does not implement - a no-op stub, since these tests never
-  // reach speak()/playNext(), which are the only things that touch it.
-  win.Audio = class {};
+  // which jsdom does not implement - a no-op stub covering the methods
+  // stop()/speak()/playNext() actually call on it.
+  win.Audio = class {
+    play() { return Promise.resolve(); }
+    pause() {}
+    removeAttribute() {}
+  };
   global.Audio = win.Audio;
   return win;
 }
@@ -352,4 +359,60 @@ test("ready({passive:true}): a real click already loading is reused, not raced",
   clickButtonNamed(win, "Not now");
   await assert.rejects(clickPromise);
   await assert.rejects(passivePromise);
+});
+
+// ---- speak(): the browser speechSynthesis fallback when Kokoro fails to load ---- //
+
+function installSpeechSynthesis(win) {
+  const calls = [];
+  class FakeUtterance {
+    constructor(text) { this.text = text; }
+  }
+  const synth = {
+    speaking: false,
+    getVoices: () => [],
+    cancel: () => {},
+    speak: (u) => { calls.push(u); },
+  };
+  win.speechSynthesis = synth;
+  win.SpeechSynthesisUtterance = FakeUtterance;
+  global.speechSynthesis = synth;
+  global.SpeechSynthesisUtterance = FakeUtterance;
+  return calls;
+}
+
+test("speak(): a superseded (stopped) utterance never reaches the speechSynthesis fallback", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "allow" });
+  const synthCalls = installSpeechSynthesis(win);
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  // net_mode=allow proceeds straight to the real vendor import, which jsdom
+  // cannot execute - the same natural, jsdom-incapable failure the tests
+  // above use to reach load()'s catch path, landing this call in speak()'s
+  // own catch { ... } fallback.
+  const first = provider.speak("first utterance");
+  provider.stop();                     // supersedes it before the load failure settles
+  await first;
+
+  assert.equal(synthCalls.length, 0,
+    "a stopped utterance must not be spoken later via the browser-voice fallback");
+});
+
+test("speak(): a NON-superseded failed load does reach the speechSynthesis fallback", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "allow" });
+  const synthCalls = installSpeechSynthesis(win);
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  await provider.speak("only utterance");
+
+  assert.equal(synthCalls.length, 1,
+    "an utterance that was never superseded must still get the browser-voice fallback");
 });

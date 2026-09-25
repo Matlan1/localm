@@ -371,6 +371,7 @@ export async function register(ctx) {
     try {
       k = await ensureLoaded();
     } catch {
+      if (myToken !== token) return;                // superseded while loading
       if (typeof window !== "undefined" && window.speechSynthesis) {
         try {
           if (speechSynthesis.speaking) speechSynthesis.cancel();

@@ -91,7 +91,7 @@ export function classifyLoadError(err, { cached = false, online = true } = {}) {
 // Resolves whether to allow the model fetch immediately or prompt the user.
 export function planModelFetch(mode, cached, allowDownloadsWhenOff) {
   if (cached) return "allow";
-  if (allowDownloadsWhenOff) return "allow";
+  if (mode === "off" && allowDownloadsWhenOff) return "allow";
   if (mode === "allow") return "allow";
   return "confirm";
 }
@@ -210,5 +210,5 @@ export function shouldAbortForCorruption(report, device) {
 // asking - the model is already cached, or net_mode allows a fetch with no
 // prompt, or downloads are allowed when off. See tts-net-gate.test.mjs.
 export function shouldWarmPassively(cached, netMode, allowDownloadsWhenOff = false) {
-  return !!cached || netMode === "allow" || !!allowDownloadsWhenOff;
+  return !!cached || netMode === "allow" || (netMode === "off" && !!allowDownloadsWhenOff);
 }
