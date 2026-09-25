@@ -32,13 +32,17 @@ test("planModelFetch: net_mode=allow proceeds uncached with no prompt", () => {
   assert.equal(planModelFetch("allow", false), "allow");
 });
 
-test("planModelFetch: net_mode=off refuses outright by default (no override)", () => {
-  assert.equal(planModelFetch("off", false), "refuse");
-  assert.equal(planModelFetch("off", false, false), "refuse");
+test("planModelFetch: net_mode=off confirms by default so user is asked", () => {
+  assert.equal(planModelFetch("off", false), "confirm");
+  assert.equal(planModelFetch("off", false, false), "confirm");
 });
 
 test("planModelFetch: net_mode=off proceeds when allowDownloadsWhenOff is set", () => {
   assert.equal(planModelFetch("off", false, true), "allow");
+});
+
+test("planModelFetch: allowDownloadsWhenOff does NOT bypass the net_mode=ask confirmation - it is an off-only override", () => {
+  assert.equal(planModelFetch("ask", false, true), "confirm");
 });
 
 test("planModelFetch: net_mode=ask requires a one-time confirmation", () => {
@@ -74,6 +78,11 @@ test("shouldWarmPassively: net_mode=ask/off must NOT warm uncached - that needs 
   assert.equal(shouldWarmPassively(false, "ask"), false);
   assert.equal(shouldWarmPassively(false, "off"), false);
   assert.equal(shouldWarmPassively(false, undefined), false);
+});
+
+test("shouldWarmPassively: allowDownloadsWhenOff allows warming uncached under off, but not under ask", () => {
+  assert.equal(shouldWarmPassively(false, "off", true), true);
+  assert.equal(shouldWarmPassively(false, "ask", true), false);
 });
 
 // ---- requestDownloadConsent: the confirmation dialog itself ------------ //
@@ -112,9 +121,13 @@ function installModalShell() {
   global.document = win.document;
   delete global.confirm;                 // force the with-shell path
   // register() unconditionally builds its playback queue's `new Audio()`,
-  // which jsdom does not implement - a no-op stub, since these tests never
-  // reach speak()/playNext(), which are the only things that touch it.
-  win.Audio = class {};
+  // which jsdom does not implement - a no-op stub covering the methods
+  // stop()/speak()/playNext() actually call on it.
+  win.Audio = class {
+    play() { return Promise.resolve(); }
+    pause() {}
+    removeAttribute() {}
+  };
   global.Audio = win.Audio;
   return win;
 }
@@ -201,7 +214,7 @@ function installFetchEnv(win, { netMode, allowDownloadsWhenOff = false }) {
   global.fetch = win.fetch;
 }
 
-test("load(): net_mode=off refuses without ever offering the dialog", async () => {
+test("load(): net_mode=off offers the dialog; declining leaves provider registered", async () => {
   const win = installModalShell();
   installFetchEnv(win, { netMode: "off" });
   const { ctx, calls } = makeCtx();
@@ -210,19 +223,19 @@ test("load(): net_mode=off refuses without ever offering the dialog", async () =
 
   const provider = calls.registerTTS[0];
   assert.ok(provider, "register() must call ctx.registerTTS with a provider");
-  await assert.rejects(provider.ready());
+  const readyPromise = provider.ready();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(win.$("modal-title").textContent, "Download voice model?",
+    "net_mode=off must offer the one-time confirmation before fetching");
 
-  assert.equal(win.$("modal").style.display, "none",
-    "off (with no override) has no bypass - no confirmation dialog is offered");
+  clickButtonNamed(win, "Not now");
+  await assert.rejects(readyPromise);
+
   const errToast = calls.toasts.find((t) => t.isError);
   assert.ok(errToast, "a toast must explain the refusal");
-  assert.match(errToast.msg, /off/i);
-  // A browser has no CLI to run: the message must point at Settings, never
-  // at a terminal command it cannot act on.
-  assert.doesNotMatch(errToast.msg, /localm config/);
-  assert.match(errToast.msg, /Settings/);
-  assert.equal(calls.registerTTS.at(-1), null,
-    "a refused load must revert to the browser voice fallback");
+  assert.match(errToast.msg, /net_mode=off/i);
+  assert.equal(calls.registerTTS.length, 1,
+    "provider must remain registered");
 });
 
 test("load(): net_mode=off with net_allow_model_downloads never refuses at the net_mode gate", async () => {
@@ -250,7 +263,7 @@ test("load(): net_mode=off with net_allow_model_downloads never refuses at the n
     "must not fail on the net_mode gate when the override is set");
 });
 
-test("load(): net_mode=ask offers the dialog; declining reverts to the browser voice with an actionable toast", async () => {
+test("load(): net_mode=ask offers the dialog; declining leaves provider registered with an actionable toast", async () => {
   const win = installModalShell();
   installFetchEnv(win, { netMode: "ask" });
   const { ctx, calls } = makeCtx();
@@ -272,7 +285,8 @@ test("load(): net_mode=ask offers the dialog; declining reverts to the browser v
   assert.ok(errToast);
   assert.match(errToast.msg, /net_mode=ask/);
   assert.match(errToast.msg, /not granted/);
-  assert.equal(calls.registerTTS.at(-1), null);
+  assert.equal(calls.registerTTS.length, 1,
+    "provider must remain registered");
 });
 
 // ---- ready({ passive: true }): the proactive warm-up ---------------------- //
@@ -345,4 +359,60 @@ test("ready({passive:true}): a real click already loading is reused, not raced",
   clickButtonNamed(win, "Not now");
   await assert.rejects(clickPromise);
   await assert.rejects(passivePromise);
+});
+
+// ---- speak(): the browser speechSynthesis fallback when Kokoro fails to load ---- //
+
+function installSpeechSynthesis(win) {
+  const calls = [];
+  class FakeUtterance {
+    constructor(text) { this.text = text; }
+  }
+  const synth = {
+    speaking: false,
+    getVoices: () => [],
+    cancel: () => {},
+    speak: (u) => { calls.push(u); },
+  };
+  win.speechSynthesis = synth;
+  win.SpeechSynthesisUtterance = FakeUtterance;
+  global.speechSynthesis = synth;
+  global.SpeechSynthesisUtterance = FakeUtterance;
+  return calls;
+}
+
+test("speak(): a superseded (stopped) utterance never reaches the speechSynthesis fallback", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "allow" });
+  const synthCalls = installSpeechSynthesis(win);
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  // net_mode=allow proceeds straight to the real vendor import, which jsdom
+  // cannot execute - the same natural, jsdom-incapable failure the tests
+  // above use to reach load()'s catch path, landing this call in speak()'s
+  // own catch { ... } fallback.
+  const first = provider.speak("first utterance");
+  provider.stop();                     // supersedes it before the load failure settles
+  await first;
+
+  assert.equal(synthCalls.length, 0,
+    "a stopped utterance must not be spoken later via the browser-voice fallback");
+});
+
+test("speak(): a NON-superseded failed load does reach the speechSynthesis fallback", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "allow" });
+  const synthCalls = installSpeechSynthesis(win);
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  await provider.speak("only utterance");
+
+  assert.equal(synthCalls.length, 1,
+    "an utterance that was never superseded must still get the browser-voice fallback");
 });

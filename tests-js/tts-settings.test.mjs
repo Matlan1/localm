@@ -402,3 +402,13 @@ test("a saved server voice applies live only when this browser has no override",
   assert.equal(win2.__applied.speed, 1.5,
     "speed still applies - only the voice is the browser's own choice");
 });
+
+test("the section renders voice model setup controls", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  await render(win);
+  const ttsBox = win.document.querySelector(".tts-model-setup-box");
+  assert.ok(ttsBox, "TTS section must include a voice model setup box");
+  const ttsBtn = ttsBox.querySelector(".tts-download-model-btn");
+  assert.ok(ttsBtn, "TTS setup box must include download button");
+});
+
