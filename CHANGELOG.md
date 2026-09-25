@@ -76,7 +76,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   also delete your saved data: chats, settings, downloaded models and
   generated images. `--purge-data` and `--yes` answer those questions up
   front. Setup now records what it creates as it goes, so an install that
-  stopped half way can be uninstalled too.
+  stopped half way can be uninstalled too. When you delete your saved data it
+  also names what it cannot remove: the app window's saved login and copies
+  of recent chats, kept in a folder pywebview shares with other apps, and the
+  copies your web browser keeps.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
@@ -176,6 +179,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   characters such as é.** `setup.bat` saved the path in the console's code
   page instead of UTF-8, which LocaLM could not read. New installs save it as
   UTF-8, and a file saved the old way is now read correctly.
+- **With a custom data folder, `localm setup-llama --rollback` now finds the
+  build setup installed.** Setup downloaded the runtime before asking where
+  your data should live, so it recorded that build in a `home` folder inside
+  the LocaLM folder instead of the folder you chose, and left that `home`
+  folder behind. Every setup now asks where data lives first.
+- **The graphical setup (`setup-gui.bat`) now works from a folder whose path
+  contains `!`.**
 - **The HuggingFace and CivitAI token fields in Settings now show whether a token is really configured.** A `HF_TOKEN`/`CIVITAI_API_KEY` environment variable that is blank or whitespace-only is now treated as not set, matching what downloads actually send, instead of disagreeing with the actual download code about whether a token is present. A stray `hf_token`/`civitai_api_key` entry in `config.json` (hand-edited, or left over from before these tokens moved to their own store) can no longer make Settings claim a token is configured, with a Clear button that has nothing to clear.
 - **Pulling `gemma3-4b` or `gemma3-12b` now checks free disk space for the vision projector too, and the curated shortcuts list says a projector comes with them.** The disk-space preflight for a plain HuggingFace model pull now also probes the same-repo vision projector it is about to auto-attach, so a pull with just enough room for the model alone no longer passes the check and then loses the projector download to insufficient disk space.
 - **Stop in chat now stops the whole turn, and messages queued while a reply is running are sent in order.** Pressing Stop while a long chat is being summarised no longer lets the reply stream anyway, and Stop no longer sends the next queued message: queued messages stay listed until you send or cancel them. A message typed during Regenerate or `/web` is now sent when that reply finishes instead of staying queued forever, and a new message goes after any older queued ones. Edit, Revert and Regenerate now appear on the transcript as soon as a reply finishes.
