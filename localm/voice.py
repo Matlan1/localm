@@ -109,13 +109,12 @@ def stt_available() -> tuple[bool, str]:
 
 
 def _stt_download_blocked_reason(name: str, mode: str) -> str:
-    """Why the one-time Whisper download cannot happen right now, stated for
-    the user. ONE helper shared by ``stt_available``, the transcribe path and
-    ``prefetch_stt_model``, so every surface reports the same reason."""
-    if mode == "off":
+    from localm.netpolicy import downloads_allowed_when_off
+    if mode == "off" and not downloads_allowed_when_off():
         return (
             f"The Whisper '{name}' speech model is not downloaded, and network "
-            "access is disabled (net_mode=off). Enable network access to fetch "
+            "access is disabled (net_mode=off). Enable network access or turn on "
+            "\"Allow model downloads while network access is off\" to fetch "
             "it once; transcription itself runs fully offline.")
     return (
         f"The Whisper '{name}' speech model is not downloaded yet, and "
@@ -577,9 +576,9 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     local_files_only = True
     blocked_reason = None
     if not cached:
-        from localm.netpolicy import network_mode
+        from localm.netpolicy import downloads_allowed_when_off, network_mode
         mode = network_mode()
-        if mode == "allow":
+        if mode == "allow" or (mode == "off" and downloads_allowed_when_off()):
             local_files_only = False
         else:
             blocked_reason = _stt_download_blocked_reason(name, mode)

@@ -26,11 +26,14 @@ const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
 // own isolated unit test). No closure dependency on register()'s cfg/ctx, so
 // it is a plain module-level export rather than nested like the rest of this
 // file's helpers.
-export function requestDownloadConsent() {
+export function requestDownloadConsent(opts = {}) {
+  const mode = (opts && opts.mode) || "ask";
   if (typeof window === "undefined" || typeof window.openModal !== "function" ||
       typeof window.$ !== "function" || typeof window.el !== "function") {
-    return Promise.resolve(typeof confirm === "function" && confirm(
-      "Download the Kokoro voice model (~86 MB) from huggingface.co now?"));
+    const msg = mode === "off"
+      ? "Network access is set to off. Download the Kokoro voice model (~86 MB) once anyway?"
+      : "Download the Kokoro voice model (~86 MB) from huggingface.co now?";
+    return Promise.resolve(typeof confirm === "function" && confirm(msg));
   }
   return new Promise((resolve) => {
     let settled = false;
@@ -42,9 +45,13 @@ export function requestDownloadConsent() {
       resolve(v);
     };
     window.openModal("Download voice model?", (body) => {
-      body.appendChild(window.el("p", "",
-        "Kokoro (~86 MB) will be downloaded from huggingface.co once, then " +
-        "cached in the browser. Network access is set to \"ask first\"."));
+      const pText = mode === "off"
+        ? "Kokoro (~86 MB) will be downloaded from huggingface.co once, then " +
+          "cached in the browser. Network access is currently turned off (net_mode=off). " +
+          "Download once anyway?"
+        : "Kokoro (~86 MB) will be downloaded from huggingface.co once, then " +
+          "cached in the browser. Network access is set to \"ask first\".";
+      body.appendChild(window.el("p", "", pText));
       const row = window.el("div", "actions");
       const skip = window.el("button", "btn-secondary", "Not now");
       skip.onclick = () => finish(false);
@@ -54,9 +61,6 @@ export function requestDownloadConsent() {
       row.appendChild(dl);
       body.appendChild(row);
     });
-    // Dismissing via the shared modal chrome (x / backdrop) sets display:none
-    // without calling either handler above; poll for it and treat as "not
-    // now" - same idiom promptText / _offerModelDownload use in helpers.js.
     const watch = setInterval(() => {
       if (window.$("modal").style.display === "none") finish(false);
     }, 200);
@@ -163,15 +167,12 @@ export async function register(ctx) {
     const cached = await modelCached();
     const policy = await currentNetPolicy();
     const decision = planModelFetch(policy.mode, cached, policy.allowDownloadsWhenOff);
-    if (decision === "refuse") {
+    if (decision === "confirm" && !(await requestDownloadConsent({ mode: policy.mode }))) {
       throw new NetGateError(
-        "Voice model download is off. Turn it on, or allow downloads only, " +
-        "in Settings → Network.");
-    }
-    if (decision === "confirm" && !(await requestDownloadConsent())) {
-      throw new NetGateError(
-        "Voice model download needs a one-time confirmation (net_mode=ask) " +
-        "and was not granted.");
+        policy.mode === "off"
+          ? "Voice model download was not granted (net_mode=off)."
+          : "Voice model download needs a one-time confirmation (net_mode=ask) and was not granted."
+      );
     }
 
     const mod = await import(libraryURL);
@@ -265,7 +266,7 @@ export async function register(ctx) {
         try {
           const cached = await modelCached();
           const policy = await currentNetPolicy();
-          if (!shouldWarmPassively(cached, policy.mode)) return null;
+          if (!shouldWarmPassively(cached, policy.mode, policy.allowDownloadsWhenOff)) return null;
           return await ensureLoaded();
         } finally {
           passiveCheck = null;
@@ -294,12 +295,23 @@ export async function register(ctx) {
             message = classifyLoadError(e, { cached, online }).message;
           }
           ctx.toast(message + "; using the browser voice (see console for details)", true);
-          ctx.registerTTS(null);                 // revert to the built-in fallback
           throw e;
         },
       );
     }
     return loadPromise;
+  }
+
+  function fallbackBrowserVoice() {
+    if (typeof window === "undefined" || !window.speechSynthesis) return null;
+    let want = "";
+    try { want = localStorage.getItem("localm.ttsVoiceBrowser") || ""; } catch {}
+    const voices = speechSynthesis.getVoices() || [];
+    if (want) {
+      const found = voices.find((v) => v.name === want);
+      if (found) return found;
+    }
+    return voices.find((v) => v.localService) || voices[0] || null;
   }
 
   // ---- sequential audio playback queue ---------------------------------- //
@@ -344,6 +356,9 @@ export async function register(ctx) {
     player.onended = null;
     player.removeAttribute("src");
     clearQueue();
+    if (typeof window !== "undefined" && window.speechSynthesis && speechSynthesis.speaking) {
+      try { speechSynthesis.cancel(); } catch {}
+    }
     fireEnd();
   }
 
@@ -356,8 +371,20 @@ export async function register(ctx) {
     try {
       k = await ensureLoaded();
     } catch {
-      // The load failure was already surfaced (console.error + toast) inside
-      // ensureLoaded's handler; just abandon this utterance (RULE 5: not hidden).
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        try {
+          if (speechSynthesis.speaking) speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          const v = fallbackBrowserVoice();
+          if (v) u.voice = v;
+          u.onend = () => { if (myToken === token) { speaking = false; fireEnd(); } };
+          u.onerror = () => { if (myToken === token) { speaking = false; fireEnd(); } };
+          speechSynthesis.speak(u);
+          return;
+        } catch (fbErr) {
+          console.error("[tts] browser voice fallback failed:", fbErr);
+        }
+      }
       speaking = false;
       if (myToken === token) fireEnd();
       return;

@@ -88,17 +88,11 @@ export function classifyLoadError(err, { cached = false, online = true } = {}) {
   };
 }
 
-// R-NET: the browser fetches the Kokoro model directly from Hugging Face, so
-// localm's server-side net_mode enforcement (netpolicy.py) never sees this
-// request. planModelFetch is the client-side gate: "allow" (already cached,
-// net_mode=allow, or net_mode=off with allowDownloadsWhenOff) proceeds with
-// no prompt; "refuse" (net_mode=off, not exempted) throws without ever
-// fetching; "confirm" (net_mode=ask, or any other value) needs an explicit
-// one-time user action before the fetch is allowed to proceed.
+// Resolves whether to allow the model fetch immediately or prompt the user.
 export function planModelFetch(mode, cached, allowDownloadsWhenOff) {
   if (cached) return "allow";
+  if (allowDownloadsWhenOff) return "allow";
   if (mode === "allow") return "allow";
-  if (mode === "off") return allowDownloadsWhenOff ? "allow" : "refuse";
   return "confirm";
 }
 
@@ -214,7 +208,7 @@ export function shouldAbortForCorruption(report, device) {
 
 // True when a passive (not user-initiated) model warm-up may proceed without
 // asking - the model is already cached, or net_mode allows a fetch with no
-// prompt. See tts-net-gate.test.mjs.
-export function shouldWarmPassively(cached, netMode) {
-  return !!cached || netMode === "allow";
+// prompt, or downloads are allowed when off. See tts-net-gate.test.mjs.
+export function shouldWarmPassively(cached, netMode, allowDownloadsWhenOff = false) {
+  return !!cached || netMode === "allow" || !!allowDownloadsWhenOff;
 }
