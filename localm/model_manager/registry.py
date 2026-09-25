@@ -3088,10 +3088,7 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
     def is_unclaimed_projector(gguf: Path) -> bool:
         return gguf.resolve() not in claimed_sibling_of and "mmproj" in gguf.name.lower()
 
-    # Preflight every owner/independent-model entry against the WHOLE folder
-    # before transferring any of them - a claimed sibling always rides with
-    # its owner (resolved below once every owner has run) and an unclaimed
-    # projector never refuses, so neither needs preflighting here.
+    # Preflight every owner/independent-model entry before transferring any of them.
     for gguf in first_parts:
         if gguf.resolve() in claimed_sibling_of or not _mm.is_external_path(gguf):
             continue
