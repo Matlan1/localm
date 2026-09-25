@@ -15,9 +15,12 @@ the desktop-shortcut screen:
 
 These run against the REAL setup.bat, so they fail if the wording regresses.
 """
+import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,13 +47,28 @@ def _shortcut_blocks(bat_text):
 
 
 def _manifest_record_block(bat_text):
-    """The `setlocal DisableDelayedExpansion` / install-manifest-record /
-    `endlocal` wrapper, sliced out of the real setup.bat text by its own
-    boundaries."""
+    """The final `setlocal DisableDelayedExpansion` / install-manifest-record /
+    `endlocal` wrapper (the one at the end of setup, not the early record after
+    the environment is created), sliced out of the real setup.bat text by its
+    own boundaries."""
+    section = bat_text.index("rem ---- record what we installed")
     start = bat_text.index(
-        'setlocal DisableDelayedExpansion\n.venv\\Scripts\\python -m localm.install_manifest record')
+        'setlocal DisableDelayedExpansion\n.venv\\Scripts\\python -m localm.install_manifest record',
+        section)
     end = bat_text.index('\nif errorlevel 1 echo  [^^!] Could not record the install manifest', start)
     return bat_text[start:end]
+
+
+def _early_record_block(bat_text):
+    """The record right after the environment is created (`:venv_create_ok`),
+    from its `setlocal DisableDelayedExpansion` through its `endlocal`."""
+    ok = bat_text.index(":venv_create_ok")
+    start = bat_text.index("setlocal DisableDelayedExpansion\n", ok)
+    end = bat_text.index("\nendlocal", start) + len("\nendlocal")
+    block = bat_text[start:end]
+    assert "localm.install_manifest record" in block, "the early record moved"
+    assert bat_text.index(":venv_done", ok) > end, "the early record left :venv_create_ok"
+    return block
 
 
 def test_window_mode_is_captured_where_it_is_chosen(bat):
@@ -421,17 +439,18 @@ class TestManifestRecordSurvivesBangInInstallPath:
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         extra_setup = (
-            'set "DATADIR=C:\\FakeData"\r\nset "CRD=--data-created"\r\n'
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\nset "RCFLAG=--runtime-contained"\r\n'
             'set "PYDIR=C:\\FakePython"\r\nset "CACHEDIR=C:\\FakeCache"\r\n'
-            'set "UVDIR=C:\\FakeUv"\r\nset "PATHDIR=C:\\FakeBin"\r\n'
+            'set "UVDIR=C:\\FakeUv"\r\nset "UVSHARED=--uv-shared-installed"\r\n'
+            'set "PATHDIR=C:\\FakeBin"\r\n'
             'set "CMDSHIM=C:\\FakeBin\\localm.cmd"\r\nset "PATHMOD=--path-modified"\r\n')
         out = self._run(bangdir, echoed, extra_setup)
         expected = (
             'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --lib-dir '
-            '"{bang}\\runtime\\localm_llama_runtime\\lib" --data-dir "C:\\FakeData" '
-            '--data-created --shortcut "C:\\FakeDesktop\\LocaLM.lnk" --runtime-contained '
+            '"{bang}\\runtime\\localm_llama_runtime\\lib" '
+            '--shortcut "C:\\FakeDesktop\\LocaLM.lnk" --runtime-contained '
             '--python-dir "C:\\FakePython" --cache-dir "C:\\FakeCache" --uv-dir "C:\\FakeUv" '
+            '--uv-shared-installed '
             '--path-dir "C:\\FakeBin" --command-shim "C:\\FakeBin\\localm.cmd" --path-modified'
         ).format(bang=bangdir)
         assert expected in out.stdout, (out.stdout, out.stderr)
@@ -447,20 +466,42 @@ class TestManifestRecordSurvivesBangInInstallPath:
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         extra_setup = (
-            'set "DATADIR=C:\\FakeData"\r\nset "CRD="\r\n'
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\nset "RCFLAG="\r\n'
             'set "PYDIR="\r\nset "CACHEDIR="\r\n'
-            'set "UVDIR=C:\\FakeUv"\r\nset "PATHDIR="\r\n'
+            'set "UVDIR=C:\\FakeUv"\r\nset "UVSHARED="\r\nset "PATHDIR="\r\n'
             'set "CMDSHIM="\r\nset "PATHMOD="\r\n')
         out = self._run(bangdir, echoed, extra_setup)
         expected = (
             'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --lib-dir '
-            '"{bang}\\runtime\\localm_llama_runtime\\lib" --data-dir "C:\\FakeData"  '
+            '"{bang}\\runtime\\localm_llama_runtime\\lib" '
             '--shortcut "C:\\FakeDesktop\\LocaLM.lnk"  --python-dir "" --cache-dir "" '
-            '--uv-dir "C:\\FakeUv" --path-dir "" --command-shim "" '
+            '--uv-dir "C:\\FakeUv"  --path-dir "" --command-shim "" '
         ).format(bang=bangdir)
         assert expected in out.stdout, (out.stdout, out.stderr)
         assert "AFTER_MARK" in out.stdout, (out.stdout, out.stderr)
+        assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
+
+    def test_the_early_record_survives_a_bang_in_the_install_path(self, bat, tmp_path):
+        """The record right after the environment is created embeds %CD% and
+        the runtime folders on one line too, so it carries the same wrap."""
+        block = _early_record_block(bat)
+        target = ".venv\\Scripts\\python -m localm.install_manifest record"
+        assert block.endswith(" >nul 2>nul\nendlocal"), "the early record's shape changed"
+        echoed = (block[: -len(" >nul 2>nul\nendlocal")] + "\nendlocal").replace(
+            target, "echo MANIFEST_ARGS", 1)
+        bangdir = tmp_path / "bang!dir"
+        bangdir.mkdir()
+        extra_setup = (
+            'set "RCFLAG=--runtime-contained"\r\nset "PYDIR=%CD:!=^!%\\.python"\r\n'
+            'set "CACHEDIR=%CD:!=^!%\\.cache"\r\nset "UVDIR=%CD:!=^!%\\.uv"\r\n'
+            'set "UVSHARED="\r\n')
+        out = self._run(bangdir, echoed, extra_setup)
+        expected = (
+            'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --runtime-contained '
+            '--python-dir "{bang}\\.python" --cache-dir "{bang}\\.cache" '
+            '--uv-dir "{bang}\\.uv" '
+        ).format(bang=bangdir)
+        assert expected in out.stdout, (out.stdout, out.stderr)
         assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
 
     @pytest.mark.parametrize("exit_code,expect_flagged", [(0, False), (3, True)])
@@ -540,14 +581,6 @@ def _uv_missing_full_sequence(bat_text):
     return bat_text[start:end]
 
 
-def _datadir_lines(bat_text):
-    """The DATADIR/DATACREATED default-plus-DATAPICK==1 span."""
-    start = bat_text.index('rem DATADIR + DATACREATED feed the install manifest')
-    end = bat_text.index(
-        "rem  Single-line `if ... call` into a goto/label subroutine", start)
-    return bat_text[start:end]
-
-
 def _pathdir_cmdshim_lines(bat_text):
     """The four single-line `if ... set ...` PATHDIR/CMDSHIM lines."""
     start = bat_text.index('if "!GCRC!"=="0" set "PATHMOD=--path-modified"')
@@ -569,28 +602,17 @@ def _pydir_cachedir_block(bat_text):
     return bat_text[start:end]
 
 
-def _custom_home_blank_lines(bat_text):
-    """The `:custom_home_blank` fallback label body, up to but excluding its
-    own `exit /b 0` - the caller appends whatever readback it needs, then its
-    own exit."""
-    start = bat_text.index(':custom_home_blank')
-    end = bat_text.index('exit /b 0', start)
-    return bat_text[start:end]
-
-
-def _do_custom_home_block(bat_text):
-    """The `:do_custom_home` label body, from the label itself up to but
-    excluding its own `exit /b 0` - the caller feeds a bang-bearing path via
-    stdin (its own two `set /p` prompts capture it) and appends whatever
-    readback it needs, then its own exit. Anchored on the label LINE via
-    regex, not a bare substring search: `call :do_custom_home` (the caller)
-    and a `rem` line documenting this function both contain the literal text
-    `:do_custom_home` earlier in the file and would satisfy a naive
-    `.index(':do_custom_home')`."""
+def _data_folder_subroutines(bat_text):
+    """`:do_custom_home`, `:custom_home_blank` and `:portable_home` verbatim,
+    from the `:do_custom_home` label LINE through `:portable_home`'s closing
+    `exit /b 0`. Anchored on the label line via regex: `call :do_custom_home`
+    and a `rem` line both contain the text earlier in the file."""
     m = re.search(r"(?m)^:do_custom_home\s*$", bat_text)
     assert m, "the :do_custom_home label moved or was renamed"
-    end = bat_text.index('exit /b 0', m.start())
-    return bat_text[m.start():end]
+    p = re.search(r"(?m)^:portable_home\s*$", bat_text)
+    assert p and p.start() > m.start(), ":portable_home moved"
+    end = bat_text.index("exit /b 0", bat_text.index("created .\\home anyway", p.start()))
+    return bat_text[m.start():end + len("exit /b 0")]
 
 
 def _flush_block(bat_text):
@@ -643,10 +665,8 @@ def test_cd_derived_set_statements_escape_the_bang_before_delayed_expansion_scan
             _uv_dirs_block,
             _uv_check_portable_block,
             _uv_missing_contained_block,
-            _datadir_lines,
             _pathdir_cmdshim_lines,
             _pydir_cachedir_block,
-            _custom_home_blank_lines,
     ):
         block = extractor(bat)
         assert "%CD:!=^!%" in block, extractor.__name__
@@ -797,31 +817,6 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
             "where uv did not find the just-installed binary at the real "
             "bang-preserving location: {}".format(out.stdout), out.stderr)
 
-    def test_datadir_default_survives_a_bang_in_the_install_path(self, bat, tmp_path):
-        block = _datadir_lines(bat)
-        bangdir = tmp_path / "bang!dir"
-        bangdir.mkdir()
-        pairs = [("DATADIR", "DATADIR")]
-        out = self._run(bangdir, 'set "DATAPICK=other"\r\n', block,
-                         self._protected_readback(pairs) + self._bang_readback(pairs)
-                         + 'echo DATACREATED=[%DATACREATED%]\r\n')
-        assert "DATADIR=[{}\\home]".format(bangdir) in out.stdout, out.stdout
-        assert "DATADIR_BANG=[{}\\home]".format(bangdir) in out.stdout, out.stdout
-        assert "DATACREATED=[0]" in out.stdout, out.stdout
-
-    def test_datadir_datapick1_block_survives_a_bang_in_the_install_path(self, bat, tmp_path):
-        block = _datadir_lines(bat)
-        bangdir = tmp_path / "bang!dir"
-        bangdir.mkdir()
-        pairs = [("DATADIR", "DATADIR")]
-        out = self._run(bangdir, 'set "DATAPICK=1"\r\n', block,
-                         self._protected_readback(pairs) + self._bang_readback(pairs)
-                         + 'echo DATACREATED=[%DATACREATED%]\r\n')
-        assert "Data directory: {}\\home".format(bangdir) in out.stdout, out.stdout
-        assert "DATADIR=[{}\\home]".format(bangdir) in out.stdout, out.stdout
-        assert "DATADIR_BANG=[{}\\home]".format(bangdir) in out.stdout, out.stdout
-        assert "DATACREATED=[1]" in out.stdout, out.stdout
-
     @pytest.mark.parametrize("gcrc", ["0", "20"])
     def test_pathdir_cmdshim_survive_a_bang_in_the_install_path(self, bat, tmp_path, gcrc):
         block = _pathdir_cmdshim_lines(bat)
@@ -859,28 +854,6 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         assert "PYDIR_BANG=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
         assert "CACHEDIR_BANG=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
 
-    def test_custom_home_blank_datadir_survives_a_bang_in_the_install_path(self, bat, tmp_path):
-        block = _custom_home_blank_lines(bat)
-        bangdir = tmp_path / "bang!dir"
-        bangdir.mkdir()
-        pairs = [("DATADIR", "DATADIR")]
-        probe = bangdir / "probe.bat"
-        probe.write_text(
-            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            "{block}\r\n"
-            "{protected}"
-            "{bang}"
-            'echo DATACREATED=[%DATACREATED%]\r\n'
-            "exit /b 0\r\n".format(
-                block=block, protected=self._protected_readback(pairs),
-                bang=self._bang_readback(pairs)),
-            encoding="utf-8")
-        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
-        assert "DATADIR=[{}\\home]".format(bangdir) in out.stdout, out.stdout
-        assert "DATADIR_BANG=[{}\\home]".format(bangdir) in out.stdout, out.stdout
-        assert "DATACREATED=[1]" in out.stdout, out.stdout
-
     def test_uninstall_header_names_the_real_bang_path(self, bat, tmp_path):
         block = _uninstall_header_block(bat)
         bangdir = tmp_path / "bang!dir"
@@ -907,13 +880,11 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         script = (
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
             'set "STOREPICK=1"\r\n' + _uv_dirs_block(bat) + "\r\n"
-            'set "DATAPICK=1"\r\n' + _datadir_lines(bat) + "\r\n"
             'set "GCRC=0"\r\nset "PATHDIR="\r\nset "CMDSHIM="\r\n'
             + _pathdir_cmdshim_lines(bat) + "\r\n"
             'set "CONTAINED=1"\r\nset "PYDIR="\r\nset "CACHEDIR="\r\n'
             + _pydir_cachedir_block(bat) + "\r\n"
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\n'
-            'set "CRD=--data-created"\r\nset "RCFLAG=--runtime-contained"\r\n'
             'set "UVDIR=%CD:!=^!%\\.uv"\r\nset "PATHMOD=--path-modified"\r\n'
             + echoed + "\r\n"
             "exit /b 0\r\n")
@@ -924,7 +895,6 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         assert "MANIFEST_ARGS" in out.stdout, (out.stdout, out.stderr)
         bang = str(bangdir)
         for flag, suffix in [
-                ("--data-dir", "\\home"),
                 ("--python-dir", "\\.python"),
                 ("--cache-dir", "\\.cache"),
                 ("--path-dir", "\\bin"),
@@ -935,96 +905,128 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
             assert expected in out.stdout, (expected, out.stdout, out.stderr)
 
 
+@pytest.fixture(scope="module")
+def venv_template(tmp_path_factory):
+    """A real, pip-less venv, copied into a probe directory as .venv so the
+    data-folder subroutines run the real install_manifest prepare-data."""
+    if os.name != "nt":
+        pytest.skip("cmd.exe only")
+    d = tmp_path_factory.mktemp("venv-template") / ".venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(d)],
+                   check=True, capture_output=True, timeout=300)
+    return d
+
+
+def _clone_with_venv(directory, template):
+    directory.mkdir(parents=True)
+    shutil.copytree(template, directory / ".venv")
+    return directory
+
+
 @pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
-class TestDoCustomHomeSurvivesBangInInstallPath:
-    """`:do_custom_home` reads its path from a `set /p` PROMPT, not from a
-    %-substituted pseudo-variable like %CD%. `set /p` writes the typed text
-    straight into the variable at runtime; it never re-enters cmd's command-
-    line parser, so it is never subject to the %-then-delayed-expansion pass
-    that drops a lone `!` from parsed source text (the mechanism %CD:!=^!%
-    above exists to work around). A later `!CUSTOMHOME!` read of that value
-    is also safe here: none of the 5 sites below has any OTHER `!`-bearing
-    construct on its own logical line for cmd's scanner to (mis)pair it
-    with. Driven below with the REAL, unmodified `:do_custom_home` (plus the
-    real `:flush` it calls twice) through a real cmd.exe, feeding a
-    genuinely typed bang-bearing path and confirming it, across several bang
-    shapes, checking all 5 read sites directly.
+class TestDataFolderSubroutinesThroughCmd:
+    """The real `:do_custom_home` / `:custom_home_blank` / `:portable_home`
+    (plus the real `:flush`), driven through cmd.exe with a real venv Python
+    running the worktree's install_manifest prepare-data.
 
-    This is a LOCK-IN test, not a fix for a reproduced defect: a prior
-    investigation (see dev-notes/installer-b1-b2-fix-2026-09-11.md) concluded
-    these 5 sites drop the bang, reasoning from a repro that staged
-    CUSTOMHOME with a literal `set "CUSTOMHOME=...!..."` instead of `set
-    /p`. That literal-assignment staging has its own, real, but DIFFERENT
-    defect (the exact one %CD:!=^!% exists to fix) that drops the bang at
-    the moment the value is SET, before any `!CUSTOMHOME!` read runs at all
-    - conflating "the read corrupts it" with "the value was already
-    corrupted before the read ever saw it". Confirmed directly: staging via
-    a literal `set` and reading back through a KNOWN-safe technique
-    (`setlocal DisableDelayedExpansion` + `%VAR%`) already shows the bang
-    missing, immediately after the `set` line and before any `!VAR!` read.
-    `set /p` does not share that defect.
+    `set /p` stores typed text without re-parsing it, and `!CUSTOMHOME!` is
+    expanded once, so a typed path with bangs reaches prepare-data intact;
+    every read site below checks that.
 
-    Deliberately does not drive the "N" (reject, re-prompt) branch, and
-    cannot currently exercise a genuinely-CAPTURED confirm answer at all:
-    `:flush` spawns a real `powershell.exe` that inherits this process's
-    stdin pipe, and reproducibly (every run, confirmed repeatedly, not a
-    rare race) the SECOND OR LATER `call :flush` in one script run silently
-    consumes the pipe's next pending line before the `set /p` that follows
-    it gets to read it - only the run's FIRST `call :flush` is clean.
-    Confirmed directly: feeding "Y", "N", or a blank line for the confirm
-    answer all produce byte-identical output (always the accept branch,
-    never a re-prompt) - the fed value never reaches OKHOME at all, so this
-    harness can only exercise the path via `if not defined OKHOME set
-    "OKHOME=Y"`. That is unaffected here: CUSTOMHOME's own capture is always
-    the run's FIRST `set /p`, so it never meets this interference, and the
-    5 sites under test all key off CUSTOMHOME, never OKHOME."""
+    The answers are fed from a FILE: `set /p` reading a pipe takes the whole
+    buffer and keeps only its first line, while from a file each line reaches
+    its own prompt."""
 
-    def _run(self, bat, directory, customhome_value, confirm_answer="Y"):
-        probe = directory / "probe.bat"
+    def _run(self, bat, clone, stdin_text, entry):
+        probe = clone / "probe.bat"
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            + _do_custom_home_block(bat) +
-            "echo POST_DATADIR_DISABLED=\r\n"
-            "setlocal DisableDelayedExpansion\r\n"
-            "echo [%DATADIR%]\r\n"
-            "endlocal\r\n"
-            'echo POST_DATADIR_BANG=[!DATADIR!]\r\n'
-            'echo POST_DATACREATED=[%DATACREATED%]\r\n'
-            "exit /b 0\r\n"
+            "call :{entry}\r\n"
+            "echo EXITED=[%errorlevel%]\r\n"
+            "exit /b 0\r\n".format(entry=entry)
+            + _data_folder_subroutines(bat) + "\r\n"
             + _flush_block(bat) + "\r\n",
             encoding="utf-8")
-        stdin_text = "{}\r\n{}\r\n".format(customhome_value, confirm_answer)
-        return subprocess.run(
-            ["cmd", "/c", str(probe)], input=stdin_text, capture_output=True, text=True,
-            timeout=15, cwd=str(directory))
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT)
+        answers = clone / "answers.txt"
+        answers.write_text(stdin_text, encoding="utf-8", newline="")
+        with open(answers, "rb") as fh:
+            return subprocess.run(["cmd", "/c", str(probe)], stdin=fh,
+                                  capture_output=True, text=True, timeout=120,
+                                  cwd=str(clone), env=env)
+
+    @staticmethod
+    def _record(clone):
+        return json.loads((clone / ".localm-install.json").read_text(encoding="utf-8"))
 
     @pytest.mark.parametrize("dirname", [
         "bang!dir", "ba!ng!dir", "!bangfirst", "banglast!", "a!b!c!d!e",
     ])
-    def test_all_five_reads_survive_a_bang_in_the_typed_path(self, bat, tmp_path, dirname):
+    def test_a_typed_path_with_bangs_reaches_every_site_intact(
+            self, bat, tmp_path, venv_template, dirname):
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
         target = tmp_path / dirname / "sub"
-        out = self._run(bat, tmp_path, str(target))
-        assert out.returncode == 0, (out.stdout, out.stderr)
-
-        # site 1: the confirm prompt names the real, bang-bearing path back.
+        out = self._run(bat, clone, "{}\r\nY\r\n".format(target), "do_custom_home")
+        assert "EXITED=[0]" in out.stdout, (out.stdout, out.stderr)
+        # the confirm prompt names the real path back
         assert "Use '{}'? [Y/n]:".format(target) in out.stdout, out.stdout
-
-        # site 2: localm-home.cfg is written with the literal, unescaped path.
-        cfg = tmp_path / "localm-home.cfg"
-        assert cfg.read_text(encoding="utf-8").strip() == str(target), out.stdout
-
-        # site 3: mkdir actually created the bang-bearing directory.
+        # localm-home.cfg holds the literal path, UTF-8
+        cfg = (clone / "localm-home.cfg").read_bytes().decode("utf-8")
+        assert cfg.strip() == str(target), out.stdout
+        # the folder exists
         assert target.is_dir(), (out.stdout, out.stderr)
+        # the install record names it, as a folder setup created
+        rec = self._record(clone)
+        assert Path(rec["data_dir"]) == target and rec["data_created"] is True
+        # the closing lines name it
+        assert "Data directory: {}".format(target) in out.stdout, out.stdout
+        assert "(recorded in localm-home.cfg)" in out.stdout, out.stdout
 
-        # site 4: DATADIR holds the real path, read back two independent ways.
-        assert "POST_DATADIR_DISABLED=" in out.stdout, out.stdout
-        assert "[{}]".format(target) in out.stdout, out.stdout
-        assert "POST_DATADIR_BANG=[{}]".format(target) in out.stdout, out.stdout
-        assert "POST_DATACREATED=[1]" in out.stdout, out.stdout
+    def test_an_existing_folder_is_recorded_with_what_was_in_it(
+            self, bat, tmp_path, venv_template):
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        shared = tmp_path / "AI models"
+        (shared / "models").mkdir(parents=True)
+        out = self._run(bat, clone, "{}\r\nY\r\n".format(shared), "do_custom_home")
+        rec = self._record(clone)
+        assert rec["data_created"] is False, (out.stdout, out.stderr)
+        assert rec["data_preexisting"] == ["models"]
 
-        # site 5: the closing confirmation echo names the real path.
-        assert "Data directory: {}  (recorded in localm-home.cfg)".format(target) in out.stdout, \
-            out.stdout
+    def test_a_bang_clone_records_its_portable_home(self, bat, tmp_path, venv_template):
+        clone = _clone_with_venv(tmp_path / "bang!clone", venv_template)
+        (clone / "localm-home.cfg").write_text("X:\\old", encoding="utf-8")
+        out = self._run(bat, clone, "", "portable_home")
+        assert (clone / "home" / ".localm-data").is_file(), (out.stdout, out.stderr)
+        assert not (clone / "localm-home.cfg").exists()
+        assert Path(self._record(clone)["data_dir"]) == clone / "home"
+        assert "Data directory: {}".format(clone / "home") in out.stdout, out.stdout
+
+    def test_a_blank_path_falls_back_to_portable(self, bat, tmp_path, venv_template):
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        out = self._run(bat, clone, "\r\n", "do_custom_home")
+        assert "No path given" in out.stdout, out.stdout
+        assert (clone / "home").is_dir()
+        assert not (clone / "localm-home.cfg").exists()
+
+    def test_a_relative_path_is_refused_and_asked_again(self, bat, tmp_path, venv_template):
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        target = tmp_path / "second try"
+        out = self._run(bat, clone, "models\r\nY\r\n{}\r\nY\r\n".format(target),
+                        "do_custom_home")
+        assert "Cannot use that data folder" in out.stdout, out.stdout
+        assert not (clone / "models").exists()
+        assert target.is_dir(), out.stdout
+        assert Path(self._record(clone)["data_dir"]) == target
+
+    def test_answering_no_asks_for_the_path_again(self, bat, tmp_path, venv_template):
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        wrong, right = tmp_path / "wrong", tmp_path / "right"
+        out = self._run(bat, clone, "{}\r\nn\r\n{}\r\nY\r\n".format(wrong, right),
+                        "do_custom_home")
+        assert not wrong.exists(), out.stdout
+        assert right.is_dir(), out.stdout
+        assert Path(self._record(clone)["data_dir"]) == right
 
 
 def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
@@ -1072,3 +1074,72 @@ def test_make_launcher_quiet_still_reports_failure(monkeypatch):
     assert res.exit_code == 1, "a failed build must still exit non-zero under --quiet"
     assert "could not build LocaLM.exe: boom" in res.output
     assert "Could not build the native launcher" in res.output
+
+
+def _data_folder_block(bat_text):
+    """The data-folder section of the install flow, verbatim: from its header
+    through the `:data_folder_chosen` label."""
+    start = bat_text.index("rem ---- choose where data lives")
+    m = re.search(r"(?m)^:data_folder_chosen\s*$", bat_text)
+    assert m and m.start() > start, "the :data_folder_chosen label moved"
+    return bat_text[start:m.end()]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
+class TestRepairOffersTheDataFolderInUse:
+    """The real data-folder section (with the real subroutines it calls),
+    through cmd.exe and a real venv running the worktree's install_manifest.
+    Setup run again in a folder that already has data offers to keep it."""
+
+    def _run(self, bat, clone, stdin_text):
+        probe = clone / "probe.bat"
+        probe.write_text(
+            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            + _data_folder_block(bat).replace("\n", "\r\n") + "\r\n"
+            "echo EXITED=[%errorlevel%]\r\n"
+            "exit /b 0\r\n"
+            + _data_folder_subroutines(bat) + "\r\n"
+            + _flush_block(bat) + "\r\n",
+            encoding="utf-8")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT)
+        answers = clone / "answers.txt"
+        answers.write_text(stdin_text, encoding="utf-8", newline="")
+        with open(answers, "rb") as fh:
+            return subprocess.run(["cmd", "/c", str(probe)], stdin=fh,
+                                  capture_output=True, text=True, timeout=120,
+                                  cwd=str(clone), env=env)
+
+    def test_keeping_the_folder_in_use_leaves_it_as_it_is(self, bat, tmp_path, venv_template):
+        from localm import install_manifest as im
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        custom = tmp_path / "my data"
+        im.prepare_data(clone, data_dir=str(custom))
+        (custom / "chats").mkdir()
+        out = self._run(bat, clone, "Y\r\n")
+        assert (custom / "chats").is_dir(), (out.stdout, out.stderr)
+        assert (clone / "localm-home.cfg").read_text(encoding="utf-8").strip() == str(custom)
+        assert not (clone / "home").exists()
+        assert "Keep using it? [Y/n]:" in out.stdout and str(custom) in out.stdout
+        assert "Where should localm keep its data" not in out.stdout
+        assert "EXITED=[0]" in out.stdout, out.stdout
+
+    def test_declining_asks_where_and_keeps_the_old_folder_on_record(
+            self, bat, tmp_path, venv_template):
+        from localm import install_manifest as im
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        custom = tmp_path / "my data"
+        im.prepare_data(clone, data_dir=str(custom))
+        out = self._run(bat, clone, "n\r\n1\r\n")
+        assert (clone / "home").is_dir(), (out.stdout, out.stderr)
+        assert not (clone / "localm-home.cfg").exists()
+        rec = json.loads((clone / ".localm-install.json").read_text(encoding="utf-8"))
+        assert [Path(p) for p in rec["previous_data_dirs"]] == [custom]
+        assert "Where should localm keep its data" in out.stdout
+
+    def test_a_first_install_is_not_asked_to_keep_anything(self, bat, tmp_path, venv_template):
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        out = self._run(bat, clone, "1\r\n")
+        assert (clone / "home").is_dir(), (out.stdout, out.stderr)
+        assert "Keep using it?" not in out.stdout
+        assert "Where should localm keep its data" in out.stdout

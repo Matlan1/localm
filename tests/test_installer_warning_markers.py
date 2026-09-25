@@ -59,8 +59,11 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] Provisioning failed - run later: .venv\\Scripts\\localm setup-llama --backend %BACKEND%',
         "if errorlevel 1 echo  [^^!] Could not build LocaLM.exe",
         "if errorlevel 1 echo  [^^!] Could not record the install manifest",
-        'echo  [^^!] No venv Python found - only the marked .venv will be removed.',
+        'echo  [^^!] Uninstall stopped - see the messages above. Close any LocaLM window',
+        "echo  [^^!] No Python was found to run the uninstaller, so only LocaLM's own",
+        'echo  [^^!] Could not remove .\\%DNAME% - close any LocaLM window and delete it by hand.',
         'echo  [^^!] No path given - using the portable .\\home instead.',
+        'echo  [^^!] Could not record the data folder; created .\\home anyway.',
     ]
     for site in sites:
         assert site in bat, site
@@ -82,7 +85,7 @@ def _own_backend_block(bat_text):
     3 levels of nested parens deep at the site under test, the highest-risk
     shape in the file."""
     start = bat_text.index('if /i "%BACKEND%"=="own" (')
-    end = bat_text.index("rem ---- choose where data lives", start)
+    end = bat_text.index("rem ---- build the native LocaLM.exe launcher", start)
     return bat_text[start:end]
 
 
@@ -118,14 +121,10 @@ class TestBangSurvivesEveryStructuralShape:
         out = self._run(tmp_path, "cmd /c exit /b 1\r\n", line)
         assert "[!] Could not build LocaLM.exe" in out.stdout, (out.stdout, out.stderr)
 
-    def test_one_level_else_block(self, bat, tmp_path):
-        start = bat.index('if exist "%PYBIN%" (')
-        end = bat.index("\n)\n", bat.index("No venv Python found", start)) + len("\n)")
-        block = bat[start:end]
-        assert "No venv Python found" in block, "the else-block boundaries moved; update this test"
-        preamble = 'set "PYBIN=nonexistent-marker-for-test.exe"\r\n'
-        out = self._run(tmp_path, preamble, block)
-        assert "[!] No venv Python found - only the marked .venv will be removed." \
+    def test_marker_line_carrying_a_percent_variable(self, bat, tmp_path):
+        line = _line_containing(bat, "Could not remove .\\%DNAME%")
+        out = self._run(tmp_path, 'set "DNAME=.python"\r\n', line)
+        assert "[!] Could not remove .\\.python - close any LocaLM window" \
             in out.stdout, (out.stdout, out.stderr)
 
     def test_three_level_nested_paren_with_a_real_bang_variable_on_the_same_line(
