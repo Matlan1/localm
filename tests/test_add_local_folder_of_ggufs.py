@@ -6,6 +6,8 @@ These tests pin the directory branch: walk *.gguf (non-recursive), register
 split GGUFs by their first part only.
 """
 
+from pathlib import Path
+
 import pytest
 
 from localm.config import load_registry
@@ -290,3 +292,66 @@ class TestFolderStoreProjectorCollision:
         assert not (models_dir / "alpha.gguf").exists()
         assert (models_dir / "shared-model.gguf").read_bytes() == \
             b"GGUF existing DIFFERENT model content"
+
+    def test_intra_batch_same_name_collision_strands_nothing(
+            self, tmp_path, isolated_home_for_store):
+        # Two DIFFERENT files sharing a name across subdirectories of the
+        # same recursive import - the preflight has to catch this against
+        # each other, not only against what MODELS_DIR already holds.
+        models_dir = isolated_home_for_store
+        d = tmp_path / "downloads"
+        _gguf(d / "sub1", "model.gguf", b"GGUF content ONE from sub1")
+        _gguf(d / "sub2", "model.gguf", b"GGUF content TWO from sub2, different")
+
+        assert add_local(str(d), store="move") is False
+        assert load_registry() == {}
+        assert (d / "sub1" / "model.gguf").exists()
+        assert (d / "sub2" / "model.gguf").exists()
+        assert not any(models_dir.iterdir())
+
+    def test_claimed_sibling_collision_registers_the_real_transferred_file(
+            self, tmp_path, isolated_home_for_store):
+        # A stranger file already occupies the attached projector's default
+        # name. The projector still travels (renamed), and the registry
+        # entry created for it must point at the file that actually moved -
+        # never silently credit the pre-existing stranger instead.
+        models_dir = isolated_home_for_store
+        _gguf(models_dir, "mmproj-gemma-f16.gguf", b"GGUF PRE-EXISTING stranger content")
+
+        d = tmp_path / "downloads"
+        _gguf(d, "gemma-3-4b-it-Q4_K_M.gguf", b"GGUF gemma model bytes")
+        _gguf(d, "mmproj-gemma-f16.gguf", b"GGUF REAL incoming projector content")
+
+        assert add_local(str(d), store="move") is True
+        reg = load_registry()
+        assert (models_dir / "mmproj-gemma-f16.gguf").read_bytes() == \
+            b"GGUF PRE-EXISTING stranger content"
+        renamed = {n: e for n, e in reg.items() if n != "gemma-3-4b-it-Q4_K_M"}
+        assert len(renamed) == 1
+        entry = next(iter(renamed.values()))
+        assert Path(entry["path"]).read_bytes() == b"GGUF REAL incoming projector content"
+        assert Path(entry["path"]).name != "mmproj-gemma-f16.gguf"
+
+    def test_standalone_projector_move_repoints_an_existing_registry_reference(
+            self, tmp_path, isolated_home_for_store):
+        # An already-registered model's mmproj can point at an external path
+        # directly (persist_cli_mmproj / pull.py do this). Sweeping that same
+        # external file up in an unrelated folder import must not leave that
+        # reference silently dangling at the now-moved-away path.
+        import localm.model_manager as mm
+
+        d = tmp_path / "downloads"
+        _gguf(d, "unrelated-model.gguf", b"GGUF unrelated model bytes")
+        proj = _gguf(d, "mmproj-vision-f16.gguf", b"GGUF vision projector bytes for foo")
+
+        other_model = tmp_path / "foo_model.gguf"
+        other_model.write_bytes(b"GGUF foo's own model bytes")
+        mm._register("foo", other_model.resolve(), "local", mmproj=proj.resolve())
+        before = load_registry()["foo"]["mmproj"]
+
+        assert add_local(str(d), store="move") is True
+        after = load_registry()["foo"]["mmproj"]
+        assert after != before
+        assert Path(after).is_file()
+        assert Path(after).read_bytes() == b"GGUF vision projector bytes for foo"
+        assert not Path(before).exists()

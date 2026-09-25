@@ -1942,10 +1942,19 @@ class StoredModel(NamedTuple):
 
     ``path`` is the primary file or directory to register (the first part, for
     a split GGUF). ``mmproj`` is the vision projector to record on that
-    registry entry, at its new location, or None when there is none to record.
+    registry entry, at its new location, or None when there is none to record
+    - including when a file travelled attached to *path* but
+    :func:`gguf_is_mmproj` disagreed it is really a projector, in which case
+    ``attached_dest`` still names where that file actually landed.
+    ``attached_dest`` is the placed path of the file ``find_sibling_mmproj``
+    attached to *path*, independent of ``gguf_is_mmproj``, or None when
+    nothing was attached - the answer a caller tracking every transferred
+    file's real location needs, as opposed to ``mmproj``'s narrower "is this
+    fit to record as the vision projector" question.
     """
     path: Path
     mmproj: Optional[Path]
+    attached_dest: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -2342,8 +2351,11 @@ def _store_with_projector(path: Path, action: str, *,
                     f" (now in the models folder): {escape(str(e))}[/yellow]")
 
     mmproj: Optional[Path] = None
-    if attached is not None and attached in arrived and gguf_is_mmproj(placed[attached]):
-        mmproj = placed[attached]
+    attached_dest: Optional[Path] = None
+    if attached is not None and attached in arrived:
+        attached_dest = placed[attached]
+        if gguf_is_mmproj(placed[attached]):
+            mmproj = placed[attached]
     unattached = [placed[t.src] for t in transfers
                   if t.src != attached and t.src in arrived]
     if attached is None and unattached:
@@ -2361,7 +2373,7 @@ def _store_with_projector(path: Path, action: str, *,
                 "projector. To use one, pass its path with --mmproj when you run "
                 "the model.")
 
-    return StoredModel(_mm.MODELS_DIR / path.name, mmproj)
+    return StoredModel(_mm.MODELS_DIR / path.name, mmproj, attached_dest)
 
 
 def _name_collision(model_name: str, p: Path, reg: dict) -> Optional[str]:
@@ -2974,21 +2986,31 @@ def _resolve_ollama_manifest(p: Path):
 
 
 
-def _primary_name_collision(gguf: Path) -> Optional[str]:
+def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
     """The conflicting path in MODELS_DIR, if *gguf*'s own name (or any split
-    part) is already occupied there by a genuinely different file; None when
-    every part's destination is free or already *gguf* itself.
+    part) is already occupied there by a genuinely different file, or by a
+    different entry already checked earlier in this same *claimed* batch;
+    None when every part's destination is free, already *gguf* itself, or
+    not yet claimed by anyone else - in which case *gguf*'s parts are added
+    to *claimed* for the rest of the batch.
 
-    Read-only (stats and path comparisons, no transfer): mirrors the check
-    ``_store_with_projector``'s own primary-item construction makes for the
-    same file, so a caller can preflight a whole batch of independent
-    transfers before starting any of them.
+    Read-only on disk (stats and path comparisons, no transfer): mirrors the
+    check ``_store_with_projector``'s own primary-item construction makes
+    for the same file, so a caller can preflight a whole batch of
+    independent transfers - including against EACH OTHER, not just against
+    what MODELS_DIR already holds - before starting any of them.
     """
-    for part in (split_gguf_parts(gguf.name) or [gguf.name]):
+    parts = split_gguf_parts(gguf.name) or [gguf.name]
+    for part in parts:
         src = gguf.parent / part
         dest = _mm.MODELS_DIR / part
         if dest.exists() and dest.resolve() != src.resolve():
             return str(dest)
+        prior = claimed.get(part.lower())
+        if prior is not None and prior.resolve() != src.resolve():
+            return str(dest)
+    for part in parts:
+        claimed[part.lower()] = gguf.parent / part
     return None
 
 
@@ -3033,7 +3055,16 @@ def _store_standalone_projector(src: Path, action: str) -> Path:
                 f"after copy to {dest} (source left untouched, bad copy removed)"
             )
     else:
+        old_key = os.path.normcase(str(src))
         shutil.move(str(src), str(dest))
+        try:
+            _repoint_projector_references({old_key: str(dest.resolve())})
+        except Exception as e:
+            logger.warning("_store_standalone_projector: could not update the "
+                           "registry entries recording %s: %s", dest, e)
+            console.print(
+                f"[yellow]Could not update the registry entries that record "
+                f"{escape(dest.name)} (now in the models folder): {escape(str(e))}[/yellow]")
     return dest
 
 
@@ -3088,13 +3119,15 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
     def is_unclaimed_projector(gguf: Path) -> bool:
         return gguf.resolve() not in claimed_sibling_of and "mmproj" in gguf.name.lower()
 
-    # Preflight every owner/independent-model entry before transferring any of them.
+    # Preflight every owner/independent-model entry before transferring any of
+    # them, against MODELS_DIR AND against each other (claimed_names).
+    claimed_names: dict = {}
     for gguf in first_parts:
         if gguf.resolve() in claimed_sibling_of or not _mm.is_external_path(gguf):
             continue
         if is_unclaimed_projector(gguf):
             continue
-        conflict = _primary_name_collision(gguf)
+        conflict = _primary_name_collision(gguf, claimed_names)
         if conflict is not None:
             console.print(f"[red]Cannot {store}: {escape(conflict)} already exists[/red]")
             return None
@@ -3126,8 +3159,8 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
         if owner is None:
             continue
         stored = owner_result.get(owner.resolve())
-        if stored is not None and stored.mmproj is not None:
-            new_parts[i] = stored.mmproj
+        if stored is not None and stored.attached_dest is not None:
+            new_parts[i] = stored.attached_dest
         else:
             new_parts[i] = _mm.MODELS_DIR / gguf.name if _mm.is_external_path(gguf) else gguf
 
