@@ -328,10 +328,11 @@ def test_the_outer_deadline_fits_around_every_inner_bound():
     fabricated failure on a healthy machine. Neither number is wrong alone; the
     relation is the thing, and it cannot be reviewed one number at a time."""
     inner = (d.PROBE_TIMEOUT_S + d.VENV_TIMEOUT_S + d.VENV_PIP_TIMEOUT_S
-             + d.SPAWN_REPLY_TIMEOUT_S + 2 * d.SPAWN_JOIN_TIMEOUT_S)
+             + d.SPAWN_REPLY_TIMEOUT_S + 2 * d.SPAWN_JOIN_TIMEOUT_S
+             + d.HF_PROBE_TIMEOUT_S + 3 * d.SPAWN_JOIN_TIMEOUT_S)
     assert d.worst_case_run_seconds() > inner, (
         "the default deadline must leave room for the steps that have no timeout "
-        "of their own (interpreter startup, importing torch and transformers)")
+        "of their own (interpreter startup, the localm import)")
     assert d.worst_case_run_seconds() - inner >= d.UNBOUNDED_HEADROOM_S
 
 

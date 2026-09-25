@@ -321,11 +321,13 @@ def add_venv_dll_directories() -> list[str]:
     is left alone, as torch leaves it in a process started from the venv.
 
     Call at the top of a worker's process-main, before anything imports torch.
-    Only the HF worker calls it: it is the worker that runs torch. The GGUF
-    worker in particular keeps its search path as it is, because these
-    directories would put the oneAPI runtime an XPU torch installs on the
-    search path of the SYCL llama.cpp runtime, which ships its own copies of
-    many of the same DLLs (see ``discover._torch_gpu_probe_known_doomed``).
+    Only the HF worker calls it, through ``_hf_runner.prepare_worker_process``
+    (which ``localm doctor``'s HF-backend probe shares): it is the worker that
+    runs torch. The GGUF worker in particular keeps its search path as it is,
+    because these directories would put the oneAPI runtime an XPU torch
+    installs on the search path of the SYCL llama.cpp runtime, which ships its
+    own copies of many of the same DLLs (see
+    ``discover._torch_gpu_probe_known_doomed``).
 
     Windows-only. A no-op in a process already running from the venv (torch
     registers these itself there), when no venv is on ``sys.path``, and for a

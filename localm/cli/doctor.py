@@ -552,12 +552,15 @@ def _check_packages() -> dict:
 
 def _check_hf_backend_usable(torch_mod, transformers_mod) -> None:
     """Print the HF-backend-usable line. The probe is
-    diagnostics.check_hf_backend, which resolves transformers' LAZY Auto*
-    classes for real, separating "installed" from "usable".
+    diagnostics.check_hf_backend, which imports torch and transformers and
+    resolves transformers' LAZY Auto* classes for real in a spawned worker,
+    where a model loads, separating "installed" from "usable".
 
     The two module handles come from ``_check_packages`` above, which has
-    already decided whether each is importable here, so ``resolved=True`` is
-    passed: a None means absent, and the core does not re-import torch."""
+    already decided whether each is present, so ``resolved=True`` is passed: a
+    None means absent and the check stays silent. A present package is imported
+    again in the worker: working in this process is no evidence that it works
+    there."""
     _render(diagnostics.check_hf_backend(torch_mod, transformers_mod,
                                          resolved=True))
 
@@ -645,7 +648,8 @@ def doctor():
       - Available VRAM
       - Required Python packages (huggingface-hub, torch, uvicorn, fastapi)
       - The HF (transformers) backend is not just installed but actually
-        USABLE - AutoTokenizer/AutoProcessor/AutoModelForCausalLM really load
+        USABLE - AutoTokenizer/AutoProcessor/AutoModelForCausalLM really load,
+        in a worker process started the way a model load starts one
       - Enabled plugins have their pip extras installed
     Also surfaces a one-line discovery hint for the opt-in managed ComfyUI.
     """

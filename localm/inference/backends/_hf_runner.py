@@ -253,16 +253,17 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
         raise
 
 
-def _runner_main(req_q, resp_q, ctrl_q) -> None:
-    """Long-lived child: owns one HFWorker (one loaded model) for its whole
-    process lifetime, dispatching one request at a time on ``req_q``/
-    ``resp_q``. A dedicated control-thread drains ``ctrl_q`` for a
-    mid-stream cancel signal and sets ``stream_cancel_event``, which the
-    active ``chat_stream``'s ``StoppingCriteria`` polls (see
-    ``_hf_worker.py``'s ``_CancelCriteria``) - mirrors
-    ``llamacpp/_runner.py``'s ``_control_loop``, minus the load-cancel
-    message HF does not support (``spawn_and_load`` below takes no
-    ``cancel_event``)."""
+def prepare_worker_process() -> None:
+    """Set up a spawned child that is about to import torch for the HF backend.
+
+    Called by this module's worker (``_runner_main``) and by ``localm doctor``'s
+    HF-backend check (``diagnostics._hf_backend_probe``). Keep both on this one
+    function: the doctor's verdict says something about this worker only while
+    its probe starts the same way. A torch import can work in one process and
+    fail in a worker started differently (GitHub issue #1989).
+
+    Call first thing in the child, before anything imports torch. What it sets
+    up lasts for the rest of the process."""
     from localm.debuglog import attach_child_logging, logger
     attach_child_logging()   # native/tokenizer failure diagnostics land in
                               # the shared debug log from this process too.
@@ -282,13 +283,26 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
     suppress_native_error_dialogs()   # a native DLL failure here (torch/CUDA/
                                        # ROCm init) must degrade to a catchable
                                        # exception, never a blocking modal dialog.
-    # Before anything below can import torch: this worker runs as the BASE
+    # Before anything can import torch: this worker runs as the BASE
     # interpreter, so torch would look for the venv's Library/bin, where an Intel
     # XPU torch's oneAPI runtime DLLs live, under the base install (#1989).
     dll_dirs = add_venv_dll_directories()
     if dll_dirs:
         logger.debug("hf worker: added the venv's DLL directories: %s",
                      ", ".join(dll_dirs))
+
+
+def _runner_main(req_q, resp_q, ctrl_q) -> None:
+    """Long-lived child: owns one HFWorker (one loaded model) for its whole
+    process lifetime, dispatching one request at a time on ``req_q``/
+    ``resp_q``. A dedicated control-thread drains ``ctrl_q`` for a
+    mid-stream cancel signal and sets ``stream_cancel_event``, which the
+    active ``chat_stream``'s ``StoppingCriteria`` polls (see
+    ``_hf_worker.py``'s ``_CancelCriteria``) - mirrors
+    ``llamacpp/_runner.py``'s ``_control_loop``, minus the load-cancel
+    message HF does not support (``spawn_and_load`` below takes no
+    ``cancel_event``)."""
+    prepare_worker_process()
 
     from localm.inference.backends._hf_worker import HFWorker
     from localm.inference.backends.base import (

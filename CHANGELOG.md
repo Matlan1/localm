@@ -118,6 +118,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`localm doctor` no longer reports the HuggingFace backend as working while
+  every HuggingFace model fails to load.** Doctor checked that PyTorch and
+  transformers load in its own process, but a model loads in a separate worker
+  process, where the same import can fail: the Intel GPU `[WinError 126]` failure
+  fixed in this release passed that check. `localm doctor` and Settings >
+  Diagnostics now run the check in a worker started the way a model load starts
+  one, and say which step failed there. A check that does not finish within two
+  minutes stops its worker and reports the backend as not verified.
 - **A web search or page read in the GUI chat no longer pulls unrelated long-term
   memories into the reply, and the session log no longer records the GUI's web
   notes as something you said.** Search results, page text and notes such as
