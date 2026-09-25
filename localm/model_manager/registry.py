@@ -448,10 +448,12 @@ _GENERIC_NAME_WORDS = frozenset({
 
 
 # A quantisation or precision tag as a whole name segment, with an unsloth
-# "ud-" or mradermacher "i1-" prefix.
+# "ud-" or mradermacher "i1-" prefix and at most three "_" parts. The bound
+# keeps a scan linear. See test_quant_tag_scan_is_linear.
 _QUANT_TAG_RE = re.compile(
     r"(?<![a-z0-9])(?:ud-|i1-)?"
-    r"(?:t?i?q\d+(?:_[a-z0-9]+)*|mxfp\d+(?:_[a-z0-9]+)*|b?f\d+|fp\d+)(?![a-z0-9])")
+    r"(?:t?i?q\d+(?:_[a-z0-9]+){0,3}|mxfp\d+(?:_[a-z0-9]+){0,3}|b?f\d+|fp\d+)"
+    r"(?![a-z0-9])")
 
 
 def _name_identity(name: str) -> str:

@@ -509,6 +509,18 @@ def test_name_residue(name, residue):
     assert _name_residue(name) == residue
 
 
+def test_quant_tag_scan_is_linear():
+    """A name built from many repeated quant-like parts, the shape a backtracking
+    tag pattern takes quadratic time on, is read in well under a second."""
+    import time
+    from localm.model_manager.registry import _name_identity, _name_residue
+    name = "q0" + "_q0" * 20000 + ".gguf"
+    start = time.perf_counter()
+    _name_identity(name)
+    _name_residue(name)
+    assert time.perf_counter() - start < 1.0
+
+
 class TestGetModelMmproj:
     def test_registry_explicit_mmproj_wins(self, tmp_path, monkeypatch):
         model = _gguf(tmp_path / "m.gguf")
