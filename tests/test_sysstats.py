@@ -4,6 +4,7 @@
 Every VRAM-reading function here is multi/split-GPU aware, including this
 status-bar widget."""
 
+import os
 import sys
 import threading
 
@@ -61,7 +62,24 @@ def _reset_vram_cache(monkeypatch):
     monkeypatch.setattr(sysstats, "_vram_ready", threading.Event())
 
 
-def _wait_for_vram_cache(timeout=2.0):
+# A mocked probe round trip normally lands in well under 100ms, but the deadline
+# below is deliberately wide relative to that: on a heavily-loaded box (many
+# concurrent processes contending for the GIL/OS scheduler) plain thread-
+# scheduling latency alone has been measured at 1.3-1.9s for a single round
+# trip, which left a naive 2.0s bound flaking on pure scheduling jitter, not a
+# real bug. LOCALM_TEST_VRAM_POLL_DEADLINE overrides the default - tighten it
+# for a fast, lightly-loaded CI box, or widen it further for a heavier one.
+# tests/test_gui.py's TestStatsVramTrust._stats_vram polls the identical
+# mechanism and imports this constant rather than keeping its own copy, so the
+# two can never drift apart.
+_VRAM_POLL_DEADLINE_ENV = "LOCALM_TEST_VRAM_POLL_DEADLINE"
+try:
+    VRAM_POLL_DEADLINE = max(0.5, float(os.environ.get(_VRAM_POLL_DEADLINE_ENV, "5")))
+except ValueError:
+    VRAM_POLL_DEADLINE = 5.0
+
+
+def _wait_for_vram_cache(timeout=VRAM_POLL_DEADLINE):
     """Poll until the background probe has landed at least once (_vram_last
     moves off its None "never asked yet" sentinel)."""
     deadline = time.monotonic() + timeout
