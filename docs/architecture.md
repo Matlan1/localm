@@ -152,9 +152,10 @@ a mutated module or the gate with a notice: that the gate runs on it when it
 carries the `mutation-test` label, and that the gate did not run on it
 otherwise. `mutation-scope` fails when it cannot compute the diff, and
 `merge-policy` fails with it. The two decision classes that
-live in `localm/inference/http_server.py` rather than a mutated module - an
-unsafe route exempted from the origin gate, and `bind_host` replaced by the
-peer address - are pinned by `tests/test_trust_boundary_controls.py`.
+live in the app assembly (`localm/inference/app_assembly/security.py` and
+`diagnostics.py`) rather than a mutated module - an unsafe route exempted from
+the origin gate, and `bind_host` replaced by the peer address - are pinned by
+`tests/test_trust_boundary_controls.py`.
 
 So before removing or renaming a config key, a route, or a response field:
 search for the old name and for every field name the route derives from
@@ -254,9 +255,17 @@ their original precision.
 holds the shared inference state; the route handlers themselves live in
 `inference/routes/` modules (chat, models, config, keys, session, admin,
 system, gpu). The plugin management API is mounted separately, by
-`localm/plugins/engine.py`. The synchronous `engine.chat_stream()` runs in a
-thread; tokens cross into the event loop via `call_soon_threadsafe` and
-stream out as SSE. Inference is serialised per loaded model (an asyncio
+`localm/plugins/engine.py`. `create_app()` reads as the boot order: it
+resets the engine registry and opens the session audit (module globals that
+`http_server` owns, as does the lifespan that starts the background services),
+then calls the stateless steps in `inference/app_assembly/`: exception
+handlers, `app.state`, the kernel diagnostics routes, the security middleware
+(CORS, the origin and shell-token gate, the CSP headers, the docs guard), the
+transport middleware, the route groups and, last, the plugin engine. The
+middleware order is load-bearing and pinned by
+`tests/test_create_app_characterization.py` and `tests/test_app_assembly.py`.
+The synchronous `engine.chat_stream()` runs in a thread; tokens cross into
+the event loop via `call_soon_threadsafe` and stream out as SSE. Inference is serialised per loaded model (an asyncio
 semaphore per display name), not globally - two concurrently loaded models
 can generate at once. Endpoints are documented in
 [server-api.md](server-api.md).

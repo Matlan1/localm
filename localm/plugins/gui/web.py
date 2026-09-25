@@ -73,7 +73,8 @@ def _index_html_with_shell_token(token: str, nonce: str = "") -> str:
     The token is embedded only in same-origin HTML served to a trusted loopback
     client and is a short-lived per-process secret, not the durable API key.
 
-    *nonce* is this request's CSP nonce (see http_server's _security_headers).
+    *nonce* is this request's CSP nonce (see _security_headers in
+    localm/inference/app_assembly/security.py).
     Every inline <script> in the shell, including the injected token snippet,
     must carry it or the enforcing Content-Security-Policy blocks it."""
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -806,8 +807,8 @@ def attach_gui(
         loopback = _is_loopback_host(
             getattr(request.app.state, "bind_host", "127.0.0.1"))
         key = auth.get_api_key() or ""
-        # This request's CSP nonce, minted by http_server's _security_headers before
-        # it called us. Empty for a standalone mount that has no such middleware,
+        # This request's CSP nonce, minted by _security_headers
+        # (localm/inference/app_assembly/security.py) before it called us. Empty for a standalone mount that has no such middleware,
         # which serves no CSP header either.
         nonce = getattr(request.state, "csp_nonce", "")
         # The shell is always revalidated: it carries the per-request shell token and

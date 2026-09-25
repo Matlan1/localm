@@ -108,7 +108,7 @@ def test_fake_model_drives_a_real_web_tool_round_trip_to_a_cited_final_answer(
     engine = _scripted_engine([_TOOL_CALL, _FINAL_ANSWER])
     app = web_chat_app(engine)
     # Every plugin POST goes through the real open-mode management gate
-    # (http_server.py's _origin_guard): with no API key configured it demands
+    # (app_assembly's _origin_guard): with no API key configured it demands
     # the per-process shell token create_app() mints into app.state.shell_token
     # for the loopback GUI shell - the credential this test's "browser" would
     # actually hold. /v1/chat/completions is separately exempt (_CROSS_ORIGIN_OK),

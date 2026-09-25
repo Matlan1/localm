@@ -220,7 +220,7 @@ class TestShellTokenNotDisclosedByIndexRoute:
     """GET / (the route that carries the shell_token) sits OUTSIDE
     _CROSS_ORIGIN_GET_REFUSED entirely, and _cross_origin_refused itself
     short-circuits to "not refused" under "cors_origins": "*"
-    (http_server.py:3355), so neither check runs for GET /.
+    (app_assembly/security.py), so neither check runs for GET /.
     test_wildcard_cors_metadata_get_with_token_still_allowed above proves the
     token stays REQUIRED; this asserts the separate property that the token
     cannot be OBTAINED cross-origin under wildcard CORS."""

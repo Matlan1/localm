@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Contract test for ``_CROSS_ORIGIN_OK`` in ``localm/inference/http_server.py``.
+"""Contract test for ``_CROSS_ORIGIN_OK`` in ``localm/inference/app_assembly/security.py``.
 
 Every entry in that tuple must be a full route path, never a directory prefix
 (it is matched with ``str.startswith()``), because a prefix silently exempts
@@ -89,7 +89,7 @@ def test_every_route_under_a_watched_prefix_is_reviewed():
         + ", ".join(sorted(offenders)) + " - such a route was never "
         "individually reviewed for the cross-origin/CSRF refusal and the "
         "open-mode shell-token gate; confirm it does NOT need to be added "
-        "to _CROSS_ORIGIN_OK in http_server.py, then add it to "
+        "to _CROSS_ORIGIN_OK in app_assembly/security.py, then add it to "
         "_REVIEWED_WATCHED_ROUTES above with a one-line reason")
 
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Deterministic control mutations for the two trust-boundary decision classes
-that live in localm/inference/http_server.py, outside the [tool.mutmut]
+that live in localm/inference/app_assembly/, outside the [tool.mutmut]
 only_mutate modules scripts/check_mutation_floors.py ratchets:
 
 * an unsafe route exempted from the origin gate: every kernel route with a

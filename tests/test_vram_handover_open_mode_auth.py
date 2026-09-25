@@ -3,7 +3,7 @@
 reload_chat_after_media) must actually authenticate on a keyless (open-mode,
 default) server.
 
-_origin_guard's open-mode management gate (http_server.py) 403s any
+_origin_guard's open-mode management gate (app_assembly) 403s any
 unsafe-method call to /v1/models/unload|load that carries neither a key nor
 the loopback shell_token/instance_token, and /v1/models/* is not in
 _CROSS_ORIGIN_OK. So self_request threads this instance's own attach token

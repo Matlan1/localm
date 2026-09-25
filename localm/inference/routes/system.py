@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """System routes: health, CA download, instance identity, and on-demand GUI mount.
 
-The api_landing "/" route and all middleware stay in create_app. Reads the live
+The api_landing "/" route and all middleware are added by create_app's assembly
+steps (localm.inference.app_assembly), not here. Reads the live
 engine from the http_server module global, so a model swap is reflected here.
 """
 
