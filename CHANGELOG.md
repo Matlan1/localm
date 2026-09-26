@@ -118,6 +118,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A GGUF vision reply can fail with "the vision projector could not evaluate
+  this image (mtmd_helper_eval_chunks rc=1)", wrongly blamed on a GPU-specific
+  fault, when the live context is too small for the image.** Unlike the text
+  path, the vision path never resized the context for what an image+prompt
+  actually needs, so llama.cpp's own KV cache ran out of room mid-encode
+  ("failed to find a memory slot") - identically on GPU and CPU, since it is a
+  capacity limit, not a compute-backend bug. On GPU that failure was
+  indistinguishable from the known gfx1030/RDNA2 hipBLAS BF16 fault, so it
+  wasted a CPU rebuild-and-retry (also disguising the on_status message as a
+  GPU problem) before still failing with the same unhelpful error. The vision
+  path now counts the real token cost of the image and prompt up front and
+  grows the context first, the same way text generation already does,
+  and gives the same graceful "conversation has outgrown the context window"
+  error as text does when even a resized context can't fit it.
 - **Sending an image to a GGUF vision model with "Max tokens per reply" set to
   unlimited (0) no longer silently returns an empty reply.** Chat showed
   "Encoding image (GPU)..." and then nothing, with no error: the image

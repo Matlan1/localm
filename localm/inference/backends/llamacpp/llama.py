@@ -2002,6 +2002,19 @@ class LlamaCpp:
                 # text path gets in _Tokenizer.encode.
                 pretokenizer_guard.check_text(self._tokenizer._pre_type, prompt)
 
+                # mtmd fills the KV from scratch every call (no reuse across
+                # turns - see the class docstring), and llama.cpp fails a batch
+                # that does not fit its context ("failed to find a memory slot")
+                # instead of growing to make room - identically on GPU and CPU,
+                # since it is a KV-capacity limit, not a compute-backend fault.
+                # Left unsized, that failure is indistinguishable from the
+                # unrelated gfx1030/RDNA2 hipBLAS bug below, wasting a CPU retry
+                # before still failing. Counting first also gives an oversized
+                # image/conversation the same graceful ContextCapacityExceededError
+                # _generate's text path already gives instead of a native abort.
+                n_prompt = self._mtmd.count_tokens(prompt, images, add_special=add_special)
+                max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
+
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd
                 # prefill AND AGAIN INSIDE THE PER-TOKEN LOOP (the llama_decode
@@ -2019,9 +2032,19 @@ class LlamaCpp:
                     if self._stop.is_set() or self._ctx_ptr is None:
                         return
                     with _ctx():
-                        # Clear any prior turn's KV so the mtmd prefill from position 0 is
-                        # valid on a reused context, then evaluate the image+text prompt.
-                        self._reset_kv_for_image()
+                        # If unlimited (<= 0), reserve the same modest chunk
+                        # _generate does rather than sizing for a runaway reply.
+                        initial_budget = max_new_tokens if max_new_tokens > 0 else 512
+                        needed = n_prompt + initial_budget + 64
+                        if needed > self._ctx_capacity:
+                            # Too small for this turn - grow it. This also
+                            # leaves a fresh, empty KV, so no separate reset.
+                            self._prefill_fresh_context([], needed)
+                        else:
+                            # Already big enough: just clear any prior turn's KV
+                            # so the mtmd prefill from position 0 is valid on a
+                            # reused context.
+                            self._reset_kv_for_image()
                         from .mtmd import MtmdGpuEncodeFailed
                         try:
                             pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,

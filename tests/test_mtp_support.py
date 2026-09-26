@@ -878,6 +878,7 @@ def test_generate_image_never_samples_or_decodes_the_draft_context():
         mtp_active_this_call=True,   # as if a PRIOR text turn had speculated
     )
     llm._mtmd = MagicMock(marker="<image>")
+    llm._mtmd.count_tokens.return_value = 10
     llm._mtmd.eval_into.return_value = 5   # position after the mtmd prefill
     llm._create_batch = MagicMock(return_value=MagicMock())
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG

@@ -71,6 +71,7 @@ def _bare_llama_vision() -> LlamaCpp:
     llm = _bare_llama()
     llm._mtmd = MagicMock()
     llm._mtmd.marker = "<image>"
+    llm._mtmd.count_tokens.return_value = 10   # well under _ctx_capacity (4096)
     llm._mtmd.eval_into.return_value = 3   # pos after prefill
     return llm
 
