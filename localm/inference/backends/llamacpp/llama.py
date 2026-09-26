@@ -2059,7 +2059,14 @@ class LlamaCpp:
                 in_decode = True
                 logger.info("gguf generate (vision): entering decode loop")
                 _decode_t0 = time.monotonic()
-                for _ in range(max_new_tokens):
+                # max_new_tokens <= 0 is this codebase's "unlimited" sentinel
+                # (see _generate's identical while condition, and
+                # _fit_generation_budget's docstring) - a `for _ in
+                # range(max_new_tokens)` loop treats 0/negative as "generate
+                # nothing" instead, which used to make a vision reply end
+                # silently with zero tokens whenever max_tokens was set to
+                # unlimited.
+                while max_new_tokens <= 0 or tokens_generated < max_new_tokens:
                     with self._gen_lock:
                         if self._stop.is_set() or self._ctx_ptr is None:
                             self.last_finish_reason = "error"
@@ -2092,8 +2099,9 @@ class LlamaCpp:
                             "gguf generate (vision): decode progress, %d "
                             "token(s) in %.2fs",
                             tokens_generated, time.monotonic() - _decode_t0)
-                else:
-                    self.last_finish_reason = "length"
+                    if max_new_tokens > 0 and tokens_generated >= max_new_tokens:
+                        self.last_finish_reason = "length"
+                        break
                 logger.info(
                     "gguf generate (vision): complete, %d token(s) in %.2fs, "
                     "finish_reason=%s", tokens_generated,
