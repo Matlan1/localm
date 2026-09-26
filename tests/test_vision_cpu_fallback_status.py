@@ -163,6 +163,7 @@ class TestLlamaCppEmitsTheSharedFallbackConstant:
         llm._mtmd.marker = "<image>"
         llm._mtmd.on_gpu = True
         llm._mtmd.retry_on_cpu.return_value = True
+        llm._mtmd.count_tokens.return_value = 10
         llm._mtmd.eval_into.side_effect = [MtmdGpuEncodeFailed(), _StopAfterRetry()]
 
         mock_api = MagicMock()

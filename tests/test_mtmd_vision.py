@@ -79,26 +79,35 @@ class _FakeMtmdLib:
     (n_batch derivation, the new_n_past sanity check) without a real native
     library or GPU."""
 
-    def __init__(self, new_n_past: int, rc_tokenize: int = 0, rc_eval: int = 0):
+    def __init__(self, new_n_past: int, rc_tokenize: int = 0, rc_eval: int = 0,
+                 n_tokens: int = 0):
         self._new_n_past = new_n_past
         self._rc_tokenize = rc_tokenize
         self._rc_eval = rc_eval
+        self._n_tokens = n_tokens
         self.last_eval_n_batch = None
+        self.bitmap_init_calls = 0
+        self.bitmap_free_calls = 0
+        self.chunks_free_calls = 0
 
     def mtmd_bitmap_init(self, w, h, rgb):
+        self.bitmap_init_calls += 1
         return 1  # any truthy "pointer"
 
     def mtmd_bitmap_free(self, bmp):
-        pass
+        self.bitmap_free_calls += 1
 
     def mtmd_input_chunks_init(self):
         return 1
 
     def mtmd_input_chunks_free(self, chunks):
-        pass
+        self.chunks_free_calls += 1
 
     def mtmd_tokenize(self, ctx, chunks, itext, arr, n_bitmaps):
         return self._rc_tokenize
+
+    def mtmd_helper_get_n_tokens(self, chunks):
+        return self._n_tokens
 
     def mtmd_helper_eval_chunks(self, ctx, llama_ctx, chunks, a, b, n_batch, c, out_ptr):
         self.last_eval_n_batch = n_batch
@@ -174,3 +183,46 @@ class TestMtmdEvalIntoSanity:
         ctx = _fake_mtmd_context(new_n_past=120)
         pos = ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
         assert pos == 120
+
+
+class TestMtmdCountTokens:
+    """count_tokens() lets the caller size the llama context BEFORE eval_into
+    runs - llama.cpp fails a batch that does not fit its context instead of
+    growing to make room, so the exact token cost (not an estimate) has to be
+    known first. Regression coverage for the tokenize-then-eval split: both
+    must free every bitmap and chunks handle exactly once, whichever one
+    runs, and neither may leak the other's resources on a tokenize failure."""
+
+    def test_reports_the_real_helper_get_n_tokens_count(self):
+        ctx = _fake_mtmd_context(new_n_past=0, n_tokens=777)
+        n = ctx.count_tokens("hi", images=[], add_special=True)
+        assert n == 777
+
+    def test_frees_chunks_and_every_bitmap_after_counting(self):
+        ctx = _fake_mtmd_context(new_n_past=0, n_tokens=10)
+        images = [(4, 4, b"\x00" * 48), (2, 2, b"\x00" * 12)]
+        ctx.count_tokens("hi <img> <img>", images=images, add_special=True)
+        assert ctx._m.bitmap_init_calls == 2
+        assert ctx._m.bitmap_free_calls == 2
+        assert ctx._m.chunks_free_calls == 1
+
+    def test_a_tokenize_failure_still_frees_every_bitmap(self):
+        ctx = _fake_mtmd_context(new_n_past=0, rc_tokenize=1)
+        images = [(4, 4, b"\x00" * 48)]
+        with pytest.raises(VisionInputError, match="mtmd_tokenize"):
+            ctx.count_tokens("hi <img>", images=images, add_special=True)
+        assert ctx._m.bitmap_init_calls == 1
+        assert ctx._m.bitmap_free_calls == 1
+
+    def test_eval_into_still_frees_resources_exactly_once(self, monkeypatch):
+        """The tokenize/eval split must not double-free or leak: eval_into's
+        own bitmap/chunks lifecycle is unchanged by count_tokens existing."""
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
+            lambda llama_ctx: 4096)
+        ctx = _fake_mtmd_context(new_n_past=120)
+        images = [(4, 4, b"\x00" * 48)]
+        ctx.eval_into(llama_ctx=1, prompt="hi <img>", images=images, add_special=True)
+        assert ctx._m.bitmap_init_calls == 1
+        assert ctx._m.bitmap_free_calls == 1
+        assert ctx._m.chunks_free_calls == 1
