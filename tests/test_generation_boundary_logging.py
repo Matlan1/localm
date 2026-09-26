@@ -220,6 +220,37 @@ class TestLlamaCppGenerateImageBoundaryLogging:
                                   "entering decode loop", "generate (vision): complete"))]
         assert order == sorted(order)
 
+    def test_zero_max_new_tokens_is_unlimited_not_an_immediate_stop(self, caplog):
+        """max_new_tokens<=0 is this codebase's "unlimited" sentinel (see
+        _generate's identical while condition) - regression test for the vision
+        path once treating it as "generate nothing" via `range(max_new_tokens)`,
+        which silently ended every vision reply at 0 tokens whenever the
+        configured max_tokens was set to unlimited."""
+        llm = _bare_llama_vision()
+        llm._tokenizer.is_eog.return_value = False
+        mock_api = _mock_native_api()
+
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             patch("localm.inference.backends.llamacpp.llama._build_sampler",
+                   return_value=999), \
+             caplog.at_level(logging.INFO, logger="localm"):
+            gen = llm._generate_image(
+                _VISION_MESSAGES, max_new_tokens=0,
+                temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1)
+            # A bounded for-loop over range(0) would already be exhausted here.
+            assert next(gen) == 42
+            assert next(gen) == 42
+            gen.close()
+
+        joined = _messages(caplog.records)
+        assert "gguf generate (vision): entering decode loop" in joined
+        assert "gguf generate (vision): complete" not in joined
+        # The second yielded token pauses the generator before its post-yield
+        # decode call runs (same as the max_new_tokens=50 cancellation test
+        # below), so only the first token's decode ever completed and counted.
+        assert ("gguf generate (vision): aborted (cancelled) during decode, "
+                "1 token(s) generated") in joined
+
     def test_prefill_failure_logs_start_but_not_complete_then_aborts(self, caplog):
         llm = _bare_llama_vision()
         llm._mtmd.eval_into.side_effect = RuntimeError("mtmd eval failed")

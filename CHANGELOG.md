@@ -118,6 +118,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Sending an image to a GGUF vision model with "Max tokens per reply" set to
+  unlimited (0) no longer silently returns an empty reply.** Chat showed
+  "Encoding image (GPU)..." and then nothing, with no error: the image
+  prefilled normally, but the decode loop that turns it into a reply used a
+  bounded `range(max_tokens)` that treats 0 (and negative values) as "generate
+  nothing" instead of the "no limit" every other generation path already gives
+  it. The vision decode loop now honors the same unlimited sentinel text
+  generation does, so it keeps generating until the model itself stops
+  (or a positive max-tokens budget is actually reached).
 - **`localm doctor` no longer reports the HuggingFace backend as working while
   every HuggingFace model fails to load.** Doctor checked that PyTorch and
   transformers load in its own process, but a model loads in a separate worker
