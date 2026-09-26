@@ -38,7 +38,10 @@ if [ -z "$UVEXE" ]; then
             ;;
     esac
     echo "  Installing uv ..."
+    # UV_UNMANAGED_INSTALL keeps it in ./.uv without editing shell startup
+    # files or writing an install receipt under ~/.config/uv.
     export UV_INSTALL_DIR="$PWD/.uv"
+    export UV_UNMANAGED_INSTALL="$PWD/.uv"
     if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
         echo
         echo "  [!] Could not download or run Astral's uv installer."
@@ -81,7 +84,16 @@ echo "  Opening the setup window ..."
 export UV_PYTHON_INSTALL_DIR="$PWD/.python"
 export UV_CACHE_DIR="$PWD/.cache"
 export UV_SYSTEM_CERTS=1
-if ! "$UVEXE" run --no-project --python 3.12 python installer/gui.py; then
+rc=0
+"$UVEXE" run --no-project --python 3.12 python installer/gui.py || rc=$?
+# 42: an uninstall finished in the window; the Python runtime it ran on is
+# removed now that it has closed.
+if [ "$rc" = 42 ]; then
+    echo "  Removing the last LocaLM folders ..."
+    bash ./setup.sh --finish-uninstall
+    exit $?
+fi
+if [ "$rc" != 0 ]; then
     echo
     echo "  [!] The setup window could not run."
     echo "      Use the console installer instead:  ./setup.sh"

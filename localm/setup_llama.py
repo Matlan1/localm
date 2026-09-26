@@ -3560,9 +3560,21 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
                 _record_provisioned_backend(target, result, build=build)
                 _record_runtime_history(result, build)
 
+            _refresh_install_record(target)
             _verify()
     except ProvisioningBusyError as e:
         _exit_provisioning_busy(e)
+
+
+def _refresh_install_record(target: Path) -> None:
+    """Re-snapshot the provisioned runtime files into the clone's install
+    record (``.localm-install.json``), when the clone has one. A failure is
+    logged at debug level; uninstall lists unrecorded runtime files anyway."""
+    try:
+        from localm import install_manifest
+        install_manifest.refresh_lib(target)
+    except Exception as e:
+        logger.debug("could not update the install record for %s: %s", target, e)
 
 
 def _ensure_importable() -> None:
