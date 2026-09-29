@@ -22,7 +22,7 @@ See the table below for what each backend needs and when to pick it.
 | `cuda` | NVIDIA | auto-picked on every OS (peak performance); setup fetches the CUDA runtime for you (no Toolkit) on both Windows and Linux, then load-tests and falls back to vulkan/cpu if it cannot load |
 | `amd-rocm` | AMD RX 6000/7000/9000 (gfx103X/110X/120X), Windows only | self-contained ROCm build matched to your card's family (bundles its runtime, no toolkit needed); auto-picked for RX 6000 (gfx103X), the best-tested family - request it explicitly (`--backend amd-rocm`) on RX 7000/9000 too, since auto-detect still defaults those to `hip`/`vulkan`; on Linux use `hip` or `--from` instead |
 | `hip` | AMD (any gfx) | upstream ROCm build; auto-picked when a system ROCm/HIP toolkit is detected present, else `vulkan` |
-| `sycl` | Intel GPU (Arc/Battlemage, or an 11th-gen+ Core integrated GPU) | self-contained on Windows (bundles the oneAPI runtime), auto-picked there and confirmed on real Intel GPU hardware; needs a system oneAPI install on Linux, so it stays opt-in there |
+| `sycl` | Intel GPU (Arc/Battlemage, or an 11th-gen+ Core integrated GPU) | self-contained on Windows (bundles the oneAPI runtime) and auto-picked there; needs a system oneAPI install on Linux, so it stays opt-in there |
 | `metal` | Apple Silicon | auto-picked on macOS; experimental and unverified - see the note below |
 | `cpu` | no GPU | always works |
 
@@ -189,8 +189,8 @@ broken runtime.
 
 `localm setup-llama --backend sycl` is the installer's default on **Windows**:
 it is self-contained (bundles the whole oneAPI/Level-Zero runtime - only the
-Intel GPU driver is needed), often faster than Vulkan, and confirmed on real
-Intel GPU hardware to load and generate. SYCL works on integrated GPUs too
+Intel GPU driver is needed) and often faster than Vulkan; if it cannot load,
+setup offers the Vulkan build instead. SYCL works on integrated GPUs too
 (11th-gen Core / Tiger Lake and newer, including the built-in Arc iGPU on
 Meteor Lake and Lunar Lake), not only discrete Arc/Battlemage cards - though
 an iGPU with fewer than 80 execution units will likely be too slow to be

@@ -25,12 +25,8 @@ binary this machine can run), before falling back to vulkan:
     toolkit at all and so beats ``hip`` even when both are viable.
   * Intel, Windows -> ``sycl``: the Windows SYCL build is self-contained
     (bundles the whole oneAPI/Level-Zero runtime, only the GPU driver is
-    needed - the same shape as the self-contained ``amd-rocm`` bundle above),
-    and real-hardware testing confirmed it loads and generates. Intel, Linux ->
-    ``vulkan``: the Linux SYCL build needs a separate system oneAPI install
-    most users will not have, so auto-picking it would routinely hit the
-    fallback rather than "just work" - the same reasoning that keeps ``hip``
-    (needs a system ROCm/HIP toolkit) from being AMD's unconditional default.
+    needed). Intel, Linux -> ``vulkan``: the Linux SYCL build needs a separate
+    system oneAPI install.
     "Intel" here includes integrated graphics (Iris Xe, UHD, built-in Arc), not
     only discrete Arc/Battlemage cards - see ``detect()``'s vendor matching.
   * ``vulkan`` is the ONE catch-all for a GPU with no better path detected as
@@ -284,14 +280,10 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
         path cannot run here)
       * Intel, Windows                        -> sycl      (self-contained -
         bundles the whole oneAPI/Level-Zero runtime, only the GPU driver is
-        needed, the same shape as the self-contained amd-rocm bundle above;
-        confirmed on real Intel GPU hardware to load and generate. Works on
-        integrated GPUs as well as discrete Arc/Battlemage)
+        needed. Works on integrated GPUs as well as discrete Arc/Battlemage)
       * Intel, Linux                          -> vulkan    (the Linux sycl
-        build needs a separate system oneAPI install most users will not
-        have, so it stays an explicit opt-in menu pick rather than the
-        default - the same reasoning that keeps AMD off hip without a
-        detected toolkit)
+        build needs a separate system oneAPI install, so it stays an explicit
+        opt-in menu pick)
     The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA
     is both-OS, so only the AMD gfx103X case is narrowed to Windows."""
     d = det or detect()
