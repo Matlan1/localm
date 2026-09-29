@@ -287,3 +287,50 @@ class TestForceRebuildFromRunningLauncher:
         assert "renamed the old copy aside to replace it" in result.stdout
         # The launcher file itself must have survived the rebuild.
         assert fake_launcher.is_file()
+
+
+# ------------------------------------------------------------------ #
+#  Linux launcher on a case-insensitive filesystem                    #
+# ------------------------------------------------------------------ #
+
+class TestLinuxLauncherKeepsTheLocalmCommand:
+    """On a case-insensitive filesystem (WSL on a Windows drive, an NTFS or exFAT
+    disk) ``<venv>/bin/LocaLM`` and ``<venv>/bin/localm`` are the same file.
+    ``make_linux_launcher`` must then leave that file alone and point the
+    .desktop at the venv python."""
+
+    ENTRY_TEXT = "#!/bin/sh\necho localm entry point\n"
+
+    def _clashing_venv(self, tmp_path, monkeypatch):
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        entry = venv / "bin" / "localm"
+        entry.write_text(self.ENTRY_TEXT, encoding="utf-8")
+        launcher = venv / "bin" / applaunch.APP_NAME
+        if not launcher.exists():
+            os.link(entry, launcher)
+        assert os.path.samefile(entry, launcher)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.setattr(applaunch, "_venv_root", lambda: venv)
+        monkeypatch.setattr(applaunch, "_repo_root", lambda: repo)
+        monkeypatch.setattr(applaunch, "_base_interpreter", lambda: Path(sys.executable))
+        return entry, launcher, repo
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_same_file_is_left_alone(self, tmp_path, monkeypatch, force):
+        entry, launcher, repo = self._clashing_venv(tmp_path, monkeypatch)
+        checked = []
+        monkeypatch.setattr(applaunch, "_self_check", lambda exe: checked.append(exe) or True)
+
+        res = applaunch.make_linux_launcher(force=force)
+
+        assert entry.is_file(), "the localm entry point was deleted"
+        assert launcher.is_file(), "the entry point's other name was deleted"
+        assert entry.read_text(encoding="utf-8") == self.ENTRY_TEXT
+        assert checked == []
+        assert res.ok is True and res.path is None
+        assert any("case-insensitive" in n for n in res.notes)
+        assert not any("did not start standalone" in n for n in res.notes)
+        desktop = (repo / f"{applaunch.APP_NAME}.desktop").read_text(encoding="utf-8")
+        assert f"Exec={Path(sys.executable)} -m localm gui" in desktop

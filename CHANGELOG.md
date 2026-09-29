@@ -118,6 +118,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`setup.sh` and `localm make-launcher` no longer delete the `localm` command
+  when the LocaLM folder is on a drive that ignores letter case** (a Windows
+  drive under WSL, or an NTFS or exFAT disk on Linux). There `LocaLM` and
+  `localm` are the same file, and building the app launcher removed it, so
+  `localm` was missing after setup. The launcher step now leaves it alone and
+  the menu entry starts LocaLM through the environment's Python.
 - **Restarting a localm server that had the GUI attached to it no longer leaves
   the window on a "not found" page.** When a second `localm gui` attached to a
   running `localm serve` (or `localm gui --api-mode`), it mounted the GUI on that

@@ -506,21 +506,22 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
             notes.append(f"built {dst.name} (copy of {base.name})")
         else:
             notes.append(f"{dst.name} already present (use --force to refresh)")
-        
+
         if not is_case_insensitive_clash:
             built_ok = _self_check(dst)
-        if not built_ok:
-            # Do not leave a launcher that does not run; the .desktop falls back to
-            # the venv python (still works, just shows python in a process monitor).
-            try:
-                dst.unlink()
-            except OSError:
-                pass
-            notes.append("the copied launcher did not start standalone (its runtime "
-                         "libs are not resolvable next to it); the .desktop will use "
-                         "the venv python instead, so it still works but a process "
-                         "monitor shows python. An AppImage is the robust path - see "
-                         "docs/native-app.md.")
+            if not built_ok:
+                # Do not leave a launcher that does not run; the .desktop falls back
+                # to the venv python (still works, just shows python in a process
+                # monitor).
+                try:
+                    dst.unlink()
+                except OSError:
+                    pass
+                notes.append("the copied launcher did not start standalone (its runtime "
+                             "libs are not resolvable next to it); the .desktop will use "
+                             "the venv python instead, so it still works but a process "
+                             "monitor shows python. An AppImage is the robust path - see "
+                             "docs/native-app.md.")
     except OSError as e:
         notes.append(f"could not build {dst.name}: {e}; the .desktop will use the "
                      "venv python instead")
