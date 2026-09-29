@@ -10,6 +10,8 @@ gate refuses an unauthenticated / wrong-credential caller. The route exposes the
 coder agent, so the negative cases are the point.
 """
 
+import collections
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -37,6 +39,26 @@ def _api_app(tmp_path, instance_token="inst-secret-token"):
     app.state.instance_scheme = "http"
     app.state.bind_host = "127.0.0.1"
     return app
+
+
+def _route_ids(app):
+    """The identities of *app*'s routes, in order."""
+    return [id(r) for r in app.router.routes]
+
+
+def _route_keys(app):
+    """(path, methods, name) of every route on *app*, repeats included."""
+    return [(getattr(r, "path", None), tuple(sorted(getattr(r, "methods", None) or ())),
+             getattr(r, "name", None)) for r in app.router.routes]
+
+
+def _state_of(app):
+    """Every key on app.state with its value."""
+    return {key: app.state[key] for key in app.state}
+
+
+def _doctor_routes_fail(app, ctx):
+    raise RuntimeError("doctor routes failed")
 
 
 # ------------------------------------------------------------------ #
@@ -74,11 +96,13 @@ class TestMountGuiSurfaceUnit:
         assert hs._gui_mounted_live is False
 
     def test_attach_failure_rolls_back_the_mounted_flag(self, tmp_path, monkeypatch):
-        """If attach_gui raises, the claimed gui_mounted flag is rolled back so a
-        later real attempt can still mount (no permanently-wedged surface)."""
+        """If attach_gui raises, gui_mounted goes back to the False it held before,
+        so a later real attempt can still mount (no permanently-wedged surface)."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         app = _api_app(tmp_path)
+        app.state.gui_mounted = False
         import localm.plugins.gui.web as web
+        real_attach = web.attach_gui
 
         def _boom(*a, **k):
             raise RuntimeError("attach failed")
@@ -86,8 +110,11 @@ class TestMountGuiSurfaceUnit:
         monkeypatch.setattr(web, "attach_gui", _boom)
         with pytest.raises(RuntimeError):
             mount_gui_surface(app)
-        assert getattr(app.state, "gui_mounted", False) is False
+        assert app.state.gui_mounted is False
         assert hs._gui_mounted_live is False
+
+        monkeypatch.setattr(web, "attach_gui", real_attach)
+        assert mount_gui_surface(app) is True
 
     def test_missing_port_raises_rather_than_dialling_none(self, tmp_path, monkeypatch):
         """No bind port on app.state -> a loud 500, not a broken
@@ -100,6 +127,69 @@ class TestMountGuiSurfaceUnit:
             mount_gui_surface(app)
         assert ei.value.status_code == 500
         assert getattr(app.state, "gui_mounted", False) is False
+
+    def test_a_mount_that_fails_part_way_leaves_the_app_as_it_was(self, tmp_path, monkeypatch):
+        """A route group that raises after other GUI routes were registered: the
+        app's routes and state are exactly what they were before the mount."""
+        import localm.plugins.gui.routes.doctor as doctor
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        app = _api_app(tmp_path)
+        routes_before = _route_ids(app)
+        state_before = _state_of(app)
+        added_before_failure = []
+
+        def _fails_after_others(app_, ctx):
+            added_before_failure.append(len(app_.router.routes) - len(routes_before))
+            _doctor_routes_fail(app_, ctx)
+
+        monkeypatch.setattr(doctor, "register", _fails_after_others)
+        exc = None
+        try:
+            mount_gui_surface(app)
+        except RuntimeError as e:
+            exc = e
+        assert _route_ids(app) == routes_before
+        assert _state_of(app) == state_before
+        assert hs._gui_mounted_live is False
+        assert added_before_failure and added_before_failure[0] > 0, (
+            "the failure must come after other GUI routes were registered")
+        assert exc is not None and "doctor routes failed" in str(exc)
+
+    def test_a_missing_static_folder_leaves_no_gui_route_behind(self, tmp_path, monkeypatch):
+        """The static mount is attach_gui's last step, so a missing static folder
+        fails after every GUI route group has registered."""
+        import localm.plugins.gui.web as web
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.setattr(web, "STATIC_DIR", tmp_path / "missing-static")
+        app = _api_app(tmp_path)
+        routes_before = _route_ids(app)
+        state_before = _state_of(app)
+        exc = None
+        try:
+            mount_gui_surface(app)
+        except RuntimeError as e:
+            exc = e
+        assert _route_ids(app) == routes_before
+        assert _state_of(app) == state_before
+        assert hs._gui_mounted_live is False
+        assert exc is not None and "missing-static" in str(exc)
+
+    def test_a_retry_after_a_failed_mount_registers_each_route_once(self, tmp_path, monkeypatch):
+        import localm.plugins.gui.routes.doctor as doctor
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        clean = _api_app(tmp_path)
+        assert mount_gui_surface(clean) is True
+        expected = collections.Counter(_route_keys(clean))
+
+        app = _api_app(tmp_path)
+        real_register = doctor.register
+        monkeypatch.setattr(doctor, "register", _doctor_routes_fail)
+        with pytest.raises(RuntimeError):
+            mount_gui_surface(app)
+        monkeypatch.setattr(doctor, "register", real_register)
+
+        assert mount_gui_surface(app) is True
+        assert collections.Counter(_route_keys(app)) == expected
 
 
 # ------------------------------------------------------------------ #
