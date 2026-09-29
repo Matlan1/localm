@@ -86,8 +86,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   also names what it cannot remove: the app window's saved login and copies
   of recent chats, kept in a folder pywebview shares with other apps, and the
   copies your web browser keeps. A data folder another LocaLM install still
-  uses is never deleted, and choosing Install again offers to keep using the
-  data folder you already have.
+  uses, on this computer or on another one that shares the folder, is never
+  deleted, and neither is a folder `LOCALM_HOME` points LocaLM at (the list
+  names it). A LocaLM folder that was moved or renamed after setup is
+  uninstalled completely, and a desktop shortcut or menu entry that opens a
+  different LocaLM folder is kept. Choosing Install again offers to keep
+  using the data folder you already have; when that folder is not available
+  (a drive that is not connected, or a network folder that is offline), setup
+  says so and offers to stop instead of quietly starting an empty one. The
+  graphical installer cannot be closed while it uninstalls, and
+  `setup-gui.bat` / `setup-gui.sh` say when something you asked to delete was
+  kept or the uninstall did not finish.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
@@ -238,10 +247,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   existed before LocaLM.** When you had pointed setup at an existing folder
   (a shared models drive, for example), the uninstaller treated the whole
   folder as LocaLM's. It now deletes only the files LocaLM put there, also
-  after running setup again on the same folder, and lists everything it
-  keeps. Setup no longer accepts a data folder that could never be deleted
-  safely: a drive root, your home folder, or the LocaLM folder itself or one
-  that contains it.
+  after running setup again on the same folder or copying another LocaLM data
+  folder into it, and lists everything it keeps. Setup no longer accepts a
+  data folder that could never be deleted safely: a drive root, your home
+  folder, the LocaLM folder itself or one that contains it, or a folder inside
+  the environment, runtime or tooling folders that uninstall removes.
 - **Uninstalling a Portable install on Windows now removes everything.** It
   could not delete the Python runtime it was running from, leaving that half
   deleted, and reported the environment as removed even when it was not.
@@ -256,7 +266,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **LocaLM no longer fails to start when its custom data folder path contains
   characters such as é.** `setup.bat` saved the path in the console's code
   page instead of UTF-8, which LocaLM could not read. New installs save it as
-  UTF-8, and a file saved the old way is now read correctly.
+  UTF-8, and a file saved the old way is now read correctly, also by
+  `rollback.bat` when it restores the previous version after an update.
 - **With a custom data folder, `localm setup-llama --rollback` now finds the
   build setup installed.** Setup downloaded the runtime before asking where
   your data should live, so it recorded that build in a `home` folder inside
