@@ -808,10 +808,11 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     kwargs["stdout"] = child_log
                     kwargs["stderr"] = subprocess.STDOUT
                     if sys.platform == "win32":
-                        # No console at all; a fresh process group so the server
-                        # outlives this CLI, mirroring start_new_session on POSIX.
+                        # Hidden console, no window; a fresh process group so the
+                        # server outlives this CLI, mirroring start_new_session on
+                        # POSIX.
                         kwargs["creationflags"] = (
-                            subprocess.DETACHED_PROCESS
+                            subprocess.CREATE_NO_WINDOW
                             | subprocess.CREATE_NEW_PROCESS_GROUP)
                     else:
                         kwargs["start_new_session"] = True
