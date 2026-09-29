@@ -172,28 +172,51 @@ def test_without_any_python_only_the_fixed_folders_go(tmp_path, venv_template):
     assert (p["lib"] / "libllama.so").exists()
 
 
-def test_setup_gui_finishes_an_uninstall_the_window_left_pending(tmp_path):
-    """setup-gui.sh hands exit code 42 from the window to setup.sh
-    --finish-uninstall. The window is stood in for by a uv that exits 42."""
-    clone = tmp_path / "clone"
+def _gui_after_window(clone: Path, code: int):
+    """Run the real setup-gui.sh from *clone*, a pending uninstall on disk, with
+    the setup window stood in for by a uv that exits *code*."""
     clone.mkdir()
     for name in ("setup.sh", "setup-gui.sh"):
         shutil.copy2(ROOT / name, clone / name)
     (clone / ".uv").mkdir()
     fake_uv = clone / ".uv" / "uv"
-    fake_uv.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    fake_uv.write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
     fake_uv.chmod(0o755)
     (clone / ".venv").mkdir()
     (clone / ".python").mkdir()
     (clone / im.PENDING_NAME).write_text(".venv\n.python\n.uv\n", encoding="ascii")
     (clone / im.MANIFEST_NAME).write_text("{}", encoding="utf-8")
     env = dict(os.environ, DISPLAY=os.environ.get("DISPLAY", ":0"))
-    out = subprocess.run([shutil.which("bash"), str(clone / "setup-gui.sh")], cwd=str(clone),
-                         capture_output=True, text=True, timeout=120, env=env,
-                         stdin=subprocess.DEVNULL)
+    return subprocess.run([shutil.which("bash"), str(clone / "setup-gui.sh")], cwd=str(clone),
+                          capture_output=True, text=True, timeout=120, env=env,
+                          stdin=subprocess.DEVNULL)
+
+
+def test_setup_gui_finishes_an_uninstall_the_window_left_pending(tmp_path):
+    """setup-gui.sh hands exit code 42 from the window to setup.sh
+    --finish-uninstall."""
+    clone = tmp_path / "clone"
+    out = _gui_after_window(clone, 42)
     assert out.returncode == 0, (out.stdout, out.stderr)
     assert _runtime_gone(clone)
     assert not (clone / im.MANIFEST_NAME).exists()
+
+
+@pytest.mark.parametrize("code, rc, message, finished", [
+    (43, 2, "some things you asked to delete were not", True),
+    (44, 2, "some things you asked to delete were not", False),
+    (45, 1, "The uninstall did not finish", False),
+])
+def test_setup_gui_reports_each_uninstall_result(tmp_path, code, rc, message, finished):
+    """43 finishes the uninstall and reports what was kept; 44 and 45 remove
+    nothing more once the window has closed."""
+    clone = tmp_path / "clone"
+    out = _gui_after_window(clone, code)
+    assert _runtime_gone(clone) is finished, (out.stdout, out.stderr)
+    assert (clone / im.MANIFEST_NAME).exists() is not finished
+    assert out.returncode == rc, (out.stdout, out.stderr)
+    assert message in out.stdout
+    assert "could not run" not in out.stdout
 
 
 def test_finish_uninstall_removes_only_allowlisted_names(tmp_path):
@@ -287,3 +310,36 @@ def test_a_first_install_is_not_asked_to_keep_anything(tmp_path, venv_template):
     out = _run_probe(clone, "1\n")
     assert (clone / "home").is_dir(), (out.stdout, out.stderr)
     assert "LocaLM's data for this folder is in:" not in out.stdout
+
+
+def test_an_unavailable_data_folder_stops_setup_and_changes_nothing(tmp_path, venv_template):
+    clone = _venv_clone(tmp_path, venv_template)
+    custom = tmp_path / "offline drive" / "data"
+    im.prepare_data(clone, data_dir=str(custom))
+    shutil.rmtree(custom.parent)
+    cfg_before = (clone / "localm-home.cfg").read_bytes()
+    record_before = (clone / im.MANIFEST_NAME).read_bytes()
+    out = _run_probe(clone, "\n")
+    assert (clone / "localm-home.cfg").read_bytes() == cfg_before, (out.stdout, out.stderr)
+    assert (clone / im.MANIFEST_NAME).read_bytes() == record_before
+    assert not (clone / "home").exists() and not custom.exists()
+    assert out.returncode == 1, (out.stdout, out.stderr)
+    assert "[!] LocaLM's data for this folder is set to:" in out.stdout
+    assert str(custom) in out.stdout
+    assert "Setup stopped. Connect the data folder, then run setup again." in out.stdout
+    assert "Where should localm keep its data" not in out.stdout
+    assert "PROBE_DONE" not in out.stdout
+
+
+def test_an_unavailable_data_folder_can_be_replaced_by_a_new_one(tmp_path, venv_template):
+    clone = _venv_clone(tmp_path, venv_template)
+    custom = tmp_path / "offline drive" / "data"
+    im.prepare_data(clone, data_dir=str(custom))
+    shutil.rmtree(custom.parent)
+    out = _run_probe(clone, "2\n1\n")
+    assert (clone / "home").is_dir(), (out.stdout, out.stderr)
+    assert not (clone / "localm-home.cfg").exists()
+    assert not custom.exists()
+    assert [Path(p) for p in im.load(clone)["previous_data_dirs"]] == [custom]
+    assert "Where should localm keep its data" in out.stdout
+    assert "PROBE_DONE" in out.stdout, (out.stdout, out.stderr)

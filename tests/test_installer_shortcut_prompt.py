@@ -1143,3 +1143,39 @@ class TestRepairOffersTheDataFolderInUse:
         assert (clone / "home").is_dir(), (out.stdout, out.stderr)
         assert "Keep using it?" not in out.stdout
         assert "Where should localm keep its data" in out.stdout
+
+    def test_an_unavailable_data_folder_stops_setup_and_changes_nothing(
+            self, bat, tmp_path, venv_template):
+        from localm import install_manifest as im
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        custom = tmp_path / "offline drive" / "data"
+        im.prepare_data(clone, data_dir=str(custom))
+        shutil.rmtree(custom.parent)
+        cfg_before = (clone / "localm-home.cfg").read_bytes()
+        record_before = (clone / ".localm-install.json").read_bytes()
+        out = self._run(bat, clone, "\r\n\r\n")
+        assert (clone / "localm-home.cfg").read_bytes() == cfg_before, (out.stdout, out.stderr)
+        assert (clone / ".localm-install.json").read_bytes() == record_before
+        assert not (clone / "home").exists() and not custom.exists()
+        assert out.returncode == 1, (out.stdout, out.stderr)
+        assert "[!] LocaLM's data for this folder is set to:" in out.stdout
+        assert str(custom) in out.stdout
+        assert "Setup stopped. Connect the data folder, then run setup again." in out.stdout
+        assert "Where should localm keep its data" not in out.stdout
+        assert "EXITED=" not in out.stdout
+
+    def test_an_unavailable_data_folder_can_be_replaced_by_a_new_one(
+            self, bat, tmp_path, venv_template):
+        from localm import install_manifest as im
+        clone = _clone_with_venv(tmp_path / "clone", venv_template)
+        custom = tmp_path / "offline drive" / "data"
+        im.prepare_data(clone, data_dir=str(custom))
+        shutil.rmtree(custom.parent)
+        out = self._run(bat, clone, "2\r\n1\r\n")
+        assert (clone / "home").is_dir(), (out.stdout, out.stderr)
+        assert not (clone / "localm-home.cfg").exists()
+        assert not custom.exists()
+        rec = json.loads((clone / ".localm-install.json").read_text(encoding="utf-8"))
+        assert [Path(p) for p in rec["previous_data_dirs"]] == [custom]
+        assert "Where should localm keep its data" in out.stdout
+        assert "EXITED=[0]" in out.stdout, out.stdout

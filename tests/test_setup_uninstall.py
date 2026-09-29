@@ -211,18 +211,19 @@ def test_finish_uninstall_removes_only_allowlisted_pending_names(tmp_path):
 _UV_RUN = '"%UVEXE%" run --no-project --python 3.12 python "installer\\gui.py"'
 
 
-def _gui_finish(clone: Path, tmp_path: Path, *, cwd: Path = None):
+def _gui_finish(clone: Path, tmp_path: Path, *, cwd: Path = None, code: int = 42):
     """Run the real setup-gui.bat from *clone*, with the setup window stood in
-    for by a command that exits 42 (an uninstall finished in the window). A uv
-    stub on PATH keeps the uv installer from ever being reached."""
+    for by a command that exits *code* (42: an uninstall finished in the
+    window). A uv stub on PATH keeps the uv installer from ever being reached."""
     text = (ROOT / "setup-gui.bat").read_text(encoding="utf-8")
     assert text.count(_UV_RUN) == 1, "the window launch line moved"
+    (clone / ".uv").mkdir(exist_ok=True)
     (clone / ".uv" / "uv.exe").write_bytes(b"")
     stub = tmp_path / "uvstub"
     stub.mkdir(exist_ok=True)
     (stub / "uv.cmd").write_text("@exit /b 1\r\n", encoding="ascii")
     probe = clone / "setup-gui-probe.bat"
-    probe.write_text(text.replace(_UV_RUN, "cmd /c exit 42").replace("\n", "\r\n"),
+    probe.write_text(text.replace(_UV_RUN, f"cmd /c exit {code}").replace("\n", "\r\n"),
                      encoding="utf-8")
     env = dict(os.environ, PATH=str(stub) + os.pathsep + os.environ.get("PATH", ""))
     return subprocess.run(["cmd", "/c", str(probe)], cwd=str(cwd or clone), env=env,
@@ -260,6 +261,38 @@ def test_setup_gui_runs_from_a_folder_with_a_bang_in_its_path(tmp_path):
     assert _runtime_gone(clone), (out.stdout, out.stderr)
     assert out.returncode == 0, (out.stdout, out.stderr)
     assert "LocaLM was uninstalled." in out.stdout, out.stdout
+
+
+def test_setup_gui_finishes_an_uninstall_that_kept_something_asked_for(tmp_path):
+    """Exit 43: the window finished an uninstall but refused part of what was
+    asked. The runtime folders still go, and the wrapper exits 2."""
+    clone = tmp_path / "clone"
+    _pending_layout(clone)
+    out = _gui_finish(clone, tmp_path, code=43)
+    assert _runtime_gone(clone), (out.stdout, out.stderr)
+    assert not (clone / im.MANIFEST_NAME).exists()
+    assert out.returncode == 2, (out.stdout, out.stderr)
+    assert "some things you asked to delete were not" in out.stdout
+    assert "LocaLM was uninstalled." not in out.stdout
+
+
+@pytest.mark.parametrize("code, rc, message", [
+    (44, 2, "some things you asked to delete were not"),
+    (45, 1, "The uninstall did not finish"),
+])
+def test_setup_gui_reports_an_uninstall_left_unfinished(tmp_path, code, rc, message):
+    """Exit 44 (the window removed everything it could, something asked for
+    was kept) and 45 (the uninstall stopped): nothing more is removed after
+    the window closes."""
+    clone = tmp_path / "clone"
+    _pending_layout(clone)
+    out = _gui_finish(clone, tmp_path, code=code)
+    assert (clone / ".venv" / "f").exists(), (out.stdout, out.stderr)
+    assert (clone / im.PENDING_NAME).exists()
+    assert out.returncode == rc, (out.stdout, out.stderr)
+    assert message in out.stdout
+    assert "LocaLM was uninstalled." not in out.stdout
+    assert "could not run" not in out.stdout
 
 
 def test_setup_gui_reports_folders_it_could_not_remove(tmp_path):

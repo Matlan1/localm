@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -970,10 +971,14 @@ class _Answer:
     def __init__(self, yes=True):
         self.yes = yes
         self.asked = []
+        self.told = []
 
     def askyesno(self, title, message):
         self.asked.append(message)
         return self.yes
+
+    def showinfo(self, title, message):
+        self.told.append(message)
 
 
 @pytest.fixture()
@@ -1118,3 +1123,125 @@ class TestUninstallFromTheWindow:
         assert not wizard.installing and wizard.mode == "uninstall"
         assert (installed["lib"] / "llama.dll").exists()
         assert wizard.exit_code == 0
+
+    @pytest.mark.parametrize("report, pending, expected", [
+        ({"exit": 0}, True, "EXIT_FINISH_UNINSTALL"),
+        ({"exit": 2}, True, "EXIT_FINISH_UNINSTALL_PARTIAL"),
+        ({"exit": 2}, False, "EXIT_UNINSTALL_PARTIAL"),
+        ({"exit": 0}, False, None),
+        ({"exit": 1}, True, "EXIT_UNINSTALL_FAILED"),
+        ({"exit": 3}, False, "EXIT_UNINSTALL_FAILED"),
+        ({"exit": 4}, False, "EXIT_UNINSTALL_FAILED"),
+        ({"exit": 1, "error": "boom"}, False, "EXIT_UNINSTALL_FAILED"),
+    ])
+    def test_each_uninstall_result_has_its_own_exit_code(
+            self, uninstall_wizard, gui, tmp_path, report, pending, expected):
+        wizard, _, _ = uninstall_wizard
+        if pending:
+            (tmp_path / ".localm-uninstall-pending").write_text(".venv\n", encoding="ascii")
+        wizard.installing = True
+        wizard._finish_uninstall(report)
+        assert wizard.exit_code == (getattr(gui, expected) if expected else 0)
+        assert not wizard.installing
+        said = wizard.step_label.cget("text")
+        if expected == "EXIT_UNINSTALL_FAILED":
+            assert said == "Uninstall could not finish."
+        else:
+            assert (report["exit"] == 2) == ("were not deleted" in said), said
+
+    def test_an_uninstall_that_keeps_saved_data_it_cannot_delete_says_so(
+            self, gui, installed, tmp_path):
+        """A data folder reached through a link is never deleted, so asking
+        for the saved data to go leaves the window with the partial result."""
+        tk = pytest.importorskip("tkinter")
+        from tkinter import filedialog, ttk
+        from localm import install_manifest as im
+        real = tmp_path / "real-data"
+        real.mkdir()
+        link = tmp_path / "data-link"
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(real), str(link))
+        else:
+            link.symlink_to(real, target_is_directory=True)
+        im.prepare_data(tmp_path, data_dir=str(link))
+        (link / "chats").mkdir()
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            pytest.skip(f"no display: {e}")
+        root.withdraw()
+        try:
+            wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=_Answer())
+            wizard.choice_var.set("uninstall")
+            wizard.next_page()
+            wizard.purge_var.set(True)
+            wizard.next_page()
+            _wait(wizard, root)
+            assert (real / "chats").is_dir()
+            assert wizard.exit_code == gui.EXIT_FINISH_UNINSTALL_PARTIAL
+            assert "were not deleted" in wizard.step_label.cget("text")
+        finally:
+            root.destroy()
+
+    def test_the_window_cannot_be_closed_while_the_uninstall_runs(self, uninstall_wizard):
+        wizard, answer, root = uninstall_wizard
+        assert root.protocol("WM_DELETE_WINDOW")
+        wizard.installing = True
+        wizard.mode = "uninstalling"
+        wizard._on_close()
+        assert root.winfo_exists()
+        assert len(answer.told) == 1 and "still running" in answer.told[0]
+
+    def test_the_window_closes_when_no_uninstall_is_running(self, gui, installed):
+        tk = pytest.importorskip("tkinter")
+        from tkinter import filedialog, ttk
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            pytest.skip(f"no display: {e}")
+        root.withdraw()
+        answer = _Answer()
+        wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=answer)
+        wizard._on_close()
+        assert answer.told == []
+        with pytest.raises(tk.TclError):
+            root.winfo_exists()
+
+
+def test_a_repair_says_when_the_data_folder_in_use_is_unavailable(gui, installed, tmp_path):
+    """The folder the install uses is kept as the choice, and the location page
+    says it is not available instead of silently choosing another one."""
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    from localm import install_manifest as im
+    custom = tmp_path / "offline drive" / "data"
+    im.prepare_data(tmp_path, data_dir=str(custom))
+    shutil.rmtree(custom.parent)
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    root.withdraw()
+    try:
+        wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=_Answer())
+        assert wizard.missing_data == str(custom)
+        assert wizard.portable_var.get() is False
+        assert wizard.current_plan().data_path == str(custom)
+        location = dict(wizard.pages)["Where things live"]
+        texts = [w.cget("text") for w in location.winfo_children()
+                 if w.winfo_class() == "TLabel"]
+        warning = [t for t in texts if "is not available right now" in t]
+        assert len(warning) == 1 and warning[0].startswith("[!]")
+        assert str(custom) in warning[0]
+    finally:
+        root.destroy()
+
+
+def test_a_repair_with_its_data_folder_present_shows_no_warning(uninstall_wizard):
+    wizard, _, _ = uninstall_wizard
+    assert wizard.missing_data == ""
+    location = dict(wizard.pages)["Where things live"]
+    texts = [w.cget("text") for w in location.winfo_children()
+             if w.winfo_class() == "TLabel"]
+    assert not any("is not available right now" in t for t in texts)
