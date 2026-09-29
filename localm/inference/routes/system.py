@@ -85,7 +85,8 @@ def register(app: FastAPI, ctx) -> None:
         same-user secret in the 0600 ``run/`` file, which the attaching process
         reads) OR an API key granting ADMIN. Exempt from the same-origin guard;
         this token/key check is the gate. Idempotent: a full instance returns
-        already_mounted."""
+        already_mounted. A mount that raises answers 500 with the exception's
+        type and message in ``detail``, and logs it with its traceback."""
         from localm.auth import ct_equal
         presented = _bearer_token(request)
         st = request.app.state
@@ -103,7 +104,14 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(
                 403, "Surface management requires this instance's attach token "
                 "or an owner API key.")
-        mounted = mount_gui_surface(request.app)
+        try:
+            mounted = mount_gui_surface(request.app)
+        except HTTPException:
+            raise
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("GUI mount failed")
+            raise HTTPException(500, f"GUI mount failed: {type(e).__name__}: {e}")
         return {"status": "mounted" if mounted else "already_mounted",
                 "mode": "full"}
 

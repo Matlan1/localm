@@ -281,19 +281,22 @@ def _gui_bind_warning(host: str):
     )
 
 
-def _mount_remote_gui(entry: dict) -> bool:
+def _mount_remote_gui(entry: dict) -> str | None:
     """Ask a running ``api``-mode instance to mount its GUI surface on demand.
     POSTs to its loopback ``/v1/surfaces/gui`` with the instance's own registry
-    attach token (a local same-user secret). Returns True on
-    success, False on any failure - an older instance without the endpoint, a
-    missing token, or a network error - so the caller can fall back to just
-    opening the address."""
+    attach token (a local same-user secret). Returns None when the GUI was
+    mounted, otherwise a short reason it was not: an instance entry without a
+    port or token, no answer, an older localm without the endpoint (404 or 405),
+    a refused token (401 or 403), or the status and ``detail`` of any other
+    reply."""
     import requests
     scheme = entry.get("scheme") or "http"
     port = entry.get("port")
     token = entry.get("token")
-    if not port or not token:
-        return False
+    if not port:
+        return "its instance entry has no port"
+    if not token:
+        return "its instance entry has no attach token"
     # Dial the loopback THAT instance bound: an IPv6-bound server does not
     # answer on the IPv4 loopback, and this call is what turns a headless
     # server into a GUI one.
@@ -308,9 +311,20 @@ def _mount_remote_gui(entry: dict) -> bool:
     try:
         r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
                           timeout=5, verify=verify)
-        return r.status_code == 200
-    except requests.RequestException:
-        return False
+    except requests.RequestException as e:
+        return f"it did not answer ({type(e).__name__})"
+    if r.status_code == 200:
+        return None
+    if r.status_code in (404, 405):
+        return "it is an older localm that cannot mount the GUI on demand"
+    if r.status_code in (401, 403):
+        return f"it refused this process's attach token (HTTP {r.status_code})"
+    try:
+        body = r.json()
+    except ValueError:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return f"HTTP {r.status_code}: {detail}" if detail else f"HTTP {r.status_code}"
 
 
 def _print_qr(url: str) -> None:
@@ -579,13 +593,15 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
         f"running for [cyan]{root_dir}[/cyan] "
         f"(pid {existing.get('pid')}, port {existing.get('port')}).")
     if existing.get("mode") != "full":
-        if _mount_remote_gui(existing):
+        reason = _mount_remote_gui(existing)
+        if reason is None:
             console.print(
                 "  [green]Mounted the GUI on the running instance.[/green]")
         else:
+            from rich.markup import escape
             console.print(
-                "  [yellow]Could not mount the GUI on it (an older "
-                "instance?); opening its address anyway.[/yellow]")
+                f"  [yellow]Could not mount the GUI on it: {escape(reason)}; "
+                "opening its address anyway.[/yellow]")
     _url_label, _ = _console_url_line(api_mode, url, url)
     console.print(f"  [dim]{_url_label}:[/dim] [cyan]{show_url(url)}[/cyan]",
                   soft_wrap=True)

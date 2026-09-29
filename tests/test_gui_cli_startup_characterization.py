@@ -155,8 +155,14 @@ class _Advertiser:
 
 
 class _Response:
-    def __init__(self, status_code):
+    def __init__(self, status_code, body=None):
         self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("not JSON")
+        return self._body
 
 
 class _Startup:
@@ -173,6 +179,7 @@ class _Startup:
         self.tray = False            # start_app_face returns a face
         self.mdns_ok = True          # netname.start_advertiser returns a handle
         self.mount_status = 200      # a running api-mode instance's mount reply
+        self.mount_body = None       # its JSON body (None: not JSON)
         self.engine_error = None     # Engine(...) raises this
         self.load_error = None       # engine.load() raises this
         self.real_readiness = False  # leave socket.create_connection real
@@ -423,7 +430,7 @@ class _Startup:
 
         def post(url, *a, **k):
             self.mounts.append({"url": url, "headers": dict(k.get("headers") or {})})
-            return _Response(self.mount_status)
+            return _Response(self.mount_status, self.mount_body)
         mp.setattr("requests.post", post)
         return self
 
@@ -861,7 +868,21 @@ class TestAttachOrNew:
         gui.window_loads = False
         r = gui.invoke()
         assert r.exit_code == 0, r.output
-        assert "Could not mount the GUI on it (an older instance?); opening its address anyway." in r.flat
+        assert ("Could not mount the GUI on it: it is an older localm that cannot "
+                "mount the GUI on demand; opening its address anyway.") in r.flat
+        assert len(gui.opened) == 1
+
+    def test_a_mount_the_server_failed_prints_the_servers_reason(self, gui):
+        """The server's own error is printed as plain text, markup-like
+        brackets included."""
+        gui.running_instance(mode="api")
+        gui.mount_status = 500
+        gui.mount_body = {"detail": "GUI mount failed: RuntimeError: [bold]x[/bold] gone"}
+        gui.window_loads = False
+        r = gui.invoke()
+        assert r.exit_code == 0, r.output
+        assert ("Could not mount the GUI on it: HTTP 500: GUI mount failed: "
+                "RuntimeError: [bold]x[/bold] gone; opening its address anyway.") in r.flat
         assert len(gui.opened) == 1
 
     @pytest.mark.parametrize("args, named", [
