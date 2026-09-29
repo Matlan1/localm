@@ -10,8 +10,9 @@ rem  you opt into the global `localm` command near the end.
 rem
 rem  Detects your GPU and provisions the matching llama.cpp backend, so an
 rem  NVIDIA, Intel, AMD, or CPU-only machine all get a working install. Vulkan
-rem  is the universal default (any GPU, no vendor toolkit); CUDA/ROCm are
-rem  offered for peak performance; CPU for machines with no GPU.
+rem  is the no-toolkit fallback (any GPU); CUDA/ROCm/SYCL are offered for
+rem  peak performance on NVIDIA/AMD/Intel respectively; CPU for machines
+rem  with no GPU.
 rem ===========================================================================
 cd /d "%~dp0"
 setlocal EnableDelayedExpansion
@@ -438,7 +439,7 @@ rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
 echo.
 rem  [1] is a shortcut for whichever backend the policy recommended, so it is
 rem  ALWAYS the same choice as one of the numbered entries below - amd-rocm on an
-rem  RX 6000, cuda on an NVIDIA card, vulkan otherwise. Listing it twice with no
+rem  RX 6000, cuda on an NVIDIA card, sycl on Intel, vulkan otherwise. Listing it twice with no
 rem  relation shown reads as two different options that happen to share a name.
 rem  Mark the twin rather than removing it: the numbering has to stay stable, and
 rem  [1] must keep working even for a REC with no numbered entry of its own.

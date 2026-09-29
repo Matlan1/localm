@@ -50,8 +50,10 @@ def test_recommended_install_backend_policy(monkeypatch):
     # cudart bundle on both.
     assert rec(["nvidia"], "nvidia geforce rtx 4090") == "cuda"
     assert rec(["nvidia"], "nvidia geforce rtx 4090", platform="linux") == "cuda"
-    # Intel -> vulkan; no GPU -> cpu; Apple Silicon -> metal.
-    assert rec(["intel"], "intel arc a770") == "vulkan"
+    # Intel -> sycl on Windows (self-contained), vulkan on Linux (sycl there
+    # needs a separate oneAPI install); no GPU -> cpu; Apple Silicon -> metal.
+    assert rec(["intel"], "intel arc a770") == "sycl"
+    assert rec(["intel"], "intel arc a770", platform="linux") == "vulkan"
     assert rec([], "") == "cpu"
     assert rec(["apple"], "", platform="darwin") == "metal"
 
@@ -77,7 +79,14 @@ def test_auto_backend_no_gpu_is_cpu(monkeypatch):
     assert sl._auto_backend() == "cpu"
 
 
-def test_auto_backend_intel_is_vulkan(monkeypatch):
+def test_auto_backend_intel_windows_is_sycl(monkeypatch):
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["intel"], "vulkan"))
+    assert sl._auto_backend() == "sycl"
+
+
+def test_auto_backend_intel_linux_is_vulkan(monkeypatch):
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["intel"], "vulkan"))
     assert sl._auto_backend() == "vulkan"
 
@@ -601,6 +610,22 @@ def test_help_text_does_not_claim_nvidia_amd_default_to_vulkan_on_linux():
     assert "vulkan for Intel and for NVIDIA" not in help_text
     assert "cuda for NVIDIA on both Windows and Linux" in help_text
     assert "hip for AMD" in help_text
+
+
+def test_help_text_does_not_claim_intel_always_defaults_to_vulkan():
+    """Pins the live `--backend` --help string against the Windows-Intel ->
+    sycl policy flip: sycl is now the Windows default (self-contained,
+    confirmed on real Intel GPU hardware), vulkan stays the Linux default
+    (sycl there needs a separate oneAPI install). A prior version of this
+    text claimed 'vulkan for Intel' unconditionally."""
+    from click.testing import CliRunner
+    runner = CliRunner()
+    result = runner.invoke(sl.main, ["--help"])
+    assert result.exit_code == 0
+    help_text = " ".join(result.output.split())
+    assert "vulkan for Intel and for AMD with no toolkit detected" not in help_text
+    assert "sycl for Intel on Windows" in help_text
+    assert "vulkan for Intel on Linux" in help_text
 
 
 # --------------------------- bad-download diagnosis ----------------------- #
