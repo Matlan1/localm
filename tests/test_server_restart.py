@@ -6,6 +6,7 @@ sequence."""
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -214,6 +215,230 @@ def test_hang_restart_forced_fallback_hands_the_recorded_gui_surface_over(
     except SystemExit:
         pass
     assert seen == {"flag": "window"}
+
+
+GUI_MOUNTED_ENV = "LOCALM_RESTART_GUI_MOUNTED"
+
+
+def _clear_gui_mounted_env(monkeypatch):
+    """Unset LOCALM_RESTART_GUI_MOUNTED; monkeypatch removes it again at
+    teardown whatever the code under test set."""
+    monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
+    monkeypatch.delenv(GUI_MOUNTED_ENV)
+
+
+def _api_app_with_gui_mounted_live(tmp_path, monkeypatch):
+    """A fresh api-mode app wired as advertise() would wire it, with the GUI
+    mounted live the way POST /v1/surfaces/gui mounts it."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    app = http_server.create_app(None)
+    app.state.instance_id = "iid-restart"
+    app.state.instance_token = "inst-token"
+    app.state.instance_mode = "api"
+    app.state.instance_port = 8642
+    app.state.instance_scheme = "http"
+    app.state.bind_host = "127.0.0.1"
+    assert http_server.mount_gui_surface(app) is True
+    return app
+
+
+def _serve_relaunched_api_app(monkeypatch, tmp_path):
+    """Run run_advertised on a fresh api-mode app with the transport stubbed,
+    the way a re-exec'd process starts. Returns the app and what
+    portmux.run_server saw at the moment serving would have begun."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    app = http_server.create_app(None)
+    app.state.bind_host = "127.0.0.1"
+    seen = {}
+
+    def _run_server(served_app, host, port, **kw):
+        registry = [json.loads(p.read_text(encoding="utf-8"))
+                    for p in (tmp_path / "run").glob("*.json")]
+        seen["flag_in_environ"] = os.environ.get(GUI_MOUNTED_ENV)
+        seen["gui_mounted"] = getattr(served_app.state, "gui_mounted", False)
+        seen["instance_mode"] = served_app.state.instance_mode
+        seen["gui_routes"] = "/api/models" in {
+            getattr(r, "path", None) for r in served_app.router.routes}
+        seen["registry_modes"] = [e["mode"] for e in registry]
+
+    monkeypatch.setattr("localm.portmux.run_server", _run_server)
+    monkeypatch.setattr(http_server, "_announce_stopping", lambda: None)
+    monkeypatch.setattr(http_server, "_shutdown_teardown", lambda **kw: None)
+    http_server.run_advertised(app, "127.0.0.1", 8642, mode="api")
+    return app, seen
+
+
+def test_do_restart_hands_a_live_gui_mount_to_the_relaunch(monkeypatch, tmp_path):
+    """A GUI mounted live onto an API-only instance is not part of the command
+    line the restart re-executes, so _do_restart hands it over in the
+    environment."""
+    _api_app_with_gui_mounted_live(tmp_path, monkeypatch)
+    monkeypatch.setattr(http_server, "_engine", None)
+    _clear_restart_env(monkeypatch)
+    _clear_gui_mounted_env(monkeypatch)
+    seen = {}
+
+    def _fake_relaunch(exe, argv):
+        seen["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert seen == {"gui_flag": "1"}
+
+
+def test_do_restart_without_a_live_gui_mount_hands_no_flag_over(monkeypatch):
+    """An instance whose GUI was never mounted live (a plain localm serve, or a
+    localm gui that attached its own GUI at startup) restarts with the flag
+    absent, and a stale value already in the environment is removed."""
+    monkeypatch.setattr(http_server, "_engine", None)
+    _clear_restart_env(monkeypatch)
+    monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
+    seen = {}
+
+    def _fake_relaunch(exe, argv):
+        seen["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert seen == {"gui_flag": None}
+
+
+def test_hang_restart_forced_fallback_hands_a_live_gui_mount_over(
+        monkeypatch, tmp_path):
+    """The hang alarm's forced re-exec hands a live GUI mount over like
+    _do_restart does."""
+    from types import SimpleNamespace
+
+    _api_app_with_gui_mounted_live(tmp_path, monkeypatch)
+    _clear_restart_env(monkeypatch)
+    _clear_gui_mounted_env(monkeypatch)
+
+    def _graceful_fails(**kw):
+        raise RuntimeError("graceful restart failed")
+
+    monkeypatch.setattr(http_server, "_do_restart", _graceful_fails)
+    monkeypatch.setattr(http_server, "_mark_fds_noninheritable", lambda: None)
+    monkeypatch.setattr(http_server, "_restart_argv",
+                        lambda port=None: ["python", "-m", "localm"])
+    seen = {}
+
+    def _fake_execv(exe, argv):
+        seen["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_execv)
+    app = SimpleNamespace(state=SimpleNamespace(instance_port=None,
+                                                instance_id=None))
+    try:
+        http_server._hang_restart_action(app)
+    except SystemExit:
+        pass
+    assert seen == {"gui_flag": "1"}
+
+
+def test_run_advertised_mounts_the_gui_a_restart_handed_over(monkeypatch, tmp_path):
+    """The re-exec'd process starts API-only from the original command line;
+    with the flag set, the GUI is mounted before serving starts and the
+    registry entry says it is a full instance."""
+    monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
+    _app, seen = _serve_relaunched_api_app(monkeypatch, tmp_path)
+    assert seen["gui_mounted"] is True
+    assert seen["gui_routes"] is True
+    assert seen["instance_mode"] == "full"
+    assert seen["registry_modes"] == ["full"]
+
+
+def test_run_advertised_stays_api_only_without_the_gui_mount_flag(
+        monkeypatch, tmp_path):
+    _clear_gui_mounted_env(monkeypatch)
+    _app, seen = _serve_relaunched_api_app(monkeypatch, tmp_path)
+    assert seen["gui_mounted"] is False
+    assert seen["gui_routes"] is False
+    assert seen["instance_mode"] == "api"
+    assert seen["registry_modes"] == ["api"]
+
+
+def test_run_advertised_removes_the_gui_mount_flag_before_serving(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
+    _app, seen = _serve_relaunched_api_app(monkeypatch, tmp_path)
+    assert seen["flag_in_environ"] is None
+    assert GUI_MOUNTED_ENV not in os.environ
+
+
+def test_run_advertised_keeps_serving_when_the_gui_cannot_be_mounted(
+        monkeypatch, tmp_path, caplog):
+    """A failed remount never stops the API from coming back: it is logged as a
+    warning and the instance stays API-only."""
+    monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
+
+    def _mount_fails(app):
+        raise RuntimeError("attach failed")
+
+    monkeypatch.setattr(http_server, "mount_gui_surface", _mount_fails)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        _app, seen = _serve_relaunched_api_app(monkeypatch, tmp_path)
+    assert seen["gui_mounted"] is False
+    assert seen["instance_mode"] == "api"
+    assert seen["registry_modes"] == ["api"]
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    assert any("could not mount the GUI after the restart" in m
+               and "attach failed" in m for m in warnings), warnings
+
+
+def test_a_restarted_api_instance_comes_back_with_its_live_gui(monkeypatch, tmp_path):
+    """The whole hand-over: an API-only instance gets the GUI mounted live, a
+    restart re-execs it, and the re-exec'd API-only process serves the GUI
+    again."""
+    _api_app_with_gui_mounted_live(tmp_path, monkeypatch)
+    monkeypatch.setattr(http_server, "_engine", None)
+    _clear_restart_env(monkeypatch)
+    _clear_gui_mounted_env(monkeypatch)
+    handed = {}
+
+    def _fake_relaunch(exe, argv):
+        handed.update({k: v for k, v in os.environ.items()
+                       if k.startswith("LOCALM_RESTART_")})
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+
+    monkeypatch.setattr(http_server, "_gui_mounted_live", False)
+    for name in ("LOCALM_RESTART_IN_PROGRESS", GUI_MOUNTED_ENV):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in handed.items():
+        monkeypatch.setenv(name, value)
+    _app, seen = _serve_relaunched_api_app(monkeypatch, tmp_path)
+    assert seen["gui_mounted"] is True
+    assert seen["gui_routes"] is True
+
+    _clear_restart_env(monkeypatch)
+    _clear_gui_mounted_env(monkeypatch)
+    handed_again = {}
+
+    def _fake_relaunch_again(exe, argv):
+        handed_again["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch_again)
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert handed_again == {"gui_flag": "1"}
 
 
 def test_do_restart_releases_embedder(monkeypatch):
