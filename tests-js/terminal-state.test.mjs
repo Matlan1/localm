@@ -243,3 +243,131 @@ test("looksLikeActionAnnouncement: positives and negatives", () => {
   for (const s of yes) assert.equal(w.looksLikeActionAnnouncement(s), true, `should match: ${s}`);
   for (const s of no) assert.equal(w.looksLikeActionAnnouncement(s), false, `should not match: ${s.slice(0, 40)}`);
 });
+
+const FISH_OFFER =
+  "I don't have any information about fish prices. You didn't tell me what " +
+  "kind of fish or where you're looking. I can search for current prices if " +
+  "that's helpful, but it would just give you a number from the internet - " +
+  "not something I actually know.";
+
+test("looksLikeActionAnnouncement: an offer or a question is not an announcement", () => {
+  const { window: w } = loadApp();
+  const offers = [
+    FISH_OFFER,
+    "I could look that up for you.",
+    "I can check the current price for you.",
+    "I'll look it up if you want.",
+    "If you'd like, I will search for the latest figures.",
+    "Let me search for that. Which city are you in?",
+    "I'll search for it now, okay?",
+    "Ich kann das gerne im Internet nachschauen.",
+    "Ich werde das nachschauen, wenn du möchtest.",
+  ];
+  for (const s of offers) {
+    assert.equal(w.looksLikeActionAnnouncement(s), false, `offer, not a promise: ${s.slice(-50)}`);
+  }
+  const promises = [
+    "Prices vary a lot. Let me search for the current price of sea bass.",
+    "I can check that. Let me look it up now.",
+    "I will do the following:\n- search the web\n- summarise it",
+  ];
+  for (const s of promises) {
+    assert.equal(w.looksLikeActionAnnouncement(s), true, `still a promise: ${s.slice(-50)}`);
+  }
+});
+
+test("announcement: an offer ends the turn with no repair round and no note", async () => {
+  const d = driver({ web: true, rounds: [
+    { deltas: [content(FISH_OFFER), done("stop")] },
+  ] });
+  await d.window.runCompletion(d.conv);
+  assert.equal(d.completions().length, 1, "the offer waits for the user's answer");
+  assert.ok(!d.conv.messages.some((m) => m.kind === "tool" && m.reason === "pending"),
+    "no [pending action] note is added for an offer");
+  assert.equal(d.conv.messages[d.conv.messages.length - 1].content, FISH_OFFER);
+});
+
+// ---------------------------------------------------------------------------
+//  a reply that is all reasoning (no visible text) does not end the turn
+// ---------------------------------------------------------------------------
+
+const thinking = (s) => ({ choices: [{ delta: { reasoning_content: s } }] });
+const SEABASS_PLAN =
+  "The user asked me to look up seabass prices. I should emit a web_search " +
+  "tool call with the query \"seabass fish price today\" or something similar.";
+
+test("reasoning only: thoughts with no reply and no call get exactly one repair round", async () => {
+  const d = driver({ web: true, rounds: [
+    { deltas: [thinking(SEABASS_PLAN), done("stop")] },
+    { deltas: [content(WEB_CALL), done("stop")] },
+    { deltas: [content("Answer from results."), done("stop")] },
+  ] });
+  d.window.confirmWebRequest = async () => true;
+  await d.window.runCompletion(d.conv);
+  const pending = d.conv.messages.filter((m) => m.kind === "tool" && m.reason === "pending");
+  assert.equal(pending.length, 1, "one repair note after the reasoning-only reply");
+  assert.match(pending[0].note, /^\[pending action\]/);
+  assert.match(pending[0].note, /no answer and no tool call/);
+  assert.equal(d.calls.filter((c) => c.url === "/api/web/retrieve").length, 1,
+    "the call the repair round emitted ran");
+  assert.equal(d.completions().length, 3);
+  assert.equal(d.conv.messages[d.conv.messages.length - 1].content, "Answer from results.");
+});
+
+test("reasoning only: a complete call written inside the thoughts runs", async () => {
+  const d = driver({ web: true, rounds: [
+    { deltas: [thinking("I should search for it.\n" + WEB_CALL), done("stop")] },
+    { deltas: [content("Answer from results."), done("stop")] },
+  ] });
+  d.window.confirmWebRequest = async () => true;
+  await d.window.runCompletion(d.conv);
+  const retrieves = d.calls.filter((c) => c.url === "/api/web/retrieve");
+  assert.equal(retrieves.length, 1, "the call found in the reasoning ran");
+  assert.equal(retrieves[0].body.query, "x");
+  assert.ok(!d.conv.messages.some((m) => m.kind === "tool" && m.reason === "pending"),
+    "no repair note: the call itself was run");
+  assert.equal(d.completions().length, 2);
+});
+
+test("reasoning only: an inline think block holding the call also runs it", async () => {
+  const d = driver({ web: true, rounds: [
+    { deltas: [content("<think>I should search for it.\n" + WEB_CALL), done("stop")] },
+    { deltas: [content("Answer from results."), done("stop")] },
+  ] });
+  d.window.confirmWebRequest = async () => true;
+  await d.window.runCompletion(d.conv);
+  assert.equal(d.calls.filter((c) => c.url === "/api/web/retrieve").length, 1);
+  assert.equal(d.completions().length, 2);
+});
+
+test("reasoning only: a call inside the thoughts of a reply that answers is not run", async () => {
+  const d = driver({ web: true, rounds: [
+    { deltas: [thinking("I could run " + WEB_CALL + " but I know this."),
+               content("It is 42."), done("stop")] },
+  ] });
+  await d.window.runCompletion(d.conv);
+  assert.equal(d.calls.filter((c) => c.url === "/api/web/retrieve").length, 0);
+  assert.equal(d.completions().length, 1);
+});
+
+test("reasoning only: the repair round is bounded to one per send", async () => {
+  const d = driver({ web: true, rounds: [
+    { deltas: [thinking(SEABASS_PLAN), done("stop")] },
+    { deltas: [thinking("Still planning the search."), done("stop")] },
+  ] });
+  await d.window.runCompletion(d.conv);
+  const pending = d.conv.messages.filter((m) => m.kind === "tool" && m.reason === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(d.completions().length, 2, "no third round");
+});
+
+test("reasoning only: no repair when web access is off, or on a length cut-off", async () => {
+  const off = driver({ web: false, rounds: [{ deltas: [thinking(SEABASS_PLAN), done("stop")] }] });
+  await off.window.runCompletion(off.conv);
+  assert.equal(off.completions().length, 1);
+  assert.ok(!off.conv.messages.some((m) => m.kind === "tool"));
+  const cut = driver({ web: true, rounds: [{ deltas: [thinking(SEABASS_PLAN), done("length")] }] });
+  await cut.window.runCompletion(cut.conv);
+  assert.equal(cut.completions().length, 1);
+  assert.equal(cut.conv.messages[1].truncated, true);
+});

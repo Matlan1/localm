@@ -178,9 +178,8 @@ def _as_web_call(obj):
     name = obj.get("name")
     if name not in _WEB_TOOLS:
         return None
-    args = obj.get("args") if isinstance(obj.get("args"), dict) else None
-    if args is None:
-        args = obj.get("arguments") if isinstance(obj.get("arguments"), dict) else {}
+    args = next((obj[k] for k in ("args", "arguments", "parameters")
+                 if isinstance(obj.get(k), dict)), {})
     return {"name": name, "args": args}
 
 

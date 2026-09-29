@@ -4,8 +4,10 @@ parallel tool dispatch. Mixed into Agent (see core.py)."""
 
 from __future__ import annotations
 
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from types import SimpleNamespace
 
 import localm.plugins.coder.agent as _agent
@@ -56,6 +58,78 @@ def implies_action(text: str) -> bool:
         if word in _ACTION_VERBS:
             return True
     return bool(_RE_WORKSPACE.search(text))
+
+
+# A fenced code block's body.
+_RE_FENCE_BLOCK = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
+# A name a code block DEFINES (Python, JS/TS, Go, Rust), not one it only uses.
+_RE_CODE_DEF = re.compile(
+    r"^[ \t]*(?:export[ \t]+)?(?:pub[ \t]+)?(?:async[ \t]+)?"
+    r"(?:def|class|function|func|fn)[ \t]+([A-Za-z_$][\w$]*)", re.MULTILINE)
+# Prose is split into tokens on these before a token is tested as a path, so the
+# path pattern is only ever matched against one short token.
+_RE_TOKEN_SPLIT = re.compile(r"[\s`'\"()\[\]{}<>,;*|]+")
+_RE_PATH_TOKEN = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]{1,8}")
+_UNFOUNDED_MAX_BYTES = 2_000_000
+
+
+def _cited_path(segment: str) -> "str | None":
+    """The last path-looking token (``dir/name.ext``) in *segment*, or None."""
+    cited = None
+    for token in _RE_TOKEN_SPLIT.split(segment):
+        token = re.sub(r":\d+(?::\d+)?$", "", token.rstrip(".,:;!?"))
+        if token and _RE_PATH_TOKEN.fullmatch(token):
+            cited = token
+    return cited
+
+
+def unfounded_code(text: str, cwd) -> "list[tuple[str, list[str]]]":
+    """``[(path, names), ...]`` for each workspace file *text* shows code for
+    whose code defines names that file does not contain.
+
+    A fenced code block is attributed to the path named last in the prose
+    right before it. When that path is an existing file inside *cwd*, every
+    name the block defines (``def``/``class``/``function``/``func``/``fn``) is
+    looked up in the file on disk; a name that occurs nowhere in it means the
+    block is not the file's content. A block with no path before it, a path
+    that is not an existing workspace file, or a file too large to check is
+    skipped. Only the file on disk is consulted, never the reply's account of
+    what it read. Pure, so it can be tested without an Agent."""
+    from ..tools.base import _confine
+    root = Path(cwd)
+    found: "dict[str, list[str]]" = {}
+    contents: "dict[Path, str | None]" = {}
+    prev_end = 0
+    for block in _RE_FENCE_BLOCK.finditer(text or ""):
+        cited = _cited_path(text[prev_end:block.start()])
+        prev_end = block.end()
+        names = list(dict.fromkeys(_RE_CODE_DEF.findall(block.group(1))))
+        if not cited or not names:
+            continue
+        try:
+            path = _confine(root, cited.replace("\\", "/"))
+        except (PermissionError, OSError, ValueError):
+            continue
+        if path not in contents:
+            try:
+                ok = path.is_file() and path.stat().st_size <= _UNFOUNDED_MAX_BYTES
+                contents[path] = (path.read_text(encoding="utf-8", errors="replace")
+                                  if ok else None)
+            except OSError:
+                contents[path] = None
+        body = contents[path]
+        if body is None:
+            continue
+        missing = [n for n in names
+                   if not re.search(r"(?<![\w$])" + re.escape(n) + r"(?![\w$])", body)]
+        if missing:
+            try:
+                rel = path.relative_to(root.resolve()).as_posix()
+            except ValueError:
+                rel = cited.replace("\\", "/")
+            found.setdefault(rel, [])
+            found[rel].extend(n for n in missing if n not in found[rel])
+    return list(found.items())
 
 
 def response_similarity(a: str, b: str) -> float:
@@ -206,7 +280,10 @@ class _LoopMixin:
                              # ladder this task has used, and whether the model
                              # has produced any call yet.
                              nocall_escalation=0, tool_calls_made=0,
-                             writes_at_start=self._write_total())
+                             writes_at_start=self._write_total(),
+                             # The one-shot re-prompt for code that is not in
+                             # the file the reply names (unfounded_code).
+                             unfounded_checked=False)
 
         try:
             while self._turns < self.max_turns:
@@ -591,6 +668,31 @@ class _LoopMixin:
         if escalated is not None:
             return escalated
 
+        # Code shown for a workspace file that defines names the file does not
+        # contain is invented file content, whatever the reply says it read.
+        # Checked against the file on disk, once per task, while turns remain.
+        unfounded = unfounded_code(response, self.cwd)
+        where = "; ".join(f"{', '.join(names)} not found in {path}"
+                          for path, names in unfounded)
+        if unfounded and not st.unfounded_checked and self._turns < self.max_turns:
+            st.unfounded_checked = True
+            self._audit.notice("unfounded_code", where)
+            self._add_assistant(response)
+            self._add_user(
+                "[unverified code] The code in your reply does not match the "
+                f"files it names: {where}. It is not those files' content. Read "
+                "the part you need first (read_file with offset and limit, or "
+                "grep for a name) and answer from what the file actually "
+                "contains. If the code is new code you are proposing, say so "
+                "plainly instead of presenting it as the file's content."
+            )
+            if interactive:
+                print_info("(unverified code: asking the agent to read the file)")
+            self._emit("info", text=(
+                f"the reply showed code that is not in the file it names ({where}) "
+                "- asking the agent to read the file"))
+            return (False, "")
+
         # Pre-done review: a reviewer model checks the cumulative diff and any
         # blocking issues go back for one more fix pass. Fires at most once per
         # loop, only when there is a real diff and turns remain. Fail-open: a
@@ -639,9 +741,15 @@ class _LoopMixin:
                 "the model did not call any tool despite being asked again "
                 "- nothing was run or written"))
 
+        unverified = ""
+        if unfounded:
+            unverified = f"\n\n[unverified code: {where}]"
+            self._emit("info", text=(
+                f"unverified code: {where} - the code in this answer is not "
+                "the content of the file it names"))
         footer = self._grounding_footer()
         sensitive = self._sensitive_changes_notice()
-        final_text = response + enforcement + (footer or "") + sensitive
+        final_text = response + enforcement + unverified + (footer or "") + sensitive
         if not interactive and self.on_event is None:
             print_assistant_response(final_text, name=self.name)
         self._add_assistant(response)

@@ -506,6 +506,65 @@ class MtmdContext:
         self._ctx = self._open(use_gpu=False)
         return bool(self._ctx)
 
+    def _tokenize_into_chunks(self, prompt: str, images: List[Tuple[int, int, bytes]], *,
+                              add_special: bool) -> Tuple[int, List[int]]:
+        """Build bitmaps for *images* and tokenize *prompt* (which contains one
+        ``self.marker`` per image, in order) against them into a fresh
+        mtmd_input_chunks handle. Returns ``(chunks, bitmaps)``; the caller frees
+        both exactly once - the bitmaps only after it is done reading the chunks
+        (mtmd_helper_eval_chunks references their buffers, not copies)."""
+        m = self._m
+        bitmaps = []
+        try:
+            for (w, h, rgb) in images:
+                bmp = m.mtmd_bitmap_init(w, h, rgb)
+                if not bmp:
+                    raise VisionInputError("mtmd_bitmap_init failed (bad image buffer)")
+                bitmaps.append(bmp)
+            chunks = m.mtmd_input_chunks_init()
+            if not chunks:
+                raise VisionInputError("mtmd_input_chunks_init failed")
+            try:
+                raw = prompt.encode("utf-8")
+                itext = _make_input_text(self._input_text_class, raw, add_special, True)
+                arr = (ctypes.c_void_p * len(bitmaps))(*bitmaps)
+                rc = m.mtmd_tokenize(self._ctx, chunks, ctypes.addressof(itext),
+                                     arr, len(bitmaps))
+                if rc != 0:
+                    from localm.debuglog import native_fault_hint
+                    raise VisionInputError(
+                        f"the vision projector could not process this image "
+                        f"(mtmd_tokenize rc={rc}); {native_fault_hint()}.")
+            except Exception:
+                m.mtmd_input_chunks_free(chunks)
+                raise
+            return chunks, bitmaps
+        except Exception:
+            for bmp in bitmaps:
+                m.mtmd_bitmap_free(bmp)
+            raise
+
+    def count_tokens(self, prompt: str, images: List[Tuple[int, int, bytes]], *,
+                      add_special: bool) -> int:
+        """How many KV positions evaluating *prompt*+*images* will need
+        (a real tokenize pass plus ``mtmd_helper_get_n_tokens``, not an estimate).
+
+        The caller sizes the llama context for this BEFORE calling
+        :meth:`eval_into`: llama.cpp fails a batch that does not fit its
+        context ("failed to find a memory slot") instead of growing to make
+        room, on the GPU and CPU paths alike since it is a KV-capacity limit,
+        not a compute-backend fault - so undersizing looks identical to the
+        gfx1030 / RDNA2 hipBLAS bug :meth:`eval_into` retries on CPU for, wastes
+        that retry too, and still ends in the same "could not evaluate" error."""
+        chunks, bitmaps = self._tokenize_into_chunks(
+            prompt, images, add_special=add_special)
+        try:
+            return int(self._m.mtmd_helper_get_n_tokens(chunks))
+        finally:
+            self._m.mtmd_input_chunks_free(chunks)
+            for bmp in bitmaps:
+                self._m.mtmd_bitmap_free(bmp)
+
     def eval_into(self, llama_ctx: int, prompt: str,
                   images: List[Tuple[int, int, bytes]], *,
                   add_special: bool, n_batch: Optional[int] = None) -> int:
@@ -519,60 +578,45 @@ class MtmdContext:
         ``llama_n_ctx``, capped the same way llama.py's own context construction
         caps it) rather than a fixed 512, so mtmd never micro-batches smaller than
         what the context was built for. An explicit *n_batch* wins, for a caller
-        that knows its own real batch size precisely."""
+        that knows its own real batch size precisely.
+
+        The caller is responsible for sizing *llama_ctx* to fit first (see
+        :meth:`count_tokens`) - this method does not grow it."""
         m = self._m
         ctx_n_ctx = api.llama_n_ctx(llama_ctx)
         if n_batch is None:
             n_batch = min(ctx_n_ctx, 2048) if ctx_n_ctx else 512
-        bitmaps = []
+        chunks, bitmaps = self._tokenize_into_chunks(
+            prompt, images, add_special=add_special)
         try:
-            for (w, h, rgb) in images:
-                bmp = m.mtmd_bitmap_init(w, h, rgb)
-                if not bmp:
-                    raise VisionInputError("mtmd_bitmap_init failed (bad image buffer)")
-                bitmaps.append(bmp)
-            chunks = m.mtmd_input_chunks_init()
-            if not chunks:
-                raise VisionInputError("mtmd_input_chunks_init failed")
-            try:
-                raw = prompt.encode("utf-8")
-                itext = _make_input_text(
-                    self._input_text_class, raw, add_special, True)
-                arr = (ctypes.c_void_p * len(bitmaps))(*bitmaps)
-                rc = m.mtmd_tokenize(self._ctx, chunks, ctypes.addressof(itext),
-                                     arr, len(bitmaps))
-                if rc != 0:
-                    from localm.debuglog import native_fault_hint
-                    raise VisionInputError(
-                        f"the vision projector could not process this image "
-                        f"(mtmd_tokenize rc={rc}); {native_fault_hint()}.")
-                new_n_past = ctypes.c_int32(0)
-                rc2 = m.mtmd_helper_eval_chunks(
-                    self._ctx, llama_ctx, chunks, 0, 0, n_batch, True,
-                    ctypes.byref(new_n_past))
-                if rc2 != 0:
-                    # On the GPU path this is the shape the gfx1030 / RDNA2
-                    # hipBLAS BF16 failure takes, so tell the caller a CPU retry
-                    # is worth one attempt rather than failing the request.
-                    exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
-                    raise exc(
-                        f"the vision projector could not evaluate this image "
-                        f"(mtmd_helper_eval_chunks rc={rc2})")
-                pos = int(new_n_past.value)
-                # The generation loop trusts this position as the base for every
-                # subsequent single-token decode with no further sanity check, so
-                # a native call that under/over-reports how many KV positions the
-                # image consumed would let generation continue from a corrupted
-                # position instead of failing loudly.
-                if pos <= 0 or (ctx_n_ctx and pos > ctx_n_ctx):
-                    raise VisionInputError(
-                        f"mtmd image eval returned an implausible position "
-                        f"(new_n_past={pos}, context size={ctx_n_ctx}) - refusing "
-                        f"to generate from a likely-corrupted KV state")
-                return pos
-            finally:
-                m.mtmd_input_chunks_free(chunks)
+            new_n_past = ctypes.c_int32(0)
+            rc2 = m.mtmd_helper_eval_chunks(
+                self._ctx, llama_ctx, chunks, 0, 0, n_batch, True,
+                ctypes.byref(new_n_past))
+            if rc2 != 0:
+                # On the GPU path this is also the shape the gfx1030 / RDNA2
+                # hipBLAS BF16 failure takes, so tell the caller a CPU retry
+                # is worth one attempt rather than failing the request outright
+                # - count_tokens() having already sized the context, this should
+                # now be that GPU-specific fault rather than a capacity miss.
+                exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
+                raise exc(
+                    f"the vision projector could not evaluate this image "
+                    f"(mtmd_helper_eval_chunks rc={rc2})")
+            pos = int(new_n_past.value)
+            # The generation loop trusts this position as the base for every
+            # subsequent single-token decode with no further sanity check, so
+            # a native call that under/over-reports how many KV positions the
+            # image consumed would let generation continue from a corrupted
+            # position instead of failing loudly.
+            if pos <= 0 or (ctx_n_ctx and pos > ctx_n_ctx):
+                raise VisionInputError(
+                    f"mtmd image eval returned an implausible position "
+                    f"(new_n_past={pos}, context size={ctx_n_ctx}) - refusing "
+                    f"to generate from a likely-corrupted KV state")
+            return pos
         finally:
+            m.mtmd_input_chunks_free(chunks)
             for bmp in bitmaps:
                 m.mtmd_bitmap_free(bmp)
 

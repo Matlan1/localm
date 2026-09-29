@@ -118,6 +118,63 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A GGUF vision reply can fail with "the vision projector could not evaluate
+  this image (mtmd_helper_eval_chunks rc=1)", wrongly blamed on a GPU-specific
+  fault, when the live context is too small for the image.** Unlike the text
+  path, the vision path never resized the context for what an image+prompt
+  actually needs, so llama.cpp's own KV cache ran out of room mid-encode
+  ("failed to find a memory slot") - identically on GPU and CPU, since it is a
+  capacity limit, not a compute-backend bug. On GPU that failure was
+  indistinguishable from the known gfx1030/RDNA2 hipBLAS BF16 fault, so it
+  wasted a CPU rebuild-and-retry (also disguising the on_status message as a
+  GPU problem) before still failing with the same unhelpful error. The vision
+  path now counts the real token cost of the image and prompt up front and
+  grows the context first, the same way text generation already does,
+  and gives the same graceful "conversation has outgrown the context window"
+  error as text does when even a resized context can't fit it.
+- **Sending an image to a GGUF vision model with "Max tokens per reply" set to
+  unlimited (0) no longer silently returns an empty reply.** Chat showed
+  "Encoding image (GPU)..." and then nothing, with no error: the image
+  prefilled normally, but the decode loop that turns it into a reply used a
+  bounded `range(max_tokens)` that treats 0 (and negative values) as "generate
+  nothing" instead of the "no limit" every other generation path already gives
+  it. The vision decode loop now honors the same unlimited sentinel text
+  generation does, so it keeps generating until the model itself stops
+  (or a positive max-tokens budget is actually reached).
+- **`localm doctor` no longer reports the HuggingFace backend as working while
+  every HuggingFace model fails to load.** Doctor checked that PyTorch and
+  transformers load in its own process, but a model loads in a separate worker
+  process, where the same import can fail: the Intel GPU `[WinError 126]` failure
+  fixed in this release passed that check. `localm doctor` and Settings >
+  Diagnostics now run the check in a worker started the way a model load starts
+  one, and say which step failed there. A check that does not finish within two
+  minutes stops its worker and reports the backend as not verified.
+- **A web search or page read in the GUI chat no longer pulls unrelated long-term
+  memories into the reply, and the session log no longer records the GUI's web
+  notes as something you said.** Search results, page text and notes such as
+  "[pending action] ..." reach the model as user-role messages, and their common
+  words ("answer", "results", "source") made loosely related facts count as
+  relevant; one web turn could go from 1 recalled memory to 6. The GUI now marks
+  those messages `origin: "tool"` (a new optional field on a chat message), and
+  the server builds the recall query and the logged user line only from what you
+  typed. API clients that do not send the field behave exactly as before.
+- **On Windows with an Intel GPU, HuggingFace models now load instead of failing
+  with `[WinError 126]` and `Error loading "...\torch\lib\c10_xpu.dll" or one of
+  its dependencies`.** The process that loads a HuggingFace model could not find
+  the Intel GPU runtime that the Intel (XPU) build of PyTorch installs into
+  localm's environment, so every HuggingFace model failed to load with that
+  build, although PyTorch itself was installed correctly.
+- **Compacting a long chat in the GUI no longer recalls memories for the summary
+  request or logs it as something you said.** To compact a chat, the GUI asks the
+  model to summarise the older turns. The server treated that prompt, and the
+  excerpt of earlier turns inside it, as your own message: it could pull in and
+  reinforce loosely related memories, and it was written to the session log as
+  your line, so memory consolidation later re-learned those turns as if you had
+  typed them again. The GUI now marks that message with `origin: "client"` (a
+  second value for the optional `origin` message field of `/v1/chat/completions`,
+  see `docs/server-api.md`), and the server leaves a marked message out of memory
+  recall and the log's user line. Clients that do not send the field are
+  unaffected.
 - **Setup no longer fails with "Failed to build `tokenizers`" on a computer
   without a Rust compiler.** A new huggingface-hub release (2.0) made setup
   pick an old version of tokenizers that has to be compiled from source.
@@ -184,7 +241,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   duplicate browser tabs was inadvertently also suppressing the native window, and
   then a second read of the same flag (which had already been consumed) opened a
   browser tab regardless.
-- **`find_sibling_mmproj` no longer auto-attaches a lone vision projector to unrelated models sharing the folder.** Directory sibling detection now enforces stem matching for all candidate counts, preventing unrelated models from auto-attaching projectors or emitting misleading "looks like projector by filename" log messages.
+- **A lone vision projector in a folder is no longer attached to a model it was not made for.** A projector beside a model is attached when its name matches the model, or when its name names no model (`mmproj-F16.gguf`, `mmproj-model-f16.gguf`) and no other model in the folder could use it: other quantizations of the same model and its multi-token-prediction head do not count, and a model with a different embedding width is ruled out. A projector named after another model in the folder is left for that model unless that model's embedding width rules it out. `localm pull` applies the same naming rules to the repo's file list, which carries no model headers.
 - **Pulling a vision model no longer attaches a different model's vision projector just because the two repos happen to name it the same.** Several HuggingFace vendors ship a vision-language release with an identically named projector file (`mmproj-model-f16.gguf` and similar); a same-named file already in the models folder from an earlier pull is now confirmed to be the repo currently being pulled (its published sha256, or, when that is not published, a matching GGUF embedding width) before it is reused, matching the check the local `--store` import already applies to a filename collision. A confirmed mismatch downloads the new projector under a numbered name instead of attaching the wrong one or touching the earlier model's own file. Covers both the automatic same-repo projector detection and an explicit `--mmproj`.
 - **Adding a model with `--store move` or `--store copy` no longer leaves its vision projector behind.** Every projector next to the model that may belong to it now comes along, including generically named ones such as `mmproj-F16.gguf`, instead of only one localm recognises by name. A projector another model in the same folder may also use is copied rather than moved, so that model keeps its vision, and the projector the model is paired with is recorded on its entry, so vision still works in a models folder that holds several projectors. When projectors came along but none is attached, a note names them with the `--mmproj` path to use one. When a single file is added, a same-named projector already in the models folder is reused if identical and otherwise stored under a numbered name, instead of failing the import. A projector path recorded on another model's entry now follows the file when it moves. The same applies when a single file is added with `--on-duplicate copy` / `move`, and importing a folder with `--on-duplicate move` no longer registers a projector at the location it was just moved out of.
 - **Grammar-constrained generation no longer floods the console with repetitive "Grammar still awaiting trigger" messages.** Generation wrapped with grammar or lazy-grammar sampling restores `_quiet_stderr` during inference so per-token trigger status lines from the llama.cpp sampler do not spam stderr.
@@ -287,6 +344,32 @@ permanent public record of what shipped and are never rewritten; the in-progress
   then stops is no longer accepted as the final answer.** With web access on,
   the chat asks the model once to either make the call or answer now; this
   happens at most once per message.
+  A reply that only offers a lookup ("I can search for current prices if
+  that's helpful") or ends on a question is left for you to answer.
+- **With web access on, a reply that stops after the model's thoughts no
+  longer ends the turn with "(no reply text)".** When a thinking model writes
+  its web search inside its thoughts, the search now runs; when it only plans
+  one there and stops, the chat asks it once to make the call or answer.
+- **Tool calls written the Llama 3 way, with `"parameters"` instead of
+  `"args"`, now keep their arguments** in the chat, scheduled jobs and the
+  coder. Before, such a web search ran with an empty query and a coder tool
+  call arrived with no arguments at all.
+- **The coder no longer passes off invented code as a file's content.** When
+  a final answer shows a code block for a file in the project and the code
+  defines functions or classes that file does not contain, the coder asks
+  the model once to read the file and answer from it. If the answer still
+  does not match, it is marked `[unverified code: ... not found in ...]`.
+- **A tool call that a thinking model starts inside its thoughts now arrives
+  as its reply.** With the tool-call grammar on (the chat with web access, and
+  the coder by default), such a call used to be delivered as part of the
+  thoughts, because the grammar lets nothing follow the call, not even the
+  end of the thoughts. The call was never run and the reply was empty, which
+  the coder then accepted as its final answer.
+- **When the coder reads a file too large to show in full, it is now told
+  exactly which lines it did not get** (`lines 103-990 of 1085 are
+  missing...`), with the `offset` to read them from. Before, it only saw a
+  character count, and a slice read that was cut short carried no notice at
+  all.
 - **Chat plugins no longer treat a failed generation as a completed turn.**
   Memory consolidation is not scheduled after a failed reply, and the audit
   log and transcript record that the generation ended in an error or a

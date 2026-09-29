@@ -31,6 +31,7 @@ from ._shared import _emit_progress
 from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _safe_models_filename
+from .gguf import first_split_part
 from .gguf import gguf_n_embd
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _sanitize_name
@@ -960,24 +961,27 @@ def _pick_mmproj_from_listing(
     is chosen. A single-path-component check is not enough: on Windows a value
     with no forward slash can still be a drive-qualified or backslash-relative
     path, and ``_safe_models_filename`` rejects those and confines the result
-    inside *base_dir*."""
+    inside *base_dir*.
+
+    The pick is ``_pick_mmproj_candidate``'s, the policy the folder scan
+    (``find_sibling_mmproj``) uses, given the listing's other model files and no
+    GGUF headers. When several candidates share the model's leading name token,
+    ``_pick_best_of_same_repo_mmprojs`` picks among them."""
     cands = [f for f in files
              if f != model_filename and "mmproj" in f.lower()
              and f.lower().endswith(".gguf")
              and _mm._safe_models_filename(f, base_dir) is not None]
     if not cands:
         return None
-    if len(cands) == 1:
-        return cands[0]
-    picked = _mm._pick_mmproj_candidate(Path(model_filename).stem, cands)
+    model_name = Path(model_filename).name
+    others = sorted({first_split_part(Path(f).name) for f in files
+                     if f.lower().endswith(".gguf") and "mmproj" not in f.lower()}
+                    - {first_split_part(model_name)})
+    picked = _mm._pick_mmproj_candidate(model_name, cands, others=others)
     if picked:
         return picked
-    # _pick_mmproj_candidate gave up, which happens for two reasons it cannot
-    # itself distinguish: NONE of the candidates share the model's leading
-    # token (no confirmed relation to this model), or SEVERAL do (confirmed
-    # related, merely ambiguous between quantised variants of the SAME
-    # projector). Only the second is guessed in: _pick_best_of_same_repo_mmprojs
-    # requires every candidate it sees to be known to be about this model.
+    # _pick_mmproj_candidate gave up. Only candidates that share the model's
+    # leading token go to _pick_best_of_same_repo_mmprojs, and only two or more.
     stem = Path(model_filename).stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
     stem_matches = [c for c in cands if stem and stem in c.lower()]
     if len(stem_matches) >= 2:

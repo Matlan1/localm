@@ -286,3 +286,81 @@ class TestUnlimitedCtxMax:
     def test_positive_max_without_auto_passes_through(self):
         b = self._backend(int(80e9), int(2e9), n_ctx_max=16384, ctx_auto=False)
         assert b._effective_ctx_max() == 16384
+
+
+class TestGenerateImageContextSizing:
+    """_generate_image must size the context for the image+prompt BEFORE
+    calling mtmd, the same way _generate does for text (TestFreshContextUsesPolicy
+    above). llama.cpp fails a batch that does not fit its context ("failed to
+    find a memory slot") instead of growing to make room, identically on GPU
+    and CPU since it is a KV-capacity limit rather than a compute-backend
+    fault - so an undersized context looks exactly like the unrelated
+    gfx1030/RDNA2 hipBLAS bug eval_into's caller already retries on CPU for,
+    and still fails after wasting that retry."""
+
+    def _vision_llm(self, *, n_tokens, **ctx_kwargs):
+        llm = _llm(**ctx_kwargs)
+        llm._model_ptr = 111
+        llm._ctx_ptr = 222
+        llm._mtmd = MagicMock(marker="<image>")
+        llm._mtmd.count_tokens.return_value = n_tokens
+        return llm
+
+    def _drive(self, llm, mock_api, *, max_new_tokens=64):
+        """Run _generate_image up to (and just past) the prefill/resize
+        decision: eval_into raises immediately so the test never reaches the
+        native decode loop, which is not what this class is about."""
+        class _StopAfterPrefillDecision(Exception):
+            pass
+        llm._mtmd.eval_into.side_effect = _StopAfterPrefillDecision()
+        messages = [{"role": "user", "content": "describe this"}]
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             patch("localm.inference.backends.llamacpp.llama._apply_model_template",
+                   return_value=("prompt text", None)), \
+             pytest.raises(_StopAfterPrefillDecision):
+            list(llm._generate_image(
+                messages, max_new_tokens=max_new_tokens, temperature=0.8,
+                top_k=40, top_p=0.95, repeat_penalty=1.1))
+
+    def test_grows_the_context_when_the_image_does_not_fit(self):
+        llm = self._vision_llm(n_tokens=5000)   # 5000 + 64 + 64 > the 4096 base
+        llm._reset_kv_for_image = MagicMock()
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+
+        self._drive(llm, mock_api, max_new_tokens=64)
+
+        assert cp.n_ctx == 8192          # rounded up to the next grow step
+        assert llm._ctx_capacity == 8192
+        # The rebuild already gives an empty KV cache - no separate reset needed.
+        llm._reset_kv_for_image.assert_not_called()
+
+    def test_reuses_the_context_when_the_image_already_fits(self):
+        llm = self._vision_llm(n_tokens=10)   # 10 + 64 + 64 well under 4096
+        llm._reset_kv_for_image = MagicMock()
+        mock_api = MagicMock()
+
+        self._drive(llm, mock_api, max_new_tokens=64)
+
+        mock_api.llama_init_from_model.assert_not_called()   # no rebuild
+        assert llm._ctx_capacity == 4096                     # unchanged
+        llm._reset_kv_for_image.assert_called_once()
+
+    def test_raises_when_the_image_alone_outgrows_the_ceiling(self):
+        from localm.inference.backends.base import ContextCapacityExceededError
+
+        llm = self._vision_llm(n_tokens=8190, n_ctx_max=8192)
+        messages = [{"role": "user", "content": "describe this"}]
+        with patch("localm.inference.backends.llamacpp.llama.api", MagicMock()), \
+             patch("localm.inference.backends.llamacpp.llama._apply_model_template",
+                   return_value=("prompt text", None)):
+            with pytest.raises(ContextCapacityExceededError, match="n_ctx_max"):
+                list(llm._generate_image(
+                    messages, max_new_tokens=1024, temperature=0.8, top_k=40,
+                    top_p=0.95, repeat_penalty=1.1))
+        # Refused before ever touching mtmd - not a failed/wasted eval attempt.
+        llm._mtmd.eval_into.assert_not_called()

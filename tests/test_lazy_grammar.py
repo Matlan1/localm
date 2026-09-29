@@ -261,3 +261,69 @@ def test_lazy_grammar_activates_at_trigger_on_real_model():
         assert calls[0].name, "the forced-valid call carries a name"
     finally:
         llm.close() if hasattr(llm, "close") else None
+
+
+class TestThinkExitMarkerOnTheServer:
+    """A lazy tool-call grammar that fired inside a think block leaves the
+    block open with the call inside it; the server hands that call to the
+    content instead of streaming it as reasoning."""
+
+    CALL = '<tool_call>{"name": "web_search", "args": {"query": "q"}}</tool_call>'
+    LAZY = {"grammar": TOOL_CALLS_ONLY, "grammar_lazy": True,
+            "grammar_triggers": [TOOL_CALL_TRIGGER]}
+
+    def _client(self, pieces):
+        from localm.inference.http_server import create_app
+        engine = MagicMock()
+        engine.chat_stream.side_effect = lambda messages, **kw: (p for p in pieces)
+        engine.count_tokens.return_value = 1
+        engine.display_name = "test-model"
+        engine.supports_images = False
+        engine.can_be_multimodal = False
+        engine.last_finish_reason = "stop"
+        type(engine).loaded = property(lambda self: True)
+        return TestClient(create_app(engine))
+
+    def _stream(self, pieces, extra):
+        import json
+        body = {"model": "test-model", "stream": True,
+                "messages": [{"role": "user", "content": "hi"}], **extra}
+        content, reasoning = "", ""
+        with self._client(pieces).stream("POST", "/v1/chat/completions", json=body) as r:
+            assert r.status_code == 200
+            for line in r.iter_lines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                delta = json.loads(line[6:])["choices"][0]["delta"]
+                content += delta.get("content") or ""
+                reasoning += delta.get("reasoning_content") or ""
+        return content, reasoning
+
+    def test_marker_helper_is_only_for_the_lazy_tool_call_trigger(self):
+        from localm.inference.gbnf import think_exit_marker
+        assert think_exit_marker(True, [TOOL_CALL_TRIGGER]) == "<tool_call>"
+        assert think_exit_marker(False, [TOOL_CALL_TRIGGER]) is None
+        assert think_exit_marker(True, [r"(<other>[\s\S]*)"]) is None
+        assert think_exit_marker(True, None) is None
+
+    def test_streamed_call_begun_while_thinking_is_content(self):
+        pieces = ["<think>I should ", "search. <tool_", "call>", self.CALL[11:]]
+        content, reasoning = self._stream(pieces, self.LAZY)
+        assert content == self.CALL
+        assert reasoning == "I should search. "
+
+    def test_without_the_lazy_grammar_it_stays_reasoning(self):
+        pieces = ["<think>I should search. ", self.CALL]
+        content, reasoning = self._stream(pieces, {})
+        assert content == ""
+        assert reasoning.endswith(self.CALL)
+
+    def test_non_streaming_reply_splits_the_same_way(self):
+        client = self._client(["<think>I should search. " + self.CALL])
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+            **self.LAZY})
+        assert r.status_code == 200
+        msg = r.json()["choices"][0]["message"]
+        assert msg["content"] == self.CALL
+        assert msg["reasoning_content"] == "I should search. "

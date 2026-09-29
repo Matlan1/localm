@@ -77,7 +77,9 @@ class TestEveryWorkerAppliesTheGuard:
 
     ENTRY_POINTS = {
         "localm.inference.backends.llamacpp._runner": "_runner_main",
-        "localm.inference.backends._hf_runner": "_runner_main",
+        # The HF worker takes both through its shared startup, which
+        # test_hf_workers_run_their_shared_startup ties to the worker.
+        "localm.inference.backends._hf_runner": "prepare_worker_process",
         "localm.inference._embedder_runner": "_runner_main",
         "localm.voice": "_worker_main",
     }
@@ -107,6 +109,19 @@ class TestEveryWorkerAppliesTheGuard:
             f"{module_name}.{self.ENTRY_POINTS[module_name]} must ignore console "
             "interrupts, or a Ctrl+C aimed at the server tears this worker down "
             "and the intentional stop is reported as a crash")
+
+    def test_hf_workers_run_their_shared_startup(self):
+        """The HF entry above is pinned to prepare_worker_process, which takes
+        the watchdog and the guard for every process that imports torch for the
+        HF backend: the model worker and `localm doctor`'s HF probe. Each must
+        still call it, or the guard checked above guards nothing."""
+        from localm import diagnostics
+        from localm.inference.backends import _hf_runner
+        for func in (_hf_runner._runner_main, diagnostics._hf_backend_probe):
+            assert self._calls(func, "prepare_worker_process"), (
+                f"{func.__module__}.{func.__qualname__} no longer runs "
+                "prepare_worker_process, so it no longer ignores console "
+                "interrupts")
 
     def test_no_other_worker_takes_the_watchdog_without_the_guard(self):
         """Wider than the four modules named above, which are a snapshot: any

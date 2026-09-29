@@ -19,10 +19,9 @@ case is minutes (the ABI probe alone allows 120s, the venv probe 60s plus 30s
 for pip). The child reports which check it has started, so the card can name the
 one currently taking the time.
 
-THE WORK RUNS IN A CHILD INTERPRETER: the HF-backend check imports torch and
-transformers, and once llama.cpp's native runtime is loaded in a process - which
-it is in any server that has served a GGUF model - that import is the
-known-doomed DLL-identity conflict. See ``diagnostics.run_report_isolated``.
+THE WORK RUNS IN A CHILD INTERPRETER: a fresh process, as a terminal ``localm
+doctor`` is, so the two answers stay comparable, and one a deadline can kill
+whole if a run overstays it. See ``diagnostics.run_report_isolated``.
 
 SCOPES. Reading the last report is ``config:read``. STARTING a run is
 ``config:write``: it spawns processes and builds a throwaway venv, the same

@@ -279,8 +279,11 @@ export async function compactConversation(conv, signal = null) {
       body: JSON.stringify({
         model: pinnedModel || modelSelect.value || modelCache.active,
         pin_model: !!pinnedModel,
+        // origin "client": the server does not recall memories for this
+        // prompt or log it as the user's line, since the user did not type it.
         messages: [{
           role: "user",
+          origin: "client",
           content: "Summarise the following conversation in under 200 words. " +
             "Keep facts, names, decisions, and anything the user asked to " +
             "remember. Reply with the summary only.\n\n" + excerpt,

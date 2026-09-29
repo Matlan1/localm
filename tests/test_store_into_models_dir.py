@@ -185,6 +185,34 @@ class TestStoreMmproj:
         assert found is not None
         assert Path(found).name == mmproj.name
 
+    def test_copy_brings_generically_named_mmproj_along(self, tmp_path, isolated_home):
+        """A projector named mmproj-F16.gguf, alone with its model and of the
+        model's embedding width, travels with it and is attached to it."""
+        src_dir = tmp_path / "external"
+        model = _text_model(src_dir / "vision-model.gguf", 2560)
+        mmproj = _projector(src_dir / "mmproj-F16.gguf", 2560)
+
+        assert add_local(str(model), store="copy") is True
+
+        dest = _models_dir() / mmproj.name
+        assert dest.is_file() and dest.read_bytes() == mmproj.read_bytes(), \
+            "mmproj sibling must travel with the model or vision silently breaks"
+        assert load_registry()["vision-model"].get("mmproj") == str(dest.resolve())
+        from localm.model_manager import get_model_mmproj
+        assert get_model_mmproj("vision-model") == str(dest.resolve())
+
+    def test_generically_named_mmproj_of_another_width_is_not_attached(
+            self, tmp_path, isolated_home):
+        src_dir = tmp_path / "external"
+        model = _text_model(src_dir / "vision-model.gguf", 2560)
+        _projector(src_dir / "mmproj-F16.gguf", 5120)
+
+        assert add_local(str(model), store="copy") is True
+
+        assert "mmproj" not in load_registry()["vision-model"]
+        from localm.model_manager import get_model_mmproj
+        assert get_model_mmproj("vision-model") is None
+
 
 # --------------------------------------------------------------------------- #
 #  Projector files travel by fit, not only by the auto-attach heuristic
@@ -589,9 +617,13 @@ class TestProjectorTravel:
 
     def test_folder_duplicate_move_keeps_a_generic_projector_registered_in_place(
             self, tmp_path, isolated_home):
+        """Two generic projectors beside one model: neither is attached, so the
+        duplicate move carries neither."""
         d = tmp_path / "downloads"
         model = _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
         proj = _projector(d / "mmproj-F16.gguf", 2560)
+        _projector(d / "mmproj-BF16.gguf", 2560)
+        assert mm.find_sibling_mmproj(model) is None
         assert add_local(str(model)) is True
 
         assert add_local(str(d), on_duplicate="move") is True
@@ -599,6 +631,21 @@ class TestProjectorTravel:
         entry = load_registry()["mmproj-F16"]
         assert Path(entry["path"]).is_file(), f"dangling registry entry: {entry['path']}"
         assert proj.is_file()
+
+    def test_folder_duplicate_move_carries_a_lone_generic_projector(
+            self, tmp_path, isolated_home):
+        d = tmp_path / "downloads"
+        model = _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        proj = _projector(d / "mmproj-F16.gguf", 2560)
+        assert mm.find_sibling_mmproj(model) == proj
+        assert add_local(str(model)) is True
+
+        assert add_local(str(d), on_duplicate="move") is True
+
+        entry = load_registry()["mmproj-F16"]
+        assert Path(entry["path"]).is_file(), f"dangling registry entry: {entry['path']}"
+        assert Path(entry["path"]).resolve().parent == _models_dir().resolve()
+        assert not proj.exists()
 
     def test_folder_duplicate_move_repoints_a_projector_registered_before_its_model(
             self, tmp_path, isolated_home):
@@ -696,10 +743,9 @@ class TestStoreLooseGgufDir:
         name collision (copy: dest already exists from the sibling copy).
         _store_loose_gguf_dir's claimed-sibling precompute must avoid this.
 
-        Only two files: find_sibling_mmproj auto-resolves to the SOLE
-        mmproj-named candidate in a folder regardless of naming correlation, so
-        a third, unrelated model in the same folder would hit that ambiguity
-        heuristic instead of the logic under test.
+        Only two files, and the projector's name carries the model's own name,
+        so find_sibling_mmproj pairs them by name alone and the claimed-sibling
+        precompute is what this exercises.
         """
         d = tmp_path / "drop"
         _gguf(d, "modelA.gguf")

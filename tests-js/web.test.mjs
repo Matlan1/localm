@@ -323,6 +323,16 @@ test("parseWebCall: trailing comma, single-quoted keys, and the arguments alias"
     { name: "web_search", args: { query: "x" } });
 });
 
+test("parseWebCall: the Llama 3 parameters alias carries the query", () => {
+  const { window: w } = loadApp();
+  eq(
+    w.parseWebCall('{"name": "web_search", "parameters": {"query": "seabass price"}}'),
+    { name: "web_search", args: { query: "seabass price" } });
+  eq(
+    w.parseWebCall('<tool_call>{"name": "fetch_url", "parameters": {"url": "https://example.com/"}}</tool_call>'),
+    { name: "fetch_url", args: { url: "https://example.com/" } });
+});
+
 test("parseWebCall: the XML-tag dialect a non-compliant model emits instead of <tool_call>", () => {
   const { window: w } = loadApp();
   // The exact shape from a live bug report: a Llama3.3 finetune, told the

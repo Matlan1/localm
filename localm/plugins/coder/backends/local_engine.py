@@ -31,6 +31,14 @@ _ENGINE_GEN_KWARGS = frozenset({
 })
 
 
+def _exit_marker(gen: dict):
+    """The think-split exit marker for these engine kwargs (see
+    ``gbnf.think_exit_marker``): a call the lazy tool grammar forced inside an
+    open think block is the answer, as it is on the server."""
+    from localm.inference.gbnf import think_exit_marker
+    return think_exit_marker(gen.get("grammar_lazy"), gen.get("grammar_triggers"))
+
+
 class LocalEngineBackend(BaseLLMBackend):
     """A BaseLLMBackend that runs an in-process inference Engine (e.g. a small GGUF
     on CPU). Construction validates the model path but does NOT load weights; the
@@ -76,8 +84,9 @@ class LocalEngineBackend(BaseLLMBackend):
         split off and latched as ``last_reasoning``."""
         self._ensure_loaded()
         self._last_reasoning = ""
-        text = "".join(self._engine.chat_stream(messages, **self._gen(kwargs)))
-        answer, reasoning = split_think(text)
+        gen = self._gen(kwargs)
+        text = "".join(self._engine.chat_stream(messages, **gen))
+        answer, reasoning = split_think(text, exit_marker=_exit_marker(gen))
         self._last_reasoning = reasoning
         return answer
 
@@ -88,7 +97,8 @@ class LocalEngineBackend(BaseLLMBackend):
         never yielded."""
         self._ensure_loaded()
         self._last_reasoning = ""
-        splitter = ThinkSplitter()
+        gen = self._gen(kwargs)
+        splitter = ThinkSplitter(exit_marker=_exit_marker(gen))
         reasoning_parts: list[str] = []
 
         def _route(reasoning: str) -> None:
@@ -98,7 +108,7 @@ class LocalEngineBackend(BaseLLMBackend):
                     on_reasoning(reasoning)
 
         try:
-            for piece in self._engine.chat_stream(messages, **self._gen(kwargs)):
+            for piece in self._engine.chat_stream(messages, **gen):
                 content, reasoning = splitter.feed(piece)
                 _route(reasoning)
                 if content:

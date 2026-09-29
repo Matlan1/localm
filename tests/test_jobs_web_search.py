@@ -112,6 +112,10 @@ class TestParseWebCall:
         text = '{"name": "web_search", "arguments": {"query": "q"}}'
         assert webtool.parse_web_call(text)["args"]["query"] == "q"
 
+    def test_llama3_parameters_alias(self):
+        text = '{"name": "web_search", "parameters": {"query": "q"}}'
+        assert webtool.parse_web_call(text)["args"]["query"] == "q"
+
     def test_plain_text_is_not_a_call(self):
         assert webtool.parse_web_call("The capital of France is Paris.") is None
 

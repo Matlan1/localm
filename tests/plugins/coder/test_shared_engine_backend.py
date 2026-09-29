@@ -425,3 +425,22 @@ def test_an_unkeyable_engine_still_serialises_on_one_lock():
     a, b = Unhashable(), Unhashable()
     assert engine_lock(a) is engine_lock(b)
     assert engine_lock(a) is engine_lock(a)
+
+
+def test_a_call_the_lazy_grammar_forced_inside_an_open_think_block_is_the_answer():
+    from localm.inference.gbnf import TOOL_CALL_TRIGGER
+    from localm.plugins.coder.parser import parse_tool_calls
+    call = '<tool_call>{"name": "read_file", "args": {"path": "a.py"}}</tool_call>'
+    lazy = {"grammar": "root ::= x", "grammar_lazy": True,
+            "grammar_triggers": [TOOL_CALL_TRIGGER]}
+    engine = _engine("<think>I should read it. " + call)
+    backend = SharedEngineBackend(engine, "m")
+    answer = backend.chat(MSG, **lazy)
+    assert answer == call
+    assert backend.last_reasoning == "I should read it. "
+    engine.chat_stream.side_effect = lambda messages, **kw: iter(
+        ["<think>I should read it. <tool_", "call>", call[11:]])
+    visible = "".join(backend.chat_stream(MSG, **lazy))
+    assert [c.name for c in parse_tool_calls(visible, tool_names={"read_file"})] == [
+        "read_file"]
+    assert backend.last_reasoning == "I should read it. "
