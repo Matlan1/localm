@@ -595,9 +595,8 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
 
 
 def _open_attached(url: str) -> None:
-    """Open an attached instance's *url* with a unique ``lm`` query parameter,
-    so the page is freshly navigated rather than an already-open tab being
-    focused or a cached shell being served.
+    """Open an attached instance's *url* with a unique ``lm`` cache-busting
+    query parameter added.
 
     Tries the native app window first (appface.run_native_window with
     hide_on_close=False, which blocks until the window closes and must run on
@@ -685,11 +684,10 @@ def _resolve_gui_bind(console, host, *, insecure: bool) -> _BindPlan:
 def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool) -> None:
     """Refuse a bind past loopback without a strong API key (_gui_bind_warning).
 
-    With --insecure, prints the warning and proceeds. Otherwise a config-sourced
-    host is replaced by 127.0.0.1, with the warning printed and logged and the
-    reason recorded in plan.fallback (--insecure has no config form, so a
-    config-driven bind is never served unauthenticated); an explicit -H prints
-    the refusal and exits 2."""
+    With --insecure (a command-line flag only; it has no config form), prints
+    the warning and proceeds. Otherwise a config-sourced host is replaced by
+    127.0.0.1, with the warning printed and logged and the reason recorded in
+    plan.fallback; an explicit -H prints the refusal and exits 2."""
     bind_warning = _gui_bind_warning(plan.host)
     if bind_warning and not insecure and plan.from_config:
         from localm.auth import any_key_configured
@@ -913,8 +911,8 @@ def _launch_url(app, base_url: str, *, pull_spec, model_less: bool) -> str:
     base_url, deep-linked to the Models page with a pending download and a
     single-use, spec-bound pull grant (web.mint_pull_grant) for --pull, or to
     the Models page when model_less. When an API key is set, a single-use launch
-    grant (web.mint_launch_grant) is added as ``localm_token`` so the opened
-    page lands authenticated."""
+    grant (web.mint_launch_grant) is added as ``localm_token``, which the GUI
+    redeems to sign the opened page in."""
     open_url = base_url
     if pull_spec:
         from urllib.parse import quote
@@ -1184,10 +1182,8 @@ def _serve_beside_native_window(serve, plan: _BindPlan, open_url: str, *, on_qui
                                          server_stopped=server_stopped):
             hs.set_restart_ui("browser")
             webbrowser.open(open_url)
-        # Must join before returning: concurrent.futures' atexit hook runs as
-        # soon as the main thread's top-level code finishes, before non-daemon
-        # threads are joined, and would shut the plugin executor down under a
-        # still-running server.
+        # Returns only once the server thread has ended.
+        # See test_native_window_close_waits_for_the_server_to_stop.
         server_thread.join()
 
 
