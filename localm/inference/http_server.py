@@ -3236,7 +3236,7 @@ def mount_gui_surface(app) -> bool:
     semaphore are this instance's own (it already loaded the model for /v1), so no
     second model load happens; ``switch_model`` swaps the shared ``_engine`` under
     ``_inference_sem`` exactly as the GUI launcher does."""
-    global _engine, _coder_session_manager
+    global _engine, _coder_session_manager, _gui_mounted_live
     if getattr(app.state, "gui_mounted", False):
         return False
 
@@ -3297,6 +3297,7 @@ def mount_gui_surface(app) -> bool:
     # discovery so /whoami and the registry report this is now a full instance.
     app.state.coder_sessions = manager
     _coder_session_manager = manager
+    _gui_mounted_live = True
     app.state.instance_mode = "full"
     app.openapi_schema = None   # force the schema to include the new routes
     try:
@@ -3480,6 +3481,12 @@ def _request_shutdown(delay: float = 0.25, *,
 # "window", "browser", or None.
 _restart_ui: Optional[str] = None
 
+# True once mount_gui_surface has mounted the GUI onto this process's running
+# API-only app.
+_gui_mounted_live: bool = False
+
+_GUI_MOUNTED_ENV = "LOCALM_RESTART_GUI_MOUNTED"
+
 
 def set_restart_ui(ui: Optional[str]) -> None:
     """Record the GUI surface this process shows the user: "window" for the
@@ -3490,10 +3497,27 @@ def set_restart_ui(ui: Optional[str]) -> None:
 
 
 def _set_restart_env() -> None:
-    """Set LOCALM_RESTART_IN_PROGRESS, which a restart's re-exec'd process
-    inherits, to the surface recorded by set_restart_ui, or to "1" when none
-    is recorded."""
+    """Set the environment a restart's re-exec'd process inherits:
+    LOCALM_RESTART_IN_PROGRESS to the surface recorded by set_restart_ui, or to
+    "1" when none is recorded, and LOCALM_RESTART_GUI_MOUNTED to "1" when the
+    GUI was mounted live onto this process's API-only app (removed otherwise)."""
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = _restart_ui or "1"
+    if _gui_mounted_live:
+        os.environ[_GUI_MOUNTED_ENV] = "1"
+    else:
+        os.environ.pop(_GUI_MOUNTED_ENV, None)
+
+
+def _remount_gui(app) -> None:
+    """Mount the GUI onto *app*, the API-only app of a process that a restart
+    re-exec'd from an instance whose GUI was mounted live. A failed mount is
+    logged as a warning and the API keeps serving."""
+    try:
+        mount_gui_surface(app)
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("could not mount the GUI after the restart; serving the "
+                     "API only: %s", e)
 
 
 def _restart_argv(port: Optional[int] = None) -> list:
@@ -5377,9 +5401,18 @@ def run_advertised(app, host: str, port: int, *, mode: str,
 
     ``mode`` is the instance-registry surface (``"api"`` or ``"full"``).
     ``log_level`` defaults to ``debuglog.uvicorn_log_level()`` when omitted.
+
+    When LOCALM_RESTART_GUI_MOUNTED is set (a restart re-exec'd this process
+    from an instance whose GUI had been mounted live), the variable is removed
+    from the environment and the GUI is mounted onto *app* once the instance is
+    advertised, before serving starts.
     """
     from localm import instances, portmux
     from localm.config import home_dir
+    # Removed from os.environ before portmux.run_server, whose crash-recovery
+    # watchdog inherits os.environ. See
+    # test_run_advertised_removes_the_gui_mount_flag_before_serving.
+    remount_gui = os.environ.pop(_GUI_MOUNTED_ENV, None) == "1"
     if log_level is None:
         from localm.debuglog import uvicorn_log_level
         log_level = uvicorn_log_level()
@@ -5396,6 +5429,8 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     with instances.advertise(app, home_dir(), host=host, port=port, mode=mode,
                              scheme=scheme, project=project, isolated=isolated):
         try:
+            if remount_gui:
+                _remount_gui(app)
             # On a TLS bind, also catch a plain-http request on the same port
             # with an https redirect; a plain bind closes a TLS connection opened
             # on its port. In debug mode uvicorn logs at "info" so the console

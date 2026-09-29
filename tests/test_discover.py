@@ -3410,6 +3410,22 @@ class TestFreeScope:
         assert gpus[0]["free"] == 15_000_000_000
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
+    def test_an_empty_list_consults_no_source(self, monkeypatch):
+        """With no entries to correct or tag, no scope source is consulted."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        scoped = MagicMock(return_value=True)
+        warm = MagicMock(return_value=True)
+        used = MagicMock(return_value={})
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", scoped)
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", warm)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", used)
+        gpus = []
+        discover._apply_device_global_free(gpus)
+        assert gpus == []
+        scoped.assert_not_called()
+        warm.assert_not_called()
+        used.assert_not_called()
+
     def test_source_failure_is_surfaced_as_process_not_crashed(self, monkeypatch):
         """A driver/ctypes failure in the correction must degrade to "we cannot vouch
         for this number", never take down the caller that only wanted a probe."""

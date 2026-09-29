@@ -12,6 +12,7 @@ import json
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import types
 
@@ -206,6 +207,18 @@ def test_no_watchdog_is_spawned_when_its_script_is_missing(spawn):
     (root / "scripts" / "crash_recovery_watchdog.py").unlink()
     _spawn()
     assert calls == []
+
+
+def test_the_watchdog_is_spawned_without_a_visible_console_window(spawn, monkeypatch):
+    _root, calls = spawn
+    monkeypatch.setattr(sys, "platform", "win32")
+    _spawn()
+    flags = calls[0][1]["creationflags"]
+    assert flags & 0x08000000, "CREATE_NO_WINDOW missing"
+    assert flags & 0x00000200, "CREATE_NEW_PROCESS_GROUP missing"
+    assert not flags & 0x00000008, (
+        "DETACHED_PROCESS leaves the venv launcher without a console, so its "
+        "child python.exe opens a visible console window")
 
 
 def test_the_relaunch_names_the_port_only_when_there_is_one(spawn):

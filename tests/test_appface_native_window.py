@@ -542,3 +542,17 @@ def test_a_stop_racing_the_window_publish_neither_hangs_nor_stalls(monkeypatch):
     assert result is True
     fake.start.assert_not_called()
     assert appface._native_window is None
+
+
+def test_start_app_face_creates_no_status_window_when_told_not_to(monkeypatch):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    window = MagicMock()
+    window.start.return_value = True
+    monkeypatch.setattr(appface, "_StatusWindow", lambda **kw: window)
+    tray = MagicMock()
+    tray.start.return_value = False
+    monkeypatch.setattr(appface, "_WinTray", lambda **kw: tray, raising=False)
+    monkeypatch.setattr(appface.sys, "platform", "win32")
+    assert appface.start_app_face(url="http://127.0.0.1:1/",
+                                  show_window=False) is None
+    window.start.assert_not_called()

@@ -912,7 +912,7 @@ def test_spawn_health_watchdog_posix_uses_start_new_session(tmp_path, monkeypatc
     assert "creationflags" not in kwargs
 
 
-def test_spawn_health_watchdog_windows_uses_detached_flags(tmp_path, monkeypatch):
+def test_spawn_health_watchdog_windows_uses_no_window_flags(tmp_path, monkeypatch):
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     monkeypatch.setattr(sys, "platform", "win32")
     calls = []
@@ -920,7 +920,8 @@ def test_spawn_health_watchdog_windows_uses_detached_flags(tmp_path, monkeypatch
                                   expect_version="1", popen=_capturing_popen(calls))
     _, kwargs = calls[0]
     assert "start_new_session" not in kwargs
-    assert kwargs["creationflags"] & 0x00000008   # DETACHED_PROCESS
+    assert kwargs["creationflags"] & 0x08000000   # CREATE_NO_WINDOW
+    assert not kwargs["creationflags"] & 0x00000008   # never DETACHED_PROCESS
     assert kwargs["creationflags"] & 0x00000200   # CREATE_NEW_PROCESS_GROUP
 
 

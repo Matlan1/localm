@@ -143,6 +143,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Restarting a localm server that had the GUI attached to it no longer leaves
+  the window on a "not found" page.** When a second `localm gui` attached to a
+  running `localm serve` (or `localm gui --api-mode`), it mounted the GUI on that
+  server live, but any restart - the tray Restart, Settings > Restart, applying
+  or rolling back an update, or the automatic recovery from a hung server -
+  relaunched the server from its original API-only command line. The GUI was
+  gone afterwards, and the window that reconnected found nothing to show. The
+  restarted server now brings the GUI back, and a server that never had a GUI
+  attached still restarts as API-only.
+- **On Windows, starting `localm gui` no longer pops a stray console window in front of
+  whatever you are doing.** The crash-recovery and update watchdogs, and the coder's
+  auto-started server, now run with a hidden console instead of none at all, so their
+  helper Python process no longer opens a visible terminal. `localm gui --no-browser`
+  also no longer shows the LocaLM status window.
 - **A GGUF vision reply can fail with "the vision projector could not evaluate
   this image (mtmd_helper_eval_chunks rc=1)", wrongly blamed on a GPU-specific
   fault, when the live context is too small for the image.** Unlike the text
@@ -837,12 +851,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Intel GPUs were not always detected, and `sycl` was never offered as a runtime choice.**
   An integrated Intel GPU (Iris Xe, UHD Graphics) could go undetected entirely, since detection
   only recognised Arc-branded names - a box like this fell back to a "no GPU found" CPU-only
-  recommendation instead of Vulkan. Detection now recognises any Intel GPU, integrated or
-  discrete. Separately, `sycl` - a real, self-contained-on-Windows runtime that is often faster
-  than Vulkan on Intel hardware, including integrated GPUs - was already downloadable via
+  recommendation. Detection now recognises any Intel GPU, integrated or discrete.
+  Separately, `sycl` - a real, self-contained-on-Windows runtime that is often faster than
+  Vulkan on Intel hardware, including integrated GPUs - was already downloadable via
   `localm setup-llama --backend sycl` but was never listed in either setup wizard's menu. Both
-  the console and graphical installers now offer it as an explicit choice. Vulkan remains the
-  default recommendation on Intel, matching every comparable local-LLM tool.
+  the console and graphical installers now offer it as an explicit choice, and on Windows an
+  Intel GPU is recommended `sycl` by default, with Vulkan as the fallback if it cannot load. On
+  Linux the SYCL build needs a separate oneAPI install, so Intel there stays on Vulkan unless
+  `sycl` is chosen.
 - **`localm setup-embeddings --model` and the RAG embedding-switch dry-run preview no longer
   make false claims about existing collections' embeddings.** The CLI always ended with a
   reminder to re-embed collections stuck on BM25, even when the switch it just ran found

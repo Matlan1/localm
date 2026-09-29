@@ -11,13 +11,14 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
     with no user-installed toolkit: NVIDIA, any OS -> ``cuda`` (self-contained
     build + runtime fetch on both Windows and Linux, see below); AMD on Windows
     (RX 6000 / unknown) -> the self-contained ROCm build; AMD elsewhere with a
-    system ROCm/HIP toolkit detected present -> ``hip``; Intel and AMD with no
-    toolkit detected -> ``vulkan`` (runs on NVIDIA/Intel/AMD through the normal
-    display driver, no vendor toolkit); Apple Silicon -> ``metal``; no GPU ->
-    ``cpu``. See ``hwdetect.recommended_install_backend`` for the full policy.
+    system ROCm/HIP toolkit detected present -> ``hip``; Intel on Windows ->
+    ``sycl`` (self-contained); Intel on Linux, and AMD with no toolkit detected
+    -> ``vulkan`` (runs on NVIDIA/Intel/AMD through the normal display driver,
+    no vendor toolkit); Apple Silicon -> ``metal``; no GPU -> ``cpu``. See
+    ``hwdetect.recommended_install_backend`` for the full policy.
   * ``vulkan`` - universal GPU build from upstream llama.cpp (a no-toolkit
-    fallback for any vendor; the default for Intel, and for AMD with no ROCm/HIP
-    toolkit detected).
+    fallback for any vendor; the default for Intel on Linux, and for AMD with
+    no ROCm/HIP toolkit detected).
   * ``cuda`` - NVIDIA peak performance, self-contained on BOTH Windows and Linux:
     the matching ``cudart`` runtime bundle (Windows) or CUDA runtime libraries
     (Linux, fetched from PyPI) are fetched alongside the build, so NO CUDA
@@ -32,9 +33,9 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
     hwdetect.py).
   * ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``sycl`` delivers peak
     Intel performance; the Windows build bundles the whole oneAPI DPC++
-    runtime and is self-contained, while the Linux build does not and needs
-    oneAPI installed separately (no Intel-GPU-presence probe for either yet,
-    so it stays opt-in); ``cpu`` is self-contained.
+    runtime and is self-contained (the auto default on Windows), while the
+    Linux build does not and needs oneAPI installed separately, so it stays
+    opt-in there; ``cpu`` is self-contained.
   * ``amd-rocm`` - the self-contained gfx103X (RDNA2) ROCm build (bundles its
     own ROCm runtime; the current default for AMD RX 6000 on Windows, since it
     needs no system toolkit at all).
@@ -987,8 +988,9 @@ def _auto_backend() -> str:
       NVIDIA, any OS -> cuda (self-contained build + runtime fetch on both
       Windows and Linux, peak performance); AMD on Windows (RX 6000 / unknown)
       -> the self-contained ROCm build; AMD elsewhere with a system ROCm/HIP
-      toolkit detected -> hip; Apple Silicon -> metal; every other GPU (Intel,
-      AMD with no toolkit detected) -> vulkan; no GPU -> cpu."""
+      toolkit detected -> hip; Intel on Windows -> sycl (self-contained);
+      Apple Silicon -> metal; every other GPU (Intel on Linux, AMD with no
+      toolkit detected) -> vulkan; no GPU -> cpu."""
     try:
         from localm import hwdetect
         det = hwdetect.detect()
@@ -3303,8 +3305,9 @@ def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
                    "for NVIDIA on both Windows and Linux (self-contained, falls "
                    "back to vulkan if the driver is too old); the self-contained "
                    "ROCm build for AMD RX 6000 on Windows; hip for AMD elsewhere "
-                   "when a system ROCm/HIP toolkit is detected; vulkan for Intel "
-                   "and for AMD with no toolkit detected; cpu if no GPU.")
+                   "when a system ROCm/HIP toolkit is detected; sycl for Intel on "
+                   "Windows (self-contained); vulkan for Intel on Linux and for "
+                   "AMD with no toolkit detected; cpu if no GPU.")
 @click.option("--url", default=None, help="Override with an explicit prebuilt archive URL.")
 @click.option("--sha256", "sha256", default=None,
               help="Expected sha256 of the downloaded archive. When given, the "
