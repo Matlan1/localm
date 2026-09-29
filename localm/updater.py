@@ -735,12 +735,13 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, env=env, close_fds=True)
         if sys.platform == "win32":
-            # DETACHED_PROCESS (no console) + CREATE_NEW_PROCESS_GROUP so the
-            # watchdog is not tied to this process's console/process group and
-            # survives past the execv this call precedes. The literal fallbacks
-            # keep this branch runnable on any platform.
+            # CREATE_NO_WINDOW (own hidden console, never a visible window) +
+            # CREATE_NEW_PROCESS_GROUP so the watchdog is not tied to this
+            # process's console/process group and survives past the execv this
+            # call precedes. The literal fallbacks keep this branch runnable on
+            # any platform.
             kwargs["creationflags"] = (
-                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
         else:
             # setsid: detaches from the parent's session/process group, so the
