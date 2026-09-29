@@ -57,6 +57,7 @@ localm-home.cfg
 
 # Install provenance ledger (what setup placed on disk; used by uninstall)
 .localm-install.json
+.localm-uninstall-pending
 
 # Personal ComfyUI workflows (which models/encoders we use stays private -
 # the committed *.example.json templates use the vanilla public stack)
