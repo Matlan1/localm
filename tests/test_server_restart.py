@@ -391,17 +391,19 @@ def test_run_advertised_removes_the_gui_mount_flag_before_serving(
 def test_run_advertised_keeps_serving_when_the_gui_cannot_be_mounted(
         monkeypatch, tmp_path, caplog):
     """A failed remount never stops the API from coming back: it is logged as a
-    warning and the instance stays API-only."""
-    import localm.plugins.gui.web as web
+    warning and the instance stays API-only, with no GUI route left behind by a
+    route group that failed after others had registered."""
+    import localm.plugins.gui.routes.doctor as doctor
 
     monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
 
-    def _attach_fails(*a, **k):
+    def _doctor_fails(app, ctx):
         raise RuntimeError("attach failed")
 
-    monkeypatch.setattr(web, "attach_gui", _attach_fails)
+    monkeypatch.setattr(doctor, "register", _doctor_fails)
     with caplog.at_level(logging.WARNING, logger="localm"):
         _app, seen = _serve_relaunched_api_app(monkeypatch, tmp_path)
+    assert seen["gui_routes"] is False
     assert seen["gui_mounted"] is False
     assert seen["instance_mode"] == "api"
     assert seen["registry_modes"] == ["api"]

@@ -3017,7 +3017,10 @@ def mount_gui_surface(app) -> bool:
     only new middleware would need a stack rebuild). The engine + inference
     semaphore are this instance's own (it already loaded the model for /v1), so no
     second model load happens; ``switch_model`` swaps the shared ``_engine`` under
-    ``_inference_sem`` exactly as the GUI launcher does."""
+    ``_inference_sem`` exactly as the GUI launcher does.
+
+    If ``attach_gui`` does not return, ``app.router.routes`` and ``app.state`` are
+    restored to what they were before the call, and the exception propagates."""
     global _engine, _coder_session_manager, _gui_mounted_live
     if getattr(app.state, "gui_mounted", False):
         return False
@@ -3064,17 +3067,25 @@ def mount_gui_surface(app) -> bool:
         return await switch_engine(name, _build_engine, force=force)
 
     from localm.plugins.gui.web import attach_gui
-    # Claim the mount BEFORE attaching so a re-entrant/concurrent call cannot
-    # double-register the GUI routes; roll the flag back if attach fails. (Today
-    # this runs fully synchronously in the request handler, so nothing interleaves;
-    # this just makes the invariant explicit.)
+    # Marks the GUI mounted before attaching; unless attach_gui returns, the routes
+    # and app.state are put back as they were. See
+    # test_a_mount_that_fails_part_way_leaves_the_app_as_it_was.
+    routes_before = len(app.router.routes)
+    state_before = {key: app.state[key] for key in app.state}
     app.state.gui_mounted = True
+    attached = False
     try:
         manager = attach_gui(
             app, self_url=self_url, switch_model=switch_model, active_model=active_model)
-    except Exception:
-        app.state.gui_mounted = False
-        raise
+        attached = True
+    finally:
+        if not attached:
+            del app.router.routes[routes_before:]
+            for key in list(app.state):
+                if key not in state_before:
+                    del app.state[key]
+            for key, value in state_before.items():
+                app.state[key] = value
     # attach_gui re-affirms app.state.gui_mounted; reflect the surface change in
     # discovery so /whoami and the registry report this is now a full instance.
     app.state.coder_sessions = manager
