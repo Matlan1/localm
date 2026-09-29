@@ -29,6 +29,22 @@ from pathlib import Path
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _read_cfg_line(marker: Path) -> str:
+    """The first line of a ``localm-home.cfg``: UTF-8 (with or without a BOM), or
+    on Windows, when that fails, the console (OEM) code page that cmd.exe's ``echo``
+    writes. Raises OSError, ValueError or LookupError when it cannot be read."""
+    raw = marker.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        if sys.platform != "win32":
+            raise
+        import ctypes
+        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
+    lines = text.strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
 def _detect_home(install_root: Path) -> Path:
     """The localm data dir, resolved WITHOUT importing localm.config (which may live in
     the broken build). Mirrors config._detect_home: LOCALM_HOME, else a portable
@@ -40,10 +56,10 @@ def _detect_home(install_root: Path) -> Path:
         marker = install_root / "localm-home.cfg"
         if marker.is_file():
             try:
-                line = marker.read_text(encoding="utf-8").strip()
+                line = _read_cfg_line(marker)
                 if line:
                     return Path(line).expanduser()
-            except OSError:
+            except (OSError, ValueError, LookupError):
                 pass   # unreadable marker: fall through to ./home
         portable = install_root / "home"
         if portable.is_dir():

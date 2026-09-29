@@ -398,7 +398,9 @@ rem  who wants a shared / other location picks Custom, and it is recorded
 rem  explicitly in localm-home.cfg (asked + recorded, never guessed).
 rem  A repair offers the data folder this install already uses first.
 .venv\Scripts\python -m localm.install_manifest current-data --root . >nul 2>nul
-if errorlevel 1 goto choose_data_folder
+set "CURDATA_RC=%errorlevel%"
+if "%CURDATA_RC%"=="3" goto data_folder_unavailable
+if not "%CURDATA_RC%"=="0" goto choose_data_folder
 echo.
 echo  LocaLM's data for this folder is in:
 .venv\Scripts\python -m localm.install_manifest current-data --root .
@@ -409,6 +411,24 @@ if not defined KEEPDATA set "KEEPDATA=Y"
 if /i "!KEEPDATA:~0,1!"=="N" goto choose_data_folder
 .venv\Scripts\python -m localm.install_manifest prepare-data --root . --keep-current
 if not errorlevel 1 goto data_folder_chosen
+goto choose_data_folder
+:data_folder_unavailable
+echo.
+echo  [^^!] LocaLM's data for this folder is set to:
+.venv\Scripts\python -m localm.install_manifest current-data --root .
+echo      but that folder is not available right now (a drive that is not
+echo      connected, or a network folder that is offline).
+echo    [1] Stop setup - connect it, then run setup again
+echo    [2] Choose a different data folder now
+set "MISSPICK="
+call :flush
+set /p "MISSPICK=  Pick 1 or 2 [1]: "
+if not defined MISSPICK set "MISSPICK=1"
+if "%MISSPICK%"=="2" goto choose_data_folder
+echo.
+echo  Setup stopped. Connect the data folder, then run setup again.
+pause
+exit /b 1
 :choose_data_folder
 echo.
 echo  Where should localm keep its data (models, config, logs, images)?

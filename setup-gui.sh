@@ -86,12 +86,29 @@ export UV_CACHE_DIR="$PWD/.cache"
 export UV_SYSTEM_CERTS=1
 rc=0
 "$UVEXE" run --no-project --python 3.12 python installer/gui.py || rc=$?
-# 42: an uninstall finished in the window; the Python runtime it ran on is
-# removed now that it has closed.
-if [ "$rc" = 42 ]; then
+# 42 and 43: an uninstall finished in the window; the Python runtime it ran on
+# is removed now that it has closed. 43 and 44: something asked for was kept.
+# 45: the uninstall did not finish.
+if [ "$rc" = 42 ] || [ "$rc" = 43 ]; then
     echo "  Removing the last LocaLM folders ..."
-    bash ./setup.sh --finish-uninstall
-    exit $?
+    frc=0
+    bash ./setup.sh --finish-uninstall || frc=$?
+    if [ "$frc" != 0 ]; then exit "$frc"; fi
+fi
+if [ "$rc" = 43 ] || [ "$rc" = 44 ]; then
+    echo
+    echo "  [!] LocaLM was removed, but some things you asked to delete were not"
+    echo "      deleted - the setup window listed them under REFUSED."
+    exit 2
+fi
+if [ "$rc" = 42 ]; then
+    exit 0
+fi
+if [ "$rc" = 45 ]; then
+    echo
+    echo "  [!] The uninstall did not finish - the setup window listed why. Close"
+    echo "      any LocaLM window and run the setup again."
+    exit 1
 fi
 if [ "$rc" != 0 ]; then
     echo

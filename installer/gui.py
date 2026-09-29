@@ -49,10 +49,15 @@ _SRC = Path(__file__).resolve().parents[1]
 APP_NAME = "LocaLM"
 PYVER = "3.12"
 
-# Exit code telling setup-gui.bat / setup-gui.sh that an uninstall finished in
-# the window and the Python runtime folders named in .localm-uninstall-pending
-# are theirs to remove now that the window has closed.
+# Exit codes telling setup-gui.bat / setup-gui.sh how an uninstall in the window
+# ended. 42 and 43: the Python runtime folders named in
+# .localm-uninstall-pending are theirs to remove now that the window has closed;
+# 43 and 44: something the user asked to delete was kept; 45: the uninstall did
+# not finish.
 EXIT_FINISH_UNINSTALL = 42
+EXIT_FINISH_UNINSTALL_PARTIAL = 43
+EXIT_UNINSTALL_PARTIAL = 44
+EXIT_UNINSTALL_FAILED = 45
 
 # The extras setup.bat installs. `desktop` is added only when the user asks for
 # an app window, because it pulls pythonnet in and no install should take on a
@@ -563,8 +568,12 @@ class Wizard:
     When setup has run in this folder before, the dialogue opens on a choice
     between repairing the install and uninstalling it. The uninstall page
     shows exactly what will be removed, with an option to delete the saved
-    data too; exit_code is EXIT_FINISH_UNINSTALL when the runtime folders are
-    left for the launcher script to remove after the window closes."""
+    data too; exit_code is EXIT_FINISH_UNINSTALL (or
+    EXIT_FINISH_UNINSTALL_PARTIAL) when the runtime folders are left for the
+    launcher script to remove after the window closes, EXIT_UNINSTALL_PARTIAL
+    when something asked for was kept and nothing is left to remove, and
+    EXIT_UNINSTALL_FAILED when the uninstall did not finish. While an
+    uninstall runs, closing the window is refused."""
 
     def __init__(self, root, tk, ttk, filedialog, *, existing=None,
                  messagebox=None):
@@ -585,6 +594,7 @@ class Wizard:
         root.geometry("660x600")
         root.minsize(580, 520)
 
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.container = ttk.Frame(root, padding=18)
         self.container.pack(fill="both", expand=True)
 
@@ -592,11 +602,14 @@ class Wizard:
         self.portable_var = tk.BooleanVar(value=True)
         self.path_var = tk.StringVar(value=str(ROOT / "home"))
         self.path_var.trace_add("write", self._on_path_typed)
+        self.missing_data = ""
         if self.existing:
-            current = install_manifest().current_data_dir(ROOT)
+            current, exists = install_manifest().configured_data_dir(ROOT)
             if current and os.path.normcase(current) != os.path.normcase(str(ROOT / "home")):
                 self.path_var.set(current)
                 self.portable_var.set(False)
+                if not exists:
+                    self.missing_data = current
         self.store_var = tk.BooleanVar(value=True)
         self.appwin_var = tk.BooleanVar(value=False)
         self.path_cmd_var = tk.BooleanVar(value=False)
@@ -673,6 +686,13 @@ class Wizard:
         ttk.Entry(row, textvariable=self.path_var, width=30).pack(side="left", padx=6)
         ttk.Button(row, text="Browse...", command=self._browse).pack(side="left")
         row.pack(anchor="w", pady=(2, 0))
+        if self.missing_data:
+            ttk.Label(page, text=f"[!] The data folder this install uses, "
+                                 f"{self.missing_data}, is not available right now "
+                                 "(a drive that is not connected, or a network folder "
+                                 "that is offline). Connect it before you continue, "
+                                 "or choose another folder.",
+                      wraplength=560, foreground="#a33").pack(anchor="w", pady=(4, 0))
 
         ttk.Label(page, text="Python tooling",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(16, 0))
@@ -950,6 +970,16 @@ class Wizard:
             pass
         self.root.after(80, self._pump)
 
+    def _on_close(self) -> None:
+        if self.installing and self.mode == "uninstalling":
+            if self.messagebox is not None:
+                self.messagebox.showinfo(
+                    f"Uninstall {APP_NAME}",
+                    "The uninstall is still running. Close this window when it "
+                    "has finished.")
+            return
+        self.root.destroy()
+
     # -- running the uninstall ----------------------------------------------
 
     def start_uninstall(self) -> None:
@@ -991,15 +1021,18 @@ class Wizard:
         self.installing = False
         self.action.configure(text="Close", state="normal", command=self.root.destroy)
         if rep.get("exit") not in (0, 2):
-            self.exit_code = 1
+            self.exit_code = EXIT_UNINSTALL_FAILED
             self.step_label.configure(text="Uninstall could not finish.")
             self.status.configure(text=(rep.get("error") or
                                         f"See above. Close any {APP_NAME} window "
                                         "and try again.")[:90])
             return
         pending = (ROOT / ".localm-uninstall-pending").is_file()
-        self.exit_code = EXIT_FINISH_UNINSTALL if pending else 0
         partial = rep.get("exit") == 2
+        if pending:
+            self.exit_code = EXIT_FINISH_UNINSTALL_PARTIAL if partial else EXIT_FINISH_UNINSTALL
+        else:
+            self.exit_code = EXIT_UNINSTALL_PARTIAL if partial else 0
         self.step_label.configure(
             text=f"{APP_NAME} is removed"
                  + (", but some things you asked to delete were not deleted."

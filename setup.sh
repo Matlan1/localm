@@ -563,8 +563,10 @@ portable_home() {
 }
 # A repair offers the data folder this install already uses first.
 KEPT_DATA=0
-if cur="$(.venv/bin/python -m localm.install_manifest current-data --root . 2>/dev/null)" \
-    && [ -n "$cur" ]; then
+cur_rc=0
+cur="$(.venv/bin/python -m localm.install_manifest current-data --root . 2>/dev/null)" \
+  || cur_rc=$?
+if [ "$cur_rc" = 0 ] && [ -n "$cur" ]; then
   say ""
   say "  LocaLM's data for this folder is in:"
   say "    $cur"
@@ -575,6 +577,20 @@ if cur="$(.venv/bin/python -m localm.install_manifest current-data --root . 2>/d
          KEPT_DATA=1
        fi ;;
   esac
+elif [ "$cur_rc" = 3 ] && [ -n "$cur" ]; then
+  say ""
+  say "  [!] LocaLM's data for this folder is set to:"
+  say "    $cur"
+  say "      but that folder is not available right now (a drive that is not"
+  say "      connected, or a network folder that is offline)."
+  say "    [1] Stop setup - connect it, then run setup again"
+  say "    [2] Choose a different data folder now"
+  mpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+  if [ "$mpick" != 2 ]; then
+    say ""
+    say "  Setup stopped. Connect the data folder, then run setup again."
+    exit 1
+  fi
 fi
 if [ "$KEPT_DATA" != 1 ]; then
 say ""

@@ -73,9 +73,15 @@ set "UV_SYSTEM_CERTS=1"
 "%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
 set "RC=%errorlevel%"
 
-rem  42: an uninstall finished in the window; the Python runtime it ran on is
-rem  removed now that it has closed.
+rem  42 and 43: an uninstall finished in the window; the Python runtime it ran
+rem  on is removed now that it has closed. 43 and 44: something asked for was
+rem  kept. 45: the uninstall did not finish.
+set "PARTIAL="
 if "%RC%"=="42" goto finish_uninstall
+if "%RC%"=="43" set "PARTIAL=1"
+if "%RC%"=="43" goto finish_uninstall
+if "%RC%"=="44" goto uninstall_partial
+if "%RC%"=="45" goto uninstall_failed
 if "%RC%"=="0" exit /b 0
 echo.
 echo   [!] The setup window could not run (exit %RC%).
@@ -87,10 +93,23 @@ exit /b %RC%
 echo   Removing the last LocaLM folders ...
 call ".\setup.bat" finish-uninstall
 if errorlevel 1 goto finish_uninstall_left
+if defined PARTIAL goto uninstall_partial
 echo.
 echo   LocaLM was uninstalled.
 pause
 exit /b 0
+:uninstall_partial
+echo.
+echo   [!] LocaLM was removed, but some things you asked to delete were not
+echo       deleted - the setup window listed them under REFUSED.
+pause
+exit /b 2
+:uninstall_failed
+echo.
+echo   [!] The uninstall did not finish - the setup window listed why. Close
+echo       any LocaLM window and run the setup again.
+pause
+exit /b 1
 :finish_uninstall_left
 echo.
 echo   [!] Some LocaLM folders could not be removed - close any LocaLM window
