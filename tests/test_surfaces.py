@@ -13,7 +13,17 @@ coder agent, so the negative cases are the point.
 import pytest
 from fastapi.testclient import TestClient
 
+from localm.inference import http_server as hs
 from localm.inference.http_server import create_app, mount_gui_surface
+
+
+@pytest.fixture(autouse=True)
+def _reset_gui_mounted_live():
+    """Clears http_server._gui_mounted_live before and after every test in this
+    file."""
+    hs._gui_mounted_live = False
+    yield
+    hs._gui_mounted_live = False
 
 
 def _api_app(tmp_path, instance_token="inst-secret-token"):
@@ -41,12 +51,14 @@ class TestMountGuiSurfaceUnit:
         paths = {getattr(r, "path", None) for r in app.router.routes}
         assert "/api/models" not in paths
         assert getattr(app.state, "gui_mounted", False) is False
+        assert hs._gui_mounted_live is False
 
         assert mount_gui_surface(app) is True
         paths_after = [getattr(r, "path", None) for r in app.router.routes]
         assert "/api/models" in paths_after
         assert app.state.gui_mounted is True
         assert app.state.instance_mode == "full"
+        assert hs._gui_mounted_live is True
         n_models_routes = paths_after.count("/api/models")
 
         # Second call: already mounted -> no-op, no duplicate routes.
@@ -59,6 +71,7 @@ class TestMountGuiSurfaceUnit:
         app = _api_app(tmp_path)
         app.state.gui_mounted = True   # a 'full' instance already has the GUI
         assert mount_gui_surface(app) is False
+        assert hs._gui_mounted_live is False
 
     def test_attach_failure_rolls_back_the_mounted_flag(self, tmp_path, monkeypatch):
         """If attach_gui raises, the claimed gui_mounted flag is rolled back so a
@@ -74,6 +87,7 @@ class TestMountGuiSurfaceUnit:
         with pytest.raises(RuntimeError):
             mount_gui_surface(app)
         assert getattr(app.state, "gui_mounted", False) is False
+        assert hs._gui_mounted_live is False
 
     def test_missing_port_raises_rather_than_dialling_none(self, tmp_path, monkeypatch):
         """No bind port on app.state -> a loud 500, not a broken

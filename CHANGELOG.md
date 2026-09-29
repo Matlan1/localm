@@ -118,6 +118,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Restarting a localm server that had the GUI attached to it no longer leaves
+  the window on a "not found" page.** When a second `localm gui` attached to a
+  running `localm serve` (or `localm gui --api-mode`), it mounted the GUI on that
+  server live, but any restart - the tray Restart, Settings > Restart, applying
+  or rolling back an update, or the automatic recovery from a hung server -
+  relaunched the server from its original API-only command line. The GUI was
+  gone afterwards, and the window that reconnected found nothing to show. The
+  restarted server now brings the GUI back, and a server that never had a GUI
+  attached still restarts as API-only.
 - **On Windows, starting `localm gui` no longer pops a stray console window in front of
   whatever you are doing.** The crash-recovery and update watchdogs, and the coder's
   auto-started server, now run with a hidden console instead of none at all, so their
