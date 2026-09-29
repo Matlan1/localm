@@ -111,6 +111,21 @@ def test_the_app_starts_with_opentelemetry_export_variables_set(monkeypatch):
         assert client.get("/whoami").status_code == 200
 
 
+def test_fastapi_telemetry_options_turn_off_every_signal_and_env_export():
+    """With a FastAPI that has a ``telemetry`` parameter, the app is built with
+    tracing, metrics, logs and the OTEL_* auto-configuration all off; with an
+    older FastAPI, no telemetry option is passed."""
+    from fastapi import FastAPI
+
+    from localm.inference.app_assembly.diagnostics import fastapi_telemetry_off
+    options = fastapi_telemetry_off()
+    if "telemetry" not in inspect.signature(FastAPI.__init__).parameters:
+        assert options == {}
+        return
+    assert options == {"telemetry": {"auto_configure": False, "tracing": False,
+                                     "metrics": False, "logs": False}}
+
+
 def test_a_handler_runs_inside_the_transport_middleware():
     from localm.inference._hang_alarm import tracker
 
