@@ -67,16 +67,8 @@ def _reset_vram_cache(monkeypatch):
     monkeypatch.setattr(_loader, "native_device_inventory", lambda: [])
 
 
-# A mocked probe round trip normally lands in well under 100ms, but the deadline
-# below is deliberately wide relative to that: on a heavily-loaded box (many
-# concurrent processes contending for the GIL/OS scheduler) plain thread-
-# scheduling latency alone has been measured at 1.3-1.9s for a single round
-# trip, which left a naive 2.0s bound flaking on pure scheduling jitter, not a
-# real bug. LOCALM_TEST_VRAM_POLL_DEADLINE overrides the default - tighten it
-# for a fast, lightly-loaded CI box, or widen it further for a heavier one.
-# tests/test_gui.py's TestStatsVramTrust._stats_vram polls the identical
-# mechanism and imports this constant rather than keeping its own copy, so the
-# two can never drift apart.
+# Seconds to wait for the background VRAM probe to land. Overridden by
+# LOCALM_TEST_VRAM_POLL_DEADLINE; tests/test_gui.py imports it.
 _VRAM_POLL_DEADLINE_ENV = "LOCALM_TEST_VRAM_POLL_DEADLINE"
 try:
     VRAM_POLL_DEADLINE = max(0.5, float(os.environ.get(_VRAM_POLL_DEADLINE_ENV, "5")))
@@ -400,6 +392,41 @@ def test_vram_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch)
     assert sysstats._vram_inflight is False, (
         "a failed thread spawn left _vram_inflight stuck True - no later "
         "call could ever retry")
+
+
+class _TorchTripwire(types.ModuleType):
+    """Stands in for ``torch`` in ``sys.modules`` and records every non-dunder
+    attribute read."""
+
+    def __init__(self):
+        super().__init__("torch")
+        self.touched = []
+
+    def __getattr__(self, name):
+        if not name.startswith("__"):
+            self.touched.append(name)
+        raise AttributeError(name)
+
+
+def test_an_empty_device_list_never_consults_torch(monkeypatch):
+    """With every source mocked and no per-device entries, computing the reading
+    reaches the scope tagging with an empty list and does not consult torch."""
+    from localm import discover
+    _reset_vram_cache(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "win32")
+    tripwire = _TorchTripwire()
+    monkeypatch.setitem(sys.modules, "torch", tripwire)
+    tagged = []
+    real_tag = discover._apply_device_global_free
+    monkeypatch.setattr(discover, "_apply_device_global_free",
+                        lambda gpus: (tagged.append(list(gpus)), real_tag(gpus))[1])
+    assert discover.last_known_gpus() == []
+    info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
+    with patch("localm.discover.vram_info", side_effect=_status_aware(info)):
+        out = sysstats._compute_vram()
+    assert out == {"vram": {"total": 16 * GB, "used": 12 * GB, "percent": 75.0}}
+    assert tagged == [[]]
+    assert tripwire.touched == []
 
 
 # --- CPU-utilisation meter ------------------------------------------------ #

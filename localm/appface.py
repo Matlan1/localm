@@ -675,7 +675,8 @@ class _AppFaceHandle(AppFace):
 def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
                    get_log_lines: Optional[Callable] = None,
                    on_restart: Optional[Callable] = None,
-                   on_stop: Optional[Callable] = None) -> Optional[AppFace]:
+                   on_stop: Optional[Callable] = None,
+                   show_window: bool = True) -> Optional[AppFace]:
     """Start the control surface for the running server: a styled status window
     (accurate startup progress; on Windows it hides to the tray when ready, on
     Linux it stays as a console-like status window), plus a native tray on Windows.
@@ -683,6 +684,7 @@ def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
     Returns a handle with .close() + set_status/set_ready/set_error, or None if
     nothing could be shown. NEVER raises - a control-surface failure must not take
     down the server. *get_log_lines* feeds the live log tail and "View logs".
+    With *show_window* False the status window is not created (the tray still is).
     """
     # Never spin up real UI (tray icon / Tk window) inside the test suite.
     if "pytest" in sys.modules:
@@ -692,7 +694,7 @@ def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
         window = _StatusWindow(name=name, url=url, logfile=logfile,
                                get_log_lines=get_log_lines, on_restart=on_restart,
                                on_stop=on_stop, hide_on_ready=False)
-        win_ok = window.start()
+        win_ok = window.start() if show_window else False
         tray = None
         tray_ok = False
         if sys.platform == "win32":

@@ -127,6 +127,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   gone afterwards, and the window that reconnected found nothing to show. The
   restarted server now brings the GUI back, and a server that never had a GUI
   attached still restarts as API-only.
+- **On Windows, starting `localm gui` no longer pops a stray console window in front of
+  whatever you are doing.** The crash-recovery and update watchdogs, and the coder's
+  auto-started server, now run with a hidden console instead of none at all, so their
+  helper Python process no longer opens a visible terminal. `localm gui --no-browser`
+  also no longer shows the LocaLM status window.
 - **A GGUF vision reply can fail with "the vision projector could not evaluate
   this image (mtmd_helper_eval_chunks rc=1)", wrongly blamed on a GPU-specific
   fault, when the live context is too small for the image.** Unlike the text

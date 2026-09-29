@@ -1153,7 +1153,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     app_face = appface.start_app_face(
         name="LocaLM", url=base_url, logfile=_home_dir() / "logs" / "recent.log",
         get_log_lines=debuglog.recent_activity,
-        on_restart=on_restart, on_stop=on_stop)
+        on_restart=on_restart, on_stop=on_stop, show_window=not no_browser)
     if app_face is not None:
         # Accurate splash: flip the window from "Starting..." to "Running" (and, on
         # Windows, hide it to the tray) once the port is ACTUALLY accepting

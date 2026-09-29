@@ -114,6 +114,8 @@ class TestHeadlessAutoStartSurfacesChildError:
             assert not (seen.get("creationflags", 0)
                         & subprocess.CREATE_NEW_CONSOLE), (
                 "a headless caller has no desktop for a new console window")
+            assert seen.get("creationflags", 0) & subprocess.CREATE_NO_WINDOW
+            assert not seen.get("creationflags", 0) & subprocess.DETACHED_PROCESS
 
 
 class TestAutoStartedServerRunsInTheProjectDirectory:
