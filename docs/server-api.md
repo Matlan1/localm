@@ -320,9 +320,10 @@ Scope: `config:write`.
 `POST /v1/server/restart` unloads every resident model, waits for the freed
 VRAM to actually be reclaimed, then restarts the process in place on the
 same port (a fresh model load right after re-exec would otherwise race the
-still-reclaiming GPU driver). `POST /v1/server/shutdown` unloads and exits
-without relaunching - a clean alternative to force-closing the window or a
-Ctrl+C that does not always land. Both return immediately
+still-reclaiming GPU driver). An API-only instance that a second `localm gui`
+attached to comes back with the GUI mounted again. `POST /v1/server/shutdown`
+unloads and exits without relaunching - a clean alternative to force-closing
+the window or a Ctrl+C that does not always land. Both return immediately
 (`{"restarting": true}` / `{"stopping": true}`) while the actual
 restart/shutdown runs a moment later, so the response reaches the client
 first.
