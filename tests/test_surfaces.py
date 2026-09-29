@@ -237,6 +237,28 @@ class TestSurfaceEndpointOpenMode:
             assert "text/html" in client.get("/").headers.get("content-type", "")
             assert client.get("/whoami").json()["mode"] == "full"
 
+    def test_a_failed_mount_answers_500_with_the_error(self, tmp_path, monkeypatch, caplog):
+        """The error that stopped the mount reaches the caller in ``detail``,
+        is logged with its traceback, and the app is left without GUI routes."""
+        import logging
+
+        import localm.plugins.gui.web as web
+        monkeypatch.setattr(web, "STATIC_DIR", tmp_path / "missing-static")
+        app = _api_app(tmp_path, instance_token="tok")
+        with caplog.at_level(logging.ERROR, logger="localm"):
+            with TestClient(app) as client:
+                r = client.post("/v1/surfaces/gui",
+                                headers={"Authorization": "Bearer tok"})
+                models = client.get("/api/models",
+                                    headers={"Authorization": "Bearer tok"}).status_code
+        assert models == 404
+        assert r.status_code == 500
+        detail = r.json()["detail"]
+        assert detail.startswith("GUI mount failed: RuntimeError: ")
+        assert "missing-static" in detail
+        logged = [rec for rec in caplog.records if rec.getMessage() == "GUI mount failed"]
+        assert logged and logged[0].exc_info is not None
+
     def test_second_mount_reports_already_mounted(self, tmp_path):
         app = _api_app(tmp_path, instance_token="tok")
         with TestClient(app) as client:
@@ -284,51 +306,87 @@ class TestSurfaceEndpointProtectedMode:
 #  gui CLI client: _mount_remote_gui (the attaching side)           #
 # ------------------------------------------------------------------ #
 
+class _MountReply:
+    """A requests.Response stand-in: *status_code*, and ``json()`` returning
+    *body*, or raising ValueError when *body* is None (a reply that is not JSON)."""
+
+    def __init__(self, status_code, body=None):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("not JSON")
+        return self._body
+
+
 class TestMountRemoteGuiClient:
-    def test_posts_with_the_attach_token_and_maps_200_to_true(self, monkeypatch):
+    _ENTRY = {"scheme": "http", "port": 8642, "token": "t"}
+
+    def _reply(self, monkeypatch, reply):
+        import requests
+        monkeypatch.setattr(requests, "post", lambda *a, **k: reply)
+
+    def test_posts_with_the_attach_token_and_gives_no_reason_on_200(self, monkeypatch):
         import requests
         from localm.plugins.gui import cli
         seen = {}
 
-        class _Resp:
-            status_code = 200
-
         def _fake_post(url, headers=None, timeout=None, verify=None):
             seen["url"] = url
             seen["headers"] = headers
-            return _Resp()
+            return _MountReply(200, {"status": "mounted", "mode": "full"})
 
         monkeypatch.setattr(requests, "post", _fake_post)
-        ok = cli._mount_remote_gui(
+        reason = cli._mount_remote_gui(
             {"scheme": "https", "port": 8651, "token": "the-token"})
-        assert ok is True
+        assert reason is None
         assert seen["url"] == "https://127.0.0.1:8651/v1/surfaces/gui"
         assert seen["headers"]["Authorization"] == "Bearer the-token"
 
-    def test_non_200_maps_to_false(self, monkeypatch):
+    @pytest.mark.parametrize("status", [404, 405])
+    def test_an_instance_without_the_endpoint_is_named_as_older(self, monkeypatch, status):
+        from localm.plugins.gui import cli
+        self._reply(monkeypatch, _MountReply(status, {"detail": "Not Found"}))
+        assert cli._mount_remote_gui(self._ENTRY) == (
+            "it is an older localm that cannot mount the GUI on demand")
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_a_refused_attach_token_is_named(self, monkeypatch, status):
+        from localm.plugins.gui import cli
+        self._reply(monkeypatch, _MountReply(status, {"detail": "no"}))
+        assert cli._mount_remote_gui(self._ENTRY) == (
+            f"it refused this process's attach token (HTTP {status})")
+
+    def test_a_server_error_carries_its_status_and_detail(self, monkeypatch):
+        from localm.plugins.gui import cli
+        detail = "GUI mount failed: RuntimeError: Directory 'x' does not exist"
+        self._reply(monkeypatch, _MountReply(500, {"detail": detail}))
+        assert cli._mount_remote_gui(self._ENTRY) == f"HTTP 500: {detail}"
+
+    @pytest.mark.parametrize("body", [None, ["not", "a", "dict"], {"detail": ""}])
+    def test_a_reply_without_a_detail_names_the_status(self, monkeypatch, body):
+        from localm.plugins.gui import cli
+        self._reply(monkeypatch, _MountReply(502, body))
+        assert cli._mount_remote_gui(self._ENTRY) == "HTTP 502"
+
+    def test_no_answer_names_the_exception_type(self, monkeypatch):
         import requests
         from localm.plugins.gui import cli
 
-        class _Resp:
-            status_code = 500
+        def _refused(*a, **k):
+            raise requests.ConnectionError("refused")
 
-        monkeypatch.setattr(requests, "post",
-                            lambda *a, **k: _Resp())
-        assert cli._mount_remote_gui(
-            {"scheme": "http", "port": 8642, "token": "t"}) is False
+        monkeypatch.setattr(requests, "post", _refused)
+        assert cli._mount_remote_gui(self._ENTRY) == "it did not answer (ConnectionError)"
 
-    def test_network_error_maps_to_false(self, monkeypatch):
+    def test_missing_token_or_port_is_named_without_a_request(self, monkeypatch):
         import requests
         from localm.plugins.gui import cli
-
-        def _boom(*a, **k):
-            raise requests.RequestException("refused")
-
-        monkeypatch.setattr(requests, "post", _boom)
-        assert cli._mount_remote_gui(
-            {"scheme": "http", "port": 8642, "token": "t"}) is False
-
-    def test_missing_token_or_port_short_circuits(self):
-        from localm.plugins.gui import cli
-        assert cli._mount_remote_gui({"scheme": "http", "port": 8642}) is False
-        assert cli._mount_remote_gui({"scheme": "http", "token": "t"}) is False
+        posts = []
+        monkeypatch.setattr(requests, "post", lambda *a, **k: posts.append(a))
+        assert cli._mount_remote_gui({"scheme": "http", "port": 8642}) == (
+            "its instance entry has no attach token")
+        assert cli._mount_remote_gui({"scheme": "http", "token": "t"}) == (
+            "its instance entry has no port")
+        assert posts == []

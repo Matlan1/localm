@@ -143,6 +143,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **When `localm gui` cannot open the GUI on an already-running `localm serve`,
+  it now says why.** It used to guess "an older instance?" for every failure.
+  It now shows the server's own error, a refused attach token, a server that
+  did not answer, or an older localm, and the server logs the full error.
 - **localm no longer fails to start when an OpenTelemetry endpoint is set in
   your environment.** With FastAPI 0.142, which a fresh install now picks up, a
   set `OTEL_EXPORTER_OTLP_ENDPOINT` stopped the server at startup, because
