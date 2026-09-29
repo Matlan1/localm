@@ -96,11 +96,13 @@ class TestMountGuiSurfaceUnit:
         assert hs._gui_mounted_live is False
 
     def test_attach_failure_rolls_back_the_mounted_flag(self, tmp_path, monkeypatch):
-        """If attach_gui raises, the claimed gui_mounted flag is rolled back so a
-        later real attempt can still mount (no permanently-wedged surface)."""
+        """If attach_gui raises, gui_mounted goes back to the False it held before,
+        so a later real attempt can still mount (no permanently-wedged surface)."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         app = _api_app(tmp_path)
+        app.state.gui_mounted = False
         import localm.plugins.gui.web as web
+        real_attach = web.attach_gui
 
         def _boom(*a, **k):
             raise RuntimeError("attach failed")
@@ -108,8 +110,11 @@ class TestMountGuiSurfaceUnit:
         monkeypatch.setattr(web, "attach_gui", _boom)
         with pytest.raises(RuntimeError):
             mount_gui_surface(app)
-        assert getattr(app.state, "gui_mounted", False) is False
+        assert app.state.gui_mounted is False
         assert hs._gui_mounted_live is False
+
+        monkeypatch.setattr(web, "attach_gui", real_attach)
+        assert mount_gui_surface(app) is True
 
     def test_missing_port_raises_rather_than_dialling_none(self, tmp_path, monkeypatch):
         """No bind port on app.state -> a loud 500, not a broken
