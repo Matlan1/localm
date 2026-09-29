@@ -143,6 +143,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **LocaLM starts again when its data-folder setting was saved by an older
+  `setup.bat`.** A custom data folder path with characters such as é was saved
+  in the console's code page instead of UTF-8, and LocaLM stopped at startup
+  trying to read it. It now reads the setting as it was written; a setting it
+  cannot read at all gives a warning instead of stopping LocaLM.
 - **`setup.sh` and `localm make-launcher` no longer delete the `localm` command
   when the LocaLM folder is on a drive that ignores letter case** (a Windows
   drive under WSL, or an NTFS or exFAT disk on Linux). There `LocaLM` and
