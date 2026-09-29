@@ -118,6 +118,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **LocaLM starts again when its data-folder setting was saved by an older
+  `setup.bat`.** A custom data folder path with characters such as é was saved
+  in the console's code page instead of UTF-8, and LocaLM stopped at startup
+  trying to read it. It now reads the setting as it was written; a setting it
+  cannot read at all gives a warning instead of stopping LocaLM.
 - **Restarting a localm server that had the GUI attached to it no longer leaves
   the window on a "not found" page.** When a second `localm gui` attached to a
   running `localm serve` (or `localm gui --api-mode`), it mounted the GUI on that
