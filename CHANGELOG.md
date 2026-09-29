@@ -277,11 +277,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   These pointed into the LocaLM folder and were left behind when it was
   deleted; on Linux and macOS every new shell then printed an error.
   Uninstall now also removes the ones earlier setups created.
-- **LocaLM no longer fails to start when its custom data folder path contains
-  characters such as é.** `setup.bat` saved the path in the console's code
-  page instead of UTF-8, which LocaLM could not read. New installs save it as
-  UTF-8, and a file saved the old way is now read correctly, also by
-  `rollback.bat` when it restores the previous version after an update.
+- **A custom data folder whose path contains characters such as é now works
+  after setup.** `setup.bat` saved the path in the console's code page instead
+  of UTF-8, which LocaLM could not read. Setup now saves it as UTF-8, also when
+  it runs again on an existing install, and the uninstaller and `rollback.bat`
+  read a file saved the old way.
 - **With a custom data folder, `localm setup-llama --rollback` now finds the
   build setup installed.** Setup downloaded the runtime before asking where
   your data should live, so it recorded that build in a `home` folder inside
