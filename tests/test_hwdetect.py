@@ -407,17 +407,25 @@ def test_install_backend_linux_amd_with_rocm_is_hip(monkeypatch):
     assert hwdetect.recommended_install_backend(d) == "hip"
 
 
-@pytest.mark.parametrize("plat", ["win32", "linux"])
-def test_install_backend_intel_is_vulkan_not_sycl(monkeypatch, plat):
-    # Deliberate, not an oversight: sycl is a real downloadable binary (see
-    # setup_llama._ASSET_MATCH) and works on Intel iGPUs too, but there is no
-    # oneAPI/Level-Zero toolkit-presence probe, and every competitor (LM
-    # Studio, Jan, ollama, koboldcpp) also defaults Intel to Vulkan - see
-    # dev-notes/INTEL-acceleration-research-2026-06-22.md. sycl stays an
-    # explicit menu pick (setup.sh/setup.bat/installer/gui.py) rather than the
-    # recommended default. If this ever changes, it is a deliberate policy
-    # decision, not a one-line accident - update this test's name too.
-    monkeypatch.setattr(hwdetect.sys, "platform", plat)
+def test_install_backend_intel_windows_is_sycl(monkeypatch):
+    # Windows sycl is self-contained (bundles the whole oneAPI/Level-Zero
+    # runtime, only the GPU driver is needed) and real-hardware testing
+    # confirmed it loads and generates, so it is the default here - the same
+    # shape as the self-contained amd-rocm bundle.
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    d = Detection(vendors=["intel"], gpu_names="intel(r) arc(tm) a770 graphics")
+    assert hwdetect.recommended_install_backend(d) == "sycl"
+
+
+def test_install_backend_intel_linux_is_vulkan_not_sycl(monkeypatch):
+    # Linux sycl needs a separate system oneAPI install most users will not
+    # have, so auto-picking it would routinely hit the fallback rather than
+    # "just work" - the same reasoning that keeps AMD off hip without a
+    # detected toolkit (_rocm_toolkit_present). sycl stays an explicit menu
+    # pick (setup.sh/installer/gui.py) here. If this ever changes, it is a
+    # deliberate policy decision, not a one-line accident - update this
+    # test's name too.
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     d = Detection(vendors=["intel"], gpu_names="intel(r) arc(tm) a770 graphics")
     assert hwdetect.recommended_install_backend(d) == "vulkan"
 

@@ -251,9 +251,9 @@ def _check_vram_torch() -> bool:
 
 
 # The llama.cpp backends that run inference on the GPU. localm's DEFAULT setup
-# provisions one of these on any GPU box (vulkan for NVIDIA/Intel/mixed, the
-# self-contained amd-rocm build for AMD on Windows, metal on Apple Silicon), or
-# the user pins cuda/sycl/hip. None of them needs nvidia-smi/rocm-smi on PATH,
+# provisions one of these on any GPU box (cuda for NVIDIA, amd-rocm or hip for
+# AMD, sycl for Intel on Windows, metal on Apple Silicon, vulkan otherwise), or
+# the user pins one. None of them needs nvidia-smi/rocm-smi on PATH,
 # and torch.cuda is False for all but CUDA/ROCm-torch. "custom" is a
 # user-supplied build of unknown class, so it is NOT assumed GPU by name; its
 # capability comes from the real device probe instead.

@@ -18,8 +18,9 @@ localm setup-llama
 
 `setup-llama` detects your GPU and provisions the matching llama.cpp runtime.
 It needs no vendor toolkit: NVIDIA gets a self-contained CUDA build, AMD on
-Windows a bundled ROCm build, Intel and toolkit-less AMD a Vulkan build, Apple
-Silicon Metal, and anything else CPU.
+Windows a bundled ROCm build, Intel on Windows a self-contained SYCL build,
+Intel on Linux and toolkit-less AMD a Vulkan build, Apple Silicon Metal, and
+anything else CPU.
 
 Then pull a model and talk to it:
 

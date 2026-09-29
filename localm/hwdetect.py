@@ -23,12 +23,15 @@ binary this machine can run), before falling back to vulkan:
     (``setup_llama._BACKEND_ASSETS``). gfx103X on Windows keeps the
     self-contained ``amd-rocm`` bundle regardless, since it needs no system
     toolkit at all and so beats ``hip`` even when both are viable.
-  * ``vulkan`` is the ONE catch-all for a GPU with no better path detected as
-    actually runnable here (Intel - no toolkit-presence probe exists yet for
-    oneAPI, so ``sycl`` stays an explicit, opt-in menu pick rather than the
-    default; AMD with no ROCm/HIP toolkit found; any mixed/unrecognised box).
+  * Intel, Windows -> ``sycl``: the Windows SYCL build is self-contained
+    (bundles the whole oneAPI/Level-Zero runtime, only the GPU driver is
+    needed). Intel, Linux -> ``vulkan``: the Linux SYCL build needs a separate
+    system oneAPI install.
     "Intel" here includes integrated graphics (Iris Xe, UHD, built-in Arc), not
     only discrete Arc/Battlemage cards - see ``detect()``'s vendor matching.
+  * ``vulkan`` is the ONE catch-all for a GPU with no better path detected as
+    actually runnable here (AMD with no ROCm/HIP toolkit found; any
+    mixed/unrecognised box).
   * ``cpu`` when no GPU is detected.
 
 Detection is conservative: a missing tool or an unparseable name means
@@ -275,12 +278,12 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
         gfx110X/gfx120X, where no SELF-CONTAINED build exists)
       * AMD, any OS, elsewhere, WITHOUT a detected toolkit -> vulkan (the vendor
         path cannot run here)
-      * Intel, any OS                         -> vulkan    (``sycl`` is a real
-        downloadable binary too - self-contained on Windows, needs a system
-        oneAPI install on Linux - and works on integrated Intel GPUs as well
-        as discrete Arc/Battlemage; there is just no toolkit-presence probe
-        for oneAPI yet, so it stays an explicit opt-in menu pick rather than
-        the default, matching every competitor's Intel default of Vulkan)
+      * Intel, Windows                        -> sycl      (self-contained -
+        bundles the whole oneAPI/Level-Zero runtime, only the GPU driver is
+        needed. Works on integrated GPUs as well as discrete Arc/Battlemage)
+      * Intel, Linux                          -> vulkan    (the Linux sycl
+        build needs a separate system oneAPI install, so it stays an explicit
+        opt-in menu pick)
     The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA
     is both-OS, so only the AMD gfx103X case is narrowed to Windows."""
     d = det or detect()
@@ -295,6 +298,8 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
             return "amd-rocm"
         if _rocm_toolkit_present():
             return "hip"
+    if d.vendors == ["intel"] and sys.platform == "win32":
+        return "sycl"
     return "vulkan"
 
 

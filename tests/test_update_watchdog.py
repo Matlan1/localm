@@ -241,7 +241,7 @@ def test_survives_after_launcher_process_exits(tmp_path):
             "kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
             "stderr=subprocess.DEVNULL, close_fds=True)\n"
             "if sys.platform == 'win32':\n"
-            "    kwargs['creationflags'] = 0x00000008 | 0x00000200\n"
+            "    kwargs['creationflags'] = 0x08000000 | 0x00000200\n"
             "else:\n"
             "    kwargs['start_new_session'] = True\n"
             "subprocess.Popen(argv, **kwargs)\n",

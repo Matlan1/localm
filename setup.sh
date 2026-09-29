@@ -532,8 +532,9 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # uses (`python -m localm.hwdetect` -> "<vendor> <backend>"), so the two installers
 # can never drift: NVIDIA -> cuda (self-contained on both OSes), AMD -> hip when a
 # system ROCm/HIP toolkit is detected present (else vulkan; gfx103X on Windows
-# always gets the self-contained amd-rocm build regardless), Intel -> vulkan (no
-# toolkit-presence probe for oneAPI yet), Apple Silicon -> metal, no GPU -> cpu.
+# always gets the self-contained amd-rocm build regardless), Intel -> sycl on
+# Windows (self-contained) or vulkan on Linux (sycl there needs a separate
+# oneAPI install), Apple Silicon -> metal, no GPU -> cpu.
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
 REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
 case "$REC" in

@@ -1096,9 +1096,10 @@ def _mark_ready_when_listening(app_face, self_host: str, port: int) -> None:
         hide_console()
 
 
-def _start_app_face(plan: _BindPlan, *, on_restart, on_stop):
+def _start_app_face(plan: _BindPlan, *, on_restart, on_stop, no_browser: bool):
     """Start the tray / status window (appface.start_app_face) for plan.base_url,
-    wired to *on_restart* and *on_stop*.
+    wired to *on_restart* and *on_stop*; with --no-browser only the tray
+    starts, without the status window.
 
     When one starts, a "localm-ready" daemon thread runs
     _mark_ready_when_listening, and the hang alarm reports into it
@@ -1110,7 +1111,7 @@ def _start_app_face(plan: _BindPlan, *, on_restart, on_stop):
     app_face = appface.start_app_face(
         name="LocaLM", url=plan.base_url, logfile=home_dir() / "logs" / "recent.log",
         get_log_lines=debuglog.recent_activity,
-        on_restart=on_restart, on_stop=on_stop)
+        on_restart=on_restart, on_stop=on_stop, show_window=not no_browser)
     if app_face is not None:
         threading.Thread(target=_mark_ready_when_listening,
                          args=(app_face, plan.self_host, plan.port),
@@ -1315,7 +1316,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     app.state.bind_fallback = plan.fallback
     from localm.inference import http_server as hs
     on_restart, on_stop = _tray_callbacks(app, hs)
-    app_face = _start_app_face(plan, on_restart=on_restart, on_stop=on_stop)
+    app_face = _start_app_face(plan, on_restart=on_restart, on_stop=on_stop,
+                               no_browser=no_browser)
 
     # Server start; everything above is released once serving ends.
     server_stopped = threading.Event()

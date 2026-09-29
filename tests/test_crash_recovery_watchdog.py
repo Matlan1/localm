@@ -525,3 +525,22 @@ class TestDiedOnStartup:
         # (exercised end to end by test_crash_triggers_a_real_relaunch_then_returns,
         # which opts the guard out to stand in for that uptime).
         assert 3600.0 >= wd._MIN_UPTIME_TO_RELAUNCH_S
+
+
+def test_relaunch_starts_the_server_without_a_visible_console_window(monkeypatch):
+    wd = _load_wd()
+    calls = []
+
+    class _P:
+        pid = 1
+
+    monkeypatch.setattr(wd.subprocess, "Popen",
+                        lambda argv, **kw: calls.append(kw) or _P())
+    monkeypatch.setattr(wd.sys, "platform", "win32")
+    wd.relaunch(["x"], restart_history=[], now_epoch=1000.0, log_path=None)
+    flags = calls[0]["creationflags"]
+    assert flags & 0x08000000, "CREATE_NO_WINDOW missing"
+    assert flags & 0x00000200, "CREATE_NEW_PROCESS_GROUP missing"
+    assert not flags & 0x00000008, (
+        "DETACHED_PROCESS leaves the venv launcher without a console, so its "
+        "child python.exe opens a visible console window")

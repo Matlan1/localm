@@ -1952,7 +1952,11 @@ def _apply_device_global_free(gpus: list) -> None:
     but is tagged :data:`FREE_SCOPE_PROCESS` rather than silently passing a
     known-process-local figure off as the board's. That tag is what makes
     /v1/models/unload say its reading is uncertain instead of asserting a wrong
-    one as fact."""
+    one as fact.
+
+    An empty *gpus* returns immediately without consulting any scope source."""
+    if not gpus:
+        return
     import sys
     if sys.platform != "win32":
         for g in gpus:
