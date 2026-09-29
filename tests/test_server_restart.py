@@ -242,10 +242,11 @@ def _api_app_with_gui_mounted_live(tmp_path, monkeypatch):
     return app
 
 
-def _serve_relaunched_api_app(monkeypatch, tmp_path):
+def _serve_relaunched_api_app(monkeypatch, tmp_path, calls=None):
     """Run run_advertised on a fresh api-mode app with the transport stubbed,
     the way a re-exec'd process starts. Returns the app and what
-    portmux.run_server saw at the moment serving would have begun."""
+    portmux.run_server saw at the moment serving would have begun. Each stop
+    sequence that runs is appended to *calls* as "teardown"."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     app = http_server.create_app(None)
     app.state.bind_host = "127.0.0.1"
@@ -261,9 +262,13 @@ def _serve_relaunched_api_app(monkeypatch, tmp_path):
             getattr(r, "path", None) for r in served_app.router.routes}
         seen["registry_modes"] = [e["mode"] for e in registry]
 
+    def _teardown(**kw):
+        if calls is not None:
+            calls.append("teardown")
+
     monkeypatch.setattr("localm.portmux.run_server", _run_server)
     monkeypatch.setattr(http_server, "_announce_stopping", lambda: None)
-    monkeypatch.setattr(http_server, "_shutdown_teardown", lambda **kw: None)
+    monkeypatch.setattr(http_server, "_shutdown_teardown", _teardown)
     http_server.run_advertised(app, "127.0.0.1", 8642, mode="api")
     return app, seen
 
@@ -378,21 +383,38 @@ def test_run_advertised_keeps_serving_when_the_gui_cannot_be_mounted(
         monkeypatch, tmp_path, caplog):
     """A failed remount never stops the API from coming back: it is logged as a
     warning and the instance stays API-only."""
+    import localm.plugins.gui.web as web
+
     monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
 
-    def _mount_fails(app):
+    def _attach_fails(*a, **k):
         raise RuntimeError("attach failed")
 
-    monkeypatch.setattr(http_server, "mount_gui_surface", _mount_fails)
+    monkeypatch.setattr(web, "attach_gui", _attach_fails)
     with caplog.at_level(logging.WARNING, logger="localm"):
         _app, seen = _serve_relaunched_api_app(monkeypatch, tmp_path)
     assert seen["gui_mounted"] is False
     assert seen["instance_mode"] == "api"
     assert seen["registry_modes"] == ["api"]
+    assert http_server._gui_mounted_live is False
     warnings = [r.getMessage() for r in caplog.records
                 if r.levelno == logging.WARNING]
     assert any("could not mount the GUI after the restart" in m
                and "attach failed" in m for m in warnings), warnings
+
+
+def test_a_stop_while_the_gui_is_being_remounted_still_runs_the_teardown(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
+    calls = []
+
+    def _stopped(app):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(http_server, "mount_gui_surface", _stopped)
+    with pytest.raises(KeyboardInterrupt):
+        _serve_relaunched_api_app(monkeypatch, tmp_path, calls=calls)
+    assert calls == ["teardown"]
 
 
 def test_a_restarted_api_instance_comes_back_with_its_live_gui(monkeypatch, tmp_path):

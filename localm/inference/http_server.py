@@ -5428,9 +5428,9 @@ def run_advertised(app, host: str, port: int, *, mode: str,
 
     with instances.advertise(app, home_dir(), host=host, port=port, mode=mode,
                              scheme=scheme, project=project, isolated=isolated):
-        if remount_gui:
-            _remount_gui(app)
         try:
+            if remount_gui:
+                _remount_gui(app)
             # On a TLS bind, also catch a plain-http request on the same port
             # with an https redirect; a plain bind closes a TLS connection opened
             # on its port. In debug mode uvicorn logs at "info" so the console

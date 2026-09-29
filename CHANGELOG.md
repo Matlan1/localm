@@ -119,14 +119,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **Restarting a localm server that had the GUI attached to it no longer leaves
-  the window on a blank page.** When a second `localm gui` attached to a running
-  `localm serve` (or `localm gui --api-mode`), it mounted the GUI on that server
-  live, but any restart - the tray Restart, Settings > Restart, applying or
-  rolling back an update, or the automatic recovery from a hung server -
+  the window on a "not found" page.** When a second `localm gui` attached to a
+  running `localm serve` (or `localm gui --api-mode`), it mounted the GUI on that
+  server live, but any restart - the tray Restart, Settings > Restart, applying
+  or rolling back an update, or the automatic recovery from a hung server -
   relaunched the server from its original API-only command line. The GUI was
-  gone afterwards, and the window that reconnected showed a plain "not found"
-  instead of the app. The restarted server now brings the GUI back, and a server
-  that never had a GUI attached still restarts as API-only.
+  gone afterwards, and the window that reconnected found nothing to show. The
+  restarted server now brings the GUI back, and a server that never had a GUI
+  attached still restarts as API-only.
 - **A GGUF vision reply can fail with "the vision projector could not evaluate
   this image (mtmd_helper_eval_chunks rc=1)", wrongly blamed on a GPU-specific
   fault, when the live context is too small for the image.** Unlike the text
