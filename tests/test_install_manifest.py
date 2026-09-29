@@ -1007,7 +1007,9 @@ def test_keep_current_prepares_the_folder_already_in_use(tmp_path, capsys):
     assert im.main(["prepare-data", "--root", str(clone), "--keep-current"]) == 0
     assert (clone / "localm-home.cfg").read_text(encoding="utf-8").strip() == str(custom)
     assert not (clone / "home").exists()
-    assert im.read_marker(custom)["installs"] == [str(clone.resolve())]
+    marker = im.read_marker(custom)
+    assert marker["bound"] is True
+    assert marker["installs"] == [{"path": str(clone.resolve()), "host": im._this_host()}]
 
 
 @pytest.mark.parametrize("which", ["clone", "parent", "home"])

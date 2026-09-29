@@ -157,6 +157,9 @@ def _split_path(value: str) -> list:
 
 
 def _same_dir(a: str, b: str) -> bool:
+    """Whether two PATH entries name the same directory, ignoring surrounding
+    spaces and quotes, case (on Windows) and redundant separators."""
+    a, b = a.strip().strip('"'), b.strip().strip('"')
     try:
         return (os.path.normcase(os.path.normpath(a))
                 == os.path.normcase(os.path.normpath(b)))

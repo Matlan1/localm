@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -57,6 +58,8 @@ EXIT_FAILED = 1          # something could not be removed; nothing deferred
 EXIT_PARTIAL = 2         # finished, but an item you asked to remove was refused
 EXIT_RUNNING = 3         # LocaLM is running from this folder; nothing touched
 EXIT_ABORTED = 4         # the record is newer than this uninstaller
+EXIT_UNAVAILABLE = 3     # current-data / prepare-data --keep-current: the data folder
+                         # this install is set to use does not exist right now
 
 # In-clone runtime folders, by manifest key. Only these names are ever written
 # to the pending file, and the shells accept only these names from it.
@@ -193,6 +196,48 @@ def _upgrade(m: dict, root: Path) -> dict:
     return out
 
 
+_IN_ROOT_KEYS = ("venv", "lib_dir", "home_cfg", "python_dir", "cache_dir", "uv_dir",
+                 "data_dir", "command_shim")
+_IN_ROOT_LISTS = ("files", "previous_data_dirs", "data_parents_created")
+
+
+def _recorded_root(m: dict) -> str:
+    """The install folder *m* was written in: its ``root``, else the folder
+    holding its recorded ``.venv``. "" when neither is recorded."""
+    if isinstance(m.get("root"), str) and m["root"]:
+        return m["root"]
+    venv = m.get("venv")
+    if isinstance(venv, str) and venv:
+        venv = venv.rstrip("\\/")
+        if os.path.basename(venv) == ".venv":
+            return os.path.dirname(venv)
+    return ""
+
+
+def _rebase(m: dict, root: Path) -> Tuple[dict, str]:
+    """(*m* with every path recorded inside the folder it was written in moved
+    under *root*, that folder) for an install folder that was moved, renamed
+    or copied after setup. The folder is "" when it is *root* or unknown, and
+    *m* is then returned unchanged. The PATH entry and the paths outside the
+    folder stay as recorded."""
+    old = _recorded_root(m)
+    if not old or _same(old, root):
+        return m, ""
+
+    def move(p):
+        if isinstance(p, str) and p and _inside(p, old):
+            rel = os.path.relpath(os.path.abspath(p), os.path.abspath(old))
+            return str(root if rel == "." else root / rel)
+        return p
+
+    out = dict(m)
+    for key in _IN_ROOT_KEYS:
+        out[key] = move(out.get(key, ""))
+    for key in _IN_ROOT_LISTS:
+        out[key] = [move(p) for p in out.get(key) or []]
+    return out, old
+
+
 def _write(root: Path, data: dict) -> Path:
     p = manifest_path(root)
     tmp = p.with_name(p.name + ".tmp")
@@ -227,6 +272,7 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
     data = _upgrade(old, root) if old else {}
     data.pop("binaries", None)
     data["schema"] = SCHEMA_VERSION
+    data["root"] = str(root)
     if stamp:
         data["stamp"] = stamp
 
@@ -292,26 +338,53 @@ def refresh_lib(lib_dir) -> Optional[Path]:
     return record(root, lib_dir=str(lib))
 
 
+def _this_host() -> str:
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
+
+
 def read_marker(folder) -> Optional[dict]:
-    """The ``.localm-data`` marker of *folder*: ``created`` (setup created the
-    folder), ``preexisting`` (what was in it before LocaLM first used it) and
-    ``installs`` (the install folders that use it). None when there is no
-    marker, it cannot be read, or it carries no ``preexisting`` list."""
+    """The ``.localm-data`` marker of *folder*, or None when there is none or it
+    cannot be read.
+
+    ``bound`` is True when the marker names *folder* as its own; a marker
+    copied from another folder, or left in a folder that was moved, is not
+    bound, and its ``created`` and ``preexisting`` say nothing about
+    *folder*. ``created``: setup created the folder. ``preexisting``: the
+    names that were in it before LocaLM first used it, or None when that is
+    unknown. ``installs``: ``{"path", "host"}`` for each install that uses
+    it; ``host`` is "" when the marker did not record one."""
     try:
         data = json.loads((Path(folder) / DATA_MARKER).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not isinstance(data.get("preexisting"), list):
+    if not isinstance(data, dict):
         return None
-    return {"created": bool(data.get("created")),
-            "preexisting": sorted({str(n) for n in data["preexisting"]}),
-            "installs": [str(p) for p in data.get("installs") or [] if isinstance(p, str)]}
+    own = data.get("folder")
+    pre = data.get("preexisting")
+    installs = []
+    for entry in data.get("installs") or []:
+        if isinstance(entry, str) and entry:
+            installs.append({"path": entry, "host": ""})
+        elif isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"]:
+            host = entry.get("host")
+            installs.append({"path": entry["path"],
+                             "host": host if isinstance(host, str) else ""})
+    return {"bound": isinstance(own, str) and bool(own) and _same(own, folder),
+            "created": bool(data.get("created")),
+            "preexisting": (sorted({str(n) for n in pre}) if isinstance(pre, list)
+                            else None),
+            "installs": installs}
 
 
 def _write_marker(folder: Path, marker: dict) -> None:
-    body = {"created_by": "localm setup", "created": bool(marker["created"]),
-            "preexisting": sorted(set(marker["preexisting"])),
-            "installs": list(marker["installs"])}
+    pre = marker["preexisting"]
+    body = {"created_by": "localm setup", "folder": _plain_abs(folder),
+            "created": bool(marker["created"]),
+            "preexisting": None if pre is None else sorted(set(pre)),
+            "installs": [{"path": i["path"], "host": i["host"]} for i in marker["installs"]]}
     tmp = folder / (DATA_MARKER + ".tmp")
     tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, folder / DATA_MARKER)
@@ -322,21 +395,69 @@ def _live_install(path: str) -> bool:
     return (p / MANIFEST_NAME).is_file() or (p / ".venv").is_dir()
 
 
-def current_data_dir(root) -> str:
-    """The data folder the clone at *root* is set up to use: the folder named
-    in ``localm-home.cfg``, else ``<root>/home``. "" when that folder does not
-    exist or the setting cannot be read."""
+def _other_host(host: str) -> bool:
+    here = _this_host()
+    return bool(host) and bool(here) and host.casefold() != here.casefold()
+
+
+def _uses_folder(install: str, folder) -> bool:
+    """Whether the install at *install* is set up to use *folder* as its data
+    folder (its ``localm-home.cfg``, else its ``home``)."""
+    configured, _exists = configured_data_dir(install)
+    return bool(configured) and _same(configured, folder)
+
+
+def _others_using(folder, root: Path, marker: Optional[dict]) -> List[str]:
+    """The other installs *marker* lists that still use *folder*: on this
+    computer, those that exist and are set up to use it; on another computer,
+    every one listed, since it cannot be checked from here."""
+    out: List[str] = []
+    for inst in (marker or {}).get("installs", []):
+        if _other_host(inst["host"]):
+            out.append(f"{inst['path']} on the computer {inst['host']}")
+        elif (not _same(inst["path"], root) and _live_install(inst["path"])
+              and _uses_folder(inst["path"], folder)):
+            out.append(inst["path"])
+    return out
+
+
+def configured_data_dir(root) -> Tuple[str, bool]:
+    """(folder, exists) for the data folder the clone at *root* is set up to
+    use: the full path named in ``localm-home.cfg``, else ``<root>/home``
+    when it exists. ("", False) when there is none or the setting cannot be
+    read."""
     root = Path(root).resolve()
     cfg = root / HOME_CFG_NAME
     if cfg.is_file():
         try:
             line = _read_cfg_line(cfg)
         except (OSError, ValueError, LookupError):
-            return ""
+            return "", False
         path = os.path.expanduser(line) if line else ""
-        return _plain_abs(path) if path and os.path.isabs(path) and os.path.isdir(path) else ""
+        if not (path and os.path.isabs(path)):
+            return "", False
+        return _plain_abs(path), os.path.isdir(path)
     home = root / PORTABLE_HOME
-    return str(home) if home.is_dir() else ""
+    return (str(home), True) if home.is_dir() else ("", False)
+
+
+def current_data_dir(root) -> str:
+    """The data folder the clone at *root* is set up to use, when it exists:
+    the folder named in ``localm-home.cfg``, else ``<root>/home``. "" when
+    there is none, it does not exist, or the setting cannot be read."""
+    folder, exists = configured_data_dir(root)
+    return folder if exists else ""
+
+
+def _already_used(root: Path, folder) -> bool:
+    """Whether the install at *root* already uses *folder*: its setting names
+    it, or its record lists it as the current or an earlier data folder."""
+    configured, _exists = configured_data_dir(root)
+    if configured and _same(configured, folder):
+        return True
+    m = load(root) or {}
+    recorded = [m.get("data_dir") or ""] + list(m.get("previous_data_dirs") or [])
+    return any(isinstance(p, str) and p and _same(p, folder) for p in recorded)
 
 
 def prepare_data(root, *, data_dir="", portable=False) -> Path:
@@ -344,17 +465,22 @@ def prepare_data(root, *, data_dir="", portable=False) -> Path:
 
     *portable* uses ``<root>/home`` and removes ``localm-home.cfg``; otherwise
     *data_dir* must be a full path, and ``localm-home.cfg`` is written with it
-    (UTF-8). The folder's ``.localm-data`` marker records whether setup created
-    it, what was in it before LocaLM first used it, and which install folders
-    use it; a marker that already carries that record is kept as it is, so
-    preparing the same folder again (a repair, another install) never counts
-    anything that was there before as LocaLM's. A folder that exists without
-    such a record counts everything in it as pre-existing.
+    (UTF-8). The folder's ``.localm-data`` marker names the folder and records
+    whether setup created it, what was in it before LocaLM first used it, and
+    which installs use it (with the computer each one is on). A marker written
+    for this folder is kept as it is, so preparing the same folder again (a
+    repair, another install) never counts anything that was there before as
+    LocaLM's. A folder without one counts everything in it as pre-existing,
+    except the folder this install already uses, where what was there before
+    is unknown; a marker written for another folder only contributes its list
+    of installs. Installs on this computer that no longer use the folder are
+    dropped from that list.
 
     Returns the data folder. Raises ValueError for a relative path, a path that
     is a file, or a folder uninstall could never safely delete (a drive root,
-    the home folder, this install folder or one that contains it), OSError when
-    the folder cannot be created or the marker written."""
+    the home folder, this install folder or one that contains it, or a folder
+    inside the environment, runtime or tooling folders uninstall removes),
+    OSError when the folder cannot be created or the marker written."""
     root = Path(root).resolve()
     cfg = root / HOME_CFG_NAME
     if portable:
@@ -369,6 +495,11 @@ def prepare_data(root, *, data_dir="", portable=False) -> Path:
                              "drive or /, for example D:\\LocaLM-data)")
         target = Path(_plain_abs(target))
         reason = _unsafe_data_dir(str(target), root, allow_link=True)
+        if not reason:
+            inside = next((n for n in DEFERRABLE + ("runtime",) if _inside(target, root / n)),
+                          None)
+            if inside:
+                reason = f"it is inside {root / inside}, which uninstall removes"
         if reason:
             raise ValueError(f"{target} cannot be the data folder ({reason}); "
                              "choose a folder of its own")
@@ -376,23 +507,31 @@ def prepare_data(root, *, data_dir="", portable=False) -> Path:
     if existed and not target.is_dir():
         raise ValueError(f"{target} is a file, not a folder")
 
-    marker = read_marker(target) if existed else None
+    found = read_marker(target) if existed else None
     parents: list = []
-    if marker is None:
-        if existed:
-            names = sorted(e.name for e in os.scandir(target))
-            marker = {"created": False, "installs": [],
-                      "preexisting": [n for n in names
-                                      if n not in (DATA_MARKER, DATA_MARKER + ".tmp")]}
+    if found is not None and found["bound"]:
+        marker = {"created": found["created"], "preexisting": found["preexisting"],
+                  "installs": found["installs"]}
+    elif existed:
+        if _already_used(root, target):
+            pre = None
         else:
-            p = target.parent
-            while not p.exists() and p != p.parent:
-                parents.append(str(p))
-                p = p.parent
-            parents.reverse()
-            marker = {"created": True, "installs": [], "preexisting": []}
-    if not any(_same(p, root) for p in marker["installs"]):
-        marker["installs"].append(str(root))
+            names = sorted(e.name for e in os.scandir(target))
+            pre = [n for n in names if n not in (DATA_MARKER, DATA_MARKER + ".tmp")]
+        marker = {"created": False, "preexisting": pre,
+                  "installs": found["installs"] if found else []}
+    else:
+        p = target.parent
+        while not p.exists() and p != p.parent:
+            parents.append(str(p))
+            p = p.parent
+        parents.reverse()
+        marker = {"created": True, "installs": [], "preexisting": []}
+    marker["installs"] = [i for i in marker["installs"]
+                          if _other_host(i["host"])
+                          or (not _same(i["path"], root) and _live_install(i["path"])
+                              and _uses_folder(i["path"], target))]
+    marker["installs"].append({"path": str(root), "host": _this_host()})
     target.mkdir(parents=True, exist_ok=True)
     _write_marker(target, marker)
     if portable:
@@ -796,18 +935,21 @@ def _alive(pid: int) -> bool:
 # --------------------------------------------------------------------------- #
 
 class _Item:
-    __slots__ = ("path", "kind", "status", "reason")
+    __slots__ = ("path", "kind", "status", "reason", "root")
 
-    def __init__(self, path, kind, status, reason=""):
+    def __init__(self, path, kind, status, reason="", root=None):
         self.path, self.kind, self.status, self.reason = str(path), kind, status, reason
+        self.root = root
 
 
 def _data_dirs(root: Path, m: Optional[dict]) -> list:
-    """[(folder, mode, preexisting, parents_created, recorded, others)] - every
-    data folder this install used. mode is 'owned' (all LocaLM's), 'entries'
-    (LocaLM's entries that are not in *preexisting*) or 'legacy' (nothing
-    records what was there before). *others* lists the other existing install
-    folders that use it, from its marker."""
+    """[(folder, mode, preexisting, parents, recorded, others)] - every data
+    folder this install used. mode is 'owned' (all LocaLM's: the clone's own
+    ``home``, or a folder whose marker is its own and says setup created it),
+    'entries' (LocaLM's entries that are not in *preexisting*) or 'legacy'
+    (nothing records what was there before). *parents* are the folders to
+    remove afterwards when they are empty. *others* lists the other installs
+    that still use the folder."""
     out: list = []
     seen: list = []
 
@@ -816,19 +958,20 @@ def _data_dirs(root: Path, m: Optional[dict]) -> list:
             return
         seen.append(path)
         marker = read_marker(path)
-        others = [p for p in (marker or {}).get("installs", [])
-                  if not _same(p, root) and _live_install(p)]
+        others = _others_using(path, root, marker)
         if _same(path, root / PORTABLE_HOME):
             out.append((path, "owned", None, [], recorded, others))
-        elif marker is not None:
-            owned = marker["created"]
-            out.append((path, "owned" if owned else "entries", marker["preexisting"],
-                        list(parents) if owned else [], recorded, others))
+        elif marker is not None and marker["bound"]:
+            if marker["preexisting"] is None:
+                out.append((path, "legacy", None, [], recorded, others))
+            else:
+                owned = marker["created"]
+                out.append((path, "owned" if owned else "entries", marker["preexisting"],
+                            list(parents) if owned else [], recorded, others))
         elif m and _same(path, m.get("data_dir", "")) \
                 and isinstance(m.get("data_preexisting"), list):
-            owned = bool(m.get("data_created")) and (Path(path) / DATA_MARKER).is_file()
-            out.append((path, "owned" if owned else "entries", m["data_preexisting"],
-                        list(parents) if owned else [], recorded, others))
+            empty = [path] + list(parents) if m.get("data_created") else []
+            out.append((path, "entries", m["data_preexisting"], empty, recorded, others))
         else:
             out.append((path, "legacy", None, [], recorded, others))
 
@@ -874,7 +1017,7 @@ def _cfg_data_dir(root: Path) -> str:
 
 
 def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
-          defer_runtime: bool) -> Tuple[List[_Item], list]:
+          defer_runtime: bool, old_root: str = "") -> Tuple[List[_Item], list]:
     items: List[_Item] = []
     data_info = []
     in_use = [p for p in {sys.executable, getattr(sys, "_base_executable", ""),
@@ -964,17 +1107,36 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
         items.append(_Item(cfg, "file", "remove"))
     elif cfg.exists():
         items.append(_Item(cfg, "file", "warn", "not in the install record"))
-    shortcut = (m or {}).get("shortcut", "")
-    if shortcut:
-        if Path(shortcut).name.lower() in _SHORTCUT_NAMES:
-            items.append(_Item(shortcut, "file", "remove"))
+    moved_away = bool(old_root) and not os.path.exists(old_root)
+
+    def shortcut(f: str) -> _Item:
+        p = Path(f)
+        if not (p.exists() or _is_link(p)) or _inside(p, root):
+            return _Item(f, "file", "remove")
+        opens = _mentions_folder(p, root)
+        if opens is False and moved_away:
+            opens = _mentions_folder(p, old_root)
+        if opens is None:
+            return _Item(f, "file", "keep", "cannot read it to check that it opens this "
+                                            "LocaLM folder - kept")
+        if not opens:
+            return _Item(f, "file", "keep", "opens another LocaLM folder - kept")
+        return _Item(f, "file", "remove")
+
+    recorded_shortcut = (m or {}).get("shortcut", "")
+    if recorded_shortcut:
+        if Path(recorded_shortcut).name.lower() in _SHORTCUT_NAMES:
+            items.append(shortcut(recorded_shortcut))
         else:
-            items.append(_Item(shortcut, "file", "refuse", "not a LocaLM shortcut"))
+            items.append(_Item(recorded_shortcut, "file", "refuse", "not a LocaLM shortcut"))
     for f in (m or {}).get("files") or []:
-        ok = (Path(f).name.lower() in _SHORTCUT_NAMES
-              or (_inside(f, root) and not _same(f, root)))
-        items.append(_Item(f, "file", "remove" if ok else "refuse",
-                           "" if ok else "outside this folder and not a LocaLM shortcut"))
+        if _inside(f, root) and not _same(f, root):
+            items.append(_Item(f, "file", "remove"))
+        elif Path(f).name.lower() in _SHORTCUT_NAMES:
+            items.append(shortcut(f))
+        else:
+            items.append(_Item(f, "file", "refuse",
+                               "outside this folder and not a LocaLM shortcut"))
     desktop = root / _LAUNCHER_DESKTOP
     if desktop.is_file() and not any(_same(i.path, desktop) for i in items):
         items.append(_Item(desktop, "file", "warn", "not in the install record"))
@@ -1026,10 +1188,14 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
             items.append(_Item(d, "data", "refuse", f"cannot read it: {e}"))
             info["delete"] = False
             continue
-        unsure = []
+        unsure, before, not_ours = [], 0, 0
         for name in names:
-            if not is_data_entry(name) or name in foreign:
+            if name in foreign:
                 info["kept_entries"].append(name)
+                before += 1
+            elif not is_data_entry(name):
+                info["kept_entries"].append(name)
+                not_ours += 1
             elif mode == "legacy" and name in _LEGACY_KEPT:
                 info["kept_entries"].append(name)
                 unsure.append(name)
@@ -1041,11 +1207,33 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
                                "LocaLM cannot tell whether these were already yours, so "
                                "they are kept; delete them by hand if they are LocaLM's: "
                                + ", ".join(unsure)))
-        rest = len(info["kept_entries"]) - len(unsure)
-        if rest:
-            why = ("was already in this folder before LocaLM was installed"
-                   if pre is not None else "not one of LocaLM's own files")
-            items.append(_Item(d, "data", "keep", f"{rest} item(s) kept: {why}"))
+        if before:
+            items.append(_Item(d, "data", "keep", f"{before} item(s) kept: was already in "
+                               "this folder before LocaLM first used it"))
+        if not_ours:
+            items.append(_Item(d, "data", "keep",
+                               f"{not_ours} item(s) kept: not one of LocaLM's own files"))
+        for par in sorted(parents, key=len, reverse=True):
+            items.append(_Item(par, "empty-dir", "remove"))
+
+    # A data folder named by LOCALM_HOME, which LocaLM uses while it is set.
+    env_home = os.path.expanduser(os.environ.get("LOCALM_HOME", "").strip().strip('"'))
+    if env_home and os.path.isabs(env_home) and os.path.isdir(env_home) \
+            and not any(_same(env_home, d["path"]) for d in data_info) \
+            and not any(i.kind == "data" and _same(env_home, i.path) for i in items):
+        eh = _plain_abs(env_home)
+        size, count, complete = _tree_size(Path(eh))
+        data_info.append({"path": eh, "mode": "legacy", "bytes": size, "files": count,
+                          "complete": complete, "delete": False, "entries": [],
+                          "kept_entries": []})
+        if purge_data:
+            items.append(_Item(eh, "data", "refuse",
+                               "LocaLM uses this folder while LOCALM_HOME is set; it is not "
+                               "part of this install's record, so it is not deleted - "
+                               "delete it by hand if it holds nothing else"))
+        else:
+            items.append(_Item(eh, "data", "keep",
+                               "LocaLM uses this folder while LOCALM_HOME is set"))
 
     # A stale lock left by an interrupted runtime download.
     lock = lib_dir.with_name(lib_dir.name + ".setup.lock")
@@ -1072,6 +1260,19 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
         if it.kind != "path-entry":
             it.status = follow
         items.append(it)
+    if moved_away:
+        for it in _pointers_into(Path(old_root)):
+            if it.kind == "command" and m and m.get("command_shim") \
+                    and _same(m["command_shim"], it.path):
+                continue
+            if it.kind == "path-entry" and handled and _same(it.path, handled):
+                continue
+            if any(i.kind == it.kind and _same(i.path, it.path) for i in items):
+                continue
+            it.status, it.root = "remove", old_root
+            it.reason = (f"points into {old_root}, where this install was before it "
+                         "was moved")
+            items.append(it)
 
     # Things kept on purpose, reported so nothing setup did is silent.
     if m and m.get("uv_shared_installed"):
@@ -1130,6 +1331,31 @@ def _pointers_into(root: Path) -> List[_Item]:
             out.append(_Item(receipt, "file", "remove",
                              "uv's install receipt for the uv in this folder"))
     return out
+
+
+def _mentions_folder(path: Path, folder) -> Optional[bool]:
+    """Whether the shortcut or menu entry at *path* names *folder* as a whole
+    path (not as the start of a longer folder name), in any of the encodings
+    a Windows shortcut or a text file stores it in. None when it cannot be
+    read."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    want = os.path.normcase(os.path.abspath(str(folder))).rstrip("\\/")
+    texts = [raw.decode("utf-8", "ignore"), raw.decode("utf-16-le", "ignore"),
+             raw[1:].decode("utf-16-le", "ignore"), raw.decode("latin-1")]
+    if sys.platform == "win32":
+        texts.append(raw.decode("mbcs", "ignore"))
+    for text in texts:
+        hay = os.path.normcase(text)
+        at = hay.find(want)
+        while at >= 0:
+            end = at + len(want)
+            if end == len(hay) or hay[end] in "\\/\"' \t\r\n\x00;":
+                return True
+            at = hay.find(want, at + 1)
+    return False
 
 
 def _is_full_path(p: str) -> bool:
@@ -1295,7 +1521,7 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
     report = {"removed": [], "skipped": [], "warned": [], "refused": [],
               "failed": [], "deferred": [], "running": [], "stopped": [], "notes": [],
               "data": [], "venv": "", "ok": True, "no_manifest": False,
-              "dry_run": bool(dry_run), "exit": EXIT_OK}
+              "dry_run": bool(dry_run), "force": bool(force), "exit": EXIT_OK}
 
     m = load(root)
     if m is not None and (m.get("schema") or 0) > SCHEMA_VERSION:
@@ -1304,14 +1530,16 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
         report["ok"] = False
         report["exit"] = EXIT_ABORTED
         return report
+    old_root = ""
     if m is None:
         report["no_manifest"] = True
     else:
-        m = _upgrade(m, root)
+        m, old_root = _rebase(_upgrade(m, root), root)
     report["venv"] = str(root / ".venv")
+    report["moved_from"] = old_root
 
     items, data_info = _plan(root, m, purge_data=purge_data,
-                             defer_runtime=defer_runtime)
+                             defer_runtime=defer_runtime, old_root=old_root)
     report["data"] = data_info
 
     busy_dirs = [root / ".venv"] + [root / n for n in RUNTIME_DIRS.values()]
@@ -1329,7 +1557,7 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
     if dry_run:
         for it in items:
             _classify(report, it, force=force, dry_run=True, root=root)
-        _global_command(report, m, root, dry_run=True)
+        _global_command(report, m, root, old_root, dry_run=True)
         return _finish(report, root, m, items, dry_run=True)
 
     if report["running"]:
@@ -1344,7 +1572,7 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
 
     for it in items:
         _classify(report, it, force=force, dry_run=False, root=root)
-    _global_command(report, m, root, dry_run=False)
+    _global_command(report, m, root, old_root, dry_run=False)
     return _finish(report, root, m, items, dry_run=False)
 
 
@@ -1371,19 +1599,30 @@ def _stop_all(report: dict, dirs: list, rounds: int = 3) -> bool:
     return False
 
 
-def _global_command(report: dict, m: Optional[dict], root: Path, *, dry_run: bool) -> None:
+def _global_command(report: dict, m: Optional[dict], root: Path, old_root: str = "",
+                    *, dry_run: bool) -> None:
     """Remove the optional global `localm` command through globalcmd. A
-    recorded command that now points to another install is kept."""
+    recorded command that now points to another install is kept. When the
+    install folder was moved from *old_root*, a command or PATH entry that
+    points into *old_root* is removed if that folder no longer exists, and
+    kept if it does (it then belongs to the install still there)."""
     if m is None or not (m.get("command_shim") or m.get("path_modified")):
         return
     shim = m.get("command_shim", "")
     if shim and Path(shim).name.lower() not in _SHIM_NAMES:
         report["refused"].append((shim, "not a localm command shim"))
+        report["partial"] = True
         return
-    if shim and not _shim_points_into(Path(shim), root):
+    gone = bool(old_root) and not os.path.exists(old_root)
+    if shim and not (_shim_points_into(Path(shim), root)
+                     or (gone and _shim_points_into(Path(shim), Path(old_root)))):
         report["skipped"].append((shim, "points to another LocaLM install - kept"))
         shim = ""
     path_dir = m.get("path_dir", "") if m.get("path_modified") else ""
+    if path_dir and old_root and not gone and _inside(path_dir, old_root):
+        report["skipped"].append((f"PATH entry {path_dir}",
+                                  f"belongs to the LocaLM install in {old_root} - kept"))
+        path_dir = ""
     if dry_run:
         if shim:
             report["removed"].append(shim)
@@ -1452,7 +1691,7 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
             report["removed"].append(label)
             return
         try:
-            n = _strip_uv_lines(Path(it.path), root)
+            n = _strip_uv_lines(Path(it.path), Path(it.root) if it.root else root)
         except (OSError, ValueError) as e:
             report["failed"].append((label, f"could not edit it: {e}"))
             return
@@ -1466,7 +1705,8 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
         report["skipped"].append((it.path, "already gone"))
         return
     if dry_run:
-        report["removed"].append(it.path)
+        report["removed"].append(f"{it.path}  (if it is empty by then)"
+                                 if it.kind == "empty-dir" else it.path)
         return
     try:
         if it.kind == "empty-dir":
@@ -1489,8 +1729,9 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
 
 def _finish(report: dict, root: Path, m: Optional[dict], items: List[_Item],
             *, dry_run: bool) -> dict:
-    asked_refused = any(it.status == "refuse" and it.kind in ("data", "data-entry", "venv", "runtime", "lib", "file")
-                        for it in items)
+    asked_refused = report.get("partial") or any(
+        it.status == "refuse" and it.kind in ("data", "data-entry", "venv", "runtime", "lib", "file")
+        for it in items)
     if report["failed"]:
         report["ok"] = False
         report["exit"] = EXIT_FAILED
@@ -1557,8 +1798,8 @@ def _pycache_dirs(root: Path, keep: Iterable[str] = ()) -> List[Path]:
 
 def _sweep_pycache(report: dict, root: Path, *, dry_run: bool) -> None:
     """Remove the Python bytecode caches running LocaLM from this folder
-    created, leaving any inside a data folder that is kept."""
-    keep = [d["path"] for d in report["data"] if not d["delete"]]
+    created, leaving any inside a data folder that is not deleted whole."""
+    keep = [d["path"] for d in report["data"] if not (d["delete"] and d["mode"] == "owned")]
     dirs = _pycache_dirs(root, keep)
     if not dirs:
         return
@@ -1667,11 +1908,16 @@ def format_report(rep: dict) -> List[str]:
     kept = [f"{x}  ({why})" for x, why in rep.get("skipped", [])
             if why not in ("already gone", "your saved data")]
     section("Kept:", kept)
-    section("Not in the install record - removed only if you continue:",
+    section("Not in the install record - removed only if you continue:" if dry
+            else ("Not in the install record - removed:" if rep.get("force")
+                  else "Not in the install record - kept:"),
             [f"{x}  ({why})" for x, why in rep.get("warned", [])])
     section("REFUSED - never removed:", [f"{x}  ({why})" for x, why in rep.get("refused", [])])
     section("Could not remove:", [f"{x}  ({why})" for x, why in rep.get("failed", [])])
     section("Also note:", [f"{x}  ({why})" for x, why in rep.get("notes", [])])
+    if rep.get("moved_from"):
+        out.append(f"  This install was set up in {rep['moved_from']}; what was recorded "
+                   "there was looked for in this folder.")
     if rep.get("no_manifest"):
         out.append("  [!] No install record (.localm-install.json) was found, so the")
         out.append("      items above are LocaLM's usual locations, not a record.")
@@ -1723,7 +1969,8 @@ def main(argv=None) -> int:
                    help="prepare the data folder this install already uses")
 
     c = sub.add_parser("current-data", help="print the data folder this install uses "
-                                            "(exit 1 when there is none)")
+                                            "(exit 1 when there is none, 3 when it is "
+                                            "set but not available)")
     c.add_argument("--root", default=".")
 
     u = sub.add_parser("uninstall", help="remove what setup created")
@@ -1750,16 +1997,19 @@ def main(argv=None) -> int:
     except (AttributeError, ValueError):
         pass
     if args.cmd == "current-data":
-        current = current_data_dir(args.root)
+        current, exists = configured_data_dir(args.root)
         if not current:
             return 1
         print(current)
-        return 0
+        return 0 if exists else EXIT_UNAVAILABLE
     if args.cmd == "prepare-data" and args.keep_current:
-        current = current_data_dir(args.root)
+        current, exists = configured_data_dir(args.root)
         if not current:
             print("  [!] No data folder is set up in this folder yet.")
             return 1
+        if not exists:
+            print(f"  [!] The data folder this install uses, {current}, is not available.")
+            return EXIT_UNAVAILABLE
         portable = _same(current, Path(args.root).resolve() / PORTABLE_HOME)
         args.portable, args.data_dir = portable, ("" if portable else current)
     if args.cmd == "record":
