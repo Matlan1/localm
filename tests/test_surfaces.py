@@ -17,6 +17,15 @@ from localm.inference import http_server as hs
 from localm.inference.http_server import create_app, mount_gui_surface
 
 
+@pytest.fixture(autouse=True)
+def _reset_gui_mounted_live():
+    """Clears http_server._gui_mounted_live before and after every test in this
+    file."""
+    hs._gui_mounted_live = False
+    yield
+    hs._gui_mounted_live = False
+
+
 def _api_app(tmp_path, instance_token="inst-secret-token"):
     """A fresh api-mode app (no engine) wired as advertise() would: an instance
     id, token, and bind coordinates on app.state, surface mode 'api'."""

@@ -17,6 +17,15 @@ import pytest
 from localm.inference import http_server
 
 
+@pytest.fixture(autouse=True)
+def _reset_gui_mounted_live():
+    """Clears http_server._gui_mounted_live before and after every test in this
+    file."""
+    http_server._gui_mounted_live = False
+    yield
+    http_server._gui_mounted_live = False
+
+
 def test_restart_route_registered_and_gated():
     app = http_server.create_app(None)
     routes = {getattr(r, "path", None): r for r in app.routes}

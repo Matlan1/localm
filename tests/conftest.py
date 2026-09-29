@@ -805,15 +805,6 @@ def _reset_http_server_model_name_state():
 
 
 @pytest.fixture(autouse=True)
-def _reset_http_server_gui_mount_state():
-    """Clears http_server._gui_mounted_live before and after every test."""
-    from localm.inference import http_server as hs
-    hs._gui_mounted_live = False
-    yield
-    hs._gui_mounted_live = False
-
-
-@pytest.fixture(autouse=True)
 def _neutralise_bare_llama_pointers():
     """tests/_bare_llama.py's make_bare_llama() registers every instance it
     builds in a module-level list; a caller that overrides a pointer to a
