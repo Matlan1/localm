@@ -4018,6 +4018,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         title="localm inference server",
         version="0.2.0",
         lifespan=_make_lifespan(),
+        **diagnostics.fastapi_telemetry_off(),
     )
 
     # 3. Exception handlers, then the app.state the middleware and routes read.

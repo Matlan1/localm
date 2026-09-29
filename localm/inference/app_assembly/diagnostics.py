@@ -2,11 +2,13 @@
 """Kernel diagnostics ``create_app()`` wires in: the debug-mode request log and
 GET /debug/stacks. Both report the event-loop lag the lifespan's heartbeat
 measures, and /debug/stacks decides on ``app.state.bind_host``, never on the
-request peer."""
+request peer. Also the ``FastAPI()`` options that keep FastAPI's own telemetry
+off."""
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import sys
 import time
@@ -15,6 +17,17 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import localm.inference.http_server as _hs
+
+
+def fastapi_telemetry_off() -> dict:
+    """Keyword arguments for ``FastAPI()`` that turn off FastAPI's built-in
+    OpenTelemetry support: tracing, metrics, logs, and the exporters it would
+    otherwise configure at startup from the ``OTEL_*`` environment variables.
+    Empty when the installed FastAPI has no ``telemetry`` parameter."""
+    if "telemetry" not in inspect.signature(FastAPI.__init__).parameters:
+        return {}
+    return {"telemetry": {"auto_configure": False, "tracing": False,
+                          "metrics": False, "logs": False}}
 
 
 def add_request_logging(app: FastAPI) -> None:

@@ -143,6 +143,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **localm no longer fails to start when an OpenTelemetry endpoint is set in
+  your environment.** With FastAPI 0.142, which a fresh install now picks up, a
+  set `OTEL_EXPORTER_OTLP_ENDPOINT` stopped the server at startup, because
+  FastAPI tried to set up telemetry export on its own. localm now turns
+  FastAPI's built-in telemetry off, so nothing is exported whatever `OTEL_*`
+  variables are set.
 - **LocaLM starts again when its data-folder setting was saved by an older
   `setup.bat`.** A custom data folder path with characters such as é was saved
   in the console's code page instead of UTF-8, and LocaLM stopped at startup

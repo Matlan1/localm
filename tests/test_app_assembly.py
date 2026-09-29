@@ -51,6 +51,8 @@ _EFFECTIVE_CHAIN = (
 def _effective_chain(app) -> tuple:
     """The built ASGI stack from ServerErrorMiddleware down to
     ExceptionMiddleware, both excluded, as ``(class name, dispatch name)``.
+    FastAPI's own ExceptionTelemetryMiddleware (FastAPI 0.142 and later),
+    which sits right inside ServerErrorMiddleware, is excluded as well.
     Follows each layer's inner app (``app``, or ``_app`` for
     _BodyStreamCapMiddleware)."""
     node = app.build_middleware_stack()
@@ -64,7 +66,10 @@ def _effective_chain(app) -> tuple:
         node = inner if inner is not None else getattr(node, "_app", None)
     assert names[0] == ("ServerErrorMiddleware", None), names
     assert names[-1] == ("ExceptionMiddleware", None), names
-    return tuple(names[1:-1])
+    inner_names = names[1:-1]
+    if inner_names[:1] == [("ExceptionTelemetryMiddleware", None)]:
+        inner_names = inner_names[1:]
+    return tuple(inner_names)
 
 
 @pytest.mark.parametrize("debug", [False, True], ids=["debug-off", "debug-on"])
@@ -92,6 +97,33 @@ def test_transport_middleware_is_the_outermost_three():
         ("_DisconnectSignalMiddleware", None),
         ("_BodyStreamCapMiddleware", None),
     )
+
+
+def test_the_app_starts_with_opentelemetry_export_variables_set(monkeypatch):
+    """OTEL_* export variables in the environment neither stop the server from
+    starting nor turn on any telemetry export. The endpoint is a local port
+    nothing listens on."""
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+    app = create_app(None)
+    with TestClient(app) as client:
+        assert client.get("/whoami").status_code == 200
+
+
+def test_fastapi_telemetry_options_turn_off_every_signal_and_env_export():
+    """With a FastAPI that has a ``telemetry`` parameter, the app is built with
+    tracing, metrics, logs and the OTEL_* auto-configuration all off; with an
+    older FastAPI, no telemetry option is passed."""
+    from fastapi import FastAPI
+
+    from localm.inference.app_assembly.diagnostics import fastapi_telemetry_off
+    options = fastapi_telemetry_off()
+    if "telemetry" not in inspect.signature(FastAPI.__init__).parameters:
+        assert options == {}
+        return
+    assert options == {"telemetry": {"auto_configure": False, "tracing": False,
+                                     "metrics": False, "logs": False}}
 
 
 def test_a_handler_runs_inside_the_transport_middleware():
