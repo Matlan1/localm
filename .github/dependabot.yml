@@ -8,6 +8,36 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Minor and patch updates arrive as one pull request; major updates and the
+    # packages under exclude-patterns keep a pull request each.
+    groups:
+      uv-minor-and-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "certifi"
+          - "click"
+          - "cryptography"
+          - "fastapi"
+          - "httpx"
+          - "huggingface-hub"
+          - "playwright"
+          - "psutil"
+          - "pydantic"
+          - "pytest"
+          - "pytest-xdist"
+          - "pywin32"
+          - "regex"
+          - "requests"
+          - "rich"
+          - "starlette"
+          - "tokenizers"
+          - "transformers"
+          - "triton-windows"
+          - "uvicorn"
+        update-types:
+          - "minor"
+          - "patch"
     ignore:
       # GPU/ROCm wheels resolve from a custom AMD index (pyproject [tool.uv.sources]
       # / [[tool.uv.index]]); blanket bumps break the install. Update these by hand
@@ -21,6 +51,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     ignore:
       # checkout, setup-python, setup-uv and setup-node are pinned to full-length
       # commit SHAs (see the workflow files). github/codeql-action alone stays on
@@ -46,3 +83,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
