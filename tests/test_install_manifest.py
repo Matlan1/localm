@@ -1,22 +1,77 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The install provenance ledger: uninstall removes ONLY what record() wrote,
-never an unrecorded path, and the data-dir rm -rf is guarded against the
-Steam/Pop!_OS class of disaster (root, $HOME, repo, ancestors, symlinks).
+"""The install provenance ledger and the uninstaller built on it.
+
+Uninstall removes what setup recorded plus LocaLM's own fixed in-clone
+locations, never an unrecorded path elsewhere, keeps the saved data unless
+asked, deletes only LocaLM's own entries from a data folder that existed
+before setup, and never deletes the Python runtime it is running on (that is
+deferred to the calling script). The data-dir rm -rf stays guarded against
+root, $HOME, the repo, its ancestors and symlinks.
+
+The machine is never touched: the user PATH is an in-memory fake, the home
+folder and app-data folders point into tmp_path, and the only processes that
+are stopped are ones these tests started.
 """
 
 from __future__ import annotations
 
+import ast
 import json
+import os
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from localm import globalcmd as gc
 from localm import install_manifest as im
+
+LOCALM = Path(im.__file__).resolve().parent
+REAL_LIST_PROCESSES = im.list_processes
+
+
+class _FakePath:
+    """In-memory HKCU\\Environment\\Path."""
+
+    def __init__(self, value=""):
+        self.value = value
+
+    def read(self):
+        return self.value, 2
+
+    def write(self, value, regtype):
+        self.value = value
+
+
+@pytest.fixture(autouse=True)
+def isolated(tmp_path, monkeypatch):
+    """Home, app data and the user PATH all point at tmp_path; process listing
+    returns nothing unless a test asks for the real one."""
+    home = tmp_path / "userhome"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for var in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "USERPROFILE"):
+        d = tmp_path / ("env-" + var.lower())
+        d.mkdir()
+        monkeypatch.setenv(var, str(d))
+    fp = _FakePath()
+    monkeypatch.setattr(gc, "_win_read_user_path", fp.read)
+    monkeypatch.setattr(gc, "_win_write_user_path", fp.write)
+    monkeypatch.setattr(im, "list_processes", lambda: [])
+    return {"home": home, "path": fp}
+
+
+def _clone(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "runtime" / "localm_llama_runtime" / "lib").mkdir(parents=True)
+    return root
 
 
 def _fake_install(root: Path, *, data_created=True):
-    """Build a recorded install layout under *root* and return key paths."""
+    """A recorded install under *root*; returns the key paths."""
     lib = root / "runtime" / "lib"
     lib.mkdir(parents=True)
     (lib / "llama.dll").write_text("x", encoding="utf-8")
@@ -32,7 +87,6 @@ def _fake_install(root: Path, *, data_created=True):
     venv = root / ".venv"
     venv.mkdir()
 
-    # Record BEFORE creating the unknown file, so it is not in the binary snapshot.
     im.record(root, venv=str(venv), lib_dir=str(lib), home_cfg=str(cfg),
               data_dir=str(data), data_created=data_created, shortcut=str(shortcut))
     unknown.write_text("not ours", encoding="utf-8")
@@ -40,64 +94,379 @@ def _fake_install(root: Path, *, data_created=True):
             "venv": venv, "unknown": unknown}
 
 
+# ------------------------------ recording --------------------------------- #
+
 def test_record_and_load_roundtrip(tmp_path):
     p = _fake_install(tmp_path)
     m = im.load(tmp_path)
     assert m["schema"] == im.SCHEMA_VERSION
-    assert sorted(m["binaries"]) == ["ggml.dll", "llama.dll"]    # snapshot, no unknown
+    assert sorted(m["lib_entries"]) == ["ggml.dll", "llama.dll"]  # snapshot, no unknown
     assert m["data_created"] is True
     assert Path(m["venv"]) == p["venv"].resolve()
 
 
+def test_lib_snapshot_takes_every_provisioned_entry_but_the_git_sentinels(tmp_path):
+    lib = _clone(tmp_path) / "runtime" / "localm_llama_runtime" / "lib"
+    for name in ("llama.dll", "LICENSE.llama-cpp", ".localm-backend", ".gitkeep", ".gitignore"):
+        (lib / name).write_text("x", encoding="utf-8")
+    (lib / "rocblas" / "library").mkdir(parents=True)
+    im.record(tmp_path, lib_dir=str(lib))
+    assert im.load(tmp_path)["lib_entries"] == sorted(
+        [".localm-backend", "LICENSE.llama-cpp", "llama.dll", "rocblas"])
+
+
+def test_record_merges_instead_of_overwriting(tmp_path):
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), runtime_contained=True,
+              python_dir=str(tmp_path / ".python"), path_modified=True,
+              files=[str(tmp_path / "LocaLM.desktop")])
+    im.record(tmp_path, shortcut=str(tmp_path / "LocaLM.lnk"), stamp="S",
+              files=[str(tmp_path / "LocaLM.desktop"), str(tmp_path / "other.txt")])
+    m = im.load(tmp_path)
+    assert Path(m["venv"]) == (tmp_path / ".venv").resolve()
+    assert Path(m["python_dir"]) == (tmp_path / ".python").resolve()
+    assert m["runtime_contained"] is True and m["path_modified"] is True
+    assert Path(m["shortcut"]) == (tmp_path / "LocaLM.lnk").resolve()
+    assert m["stamp"] == "S"
+    assert [Path(f).name for f in m["files"]] == ["LocaLM.desktop", "other.txt"]
+
+
+def test_record_refuses_a_newer_schema(tmp_path):
+    im.manifest_path(tmp_path).write_text('{"schema": 999}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        im.record(tmp_path, venv=str(tmp_path / ".venv"))
+    assert im.main(["record", "--root", str(tmp_path), "--venv", "x"]) == 1
+    assert json.loads(im.manifest_path(tmp_path).read_text())["schema"] == 999
+
+
+def test_v2_manifest_is_upgraded_and_its_custom_data_claim_dropped(tmp_path):
+    lib = tmp_path / "runtime" / "lib"
+    lib.mkdir(parents=True)
+    shared = tmp_path / "shared-data"
+    im.manifest_path(tmp_path).write_text(json.dumps({
+        "schema": 2, "venv": str(tmp_path / ".venv"), "lib_dir": str(lib),
+        "binaries": ["llama.dll"], "data_dir": str(shared), "data_created": True,
+    }), encoding="utf-8")
+    im.record(tmp_path, stamp="later")
+    m = im.load(tmp_path)
+    assert m["schema"] == 3
+    assert m["lib_entries"] == ["llama.dll"] and "binaries" not in m
+    assert m["data_created"] is False and m["data_preexisting"] is None
+
+
+# ------------------------------ data folder ------------------------------- #
+
+def test_prepare_portable_creates_home_and_drops_the_pointer(tmp_path):
+    (tmp_path / "localm-home.cfg").write_text("X:\\old", encoding="utf-8")
+    target = im.prepare_data(tmp_path, portable=True)
+    assert target == tmp_path.resolve() / "home"
+    assert (target / im.DATA_MARKER).is_file()
+    assert not (tmp_path / "localm-home.cfg").exists()
+    m = im.load(tmp_path)
+    assert Path(m["data_dir"]) == target and m["data_created"] is True
+
+
+def test_prepare_custom_new_folder_records_created_parents_and_utf8_pointer(tmp_path):
+    target = tmp_path / "Jösé 数据" / "a" / "LocaLM"
+    im.prepare_data(tmp_path, data_dir=str(target))
+    assert target.is_dir() and (target / im.DATA_MARKER).is_file()
+    cfg = (tmp_path / "localm-home.cfg").read_bytes().decode("utf-8")
+    assert cfg.strip() == str(target)
+    m = im.load(tmp_path)
+    assert m["data_created"] is True and m["data_preexisting"] == []
+    assert [Path(p) for p in m["data_parents_created"]] == [
+        tmp_path / "Jösé 数据", tmp_path / "Jösé 数据" / "a"]
+    assert Path(m["home_cfg"]) == (tmp_path / "localm-home.cfg").resolve()
+
+
+def test_prepare_existing_folder_remembers_what_was_already_there(tmp_path):
+    shared = tmp_path / "AI"
+    (shared / "models").mkdir(parents=True)
+    (shared / "ComfyUI").mkdir()
+    (shared / "notes.txt").write_text("mine", encoding="utf-8")
+    im.prepare_data(tmp_path, data_dir=str(shared))
+    m = im.load(tmp_path)
+    assert m["data_created"] is False
+    assert m["data_preexisting"] == ["ComfyUI", "models", "notes.txt"]
+
+
+def test_a_marker_without_a_record_counts_everything_as_already_there(tmp_path):
+    old = tmp_path / "kept-data"
+    (old / "models").mkdir(parents=True)
+    (old / "config.json").write_text("{}", encoding="utf-8")
+    (old / im.DATA_MARKER).write_text("{}", encoding="utf-8")
+    (old / "holiday.jpg").write_text("mine", encoding="utf-8")
+    im.prepare_data(tmp_path, data_dir=str(old))
+    assert im.load(tmp_path)["data_preexisting"] == ["config.json", "holiday.jpg", "models"]
+
+
+@pytest.mark.parametrize("bad", ["relative\\dir", "relative/dir", ""])
+def test_prepare_refuses_a_relative_or_empty_path(tmp_path, bad, capsys):
+    with pytest.raises(ValueError):
+        im.prepare_data(tmp_path, data_dir=bad)
+    assert not (tmp_path / "localm-home.cfg").exists()
+    assert im.main(["prepare-data", "--root", str(tmp_path), "--data-dir", bad or " "]) == 1
+    assert "Cannot use that data folder" in capsys.readouterr().out
+
+
+def test_prepare_refuses_a_file(tmp_path):
+    f = tmp_path / "afile"
+    f.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError):
+        im.prepare_data(tmp_path, data_dir=str(f))
+
+
+def test_prepare_again_on_its_own_folder_keeps_it_owned(tmp_path):
+    target = tmp_path / "LocaLM-data"
+    im.prepare_data(tmp_path, data_dir=str(target))
+    (target / "models").mkdir()
+    im.prepare_data(tmp_path, data_dir=str(target))
+    assert im.load(tmp_path)["data_created"] is True
+
+
+# ------------------------------ uninstall --------------------------------- #
+
 def test_uninstall_removes_only_recorded_items(tmp_path):
     p = _fake_install(tmp_path)
     rep = im.uninstall(tmp_path, purge_data=False)
-    assert rep["ok"]
-    # recorded binaries + cfg + shortcut gone
+    assert rep["ok"] and rep["exit"] == im.EXIT_OK
     assert not (p["lib"] / "llama.dll").exists()
     assert not (p["lib"] / "ggml.dll").exists()
     assert not p["cfg"].exists()
     assert not p["shortcut"].exists()
-    # the UNRECORDED file is left strictly alone
-    assert p["unknown"].exists()
-    # data kept (no --purge-data), venv reported not removed, manifest gone
+    assert p["unknown"].exists()                      # unrecorded: warned, kept
+    assert any("not in the install record" in why for _, why in rep["warned"])
     assert p["data"].exists()
-    assert p["venv"].exists()
-    assert Path(rep["venv"]) == p["venv"].resolve()
+    assert not p["venv"].exists()
     assert im.load(tmp_path) is None
 
 
-def test_uninstall_purge_data_removes_data_when_we_created_it(tmp_path):
-    p = _fake_install(tmp_path, data_created=True)
+def test_uninstall_purge_removes_a_folder_setup_created(tmp_path):
+    target = tmp_path / "made" / "LocaLM-data"
+    im.prepare_data(tmp_path, data_dir=str(target))
+    (target / "models").mkdir()
+    (target / "models" / "m.gguf").write_text("z", encoding="utf-8")
     rep = im.uninstall(tmp_path, purge_data=True)
-    assert not p["data"].exists()
-    assert str(p["data"].resolve()) in rep["removed"]
+    assert not target.exists()
+    assert not (tmp_path / "made").exists()           # the parent setup created, now empty
+    assert str(target) in rep["removed"]
 
 
-def test_purge_data_not_ours_is_warned_not_removed_without_force(tmp_path):
-    p = _fake_install(tmp_path, data_created=False)
-    rep = im.uninstall(tmp_path, purge_data=True)     # no force
-    assert p["data"].exists()                         # kept - not removed by default
-    assert any("not recorded as created" in why for _, why in rep["warned"])
+def test_created_claim_without_the_marker_is_not_trusted(tmp_path):
+    p = _fake_install(tmp_path, data_created=True)    # recorded created, no marker
+    (p["data"] / "config.json").write_text("{}", encoding="utf-8")
+    (p["data"] / "sessions.json").write_text("{}", encoding="utf-8")
+    rep = im.uninstall(tmp_path, purge_data=True, force=True)
+    assert p["data"].is_dir()
+    assert (p["data"] / "model.gguf").exists()        # not LocaLM's name: kept
+    assert (p["data"] / "config.json").exists()       # a name other programs use: kept
+    assert not (p["data"] / "sessions.json").exists() # only LocaLM's: deleted
+    assert any("cannot tell" in why and "config.json" in why for _, why in rep["skipped"])
 
 
-def test_purge_data_not_ours_removed_with_force(tmp_path):
-    p = _fake_install(tmp_path, data_created=False)
-    im.uninstall(tmp_path, purge_data=True, force=True)   # user accepted the risk
-    assert not p["data"].exists()                     # safe nested path -> removed
+def test_purge_in_a_folder_that_already_existed_deletes_only_localm_entries(tmp_path):
+    shared = tmp_path / "AI"
+    (shared / "models").mkdir(parents=True)           # the user's own models folder
+    (shared / "models" / "theirs.safetensors").write_text("x", encoding="utf-8")
+    (shared / "notes.txt").write_text("mine", encoding="utf-8")
+    im.prepare_data(tmp_path, data_dir=str(shared))
+    (shared / "config.json").write_text("{}", encoding="utf-8")
+    (shared / "sessions").mkdir()
+    (shared / "config.json.lock").write_text("", encoding="utf-8")
+    (shared / "config.json.123.tmp").write_text("", encoding="utf-8")
+    (shared / "comfy-launch-abcdef123456.log").write_text("", encoding="utf-8")
+    (shared / "later-app-output").mkdir()             # another program, after setup
+
+    rep = im.uninstall(tmp_path, purge_data=True, force=True)
+
+    assert shared.is_dir()
+    assert (shared / "models" / "theirs.safetensors").exists()
+    assert (shared / "notes.txt").exists()
+    assert (shared / "later-app-output").is_dir()
+    for gone in ("config.json", "sessions", im.DATA_MARKER, "config.json.lock",
+                 "config.json.123.tmp", "comfy-launch-abcdef123456.log"):
+        assert not (shared / gone).exists(), gone
+    data = next(d for d in rep["data"] if Path(d["path"]) == shared)
+    assert "models" in data["kept_entries"] and "notes.txt" in data["kept_entries"]
+
+
+def test_legacy_custom_folder_keeps_what_might_not_be_localms(tmp_path):
+    """A schema 2 record cannot say what was in a custom folder before LocaLM:
+    names other programs use too are kept, LocaLM-only ones deleted."""
+    lib = tmp_path / "runtime" / "lib"
+    lib.mkdir(parents=True)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "config.json").write_text("{}", encoding="utf-8")
+    (shared / "photos").mkdir()
+    (shared / "models").mkdir()
+    (shared / "workflows").mkdir()
+    (shared / "chats").mkdir()
+    im.manifest_path(tmp_path).write_text(json.dumps({
+        "schema": 2, "venv": "", "lib_dir": str(lib), "binaries": [],
+        "data_dir": str(shared), "data_created": True}), encoding="utf-8")
+    im.uninstall(tmp_path, purge_data=True, force=True)
+    assert shared.is_dir() and (shared / "photos").is_dir()
+    assert (shared / "config.json").exists()
+    assert (shared / "models").is_dir() and (shared / "workflows").is_dir()
+    assert not (shared / "chats").exists()
+
+
+def test_portable_home_is_localms_even_without_a_record(tmp_path):
+    home = tmp_path / "home"
+    (home / "models").mkdir(parents=True)
+    (home / "anything").write_text("x", encoding="utf-8")
+    im.uninstall(tmp_path, purge_data=False)
+    assert home.is_dir()
+    im.uninstall(tmp_path, purge_data=True)
+    assert not home.exists()
+
+
+def test_pointer_file_names_a_data_folder_the_record_does_not(tmp_path):
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "registry.json").write_text("{}", encoding="utf-8")
+    (other / "instance_id.txt").write_text("x", encoding="utf-8")
+    (other / "family.mp4").write_text("x", encoding="utf-8")
+    (tmp_path / "localm-home.cfg").write_text(str(other) + "\n", encoding="utf-8")
+    im.uninstall(tmp_path, purge_data=True, force=True)
+    assert (other / "family.mp4").exists()
+    assert (other / "registry.json").exists()
+    assert not (other / "instance_id.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the console code page is Windows-only")
+def test_pointer_file_in_the_console_code_page_is_read(tmp_path):
+    """An older setup.bat wrote localm-home.cfg with cmd's echo, in the OEM
+    code page, so a non-ASCII folder name is not valid UTF-8 there."""
+    import ctypes
+    oem = f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    other = tmp_path / "données"
+    other.mkdir()
+    (other / "instance_id.txt").write_text("x", encoding="utf-8")
+    (other / "family.mp4").write_text("x", encoding="utf-8")
+    raw = (str(other) + "\r\n").encode(oem)
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+    (tmp_path / "localm-home.cfg").write_bytes(raw)
+    im.uninstall(tmp_path, purge_data=True, force=True)
+    assert (other / "family.mp4").exists()
+    assert not (other / "instance_id.txt").exists()
+
+
+def test_an_unreadable_pointer_file_is_reported(tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    (tmp_path / "localm-home.cfg").write_bytes(b"/data/\xff\xfe\n")
+    rep = im.uninstall(tmp_path, purge_data=True, dry_run=True)
+    assert any("cannot read it" in why for _, why in rep["notes"]), rep["notes"]
+
+
+def _app_window_install(tmp_path, isolated, monkeypatch, platform):
+    """A portable install with the app-window extra, and pywebview's shared
+    profile folder holding something."""
+    monkeypatch.setattr(sys, "platform", platform)
+    clone = tmp_path / "clone"
+    site = (clone / ".venv" / "Lib" / "site-packages" if platform == "win32"
+            else clone / ".venv" / "lib" / "python3.12" / "site-packages")
+    (site / "webview").mkdir(parents=True)
+    profile = (Path(os.environ["APPDATA"]) / "pywebview" if platform == "win32"
+               else isolated["home"] / ".pywebview")
+    (profile / "EBWebView").mkdir(parents=True)
+    (profile / "EBWebView" / "Local State").write_text("{}", encoding="utf-8")
+    im.prepare_data(clone, portable=True)
+    return clone, profile
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_deleting_data_names_what_it_cannot_reach(tmp_path, isolated, monkeypatch, platform):
+    """The app window's profile is pywebview's shared default folder, and a
+    browser keeps its own copy of recent chats: both are named."""
+    clone, profile = _app_window_install(tmp_path, isolated, monkeypatch, platform)
+    kept = im.uninstall(clone, purge_data=False, dry_run=True)
+    assert kept["notes"] == []
+    assert not any(_same_path(x, profile) for x, _ in kept["skipped"])
+    plan = im.uninstall(clone, purge_data=True, dry_run=True)
+    assert any(_same_path(x, profile) and "other pywebview apps" in why
+               for x, why in plan["skipped"]), plan["skipped"]
+    assert [str(x) for x, _ in plan["notes"]] == ["Your web browser"], plan["notes"]
+    text = "\n".join(im.format_report(plan))
+    assert "Kept:" in text and "Also note:" in text and str(profile) in text
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_deleting_data_never_touches_the_app_window_profile(tmp_path, isolated, monkeypatch,
+                                                           platform):
+    clone, profile = _app_window_install(tmp_path, isolated, monkeypatch, platform)
+    im.uninstall(clone, purge_data=True, force=True)
+    assert (profile / "EBWebView" / "Local State").is_file()
+    assert not (clone / "home").exists()
+
+
+def test_no_app_window_profile_note_without_the_app_window_extra(tmp_path, isolated,
+                                                                 monkeypatch):
+    """Without the app-window package this install never wrote to pywebview's
+    folder, so naming it would claim chats are there that are not."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    profile = Path(os.environ["APPDATA"]) / "pywebview"
+    profile.mkdir()
+    im.prepare_data(tmp_path, portable=True)
+    plan = im.uninstall(tmp_path, purge_data=True, dry_run=True)
+    assert not any(_same_path(x, profile) for x, _ in plan["skipped"]), plan["skipped"]
+    assert [str(x) for x, _ in plan["notes"]] == ["Your web browser"]
+
+
+def _same_path(a, b) -> bool:
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def test_kept_data_is_reported_with_its_size(tmp_path):
+    im.prepare_data(tmp_path, portable=True)
+    (tmp_path / "home" / "big.bin").write_bytes(b"x" * 2048)
+    rep = im.uninstall(tmp_path, dry_run=True)
+    d = rep["data"][0]
+    assert d["delete"] is False and d["bytes"] >= 2048 and d["files"] >= 2
+    text = "\n".join(im.format_report(rep))
+    assert "KEPT:" in text and "KB" in text
+
+
+def test_data_folder_link_entries_lose_the_link_not_the_target(tmp_path):
+    target = tmp_path / "real-models"
+    target.mkdir()
+    (target / "keep.gguf").write_text("x", encoding="utf-8")
+    shared = tmp_path / "AI"
+    shared.mkdir()
+    im.prepare_data(tmp_path, data_dir=str(shared))
+    link = shared / "models"
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
+    im.uninstall(tmp_path, purge_data=True, force=True)
+    assert not os.path.lexists(link)
+    assert (target / "keep.gguf").exists()
+
+
+def test_purge_data_refused_for_unsafe_folder(tmp_path):
+    (tmp_path / "runtime" / "lib").mkdir(parents=True)
+    im.record(tmp_path, venv=str(tmp_path / ".venv"),
+              lib_dir=str(tmp_path / "runtime" / "lib"),
+              data_dir=str(tmp_path), data_created=True)
+    (tmp_path / "keepme.txt").write_text("important", encoding="utf-8")
+    rep = im.uninstall(tmp_path, purge_data=True, force=True)
+    assert (tmp_path / "keepme.txt").exists()
+    assert any("repository root" in why for _, why in rep["refused"])
+    assert rep["exit"] == im.EXIT_PARTIAL
 
 
 def test_no_manifest_warns_then_force_removes_known_binaries(tmp_path):
     lib = tmp_path / "runtime" / "localm_llama_runtime" / "lib"
     lib.mkdir(parents=True)
     (lib / "llama.dll").write_text("x", encoding="utf-8")
-    # No record: warned, but nothing removed without force.
     rep = im.uninstall(tmp_path)
     assert rep["no_manifest"] is True
     assert rep["removed"] == []
     assert any("no install record" in why for _, why in rep["warned"])
     assert (lib / "llama.dll").exists()
-    # With force (the dragons warning was shown and accepted): removed.
     im.uninstall(tmp_path, force=True)
     assert not (lib / "llama.dll").exists()
 
@@ -105,145 +474,190 @@ def test_no_manifest_warns_then_force_removes_known_binaries(tmp_path):
 def test_bad_schema_aborts(tmp_path):
     im.manifest_path(tmp_path).write_text('{"schema": 999}', encoding="utf-8")
     rep = im.uninstall(tmp_path, purge_data=True)
-    assert rep["ok"] is False
+    assert rep["ok"] is False and rep["exit"] == im.EXIT_ABORTED
     assert rep["removed"] == []
 
 
 def test_dry_run_touches_nothing(tmp_path):
     p = _fake_install(tmp_path)
     rep = im.uninstall(tmp_path, purge_data=True, dry_run=True)
-    assert (p["lib"] / "llama.dll").exists()      # still there
-    assert p["data"].exists()
-    assert im.load(tmp_path) is not None          # manifest preserved
-    assert rep["removed"]                         # but the plan is reported
+    assert (p["lib"] / "llama.dll").exists()
+    assert p["data"].exists() and p["venv"].exists()
+    assert im.load(tmp_path) is not None
+    assert rep["removed"]
 
 
-# --------------------------- the rm -rf guard ----------------------------- #
-
-def test_unsafe_data_dir_refuses_dangerous_targets(tmp_path):
-    repo = tmp_path
-    root_anchor = Path(tmp_path.anchor)           # "/" or "Z:\\"
-    assert im._unsafe_data_dir("", repo)
-    assert im._unsafe_data_dir("relative/dir", repo)
-    assert im._unsafe_data_dir(str(root_anchor), repo)
-    assert im._unsafe_data_dir(str(Path.home()), repo)
-    assert im._unsafe_data_dir(str(repo), repo)              # repo root
-    assert im._unsafe_data_dir(str(repo.parent), repo)       # ancestor of repo
-    # a genuine nested data dir is allowed
-    assert im._unsafe_data_dir(str(repo / "data"), repo) is None
-
-
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="symlink creation usually needs privilege on Windows")
-def test_unsafe_data_dir_refuses_symlink(tmp_path):
-    real = tmp_path / "real"; real.mkdir()
-    link = tmp_path / "link"
-    link.symlink_to(real, target_is_directory=True)
-    assert im._unsafe_data_dir(str(link), tmp_path)           # symlink refused
+def test_poisoned_record_cannot_reach_outside_the_clone(tmp_path):
+    outside = tmp_path / "system"
+    outside.mkdir()
+    victim = outside / "kernel32.dll"
+    victim.write_text("x", encoding="utf-8")
+    note = outside / "resume.docx"
+    note.write_text("x", encoding="utf-8")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    im.manifest_path(clone).write_text(json.dumps({
+        "schema": 3, "venv": "", "lib_dir": str(outside), "lib_entries": ["kernel32.dll"],
+        "shortcut": str(note), "files": [str(note)],
+        "home_cfg": str(outside / "localm-home.cfg"), "data_dir": "",
+    }), encoding="utf-8")
+    rep = im.uninstall(clone, force=True)
+    assert victim.exists() and note.exists()
+    reasons = " | ".join(why for _, why in rep["refused"])
+    assert "runtime folder recorded outside this folder" in reasons
+    assert "not a LocaLM shortcut" in reasons
 
 
-def test_unsafe_data_dir_refuses_when_home_cannot_be_resolved(tmp_path, monkeypatch):
-    # A broken Path.home() must make the guard REFUSE the path, not silently
-    # treat it as safe just because the $HOME comparison itself blew up.
-    def _broken_home():
-        raise RuntimeError("could not determine home directory")
-    monkeypatch.setattr(Path, "home", staticmethod(_broken_home))
-    assert im._unsafe_data_dir(str(tmp_path / "data"), tmp_path) is not None
+# ------------------------- the runtime it runs on ------------------------- #
+
+def _runtime_layout(root: Path) -> None:
+    for name in (".venv", ".python", ".cache", ".uv"):
+        (root / name).mkdir(parents=True)
+        (root / name / "f").write_text("x", encoding="utf-8")
+    (root / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
+    im.record(root, venv=str(root / ".venv"), runtime_contained=True,
+              python_dir=str(root / ".python"), cache_dir=str(root / ".cache"),
+              uv_dir=str(root / ".uv"))
 
 
-def test_uninstall_refuses_when_data_dir_is_unsafe(tmp_path):
-    # Record a manifest whose data_dir is the repo root itself, then purge.
-    (tmp_path / "runtime" / "lib").mkdir(parents=True)
-    im.record(tmp_path, venv=str(tmp_path / ".venv"),
-              lib_dir=str(tmp_path / "runtime" / "lib"),
-              data_dir=str(tmp_path), data_created=True)
-    (tmp_path / "keepme.txt").write_text("important", encoding="utf-8")
-    rep = im.uninstall(tmp_path, purge_data=True, force=True)  # NOT overridable
-    assert (tmp_path / "keepme.txt").exists()                 # repo not nuked even forced
-    assert any("repository root" in why for _, why in rep["refused"])
+def test_defer_runtime_leaves_the_runtime_for_the_script(tmp_path):
+    _runtime_layout(tmp_path)
+    rep = im.uninstall(tmp_path, defer_runtime=True)
+    assert rep["exit"] == im.EXIT_OK
+    for name in (".venv", ".python", ".cache", ".uv"):
+        assert (tmp_path / name).is_dir(), name
+    assert sorted(im.pending_path(tmp_path).read_text(encoding="ascii").split()) == \
+        [".cache", ".python", ".uv", ".venv"]
+    assert im.load(tmp_path) is not None                # kept until the script finishes
+    removed, left = im.finish_pending(tmp_path)
+    assert not left and len(removed) == 4
+    assert not im.pending_path(tmp_path).exists()
+    assert im.load(tmp_path) is None
 
 
-# ------------------------------ schema v2 --------------------------------- #
+def test_finish_pending_ignores_names_it_does_not_own(tmp_path):
+    (tmp_path / "src").mkdir()
+    im.pending_path(tmp_path).write_text("src\n..\n.venv\n", encoding="ascii")
+    im.finish_pending(tmp_path)
+    assert (tmp_path / "src").is_dir()
 
-def _v2_lib(root: Path) -> Path:
-    lib = root / "runtime" / "lib"
+
+def test_the_running_interpreters_folder_is_deferred_not_deleted(tmp_path, monkeypatch):
+    _runtime_layout(tmp_path)
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / ".python" / "cpython"))
+    rep = im.uninstall(tmp_path)
+    assert (tmp_path / ".python").is_dir()
+    assert str(tmp_path.resolve() / ".python") in rep["deferred"]
+    assert not (tmp_path / ".cache").exists()           # not in use: removed in-process
+
+
+def test_contained_runtime_removed_in_process_and_shared_kept(tmp_path):
+    lib = tmp_path / "runtime" / "lib"
     lib.mkdir(parents=True)
-    return lib
-
-
-def test_record_v2_fields_roundtrip(tmp_path):
-    lib = _v2_lib(tmp_path)
-    pydir = tmp_path / ".python"; pydir.mkdir()
-    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
-              runtime_contained=True, python_dir=str(pydir),
-              cache_dir=str(tmp_path / ".cache"),
-              path_dir=str(tmp_path / "bin"),
-              command_shim=str(tmp_path / "bin" / "localm.cmd"),
-              path_modified=True)
-    m = im.load(tmp_path)
-    assert m["schema"] == 2
-    assert m["runtime_contained"] is True
-    assert Path(m["python_dir"]) == pydir.resolve()
-    assert m["path_modified"] is True
-
-
-def test_uninstall_removes_contained_runtime(tmp_path):
-    lib = _v2_lib(tmp_path)
-    pydir = tmp_path / ".python"; pydir.mkdir()
-    (pydir / "python").write_text("x", encoding="utf-8")
-    cachedir = tmp_path / ".cache"; cachedir.mkdir()
-    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
-              runtime_contained=True, python_dir=str(pydir), cache_dir=str(cachedir))
+    pydir = tmp_path / ".python"
+    pydir.mkdir()
+    shared = tmp_path / "elsewhere" / "uvpython"
+    shared.mkdir(parents=True)
+    im.record(tmp_path, lib_dir=str(lib), runtime_contained=True, python_dir=str(pydir))
+    im.uninstall(tmp_path)
+    assert not pydir.exists()
+    im.record(tmp_path, lib_dir=str(lib), runtime_contained=False, python_dir=str(shared))
     rep = im.uninstall(tmp_path)
-    assert not pydir.exists()                          # contained -> removed
-    assert not cachedir.exists()
-    assert str(pydir.resolve()) in rep["removed"]
-
-
-def test_uninstall_keeps_shared_runtime(tmp_path):
-    # A SHARED runtime lives outside the clone and is reused by other clones: it
-    # must be reported, NEVER deleted.
-    lib = _v2_lib(tmp_path)
-    shared = tmp_path / "elsewhere" / "uvpython"; shared.mkdir(parents=True)
-    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
-              runtime_contained=False, python_dir=str(shared))
-    rep = im.uninstall(tmp_path)
-    assert shared.exists()                             # never deleted
+    assert shared.exists()
     assert any("shared runtime kept" in why for _, why in rep["skipped"])
 
 
-def test_uv_dir_roundtrips_and_is_removed_when_contained(tmp_path):
-    # A Portable install that had to bootstrap uv itself confines uv's OWN binary
-    # dir to the clone too (not just the Python runtime it manages) - this is the
-    # v2 "uv_dir" field. Removed on uninstall exactly like python_dir/cache_dir.
-    lib = _v2_lib(tmp_path)
-    uvdir = tmp_path / ".uv"; uvdir.mkdir()
-    (uvdir / "uv.exe").write_text("x", encoding="utf-8")
-    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
-              runtime_contained=True, uv_dir=str(uvdir))
-    m = im.load(tmp_path)
-    assert Path(m["uv_dir"]) == uvdir.resolve()
-    rep = im.uninstall(tmp_path)
-    assert not uvdir.exists()
-    assert str(uvdir.resolve()) in rep["removed"]
+def test_a_failure_keeps_the_record_and_the_runtime(tmp_path):
+    _runtime_layout(tmp_path)
+    lib = tmp_path / "runtime" / "localm_llama_runtime" / "lib"
+    lib.mkdir(parents=True)
+    locked = lib / "llama.dll"
+    locked.write_text("x", encoding="utf-8")
+    im.record(tmp_path, lib_dir=str(lib))
+    if sys.platform == "win32":
+        holder = open(locked, "rb")                     # no delete sharing on Windows
+    else:
+        os.chmod(lib, 0o500)
+        holder = None
+    try:
+        rep = im.uninstall(tmp_path, defer_runtime=True)
+    finally:
+        if holder:
+            holder.close()
+        else:
+            os.chmod(lib, 0o700)
+    if not locked.exists():
+        pytest.skip("this account can delete from a read-only folder")
+    assert rep["exit"] == im.EXIT_FAILED
+    assert rep["deferred"] == []
+    assert not im.pending_path(tmp_path).exists()
+    assert im.load(tmp_path) is not None
+    assert (tmp_path / ".python").is_dir() and (tmp_path / ".venv").is_dir()
 
 
-def test_uv_dir_kept_when_shared(tmp_path):
-    # uv was already on PATH (a pre-existing / Shared install) - setup never
-    # installed it into this clone, so uv_dir is blank and there is nothing to
-    # remove; a NON-blank uv_dir recorded without runtime_contained (e.g. a
-    # user-edited manifest) must still be reported, never deleted.
-    lib = _v2_lib(tmp_path)
-    shared_uv = tmp_path / "elsewhere" / "uv"; shared_uv.mkdir(parents=True)
-    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
-              runtime_contained=False, uv_dir=str(shared_uv))
-    rep = im.uninstall(tmp_path)
-    assert shared_uv.exists()
-    assert any("shared runtime kept" in why for _, why in rep["skipped"])
+# --------------------- entries that point into the clone ------------------ #
 
+def test_user_path_entries_inside_the_clone_are_removed(tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    other = str(tmp_path / "tools")
+    isolated["path"].value = os.pathsep.join([other, str(clone / ".uv"), str(clone / "bin")])
+    rep = im.uninstall(clone)
+    assert isolated["path"].value == other
+    assert any(x.startswith("PATH entry") for x in rep["removed"])
+
+
+def test_uv_rc_lines_for_this_folder_are_removed_byte_exactly(tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    home = isolated["home"]
+    clone = home / "localm"
+    (clone / ".uv").mkdir(parents=True)
+    im.record(clone, runtime_contained=True, uv_dir=str(clone / ".uv"))
+    bashrc = home / ".bashrc"
+    bashrc.write_bytes(b"alias ll='ls -l'\r\n\r\n. \"$HOME/localm/.uv/env\"\r\nexport X=1\r\n")
+    profile = home / ".profile"
+    profile.write_text(f'. "{(clone / ".uv").as_posix()}/env"\n. "$HOME/other/.uv/env"\n',
+                       encoding="utf-8")
+    fish = home / ".config" / "fish" / "conf.d" / "uv.env.fish"
+    fish.parent.mkdir(parents=True)
+    fish.write_text('\nsource "$HOME/localm/.uv/env.fish"\n', encoding="utf-8")
+    rep = im.uninstall(clone)
+    assert bashrc.read_bytes() == b"alias ll='ls -l'\r\n\r\nexport X=1\r\n"
+    assert profile.read_text(encoding="utf-8") == '. "$HOME/other/.uv/env"\n'
+    assert not fish.exists()
+    assert sum(x.startswith("uv line in") for x in rep["removed"]) == 3
+
+
+def test_uv_rc_lines_follow_the_uv_folder_decision(tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    home = isolated["home"]
+    clone = home / "localm"
+    (clone / ".uv").mkdir(parents=True)                 # unrecorded: only a warning
+    bashrc = home / ".bashrc"
+    bashrc.write_text('. "$HOME/localm/.uv/env"\n', encoding="utf-8")
+    im.uninstall(clone)                                 # no force
+    assert (clone / ".uv").is_dir()
+    assert bashrc.read_text(encoding="utf-8") == '. "$HOME/localm/.uv/env"\n'
+
+
+def test_uv_receipt_is_removed_only_when_it_names_this_folder(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    receipt = Path(os.environ["LOCALAPPDATA"]) / "uv" / "uv-receipt.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"install_prefix": str(clone / ".uv")}), encoding="utf-8")
+    im.uninstall(clone)
+    assert not receipt.exists()
+    receipt.write_text(json.dumps({"install_prefix": str(tmp_path / "global")}),
+                       encoding="utf-8")
+    im.uninstall(clone)
+    assert receipt.exists()
+
+
+# ------------------------------ global command ---------------------------- #
 
 def test_uninstall_reverses_global_command(tmp_path, monkeypatch):
-    import localm.globalcmd as gc
     calls = {}
 
     def fake_uninstall_command(path_dir, shim):
@@ -251,7 +665,8 @@ def test_uninstall_reverses_global_command(tmp_path, monkeypatch):
         return {"removed": [shim, f"PATH entry {path_dir}"], "notes": []}
 
     monkeypatch.setattr(gc, "uninstall_command", fake_uninstall_command)
-    lib = _v2_lib(tmp_path)
+    lib = tmp_path / "runtime" / "lib"
+    lib.mkdir(parents=True)
     im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
               path_dir=str(tmp_path / "bin"),
               command_shim=str(tmp_path / "bin" / "localm.cmd"), path_modified=True)
@@ -260,10 +675,35 @@ def test_uninstall_reverses_global_command(tmp_path, monkeypatch):
     assert any("PATH entry" in x for x in rep["removed"])
 
 
+def test_uninstall_skips_path_when_not_modified(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_uninstall_command(path_dir, shim):
+        seen["path_dir"] = path_dir
+        return {"removed": [shim] if shim else [], "notes": []}
+
+    monkeypatch.setattr(gc, "uninstall_command", fake_uninstall_command)
+    lib = tmp_path / "runtime" / "lib"
+    lib.mkdir(parents=True)
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              path_dir=str(tmp_path / "bin"),
+              command_shim=str(tmp_path / "bin" / "localm.cmd"), path_modified=False)
+    im.uninstall(tmp_path)
+    assert seen["path_dir"] == ""
+
+
+def test_a_failing_global_command_is_a_failure_not_a_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(gc, "uninstall_command", lambda p, s: {
+        "removed": [], "notes": [f"could not remove shim {s}: denied"]})
+    im.record(tmp_path, command_shim=str(tmp_path / "bin" / "localm.cmd"))
+    rep = im.uninstall(tmp_path)
+    assert rep["exit"] == im.EXIT_FAILED
+    assert im.load(tmp_path) is not None
+
+
 def test_v1_manifest_still_uninstalls(tmp_path):
-    # An OLD schema-1 manifest (no v2 keys) must still uninstall cleanly (missing
-    # keys read as absent).
-    lib = _v2_lib(tmp_path)
+    lib = tmp_path / "runtime" / "lib"
+    lib.mkdir(parents=True)
     (lib / "llama.dll").write_text("x", encoding="utf-8")
     im.manifest_path(tmp_path).write_text(json.dumps({
         "schema": 1, "venv": str(tmp_path / ".venv"), "lib_dir": str(lib),
@@ -275,20 +715,867 @@ def test_v1_manifest_still_uninstalls(tmp_path):
     assert not (lib / "llama.dll").exists()
 
 
-def test_uninstall_skips_path_when_not_modified(tmp_path, monkeypatch):
-    # path_modified=False (we installed the shim but PATH was already set): uninstall
-    # must remove our shim but NOT strip a PATH dir we did not add ourselves.
-    import localm.globalcmd as gc
-    seen = {}
+# ------------------------------- the rm guard ----------------------------- #
 
-    def fake_uninstall_command(path_dir, shim):
-        seen["path_dir"] = path_dir
-        return {"removed": [shim] if shim else [], "notes": []}
+def test_unsafe_data_dir_refuses_dangerous_targets(tmp_path):
+    repo = tmp_path
+    root_anchor = Path(tmp_path.anchor)
+    assert im._unsafe_data_dir("", repo)
+    assert im._unsafe_data_dir("relative/dir", repo)
+    assert im._unsafe_data_dir(str(root_anchor), repo)
+    assert im._unsafe_data_dir(str(Path.home()), repo)
+    assert im._unsafe_data_dir(str(repo), repo)
+    assert im._unsafe_data_dir(str(repo.parent), repo)
+    assert im._unsafe_data_dir(str(repo / "data"), repo) is None
 
-    monkeypatch.setattr(gc, "uninstall_command", fake_uninstall_command)
-    lib = _v2_lib(tmp_path)
-    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
-              path_dir=str(tmp_path / "bin"),
-              command_shim=str(tmp_path / "bin" / "localm.cmd"), path_modified=False)
-    im.uninstall(tmp_path)
-    assert seen["path_dir"] == ""            # PATH we did not change is left alone
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="symlink creation usually needs privilege on Windows")
+def test_unsafe_data_dir_refuses_symlink(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert im._unsafe_data_dir(str(link), tmp_path)
+
+
+def test_unsafe_data_dir_refuses_a_junction_on_windows(tmp_path):
+    if sys.platform != "win32":
+        pytest.skip("junctions are Windows-only")
+    import _winapi
+    real = tmp_path / "real"
+    real.mkdir()
+    _winapi.CreateJunction(str(real), str(tmp_path / "j"))
+    assert im._unsafe_data_dir(str(tmp_path / "j"), tmp_path) == "is a symlink"
+
+
+def test_unsafe_data_dir_refuses_when_home_cannot_be_resolved(tmp_path, monkeypatch):
+    def _broken_home():
+        raise RuntimeError("could not determine home directory")
+    monkeypatch.setattr(Path, "home", staticmethod(_broken_home))
+    assert im._unsafe_data_dir(str(tmp_path / "data"), tmp_path) is not None
+
+
+# ------------------------------- processes -------------------------------- #
+
+def _abs_path(*parts) -> str:
+    return os.path.join("C:\\" if os.name == "nt" else os.sep, *parts)
+
+
+def test_running_from_matches_programs_inside_not_what_they_started():
+    """A browser or file viewer LocaLM opened runs a program from elsewhere
+    and is the user's, so it is never stopped."""
+    venv, py = _abs_path("clone", ".venv"), _abs_path("clone", ".python")
+    procs = [
+        (1, 0, _abs_path("Windows", "explorer.exe"), 5),
+        (10, 1, os.path.join(venv, "Scripts", "localm.exe"), 100),
+        (11, 10, _abs_path("Program Files", "Browser", "browser.exe"), 110),
+        (12, 11, _abs_path("Program Files", "Browser", "browser.exe"), 111),
+        (13, 10, None, 120),
+        (20, 1, os.path.join(py, "python.exe"), 200),               # this process
+        (21, 20, os.path.join(venv, "Scripts", "python.exe"), 210), # its child, not an ancestor
+        (30, 1, _abs_path("usr", "bin", "python3"), 300,            # started as the venv's
+         os.path.join(venv, "bin", "python")),                      # symlinked python
+    ]
+    got = {pid for pid, _ in im.running_from([venv, py], procs=procs, self_pid=20)}
+    assert got == {10, 21, 30}
+
+
+def test_running_from_excludes_this_process_and_its_ancestors():
+    procs = [(1, 0, os.path.join(os.sep, "c", ".venv", "x"), 1),
+             (2, 1, os.path.join(os.sep, "c", ".python", "p"), 2)]
+    got = im.running_from([os.path.join(os.sep, "c")], procs=procs, self_pid=2)
+    assert got == []
+
+
+def _spawn_from(clone: Path) -> subprocess.Popen:
+    """A real process whose program lives in clone/.venv."""
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(clone / ".venv")],
+                   check=True, capture_output=True, timeout=180)
+    py = clone / ".venv" / ("Scripts" if sys.platform == "win32" else "bin") / \
+        ("python.exe" if sys.platform == "win32" else "python")
+    (clone / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
+    return subprocess.Popen([str(py), "-c", "import time; time.sleep(120)"])
+
+
+def test_a_running_localm_blocks_uninstall_until_stopped(tmp_path, monkeypatch):
+    monkeypatch.setattr(im, "list_processes", REAL_LIST_PROCESSES)
+    clone = _clone(tmp_path / "clone")
+    proc = _spawn_from(clone)
+    try:
+        deadline = time.monotonic() + 30
+        found = []
+        while time.monotonic() < deadline and proc.pid not in found:
+            found = [pid for pid, _ in im.running_from([clone / ".venv"]) or []]
+            time.sleep(0.2)
+        assert proc.pid in found, found
+
+        dry = im.uninstall(clone, dry_run=True)
+        assert dry["running"], dry
+        assert "will be stopped first" in "\n".join(im.format_report(dry))
+
+        blocked = im.uninstall(clone)
+        assert blocked["exit"] == im.EXIT_RUNNING
+        assert (clone / ".venv").is_dir()
+
+        done = im.uninstall(clone, stop_running=True, defer_runtime=True)
+        assert done["exit"] == im.EXIT_OK, done
+        assert done["stopped"]
+        proc.wait(timeout=20)
+        assert proc.poll() is not None
+        removed, left = im.finish_pending(clone)
+        assert not left and not (clone / ".venv").exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=20)
+
+
+# ------------------------------------ CLI --------------------------------- #
+
+def test_cli_dry_run_prints_sections_and_exit_codes(tmp_path, capsys):
+    _fake_install(tmp_path)
+    assert im.main(["uninstall", "--root", str(tmp_path), "--dry-run"]) == im.EXIT_OK
+    out = capsys.readouterr().out
+    assert "Will be removed:" in out and "KEPT:" in out
+    assert im.main(["uninstall", "--root", str(tmp_path), "--dry-run", "--purge-data"]) in (
+        im.EXIT_OK, im.EXIT_PARTIAL)
+    out = capsys.readouterr().out
+    assert "In " in out or "WILL BE DELETED" in out
+
+
+def test_cli_prepare_and_finish(tmp_path, capsys):
+    assert im.main(["prepare-data", "--root", str(tmp_path), "--portable"]) == 0
+    assert "Data directory:" in capsys.readouterr().out
+    assert im.main(["finish", "--root", str(tmp_path)]) == 0
+
+
+# ------------------------------ the data layout --------------------------- #
+
+def _is_data_dir_expr(node) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "HOME_DIR"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "HOME_DIR"
+    if isinstance(node, ast.Call):
+        f = node.func
+        return (isinstance(f, ast.Name) and f.id == "home_dir") or \
+            (isinstance(f, ast.Attribute) and f.attr == "home_dir")
+    return False
+
+
+def _data_dir_children() -> dict:
+    """Every ``<data dir> / <name>`` in the package, where the data dir is
+    ``HOME_DIR``, ``config.HOME_DIR``, ``home_dir()`` or ``config.home_dir()``
+    and the name is a string literal, a module-level string constant, or an
+    f-string (its placeholders become ``*``). Paths built any other way (a
+    function parameter such as ``tls_dir(home)``) are not seen."""
+    found = {}
+    for f in LOCALM.rglob("*.py"):
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        consts = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                    and isinstance(node.value.value, str):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        consts[t.id] = node.value.value
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                    and _is_data_dir_expr(node.left)):
+                continue
+            r = node.right
+            if isinstance(r, ast.Constant) and isinstance(r.value, str):
+                name = r.value
+            elif isinstance(r, ast.Name) and r.id in consts:
+                name = consts[r.id]
+            elif isinstance(r, ast.JoinedStr):
+                name = "".join(v.value if isinstance(v, ast.Constant) else "*"
+                               for v in r.values)
+            else:
+                continue
+            found.setdefault(name.split("/")[0], f"{f.relative_to(LOCALM.parent)}:{node.lineno}")
+    return found
+
+
+def test_data_entries_cover_every_data_dir_child():
+    found = _data_dir_children()
+    assert len(found) >= 20, found                       # the scan itself works
+    missing = {n: where for n, where in found.items() if not im.is_data_entry(n)}
+    assert not missing, (
+        "LocaLM writes these into its data folder but install_manifest does not "
+        f"list them, so 'delete saved data' would leave them behind: {missing}")
+
+
+# ----------------------- the data folder's own record ---------------------- #
+
+def _user_folder(base: Path) -> Path:
+    """A folder that existed before LocaLM, holding the user's own models and
+    workflows (names LocaLM uses too) and a note."""
+    shared = base / "AI"
+    (shared / "models").mkdir(parents=True)
+    (shared / "models" / "theirs.safetensors").write_text("user model", encoding="utf-8")
+    (shared / "workflows").mkdir()
+    (shared / "workflows" / "mine.json").write_text("{}", encoding="utf-8")
+    (shared / "notes.txt").write_text("mine", encoding="utf-8")
+    return shared
+
+
+def test_a_repair_that_picks_the_same_folder_keeps_the_users_files(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    shared = _user_folder(tmp_path)
+    im.prepare_data(clone, data_dir=str(shared))
+    (shared / "chats").mkdir()                         # LocaLM's own data
+    im.prepare_data(clone, data_dir=str(shared))       # a repair, same folder
+    snapshot = im.load(clone)["data_preexisting"]
+    im.uninstall(clone, purge_data=True, force=True)
+    assert (shared / "models" / "theirs.safetensors").exists()
+    assert (shared / "workflows" / "mine.json").exists()
+    assert (shared / "notes.txt").exists()
+    assert not (shared / "chats").exists()
+    assert snapshot == ["models", "notes.txt", "workflows"]
+
+
+def test_reinstalling_into_kept_data_keeps_the_users_files(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    shared = _user_folder(tmp_path)
+    im.prepare_data(first, data_dir=str(shared))
+    (shared / "chats").mkdir()
+    im.uninstall(first, force=True)                    # keeps the data
+    assert not im.manifest_path(first).exists()
+    im.prepare_data(second, data_dir=str(shared))
+    im.uninstall(second, purge_data=True, force=True)
+    assert (shared / "models" / "theirs.safetensors").exists()
+    assert (shared / "workflows" / "mine.json").exists()
+    assert not (shared / "chats").exists()
+
+
+def test_a_folder_another_install_still_uses_is_not_deleted(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    data = tmp_path / "LocaLM-data"
+    im.prepare_data(first, data_dir=str(data))
+    im.prepare_data(second, data_dir=str(data))
+    (data / "chats").mkdir()
+    rep = im.uninstall(second, purge_data=True, force=True)
+    assert (data / "chats").is_dir()
+    assert rep["exit"] == im.EXIT_PARTIAL
+    assert any("also used by" in why and str(first) in why for _, why in rep["refused"])
+    assert "NOT DELETED (see REFUSED below)" in "\n".join(im.format_report(rep))
+    rep = im.uninstall(first, purge_data=True, force=True)   # now the only user
+    assert not data.exists()
+    assert rep["exit"] == im.EXIT_OK
+
+
+def test_switching_the_data_folder_keeps_the_old_one_in_the_record(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    custom = tmp_path / "LocaLM-data"
+    im.prepare_data(clone, data_dir=str(custom))
+    (custom / "chats").mkdir()
+    im.prepare_data(clone, portable=True)
+    assert [Path(p) for p in im.load(clone)["previous_data_dirs"]] == [custom]
+    plan = im.uninstall(clone, dry_run=True)
+    assert {Path(d["path"]) for d in plan["data"]} == {custom, clone / "home"}
+    im.uninstall(clone, purge_data=True, force=True)
+    assert not custom.exists() and not (clone / "home").exists()
+
+
+def test_current_data_dir_follows_the_setting(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    assert im.current_data_dir(clone) == ""
+    im.prepare_data(clone, portable=True)
+    assert Path(im.current_data_dir(clone)) == clone / "home"
+    custom = tmp_path / "data"
+    im.prepare_data(clone, data_dir=str(custom))
+    assert Path(im.current_data_dir(clone)) == custom
+
+
+def test_keep_current_prepares_the_folder_already_in_use(tmp_path, capsys):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    assert im.main(["prepare-data", "--root", str(clone), "--keep-current"]) == 1
+    assert "No data folder" in capsys.readouterr().out
+    custom = tmp_path / "data"
+    im.prepare_data(clone, data_dir=str(custom))
+    assert im.main(["current-data", "--root", str(clone)]) == 0
+    assert capsys.readouterr().out.strip() == str(custom)
+    assert im.main(["prepare-data", "--root", str(clone), "--keep-current"]) == 0
+    assert (clone / "localm-home.cfg").read_text(encoding="utf-8").strip() == str(custom)
+    assert not (clone / "home").exists()
+    marker = im.read_marker(custom)
+    assert marker["bound"] is True
+    assert marker["installs"] == [{"path": str(clone.resolve()), "host": im._this_host()}]
+
+
+@pytest.mark.parametrize("which", ["clone", "parent", "home"])
+def test_a_folder_uninstall_could_never_delete_is_refused_as_the_data_folder(
+        tmp_path, isolated, which):
+    clone = tmp_path / "LocaLM" / "app"
+    clone.mkdir(parents=True)
+    target = {"clone": clone, "parent": clone.parent, "home": isolated["home"]}[which]
+    with pytest.raises(ValueError, match="cannot be the data folder"):
+        im.prepare_data(clone, data_dir=str(target))
+    assert not (clone / "localm-home.cfg").exists()
+    assert not (target / im.DATA_MARKER).exists()
+
+
+def test_the_plan_lists_what_it_removes_inside_a_kept_data_folder(tmp_path):
+    outer = tmp_path / "LocaLM"
+    clone = outer / "app"
+    lib = clone / "runtime" / "localm_llama_runtime" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "llama.dll").write_text("x", encoding="utf-8")
+    im.record(clone, lib_dir=str(lib), data_dir=str(outer), data_preexisting=["app"])
+    rep = im.uninstall(clone, purge_data=True, dry_run=True)
+    text = "\n".join(im.format_report(rep))
+    assert str(lib / "llama.dll") in text
+    assert "NOT DELETED (see REFUSED below)" in text
+    assert rep["exit"] == im.EXIT_PARTIAL
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks deletion only on Windows")
+def test_a_record_that_cannot_be_deleted_is_reported_as_a_failure(tmp_path):
+    im.prepare_data(tmp_path, portable=True)
+    holder = open(im.manifest_path(tmp_path), "rb")
+    try:
+        rep = im.uninstall(tmp_path)
+    finally:
+        holder.close()
+    assert im.manifest_path(tmp_path).exists()
+    assert rep["exit"] == im.EXIT_FAILED and rep["ok"] is False
+
+
+def test_a_program_of_yours_in_a_shared_folder_is_not_stopped(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    shared = _user_folder(tmp_path)
+    (shared / "ComfyUI_portable").mkdir()
+    im.prepare_data(clone, data_dir=str(shared))
+    (shared / "comfyui" / "venv").mkdir(parents=True)  # LocaLM's managed ComfyUI
+    theirs = shared / "ComfyUI_portable" / "python.exe"
+    ours = shared / "comfyui" / "venv" / "python.exe"
+    monkeypatch.setattr(im, "list_processes",
+                        lambda: [(501, 1, str(theirs), 10), (502, 1, str(ours), 11)])
+    rep = im.uninstall(clone, purge_data=True, dry_run=True)
+    assert [pid for pid, _ in rep["running"]] == [502]
+
+
+def test_relative_user_path_entries_are_never_removed(tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    monkeypatch.chdir(clone)
+    monkeypatch.delenv("LOCALM_UNDEFINED_VAR", raising=False)
+    keep = [".", "bin", os.path.join("%LOCALM_UNDEFINED_VAR%", "x")]
+    isolated["path"].value = os.pathsep.join(keep + [str(clone / ".uv")])
+    im.uninstall(clone)
+    assert isolated["path"].value == os.pathsep.join(keep)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the command is a symlink on Linux/macOS")
+def test_the_global_command_symlink_is_removed_not_its_target(tmp_path, isolated):
+    clone = tmp_path / "clone"
+    target = clone / ".venv" / "bin" / "localm"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    shim = isolated["home"] / ".local" / "bin" / "localm"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(target)
+    im.record(clone, command_shim=str(shim), path_dir=str(shim.parent))
+    assert im.load(clone)["command_shim"] == str(shim)
+    im.uninstall(clone, force=True)
+    assert not os.path.lexists(shim)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the command is a symlink on Linux/macOS")
+def test_an_older_record_of_the_command_still_removes_the_symlink(tmp_path, isolated):
+    clone = tmp_path / "clone"
+    target = clone / ".venv" / "bin" / "localm"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    shim = isolated["home"] / ".local" / "bin" / "localm"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(target)
+    record = json.loads(im.manifest_path(im.record(clone, venv=str(clone / ".venv")).parent)
+                        .read_text(encoding="utf-8"))
+    record["command_shim"] = str(target)               # what the older record held
+    im.manifest_path(clone).write_text(json.dumps(record), encoding="utf-8")
+    im.uninstall(clone, force=True)
+    assert not os.path.lexists(shim)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the command is a symlink on Linux/macOS")
+def test_a_command_now_pointing_to_another_install_is_kept(tmp_path, isolated):
+    clone, other = tmp_path / "clone", tmp_path / "other"
+    (clone / ".venv" / "bin").mkdir(parents=True)
+    target = other / ".venv" / "bin" / "localm"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    shim = isolated["home"] / ".local" / "bin" / "localm"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(target)
+    im.record(clone, command_shim=str(shim))
+    rep = im.uninstall(clone, force=True)
+    assert shim.is_symlink() and target.exists()
+    assert any("another LocaLM install" in why for _, why in rep["skipped"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinked shell files on Linux/macOS")
+def test_a_symlinked_shell_file_is_edited_through_the_link(tmp_path, isolated, monkeypatch):
+    import stat
+    monkeypatch.setattr(sys, "platform", "linux")
+    home = isolated["home"]
+    clone = home / "localm"
+    (clone / ".uv").mkdir(parents=True)
+    im.record(clone, runtime_contained=True, uv_dir=str(clone / ".uv"))
+    real = tmp_path / "dotfiles" / "bashrc"
+    real.parent.mkdir()
+    real.write_text(f'export A=1\n. "{clone}/.uv/env"\n', encoding="utf-8")
+    os.chmod(real, 0o600)
+    mode = stat.S_IMODE(os.stat(real).st_mode)
+    (home / ".bashrc").symlink_to(real)
+    im.uninstall(clone, force=True)
+    assert (home / ".bashrc").is_symlink()
+    assert real.read_text(encoding="utf-8") == "export A=1\n"
+    assert stat.S_IMODE(os.stat(real).st_mode) == mode
+
+
+# --------------------------- Python bytecode caches ------------------------ #
+
+def _pyc(folder: Path) -> Path:
+    cache = folder / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "m.cpython-312.pyc").write_bytes(b"\x00")
+    return cache
+
+
+def test_bytecode_caches_in_the_install_are_removed(tmp_path):
+    clone = tmp_path / "clone"
+    src = _pyc(clone / "localm" / "cli")
+    top = _pyc(clone / "localm")
+    git = _pyc(clone / ".git" / "hooks")
+    home = im.prepare_data(clone, portable=True)
+    plugin = _pyc(home / "plugins" / "mine")
+    plan = im.uninstall(clone, dry_run=True)
+    assert src.is_dir()
+    assert any("__pycache__" in x and "2 Python bytecode" in x for x in plan["removed"])
+    im.uninstall(clone, force=True)
+    assert not src.exists() and not top.exists()
+    assert git.is_dir()                                 # not the repository's own files
+    assert plugin.is_dir()                              # inside the kept data folder
+
+
+def test_bytecode_caches_behind_a_link_are_left_alone(tmp_path):
+    outside = _pyc(tmp_path / "elsewhere" / "pkg")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    link = clone / "linked"
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(outside.parent), str(link))
+    else:
+        link.symlink_to(outside.parent, target_is_directory=True)
+    im.prepare_data(clone, portable=True)
+    im.uninstall(clone, force=True)
+    assert outside.is_dir()
+
+
+# ------------------------------------------------------------------ #
+#  The data-folder marker belongs to the folder it was written for    #
+# ------------------------------------------------------------------ #
+
+OTHER_PC = "OTHER-PC-7Q4M"
+
+
+def _copy_contents(src: Path, dst: Path) -> None:
+    """Copy everything in *src*, its marker included, into *dst*, the way
+    selecting every file in one folder and pasting it into another does."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if item.is_dir():
+            shutil.copytree(item, dst / item.name, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dst / item.name)
+
+
+def _photos(folder: Path) -> Path:
+    photo = folder / "photos" / "holiday.jpg"
+    photo.parent.mkdir(parents=True)
+    photo.write_text("mine", encoding="utf-8")
+    return photo
+
+
+def _gone_install(base: Path) -> Path:
+    """A data folder setup created for an install that was removed since."""
+    first = base / "first"
+    first.mkdir()
+    made = im.prepare_data(first, data_dir=str(base / "made-by-setup"))
+    (made / "chats").mkdir()
+    im.manifest_path(first).unlink()
+    return made
+
+
+def _add_install(folder: Path, path: str, host: str) -> None:
+    marker = json.loads((folder / im.DATA_MARKER).read_text(encoding="utf-8"))
+    marker["installs"].append({"path": path, "host": host})
+    (folder / im.DATA_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+
+
+def test_a_copied_marker_does_not_make_the_users_folder_localms(tmp_path):
+    made = _gone_install(tmp_path)
+    ai = tmp_path / "AI"
+    photo = _photos(ai)
+    _copy_contents(made, ai)
+    second = tmp_path / "second"
+    second.mkdir()
+    im.prepare_data(second, data_dir=str(ai))
+    plan = im.uninstall(second, purge_data=True, dry_run=True)
+    rep = im.uninstall(second, purge_data=True, force=True)
+    assert photo.is_file()
+    assert (ai / "chats").is_dir()                      # it was there before this install
+    assert [d["mode"] for d in plan["data"]] == ["entries"]
+    assert rep["exit"] == im.EXIT_OK
+
+
+def test_a_copied_marker_over_the_folders_own_marker_is_ignored(tmp_path):
+    made = _gone_install(tmp_path)
+    second = tmp_path / "second"
+    second.mkdir()
+    shared = _user_folder(tmp_path)
+    im.prepare_data(second, data_dir=str(shared))
+    (shared / "chats").mkdir()
+    shutil.copy2(made / im.DATA_MARKER, shared / im.DATA_MARKER)
+    rep = im.uninstall(second, purge_data=True, force=True)
+    assert (shared / "models" / "theirs.safetensors").is_file()
+    assert (shared / "workflows" / "mine.json").is_file()
+    assert (shared / "notes.txt").is_file()
+    assert not (shared / "chats").exists()
+    assert rep["exit"] == im.EXIT_OK
+
+
+def test_a_copied_marker_in_a_folder_named_only_by_the_setting_is_ignored(tmp_path):
+    made = _gone_install(tmp_path)
+    second = tmp_path / "second"
+    second.mkdir()
+    im.prepare_data(second, data_dir=str(tmp_path / "second-data"))
+    ai = tmp_path / "AI"
+    photo = _photos(ai)
+    shutil.copy2(made / im.DATA_MARKER, ai / im.DATA_MARKER)
+    (second / im.HOME_CFG_NAME).write_text(str(ai) + "\n", encoding="utf-8")
+    im.uninstall(second, purge_data=True, force=True)
+    assert photo.is_file()
+
+
+def test_a_folder_setup_created_is_still_deleted_whole(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    data = im.prepare_data(clone, data_dir=str(tmp_path / "LocaLM-data"))
+    (data / "chats").mkdir()
+    assert im.read_marker(data)["bound"] is True
+    im.uninstall(clone, purge_data=True, force=True)
+    assert not data.exists()
+
+
+def test_an_install_on_another_computer_keeps_a_shared_folder(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    data = im.prepare_data(clone, data_dir=str(tmp_path / "LocaLM-data"))
+    (data / "chats").mkdir()
+    _add_install(data, str(clone), OTHER_PC)            # the same path, on another PC
+    rep = im.uninstall(clone, purge_data=True, force=True)
+    assert (data / "chats").is_dir()
+    assert rep["exit"] == im.EXIT_PARTIAL
+    assert any(f"on the computer {OTHER_PC}" in why for _, why in rep["refused"])
+
+
+def test_preparing_keeps_other_computers_and_drops_installs_that_left(tmp_path):
+    first, second, third = (tmp_path / n for n in ("first", "second", "third"))
+    for clone in (first, second, third):
+        clone.mkdir()
+    data = tmp_path / "LocaLM-data"
+    im.prepare_data(first, data_dir=str(data))
+    im.prepare_data(second, data_dir=str(data))
+    im.prepare_data(second, data_dir=str(tmp_path / "elsewhere"))
+    im.manifest_path(first).unlink()
+    _add_install(data, "C:\\LocaLM", OTHER_PC)
+    im.prepare_data(third, data_dir=str(data))
+    got = {(i["path"], i["host"]) for i in im.read_marker(data)["installs"]}
+    assert got == {("C:\\LocaLM", OTHER_PC), (str(third.resolve()), im._this_host())}
+
+
+def test_repairing_an_older_install_does_not_count_localms_files_as_yours(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    shared = tmp_path / "LocaLM-data"
+    (shared / "chats").mkdir(parents=True)
+    (shared / "models").mkdir()
+    (shared / "config.json").write_text("{}", encoding="utf-8")
+    photo = _photos(shared)
+    (clone / im.HOME_CFG_NAME).write_text(str(shared) + "\n", encoding="utf-8")
+    im.manifest_path(clone).write_text(json.dumps({
+        "schema": 2, "data_dir": str(shared), "data_created": True,
+        "home_cfg": str(clone / im.HOME_CFG_NAME)}), encoding="utf-8")
+    assert im.main(["prepare-data", "--root", str(clone), "--keep-current"]) == 0
+    assert im.read_marker(shared)["preexisting"] is None
+    rep = im.uninstall(clone, purge_data=True, force=True)
+    assert photo.is_file()
+    assert (shared / "models").is_dir() and (shared / "config.json").is_file()
+    assert not (shared / "chats").exists()
+    assert "cannot tell" in "\n".join(im.format_report(rep))
+
+
+# ------------------------------------------------------------------ #
+#  An install folder that was moved, renamed or copied after setup    #
+# ------------------------------------------------------------------ #
+
+def _portable_install(root: Path) -> None:
+    lib = root / "runtime" / "localm_llama_runtime" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "llama.dll").write_text("x", encoding="utf-8")
+    for name in (".venv", ".python", ".cache", ".uv"):
+        (root / name).mkdir()
+    im.record(root, venv=str(root / ".venv"), lib_dir=str(lib), runtime_contained=True,
+              python_dir=str(root / ".python"), cache_dir=str(root / ".cache"),
+              uv_dir=str(root / ".uv"))
+    home = im.prepare_data(root, portable=True)
+    (home / "chats").mkdir()
+
+
+def test_a_moved_install_folder_is_uninstalled_where_it_is_now(tmp_path):
+    old = tmp_path / "LocaLM"
+    _portable_install(old)
+    new = tmp_path / "LocaLM-moved"
+    old.rename(new)
+    rep = im.uninstall(new, purge_data=True, force=True, defer_runtime=True)
+    assert not (new / "runtime" / "localm_llama_runtime" / "lib" / "llama.dll").exists()
+    assert not (new / "home").exists()
+    pending = sorted(im.pending_path(new).read_text(encoding="ascii").split())
+    assert pending == [".cache", ".python", ".uv", ".venv"]
+    assert not rep["refused"] and rep["exit"] == im.EXIT_OK
+    assert Path(rep["moved_from"]) == old.resolve()
+    assert "set up in" in "\n".join(im.format_report(rep))
+
+
+def test_a_moved_install_removes_its_receipt_and_a_copy_keeps_the_originals(
+        tmp_path, monkeypatch):
+    receipt = tmp_path / "receipts" / "uv-receipt.json"
+    receipt.parent.mkdir()
+    monkeypatch.setattr(im, "_uv_receipts", lambda: [receipt])
+    old = tmp_path / "LocaLM"
+    (old / ".uv").mkdir(parents=True)
+    im.record(old, uv_dir=str(old / ".uv"), runtime_contained=True)
+    receipt.write_text(json.dumps({"install_prefix": str(old / ".uv")}), encoding="utf-8")
+    copy = tmp_path / "LocaLM-copy"
+    shutil.copytree(old, copy)
+    im.uninstall(copy, force=True)
+    assert receipt.is_file()                            # the original is still there
+    assert not (copy / ".uv").exists()
+    moved = tmp_path / "LocaLM-moved"
+    old.rename(moved)
+    im.uninstall(moved, force=True)
+    assert not receipt.exists()
+
+
+def test_a_moved_install_takes_its_dead_path_entry_off_and_a_copy_leaves_it(
+        tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    old = tmp_path / "LocaLM"
+    (old / "bin").mkdir(parents=True)
+    (old / "bin" / "localm.cmd").write_text("@echo off", encoding="utf-8")
+    im.record(old, path_dir=str(old / "bin"), command_shim=str(old / "bin" / "localm.cmd"),
+              path_modified=True)
+    other = str(tmp_path / "Other" / "bin")
+    both = os.pathsep.join([other, str(old / "bin")])
+    isolated["path"].value = both
+    copy = tmp_path / "LocaLM-copy"
+    shutil.copytree(old, copy)
+    im.uninstall(copy, force=True)
+    assert isolated["path"].value == both               # the original still uses it
+    assert not (copy / "bin" / "localm.cmd").exists()
+    moved = tmp_path / "LocaLM-moved"
+    old.rename(moved)
+    im.uninstall(moved, force=True)
+    assert isolated["path"].value == other
+    assert not (moved / "bin" / "localm.cmd").exists()
+
+
+# ------------------------------------------------------------------ #
+#  LOCALM_HOME, shared shortcuts, PATH entries and other edges         #
+# ------------------------------------------------------------------ #
+
+def _env_home(tmp_path: Path, monkeypatch) -> Path:
+    env_home = tmp_path / "set-by-the-user"
+    (env_home / "chats").mkdir(parents=True)
+    monkeypatch.setenv("LOCALM_HOME", str(env_home))
+    return env_home
+
+
+def test_localm_home_is_reported_and_not_deleted(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    im.prepare_data(clone, portable=True)
+    env_home = _env_home(tmp_path, monkeypatch)
+    rep = im.uninstall(clone, purge_data=True, force=True)
+    assert (env_home / "chats").is_dir()
+    assert not (clone / "home").exists()
+    assert rep["exit"] == im.EXIT_PARTIAL
+    assert any("LOCALM_HOME" in why for _, why in rep["refused"])
+    assert "NOT DELETED (see REFUSED below)" in "\n".join(im.format_report(rep))
+
+
+def test_localm_home_is_listed_when_the_data_is_kept(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    im.prepare_data(clone, portable=True)
+    env_home = _env_home(tmp_path, monkeypatch)
+    rep = im.uninstall(clone, force=True)
+    assert (env_home / "chats").is_dir()
+    assert rep["exit"] == im.EXIT_OK
+    assert any(Path(d["path"]) == env_home and not d["delete"] for d in rep["data"])
+
+
+def _shortcut_to(path: Path, folder: Path) -> Path:
+    """A shortcut naming *folder* the way a Windows .lnk stores it: UTF-16
+    target and working-folder strings among binary header bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target = str(folder / "localm-launcher.bat")
+    path.write_bytes(b"L\x00\x00\x00\x01\x14\x02\x00" + target.encode("utf-16-le")
+                     + b"\x00\x00" + str(folder).encode("utf-16-le") + b"\x00\x00")
+    return path
+
+
+def test_a_shortcut_that_now_opens_another_folder_is_kept(tmp_path):
+    clone, sibling = tmp_path / "LocaLM", tmp_path / "LocaLM2"
+    clone.mkdir()
+    sibling.mkdir()
+    desk = _shortcut_to(tmp_path / "Desktop" / "LocaLM.lnk", sibling)
+    im.record(clone, shortcut=str(desk))
+    rep = im.uninstall(clone, force=True)
+    assert desk.is_file()
+    assert any("opens another LocaLM folder" in why for _, why in rep["skipped"])
+
+
+def test_a_shortcut_that_opens_this_folder_is_removed(tmp_path):
+    clone = tmp_path / "LocaLM"
+    clone.mkdir()
+    desk = _shortcut_to(tmp_path / "Desktop" / "LocaLM.lnk", clone)
+    im.record(clone, shortcut=str(desk))
+    im.uninstall(clone, force=True)
+    assert not desk.exists()
+
+
+def test_a_menu_entry_is_removed_only_when_it_opens_this_folder(tmp_path):
+    clone, sibling = tmp_path / "LocaLM", tmp_path / "LocaLM2"
+    clone.mkdir()
+    sibling.mkdir()
+    entry = tmp_path / "applications" / "localm.desktop"
+    entry.parent.mkdir()
+
+    def point_at(folder):
+        entry.write_text(f"[Desktop Entry]\nExec={folder / 'localm-launcher.sh'}\n"
+                         f"Path={folder}\n", encoding="utf-8")
+        im.record(clone, files=[str(entry)])
+
+    point_at(sibling)
+    im.uninstall(clone, force=True)
+    assert entry.is_file()
+    point_at(clone)
+    im.uninstall(clone, force=True)
+    assert not entry.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a real Windows shortcut")
+def test_a_real_windows_shortcut_is_matched_to_its_folder(tmp_path):
+    clone, sibling = tmp_path / "LocaLM", tmp_path / "LocaLM2"
+    for folder in (clone, sibling):
+        folder.mkdir()
+        (folder / "localm-launcher.bat").write_text("@echo off", encoding="utf-8")
+    lnk = tmp_path / "LocaLM.lnk"
+    script = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');"
+              f"$s.TargetPath = '{sibling / 'localm-launcher.bat'}';"
+              f"$s.WorkingDirectory = '{sibling}'; $s.Save()")
+    subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True,
+                   capture_output=True, timeout=120)
+    assert im._mentions_folder(lnk, sibling) is True
+    assert im._mentions_folder(lnk, clone) is False
+
+
+def test_a_quoted_or_padded_path_entry_into_the_folder_is_removed(
+        tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    other = str(tmp_path / "Other" / "bin")
+    isolated["path"].value = os.pathsep.join(
+        [f'"{clone / ".uv"}"', other, f"  {clone / 'bin'}  "])
+    im.uninstall(clone)
+    assert isolated["path"].value == other
+
+
+def test_current_data_tells_an_unavailable_folder_apart(tmp_path, capsys):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    gone = tmp_path / "unplugged" / "LocaLM-data"
+    (clone / im.HOME_CFG_NAME).write_text(str(gone) + "\n", encoding="utf-8")
+    assert im.main(["current-data", "--root", str(clone)]) == im.EXIT_UNAVAILABLE
+    assert capsys.readouterr().out.strip() == str(gone)
+    assert im.main(["prepare-data", "--root", str(clone), "--keep-current"]) \
+        == im.EXIT_UNAVAILABLE
+    assert "is not available" in capsys.readouterr().out
+    assert (clone / im.HOME_CFG_NAME).read_text(encoding="utf-8").strip() == str(gone)
+    assert not gone.exists()
+
+
+@pytest.mark.parametrize("inside", [".venv", ".python", ".cache", ".uv", "runtime"])
+def test_a_data_folder_inside_what_uninstall_removes_is_refused(tmp_path, inside):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    with pytest.raises(ValueError, match="which uninstall removes"):
+        im.prepare_data(clone, data_dir=str(clone / inside / "data"))
+    assert not (clone / im.HOME_CFG_NAME).exists()
+    assert not (clone / inside / "data").exists()
+
+
+def test_a_recorded_command_that_is_not_a_shim_makes_the_result_partial(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    other = tmp_path / "bin" / "python.exe"
+    other.parent.mkdir()
+    other.write_text("x", encoding="utf-8")
+    im.record(clone, command_shim=str(other))
+    rep = im.uninstall(clone, force=True)
+    assert other.is_file()
+    assert rep["exit"] == im.EXIT_PARTIAL
+
+
+def test_after_a_real_run_the_report_says_what_became_of_unrecorded_items(tmp_path):
+    clone = tmp_path / "clone"
+    (clone / ".python").mkdir(parents=True)
+    kept = "\n".join(im.format_report(im.uninstall(clone)))
+    assert (clone / ".python").is_dir()
+    assert "Not in the install record - kept:" in kept
+    removed = "\n".join(im.format_report(im.uninstall(clone, force=True)))
+    assert not (clone / ".python").exists()
+    assert "Not in the install record - removed:" in removed
+
+
+def test_bytecode_caches_in_a_partly_deleted_data_folder_are_left_alone(tmp_path):
+    clone = tmp_path / "clone"
+    notes = clone / "mydata" / "notes"
+    notes.mkdir(parents=True)
+    im.prepare_data(clone, data_dir=str(clone / "mydata"))
+    cache = _pyc(notes)
+    im.uninstall(clone, purge_data=True, force=True)
+    assert cache.is_dir()
+
+
+def test_the_record_and_the_pending_file_are_ignored_by_git():
+    lines = {line.strip() for line in
+             (LOCALM.parent / ".gitignore").read_text(encoding="utf-8").splitlines()}
+    assert im.MANIFEST_NAME in lines and im.PENDING_NAME in lines

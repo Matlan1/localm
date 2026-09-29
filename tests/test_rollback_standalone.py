@@ -9,7 +9,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -115,6 +118,44 @@ def test_detect_home_honors_localm_home(tmp_path, monkeypatch):
     rb = _load_rb()
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "custom"))
     assert rb._detect_home(tmp_path / "install") == tmp_path / "custom"
+
+
+def _clone_with_cfg(tmp_path, raw: bytes) -> Path:
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "pyproject.toml").write_text("", encoding="utf-8")
+    (install / "localm-home.cfg").write_bytes(raw)
+    return install
+
+
+def test_detect_home_reads_a_cfg_saved_with_a_byte_order_mark(tmp_path, monkeypatch):
+    rb = _load_rb()
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    target = tmp_path / "my data"
+    install = _clone_with_cfg(tmp_path, (str(target) + "\r\n").encode("utf-8-sig"))
+    assert rb._detect_home(install) == target
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the console code page is Windows-only")
+def test_detect_home_reads_a_cfg_written_in_the_console_code_page(tmp_path, monkeypatch):
+    """An older setup.bat wrote localm-home.cfg with cmd's echo, in the OEM
+    code page, so a non-ASCII folder name is not valid UTF-8 there."""
+    import ctypes
+    rb = _load_rb()
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    target = tmp_path / "données"
+    raw = (str(target) + "\r\n").encode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+    assert rb._detect_home(_clone_with_cfg(tmp_path, raw)) == target
+
+
+def test_detect_home_falls_back_when_the_cfg_cannot_be_decoded(tmp_path, monkeypatch):
+    rb = _load_rb()
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    install = _clone_with_cfg(tmp_path, b"/data/\xff\xfe\n")
+    assert rb._detect_home(install) == install / "home"
 
 
 def test_shims_invoke_the_rollback_script():

@@ -72,6 +72,31 @@ permanent public record of what shipped and are never rewritten; the in-progress
   recently used dropped first) and are re-read whenever their files change.
   Chat now displays an immediate search status indicator with elapsed timer and
   allows queueing follow-up messages while generation or retrieval is active.
+- **Uninstall from setup.** Running `setup.bat`, `setup.sh` or the graphical
+  installer again in a folder where LocaLM is set up now offers to install
+  again, uninstall, or cancel (`setup.bat uninstall` / `bash setup.sh
+  --uninstall` go straight there). Uninstall lists what it will remove before
+  anything happens, stops LocaLM if it is still running, removes what setup
+  installed in the folder and what it added elsewhere (desktop shortcut or
+  menu entry, the `localm` command and its PATH entry), and asks whether to
+  also delete your saved data: chats, settings, downloaded models and
+  generated images. `--purge-data` and `--yes` answer those questions up
+  front. Setup now records what it creates as it goes, so an install that
+  stopped half way can be uninstalled too. When you delete your saved data it
+  also names what it cannot remove: the app window's saved login and copies
+  of recent chats, kept in a folder pywebview shares with other apps, and the
+  copies your web browser keeps. A data folder another LocaLM install still
+  uses, on this computer or on another one that shares the folder, is never
+  deleted, and neither is a folder `LOCALM_HOME` points LocaLM at (the list
+  names it). A LocaLM folder that was moved or renamed after setup is
+  uninstalled completely, and a desktop shortcut or menu entry that opens a
+  different LocaLM folder is kept. Choosing Install again offers to keep
+  using the data folder you already have; when that folder is not available
+  (a drive that is not connected, or a network folder that is offline), setup
+  says so and offers to stop instead of quietly starting an empty one. The
+  graphical installer cannot be closed while it uninstalls, and
+  `setup-gui.bat` / `setup-gui.sh` say when something you asked to delete was
+  kept or the uninstall did not finish.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
@@ -123,6 +148,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   in the console's code page instead of UTF-8, and LocaLM stopped at startup
   trying to read it. It now reads the setting as it was written; a setting it
   cannot read at all gives a warning instead of stopping LocaLM.
+- **`setup.sh` and `localm make-launcher` no longer delete the `localm` command
+  when the LocaLM folder is on a drive that ignores letter case** (a Windows
+  drive under WSL, or an NTFS or exFAT disk on Linux). There `LocaLM` and
+  `localm` are the same file, and building the app launcher removed it, so
+  `localm` was missing after setup. The launcher step now leaves it alone and
+  the menu entry starts LocaLM through the environment's Python.
 - **Restarting a localm server that had the GUI attached to it no longer leaves
   the window on a "not found" page.** When a second `localm gui` attached to a
   running `localm serve` (or `localm gui --api-mode`), it mounted the GUI on that
@@ -237,6 +268,38 @@ permanent public record of what shipped and are never rewritten; the in-progress
   different model that shares a name is never offered; any model that instance has
   loaded counts, not only its active one; and forwarded requests name the model the
   way that instance does.
+- **Deleting saved data while uninstalling no longer deletes a folder that
+  existed before LocaLM.** When you had pointed setup at an existing folder
+  (a shared models drive, for example), the uninstaller treated the whole
+  folder as LocaLM's. It now deletes only the files LocaLM put there, also
+  after running setup again on the same folder or copying another LocaLM data
+  folder into it, and lists everything it keeps. Setup no longer accepts a
+  data folder that could never be deleted safely: a drive root, your home
+  folder, the LocaLM folder itself or one that contains it, or a folder inside
+  the environment, runtime or tooling folders that uninstall removes.
+- **Uninstalling a Portable install on Windows now removes everything.** It
+  could not delete the Python runtime it was running from, leaving that half
+  deleted, and reported the environment as removed even when it was not.
+  Leftovers are also gone: the data-folder setting, the Linux menu launcher
+  file, the empty folder of the `localm` command, and the runtime's license
+  and marker files.
+- **A Portable setup no longer adds its private copy of uv to your PATH or
+  shell startup files, or writes a uv install receipt in your user profile.**
+  These pointed into the LocaLM folder and were left behind when it was
+  deleted; on Linux and macOS every new shell then printed an error.
+  Uninstall now also removes the ones earlier setups created.
+- **A custom data folder whose path contains characters such as é now works
+  after setup.** `setup.bat` saved the path in the console's code page instead
+  of UTF-8, which LocaLM could not read. Setup now saves it as UTF-8, also when
+  it runs again on an existing install, and the uninstaller and `rollback.bat`
+  read a file saved the old way.
+- **With a custom data folder, `localm setup-llama --rollback` now finds the
+  build setup installed.** Setup downloaded the runtime before asking where
+  your data should live, so it recorded that build in a `home` folder inside
+  the LocaLM folder instead of the folder you chose, and left that `home`
+  folder behind. Every setup now asks where data lives first.
+- **The graphical setup (`setup-gui.bat`) now works from a folder whose path
+  contains `!`.**
 - **The HuggingFace and CivitAI token fields in Settings now show whether a token is really configured.** A `HF_TOKEN`/`CIVITAI_API_KEY` environment variable that is blank or whitespace-only is now treated as not set, matching what downloads actually send, instead of disagreeing with the actual download code about whether a token is present. A stray `hf_token`/`civitai_api_key` entry in `config.json` (hand-edited, or left over from before these tokens moved to their own store) can no longer make Settings claim a token is configured, with a Clear button that has nothing to clear.
 - **Pulling `gemma3-4b` or `gemma3-12b` now checks free disk space for the vision projector too, and the curated shortcuts list says a projector comes with them.** The disk-space preflight for a plain HuggingFace model pull now also probes the same-repo vision projector it is about to auto-attach, so a pull with just enough room for the model alone no longer passes the check and then loses the projector download to insufficient disk space.
 - **Stop in chat now stops the whole turn, and messages queued while a reply is running are sent in order.** Pressing Stop while a long chat is being summarised no longer lets the reply stream anyway, and Stop no longer sends the next queued message: queued messages stay listed until you send or cancel them. A message typed during Regenerate or `/web` is now sent when that reply finishes instead of staying queued forever, and a new message goes after any older queued ones. Edit, Revert and Regenerate now appear on the transcript as soon as a reply finishes.

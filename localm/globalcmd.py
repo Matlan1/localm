@@ -157,6 +157,9 @@ def _split_path(value: str) -> list:
 
 
 def _same_dir(a: str, b: str) -> bool:
+    """Whether two PATH entries name the same directory, ignoring surrounding
+    spaces and quotes, case (on Windows) and redundant separators."""
+    a, b = a.strip().strip('"'), b.strip().strip('"')
     try:
         return (os.path.normcase(os.path.normpath(a))
                 == os.path.normcase(os.path.normpath(b)))
@@ -337,12 +340,18 @@ def uninstall_command(path_dir: str, shim: str) -> dict:
     ``{removed: [...], notes: [...]}``. Safe to call when nothing was installed."""
     report = {"removed": [], "notes": []}
 
-    # 1) the shim file / symlink
+    # 1) the shim file / symlink, and on Windows its <clone>/bin folder once empty
     try:
         p = Path(shim) if shim else None
         if p and (p.exists() or p.is_symlink()):
             p.unlink()
             report["removed"].append(str(p))
+        if p and sys.platform == "win32" and p.parent.name.lower() == "bin":
+            try:
+                p.parent.rmdir()
+                report["removed"].append(str(p.parent))
+            except OSError:
+                pass
     except OSError as e:
         report["notes"].append(f"could not remove shim {shim}: {e}")
 
@@ -360,8 +369,27 @@ def uninstall_command(path_dir: str, shim: str) -> dict:
                     f"left {path_dir} on PATH (shared with other tools)")
         except Exception as e:  # never let uninstall hard-fail on a PATH edit
             report["notes"].append(f"could not update PATH for {path_dir}: {e}")
+    if sys.platform != "win32":
+        for rc in rc_files_with_mark():
+            report["notes"].append(
+                f"left the PATH line marked '{_RC_MARK}' in {rc} "
+                "(it adds ~/.local/bin, which other tools use too)")
 
     return report
+
+
+def rc_files_with_mark() -> list:
+    """The shell startup files that carry the PATH line install() adds."""
+    out = []
+    for name in (".bashrc", ".zshrc", ".profile"):
+        rc = Path.home() / name
+        try:
+            if rc.is_file() and _RC_MARK in rc.read_text(encoding="utf-8",
+                                                         errors="replace"):
+                out.append(str(rc))
+        except OSError:
+            continue
+    return out
 
 
 # --------------------------------------------------------------------------- #
