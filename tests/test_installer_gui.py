@@ -1185,11 +1185,11 @@ class TestUninstallFromTheWindow:
             root.destroy()
 
     def test_the_window_cannot_be_closed_while_the_uninstall_runs(self, uninstall_wizard):
+        """Runs the handler the window manager calls when the window is closed."""
         wizard, answer, root = uninstall_wizard
-        assert root.protocol("WM_DELETE_WINDOW")
         wizard.installing = True
         wizard.mode = "uninstalling"
-        wizard._on_close()
+        root.tk.call(root.protocol("WM_DELETE_WINDOW"))
         assert root.winfo_exists()
         assert len(answer.told) == 1 and "still running" in answer.told[0]
 
@@ -1203,7 +1203,8 @@ class TestUninstallFromTheWindow:
         root.withdraw()
         answer = _Answer()
         wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=answer)
-        wizard._on_close()
+        wizard.installing = True                    # an install, not an uninstall
+        root.tk.call(root.protocol("WM_DELETE_WINDOW"))
         assert answer.told == []
         with pytest.raises(tk.TclError):
             root.winfo_exists()
