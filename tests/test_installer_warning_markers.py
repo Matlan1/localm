@@ -64,6 +64,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] Could not remove .\\%DNAME% - close any LocaLM window and delete it by hand.',
         'echo  [^^!] No path given - using the portable .\\home instead.',
         'echo  [^^!] Could not record the data folder; created .\\home anyway.',
+        "echo  [^^!] LocaLM's data for this folder is set to:",
     ]
     for site in sites:
         assert site in bat, site
@@ -155,6 +156,12 @@ class TestBangSurvivesEveryStructuralShape:
             'setup-llama --from "C:\\some\\bang!path"'
         )
         assert expected in out.stdout, (out.stdout, out.stderr)
+
+    def test_the_unavailable_data_folder_warning(self, bat, tmp_path):
+        line = _line_containing(bat, "LocaLM's data for this folder is set to:")
+        out = self._run(tmp_path, "", line)
+        assert "[!] LocaLM's data for this folder is set to:" in out.stdout, (
+            out.stdout, out.stderr)
 
     def test_double_or_fallback_after_a_failed_pip_install(self, bat, tmp_path):
         """The `cmd || echo [^^!] ...` shape - distinct from `if errorlevel 1`,

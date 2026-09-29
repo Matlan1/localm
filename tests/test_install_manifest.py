@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -1183,3 +1184,398 @@ def test_bytecode_caches_behind_a_link_are_left_alone(tmp_path):
     im.prepare_data(clone, portable=True)
     im.uninstall(clone, force=True)
     assert outside.is_dir()
+
+
+# ------------------------------------------------------------------ #
+#  The data-folder marker belongs to the folder it was written for    #
+# ------------------------------------------------------------------ #
+
+OTHER_PC = "OTHER-PC-7Q4M"
+
+
+def _copy_contents(src: Path, dst: Path) -> None:
+    """Copy everything in *src*, its marker included, into *dst*, the way
+    selecting every file in one folder and pasting it into another does."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if item.is_dir():
+            shutil.copytree(item, dst / item.name, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dst / item.name)
+
+
+def _photos(folder: Path) -> Path:
+    photo = folder / "photos" / "holiday.jpg"
+    photo.parent.mkdir(parents=True)
+    photo.write_text("mine", encoding="utf-8")
+    return photo
+
+
+def _gone_install(base: Path) -> Path:
+    """A data folder setup created for an install that was removed since."""
+    first = base / "first"
+    first.mkdir()
+    made = im.prepare_data(first, data_dir=str(base / "made-by-setup"))
+    (made / "chats").mkdir()
+    im.manifest_path(first).unlink()
+    return made
+
+
+def _add_install(folder: Path, path: str, host: str) -> None:
+    marker = json.loads((folder / im.DATA_MARKER).read_text(encoding="utf-8"))
+    marker["installs"].append({"path": path, "host": host})
+    (folder / im.DATA_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+
+
+def test_a_copied_marker_does_not_make_the_users_folder_localms(tmp_path):
+    made = _gone_install(tmp_path)
+    ai = tmp_path / "AI"
+    photo = _photos(ai)
+    _copy_contents(made, ai)
+    second = tmp_path / "second"
+    second.mkdir()
+    im.prepare_data(second, data_dir=str(ai))
+    plan = im.uninstall(second, purge_data=True, dry_run=True)
+    rep = im.uninstall(second, purge_data=True, force=True)
+    assert photo.is_file()
+    assert (ai / "chats").is_dir()                      # it was there before this install
+    assert [d["mode"] for d in plan["data"]] == ["entries"]
+    assert rep["exit"] == im.EXIT_OK
+
+
+def test_a_copied_marker_over_the_folders_own_marker_is_ignored(tmp_path):
+    made = _gone_install(tmp_path)
+    second = tmp_path / "second"
+    second.mkdir()
+    shared = _user_folder(tmp_path)
+    im.prepare_data(second, data_dir=str(shared))
+    (shared / "chats").mkdir()
+    shutil.copy2(made / im.DATA_MARKER, shared / im.DATA_MARKER)
+    rep = im.uninstall(second, purge_data=True, force=True)
+    assert (shared / "models" / "theirs.safetensors").is_file()
+    assert (shared / "workflows" / "mine.json").is_file()
+    assert (shared / "notes.txt").is_file()
+    assert not (shared / "chats").exists()
+    assert rep["exit"] == im.EXIT_OK
+
+
+def test_a_copied_marker_in_a_folder_named_only_by_the_setting_is_ignored(tmp_path):
+    made = _gone_install(tmp_path)
+    second = tmp_path / "second"
+    second.mkdir()
+    im.prepare_data(second, data_dir=str(tmp_path / "second-data"))
+    ai = tmp_path / "AI"
+    photo = _photos(ai)
+    shutil.copy2(made / im.DATA_MARKER, ai / im.DATA_MARKER)
+    (second / im.HOME_CFG_NAME).write_text(str(ai) + "\n", encoding="utf-8")
+    im.uninstall(second, purge_data=True, force=True)
+    assert photo.is_file()
+
+
+def test_a_folder_setup_created_is_still_deleted_whole(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    data = im.prepare_data(clone, data_dir=str(tmp_path / "LocaLM-data"))
+    (data / "chats").mkdir()
+    assert im.read_marker(data)["bound"] is True
+    im.uninstall(clone, purge_data=True, force=True)
+    assert not data.exists()
+
+
+def test_an_install_on_another_computer_keeps_a_shared_folder(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    data = im.prepare_data(clone, data_dir=str(tmp_path / "LocaLM-data"))
+    (data / "chats").mkdir()
+    _add_install(data, str(clone), OTHER_PC)            # the same path, on another PC
+    rep = im.uninstall(clone, purge_data=True, force=True)
+    assert (data / "chats").is_dir()
+    assert rep["exit"] == im.EXIT_PARTIAL
+    assert any(f"on the computer {OTHER_PC}" in why for _, why in rep["refused"])
+
+
+def test_preparing_keeps_other_computers_and_drops_installs_that_left(tmp_path):
+    first, second, third = (tmp_path / n for n in ("first", "second", "third"))
+    for clone in (first, second, third):
+        clone.mkdir()
+    data = tmp_path / "LocaLM-data"
+    im.prepare_data(first, data_dir=str(data))
+    im.prepare_data(second, data_dir=str(data))
+    im.prepare_data(second, data_dir=str(tmp_path / "elsewhere"))
+    im.manifest_path(first).unlink()
+    _add_install(data, "C:\\LocaLM", OTHER_PC)
+    im.prepare_data(third, data_dir=str(data))
+    got = {(i["path"], i["host"]) for i in im.read_marker(data)["installs"]}
+    assert got == {("C:\\LocaLM", OTHER_PC), (str(third.resolve()), im._this_host())}
+
+
+def test_repairing_an_older_install_does_not_count_localms_files_as_yours(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    shared = tmp_path / "LocaLM-data"
+    (shared / "chats").mkdir(parents=True)
+    (shared / "models").mkdir()
+    (shared / "config.json").write_text("{}", encoding="utf-8")
+    photo = _photos(shared)
+    (clone / im.HOME_CFG_NAME).write_text(str(shared) + "\n", encoding="utf-8")
+    im.manifest_path(clone).write_text(json.dumps({
+        "schema": 2, "data_dir": str(shared), "data_created": True,
+        "home_cfg": str(clone / im.HOME_CFG_NAME)}), encoding="utf-8")
+    assert im.main(["prepare-data", "--root", str(clone), "--keep-current"]) == 0
+    assert im.read_marker(shared)["preexisting"] is None
+    rep = im.uninstall(clone, purge_data=True, force=True)
+    assert photo.is_file()
+    assert (shared / "models").is_dir() and (shared / "config.json").is_file()
+    assert not (shared / "chats").exists()
+    assert "cannot tell" in "\n".join(im.format_report(rep))
+
+
+# ------------------------------------------------------------------ #
+#  An install folder that was moved, renamed or copied after setup    #
+# ------------------------------------------------------------------ #
+
+def _portable_install(root: Path) -> None:
+    lib = root / "runtime" / "localm_llama_runtime" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "llama.dll").write_text("x", encoding="utf-8")
+    for name in (".venv", ".python", ".cache", ".uv"):
+        (root / name).mkdir()
+    im.record(root, venv=str(root / ".venv"), lib_dir=str(lib), runtime_contained=True,
+              python_dir=str(root / ".python"), cache_dir=str(root / ".cache"),
+              uv_dir=str(root / ".uv"))
+    home = im.prepare_data(root, portable=True)
+    (home / "chats").mkdir()
+
+
+def test_a_moved_install_folder_is_uninstalled_where_it_is_now(tmp_path):
+    old = tmp_path / "LocaLM"
+    _portable_install(old)
+    new = tmp_path / "LocaLM-moved"
+    old.rename(new)
+    rep = im.uninstall(new, purge_data=True, force=True, defer_runtime=True)
+    assert not (new / "runtime" / "localm_llama_runtime" / "lib" / "llama.dll").exists()
+    assert not (new / "home").exists()
+    pending = sorted(im.pending_path(new).read_text(encoding="ascii").split())
+    assert pending == [".cache", ".python", ".uv", ".venv"]
+    assert not rep["refused"] and rep["exit"] == im.EXIT_OK
+    assert Path(rep["moved_from"]) == old.resolve()
+    assert "set up in" in "\n".join(im.format_report(rep))
+
+
+def test_a_moved_install_removes_its_receipt_and_a_copy_keeps_the_originals(
+        tmp_path, monkeypatch):
+    receipt = tmp_path / "receipts" / "uv-receipt.json"
+    receipt.parent.mkdir()
+    monkeypatch.setattr(im, "_uv_receipts", lambda: [receipt])
+    old = tmp_path / "LocaLM"
+    (old / ".uv").mkdir(parents=True)
+    im.record(old, uv_dir=str(old / ".uv"), runtime_contained=True)
+    receipt.write_text(json.dumps({"install_prefix": str(old / ".uv")}), encoding="utf-8")
+    copy = tmp_path / "LocaLM-copy"
+    shutil.copytree(old, copy)
+    im.uninstall(copy, force=True)
+    assert receipt.is_file()                            # the original is still there
+    assert not (copy / ".uv").exists()
+    moved = tmp_path / "LocaLM-moved"
+    old.rename(moved)
+    im.uninstall(moved, force=True)
+    assert not receipt.exists()
+
+
+def test_a_moved_install_takes_its_dead_path_entry_off_and_a_copy_leaves_it(
+        tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    old = tmp_path / "LocaLM"
+    (old / "bin").mkdir(parents=True)
+    (old / "bin" / "localm.cmd").write_text("@echo off", encoding="utf-8")
+    im.record(old, path_dir=str(old / "bin"), command_shim=str(old / "bin" / "localm.cmd"),
+              path_modified=True)
+    other = str(tmp_path / "Other" / "bin")
+    both = os.pathsep.join([other, str(old / "bin")])
+    isolated["path"].value = both
+    copy = tmp_path / "LocaLM-copy"
+    shutil.copytree(old, copy)
+    im.uninstall(copy, force=True)
+    assert isolated["path"].value == both               # the original still uses it
+    assert not (copy / "bin" / "localm.cmd").exists()
+    moved = tmp_path / "LocaLM-moved"
+    old.rename(moved)
+    im.uninstall(moved, force=True)
+    assert isolated["path"].value == other
+    assert not (moved / "bin" / "localm.cmd").exists()
+
+
+# ------------------------------------------------------------------ #
+#  LOCALM_HOME, shared shortcuts, PATH entries and other edges         #
+# ------------------------------------------------------------------ #
+
+def _env_home(tmp_path: Path, monkeypatch) -> Path:
+    env_home = tmp_path / "set-by-the-user"
+    (env_home / "chats").mkdir(parents=True)
+    monkeypatch.setenv("LOCALM_HOME", str(env_home))
+    return env_home
+
+
+def test_localm_home_is_reported_and_not_deleted(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    im.prepare_data(clone, portable=True)
+    env_home = _env_home(tmp_path, monkeypatch)
+    rep = im.uninstall(clone, purge_data=True, force=True)
+    assert (env_home / "chats").is_dir()
+    assert not (clone / "home").exists()
+    assert rep["exit"] == im.EXIT_PARTIAL
+    assert any("LOCALM_HOME" in why for _, why in rep["refused"])
+    assert "NOT DELETED (see REFUSED below)" in "\n".join(im.format_report(rep))
+
+
+def test_localm_home_is_listed_when_the_data_is_kept(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    im.prepare_data(clone, portable=True)
+    env_home = _env_home(tmp_path, monkeypatch)
+    rep = im.uninstall(clone, force=True)
+    assert (env_home / "chats").is_dir()
+    assert rep["exit"] == im.EXIT_OK
+    assert any(Path(d["path"]) == env_home and not d["delete"] for d in rep["data"])
+
+
+def _shortcut_to(path: Path, folder: Path) -> Path:
+    """A shortcut naming *folder* the way a Windows .lnk stores it: UTF-16
+    target and working-folder strings among binary header bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target = str(folder / "localm-launcher.bat")
+    path.write_bytes(b"L\x00\x00\x00\x01\x14\x02\x00" + target.encode("utf-16-le")
+                     + b"\x00\x00" + str(folder).encode("utf-16-le") + b"\x00\x00")
+    return path
+
+
+def test_a_shortcut_that_now_opens_another_folder_is_kept(tmp_path):
+    clone, sibling = tmp_path / "LocaLM", tmp_path / "LocaLM2"
+    clone.mkdir()
+    sibling.mkdir()
+    desk = _shortcut_to(tmp_path / "Desktop" / "LocaLM.lnk", sibling)
+    im.record(clone, shortcut=str(desk))
+    rep = im.uninstall(clone, force=True)
+    assert desk.is_file()
+    assert any("opens another LocaLM folder" in why for _, why in rep["skipped"])
+
+
+def test_a_shortcut_that_opens_this_folder_is_removed(tmp_path):
+    clone = tmp_path / "LocaLM"
+    clone.mkdir()
+    desk = _shortcut_to(tmp_path / "Desktop" / "LocaLM.lnk", clone)
+    im.record(clone, shortcut=str(desk))
+    im.uninstall(clone, force=True)
+    assert not desk.exists()
+
+
+def test_a_menu_entry_is_removed_only_when_it_opens_this_folder(tmp_path):
+    clone, sibling = tmp_path / "LocaLM", tmp_path / "LocaLM2"
+    clone.mkdir()
+    sibling.mkdir()
+    entry = tmp_path / "applications" / "localm.desktop"
+    entry.parent.mkdir()
+
+    def point_at(folder):
+        entry.write_text(f"[Desktop Entry]\nExec={folder / 'localm-launcher.sh'}\n"
+                         f"Path={folder}\n", encoding="utf-8")
+        im.record(clone, files=[str(entry)])
+
+    point_at(sibling)
+    im.uninstall(clone, force=True)
+    assert entry.is_file()
+    point_at(clone)
+    im.uninstall(clone, force=True)
+    assert not entry.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a real Windows shortcut")
+def test_a_real_windows_shortcut_is_matched_to_its_folder(tmp_path):
+    clone, sibling = tmp_path / "LocaLM", tmp_path / "LocaLM2"
+    for folder in (clone, sibling):
+        folder.mkdir()
+        (folder / "localm-launcher.bat").write_text("@echo off", encoding="utf-8")
+    lnk = tmp_path / "LocaLM.lnk"
+    script = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');"
+              f"$s.TargetPath = '{sibling / 'localm-launcher.bat'}';"
+              f"$s.WorkingDirectory = '{sibling}'; $s.Save()")
+    subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True,
+                   capture_output=True, timeout=120)
+    assert im._mentions_folder(lnk, sibling) is True
+    assert im._mentions_folder(lnk, clone) is False
+
+
+def test_a_quoted_or_padded_path_entry_into_the_folder_is_removed(
+        tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    other = str(tmp_path / "Other" / "bin")
+    isolated["path"].value = os.pathsep.join(
+        [f'"{clone / ".uv"}"', other, f"  {clone / 'bin'}  "])
+    im.uninstall(clone)
+    assert isolated["path"].value == other
+
+
+def test_current_data_tells_an_unavailable_folder_apart(tmp_path, capsys):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    gone = tmp_path / "unplugged" / "LocaLM-data"
+    (clone / im.HOME_CFG_NAME).write_text(str(gone) + "\n", encoding="utf-8")
+    assert im.main(["current-data", "--root", str(clone)]) == im.EXIT_UNAVAILABLE
+    assert capsys.readouterr().out.strip() == str(gone)
+    assert im.main(["prepare-data", "--root", str(clone), "--keep-current"]) \
+        == im.EXIT_UNAVAILABLE
+    assert "is not available" in capsys.readouterr().out
+    assert (clone / im.HOME_CFG_NAME).read_text(encoding="utf-8").strip() == str(gone)
+    assert not gone.exists()
+
+
+@pytest.mark.parametrize("inside", [".venv", ".python", ".cache", ".uv", "runtime"])
+def test_a_data_folder_inside_what_uninstall_removes_is_refused(tmp_path, inside):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    with pytest.raises(ValueError, match="which uninstall removes"):
+        im.prepare_data(clone, data_dir=str(clone / inside / "data"))
+    assert not (clone / im.HOME_CFG_NAME).exists()
+    assert not (clone / inside / "data").exists()
+
+
+def test_a_recorded_command_that_is_not_a_shim_makes_the_result_partial(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    other = tmp_path / "bin" / "python.exe"
+    other.parent.mkdir()
+    other.write_text("x", encoding="utf-8")
+    im.record(clone, command_shim=str(other))
+    rep = im.uninstall(clone, force=True)
+    assert other.is_file()
+    assert rep["exit"] == im.EXIT_PARTIAL
+
+
+def test_after_a_real_run_the_report_says_what_became_of_unrecorded_items(tmp_path):
+    clone = tmp_path / "clone"
+    (clone / ".python").mkdir(parents=True)
+    kept = "\n".join(im.format_report(im.uninstall(clone)))
+    assert (clone / ".python").is_dir()
+    assert "Not in the install record - kept:" in kept
+    removed = "\n".join(im.format_report(im.uninstall(clone, force=True)))
+    assert not (clone / ".python").exists()
+    assert "Not in the install record - removed:" in removed
+
+
+def test_bytecode_caches_in_a_partly_deleted_data_folder_are_left_alone(tmp_path):
+    clone = tmp_path / "clone"
+    notes = clone / "mydata" / "notes"
+    notes.mkdir(parents=True)
+    im.prepare_data(clone, data_dir=str(clone / "mydata"))
+    cache = _pyc(notes)
+    im.uninstall(clone, purge_data=True, force=True)
+    assert cache.is_dir()
+
+
+def test_the_record_and_the_pending_file_are_ignored_by_git():
+    lines = {line.strip() for line in
+             (LOCALM.parent / ".gitignore").read_text(encoding="utf-8").splitlines()}
+    assert im.MANIFEST_NAME in lines and im.PENDING_NAME in lines
