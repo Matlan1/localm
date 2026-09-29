@@ -124,9 +124,9 @@ _server_loop: "asyncio.AbstractEventLoop | None" = None
 
 # Preemptive model switching (see switch_engine). _switch_desired = most-recent
 # switch request; _switch_loading = model whose load is in flight; _switch_cancel
-# aborts it. Touched only on the event-loop thread inside switch_engine, except the
-# cancel event, which the loader-thread load-progress callback reads
-# (threading.Event is thread-safe).
+# aborts it. Touched only on the event-loop thread inside switch_engine and its
+# _switch_load helper, except the cancel event, which the loader-thread
+# load-progress callback reads (threading.Event is thread-safe).
 _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
 _switch_cancel: Optional["threading.Event"] = None
@@ -1703,7 +1703,7 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
     regardless of what is in the engine map. Measured live, on a server
     started with the renamed model: a stale ``_default_model_name`` puts a
     ghost row for the old name into ``GET /v1/models`` (list_models adds the
-    startup name when the registry lacks it) and makes ``switch_engine``'s
+    startup name when the registry lacks it) and makes ``get_engine``'s
     registration check at ``name != _default_model_name`` accept a request
     for a name the registry no longer has, instead of answering the honest
     404. ``_last_active_model_name`` is the same shape one step along:
@@ -1880,7 +1880,7 @@ async def _idle_unload_once(ttl: int) -> bool:
         # only ever reached for an engine that was assigned to `_engine` directly
         # without going through switch_engine's registration (a test/script
         # setting _engine, or a genuinely single-model/direct-path startup with
-        # an empty registry - see switch_engine's own "empty registry" comment).
+        # an empty registry - see _switch_load_budget's docstring).
         # In that mode there is only ONE model, ever, so "the last activity of
         # any request" and "the last activity of THIS model" are the same fact -
         # falling back to it is correct, not a cross-model leak. A model loaded
