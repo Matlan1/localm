@@ -1540,7 +1540,7 @@ export const I18N_EN = {
   "settings.field.browserEnabled.label": "Let the model drive a web browser",
   "settings.field.browserEnabled.help": "Off by default. A key must also hold the browser capability. The browser reaches only what the network policy already allows.",
   "settings.field.browserEngine.label": "Browser to drive",
-  "settings.field.browserEngine.help": "'bundled' runs the sandboxed browser localm downloads. 'system' drives your own installed browser, including its logged-in sessions, which is why it is not the default.",
+  "settings.field.browserEngine.help": "'bundled' runs the browser localm downloads. 'system' runs a Chrome, Chromium, Edge or Brave already installed here. Either way it starts with a fresh, empty profile: none of your logins carry over.",
   "settings.field.browserHeadless.label": "Run the browser hidden",
   "settings.field.browserHeadless.help": "On by default. Off opens a visible window; the live view works either way.",
   "settings.field.browserCustomDomainRules.label": "Use browser-specific domain rules",
@@ -2258,6 +2258,31 @@ export const I18N_EN = {
   "browser.liveView.inputRestored": "Input is reaching the browser again.",
   "browser.liveView.keysHint":
     "Keys go to the page · Esc releases the keyboard · Shift+Tab moves back",
+  "browser.setup.alreadyDownloading": "A download is already running.",
+  "browser.setup.bundledMissing":
+    "The bundled browser has not been downloaded yet. It is a one-time " +
+    "download, separate from the localm install.",
+  "browser.setup.checkFailed": "Could not check the browser.",
+  "browser.setup.checking": "Checking the browser...",
+  "browser.setup.download": "Download browser",
+  "browser.setup.downloadBlockedNetwork":
+    "Network access is off, which blocks the download. Turn network access on, " +
+    "or allow model downloads while it is off, in Settings > Server & network.",
+  "browser.setup.downloadBlockedPermission":
+    "Downloading the browser needs permission to change settings.",
+  "browser.setup.downloadDone": "The browser is downloaded and ready.",
+  "browser.setup.downloadFailed": "The download did not finish: {detail}",
+  "browser.setup.downloading": "Downloading the browser...",
+  "browser.setup.heading": "Browser setup",
+  "browser.setup.playwrightMissing":
+    "The browser automation extra is not installed. Install it with:  " +
+    "pip install \"localm[browser]\"",
+  "browser.setup.readyBundled": "The bundled browser is downloaded and ready.",
+  "browser.setup.readySystem": "localm will use {browser}, found on this computer.",
+  "browser.setup.switchedToBundled": "Switched to the bundled browser.",
+  "browser.setup.systemMissing":
+    "No supported browser was found on this computer. localm looked for {names}.",
+  "browser.setup.useBundled": "Use the bundled browser instead",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
 };

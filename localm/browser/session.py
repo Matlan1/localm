@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 from urllib.parse import urljoin
 
-from localm.browser import netgate
+from localm.browser import discovery, launch_errors, netgate, provision
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,13 @@ _BLANK_WINDOW_WAIT_MS = 5000
 
 
 class BrowserUnavailableError(RuntimeError):
-    """Playwright, or the browser build it pins, is not installed."""
+    """The browser could not be started: playwright or the browser build it
+    drives is missing, no installed browser was found, or the browser failed to
+    launch. ``kind`` is one of the ``launch_errors`` kinds."""
+
+    def __init__(self, message: str, kind: str = launch_errors.OTHER):
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass
@@ -119,6 +125,8 @@ class BrowserSession:
         self.session_id = session_id
         self.headless = headless
         self.engine = engine or "bundled"
+        #: The browser that was launched; None until it has started.
+        self.browser_name: Optional[str] = None
         self.extra_deny = tuple(extra_deny)
         self.extra_allow = tuple(extra_allow)
         self.state = SessionState()
@@ -185,28 +193,10 @@ class BrowserSession:
     async def _launch(self) -> None:
         async_playwright = _require_playwright()
         self._pw = await async_playwright().start()
-        # "system" drives the browser already installed on this machine, which
-        # carries its real logged-in sessions; "bundled" launches the build
-        # localm downloaded, with a fresh profile.
-        launch = {"headless": self.headless}
         if self.engine == "system":
-            launch["channel"] = "chrome"
-        try:
-            self._browser = await self._pw.chromium.launch(**launch)
-        except Exception as exc:
-            if self.engine == "system":
-                raise BrowserUnavailableError(
-                    "Could not start the system browser (Google Chrome). Install "
-                    "it, or set the browser engine back to 'bundled'. "
-                    + str(exc)) from exc
-            # The bundled engine needs a Chromium build the pip extra does NOT
-            # bring: playwright downloads it separately, one build per version.
-            # A missing build arrives here as a raw playwright error, so name
-            # the command that fixes it instead of passing the raw text on.
-            raise BrowserUnavailableError(
-                "Could not start the bundled browser. Its Chromium build is "
-                "downloaded separately from the Python package; get it with:  "
-                "localm setup-browser. " + str(exc)) from exc
+            self._browser = await self._launch_system()
+        else:
+            self._browser = await self._launch_bundled()
         self._ctx = await self._browser.new_context()
         # Routed on the CONTEXT rather than the page, so a popup or a second
         # page the site opens is gated too.
@@ -221,6 +211,42 @@ class BrowserSession:
         self._ctx.on("page", self._on_new_page)
         if self._on_frame is not None:
             await self._ensure_screencast()
+
+    async def _launch_bundled(self):
+        """Launch the Chromium build localm downloads, in a fresh profile."""
+        try:
+            browser = await self._pw.chromium.launch(headless=self.headless)
+        except Exception as exc:
+            logger.debug("bundled browser launch failed: %s", exc)
+            provision.note_missing_executable(exc)
+            kind, message = launch_errors.launch_failure(exc, engine="bundled")
+            raise BrowserUnavailableError(message, kind) from exc
+        self.browser_name = "Bundled Chromium"
+        return browser
+
+    async def _launch_system(self):
+        """Launch the first browser already installed on this machine that
+        starts, in a fresh profile: none of the user's own profile data is
+        used."""
+        candidates = discovery.find_system_browsers()
+        if not candidates:
+            raise BrowserUnavailableError(
+                launch_errors.no_system_browser(discovery.LOOKED_FOR),
+                launch_errors.SYSTEM_MISSING)
+        attempts = []
+        for candidate in candidates:
+            try:
+                browser = await self._pw.chromium.launch(
+                    headless=self.headless, **candidate.launch_options())
+            except Exception as exc:
+                logger.debug("system browser %s launch failed: %s",
+                             candidate.name, exc)
+                attempts.append((candidate.name, exc))
+                continue
+            self.browser_name = candidate.name
+            return browser
+        kind, message = launch_errors.system_launch_failure(attempts)
+        raise BrowserUnavailableError(message, kind) from attempts[-1][1]
 
     async def _start_screencast(self) -> None:
         """Stream the page as JPEG frames to the on_frame callback.

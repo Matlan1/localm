@@ -66,7 +66,8 @@ _TRACEBACK_MARKER = "Traceback (most recent call last)"
 # traceback marker is not collapsed away as a benign near-duplicate.
 _CONTINUATION_ERROR_SIGNAL_RE = re.compile(
     r"\b(?:error|exception|fatal|crash(?:ed)?|segfault|segmentation fault|"
-    r"core dumped|assert(?:ion)?\s+fail\w*|panic|abort(?:ed)?)\b",
+    r"core dumped|assert(?:ion)?\s+fail\w*|panic|abort(?:ed)?|"
+    r"out of memory|failed to allocate|failed to initialize)\b",
     re.IGNORECASE,
 )
 
