@@ -82,12 +82,14 @@ def _agent(proj: Path) -> Agent:
 
 
 def _saved_session(proj: Path, task: str = _SAVED_TASK) -> str:
-    """Save a real checkpoint for *proj* the way an interrupted session leaves
-    one; returns its id."""
+    """Leave a checkpoint for *proj* the way a real session does, with a turn
+    interrupted by Ctrl-C; returns its id."""
     agent = _agent(proj)
-    agent.run_task(task)
-    assert agent.save_checkpoint()
+    with patch.object(Agent, "_call_llm", side_effect=KeyboardInterrupt), \
+         pytest.raises(KeyboardInterrupt):
+        agent.chat(task)
     agent.close()
+    assert _checkpoint_path_for(proj, agent._checkpoint_id).is_file()
     return agent._checkpoint_id
 
 
