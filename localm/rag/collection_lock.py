@@ -47,14 +47,15 @@ holds the lock (``_is_stale``) by what it can establish about it
   * a holder proven running (its process has the start identity the record
     names, and the heartbeat thread the record names still runs in it) keeps
     the lock however old its heartbeat is;
-  * any other holder is taken over only once the waiter has itself watched the
-    heartbeat stay unchanged for ``CONFIRM_BEATS`` heartbeats on its own
-    monotonic clock, and the heartbeat has been silent, by the wall clock or by
-    the waiter's own watch, for longer than ``DEAD_HOLDER_GRACE`` when the
-    holder is proven gone (its pid has exited or now names another process),
-    or ``STALE_AFTER`` otherwise (a record from another pid space, one without
-    a start identity, one written by an earlier localm, a heartbeat thread that
-    has stopped, a probe that cannot answer).
+  * any other holder is taken over only once waiters in the taking process
+    have watched the heartbeat stay unchanged for ``CONFIRM_BEATS`` heartbeats
+    on their own monotonic clock (``_watch``, kept across their waits), and
+    the heartbeat has been silent, by the wall clock or by that watch, for
+    longer than ``DEAD_HOLDER_GRACE`` when the holder is proven gone (its pid
+    has exited or now names another process), or ``STALE_AFTER`` otherwise (a
+    record from another pid space, one without a start identity, one written
+    by an earlier localm, a heartbeat thread that has stopped, a probe that
+    cannot answer).
 
 So a lock whose heartbeat keeps moving is never taken over, whatever either
 clock reads, and a heartbeat age read from the wall clock never takes over a
@@ -128,7 +129,7 @@ class CollectionLockedError(RuntimeError):
     def __init__(self, name: str, holder: Optional[dict], waited: float,
                  last_alive: Optional[float] = None,
                  lockpath: Optional[Path] = None, same_process: bool = False,
-                 kind: str = "Collection"):
+                 kind: str = "Collection", watch_needed: Optional[float] = None):
         # *kind* names WHAT is locked, for the message only. It defaults to
         # "Collection" for the RAG raise sites; agent memory passes "Memory
         # namespace" (see memory/store.py), since the same machinery serialises
@@ -146,6 +147,12 @@ class CollectionLockedError(RuntimeError):
             # concrete thing they can act on rather than an unexplained refusal.
             tail = (f" Its lock file is {lockpath}; if you are certain no localm "
                     f"process is using it, deleting that file releases it.")
+        if watch_needed is not None:
+            # *watch_needed*: the waiter's budget was shorter than the watch a
+            # takeover needs, and the holder's heartbeat is old.
+            tail += (f" A waiting command takes a lock over only after watching "
+                     f"it for {watch_needed:.0f}s, longer than this wait "
+                     f"(LOCALM_RAG_LOCK_WAIT).")
         super().__init__(
             f"{kind} '{name}' is being written by {who}. "
             f"Waited {_duration(waited)} and gave up; nothing was changed. Let "
@@ -260,6 +267,31 @@ def _machine_id() -> str:
 # acquiring, a lock.
 _held_tokens: set = set()
 _held_tokens_lock = threading.Lock()
+
+# Per lock file path: the (token, mtime) waiters in this process last read from
+# it, and when they first read it, on the monotonic clock.
+_watches: dict = {}
+_watches_lock = threading.Lock()
+
+
+def _watch(lockpath: Path, seen) -> float:
+    """Seconds, on the monotonic clock, for which waiters in this process have
+    read *lockpath* as *seen* (its ``(token, mtime)``) without a change, across
+    every wait. 0.0 when *seen* differs from what was read before."""
+    now = time.monotonic()
+    key = os.fspath(lockpath)
+    with _watches_lock:
+        prev = _watches.get(key)
+        if prev is None or prev[0] != seen:
+            _watches[key] = (seen, now)
+            return 0.0
+        return now - prev[1]
+
+
+def _forget_watch(lockpath: Path) -> None:
+    """Drop the watch on *lockpath* (see _watch)."""
+    with _watches_lock:
+        _watches.pop(os.fspath(lockpath), None)
 
 
 def _thread_identity(thread: threading.Thread) -> Optional[dict]:
@@ -554,10 +586,14 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
     started_waiting = time.time()
     announced = False
     attempt = 0
-    # The (token, mtime) last read from an existing lock file, and when this
-    # waiter first read it, on the monotonic clock.
-    watched = None
-    watched_since = 0.0
+    window = CONFIRM_BEATS * HEARTBEAT_INTERVAL
+
+    def _refusal(rec, waited, mtime):
+        """The error for a wait that ran out of budget."""
+        short = (timeout < window and mtime is not None
+                 and time.time() - mtime > min(DEAD_HOLDER_GRACE, stale_after))
+        return CollectionLockedError(collection, rec, waited, mtime, lockpath,
+                                     kind=kind, watch_needed=window if short else None)
 
     while True:
         try:
@@ -584,8 +620,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             rec, mtime = _read_record(lockpath)
             waited = time.time() - started_waiting
             if time.time() >= deadline:
-                raise CollectionLockedError(collection, rec, waited, mtime,
-                                            lockpath, kind=kind)
+                raise _refusal(rec, waited, mtime)
             if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
                 announced = True
                 on_wait(f"waiting for the write lock on '{collection}': "
@@ -595,11 +630,8 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             continue
         except FileExistsError:
             rec, mtime = _read_record(lockpath)
-            now = time.monotonic()
             seen = (rec.get("token") if isinstance(rec, dict) else None, mtime)
-            if seen != watched:
-                watched, watched_since = seen, now
-            quiet = now - watched_since
+            quiet = _watch(lockpath, seen)
             if (mtime is not None and _is_stale(rec, mtime, stale_after, quiet)
                     and _reclaim(lockpath, rec, mtime, stale_after, quiet)):
                 continue          # removed: retry the create straight away
@@ -610,8 +642,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             # ever consulting the deadline.
             waited = time.time() - started_waiting
             if time.time() >= deadline:
-                raise CollectionLockedError(collection, rec, waited, mtime,
-                                            lockpath, kind=kind)
+                raise _refusal(rec, waited, mtime)
             if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
                 announced = True
                 on_wait(f"waiting for the write lock on '{collection}': "
@@ -619,6 +650,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             time.sleep(min(_POLL * (attempt + 1), _POLL_CAP))
             attempt += 1
             continue
+        _forget_watch(lockpath)
         # We created the file, so from here every failure must remove OUR file,
         # or a transient error leaks a lock nobody owns that blocks every writer
         # of this collection until it goes stale.
@@ -709,7 +741,7 @@ def _reclaim(lockpath: Path, rec: Optional[dict], mtime: Optional[float],
         _note(f"the write lock on '{(rec or {}).get('collection', lockpath.stem)}' "
               f"looks abandoned but could not be removed ({e}); waiting instead.")
         return False
-    age = time.time() - current_mtime
+    age = max(time.time() - current_mtime, quiet)
     _note(f"reclaimed the write lock on "
           f"'{(rec or {}).get('collection', lockpath.stem)}': its holder "
           f"({describe_holder(rec, current_mtime)}) had not reported for "

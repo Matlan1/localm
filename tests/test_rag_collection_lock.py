@@ -270,17 +270,19 @@ def test_a_dead_holders_stale_lock_is_reclaimed(base, capsys, monkeypatch):
     assert "reclaimed the write lock" in capsys.readouterr().err
 
 
-def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base):
+def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base, monkeypatch):
     """The other direction, and the whole reason for the heartbeat: a holder
     that has held the lock far LONGER than the staleness window but is still
-    reporting must be left alone. config._cross_process_lock's fixed 30 s rule
-    would have reaped this one - it is a normal indexing run."""
+    reporting must be left alone, even by a waiter that has watched it for
+    longer than its confirm window. config._cross_process_lock's fixed 30 s
+    rule would have reaped this one - it is a normal indexing run."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(started=time.time() - 7200))     # held 2h, reporting now
 
     with pytest.raises(CollectionLockedError) as e:
         with collection_write_lock(lp, collection="kb", op="a test",
-                                   timeout=0.3, stale_after=1.0):
+                                   timeout=1.0, stale_after=5.0):
             pass
     assert "pid 999999" in _flat(str(e.value)), "the refusal must name the holder"
     assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == 999_999, (
@@ -307,19 +309,24 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
     lp = lock_path_for(base / "kb")
     stale_after = 1.2
 
+    # The hold is recorded under another pid space, so the waiter below cannot
+    # check its liveness and only the heartbeat keeps it.
+    monkeypatch.setattr(cl, "_machine_id_cache", "another-pid-space")
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
+        monkeypatch.setattr(cl, "_machine_id_cache", None)
         # TWO windows, not four, to bound how long this test occupies heavy_slot,
         # which is box-wide across xdist workers. Crossing the staleness
         # threshold twice proves the same property: a REFRESHED record survives
         # past the threshold.
         time.sleep(stale_after * 2)          # two whole staleness windows
-        mine = json.loads(lp.read_text(encoding="utf-8"))["token"]
+        held = json.loads(lp.read_text(encoding="utf-8"))
+        assert cl._holder_liveness(held) == "unknown"
         with pytest.raises(CollectionLockedError):
             with collection_write_lock(lp, collection="kb", op="a waiter",
-                                       timeout=0.2, stale_after=stale_after):
+                                       timeout=1.0, stale_after=stale_after):
                 pass
-        assert json.loads(lp.read_text(encoding="utf-8"))["token"] == mine
+        assert json.loads(lp.read_text(encoding="utf-8"))["token"] == held["token"]
 
     # The control, same run and same stale_after: an identical record that is
     # NOT being refreshed is reclaimed.
@@ -554,6 +561,64 @@ def test_an_unidentifiable_holders_lock_is_taken_over_after_the_clock_was_set_ba
 
     assert _acquired_pid(lp, timeout=5.0, stale_after=1.0) == os.getpid(), (
         "an abandoned lock stayed wedged after the clock was set back")
+
+
+def test_short_waits_in_one_process_take_over_an_abandoned_lock_between_them(
+        base, monkeypatch):
+    """Waits each shorter than the confirm window (a stats backfill, a memory
+    reinforcement) keep watching the same lock across calls in one process, so
+    together they take over a lock no single one of them could."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    window = cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+
+    assert _acquired_pid(lp, timeout=0) is None, (
+        "a single zero-length wait took over before any watch")
+    taken, deadline = None, time.monotonic() + 10 * window
+    while taken is None and time.monotonic() < deadline:
+        time.sleep(window / 3)
+        taken = _acquired_pid(lp, timeout=0)
+    assert taken == os.getpid(), (
+        "repeated short waits never took over an abandoned lock")
+
+
+def test_a_heartbeat_between_short_waits_restarts_their_watch(base, monkeypatch):
+    """A heartbeat that lands between two short waits (its mtime changes, even
+    to a time that still reads as old) restarts the watch, so the next wait
+    does not take the lock over."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    window = cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    assert _acquired_pid(lp, timeout=0) is None
+
+    time.sleep(window * 2)
+    beat = lp.stat().st_mtime + 1
+    os.utime(lp, (beat, beat))
+    before = lp.read_text(encoding="utf-8")
+    taken = _acquired_pid(lp, timeout=0)
+    assert lp.read_text(encoding="utf-8") == before, (
+        "a lock whose heartbeat had just moved was taken over")
+    assert taken is None
+
+    time.sleep(window * 2)
+    assert _acquired_pid(lp, timeout=0) == os.getpid(), (
+        "the restarted watch never completed")
+
+
+def test_a_wait_shorter_than_the_confirm_window_says_so(base):
+    """A refusal from a wait too short to take over a lock that has stopped
+    reporting names that as the reason."""
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    with pytest.raises(CollectionLockedError) as e:
+        with collection_write_lock(lp, collection="kb", op="a test",
+                                   timeout=0.5):
+            pass
+    msg = _flat(str(e.value))
+    assert "only after watching it for 15s" in msg, msg
+    assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == 999_999
 
 
 def test_a_beating_holder_is_never_taken_over_even_when_judged_dead(
