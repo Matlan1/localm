@@ -443,6 +443,86 @@ class VramSizingMixin:
         process can invalidate between the probe and the load."""
         return self._VRAM_OVERHEAD_BYTES * max(1, int(devices or 1))
 
+    # Largest n_batch/n_ubatch llama.py gives a context: n_batch = min(n_ctx,
+    # this), n_ubatch = n_batch.
+    _MAX_BATCH = 2048
+
+    def _implicit_split_fit(self, gpu_layers: int):
+        """Per-device fit of llama.cpp's IMPLICIT layer split for this load, as
+        a :class:`~localm.inference.backends.llamacpp._split_fit.SplitFitPlan`,
+        or ``None`` when it does not apply or cannot be measured.
+
+        Applies only to a GPU load (``gpu_layers != 0``) with no configured
+        ``gpu_split_indices`` and no ``n_cpu_moe``, on 2+ devices whose
+        readings :func:`localm.discover.implicit_split_devices` returns, for a
+        model whose GGUF header :func:`localm.model_manager.gguf.gguf_split_layout`
+        reads. Each device is charged its layers' weights and KV cache and
+        ``_VRAM_OVERHEAD_BYTES``; the device that receives the output layer is
+        also charged the output weights and the logits buffer (twice when an
+        MTP draft context will be created). The weights of MTP / nextn layers
+        are charged only when MTP is enabled, since llama.cpp skips loading
+        them otherwise. Must run off the event loop (it probes). Never raises."""
+        if gpu_layers == 0 or (getattr(self, "n_cpu_moe", 0) or 0) > 0:
+            return None
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            return None
+        try:
+            from localm.config import load_config
+            from localm.discover import implicit_split_devices
+            from localm.inference.backends.llamacpp._split_fit import (
+                logits_buffer_bytes, plan_split)
+            from localm.model_manager.gguf import (
+                gguf_nextn_predict_layers, gguf_split_layout)
+            cfg = load_config()
+            if cfg.get("gpu_split_indices"):
+                return None
+            path = Path(self.model_path)
+            layout = gguf_split_layout(path)
+            if layout is None:
+                return None
+            devices = implicit_split_devices(cfg, wait_for_inflight=True)
+            if not devices:
+                return None
+            n_layer_all = int(layout["block_count"])
+            sizes = layout["tensor_bytes"]
+            arch, nextn = gguf_nextn_predict_layers(path)
+            nextn = max(0, min(int(nextn), n_layer_all))
+            mtp_on = bool(getattr(self, "mtp_enabled", False)) and nextn > 0
+            if mtp_on:
+                from localm.inference.backends.llamacpp._api import (
+                    MTP_GRAPH_ARCHITECTURES)
+                mtp_on = arch in MTP_GRAPH_ARCHITECTURES
+            layer_bytes = [0] * n_layer_all
+            for name, size in sizes.items():
+                if not name.startswith("blk."):
+                    continue
+                head, _, _rest = name[4:].partition(".")
+                if head.isdigit() and int(head) < n_layer_all:
+                    layer_bytes[int(head)] += int(size)
+            if not mtp_on:
+                for il in range(n_layer_all - nextn, n_layer_all):
+                    layer_bytes[il] = 0
+            output_bytes = (sizes.get("output.weight")
+                            or sizes.get("token_embd.weight") or 0)
+            output_bytes += sizes.get("output_norm.weight", 0)
+            repeating = max(1, n_layer_all - nextn)
+            kv_per_layer = (self.n_ctx * self._kv_bytes_per_token()) // repeating
+            layer_kv = [kv_per_layer if il < n_layer_all - nextn else 0
+                        for il in range(n_layer_all)]
+            logits = logits_buffer_bytes(layout["n_vocab"], self.n_ctx,
+                                         max_batch=self._MAX_BATCH,
+                                         contexts=2 if mtp_on else 1)
+            return plan_split(
+                devices, layer_bytes=layer_bytes, output_bytes=int(output_bytes),
+                layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
+                logits_bytes=logits, reserve_bytes=int(self._VRAM_OVERHEAD_BYTES))
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("implicit split fit unavailable (%s); keeping llama.cpp's "
+                       "default split", type(e).__name__)
+            return None
+
     # The MTP draft context is never created larger than this many tokens
     # regardless of the main n_ctx - matches llama.py's own
     # cp_mtp.n_ctx = min(n_ctx, 2048).

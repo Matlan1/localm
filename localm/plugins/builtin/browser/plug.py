@@ -12,6 +12,8 @@ Routes (mounted by the engine, auto-scoped to the ``browser`` capability):
   POST   /api/browser/type       - type text into the open browser
   POST   /api/browser/stop       - close the browser and end the stream
   GET    /api/browser/state      - whether one is open, and what it reached
+  GET    /api/browser/engine     - whether the configured browser can start, and why not
+  POST   /api/browser/download   - download the bundled browser, as a background job
 
 The live view is a background job: its worker owns the browser for the job's
 lifetime and pushes one ``frame`` event per rendered frame, which the kernel's
@@ -23,20 +25,26 @@ returns: the navigate route reaches the same live browser through the session
 registry while the worker is still streaming it.
 
 Ships DISABLED by default, and every route refuses unless ``browser_enabled`` is
-switched on, except ``/stop`` and ``/state``, which work regardless. Holding the
-capability is not on its own enough to drive a browser.
+switched on, except ``/stop``, ``/state``, ``/engine`` and ``/download``, which
+work regardless: the last two are how a user sets the browser up before turning
+it on. Holding the capability is not on its own enough to drive a browser.
 """
 
 from __future__ import annotations
 
+import asyncio
+import importlib.util
+import threading
 import time
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from localm import scopes
+from localm.browser import discovery, provision
 from localm.browser import session as bsession
-from localm.inference.http_server import principal_id
+from localm.inference.http_server import caller_scopes, principal_id
 from localm.plugins.gui.jobs import FRAME_EVENT
 
 _router = APIRouter()
@@ -377,10 +385,139 @@ async def state(request: Request):
         "inlineLiveView": _inline_live_view(),
         "headless": live.headless,
         "engine": live.engine,
+        "browser": live.browser_name,
         "blocked": live.blocked_requests()[-50:],
         "allowed": live.allowed_requests()[-50:],
         "console": live.console_messages()[-50:],
     }
+
+
+#: The running bundled-browser download as ``(job id, owner)``, or None.
+#: Guarded by ``_download_lock``.
+_download: tuple | None = None
+_download_lock = threading.Lock()
+
+
+def _playwright_installed() -> bool:
+    return importlib.util.find_spec("playwright") is not None
+
+
+def _engine_status(can_write: bool) -> dict:
+    """What the configured engine needs before it can start a browser."""
+    engine = _settings()["engine"]
+    have_playwright = _playwright_installed()
+    bundled = provision.is_chromium_installed() if have_playwright else False
+    system = [b.name for b in discovery.find_system_browsers()]
+    ready = have_playwright and (bundled if engine == "bundled" else bool(system))
+    problem = None
+    if not have_playwright:
+        problem = "playwright_missing"
+    elif not ready:
+        problem = "bundled_missing" if engine == "bundled" else "system_missing"
+    blocked = None
+    if not provision.download_allowed():
+        blocked = "network"
+    elif not can_write:
+        blocked = "permission"
+    with _download_lock:
+        downloading = _download is not None
+    return {
+        "engine": engine,
+        "ready": ready,
+        "problem": problem,
+        "bundled_installed": bundled,
+        "system_browsers": system,
+        "looked_for": list(discovery.LOOKED_FOR),
+        "can_download": have_playwright and not bundled and blocked is None,
+        "download_blocked": blocked if have_playwright and not bundled else None,
+        "downloading": downloading,
+    }
+
+
+def _can_write_config(request: Request) -> bool:
+    held = caller_scopes(request)
+    return held is None or scopes.grants(held, scopes.CONFIG_WRITE)
+
+
+@_router.get("/api/browser/engine")
+async def engine_status(request: Request):
+    """Whether the configured browser engine can start a browser right now.
+
+    ``problem`` is None when it can, else ``bundled_missing`` (the download has
+    not been done), ``system_missing`` (no installed browser was found) or
+    ``playwright_missing`` (the browser extra is not installed).
+    ``can_download`` is a UI hint for the download action; ``download_blocked``
+    says why it is off (``network`` or ``permission``). POST
+    /api/browser/download re-checks both."""
+    from localm.executor import get_plugin_executor
+    can_write = _can_write_config(request)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(get_plugin_executor(),
+                                      lambda: _engine_status(can_write))
+
+
+@_router.post("/api/browser/download")
+async def download_browser(request: Request):
+    """Download the bundled browser once, as a background job.
+
+    Writes no setting. Needs config:write, the scope that governs the network
+    policy itself, so a key that could not lift the policy cannot bypass it
+    here. Refused under ``net_mode=off`` unless downloads are exempted, and a
+    no-op when the browser is already installed. A second request while one
+    download runs from the same key returns that job."""
+    from localm.executor import get_plugin_executor
+    if not _can_write_config(request):
+        raise HTTPException(
+            403, "Downloading the browser needs the config:write scope (the "
+                 "same permission that governs the network policy).")
+    if not _playwright_installed():
+        raise HTTPException(
+            409, "The browser automation extra is not installed. Install it "
+                 f"with:  {provision.PIP_INSTALL_HINT}")
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, "The browser download needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    loop = asyncio.get_running_loop()
+    if await loop.run_in_executor(get_plugin_executor(),
+                                  provision.is_chromium_installed):
+        return {"status": "already_installed"}
+    if not provision.download_allowed():
+        raise HTTPException(
+            409, "Network access is disabled (net_mode=off), which blocks even "
+                 "an explicitly requested download. Set net_mode to ask or "
+                 "allow, or turn on \"Allow model downloads while network "
+                 "access is off\", first.")
+    global _download
+    owner = principal_id(request)
+
+    def _run(job) -> bool:
+        global _download
+        try:
+            job.push({"type": "line", "text": "Downloading the browser "
+                      "(one-time, a few hundred MB)..."})
+            result = provision.install_chromium(
+                on_progress=lambda line: job.push({"type": "line", "text": line}))
+            if not result.ok:
+                job.push({"type": "line", "text": "error: " + result.message})
+                return False
+            job.push({"type": "line", "text": "Ready: " + result.message})
+            return True
+        finally:
+            with _download_lock:
+                _download = None
+
+    with _download_lock:
+        if _download is not None:
+            running_id, running_owner = _download
+            if running_owner != owner:
+                raise HTTPException(409, "A browser download is already running.")
+            return {"job_id": running_id, "status": "running"}
+        job = jobs.start_fn("browser-download", _run, owner=owner,
+                            label="Download the browser")
+        _download = (job.id, owner)
+    return {"job_id": job.id, "status": "started"}
 
 
 def register(host) -> None:

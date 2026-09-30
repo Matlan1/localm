@@ -1140,9 +1140,10 @@ CORE_FIELDS: list = [
                  "allows.",
                  group="Network", owner="browser", admin_only=True),
     SettingField("browser_engine", Widget.SELECT, "Browser to drive",
-                 "'bundled' runs the sandboxed browser localm downloads. "
-                 "'system' drives your own installed browser, including its "
-                 "logged-in sessions, which is why it is not the default.",
+                 "'bundled' runs the browser localm downloads. 'system' runs a "
+                 "Chrome, Chromium, Edge or Brave already installed here. "
+                 "Either way it starts with a fresh, empty profile: none of "
+                 "your logins carry over.",
                  group="Network", owner="browser", admin_only=True,
                  options=["bundled", "system"]),
     SettingField("browser_headless", Widget.TOGGLE, "Run the browser hidden",
