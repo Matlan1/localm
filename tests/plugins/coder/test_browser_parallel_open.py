@@ -119,6 +119,7 @@ def fleet(monkeypatch):
     for owner in (OWNER, OTHER):
         bt.close_for_owner(owner)
         bsession.close("coder-" + owner)
+    bt._STARTING.clear()
 
 
 def _navigate_from_threads(cwd, owner, urls):
