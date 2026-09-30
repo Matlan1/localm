@@ -72,6 +72,7 @@
   "chat.routed.cap.tool_use": "Tool-Aufrufe",
   "chat.routed.cap.vision": "Bilder lesen",
   "chat.routed.chip": "statt {from}",
+  "chat.routed.fallbackChip": "ein geeignetes Modell wurde nicht verwendet",
   "chat.routed.title": "{from} fehlt, was diese Anfrage brauchte ({needs}), deshalb hat ein installiertes Modell geantwortet, das es kann. Legen Sie den Chat in seinen Parametern fest, um immer ein Modell zu verwenden.",
   "chat.seed": "Seed",
   "chat.send": "Senden",

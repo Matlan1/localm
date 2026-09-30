@@ -654,6 +654,13 @@ class TestServeAndSurfaces:
     def test_a_native_window_that_fails_falls_back_to_a_tab(self, gui):
         gui.native = True
         gui.window_loads = False
+
+        def during_serve(app):
+            deadline = time.monotonic() + 10
+            while not gui.opened and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        gui.during_serve = during_serve
         r = gui.invoke("--no-model")
         assert r.exit_code == 0, r.output
         assert gui.opened == [gui.windows[0]["url"]]

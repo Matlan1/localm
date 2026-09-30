@@ -250,6 +250,49 @@ def test_run_native_window_returns_false_when_the_window_never_reports_loaded(mo
     fake.start.assert_called_once()
 
 
+class _LoadsAfterTheConfirmationWait:
+    """window.events.loaded for a page that finishes loading after the helper
+    thread's finite wait has run out. A finite wait that finds the event unset
+    reports its timeout at once, without sleeping; load() then sets the event."""
+
+    def __init__(self):
+        self._loaded = threading.Event()
+        self.gave_up = threading.Event()
+
+    def wait(self, timeout=None):
+        if timeout is not None and not self._loaded.is_set():
+            self.gave_up.set()
+            return False
+        return self._loaded.wait(timeout)
+
+    def load(self):
+        self._loaded.set()
+
+
+@pytest.mark.parametrize("hide_on_close", [True, False])
+def test_run_native_window_returns_true_for_a_page_that_loads_after_the_confirmation_wait(
+        monkeypatch, hide_on_close):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, window = _fake_webview(loaded=False)
+    slow = _LoadsAfterTheConfirmationWait()
+    window.events.loaded = slow
+    seen = {}
+
+    def start(*a, **k):
+        seen["gave_up"] = slow.gave_up.wait(5.0)
+        slow.load()
+    fake.start.side_effect = start
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
+
+    result = appface.run_native_window("http://127.0.0.1:8642/",
+                                       hide_on_close=hide_on_close)
+
+    assert seen["gave_up"], "the confirmation wait never ran out before the page loaded"
+    assert result is True
+
+
 def test_run_native_window_hides_and_vetoes_close_when_quit_setting_is_off(monkeypatch):
     """Default behavior (config key desktop_window_quit_on_close = False):
     the window's own close button hides it and vetoes the real close,

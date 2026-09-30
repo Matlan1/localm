@@ -167,6 +167,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A slow-to-load app window no longer makes a stopped localm open a browser
+  tab.** When the app window took longer than about 8 seconds to load its first
+  page, stopping localm with a termination signal, or closing the window with
+  "Quit when the app window is closed" on, opened a browser tab onto the server
+  that had just stopped, and closing the window of a `localm gui` attached to an
+  already-running instance opened a tab as well. A slow first load now counts as
+  loaded, and no tab opens once the server has stopped.
+- **A model whose load just failed is no longer loaded again on every request.**
+  When a request needed something the selected model lacks (for example tool
+  calls in the coder) and the model chosen to answer it crashed or failed while
+  loading, localm retried that load on every later request, each time costing
+  the load time and a crashed worker before falling back. Routing now leaves
+  that model out until its load settings, its model file or the llama.cpp
+  runtime change, it loads successfully, or a growing delay (10 minutes, doubling
+  to 6 hours) passes. Loading it yourself still tries it. A reply answered by
+  the selected model for that reason says so: the chat shows "a capable model was
+  not used", the coder session feed and `localm coder` print why, the MCP tools
+  add a note, and the `X-Localm-Model-Routing` header and the debug log name the
+  skipped model, when its load failed and the reason.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm

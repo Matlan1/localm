@@ -194,6 +194,7 @@ export const I18N_EN = {
   "chat.routed.cap.tool_use": "tool calls",
   "chat.routed.cap.vision": "reading images",
   "chat.routed.chip": "instead of {from}",
+  "chat.routed.fallbackChip": "a capable model was not used",
   "chat.routed.title": "{from} lacks what this request needed ({needs}), so an installed model that has it answered. Pin the chat in its parameters to always use one model.",
   "chat.seed": "Seed",
   "chat.send": "Send",

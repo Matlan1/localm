@@ -168,12 +168,17 @@ def test_restart_env_round_trip(monkeypatch, recorded, expected):
 
 
 def _run_gui_startup(monkeypatch, *, native, window_loads=True, args=(),
-                     restart=None):
+                     restart=None, stop_first=False):
     """Run `localm gui --no-model --isolated` through its real startup, with the
     server, the app window and the browser replaced by recorders, and
     LOCALM_RESTART_IN_PROGRESS set to *restart* (unset when None). Returns the
     surfaces passed to http_server.set_restart_ui, the URLs opened in a browser,
-    and LOCALM_RESTART_IN_PROGRESS as the server start saw it."""
+    and LOCALM_RESTART_IN_PROGRESS as the server start saw it.
+
+    A server running beside the app window keeps running until the window
+    returns True or a browser tab is opened. With *stop_first* the window
+    instead stops the server, waits for the stop to be signalled, and then
+    returns *window_loads*."""
     import contextlib
     import socket
     import threading
@@ -183,13 +188,29 @@ def _run_gui_startup(monkeypatch, *, native, window_loads=True, args=(),
     from localm.plugins.gui import cli as guicli
 
     recorded, opened, at_serve = [], [], []
+    server_may_stop = threading.Event()
+
+    def run_advertised(*a, **k):
+        at_serve.append(os.environ.get("LOCALM_RESTART_IN_PROGRESS"))
+        if threading.current_thread() is not threading.main_thread():
+            server_may_stop.wait(10.0)
+
+    def run_native_window(url, *a, server_stopped=None, **k):
+        if stop_first:
+            server_may_stop.set()
+            server_stopped.wait(10.0)
+        elif window_loads:
+            server_may_stop.set()
+        return window_loads
+
+    def open_tab(url, *a, **k):
+        opened.append(url)
+        server_may_stop.set()
+
     monkeypatch.setattr("localm.appface.native_window_available", lambda: native)
-    monkeypatch.setattr("localm.appface.run_native_window",
-                        lambda url, *a, **k: window_loads)
-    monkeypatch.setattr("webbrowser.open", lambda url, *a, **k: opened.append(url))
-    monkeypatch.setattr(
-        "localm.inference.http_server.run_advertised",
-        lambda *a, **k: at_serve.append(os.environ.get("LOCALM_RESTART_IN_PROGRESS")))
+    monkeypatch.setattr("localm.appface.run_native_window", run_native_window)
+    monkeypatch.setattr("webbrowser.open", open_tab)
+    monkeypatch.setattr("localm.inference.http_server.run_advertised", run_advertised)
     monkeypatch.setattr("localm.inference.http_server.set_restart_ui",
                         recorded.append)
     monkeypatch.setattr("localm.winconsole.disable_quickedit", lambda: None)
@@ -253,6 +274,16 @@ def test_gui_startup_records_the_fallback_browser_tab(monkeypatch):
                                            window_loads=False)
     assert recorded == ["window", "browser"]
     assert len(opened) == 1
+
+
+def test_gui_startup_opens_no_tab_for_a_stopped_server_when_the_window_never_loaded(
+        monkeypatch):
+    """The window returns "not loaded" only after the server has stopped: no
+    browser tab opens and no browser surface is recorded."""
+    recorded, opened, _ = _run_gui_startup(monkeypatch, native=True,
+                                           window_loads=False, stop_first=True)
+    assert opened == []
+    assert recorded == ["window"]
 
 
 def test_gui_startup_with_no_browser_records_no_surface(monkeypatch):
