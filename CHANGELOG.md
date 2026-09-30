@@ -151,6 +151,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Two browser calls in one coder turn no longer open two browsers.** With no
+  browser open yet, a turn that called `browser_navigate` twice at once started
+  a browser for each call. The second replaced the first in the session's
+  record, so the first kept running with nothing able to close it. The calls
+  now share a single start and drive the same browser; if that start fails,
+  every waiting call gets the same error.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm
