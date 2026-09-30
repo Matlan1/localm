@@ -1200,10 +1200,17 @@ const MEMORY_DEGRADE_LABELS = {
 
 /** A chip on an assistant turn that was answered by a different model than
  *  the one selected, because the selected one lacked something the request
- *  needed. *routed* is { from, gaps: [capability, ...] }. */
+ *  needed. *routed* is { from, gaps: [capability, ...] }, or { fallback } when
+ *  the selected model answered because a model that could have answered was
+ *  skipped or failed to load: `fallback` is the server's explanation. */
 export function buildRoutedChip(routed) {
   const chip = el("span", "routed-chip");
   chip.appendChild(iconEl("models", "btn-ic"));
+  if (routed.fallback) {
+    chip.appendChild(document.createTextNode(t("chat.routed.fallbackChip")));
+    chip.title = routed.fallback;
+    return chip;
+  }
   const gaps = (routed.gaps || []).map((g) => t("chat.routed.cap." + g));
   chip.appendChild(document.createTextNode(t("chat.routed.chip", { from: routed.from || "?" })));
   chip.title = t("chat.routed.title", {

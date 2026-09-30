@@ -107,12 +107,13 @@ def register(app: FastAPI, ctx) -> None:
                     # model does not make it the model every later unnamed
                     # request resolves to.
                     engine = await _hs.get_engine(_cand, activate=False)
-                except HTTPException as e:
-                    load_errors.append(f"{_cand}: {e.detail}")
+                except (HTTPException, OSError, ValueError) as e:
+                    detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+                    load_errors.append(f"{_cand}: {detail}")
                     from localm.debuglog import logger as _dbg
                     _dbg.warning("capability routing: could not load %s for a "
                                  "request %s lacks (%s): %s", _cand, route.current,
-                                 ", ".join(sorted(route.gaps)), e.detail)
+                                 ", ".join(sorted(route.gaps)), detail)
                     continue
                 if _cand != route.resolved:
                     route = route.answered_by(_cand)

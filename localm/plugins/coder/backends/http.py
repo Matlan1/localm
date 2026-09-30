@@ -266,6 +266,11 @@ class HTTPBackend(BaseLLMBackend):
         # The model the server reported answering the most recent request, or
         # None before the first response.
         self.answered_model: Optional[str] = None
+        # The server's note about a model it could not use for the most recent
+        # request (see _note_routing), or None; on_routing_note, when set, is
+        # called with each new note.
+        self.routing_note: Optional[str] = None
+        self.on_routing_note: Optional[Callable[[str], None]] = None
 
     @property
     def supports_native_tools(self) -> bool:
@@ -343,6 +348,31 @@ class HTTPBackend(BaseLLMBackend):
             self.model_pinned = bool(pinned)
         self._ctx_capacity_cached = False
         self._ctx_capacity = None
+
+    def _note_routing(self, headers) -> None:
+        """Record the ``note`` of the ``X-Localm-Model-Routing`` response header
+        in ``routing_note`` when the reply was neither routed nor pinned, which
+        is when the server kept this session's model because a model that
+        could have answered was skipped or failed to load. Any other reply
+        clears ``routing_note``. A note different from the previous one is
+        passed to ``on_routing_note``."""
+        import json as _json
+        getter = getattr(headers, "get", None)
+        raw = getter("X-Localm-Model-Routing") if callable(getter) else None
+        note = None
+        if isinstance(raw, str) and raw:
+            try:
+                data = _json.loads(raw)
+            except ValueError:
+                data = None
+            if isinstance(data, dict) and not data.get("routed") \
+                    and not data.get("pinned"):
+                text = data.get("note")
+                if isinstance(text, str) and text:
+                    note = text
+        previous, self.routing_note = self.routing_note, note
+        if note and note != previous and self.on_routing_note is not None:
+            self.on_routing_note(note)
 
     def _note_answer(self, model, usage) -> None:
         """Record which model answered, and the context capacity it reported
@@ -583,6 +613,7 @@ class HTTPBackend(BaseLLMBackend):
             pinned=self._pinned,
         )
         _raise_for_status(resp)
+        self._note_routing(getattr(resp, "headers", None))
         data = resp.json()
         if self.anthropic:
             return self._parse_anthropic_response(data)
@@ -631,6 +662,7 @@ class HTTPBackend(BaseLLMBackend):
             pinned=self._pinned,
         ) as resp:
             _raise_for_status(resp)
+            self._note_routing(getattr(resp, "headers", None))
             for line in resp.iter_lines():
                 if not line:
                     continue
