@@ -5,9 +5,10 @@ The browser tools are not destructive, so the calls of one model turn run on a
 thread pool. Two calls that both find no browser open must end up driving the
 same one, not launch a browser each and leave one running that nothing closes.
 
-The fake browser blocks in start() until a test opens its gate, and the
-registry check is spied on, so each test knows both calls have found no browser
-before the start is allowed to finish.
+The fake browser blocks in start() until a test opens its gate. The registry
+check is spied on, so a test opens the gate as soon as both calls have found no
+browser open, or after a short grace when an implementation holds the second
+call back before that check.
 """
 
 import threading
@@ -19,6 +20,7 @@ from localm.browser.session import BrowserUnavailableError
 OWNER = "parallel-open-a"
 OTHER = "parallel-open-b"
 WAIT = 10.0
+GRACE = 0.5
 URL_A = "https://example.com/a"
 URL_B = "https://example.com/b"
 
@@ -151,7 +153,7 @@ class TestCallsMadeTogetherShareOneBrowser:
         sid = "coder-" + OWNER
         before = set(bsession.active_ids())
         threads, results = _navigate_from_threads(tmp_path, OWNER, [URL_A, URL_B])
-        assert fleet.both_checked.wait(WAIT), "the calls never both reached the launch"
+        fleet.both_checked.wait(GRACE)
         fleet.gate(sid).set()
         _join(threads)
         assert len(fleet.built) == 1, (
@@ -171,7 +173,7 @@ class TestCallsMadeTogetherShareOneBrowser:
         before = set(bsession.active_ids())
         fleet.failure = BrowserUnavailableError("no chromium build here")
         threads, results = _navigate_from_threads(tmp_path, OWNER, [URL_A, URL_B])
-        assert fleet.both_checked.wait(WAIT), "the calls never both reached the launch"
+        fleet.both_checked.wait(GRACE)
         fleet.gate(sid).set()
         _join(threads)
         assert len(fleet.built) == 1, (
