@@ -156,12 +156,29 @@ class TestRepoFolderSpec:
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
 
         def _fake_head(url, allow_redirects=None, timeout=None):
+            # An ETag, as HuggingFace sends, so the resume check runs
+            # huggingface_hub's real local-dir path helpers, which create the
+            # repo folder under the destination.
             h = MagicMock()
-            h.headers = {"content-length": str(len(body))}
+            h.history = []
+            h.headers = {"content-length": str(len(body)), "ETag": '"0123abcd"'}
             return h
 
         monkeypatch.setattr("requests.head", _fake_head)
         return calls
+
+    def test_a_refused_download_removes_the_folder_it_created(
+            self, fake_registry, tmp_path, monkeypatch):
+        calls = self._record_downloads(monkeypatch)
+        monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: False)
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+
+        ok = mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
+                                dest_dir=dest_dir, register=False)
+
+        assert not (dest_dir / "all_in_one").exists(), "the repo folder was left behind"
+        assert calls == []
+        assert ok is False
 
     def test_lands_under_its_bare_name_and_leaves_no_folder(
             self, fake_registry, tmp_path, monkeypatch):
