@@ -1254,6 +1254,30 @@ class TestStatsVramTrust:
         assert [boundary for boundary, _ in hits] == ["_loader._probe_roundtrip"]
         assert raised is not None
 
+    def test_a_probe_thread_from_an_earlier_test_is_passed_through(self, monkeypatch):
+        """A localm-vram-probe thread already running when the tripwires are armed
+        reaches the real function and is not recorded."""
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "load_lib", lambda: "real")
+        release = threading.Event()
+        results = []
+
+        def _earlier_probe():
+            release.wait(timeout=5)
+            results.append(_loader.load_lib())
+
+        thread = threading.Thread(target=_earlier_probe, name="localm-vram-probe",
+                                  daemon=True)
+        thread.start()
+        try:
+            hits = _arm_native_tripwires(monkeypatch)
+            release.set()
+            thread.join(timeout=5)
+        finally:
+            release.set()
+        assert hits == []
+        assert results == ["real"]
+
 
 class TestGpusEndpoint:
     """GET /api/gpus - powers the Settings > Live tuning "Main GPU" selector."""
