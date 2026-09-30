@@ -39,9 +39,10 @@ from ._structs import (
 # Held by _quiet_stderr for its whole block, and by generation's
 # dedup_native_stderr only while it redirects or restores fd 2. Lock order: a
 # LlamaCpp's _gen_lock is taken before _stderr_lock, never after; no block that
-# holds it contains a yield; no fd-2 redirect is entered inside another on the
-# same thread. See test_close_during_a_suspended_grammar_generation_does_not_deadlock
-# and test_abandoning_a_generation_during_close_restores_fd2_in_order.
+# holds it contains a yield; it is not reentrant, so neither scope is entered
+# inside a _quiet_stderr block. See
+# test_close_during_a_suspended_grammar_generation_does_not_deadlock and
+# test_abandoning_a_generation_during_close_restores_fd2_in_order.
 _stderr_lock = threading.Lock()
 _devnull_fd: Optional[int] = None
 

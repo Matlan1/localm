@@ -66,8 +66,10 @@ def test_verbose_uses_nullcontext():
     assert _stderr_ctx_for_generate(True) is contextlib.nullcontext
 
 
-def test_non_verbose_uses_dedup_native_stderr():
-    assert _stderr_ctx_for_generate(False) is dedup_native_stderr
+def test_non_verbose_uses_dedup_native_stderr_with_the_stderr_lock():
+    ctx = _stderr_ctx_for_generate(False)
+    assert ctx.func is dedup_native_stderr
+    assert ctx.keywords == {"swap_lock": llama_mod._stderr_lock}
 
 
 @pytest.mark.parametrize(
@@ -77,13 +79,14 @@ def test_non_verbose_uses_dedup_native_stderr():
 )
 def test_generate_wraps_prefill_and_decode_in_dedup(monkeypatch, grammar, grammar_lazy):
     """Every non-verbose generation, grammar or not, runs its prefill and its
-    decode loop inside dedup_native_stderr and never inside _quiet_stderr."""
+    decode loop inside dedup_native_stderr, with _stderr_lock as its swap lock,
+    and never inside _quiet_stderr."""
     entered = []
 
     def _recorder(name):
         @contextlib.contextmanager
-        def _ctx():
-            entered.append(name)
+        def _ctx(swap_lock=None):
+            entered.append((name, swap_lock is llama_mod._stderr_lock))
             yield
         return _ctx
 
@@ -96,13 +99,15 @@ def test_generate_wraps_prefill_and_decode_in_dedup(monkeypatch, grammar, gramma
                            grammar=grammar, grammar_lazy=grammar_lazy)
 
     assert tokens == [42, 42]
-    assert entered == ["dedup", "dedup"], entered
+    assert entered == [("dedup", True), ("dedup", True)], entered
 
 
 # Pieces a lazy-grammar trace record carries: plain text, pieces that contain a
 # newline (so the record spans lines), a piece ending in ")" before a newline,
-# a backtick and an empty piece. "ZQX" marks generated text that must not leak.
-_PIECES = ("I", " will", "\n", " ZQXalpha", "\n\n", ")\n", "`", "", "ZQXbeta\nZQXgamma")
+# pieces with "`)" right before a newline, a backtick and an empty piece. "ZQX"
+# marks generated text that must not leak.
+_PIECES = ("I", " will", "\n", " ZQXalpha", "\n\n", ")\n", "}`)\n", "`", "",
+           "ZQXbeta\nZQXgamma", "`)\n")
 
 
 def test_grammar_generation_shows_native_lines_and_folds_the_trigger_trace(monkeypatch):

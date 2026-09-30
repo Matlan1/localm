@@ -965,10 +965,10 @@ def dedup_native_stderr(swap_lock=None):
                             "missing the tail of this run's native output until "
                             "the abandoned reader catches up",
                             _READER_JOIN_TIMEOUT)
-            return
-        if debug_fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(debug_fd)
-        if console is not None:
-            with contextlib.suppress(OSError):
-                console.close()
+        else:
+            if debug_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(debug_fd)
+            if console is not None:
+                with contextlib.suppress(OSError):
+                    console.close()
