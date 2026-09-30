@@ -17,6 +17,8 @@ import os
 import string
 import time
 
+import pytest
+
 from localm import debuglog
 
 
@@ -248,6 +250,35 @@ def test_teardown_survives_a_slow_reader_thread(monkeypatch, caplog):
         f"{[w.getMessage() for w in warns]}")
 
 
+def test_an_exception_inside_the_scope_propagates_when_the_reader_times_out(
+        monkeypatch, caplog):
+    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 0.3)
+    real_feed = debuglog._LineGrouper.feed
+
+    def slow_feed(self, line):
+        time.sleep(0.5)
+        return real_feed(self, line)
+
+    monkeypatch.setattr(debuglog._LineGrouper, "feed", slow_feed)
+
+    class _RaisedInside(Exception):
+        pass
+
+    caught = None
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        try:
+            with debuglog.dedup_native_stderr():
+                os.write(2, b"slow-line-one\n")
+                os.write(2, b"slow-line-two\n")
+                raise _RaisedInside()
+        except _RaisedInside as exc:
+            caught = exc
+
+    assert caught is not None, "the exception raised inside the scope was swallowed"
+    assert any("did not finish" in r.getMessage() for r in caplog.records), (
+        "the reader finished in time, so the timeout branch was not exercised")
+
+
 # --------------------------------------------------------------------------- #
 #  Template grouping: a varying-integer flood
 #
@@ -326,3 +357,166 @@ def test_distinct_variant_count_is_bounded_but_still_reported():
     out = _group([f"thing {i} done" for i in range(cap + 50)] * 3)
     assert len(out) == 1
     assert f"{cap}+ distinct" in out[0], out[0]
+
+
+# --------------------------------------------------------------------------- #
+#  llama.cpp's lazy-grammar trace
+#
+#  "Grammar still awaiting trigger after token <id> (`<piece>`)" is logged for
+#  every token while a lazy grammar waits for its trigger. <piece> is generated
+#  text: it varies per token and may contain newlines, so a record can span
+#  several lines. "ZQX" marks generated text that must not reach any view.
+# --------------------------------------------------------------------------- #
+
+class _Console:
+    """Stands in for the stderr duplicate dedup_native_stderr writes to."""
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, text):
+        self.writes.append(text)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+    def lines(self):
+        return [line for line in "".join(self.writes).splitlines() if line]
+
+
+def _awaiting(token_id, piece, end="\n"):
+    return (f"Grammar still awaiting trigger after token {token_id} "
+            f"(`{piece}`){end}").encode()
+
+
+# Includes pieces with "`)" right before a newline, whose record has a line ending
+# in "`)" before its last line.
+_PIECES = ("ZQXa", " ZQXb", "\n", "\n\n", ")\n", "`", "", "ZQXc\nZQXd", "\r\n",
+           "`)\n", "}`)\n", "`)\n\n", "ZQXe\nZQXf`)\nZQXg")
+
+
+def test_awaiting_trigger_records_never_reach_the_console_and_are_counted_once(monkeypatch):
+    console = _Console()
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: console)
+    before = len(debuglog.recent_activity())
+    with debuglog.dedup_native_stderr():
+        for i in range(40):
+            end = "\r\n" if i % 5 == 0 else "\n"
+            os.write(2, _awaiting(1000 + i, _PIECES[i % len(_PIECES)], end))
+    tail = debuglog.recent_activity()[before:]
+    assert console.lines() == [], console.lines()
+    assert len(tail) == 1, tail
+    assert tail[0].endswith("localm.native: Grammar still awaiting trigger after 40 token(s)")
+    assert not any("ZQX" in line for line in tail)
+
+
+def test_a_native_line_among_trigger_records_still_reaches_both_views(monkeypatch):
+    console = _Console()
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: console)
+    before = len(debuglog.recent_activity())
+    with debuglog.dedup_native_stderr():
+        for i in range(10):
+            os.write(2, _awaiting(2000 + i, _PIECES[i % len(_PIECES)]))
+            if i == 4:
+                os.write(2, b"ggml_vulkan: vk::Queue::submit: ErrorDeviceLost\n")
+    joined = "\n".join(debuglog.recent_activity()[before:])
+    assert console.lines() == ["ggml_vulkan: vk::Queue::submit: ErrorDeviceLost"]
+    assert "ggml_vulkan: vk::Queue::submit: ErrorDeviceLost" in joined
+    assert joined.count("Grammar still awaiting trigger") == 1, joined
+    assert "Grammar still awaiting trigger after 10 token(s)" in joined
+    assert "ZQX" not in joined
+
+
+def test_regex_trigger_record_is_recorded_without_its_payload(monkeypatch):
+    console = _Console()
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: console)
+    before = len(debuglog.recent_activity())
+    with debuglog.dedup_native_stderr():
+        for i in range(3):
+            os.write(2, _awaiting(3000 + i, "ZQXpre"))
+        os.write(2, b"Grammar triggered on regex: '<tool_call>\nZQXpayload'\n")
+        os.write(2, b"llama_decode: failed to decode, ret = -3\n")
+    tail = [line.split("localm.native: ", 1)[-1]
+            for line in debuglog.recent_activity()[before:]]
+    assert tail == [
+        "Grammar still awaiting trigger after 3 token(s)",
+        "Grammar triggered on regex",
+        "llama_decode: failed to decode, ret = -3",
+    ], tail
+    assert console.lines() == ["llama_decode: failed to decode, ret = -3"]
+
+
+def _fold(lines):
+    recorded, passed = [], []
+    trace = debuglog._GrammarTraceFolder(recorded.append, passed.append)
+    for line in lines:
+        trace.feed(line)
+    trace.flush()
+    return passed, recorded
+
+
+def _record_lines(token_id, piece):
+    return _awaiting(token_id, piece).decode().split("\n")[:-1]
+
+
+@pytest.mark.parametrize("piece", _PIECES + ("`)", "(`", "a'b"))
+def test_folder_consumes_every_line_of_one_record(piece):
+    passed, recorded = _fold(_record_lines(7, piece) + ["next native line"])
+    assert passed == ["next native line"], (piece, passed)
+    assert recorded == ["Grammar still awaiting trigger after 1 token(s)"]
+
+
+@pytest.mark.parametrize("piece", _PIECES)
+def test_folder_consumes_consecutive_records(piece):
+    lines = _record_lines(7, piece) + _record_lines(8, piece) + _record_lines(9, "x")
+    passed, recorded = _fold(lines)
+    assert passed == [], (piece, passed)
+    assert recorded == ["Grammar still awaiting trigger after 3 token(s)"]
+
+
+def test_folder_releases_lines_held_after_a_record_in_order():
+    lines = (_record_lines(1, "x") + ["", "ggml: short note"]
+             + _record_lines(2, "y") + ["ggml: tail note"])
+    passed, recorded = _fold(lines)
+    assert passed == ["", "ggml: short note", "ggml: tail note"], passed
+    assert recorded == ["Grammar still awaiting trigger after 2 token(s)"]
+
+
+def test_folder_forwards_a_long_line_after_a_record_without_waiting():
+    passed, recorded = [], []
+    trace = debuglog._GrammarTraceFolder(recorded.append, passed.append)
+    long_line = "ggml_vulkan: " + "x" * debuglog._GrammarTraceFolder._MAX_TAIL
+    for line in _record_lines(1, "x") + [long_line]:
+        trace.feed(line)
+    assert passed == [long_line]
+
+
+def test_folder_forwards_a_trigger_token_line_after_a_record():
+    token_line = "Grammar triggered on token 12 (`<tool_call>`)"
+    passed, recorded = _fold(_record_lines(1, "x") + [token_line])
+    assert passed == [token_line]
+    assert recorded == ["Grammar still awaiting trigger after 1 token(s)"]
+
+
+def test_folder_leaves_lines_that_only_mention_the_phrase_alone():
+    lines = [
+        "note: Grammar still awaiting trigger after token 5 (`x`)",
+        "Grammar still awaiting trigger after token soon",
+        "Grammar triggered on token 12 (`<tool_call>`)",
+    ]
+    passed, recorded = _fold(lines)
+    assert passed == lines
+    assert recorded == []
+
+
+def test_folder_bounds_an_unterminated_record():
+    cap = debuglog._GrammarTraceFolder._MAX_CONTINUATION_LINES
+    lines = ["Grammar still awaiting trigger after token 9 (`ZQXopen"]
+    lines += [f"continuation {i}" for i in range(cap)]
+    lines += ["after the bound"]
+    passed, recorded = _fold(lines)
+    assert passed == ["after the bound"], passed
+    assert recorded == ["Grammar still awaiting trigger after 1 token(s)"]
