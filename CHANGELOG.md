@@ -105,6 +105,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   colours to match Windows, macOS or GNOME, including a dark title bar on
   Windows. Set `LOCALM_THEME=dark` or `LOCALM_THEME=light` to choose one
   yourself.
+- **Delete past coder sessions and remove projects from the coder's session
+  list.** Each past session in the list has a delete button, and each project
+  has a remove button that forgets the project and deletes its saved sessions.
+  Both ask first. Removing a project deletes only the coder's saved sessions
+  for it, including an older one kept in the project's `.localcoder` folder;
+  your project files are left alone. A session that is open, or a project
+  with an open session, has to be ended first.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
@@ -158,6 +165,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   that had just stopped, and closing the window of a `localm gui` attached to an
   already-running instance opened a tab as well. A slow first load now counts as
   loaded, and no tab opens once the server has stopped.
+- **A model whose load just failed is no longer loaded again on every request.**
+  When a request needed something the selected model lacks (for example tool
+  calls in the coder) and the model chosen to answer it crashed or failed while
+  loading, localm retried that load on every later request, each time costing
+  the load time and a crashed worker before falling back. Routing now leaves
+  that model out until its load settings, its model file or the llama.cpp
+  runtime change, it loads successfully, or a growing delay (10 minutes, doubling
+  to 6 hours) passes. Loading it yourself still tries it. A reply answered by
+  the selected model for that reason says so: the chat shows "a capable model was
+  not used", the coder session feed and `localm coder` print why, the MCP tools
+  add a note, and the `X-Localm-Model-Routing` header and the debug log name the
+  skipped model, when its load failed and the reason.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm
@@ -840,6 +859,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
+- **Windows network-share paths written with the `\??\` prefix are refused like
+  any other network path.** A path such as `\??\UNC\host\share` got past the
+  checks that stop localm from reaching network shares and device paths
+  (folder settings, coder and job working folders, model file paths), and
+  Windows would then open the share. It is now refused before any file access.
 - **A malicious search result or fetched web page could still attempt to forge a model role
   marker.** Web content was already stripped of literal control-token text before reaching the
   model; the chat now also marks exactly which characters of a search result or page came from

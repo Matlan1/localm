@@ -190,6 +190,11 @@ class CoderSession:
         # preferred model, which the server may replace when a request needs
         # something it lacks.
         self.model_pinned = bool(getattr(backend, "model_pinned", True))
+        # A backend that reports why the server did not use a model that could
+        # have answered has each report shown in this session's feed.
+        if hasattr(backend, "on_routing_note"):
+            backend.on_routing_note = (
+                lambda text: self._push({"type": "info", "text": text}))
         self.auto_approve = auto_approve
         self.mode = mode
         self.dry_run = dry_run
@@ -890,6 +895,9 @@ class CoderSession:
             # can; "answered_by" names the model that answered last.
             "model_pinned": self.model_pinned,
             "answered_by": getattr(self.agent.backend, "answered_model", None),
+            # Why the last request was not answered by a model that could have
+            # answered it (skipped, or failed to load); None otherwise.
+            "routing_note": getattr(self.agent.backend, "routing_note", None),
             "mode": self.mode,
             "auto_approve": self.auto_approve,
             # The LIVE glob, not the one passed at creation: it is settable
@@ -1028,6 +1036,12 @@ class SessionManager:
         if not is_owner:
             sessions = [s for s in sessions if s.principal == principal]
         return [s.info() for s in sorted(sessions, key=lambda s: s.created_at)]
+
+    def snapshot(self) -> list:
+        """Every live session, for every principal. Unlike :meth:`list`, this
+        never reaps an idle session."""
+        with self._lock:
+            return list(self._sessions.values())
 
     def remove(self, session_id: str) -> Optional[CoderSession]:
         with self._lock:

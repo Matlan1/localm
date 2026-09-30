@@ -83,7 +83,7 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
         "!localm/inference/routes/**",
         "localm/_mp_spawn.py",
         "localm/_torch_gpu_probe.py",
-        "localm/setup_llama.py",
+        "localm/setup_llama/**",
         "runtime/**",
     ),
     "packaging and installers": (

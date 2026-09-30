@@ -13,6 +13,8 @@ A test file is selected when any of these holds:
   - it names a changed module by its dotted name (a monkeypatch target, an
     import written as a string), a changed script by file name, or a changed
     non-Python file by file name;
+  - a change to a module inside a package listed in _REEXPORT_FACADES also
+    counts as a change to that package, for both rules above;
   - it imports a changed dependency, names it in a string literal, imports a
     module that imports it (with --depth N, also that module's importers, up
     to N hops), or sits under the folder of a conftest.py that imports it. A
@@ -70,6 +72,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 _ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "websocket", "api_route"}
 _EVERYTHING = {"tests/conftest.py"}
+# Packages whose callers import and patch the package itself, which re-exports
+# its submodules' names.
+_REEXPORT_FACADES = ("localm.setup_llama",)
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
@@ -465,6 +470,7 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
         return reasons
 
     changed_modules: set[str] = set()
+    facades: set[str] = set()
     needles: list[tuple[str, re.Pattern[str]]] = []
     for rel in changed:
         if rel in graph.test_imports:
@@ -480,6 +486,8 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
         if rel.endswith(".py") and under_source:
             mod = module_name(rel)
             changed_modules.add(mod)
+            facades.update(f for f in _REEXPORT_FACADES
+                           if mod.startswith(f + ".") and f in graph.sources)
             text = _read(rel) + "\n" + _read_at(base_ref, rel)
             for prefix in sorted(route_prefixes(text)):
                 needles.append((f"names route {prefix}", re.compile(re.escape(prefix))))
@@ -491,6 +499,9 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
             name = Path(rel).name
             if name:
                 needles.append((f"names {name}", re.compile(re.escape(name))))
+    for facade in sorted(facades - changed_modules):
+        changed_modules.add(facade)
+        needles.append((f"names {facade}", re.compile(re.escape(facade) + r"\b")))
 
     hops = graph.importers(changed_modules, depth)
     for t in graph.test_files:

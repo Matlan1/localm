@@ -128,12 +128,89 @@ function _when(iso) {
   return t("coder.session.daysAgo", { days: Math.floor(hrs / 24) });
 }
 
+// A hidden-until-hover delete button for a rail row or group. The click is
+// stopped here so it never reaches the row's resume or the group's toggle.
+function _railDeleteButton(label, onDelete) {
+  const btn = el("button", "coder-rail-del");
+  btn.type = "button";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.appendChild(iconEl("trash", "ic"));
+  btn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onDelete();
+  };
+  return btn;
+}
+
+// The server's error detail when it is a string, else the HTTP status text.
+async function _errorDetail(r) {
+  const data = await r.json().catch(() => ({}));
+  return typeof data.detail === "string" && data.detail ? data.detail : r.statusText;
+}
+
+/** Delete one past session's saved conversation, after a confirmation. On
+ *  success the row leaves the rail at once and the listing is re-fetched. */
+export function deleteDormantSession(projectPath, sess) {
+  const title = sess.title || t("coder.session.untitled");
+  confirmDanger(
+    t("coder.session.deleteConfirmTitle"),
+    t("coder.session.deleteConfirmBody", { title }),
+    t("coder.session.deleteConfirmLabel"),
+    async () => {
+      try {
+        const r = await fetch("/api/coder/checkpoints", {
+          method: "DELETE", headers: authHeaders(),
+          body: JSON.stringify({ cwd: projectPath, checkpoint_id: sess.id }),
+        });
+        if (!r.ok) throw new Error(await _errorDetail(r));
+      } catch (e) {
+        toast(t("coder.session.deleteFailed") + e.message, true);
+        return;
+      }
+      for (const p of dormant.projects) {
+        if (p.path === projectPath) p.sessions = p.sessions.filter((s) => s.id !== sess.id);
+      }
+      renderCoderSessionList();
+      toast(t("coder.session.deleted"));
+      await refreshDormant();
+    });
+}
+
+/** Forget one project and delete its saved sessions, after a confirmation.
+ *  The project folder on disk is not touched. */
+export function removeDormantProject(proj) {
+  confirmDanger(
+    t("coder.rail.removeProjectConfirmTitle"),
+    t("coder.rail.removeProjectConfirmBody", { name: proj.name, path: proj.path }),
+    t("coder.rail.removeProjectConfirmLabel"),
+    async () => {
+      try {
+        const r = await fetch("/api/coder/projects", {
+          method: "DELETE", headers: authHeaders(),
+          body: JSON.stringify({ path: proj.path }),
+        });
+        if (!r.ok) throw new Error(await _errorDetail(r));
+      } catch (e) {
+        toast(t("coder.rail.removeProjectFailed") + e.message, true);
+        return;
+      }
+      dormant.projects = dormant.projects.filter((p) => p.path !== proj.path);
+      renderCoderSessionList();
+      toast(t("coder.rail.projectRemoved"));
+      await refreshDormant();
+    });
+}
+
 function _dormantRow(projectPath, sess, available) {
   const item = el("div", "coder-session-item dormant");
   item.appendChild(el("span", "title", sess.title || t("coder.session.untitled")));
   const meta = [_when(sess.interrupted_at), tn("coder.session.turnsCount", sess.turns || 0)]
     .filter(Boolean).join(" · ");
   item.appendChild(el("span", "coder-session-meta", meta));
+  item.appendChild(_railDeleteButton(t("coder.session.deleteTitle"),
+    () => deleteDormantSession(projectPath, sess)));
   if (available) {
     item.title = t("coder.session.continueTitle");
     item.onclick = () => startCoderSession(
@@ -185,7 +262,11 @@ export function renderCoderSessionList() {
   const current = dormant.projects.find((p) => p.current);
   const currentPast = current ? pastOnly(current) : [];
   if (currentPast.length) {
-    list.appendChild(el("div", "coder-rail-head", t("coder.rail.pastHere")));
+    const head = el("div", "coder-rail-head with-action");
+    head.appendChild(el("span", "title", t("coder.rail.pastHere")));
+    head.appendChild(_railDeleteButton(
+      t("coder.rail.removeProjectTitle"), () => removeDormantProject(current)));
+    list.appendChild(head);
     for (const sess of currentPast) {
       list.appendChild(_dormantRow(current.path, sess, current.available));
     }
@@ -205,6 +286,8 @@ export function renderCoderSessionList() {
       sum.appendChild(el("span", "title", proj.name));
       sum.appendChild(el("span", "coder-session-meta",
         sessions.length + (proj.available ? "" : t("coder.rail.folderMissingSuffix"))));
+      sum.appendChild(_railDeleteButton(
+        t("coder.rail.removeProjectTitle"), () => removeDormantProject(proj)));
       group.appendChild(sum);
       for (const sess of sessions) {
         group.appendChild(_dormantRow(proj.path, sess, proj.available));

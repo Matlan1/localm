@@ -70,7 +70,7 @@ def mp():
     ("localm/inference/backends/llamacpp/_worker.py", "inference"),
     ("localm/inference/_embedder_runner.py", "inference"),
     ("localm/_mp_spawn.py", "inference"),
-    ("localm/setup_llama.py", "inference"),
+    ("localm/setup_llama/cli.py", "inference"),
     ("runtime/localm_llama_runtime/__init__.py", "inference"),
     ("pyproject.toml", "packaging"),
     ("uv.lock", "packaging"),
