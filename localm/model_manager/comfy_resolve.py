@@ -61,7 +61,7 @@ _MAX_PREFIX_QUERIES = 2
 MAX_HF_REQUESTS = 1 + (1 + _MAX_PREFIX_QUERIES + 1) + 1
 _MIN_TOKEN_QUERY = 5
 _EXPAND = ["siblings", "downloads", "gated", "private", "disabled"]
-_REPO_ID_RE = re.compile(r"\A[\w.-]+/[\w.-]+\Z")
+_REPO_ID_RE = re.compile(r"\A[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*\Z")
 _PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 _SEPARATOR_RE = re.compile(r"[\s_.\-]+")
 
@@ -302,7 +302,7 @@ def _matches(rows: list, filename: str) -> list[tuple[str, str, int]]:
         if not isinstance(row, dict):
             continue
         repo = row.get("id")
-        if (not isinstance(repo, str) or not _REPO_ID_RE.match(repo)
+        if (not isinstance(repo, str) or not _REPO_ID_RE.match(repo) or ".." in repo
                 or row.get("gated") or row.get("private") or row.get("disabled")):
             continue
         downloads = row.get("downloads")

@@ -1382,14 +1382,14 @@ def _pull_gguf_file(
     base_dir = dest_dir if dest_dir is not None else _mm.MODELS_DIR
 
     if ":" in spec:
-        repo_id, remote = spec.rsplit(":", 1)
+        repo_id, remote = spec.split(":", 1)
     else:
         parts = spec.rsplit("/", 1)
         repo_id, remote = parts[0], parts[1]
     # "owner/repo:sub/dir/file" names a file inside a repo folder; it is saved
     # under its bare filename in base_dir.
-    remote_dir, _sep, filename = remote.rpartition("/")
-    if remote_dir and not _safe_repo_subdir(remote_dir, base_dir):
+    remote_dir, in_folder, filename = remote.rpartition("/")
+    if in_folder and not _safe_repo_subdir(remote_dir, base_dir):
         console.print(
             f"[red]Unsafe repository path:[/red] {escape(remote)}\n"
             "A folder inside the repository may only use letters, digits and "

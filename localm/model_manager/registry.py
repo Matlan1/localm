@@ -303,11 +303,11 @@ COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
     "wan2.2_ti2v_5B_fp16.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
-        "diffusion-unet", "unet", 9_999_658_848),
+        "diffusion-unet", "diffusion_models", 9_999_658_848),
     "umt5_xxl_fp8_e4m3fn_scaled.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-        "text-encoder", "clip", 6_735_906_897),
+        "text-encoder", "text_encoders", 6_735_906_897),
     "wan2.2_vae.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:split_files/vae/wan2.2_vae.safetensors",
         "vae", "vae", 1_409_400_960),

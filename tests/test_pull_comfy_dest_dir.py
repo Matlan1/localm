@@ -136,6 +136,112 @@ class TestPullGgufFileDestDir:
         assert downloaded == []      # no network call - it was already there
 
 
+class TestRepoFolderSpec:
+    """``owner/repo:dir/file`` names a file inside a folder of the repository;
+    it is fetched from that path and saved under its bare filename."""
+
+    SPEC = "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors"
+
+    def _record_downloads(self, monkeypatch, body=b"ace-bytes"):
+        calls = []
+
+        def _fake_download(repo_id, filename, local_dir, **kw):
+            calls.append((repo_id, filename))
+            p = Path(local_dir) / filename
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(body)
+            return str(p)
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+
+        def _fake_head(url, allow_redirects=None, timeout=None):
+            h = MagicMock()
+            h.headers = {"content-length": str(len(body))}
+            return h
+
+        monkeypatch.setattr("requests.head", _fake_head)
+        return calls
+
+    def test_lands_under_its_bare_name_and_leaves_no_folder(
+            self, fake_registry, tmp_path, monkeypatch):
+        calls = self._record_downloads(monkeypatch)
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+
+        ok = mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
+                                dest_dir=dest_dir, register=False)
+
+        assert (dest_dir / "ace_step_v1_3.5b.safetensors").read_bytes() == b"ace-bytes"
+        assert not (dest_dir / "all_in_one").exists(), "the repo folder was left behind"
+        assert calls == [("Comfy-Org/ACE-Step_ComfyUI_repackaged",
+                          "all_in_one/ace_step_v1_3.5b.safetensors")]
+        assert ok is True
+
+    def test_the_digest_is_looked_up_by_the_path_in_the_repo(
+            self, fake_registry, tmp_path, monkeypatch):
+        self._record_downloads(monkeypatch)
+        asked = []
+        monkeypatch.setattr(mm, "_hf_file_sha256",
+                            lambda repo, fn: asked.append((repo, fn)) or None)
+
+        mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
+                           dest_dir=tmp_path / "ckpt", register=False)
+
+        assert asked == [("Comfy-Org/ACE-Step_ComfyUI_repackaged",
+                          "all_in_one/ace_step_v1_3.5b.safetensors")]
+
+    def test_a_folder_that_already_existed_is_kept(
+            self, fake_registry, tmp_path, monkeypatch):
+        self._record_downloads(monkeypatch)
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+        keep = dest_dir / "all_in_one" / "mine.txt"
+        keep.parent.mkdir(parents=True)
+        keep.write_text("user file")
+
+        assert mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
+                                  dest_dir=dest_dir, register=False) is True
+
+        assert keep.read_text() == "user file"
+        assert (dest_dir / "ace_step_v1_3.5b.safetensors").is_file()
+
+    def test_a_failed_download_removes_the_folder_it_created(
+            self, fake_registry, tmp_path, monkeypatch):
+        def _failing_download(repo_id, filename, local_dir, **kw):
+            (Path(local_dir) / filename).parent.mkdir(parents=True, exist_ok=True)
+            raise OSError("connection reset")
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _failing_download)
+        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(headers={}))
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+
+        assert mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
+                                  dest_dir=dest_dir, register=False) is False
+
+        assert not (dest_dir / "all_in_one").exists()
+
+    @pytest.mark.parametrize("spec", [
+        "owner/repo:../evil.safetensors",
+        "owner/repo:a/../../evil.safetensors",
+        "owner/repo:./evil.safetensors",
+        "owner/repo:a//evil.safetensors",
+        "owner/repo:a\\b/evil.safetensors",
+        "owner/repo:C:/evil.safetensors",
+        "owner/repo:.hidden/evil.safetensors",
+    ])
+    def test_an_unsafe_repo_folder_is_refused_before_any_download(
+            self, fake_registry, tmp_path, monkeypatch, spec):
+        calls = self._record_downloads(monkeypatch)
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+
+        ok = mm._pull_gguf_file(spec, None, model_type="diffusion-unet",
+                                dest_dir=dest_dir, register=False)
+
+        assert calls == [], "an unsafe spec reached the downloader"
+        assert not any(p.name == "evil.safetensors" for p in tmp_path.rglob("*"))
+        assert ok is False
+
+
 class TestPullModelDestDirGuard:
     def test_refuses_dest_dir_with_a_bare_repo_snapshot_spec(self, fake_registry, tmp_path):
         _store, _ = fake_registry
