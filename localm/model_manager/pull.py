@@ -386,6 +386,30 @@ def _hf_incomplete_path(base_dir: Path, rel: str, etag: str) -> "Path | None":
         return None
 
 
+_REPO_PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
+
+
+# The folder under a destination that a download of a file inside a repo
+# folder is staged in before it is moved into the destination.
+_REPO_FOLDER_STAGING = Path(".cache") / "localm-staging"
+
+
+def _safe_repo_subdir(remote_dir: str, base_dir: Path) -> bool:
+    """True when *remote_dir* (the folder part of an ``owner/repo:dir/file``
+    spec) is a plain relative path whose every component matches
+    ``_REPO_PATH_PART_RE`` and is not ``.``/``..``, and which stays inside
+    *base_dir* when joined to it and resolved."""
+    comps = remote_dir.split("/")
+    if not comps or any(c in ("", ".", "..") or not _REPO_PATH_PART_RE.match(c)
+                        for c in comps):
+        return False
+    try:
+        base = Path(base_dir).resolve()
+        return (base / remote_dir).resolve().is_relative_to(base)
+    except (OSError, ValueError):
+        return False
+
+
 def _etag_from_head(resp: Any) -> "str | None":
     """The etag huggingface_hub will name a download by, read from the first
     response of a redirect-following HEAD (X-Linked-Etag, then ETag)."""
@@ -1347,10 +1371,27 @@ def _pull_gguf_file(
     base_dir = dest_dir if dest_dir is not None else _mm.MODELS_DIR
 
     if ":" in spec:
-        repo_id, filename = spec.rsplit(":", 1)
+        repo_id, remote = spec.split(":", 1)
     else:
         parts = spec.rsplit("/", 1)
-        repo_id, filename = parts[0], parts[1]
+        repo_id, remote = parts[0], parts[1]
+    # "owner/repo:sub/dir/file" names a file inside a repo folder. huggingface_hub
+    # writes it to <stage_dir>/sub/dir/file, which is then moved to
+    # base_dir/file; stage_dir is under base_dir's hidden .cache so no folder of
+    # the repo's layout appears in base_dir. A root-level file stages in
+    # base_dir itself.
+    remote_dir, in_folder, filename = remote.rpartition("/")
+    stage_dir = base_dir / _REPO_FOLDER_STAGING if in_folder else base_dir
+    if in_folder and not _safe_repo_subdir(remote_dir, stage_dir):
+        console.print(
+            f"[red]Unsafe repository path:[/red] {escape(remote)}\n"
+            "A folder inside the repository may only use letters, digits and "
+            "'._+-', with no '.' or '..' parts."
+        )
+        return False
+
+    def _remote(part: str) -> str:
+        return f"{remote_dir}/{part}" if remote_dir else part
 
     # Split GGUF: normalise to the full ordered part list. llama.cpp loads
     # the model from the first part, so that's what gets registered. A
@@ -1376,7 +1417,7 @@ def _pull_gguf_file(
 
     # Expected digest from HF metadata - free, no download needed.
     # (Only identifies the first part of a split GGUF, which is enough.)
-    expected = _mm._hf_file_sha256(repo_id, filename)
+    expected = _mm._hf_file_sha256(repo_id, _remote(filename))
 
     # Honour a user-supplied --sha256: when HF's own metadata digest is known
     # and disagrees with it, the bytes can never match, so refuse up front
@@ -1460,7 +1501,7 @@ def _pull_gguf_file(
         import requests as _req
         total_size = 0
         for part in missing:
-            cdn_url = hf_hub_url(repo_id, part, endpoint=_HF_ENDPOINT)
+            cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT)
             head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
             size = int(head.headers.get("content-length", 0))
             part_sizes[part] = size
@@ -1493,7 +1534,7 @@ def _pull_gguf_file(
         etag = etags.get(part)
         if not etag:
             continue
-        inc = _hf_incomplete_path(base_dir, part, etag)
+        inc = _hf_incomplete_path(stage_dir, _remote(part), etag)
         if inc is None:
             continue
         already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
@@ -1522,14 +1563,15 @@ def _pull_gguf_file(
                       f"[bold]{escape(filename)}[/bold]")
 
     with _download_progress([base_dir / p for p in missing], total_size,
-                            base_dir=base_dir, rel_parts=list(missing),
-                            etags=etags) as _prog:
+                            base_dir=stage_dir,
+                            rel_parts=[_remote(p) for p in missing],
+                            etags={_remote(p): e for p, e in etags.items()}) as _prog:
         for part in missing:
             try:
                 local = hf_hub_download(
                     repo_id=repo_id,
-                    filename=part,
-                    local_dir=str(base_dir),
+                    filename=_remote(part),
+                    local_dir=str(stage_dir),
                     endpoint=_HF_ENDPOINT,
                 )
                 final = base_dir / part

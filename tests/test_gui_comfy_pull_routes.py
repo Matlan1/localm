@@ -199,7 +199,7 @@ class TestPreflightRoute:
         assert r.status_code == 200, r.text
         assert captured.get("lora_name") == "my_style.safetensors"
 
-    def test_reports_uncurated_missing_file_with_null_source(self, scoped_app, tmp_path):
+    def test_reports_uncurated_missing_file_with_null_source(self, scoped_app, tmp_path, no_hf):
         fake_info = {
             "CheckpointLoaderSimple": {
                 "input": {"required": {"ckpt_name": [["other.safetensors"], {}]}}
@@ -220,6 +220,224 @@ class TestPreflightRoute:
         assert len(missing) == 1
         assert missing[0]["source"] is None
         assert missing[0]["dest_dir"] is None
+        assert missing[0]["searchable"] is True
+        assert missing[0]["reason"] == ""
+
+    def test_reports_why_an_unsearchable_file_cannot_be_downloaded(
+            self, scoped_app, tmp_path, no_hf):
+        fake_info = {
+            "UpscaleModelLoader": {
+                "input": {"required": {"model_name": [["other.pth"], {}]}}
+            }
+        }
+        fake_wf = tmp_path / "wf.json"
+        fake_wf.write_text(json.dumps({
+            "1": {"class_type": "UpscaleModelLoader",
+                  "inputs": {"model_name": "RealESRGAN_x4plus.pth"}}
+        }))
+        from localm.media import comfy_client as cc
+        with patch.object(cc, "comfy_object_info", return_value=fake_info), \
+             patch("localm.image_gen.comfy.workflow_path", return_value=fake_wf):
+            with TestClient(scoped_app) as c:
+                r = c.post("/api/media/image/preflight", json={})
+        [entry] = r.json()["missing"]
+        assert no_hf.calls == [], "preflight made a network request"
+        assert (entry["source"], entry["searchable"], entry["reason"]) == (None, False, "format")
+        assert ".safetensors" in entry["detail"]
+
+
+WAN = "wan2.1_t2v_1.3B_fp16.safetensors"
+WAN_PATH = f"split_files/diffusion_models/{WAN}"
+
+
+class RecordingHF:
+    """Stands in for discover._get: records calls, answers the Comfy-Org
+    listing with *org* and every search with nothing."""
+
+    def __init__(self, org=()):
+        self.org = list(org)
+        self.calls = []
+
+    def __call__(self, url, params=None, *, token=None):
+        self.calls.append((url, dict(params or {})))
+        if url.endswith("/api/models"):
+            return self.org if (params or {}).get("author") == "Comfy-Org" else []
+        return []
+
+
+@pytest.fixture
+def no_hf(monkeypatch):
+    from localm import discover
+    from localm.model_manager import comfy_resolve as cr
+    cr.clear_lookup_cache()
+    fake = RecordingHF()
+    monkeypatch.setattr(discover, "_get", fake)
+    monkeypatch.setattr(discover, "_ensure_online", lambda: None)
+    yield fake
+    cr.clear_lookup_cache()
+
+
+@pytest.fixture
+def wan_on_hf(no_hf):
+    no_hf.org = [{"id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "downloads": 5,
+                  "siblings": [{"rfilename": WAN_PATH}]}]
+    return no_hf
+
+
+def _workdir(tmp_path):
+    import localm.config as _cfg
+    cfg = _cfg.load_config()
+    cfg["comfy_workdir"] = str(tmp_path / "external-comfy")
+    _cfg.save_config(cfg)
+    return tmp_path / "external-comfy"
+
+
+LOOKUP = {"filename": WAN, "class_type": "UNETLoader", "input_name": "unet_name",
+          "plugin": "video"}
+
+
+class TestSourceLookupRoute:
+    def test_finds_a_file_and_names_its_destination(self, scoped_app, tmp_path, wan_on_hf):
+        workdir = _workdir(tmp_path)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/comfy-source/lookup", json=LOOKUP)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "found"
+        assert body["source"] == {
+            "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "file": WAN_PATH,
+            "size_bytes": None, "model_type": "diffusion-unet", "origin": "huggingface"}
+        assert body["dest_dir"] == str(workdir / "models" / "unet")
+
+    def test_a_miss_is_not_found(self, scoped_app, no_hf):
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/comfy-source/lookup", json=LOOKUP)
+        assert r.json()["status"] == "not_found"
+        assert r.json()["source"] is None
+
+    def test_an_unsupported_file_makes_no_request(self, scoped_app, no_hf):
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/comfy-source/lookup",
+                       json={**LOOKUP, "filename": "RealESRGAN_x4plus.pth"})
+        assert no_hf.calls == []
+        assert (r.json()["status"], r.json()["reason"]) == ("unsupported", "format")
+
+    def test_an_overlong_field_is_400_before_any_request(self, scoped_app, no_hf):
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/comfy-source/lookup",
+                       json={**LOOKUP, "class_type": "x" * 256})
+        assert no_hf.calls == []
+        assert r.status_code == 400
+
+    def test_a_found_file_is_then_offered_by_preflight(self, scoped_app, tmp_path, wan_on_hf):
+        _workdir(tmp_path)
+        fake_info = {"UNETLoader": {"input": {"required": {"unet_name": [["x.safetensors"], {}]}}}}
+        fake_wf = tmp_path / "wf.json"
+        fake_wf.write_text(json.dumps({
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": WAN}}}))
+        from localm.media import comfy_client as cc
+        with patch.object(cc, "comfy_object_info", return_value=fake_info), \
+             patch("localm.image_gen.comfy.workflow_path", return_value=fake_wf):
+            with TestClient(scoped_app) as c:
+                before = c.post("/api/media/image/preflight", json={}).json()["missing"][0]
+                c.post("/api/models/comfy-source/lookup", json=LOOKUP)
+                n = len(wan_on_hf.calls)
+                after = c.post("/api/media/image/preflight", json={}).json()["missing"][0]
+        assert before["source"] is None and before["searchable"] is True
+        assert after["source"]["file"] == WAN_PATH
+        assert len(wan_on_hf.calls) == n, "preflight made a network request"
+
+
+def _capture_start_cli(monkeypatch):
+    captured = {}
+
+    class _FakeJob:
+        id = "job-test"
+
+    def fake_start_cli(self, kind, cli_args, **kw):
+        captured["args"] = list(cli_args)
+        return _FakeJob()
+
+    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+    return captured
+
+
+class TestPullComfySourceFromASearch:
+    def test_pulls_the_file_the_server_found_for_that_slot(
+            self, scoped_app, tmp_path, monkeypatch, wan_on_hf):
+        workdir = _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source", json={
+                "filename": WAN, "plugin": "video",
+                "class_type": "UNETLoader", "input_name": "unet_name"})
+        assert captured.get("args") == [
+            "pull", "--type", "diffusion-unet", "--comfy-dest-dir",
+            str(workdir / "models" / "unet"), "--no-register", "--",
+            f"Comfy-Org/Wan_2.1_ComfyUI_repackaged:{WAN_PATH}"]
+        assert r.status_code == 200, r.text
+
+    def test_without_the_slot_an_unknown_file_is_still_400(
+            self, scoped_app, tmp_path, monkeypatch, wan_on_hf):
+        _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source", json={"filename": WAN})
+        assert captured == {}
+        assert wan_on_hf.calls == []
+        assert r.status_code == 400
+
+    def test_a_file_hf_does_not_have_is_400_and_nothing_starts(
+            self, scoped_app, tmp_path, monkeypatch, no_hf):
+        _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source", json={
+                "filename": WAN, "class_type": "UNETLoader", "input_name": "unet_name"})
+        assert captured == {}
+        assert r.status_code == 400
+
+    def test_a_source_that_changed_since_it_was_shown_is_409_and_nothing_starts(
+            self, scoped_app, tmp_path, monkeypatch, wan_on_hf):
+        _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        body = {"filename": WAN, "class_type": "UNETLoader", "input_name": "unet_name"}
+        with TestClient(scoped_app) as c:
+            stale = c.post("/api/models/pull-comfy-source", json={
+                **body, "repo": "someone/older-copy", "file": WAN})
+            same = c.post("/api/models/pull-comfy-source", json={
+                **body, "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "file": WAN_PATH})
+        assert stale.status_code == 409
+        assert "Comfy-Org/Wan_2.1_ComfyUI_repackaged" in stale.json()["detail"]
+        assert same.status_code == 200, same.text
+        assert captured["args"][-1] == f"Comfy-Org/Wan_2.1_ComfyUI_repackaged:{WAN_PATH}"
+
+    def test_a_file_in_a_workflow_subfolder_goes_into_that_subfolder(
+            self, scoped_app, tmp_path, monkeypatch, wan_on_hf):
+        workdir = _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        with TestClient(scoped_app) as c:
+            found = c.post("/api/models/comfy-source/lookup",
+                           json={**LOOKUP, "filename": f"wan\\{WAN}"}).json()
+            r = c.post("/api/models/pull-comfy-source", json={
+                "filename": f"wan\\{WAN}", "plugin": "video",
+                "class_type": "UNETLoader", "input_name": "unet_name"})
+        assert found["dest_dir"] == str(workdir / "models" / "unet" / "wan")
+        assert captured["args"][4] == str(workdir / "models" / "unet" / "wan")
+        assert r.status_code == 200, r.text
+
+    def test_a_curated_file_needs_no_search(self, scoped_app, tmp_path, monkeypatch, no_hf):
+        workdir = _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source", json={
+                "filename": "ace_step_v1_3.5b.safetensors", "plugin": "music",
+                "class_type": "CheckpointLoaderSimple", "input_name": "ckpt_name"})
+        assert no_hf.calls == []
+        assert captured["args"][-1] == (
+            "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors")
+        assert captured["args"][4] == str(workdir / "models" / "checkpoints")
+        assert r.status_code == 200, r.text
 
 
 class TestPullComfySourceRoute:
@@ -306,6 +524,14 @@ class TestComfyRoutesAreScoped:
                        json={"filename": "ae.safetensors"}, headers=_hdr(narrow))
         assert r1.status_code == 403
         assert r2.status_code == 403
+
+    def test_underscoped_key_cannot_search(self, scoped_app, no_hf):
+        from localm import auth
+        narrow = auth.create_key("narrow", [S.MODELS_READ])["key"]
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/comfy-source/lookup", json=LOOKUP, headers=_hdr(narrow))
+        assert no_hf.calls == []
+        assert r.status_code == 403
 
     def test_models_write_key_reaches_preflight(self, scoped_app):
         """preflight is READ-ONLY (it reports which models ComfyUI is missing), so

@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Missing ComfyUI models can be downloaded even when localm has no built-in
+  source for them.** When an image, video or music workflow needs a model file
+  that is not installed, localm now offers to search Hugging Face for a file with
+  exactly that name, shows the repository, path and size it found, and downloads
+  it into the right ComfyUI models folder when you confirm. Files published by
+  ComfyUI's own Hugging Face organisation are preferred. Only `.safetensors`,
+  `.sft` and `.gguf` files are downloaded this way, and a model the workflow
+  keeps in a subfolder of its models folder is saved in that subfolder. The
+  models used by the built-in music (ACE-Step) and video (Wan 2.2) workflows are
+  now offered directly, without a search.
 - **Text-to-speech and speech-to-text offer a one-time download prompt instead of a
   hard refusal when network access is off.** Settings also gained direct "download
   the voice/speech model now" controls for both, so first-time setup no longer

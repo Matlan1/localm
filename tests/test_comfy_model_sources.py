@@ -17,7 +17,9 @@ class TestResolveComfyModelSource:
         for filename in COMFY_MODEL_SOURCES:
             source = resolve_comfy_model_source(filename)
             assert isinstance(source, ComfySource)
-            assert source.spec.endswith(f":{filename}")
+            repo, path = source.spec.split(":", 1)
+            assert repo.count("/") == 1
+            assert path.rsplit("/", 1)[-1] == filename
             assert source.size_bytes > 0
             assert source.model_type
             assert source.comfy_subfolder

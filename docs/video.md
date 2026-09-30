@@ -44,6 +44,8 @@ The template expects the public Comfy-Org repackaged files (ComfyUI v0.3.46+ has
 | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (~6 GB) | `models/text_encoders/` |
 | `wan2.2_vae.safetensors` (~1.4 GB) | `models/vae/` |
 
+In the GUI you do not have to fetch these by hand: when you press Generate and one is missing, localm offers to download it into the right folder.
+
 The fp16 encoder (`umt5_xxl_fp16.safetensors`, ~11 GB) also works but uses more VRAM; prefer the fp8_scaled file. A different encoder filename needs a custom workflow (see [Using your own workflow](#using-your-own-workflow), below).
 
 ## Usage
