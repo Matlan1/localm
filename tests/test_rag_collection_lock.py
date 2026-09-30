@@ -113,9 +113,8 @@ def _live_holder(tmp_path, lockpath, *, beat: float = cl.HEARTBEAT_INTERVAL,
                            stdin=subprocess.PIPE)
     first = p.stdout.readline().split()
     if first[:1] != ["HELD"]:
-        _release(p)
-        pytest.fail(f"the holder did not take the lock: {first} "
-                    f"{p.stderr.read()}")
+        _, err = p.communicate(timeout=60)
+        pytest.fail(f"the holder did not take the lock: {first} {err}")
     return p, int(first[1])
 
 
@@ -130,7 +129,6 @@ def _idle_process():
 
 def _release(p) -> None:
     """Close *p*'s stdin and wait for it to exit."""
-    p.stdin.close()
     p.communicate(timeout=60)
 
 
