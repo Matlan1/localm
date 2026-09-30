@@ -555,6 +555,231 @@ def _is_custom_folder_text(text: str) -> bool:
     return bool(text.strip())
 
 
+# The environment variable that forces the window's theme: "dark" or "light".
+THEME_ENV = "LOCALM_THEME"
+
+# The window's colours for each theme.
+PALETTES = {
+    "dark": {
+        "bg": "#0e1014",
+        "surface": "#171c26",
+        "field": "#1e242f",
+        "border": "#2c3341",
+        "outline": "#5c6473",
+        "text": "#dce2ec",
+        "dim": "#98a2b4",
+        "accent": "#5aa2fb",
+        "on_accent": "#0e1014",
+        "warn": "#e25d5d",
+    },
+    "light": {
+        "bg": "#f5f6f8",
+        "surface": "#ffffff",
+        "field": "#eef0f4",
+        "border": "#d8dce4",
+        "outline": "#858c99",
+        "text": "#23272f",
+        "dim": "#5f6675",
+        "accent": "#2563eb",
+        "on_accent": "#ffffff",
+        "warn": "#c2410c",
+    },
+}
+
+_PERSONALIZE_KEY = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
+
+
+def _apps_use_light_theme():
+    """The current user's AppsUseLightTheme setting (0 means dark apps).
+    Raises OSError when Windows has no such setting."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PERSONALIZE_KEY) as key:
+        return winreg.QueryValueEx(key, "AppsUseLightTheme")[0]
+
+
+def _command_output(argv: List[str], timeout: float = 2.0) -> Optional[str]:
+    """stdout of argv, or None when it cannot start, exits non-zero or runs
+    longer than timeout seconds."""
+    try:
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def detect_theme(env=None, platform: Optional[str] = None,
+                 read_windows: Optional[Callable[[], object]] = None,
+                 run: Optional[Callable[[List[str]], Optional[str]]] = None) -> str:
+    """Return "dark" or "light" for the setup window.
+
+    LOCALM_THEME wins when it is "dark" or "light" (any case). Otherwise:
+    Windows reads AppsUseLightTheme (0 is dark), macOS reads
+    AppleInterfaceStyle ("Dark" is dark), and every other system reads GNOME's
+    color-scheme ("prefer-dark" or "prefer-light"), then whether the GTK theme
+    name contains "dark". A setting that is missing or cannot be read means
+    light.
+
+    env replaces os.environ, platform replaces sys.platform, read_windows
+    replaces the registry read and run replaces the command runner, which
+    returns a command's stdout or None."""
+    env = os.environ if env is None else env
+    forced = str(env.get(THEME_ENV) or "").strip().lower()
+    if forced in PALETTES:
+        return forced
+    platform = sys.platform if platform is None else platform
+    run = _command_output if run is None else run
+    # Any failure leaves the light theme. See
+    # test_a_reader_that_fails_means_light.
+    try:
+        if platform == "win32":
+            read = _apps_use_light_theme if read_windows is None else read_windows
+            return "dark" if read() == 0 else "light"
+        if platform == "darwin":
+            style = run(["defaults", "read", "-g", "AppleInterfaceStyle"]) or ""
+            return "dark" if style.strip().lower() == "dark" else "light"
+        scheme = run(["gsettings", "get", "org.gnome.desktop.interface",
+                      "color-scheme"]) or ""
+        scheme = scheme.strip().strip("'\"").lower()
+        if scheme in ("prefer-dark", "prefer-light"):
+            return scheme[len("prefer-"):]
+        gtk = run(["gsettings", "get", "org.gnome.desktop.interface",
+                   "gtk-theme"]) or ""
+        return "dark" if "dark" in gtk.lower() else "light"
+    except Exception:
+        return "light"
+
+
+def apply_theme(root, ttk, palette: dict) -> None:
+    """Switch ttk to the "clam" theme and colour the root window and every ttk
+    widget class the wizard uses from palette. Adds the Dim.TLabel and
+    Warn.TLabel label styles."""
+    p = palette
+    root.configure(background=p["bg"])
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure(".", background=p["bg"], foreground=p["text"],
+                    bordercolor=p["border"], lightcolor=p["bg"],
+                    darkcolor=p["bg"], troughcolor=p["field"],
+                    fieldbackground=p["field"], insertcolor=p["text"],
+                    selectbackground=p["accent"],
+                    selectforeground=p["on_accent"],
+                    focuscolor=p["accent"], arrowcolor=p["dim"])
+    style.map(".",
+              background=[("disabled", p["bg"]), ("active", p["bg"])],
+              foreground=[("disabled", p["outline"])],
+              selectbackground=[("!focus", p["border"])],
+              selectforeground=[("!focus", p["text"])])
+
+    style.configure("Dim.TLabel", foreground=p["dim"])
+    style.configure("Warn.TLabel", foreground=p["warn"])
+
+    style.configure("TButton", background=p["surface"], foreground=p["text"],
+                    bordercolor=p["outline"], lightcolor=p["surface"],
+                    darkcolor=p["surface"])
+    style.map("TButton",
+              background=[("disabled", p["bg"]), ("pressed", p["border"]),
+                          ("active", p["field"])],
+              lightcolor=[("disabled", p["bg"]), ("pressed", p["border"]),
+                          ("active", p["field"])],
+              darkcolor=[("disabled", p["bg"]), ("pressed", p["border"]),
+                         ("active", p["field"])],
+              bordercolor=[("disabled", p["border"]), ("focus", p["accent"])],
+              foreground=[("disabled", p["outline"])])
+
+    for cls in ("TCheckbutton", "TRadiobutton"):
+        style.configure(cls, background=p["bg"], foreground=p["text"],
+                        indicatorbackground=p["field"],
+                        indicatorforeground=p["accent"],
+                        upperbordercolor=p["outline"],
+                        lowerbordercolor=p["outline"])
+        style.map(cls,
+                  background=[("active", p["bg"])],
+                  foreground=[("disabled", p["outline"])],
+                  indicatorbackground=[("pressed", p["surface"]),
+                                       ("disabled", p["bg"]),
+                                       ("alternate", p["accent"])])
+
+    style.configure("TEntry", fieldbackground=p["field"], foreground=p["text"],
+                    insertcolor=p["text"], bordercolor=p["outline"],
+                    lightcolor=p["field"], darkcolor=p["field"])
+    style.map("TEntry",
+              background=[("readonly", p["bg"])],
+              fieldbackground=[("disabled", p["bg"]), ("readonly", p["bg"])],
+              foreground=[("disabled", p["outline"])],
+              bordercolor=[("focus", p["accent"])],
+              lightcolor=[("focus", p["accent"])],
+              darkcolor=[("focus", p["accent"])])
+
+    style.configure("TProgressbar", background=p["accent"],
+                    troughcolor=p["field"], bordercolor=p["border"],
+                    lightcolor=p["accent"], darkcolor=p["accent"])
+
+    style.configure("TScrollbar", background=p["surface"],
+                    troughcolor=p["bg"], bordercolor=p["border"],
+                    lightcolor=p["surface"], darkcolor=p["surface"],
+                    arrowcolor=p["dim"], gripcount=0)
+    style.map("TScrollbar",
+              background=[("disabled", p["bg"]), ("active", p["field"])],
+              lightcolor=[("disabled", p["bg"]), ("active", p["field"])],
+              darkcolor=[("disabled", p["bg"]), ("active", p["field"])],
+              arrowcolor=[("disabled", p["outline"])])
+
+
+def text_options(palette: dict) -> dict:
+    """Colour and border options for a plain tk.Text widget in palette."""
+    p = palette
+    return {
+        "background": p["surface"],
+        "foreground": p["text"],
+        "insertbackground": p["text"],
+        "selectbackground": p["accent"],
+        "selectforeground": p["on_accent"],
+        "inactiveselectbackground": p["border"],
+        "relief": "flat",
+        "borderwidth": 0,
+        "highlightthickness": 1,
+        "highlightbackground": p["border"],
+        "highlightcolor": p["accent"],
+        "padx": 4,
+        "pady": 4,
+    }
+
+
+def set_title_bar_theme(root, dark: bool, windll=None) -> bool:
+    """On Windows, ask the window manager to draw root's title bar dark (dark
+    is True) or light. Returns True when it accepted the setting and False on
+    any other system or when any call fails. Never raises.
+
+    windll replaces ctypes.windll."""
+    # A failure leaves the system's default title bar. See
+    # test_a_title_bar_that_cannot_be_set_is_reported_not_raised.
+    try:
+        import ctypes
+        if windll is None:
+            if not IS_WINDOWS:
+                return False
+            windll = ctypes.windll
+        root.update_idletasks()
+        hwnd = windll.user32.GetParent(root.winfo_id())
+        if not hwnd:
+            return False
+        value = ctypes.c_int(1 if dark else 0)
+        for attribute in (DWMWA_USE_IMMERSIVE_DARK_MODE,
+                          DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1):
+            result = windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd), attribute, ctypes.byref(value),
+                ctypes.sizeof(value))
+            if result == 0:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 class Wizard:
     """The setup dialogue: one page per group of questions, then the install.
 
@@ -573,15 +798,19 @@ class Wizard:
     launcher script to remove after the window closes, EXIT_UNINSTALL_PARTIAL
     when something asked for was kept and nothing is left to remove, and
     EXIT_UNINSTALL_FAILED when the uninstall did not finish. While an
-    uninstall runs, closing the window is refused."""
+    uninstall runs, closing the window is refused.
+
+    theme is "dark" or "light"; None follows detect_theme()."""
 
     def __init__(self, root, tk, ttk, filedialog, *, existing=None,
-                 messagebox=None):
+                 messagebox=None, theme: Optional[str] = None):
         self.root = root
         self.tk = tk
         self.ttk = ttk
         self.filedialog = filedialog
         self.messagebox = messagebox
+        self.theme = detect_theme() if theme is None else theme
+        self.palette = PALETTES[self.theme]
         self.vendor, self.recommended = detect_recommendation()
         self.plugin_rows = plugin_choices()
         self.index = 0
@@ -593,6 +822,7 @@ class Wizard:
         root.title(f"{APP_NAME} Setup")
         root.geometry("660x600")
         root.minsize(580, 520)
+        apply_theme(root, ttk, self.palette)
 
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.container = ttk.Frame(root, padding=18)
@@ -635,6 +865,7 @@ class Wizard:
             self._show_choice()
         else:
             self._show(0)
+        set_title_bar_theme(root, self.theme == "dark")
 
     # -- pages --------------------------------------------------------------
 
@@ -648,7 +879,7 @@ class Wizard:
                        font=("Segoe UI", 15, "bold")).pack(anchor="w")
         if sub:
             self.ttk.Label(parent, text=sub, wraplength=590,
-                           foreground="#555").pack(anchor="w", pady=(2, 12))
+                           style="Dim.TLabel").pack(anchor="w", pady=(2, 12))
 
     def _build_runtime_page(self):
         ttk = self.ttk
@@ -678,7 +909,7 @@ class Wizard:
         ttk.Radiobutton(page, text="Inside this folder - delete it and "
                                    "everything is gone",
                         value=True, variable=self.portable_var).pack(anchor="w")
-        ttk.Label(page, text=str(ROOT / "home"), foreground="#555",
+        ttk.Label(page, text=str(ROOT / "home"), style="Dim.TLabel",
                   wraplength=560).pack(anchor="w", padx=(22, 0))
         row = ttk.Frame(page)
         ttk.Radiobutton(row, text="A folder I choose:", value=False,
@@ -692,7 +923,7 @@ class Wizard:
                                  "(a drive that is not connected, or a network folder "
                                  "that is offline). Connect it before you continue, "
                                  "or choose another folder.",
-                      wraplength=560, foreground="#a33").pack(anchor="w", pady=(4, 0))
+                      wraplength=560, style="Warn.TLabel").pack(anchor="w", pady=(4, 0))
 
         ttk.Label(page, text="Python tooling",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(16, 0))
@@ -713,7 +944,7 @@ class Wizard:
             ttk.Label(page, text="The feature list could not be read, so none "
                                  "are preselected. Choose them after setup "
                                  "with:  localm plugin setup",
-                      wraplength=590, foreground="#a33").pack(anchor="w")
+                      wraplength=590, style="Warn.TLabel").pack(anchor="w")
             return
         for name, desc in self.plugin_rows:
             ttk.Checkbutton(page, text=f"{name} - {desc}",
@@ -745,7 +976,8 @@ class Wizard:
         page = self._page("Installing")
         self.step_label = ttk.Label(page, text="", font=("Segoe UI", 11, "bold"))
         self.bar = ttk.Progressbar(page, mode="determinate")
-        self.log = tk.Text(page, height=18, wrap="none", font=("Consolas", 9))
+        self.log = tk.Text(page, height=18, wrap="none", font=("Consolas", 9),
+                           **text_options(self.palette))
         self.log_scroll = ttk.Scrollbar(page, command=self.log.yview)
         self.log.configure(yscrollcommand=self.log_scroll.set, state="disabled")
 
@@ -771,7 +1003,8 @@ class Wizard:
                                     "downloaded models, generated images",
                         variable=self.purge_var,
                         command=self._refresh_plan).pack(anchor="w", pady=(0, 8))
-        self.plan_text = tk.Text(frame, height=16, wrap="none", font=("Consolas", 9))
+        self.plan_text = tk.Text(frame, height=16, wrap="none", font=("Consolas", 9),
+                                 **text_options(self.palette))
         self.plan_text.pack(fill="both", expand=True)
         self.plan_text.configure(state="disabled")
 
