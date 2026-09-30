@@ -138,7 +138,7 @@ async def web_retrieve_endpoint(req: WebRetrieveRequest):
     from localm.web_retrieval import retrieve
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
-    logger.info("web retrieve: query=%r", req.query)
+    logger.info("web retrieve: %d-char query", len(req.query))
     loop = asyncio.get_running_loop()
     # The retrieval and the defanging of its text both run in the executor.
     bundle_dict = await loop.run_in_executor(
@@ -161,7 +161,8 @@ async def web_search_endpoint(req: WebSearchRequest):
     from localm.netpolicy import web_search
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
-    logger.info("web search: query=%r (max_results=%d)", req.query, req.max_results)
+    logger.info("web search: %d-char query (max_results=%d)",
+                len(req.query), req.max_results)
     loop = asyncio.get_running_loop()
     # Defanging runs INSIDE the executor with the search itself: it is unbounded
     # CPU over remote-controlled text and must not run on the event loop.
@@ -182,7 +183,7 @@ async def web_fetch_endpoint(req: WebFetchRequest):
     from localm.debuglog import logger
     from localm.netpolicy import fetch_text
     max_chars = max(500, min(req.max_chars, 60_000))
-    logger.info("web fetch: url=%r (max_chars=%d)", req.url, max_chars)
+    logger.info("web fetch: %d-char url (max_chars=%d)", len(req.url), max_chars)
 
     def _fetch_and_defang():
         # neutralise() runs in the SAME executor call as the fetch: both the URL

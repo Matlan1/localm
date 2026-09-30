@@ -21,6 +21,7 @@ DISABLED by default.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import time
@@ -74,12 +75,14 @@ def _music_path(name: str) -> Path:
 async def music(req: MusicRequest, request: Request):
     if not req.tags.strip():
         raise HTTPException(400, "Empty style tags")
-    from localm.debuglog import logger
-    logger.info("music: tags=%r (duration=%ds)", req.tags, req.duration_seconds)
-    if req.duration_seconds <= 0 or req.duration_seconds > 3600:
+    if (not math.isfinite(req.duration_seconds)
+            or req.duration_seconds <= 0 or req.duration_seconds > 3600):
         raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
     if req.steps is not None and not (1 <= req.steps <= 200):
         raise HTTPException(400, "Steps must be between 1 and 200")
+    from localm.debuglog import logger
+    logger.info("music: %d-char tags (duration=%gs)",
+                len(req.tags), req.duration_seconds)
 
     # The job registry is kernel-level, so the real precondition is knowing this
     # server's own address for the VRAM handover, not the GUI being attached.
