@@ -158,6 +158,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A slow-to-load app window no longer makes a stopped localm open a browser
+  tab.** When the app window took longer than about 8 seconds to load its first
+  page, stopping localm with a termination signal, or closing the window with
+  "Quit when the app window is closed" on, opened a browser tab onto the server
+  that had just stopped, and closing the window of a `localm gui` attached to an
+  already-running instance opened a tab as well. A slow first load now counts as
+  loaded, and no tab opens once the server has stopped.
 - **A model whose load just failed is no longer loaded again on every request.**
   When a request needed something the selected model lacks (for example tool
   calls in the coder) and the model chosen to answer it crashed or failed while
