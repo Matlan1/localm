@@ -5,7 +5,8 @@ markers a provision leaves behind.
 
 The command runs end to end. Only the outer seams are replaced: the network
 (``verified_urlopen``), child processes (``subprocess.run``: the load probe and
-nvidia-smi), GPU detection (``hwdetect.detect`` and
+nvidia-smi, and ``shutil.which``, which finds nothing on PATH), GPU detection
+(``hwdetect.detect`` and
 ``hwdetect.recommended_install_backend``), and the ``localm_llama_runtime``
 package, which decides the runtime lib dir. Asset resolution, download,
 checksum, extraction, copying, the marker, the rollback history and the
@@ -19,6 +20,7 @@ import io
 import json
 import os
 import random
+import shutil
 import struct
 import subprocess
 import sys
@@ -193,6 +195,7 @@ class World:
         self.recommended = "vulkan"
         monkeypatch.setattr(sl, "verified_urlopen", self._urlopen)
         monkeypatch.setattr(subprocess, "run", self._run)
+        monkeypatch.setattr(shutil, "which", lambda cmd, *args, **kwargs: None)
         monkeypatch.setattr(hwdetect, "detect", lambda: SimpleNamespace(
             vendors=list(self.vendors), gpu_names=self.gpu_names))
         monkeypatch.setattr(hwdetect, "recommended_install_backend",
