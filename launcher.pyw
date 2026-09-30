@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -61,6 +62,9 @@ USE_GLOBAL = "(use global)"
 # Dropdown sentinel: open the Web GUI with nothing loaded (pick a model in the
 # GUI). Only valid for the Web GUI mode; chat/serve/coder need a real model.
 NO_MODEL_LABEL = "(no model - choose later in the GUI)"
+
+#: Milliseconds between checks for a background task's result.
+_POLL_MS = 100
 
 # Wordmark treatments, shared with the web GUI through the logo_style config key
 # (see localm/config.py). The blue half is the accent colour; the rest is normal
@@ -287,14 +291,17 @@ def load_models() -> list:
 
 def sync_models_dir_safe():
     """Reconcile the models folder with the registry - the same local, no-network
-    scan `localm gui`/`serve` runs at startup. Returns the sync_models_dir()
-    result (a ModelSyncResult), or None if it could not run."""
+    scan `localm gui`/`serve` runs at startup.
+
+    Returns ``(result, error)``: the sync_models_dir() result (a
+    ModelSyncResult) and None, or None and a one-line description of why the
+    scan could not run."""
     try:
         sys.path.insert(0, str(REPO_DIR))
         from localm.model_manager import sync_models_dir
-        return sync_models_dir(backfill_mmproj=False)
-    except Exception:
-        return None
+        return sync_models_dir(backfill_mmproj=False), None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def is_models_root(path: str) -> bool:
@@ -683,19 +690,45 @@ class Launcher(tk.Tk):
         self._start_ticker("Checking models folder")
 
         def work():
-            result = sync_models_dir_safe()
-            models = load_models()
-            # The scan can outlive the window: closing the launcher while a
-            # large models folder is being read destroys the widget this would
-            # schedule onto, and Tk raises from a thread that is no longer the
-            # one running its loop. Nothing is owed to a window that is gone.
-            try:
-                if self.winfo_exists():
-                    self.after(0, lambda: self._refresh_done(result, models))
-            except (tk.TclError, RuntimeError):
-                pass
+            result, error = sync_models_dir_safe()
+            return result, error, load_models()
 
-        threading.Thread(target=work, daemon=True).start()
+        self._run_in_background(
+            work, lambda out: self._refresh_done(out[0], out[2], out[1]))
+
+    def _run_in_background(self, work, done) -> None:
+        """Run *work* on a worker thread and call *done* with its return value
+        on the Tk thread.
+
+        The worker never touches Tk. The Tk thread polls for the result with
+        after(), so the result arrives whether the worker finishes before or
+        after mainloop() starts, and a window closed mid-run stops polling. If
+        *work* raises, the busy state is cleared and the error is shown in the
+        status line instead of calling *done*.
+        See test_a_scan_that_finishes_before_the_main_loop_still_completes."""
+        box: queue.Queue = queue.Queue(maxsize=1)
+
+        def runner():
+            try:
+                box.put((True, work()))
+            except BaseException as e:               # noqa: BLE001
+                box.put((False, e))
+
+        threading.Thread(target=runner, daemon=True).start()
+        self._poll_background(box, done)
+
+    def _poll_background(self, box: queue.Queue, done) -> None:
+        try:
+            ok, value = box.get_nowait()
+        except queue.Empty:
+            self.after(_POLL_MS, self._poll_background, box, done)
+            return
+        if not ok:
+            self._stop_ticker()
+            self._set_busy(False)
+            self.status_msg(f"Failed: {type(value).__name__}: {value}", error=True)
+            return
+        done(value)
 
     def _apply_models(self, models: list) -> None:
         # The "no model" sentinel always leads the list so the Web GUI can be
@@ -711,10 +744,14 @@ class Launcher(tk.Tk):
         if self.model.get() not in values:
             self.model.set(models[0] if models else NO_MODEL_LABEL)
 
-    def _refresh_done(self, result, models: list) -> None:
+    def _refresh_done(self, result, models: list, error: str | None = None) -> None:
         self._stop_ticker()
         self._set_busy(False)
         self._apply_models(models)
+        if error:
+            self.status_msg(f"Could not check the models folder: {error}",
+                            error=True)
+            return
         if result is not None and result.changed:
             bits = []
             if result.added:
@@ -819,9 +856,10 @@ class Launcher(tk.Tk):
                 msg = out[-1] if out else ""
             except Exception as e:
                 msg = str(e)
-            self.after(0, lambda: self._register_done(ok, msg, before))
+            return ok, msg
 
-        threading.Thread(target=work, daemon=True).start()
+        self._run_in_background(
+            work, lambda out: self._register_done(out[0], out[1], before))
 
     def _register_done(self, ok: bool, msg: str, before: set) -> None:
         self._stop_ticker()
