@@ -166,8 +166,8 @@ def _repl(agent: Agent) -> None:
             continue
 
         try:
-            # The saved checkpoint stays until this turn finishes (cleared),
-            # is interrupted (rewritten), or fails (left as it was). See
+            # The saved checkpoint is not cleared before the turn; the turn
+            # itself clears or rewrites it. See
             # test_a_failed_turn_after_an_interrupted_one_keeps_the_saved_progress.
             if agent.goal_cmd is not None:
                 before = {f["path"]: f["writes"] for f in agent.changed_files()}
@@ -179,8 +179,8 @@ def _repl(agent: Agent) -> None:
             else:
                 agent.chat(user_input)
         except KeyboardInterrupt:
-            # _loop has already saved the checkpoint (or said why not); swallow
-            # the interrupt here.
+            # _loop has already dealt with the checkpoint; swallow the
+            # interrupt here.
             pass
         except CoderAuthError:
             # Must raise here to bypass generic Exception block and bubble up to main
