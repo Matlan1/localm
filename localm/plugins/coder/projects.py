@@ -17,7 +17,11 @@ whole history.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +34,10 @@ from localm.pathsafe import is_unc_or_device_path
 PRIVACY_MODE = "privacy"
 
 _FILENAME = "coder-projects.json"
+
+# Held, outside the store's cross-process lock, across every read-modify-write
+# of the store. LOCK ORDER: _LOCK (outer) -> the store's .lock file.
+_LOCK = threading.Lock()
 
 
 def _store() -> Path:
@@ -49,6 +57,37 @@ def _load() -> list:
                        "list. The old file is left in place.", _store().name, e)
         return []
     return raw if isinstance(raw, list) else []
+
+
+@contextmanager
+def _locked():
+    """Hold this process's lock and the store's cross-process lock."""
+    from localm.config import _cross_process_lock
+    store = _store()
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK, _cross_process_lock(store):
+        yield
+
+
+def _write(entries: list) -> None:
+    """Replace the store with *entries* through a temporary file in the same
+    folder, so a reader sees the old list or the new one, never a partial
+    file. Raises OSError when it could not be written; the old file is then
+    unchanged."""
+    from localm.config import _replace_atomic
+    store = _store()
+    fd, tmp = tempfile.mkstemp(prefix=store.name + ".", suffix=".tmp",
+                               dir=str(store.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(entries, indent=2))
+        _replace_atomic(Path(tmp), store)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _remember_enabled() -> bool:
@@ -92,20 +131,21 @@ def record_project(cwd, mode: Optional[str]) -> bool:
         logger.debug("coder projects: unusable cwd %r (%s); not recorded", cwd, e)
         return False
 
-    entries = [e for e in _load() if isinstance(e, dict) and e.get("path") != path]
-    prior = next((e for e in _load()
-                  if isinstance(e, dict) and e.get("path") == path), {})
-    entries.insert(0, {
-        "path": path,
-        "name": Path(path).name or path,
-        "last_used": time.time(),
-        "sessions": int(prior.get("sessions", 0)) + 1,
-    })
-    del entries[limit:]
     try:
-        p = _store()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        with _locked():
+            loaded = _load()
+            prior = next((e for e in loaded
+                          if isinstance(e, dict) and e.get("path") == path), {})
+            entries = [e for e in loaded
+                       if isinstance(e, dict) and e.get("path") != path]
+            entries.insert(0, {
+                "path": path,
+                "name": Path(path).name or path,
+                "last_used": time.time(),
+                "sessions": int(prior.get("sessions", 0)) + 1,
+            })
+            del entries[limit:]
+            _write(entries)
     except Exception as e:
         logger.warning("coder projects: could not record %s (%s)", path, e)
         return False
@@ -134,6 +174,43 @@ def list_projects() -> list:
             available = False
         out.append({**e, "available": available})
     return out
+
+
+def _key(path: str) -> str:
+    return os.path.normcase(path)
+
+
+def forget_project(cwd) -> bool:
+    """Remove *cwd* from the list. Returns True when an entry was removed.
+
+    An entry matches when its stored path equals *cwd* expanded and resolved,
+    the form ``record_project`` stores, or *cwd* expanded as given. Both sides
+    are compared through ``os.path.normcase``, the same folding the per-project
+    checkpoint digest uses, so on Windows a difference in letter case alone
+    still matches. A UNC or device path is matched as given, never resolved.
+
+    The file is rewritten only when something was removed, under the same
+    locks ``record_project`` takes. Raises OSError when the locks could not be
+    taken, when it could not be rewritten, or when a matching entry is still
+    listed after the rewrite.
+    """
+    raw = Path(cwd).expanduser()
+    keys = {_key(str(raw))}
+    if not is_unc_or_device_path(str(raw)):
+        keys.add(_key(str(raw.resolve())))
+
+    def _matches(e) -> bool:
+        return isinstance(e, dict) and _key(str(e.get("path") or "")) in keys
+
+    with _locked():
+        entries = _load()
+        kept = [e for e in entries if not _matches(e)]
+        if len(kept) == len(entries):
+            return False
+        _write(kept)
+        if any(_matches(e) for e in _load()):
+            raise OSError(f"{_store().name} still lists {raw} after removing it")
+    return True
 
 
 def forget_all() -> None:

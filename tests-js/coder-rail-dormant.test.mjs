@@ -467,3 +467,131 @@ test("rail: an other-project group disappears when its only session is open",
       "an other-project group whose only session is now open must not be shown");
     assert.ok(!dormantTitles(window).includes("write a csv parser"));
   });
+
+// Records every request; a DELETE answers with `deleteStatus` and, on a
+// failure, a detail string as the real server does.
+function bootDeletable({ deleteStatus = 200, detail = "" } = {}) {
+  const calls = [];
+  const { window } = loadApp({
+    fetchImpl: async (url, opts = {}) => {
+      const u = String(url);
+      const method = opts.method || "GET";
+      if (method !== "GET") calls.push({ url: u, method, body: opts.body });
+      if (method === "DELETE") {
+        const ok = deleteStatus < 400;
+        return { ok, status: deleteStatus, statusText: ok ? "OK" : "Conflict",
+                 json: async () => (ok ? {} : { detail }),
+                 text: async () => "", headers: { get: () => null } };
+      }
+      const body = u.startsWith("/api/coder/dormant") ? PAYLOAD : {};
+      return { ok: true, status: 200, json: async () => body,
+               text: async () => "", headers: { get: () => null } };
+    },
+  });
+  return { window, calls };
+}
+
+const delButton = (node) => node.querySelector("button.coder-rail-del");
+
+test("rail: a past session's delete button is a labelled button on the row", async () => {
+  const { window } = bootDeletable();
+  await settle();
+  await window.refreshDormant();
+  for (const row of rail(window).querySelectorAll(".coder-session-item.dormant")) {
+    const btn = delButton(row);
+    assert.ok(btn, "every past-session row has a delete button, folder missing or not");
+    assert.equal(btn.tagName, "BUTTON");
+    assert.equal(btn.getAttribute("aria-label"), "Delete this saved session");
+  }
+});
+
+test("rail: deleting a past session sends its project and id, and does not resume it",
+  async () => {
+    const { window, calls } = bootDeletable();
+    await settle();
+    await window.refreshDormant();
+
+    delButton(rowNamed(window, "write a csv parser")).click();
+    await settle();
+    assert.equal(calls.length, 0, "nothing is sent before the user confirms");
+    modalButton(window, "Delete").click();
+    await settle();
+    await settle();
+
+    assert.ok(!calls.some((c) => c.url.startsWith("/api/coder/sessions")),
+      "the click on the delete button reached the row and resumed the session");
+    const del = calls.filter((c) => c.method === "DELETE");
+    assert.equal(del.length, 1);
+    assert.equal(del[0].url, "/api/coder/checkpoints");
+    assert.deepEqual(JSON.parse(del[0].body),
+      { cwd: "/work/elsewhere", checkpoint_id: "bbb222" },
+      "the delete names the row's own project and checkpoint");
+  });
+
+test("rail: cancelling the confirmation deletes nothing", async () => {
+  const { window, calls } = bootDeletable();
+  await settle();
+  await window.refreshDormant();
+  delButton(rowNamed(window, "build a calculator")).click();
+  await settle();
+  modalButton(window, "Cancel").click();
+  await settle();
+  assert.equal(calls.length, 0);
+  assert.ok(rowNamed(window, "build a calculator"), "the row is still listed");
+});
+
+test("rail: a refused delete shows the server's reason and keeps the row", async () => {
+  const detail = "This conversation is open in a live coder session.";
+  const { window } = bootDeletable({ deleteStatus: 409, detail });
+  await settle();
+  await window.refreshDormant();
+  delButton(rowNamed(window, "build a calculator")).click();
+  await settle();
+  modalButton(window, "Delete").click();
+  await settle();
+  await settle();
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent, /open in a live coder session/);
+  assert.ok(toastEl.className.includes("error"));
+  assert.ok(rowNamed(window, "build a calculator"), "a failed delete must not drop the row");
+});
+
+test("rail: removing a project sends its path and does not toggle the group", async () => {
+  const { window, calls } = bootDeletable();
+  await settle();
+  await window.refreshDormant();
+
+  const group = [...rail(window).querySelectorAll(".coder-rail-project")]
+    .find((g) => g.querySelector("summary .title").textContent === "vanished");
+  assert.ok(group, "precondition: the project group rendered");
+  const btn = delButton(group.querySelector("summary"));
+  assert.ok(btn, "the project group has a remove button");
+  assert.equal(btn.getAttribute("aria-label"), "Remove this project and its saved sessions");
+  btn.click();
+  await settle();
+  assert.equal(group.open, false, "the remove click toggled the group open");
+  modalButton(window, "Remove project").click();
+  await settle();
+  await settle();
+
+  const del = calls.filter((c) => c.method === "DELETE");
+  assert.equal(del.length, 1);
+  assert.equal(del[0].url, "/api/coder/projects");
+  assert.deepEqual(JSON.parse(del[0].body), { path: "/work/vanished" });
+});
+
+test("rail: the current project's heading also offers removing it", async () => {
+  const { window, calls } = bootDeletable();
+  await settle();
+  await window.refreshDormant();
+  const head = [...rail(window).querySelectorAll(".coder-rail-head")]
+    .find((h) => h.textContent === "Past sessions here");
+  delButton(head).click();
+  await settle();
+  modalButton(window, "Remove project").click();
+  await settle();
+  await settle();
+  const del = calls.filter((c) => c.method === "DELETE");
+  assert.deepEqual(del.map((c) => [c.url, JSON.parse(c.body)]),
+    [["/api/coder/projects", { path: "/work/here" }]]);
+});

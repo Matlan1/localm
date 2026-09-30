@@ -1029,6 +1029,12 @@ class SessionManager:
             sessions = [s for s in sessions if s.principal == principal]
         return [s.info() for s in sorted(sessions, key=lambda s: s.created_at)]
 
+    def snapshot(self) -> list:
+        """Every live session, for every principal. Unlike :meth:`list`, this
+        never reaps an idle session."""
+        with self._lock:
+            return list(self._sessions.values())
+
     def remove(self, session_id: str) -> Optional[CoderSession]:
         with self._lock:
             session = self._sessions.pop(session_id, None)
