@@ -168,6 +168,14 @@ the managed ComfyUI's folder if one is active, otherwise your configured
 `comfy_workdir`. With neither configured, the pull fails outright rather than
 falling back to localm's own models folder.
 
+Versions of one CivitAI model often share a filename. A file already in that
+folder is reused only when it is shown to be the requested version's: its
+SHA256 matches CivitAI's (or the one you pass with `--sha256`), or, when
+CivitAI lists no SHA256, localm's registry records it as that version and its
+size matches. Any other file is left untouched and the pull stops with the
+steps to replace it. `--redownload` replaces a file only once no model
+registered from another source points at it.
+
 An optional CivitAI API token, and a matching one for HuggingFace, raise rate
 limits and reach gated or login-required models on search and download.
 Neither is required - both sources keep working anonymously with nothing

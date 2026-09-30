@@ -349,7 +349,7 @@ class CivitAISource:
             raise CivitAIError(f"CivitAI file {file_id} has no download URL.")
         sha256 = ((picked.get("hashes") or {}).get("SHA256") or "").lower() or None
         size_kb = picked.get("sizeKB")
-        size_bytes = int(size_kb * 1024) if isinstance(size_kb, (int, float)) else None
+        size_bytes = round(size_kb * 1024) if isinstance(size_kb, (int, float)) else None
         picked_id = picked.get("id")
 
         return ResolvedDownload(
