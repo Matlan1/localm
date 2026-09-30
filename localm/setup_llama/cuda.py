@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -109,6 +109,9 @@ class NvidiaInfo:
     driver_version: str = ""
     cuda_capability: str = ""       # max CUDA the driver supports, e.g. "12.4"
     compute_capability: str = ""    # the GPU's own sm/arch level, e.g. "12.0" (Blackwell/sm_120)
+    # Every GPU nvidia-smi lists, in nvidia-smi's own order:
+    # [{"index", "name", "total_mib", "free_mib"}, ...].
+    gpus: list = field(default_factory=list)
 
     @property
     def cuda_line(self) -> str:
@@ -157,26 +160,89 @@ def nvidia_preflight() -> NvidiaInfo:
     the CARD IS, which is what decides whether the 12.x build's fatbin even
     has kernels for it (see NvidiaInfo.cuda_line).
 
-    Never raises. Parses the nvidia-smi banner ("Driver Version: X  CUDA
-    Version: Y") and asks explicitly for the (untruncated) GPU name and its
-    compute capability."""
+    Never raises. Asks explicitly for the driver version, the (untruncated)
+    GPU name, the compute capability and every GPU's memory. The max CUDA
+    version has no query field, so it comes from the banner ("CUDA Version:
+    Y"), or from ``nvidia-smi -q`` when the banner does not carry it; the
+    driver version falls back to the banner the same way. A field that still
+    cannot be parsed stays empty and the start of the raw output is logged at
+    debug."""
     out = _sl._nvidia_smi()
     if not out.strip():
         return NvidiaInfo(present=False)
     info = NvidiaInfo(present=True)
-    m = re.search(r"Driver Version:\s*([0-9.]+)", out)
-    if m:
-        info.driver_version = m.group(1)
-    m = re.search(r"CUDA Version:\s*([0-9]+\.[0-9]+)", out)
-    if m:
-        info.cuda_capability = m.group(1)
+    info.driver_version = _first_version_line(
+        _sl._nvidia_smi("--query-gpu=driver_version", "--format=csv,noheader"))
+    long_out = ""
+    for text in (out, None):
+        if text is None:
+            if info.driver_version and info.cuda_capability:
+                break
+            long_out = _sl._nvidia_smi("-q")
+            text = long_out
+        if not info.driver_version:
+            m = _DRIVER_VERSION_RE.search(text)
+            if m:
+                info.driver_version = m.group(1)
+        if not info.cuda_capability:
+            m = _CUDA_VERSION_RE.search(text)
+            if m:
+                info.cuda_capability = m.group(1)
     name = _sl._nvidia_smi("--query-gpu=name", "--format=csv,noheader").strip().splitlines()
     if name:
         info.gpu_name = name[0].strip()
     cap = _sl._nvidia_smi("--query-gpu=compute_cap", "--format=csv,noheader").strip().splitlines()
     if cap:
         info.compute_capability = cap[0].strip()
+    info.gpus = _parse_gpu_memory(_sl._nvidia_smi(
+        "--query-gpu=index,name,memory.total,memory.free",
+        "--format=csv,noheader,nounits"))
+    missing = [label for label, value in (("driver version", info.driver_version),
+                                          ("CUDA version", info.cuda_capability),
+                                          ("GPU name", info.gpu_name))
+               if not value]
+    if missing:
+        logger.debug("nvidia-smi: could not parse %s; start of its output: %r; "
+                     "start of 'nvidia-smi -q': %r", ", ".join(missing),
+                     out[:_RAW_LOG_CHARS], long_out[:_RAW_LOG_CHARS])
     return info
+
+
+# How much raw nvidia-smi output nvidia_preflight logs when a field is missing.
+_RAW_LOG_CHARS = 800
+
+# "Driver Version: 552.22" in the banner, "Driver Version    : 552.22" in -q.
+_DRIVER_VERSION_RE = re.compile(r"Driver Version[ \t]*:[ \t]*([0-9]+(?:\.[0-9]+)+)")
+_CUDA_VERSION_RE = re.compile(r"CUDA Version[ \t]*:[ \t]*([0-9]+\.[0-9]+)")
+_VERSION_LINE_RE = re.compile(r"[0-9]+(?:\.[0-9]+)+")
+
+
+def _first_version_line(text: str) -> str:
+    """The first line of *text* when it is a dotted version number, else ""
+    (an error sentence from an nvidia-smi that rejects the query field)."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line if _VERSION_LINE_RE.fullmatch(line) else ""
+    return ""
+
+
+def _parse_gpu_memory(text: str) -> list:
+    """``[{"index", "name", "total_mib", "free_mib"}, ...]`` from nvidia-smi's
+    ``--query-gpu=index,name,memory.total,memory.free
+    --format=csv,noheader,nounits`` output. A line that does not parse is
+    skipped; an error sentence parses to ``[]``."""
+    out = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 4:
+            continue
+        try:
+            out.append({"index": int(parts[0]), "name": parts[1],
+                        "total_mib": int(parts[2]), "free_mib": int(parts[3])})
+        except ValueError:
+            continue
+    return out
 
 
 # NVIDIA publishes its own CUDA runtime libraries (cudart, cuBLAS) as plain
