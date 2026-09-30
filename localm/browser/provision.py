@@ -71,12 +71,37 @@ def chromium_executable_path() -> Optional[Path]:
         return None
 
 
+_MISSING_EXECUTABLE = re.compile(r"Executable doesn't exist at (.+)")
+
+#: Executables a launch reported missing that have not appeared since.
+_missing_executables: set = set()
+_missing_lock = threading.Lock()
+
+
+def note_missing_executable(raw: object) -> None:
+    """Remember the executable a launch failure names as missing (playwright's
+    ``Executable doesn't exist at <path>``); ``is_chromium_installed`` is False
+    until that file exists."""
+    for line in str(raw).splitlines():
+        found = _MISSING_EXECUTABLE.search(line)
+        if found:
+            with _missing_lock:
+                _missing_executables.add(found.group(1).strip())
+
+
 def is_chromium_installed() -> bool:
     """Whether the Chromium build this playwright version drives is already
-    on disk. False (never raises) when playwright itself is not installed or
-    its driver could not answer."""
+    on disk, and no executable a launch reported missing is still absent.
+    False (never raises) when playwright itself is not installed or its driver
+    could not answer."""
     path = chromium_executable_path()
-    return path is not None and path.exists()
+    if path is None or not path.exists():
+        return False
+    with _missing_lock:
+        for reported in list(_missing_executables):
+            if Path(reported).exists():
+                _missing_executables.discard(reported)
+        return not _missing_executables
 
 
 def download_allowed() -> bool:

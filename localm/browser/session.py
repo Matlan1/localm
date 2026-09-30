@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 from urllib.parse import urljoin
 
-from localm.browser import discovery, launch_errors, netgate
+from localm.browser import discovery, launch_errors, netgate, provision
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +218,7 @@ class BrowserSession:
             browser = await self._pw.chromium.launch(headless=self.headless)
         except Exception as exc:
             logger.debug("bundled browser launch failed: %s", exc)
+            provision.note_missing_executable(exc)
             kind, message = launch_errors.launch_failure(exc, engine="bundled")
             raise BrowserUnavailableError(message, kind) from exc
         self.browser_name = "Bundled Chromium"

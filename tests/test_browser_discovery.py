@@ -220,13 +220,21 @@ posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="needs POSIX permission bits and PATH lookup")
 
 
+def _only_under(folder: Path):
+    """The real executable check, limited to files under *folder*, so a
+    browser installed on the machine running the test is not seen."""
+    root = str(folder)
+    return lambda path: path.startswith(root) and discovery._is_runnable(path)
+
+
 @posix_only
 def test_a_file_that_is_not_executable_is_not_a_browser(tmp_path):
     (tmp_path / "chromium").write_bytes(b"")
     (tmp_path / "chromium").chmod(0o644)
 
     found = discovery.find_system_browsers(
-        platform="linux", env={"PATH": str(tmp_path)})
+        platform="linux", env={"PATH": str(tmp_path)},
+        runnable=_only_under(tmp_path))
 
     assert found == []
 
@@ -236,10 +244,31 @@ def test_an_executable_on_the_real_path_is_found(tmp_path):
     exe = _exe(tmp_path / "chromium-browser")
 
     found = discovery.find_system_browsers(
-        platform="linux", env={"PATH": str(tmp_path)})
+        platform="linux", env={"PATH": str(tmp_path)},
+        runnable=_only_under(tmp_path))
 
     assert [(b.name, b.channel, b.path) for b in found] == [
         ("Chromium", None, str(exe))]
+
+
+@posix_only
+def test_a_path_lookup_that_returns_a_non_executable_file_is_not_a_browser(tmp_path):
+    exe = _exe(tmp_path / "chromium-browser")
+    exe.chmod(0o644)
+
+    found = discovery.find_system_browsers(
+        platform="linux", env={"PATH": ""},
+        which=lambda command: str(exe) if command == "chromium-browser" else None,
+        runnable=_only_under(tmp_path))
+
+    assert found == []
+
+    exe.chmod(0o755)
+    found = discovery.find_system_browsers(
+        platform="linux", env={"PATH": ""},
+        which=lambda command: str(exe) if command == "chromium-browser" else None,
+        runnable=_only_under(tmp_path))
+    assert [b.path for b in found] == [str(exe)]
 
 
 def test_the_default_search_reads_this_machine_without_raising():

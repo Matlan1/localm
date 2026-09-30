@@ -784,6 +784,63 @@ class TestDownloadRoute:
         assert fake.calls == 1
 
 
+@pytest.fixture
+def half_installed(monkeypatch, tmp_path):
+    """The full browser is on disk and a launch has reported the headless
+    shell missing. Returns the path of that missing executable."""
+    from localm.browser import discovery, provision
+    from localm.plugins.builtin.browser import plug
+    full = tmp_path / "full" / "chrome"
+    full.parent.mkdir()
+    full.write_bytes(b"")
+    shell = tmp_path / "shell" / "chrome-headless-shell"
+    monkeypatch.setattr(plug, "_playwright_installed", lambda: True)
+    monkeypatch.setattr(provision, "chromium_executable_path", lambda: full)
+    monkeypatch.setattr(discovery, "find_system_browsers", lambda: [])
+    monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+    with provision._missing_lock:
+        provision._missing_executables.clear()
+    provision.note_missing_executable(
+        f"BrowserType.launch: Executable doesn't exist at {shell}")
+    yield shell
+    with provision._missing_lock:
+        provision._missing_executables.clear()
+
+
+class TestAnIncompleteBuild:
+    def test_the_status_offers_the_download_for_a_build_a_launch_found_incomplete(
+            self, app, half_installed):
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["bundled_installed"] is False
+        assert body["problem"] == "bundled_missing"
+        assert body["can_download"] is True
+
+    def test_the_download_repairs_it_rather_than_calling_it_installed(
+            self, app, half_installed, installer):
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download")
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "started"
+            assert _wait_until(
+                lambda: _job_status(app, r.json()["job_id"]) == "done", timeout=10)
+
+        assert fake.calls == 1
+
+    def test_once_the_executable_exists_the_download_is_a_no_op_again(
+            self, app, half_installed, installer):
+        half_installed.parent.mkdir()
+        half_installed.write_bytes(b"")
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download")
+
+        assert r.json() == {"status": "already_installed"}
+        assert fake.calls == 0
+
+
 class TestStateNamesTheBrowser:
     def test_an_open_browser_reports_which_one_it_is(self, app):
         from localm.browser import session as bsession

@@ -20,7 +20,7 @@ import types
 
 import pytest
 
-from localm.browser import discovery, launch_errors
+from localm.browser import discovery, launch_errors, provision
 from localm.browser import session as bsession
 
 _TL, _TR, _BL, _BR, _V, _H = (chr(c) for c in (0x2554, 0x2557, 0x255A, 0x255D,
@@ -489,6 +489,77 @@ def test_the_raw_launch_error_is_kept_in_the_debug_log(caplog):
 
     assert "Executable doesn't exist at" in caplog.text
     assert "playwright install" in caplog.text
+
+
+@pytest.fixture(autouse=True)
+def _forget_missing_executables():
+    def clear():
+        with provision._missing_lock:
+            provision._missing_executables.clear()
+    clear()
+    yield
+    clear()
+
+
+def test_a_missing_bundled_executable_is_remembered_until_it_exists(
+        tmp_path, monkeypatch):
+    full = tmp_path / "full" / "chrome"
+    full.parent.mkdir()
+    full.write_bytes(b"")
+    shell = tmp_path / "shell" / "chrome-headless-shell"
+    monkeypatch.setattr(provision, "chromium_executable_path", lambda: full)
+    sess = _session("bundled", RuntimeError(
+        BUNDLED_MISSING_LINUX.replace(HEADLESS_SHELL, str(shell))))
+    assert provision.is_chromium_installed() is True
+
+    with pytest.raises(bsession.BrowserUnavailableError):
+        asyncio.run(sess._launch_bundled())
+
+    assert provision.is_chromium_installed() is False
+    shell.parent.mkdir()
+    shell.write_bytes(b"")
+    assert provision.is_chromium_installed() is True
+
+
+def test_a_failure_with_another_cause_does_not_mark_the_browser_not_installed(
+        tmp_path, monkeypatch):
+    full = tmp_path / "full" / "chrome"
+    full.parent.mkdir()
+    full.write_bytes(b"")
+    monkeypatch.setattr(provision, "chromium_executable_path", lambda: full)
+    sess = _session("bundled", RuntimeError(MISSING_LIBRARY_LINUX))
+
+    with pytest.raises(bsession.BrowserUnavailableError):
+        asyncio.run(sess._launch_bundled())
+
+    assert provision.is_chromium_installed() is True
+
+
+def test_the_real_missing_headless_shell_marks_a_half_installed_build(
+        tmp_path, monkeypatch):
+    """Only the full browser is on disk: a headless launch names the headless
+    shell as the missing executable, and the build stops counting as installed."""
+    async_api = pytest.importorskip("playwright.async_api")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    full = provision.chromium_executable_path()
+    assert full is not None
+    full.parent.mkdir(parents=True)
+    full.write_bytes(b"")
+    assert provision.is_chromium_installed() is True
+    sess = bsession.BrowserSession("t-half", engine="bundled", headless=True)
+
+    async def launch():
+        sess._pw = await async_api.async_playwright().start()
+        try:
+            await sess._launch_bundled()
+        finally:
+            await sess._pw.stop()
+
+    with pytest.raises(bsession.BrowserUnavailableError) as ei:
+        asyncio.run(launch())
+
+    assert ei.value.kind == launch_errors.BUNDLED_MISSING
+    assert provision.is_chromium_installed() is False
 
 
 def test_a_bundled_launch_passes_the_headless_setting_and_no_channel():

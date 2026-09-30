@@ -195,6 +195,106 @@ def test_force_failure_warns_browser_now_uninstalled(cli_runner, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  A launch that found the build incomplete                                   #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _forget_missing_executables():
+    def clear():
+        with bprovision._missing_lock:
+            bprovision._missing_executables.clear()
+    clear()
+    yield
+    clear()
+
+
+def _the_full_build_is_there(monkeypatch, tmp_path):
+    exe = tmp_path / "chromium-1" / "chrome"
+    exe.parent.mkdir()
+    exe.write_bytes(b"")
+    monkeypatch.setattr(bprovision, "chromium_executable_path", lambda: exe)
+    return exe
+
+
+def _missing_shell_error(shell) -> str:
+    return (f"BrowserType.launch: Executable doesn't exist at {shell}\n"
+            "Looks like Playwright was just installed or updated.")
+
+
+def test_a_reported_missing_executable_marks_the_browser_not_installed_until_it_exists(
+        monkeypatch, tmp_path):
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    shell = tmp_path / "shell-1" / "chrome-headless-shell"
+    assert bprovision.is_chromium_installed() is True
+
+    bprovision.note_missing_executable(_missing_shell_error(shell))
+
+    assert bprovision.is_chromium_installed() is False
+    shell.parent.mkdir()
+    shell.write_bytes(b"")
+    assert bprovision.is_chromium_installed() is True
+    assert bprovision._missing_executables == set()
+
+
+def test_an_error_that_names_no_missing_executable_changes_nothing(
+        monkeypatch, tmp_path):
+    _the_full_build_is_there(monkeypatch, tmp_path)
+
+    bprovision.note_missing_executable("BrowserType.launch: Target closed")
+    bprovision.note_missing_executable(
+        "Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome")
+
+    assert bprovision.is_chromium_installed() is True
+
+
+def test_the_full_build_being_absent_is_not_installed_whatever_was_reported(
+        monkeypatch, tmp_path):
+    gone = tmp_path / "gone" / "chrome"
+    monkeypatch.setattr(bprovision, "chromium_executable_path", lambda: gone)
+
+    assert bprovision.is_chromium_installed() is False
+
+
+def test_the_installer_repairs_a_build_a_launch_found_incomplete(
+        monkeypatch, tmp_path):
+    _stub_playwright_importable(monkeypatch)
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    shell = tmp_path / "shell-1" / "chrome-headless-shell"
+    bprovision.note_missing_executable(_missing_shell_error(shell))
+    ran = []
+
+    def fake_install(cmd, **kw):
+        ran.append(cmd)
+        shell.parent.mkdir()
+        shell.write_bytes(b"")
+        return 0, ["downloaded the headless shell"]
+    monkeypatch.setattr(bprovision, "_stream_install", fake_install)
+
+    result = bprovision.install_chromium()
+
+    assert len(ran) == 1, "an incomplete build was reported as already installed"
+    assert result.ok is True, result.message
+    assert result.already_installed is False
+
+
+def test_an_install_that_does_not_supply_the_missing_executable_is_not_success(
+        monkeypatch, tmp_path):
+    _stub_playwright_importable(monkeypatch)
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    bprovision.note_missing_executable(
+        _missing_shell_error(tmp_path / "shell-1" / "chrome-headless-shell"))
+    monkeypatch.setattr(bprovision, "_stream_install",
+                        lambda cmd, **kw: (0, ["nothing useful happened"]))
+
+    result = bprovision.install_chromium()
+
+    assert result.ok is False
+    assert "still not on disk" in result.message
+
+
+# --------------------------------------------------------------------------- #
 #  The installer's output, line by line                                       #
 # --------------------------------------------------------------------------- #
 
