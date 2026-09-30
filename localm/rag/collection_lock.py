@@ -37,24 +37,28 @@ hold a meta.json, so the lock file is never mistaken for a collection.
 
 Identity is the per-acquisition ``token`` (uuid4), never the pid. The record
 also names the holder's ``pid``, the pid space that pid belongs to
-(``machine``) and the holder's ``start`` identity
-(``instances.process_start_identity``), which no change of the system clock
-alters. A waiter decides whether the holder still holds the lock
-(``_is_stale``) by what it can establish about that process
+(``machine``), the holder's ``start`` identity
+(``instances.process_start_identity``) and its heartbeat thread's id and start
+identity (``beat``, ``instances.thread_start_identity``), none of which a
+change of the system clock alters. A waiter decides whether the holder still
+holds the lock (``_is_stale``) by what it can establish about it
 (``_holder_liveness``):
 
-  * a holder proven running keeps the lock however old its heartbeat is;
-  * a holder proven gone (its pid has exited, or now names a process with
-    another start identity) is taken over once its heartbeat is
-    ``DEAD_HOLDER_GRACE`` old;
-  * any other holder (a record from another pid space, one without a start
-    identity, one written by an earlier localm, a probe that cannot answer) is
-    taken over once its heartbeat is ``STALE_AFTER`` old AND the waiter has
-    itself watched ``CONFIRM_BEATS`` heartbeats go missing, timed on its own
-    monotonic clock.
+  * a holder proven running (its process has the start identity the record
+    names, and the heartbeat thread the record names still runs in it) keeps
+    the lock however old its heartbeat is;
+  * any other holder is taken over only once the waiter has itself watched the
+    heartbeat stay unchanged for ``CONFIRM_BEATS`` heartbeats on its own
+    monotonic clock, and the heartbeat has been silent, by the wall clock or by
+    the waiter's own watch, for longer than ``DEAD_HOLDER_GRACE`` when the
+    holder is proven gone (its pid has exited or now names another process),
+    or ``STALE_AFTER`` otherwise (a record from another pid space, one without
+    a start identity, one written by an earlier localm, a heartbeat thread that
+    has stopped, a probe that cannot answer).
 
-So a heartbeat age read from the wall clock never, on its own, takes the lock
-from a holder that is still running or still beating.
+So a lock whose heartbeat keeps moving is never taken over, whatever either
+clock reads, and a heartbeat age read from the wall clock never takes over a
+lock on its own.
 
 Failure is never silent and never optimistic:
 
@@ -63,9 +67,9 @@ Failure is never silent and never optimistic:
   * A lock file whose record is corrupt or unreadable is treated as HELD by a
     holder whose liveness is unknown, never as free.
   * Release removes the file only on a POSITIVE token match. "I cannot read it"
-    is never taken as "it must be mine". A file it cannot remove it empties
-    through a handle whose record carries its token, so no record is left
-    naming a holder that has released.
+    is never taken as "it must be mine". A record a release could not remove
+    names a heartbeat thread that has stopped, so it is taken over by the rules
+    above.
   * A reclaim is printed, and so is the case where this process's own hold was
     reclaimed while it was still running.
 """
@@ -89,19 +93,18 @@ from localm.debuglog import logger as _log
 # How often the holder refreshes its heartbeat. Everything else is a multiple of
 # this.
 HEARTBEAT_INTERVAL = 5.0
-# A holder whose liveness cannot be established (see _holder_liveness) is
-# presumed crashed once its heartbeat is this old and a waiter has seen
-# CONFIRM_BEATS heartbeats go missing. NOT a limit on how long a lock may be
-# held: a live holder beats every HEARTBEAT_INTERVAL.
+# A holder not proven running or gone (see _holder_liveness) is presumed crashed
+# once its heartbeat has been silent this long. NOT a limit on how long a lock
+# may be held: a live holder beats every HEARTBEAT_INTERVAL.
 STALE_AFTER = 60.0
 # Heartbeats a waiter must itself see go missing, timed on its own monotonic
-# clock, before STALE_AFTER counts against such a holder. See
+# clock, before any holder is taken over. See
 # test_the_confirm_window_fits_inside_the_wait_budget.
 CONFIRM_BEATS = 3
 # A holder proven gone (see _holder_liveness) is taken over once its heartbeat
-# is this old.
+# has been silent this long.
 DEAD_HOLDER_GRACE = 4 * HEARTBEAT_INTERVAL
-# Attempts a holder makes at removing its own lock file before emptying it.
+# Attempts a holder makes at removing its own lock file on release.
 _UNLINK_TRIES = 5
 # How long a would-be writer waits for the lock before refusing. Bounded: an
 # unbounded wait turns a stuck peer into a hung CLI or a hung job.
@@ -259,17 +262,38 @@ _held_tokens: set = set()
 _held_tokens_lock = threading.Lock()
 
 
+def _thread_identity(thread: threading.Thread) -> Optional[dict]:
+    """``{"tid": ..., **start identity}`` of running *thread* of this process,
+    or None when its start identity cannot be read."""
+    from localm import instances
+    tid = thread.native_id
+    ident = instances.thread_start_identity(os.getpid(), tid) if tid else None
+    return None if ident is None else {"tid": tid, **ident}
+
+
+def _beat_is_running(pid: int, beat) -> bool:
+    """True only when *beat* (a record's ``beat``) names a thread that still
+    runs in process *pid* with the start identity *beat* recorded."""
+    from localm import instances
+    if not isinstance(beat, dict) or type(beat.get("tid")) is not int:
+        return False
+    current = instances.thread_start_identity(pid, beat["tid"])
+    return bool(current) and all(beat.get(k) == v for k, v in current.items())
+
+
 def _holder_liveness(rec: dict) -> str:
     """``"alive"``, ``"dead"`` or ``"unknown"`` for the holder *rec* names.
 
-    ``"alive"``: the record names this pid space and a start identity, and the
-    process now running under its pid has that start identity; a record naming
-    this process counts only while the acquisition that wrote it still holds
-    the lock. ``"dead"``: the pid has exited, now names a process with another
+    ``"alive"``: the record names this pid space and a start identity, the
+    process now running under its pid has that start identity, and the
+    heartbeat thread the record names still runs in it; a record naming this
+    process counts only while the acquisition that wrote it still holds the
+    lock. ``"dead"``: the pid has exited, now names a process with another
     start identity, or is this process's under a released acquisition.
     ``"unknown"``: anything else, including a record from another pid space,
-    one without a start identity (every record written by an earlier localm)
-    and a probe that cannot answer.
+    one without a start identity (every record written by an earlier localm),
+    one whose heartbeat thread has stopped or is not named, and a probe that
+    cannot answer.
     """
     from localm import instances
     if rec.get("machine") != _machine_id():
@@ -292,9 +316,14 @@ def _holder_liveness(rec: dict) -> str:
     if pid == os.getpid():
         token = rec.get("token")
         with _held_tokens_lock:
-            if not (isinstance(token, str) and token in _held_tokens):
-                return "dead"
-    return "alive"
+            held = isinstance(token, str) and token in _held_tokens
+        return "alive" if held else "dead"
+    try:
+        running = _beat_is_running(pid, rec.get("beat"))
+    except Exception as e:
+        _log.debug("rag lock: heartbeat probe for pid %s failed (%s)", pid, e)
+        return "unknown"
+    return "alive" if running else "unknown"
 
 
 def _read_record(lockpath: Path):
@@ -334,17 +363,16 @@ def _is_stale(rec: Optional[dict], mtime: Optional[float], stale_after: float,
     is judged as a holder whose liveness is unknown."""
     if mtime is None:
         return False              # the file vanished; the caller re-tries the create
-    # A holder whose clock runs ahead of ours yields a negative age. Clamp to 0
-    # (treat as fresh) rather than letting arithmetic decide to steal a lock.
-    age = max(0.0, time.time() - mtime)
-    if age <= min(DEAD_HOLDER_GRACE, stale_after):
+    if quiet < CONFIRM_BEATS * HEARTBEAT_INTERVAL:
         return False
     liveness = _holder_liveness(rec) if isinstance(rec, dict) else "unknown"
     if liveness == "alive":
         return False
-    if liveness == "dead":
-        return age > DEAD_HOLDER_GRACE
-    return age > stale_after and quiet >= CONFIRM_BEATS * HEARTBEAT_INTERVAL
+    limit = DEAD_HOLDER_GRACE if liveness == "dead" else stale_after
+    # A holder whose clock runs ahead of ours yields a negative age. Clamp to 0
+    # (treat as fresh) rather than letting arithmetic decide to steal a lock.
+    age = max(0.0, time.time() - mtime)
+    return age > limit or quiet > limit
 
 
 class _Heartbeat(threading.Thread):
@@ -432,45 +460,33 @@ def _note(message: str) -> None:
     _log.warning("rag lock: %s", message)
 
 
-def _empty_own_lock(lockpath: Path, token: str) -> Optional[bool]:
-    """Truncate *lockpath* to nothing through one handle, only when the record
-    read through that same handle carries *token*.
-
-    True when it was emptied, False when its record does not carry *token* (or
-    cannot be parsed), None when the file could not be opened, read or
-    truncated."""
-    try:
-        with open(lockpath, "r+b") as f:
-            try:
-                rec = json.loads(f.read().decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                return False
-            if not isinstance(rec, dict) or rec.get("token") != token:
-                return False
-            f.seek(0)
-            f.truncate()
-    except OSError:
-        return None
-    return True
-
-
 def _remove_own_lock(lockpath: Path, token: str, collection: str,
-                     stale_after: float) -> None:
+                     stale_after: float, *, just_created: bool = False) -> None:
     """Remove the lock file this acquisition created.
 
-    A refused unlink is retried up to ``_UNLINK_TRIES`` times in all, each
-    retry only while the file's record is this acquisition's or unreadable.
-    If it is still there, the file is emptied (see _empty_own_lock). Every
-    outcome other than a removal is reported."""
+    A refused unlink is retried up to ``_UNLINK_TRIES`` times in all. Before
+    each retry the record is read again: a record naming another holder is
+    left in place, and so is one that cannot be read, unless *just_created*
+    (the caller created the file moments ago and may not have written its
+    record yet). Every outcome other than a removal is reported."""
     err: Optional[OSError] = None
     for attempt in range(_UNLINK_TRIES):
         if attempt:
             time.sleep(min(_POLL * 2 ** attempt, _POLL_CAP))
-            rec, _ = _read_record(lockpath)
+            rec, mtime = _read_record(lockpath)
+            if mtime is None:
+                return
             if isinstance(rec, dict) and rec.get("token") != token:
                 _note(f"the write lock on '{collection}' was taken over by "
                       f"another localm process before this write finished; "
                       f"leaving their lock in place.")
+                return
+            if rec is None and not just_created:
+                _note(f"the write lock file for '{collection}' is no longer "
+                      f"readable, so this run cannot prove the lock is still "
+                      f"its own; leaving it rather than risk deleting another "
+                      f"writer's. It is reclaimed as stale after "
+                      f"{stale_after:.0f}s.")
                 return
         try:
             lockpath.unlink()
@@ -479,21 +495,9 @@ def _remove_own_lock(lockpath: Path, token: str, collection: str,
             return
         except OSError as e:
             err = e
-    if not lockpath.exists():
-        return
-    emptied = _empty_own_lock(lockpath, token)
-    if emptied:
-        _note(f"could not remove the write lock file for '{collection}' "
-              f"({err}); emptied it instead, so it is reclaimed as stale "
-              f"after {stale_after:.0f}s.")
-    elif emptied is False:
+    if lockpath.exists():
         _note(f"could not remove the write lock file for '{collection}' "
               f"({err}); it is reclaimed as stale after {stale_after:.0f}s.")
-    else:
-        _note(f"could not remove or empty the write lock file {lockpath} "
-              f"({err}). Until this process exits, other localm processes on "
-              f"this machine wait for it; deleting that file releases "
-              f"'{collection}'.")
 
 
 @contextlib.contextmanager
@@ -618,18 +622,21 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
         # We created the file, so from here every failure must remove OUR file,
         # or a transient error leaks a lock nobody owns that blocks every writer
         # of this collection until it goes stale.
+        # The heartbeat thread starts first; the record names it.
+        beat = None
         try:
             try:
+                beat = _Heartbeat(lockpath, record, HEARTBEAT_INTERVAL)
+                beat.start()
+                record["beat"] = _thread_identity(beat)
                 os.write(fd, json.dumps(record).encode("utf-8"))
             finally:
                 os.close(fd)
-            beat = _Heartbeat(lockpath, record, HEARTBEAT_INTERVAL)
-            # Inside the cleanup block: a thread that cannot start (thread
-            # exhaustion) would otherwise leave a lock file behind with nothing
-            # refreshing it, blocking this collection until it went stale.
-            beat.start()
         except BaseException:
-            _remove_own_lock(lockpath, token, collection, stale_after)
+            if beat is not None and beat.is_alive():
+                beat.stop()
+            _remove_own_lock(lockpath, token, collection, stale_after,
+                             just_created=True)
             raise
         break
 

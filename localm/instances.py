@@ -376,6 +376,81 @@ def start_identity_differs(recorded, current) -> bool:
     return False
 
 
+_WIN_THREAD_API = None
+
+
+def _win_thread_api():
+    """ctypes bindings for the kernel32 thread calls thread_start_identity
+    makes on Windows, created once."""
+    global _WIN_THREAD_API
+    if _WIN_THREAD_API is None:
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k.OpenThread.restype = wintypes.HANDLE
+        k.GetProcessIdOfThread.argtypes = [wintypes.HANDLE]
+        k.GetProcessIdOfThread.restype = wintypes.DWORD
+        k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k.WaitForSingleObject.restype = wintypes.DWORD
+        k.GetThreadTimes.argtypes = [wintypes.HANDLE] + [
+            ctypes.POINTER(wintypes.FILETIME)] * 4
+        k.GetThreadTimes.restype = wintypes.BOOL
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        k.CloseHandle.restype = wintypes.BOOL
+        _WIN_THREAD_API = (ctypes, wintypes, k)
+    return _WIN_THREAD_API
+
+
+def _win_thread_created(pid: int, tid: int) -> "int | None":
+    """The creation time of running thread *tid* of process *pid*, in 100 ns
+    units since 1601, or None."""
+    ctypes, wintypes, k = _win_thread_api()
+    h = k.OpenThread(0x0800 | 0x00100000, False, tid)
+    if not h:
+        return None
+    try:
+        if k.GetProcessIdOfThread(h) != pid:
+            return None
+        if k.WaitForSingleObject(h, 0) != 0x00000102:
+            return None
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not k.GetThreadTimes(h, *[ctypes.byref(t) for t in times]):
+            return None
+        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+    finally:
+        k.CloseHandle(h)
+
+
+def thread_start_identity(pid: int, tid: int) -> "dict | None":
+    """When thread *tid* of process *pid* started, or None when that is not a
+    running thread of that process or cannot be read.
+
+    Linux: ``{"ticks": <start time in clock ticks since boot>}``, read from
+    /proc/<pid>/task/<tid>/stat. Windows: ``{"created": <creation time in 100 ns
+    units since 1601>}``, for a thread that has not exited. Every other
+    platform: None.
+    """
+    if type(pid) is not int or type(tid) is not int or pid <= 0 or tid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/task/{tid}/stat").read_bytes()
+            return {"ticks": int(stat[stat.rindex(b")") + 2:].split()[19])}
+        except (OSError, ValueError, IndexError):
+            return None
+    if sys.platform == "win32":
+        if tid > 0xFFFFFFFF:
+            return None
+        try:
+            created = _win_thread_created(pid, tid)
+        except (OSError, AttributeError) as e:
+            logger.debug("thread start identity of %s/%s unreadable (%s)", pid, tid, e)
+            return None
+        return None if created is None else {"created": created}
+    return None
+
+
 def start_identity_matches(recorded, current) -> bool:
     """True only when *recorded* and *current* are start identities of the
     same shape that name one process: the same start tick under the same boot
