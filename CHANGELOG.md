@@ -143,6 +143,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **The desktop launcher no longer gets stuck on "Checking models folder".**
+  When the models folder scan finished before the launcher window was fully
+  up, which happens easily with an empty or small models folder, its result
+  was lost: the status line kept counting and Launch stayed greyed out. The
+  result now always reaches the window, and a scan that cannot run shows why
+  instead of reporting the folder as up to date.
 - **When `localm gui` cannot open the GUI on an already-running `localm serve`,
   it now says why.** It used to guess "an older instance?" for every failure.
   It now shows the server's own error, a refused attach token, a server that

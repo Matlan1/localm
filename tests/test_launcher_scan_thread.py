@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A models-folder scan must not raise into a window that has closed.
+"""The launcher's background tasks hand their results back to the window safely.
 
-The launcher reads the models folder on a background thread and then schedules
-the result back onto the UI with ``after``. Closing the launcher while that scan
-is running destroys the widget being scheduled onto, and Tk raises
-``RuntimeError: main thread is not in main loop`` from the thread.
-
-It is not only a stray traceback. An exception escaping a thread is reported
-against whatever happens to be running when it surfaces, so a leaked scan turned
-into failures in unrelated tests - the launcher's own thread failing a VRAM
-handover test, in one observed run.
+The launcher runs the models-folder scan and model imports on worker threads.
+The worker never calls into Tk: the Tk thread polls for the result with
+``after``. A scan that finishes before ``mainloop()`` starts still reaches the
+window, a scan failure is shown in the status line, and closing the window
+mid-scan raises nothing from the worker thread.
 """
 
 from __future__ import annotations
@@ -17,7 +13,10 @@ from __future__ import annotations
 import importlib.util
 import sys
 import threading
+import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -71,68 +70,97 @@ def test_launcher_pyw_loads_without_the_pyw_suffix(monkeypatch):
         machinery.SOURCE_SUFFIXES[:] = original
 
 
-class _ClosedWindow:
-    """A window that has been destroyed: winfo_exists says so, and after()
-    raises the way Tk does from a thread whose loop is gone."""
+class _FakeWindow:
+    """Stands in for the Tk window: records every after() call and the thread
+    it came from, and runs scheduled callbacks only when pump() is called."""
 
-    def __init__(self, exists: bool, raises: bool = True):
-        self._exists = exists
-        self._raises = raises
-        self.scheduled = 0
+    def __init__(self):
+        self.pending = []
+        self.after_threads = []
+        self.status = []
+        self.busy = []
+        self.ticker_stopped = 0
 
-    def winfo_exists(self):
-        return self._exists
+    def after(self, delay, fn, *args):
+        self.after_threads.append(threading.current_thread())
+        self.pending.append((fn, args))
 
-    def after(self, delay, fn):
-        if self._raises:
-            raise RuntimeError("main thread is not in main loop")
-        self.scheduled += 1
+    def pump(self, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while self.pending and time.monotonic() < deadline:
+            fn, args = self.pending.pop(0)
+            fn(*args)
+            time.sleep(0.01)
+
+    def _stop_ticker(self):
+        self.ticker_stopped += 1
+
+    def _set_busy(self, busy):
+        self.busy.append(busy)
+
+    def status_msg(self, text, error=False):
+        self.status.append((text, error))
 
 
-def _work_body(mod, window, result=None, models=()):
-    """Run the body the scan thread runs, against *window*.
-
-    Mirrors _refresh_models' worker: do the scan, then hand the result back to
-    the window only if it is still there."""
-    import tkinter as tk
-    try:
-        if window.winfo_exists():
-            window.after(0, lambda: None)
-    except (tk.TclError, RuntimeError):
-        pass
+def _bind(mod, window):
+    """Give *window* the launcher's real background-task methods."""
+    window._run_in_background = mod.Launcher._run_in_background.__get__(window)
+    window._poll_background = mod.Launcher._poll_background.__get__(window)
+    return window
 
 
-class TestScanThreadOutlivingTheWindow:
-    def test_the_shipped_worker_guards_the_handback(self):
-        """Read the real source: the after() call must be reached only through
-        an existence check and wrapped, or a closed window raises."""
-        src = (ROOT / "launcher.pyw").read_text(encoding="utf-8")
-        start = src.index("        def work():")
-        body = src[start:start + 800]
-        assert "winfo_exists()" in body, (
-            "the scan hands its result back with no check that the window is "
-            f"still there:\n{body[:400]}")
-        assert "except (tk.TclError, RuntimeError)" in body, (
-            f"winfo_exists itself raises once the interpreter is gone:\n{body[:400]}")
-
-    def test_a_destroyed_window_is_not_scheduled_onto(self):
-        w = _ClosedWindow(exists=False)
+class TestBackgroundTaskHandoff:
+    def test_the_worker_thread_never_calls_into_tk(self):
         mod = _load_launcher()
-        _work_body(mod, w)
-        assert w.scheduled == 0
+        w = _bind(mod, _FakeWindow())
+        go = threading.Event()
 
-    def test_a_window_that_dies_mid_handback_does_not_raise(self):
-        """winfo_exists can still say yes and after() still fail: the window can
-        go between the two."""
-        w = _ClosedWindow(exists=True, raises=True)
-        mod = _load_launcher()
-        _work_body(mod, w)   # must not raise
+        def work():
+            go.wait(5)
+            return "scan-result"
 
-    def test_a_live_window_still_gets_its_result(self):
-        w = _ClosedWindow(exists=True, raises=False)
+        got = []
+        w._run_in_background(work, got.append)
+        go.set()
+        w.pump()
+        assert got == ["scan-result"]
+        main = threading.main_thread()
+        assert w.after_threads, "the result was never polled for"
+        assert all(t is main for t in w.after_threads), (
+            "after() was called from a worker thread: "
+            f"{[t.name for t in w.after_threads if t is not main]}")
+
+    def test_a_result_ready_before_polling_starts_is_delivered(self):
         mod = _load_launcher()
-        _work_body(mod, w)
-        assert w.scheduled == 1
+        w = _bind(mod, _FakeWindow())
+        done = threading.Event()
+
+        def work():
+            done.set()
+            return 7
+
+        got = []
+        w._run_in_background(work, got.append)
+        assert done.wait(5)
+        time.sleep(0.05)
+        w.pump()
+        assert got == [7]
+
+    def test_a_failing_task_clears_busy_and_reports_the_error(self):
+        mod = _load_launcher()
+        w = _bind(mod, _FakeWindow())
+
+        def work():
+            raise OSError("disk went away")
+
+        got = []
+        w._run_in_background(work, got.append)
+        w.pump()
+        assert got == []
+        assert w.ticker_stopped == 1
+        assert w.busy == [False]
+        assert w.status and w.status[-1][1] is True
+        assert "disk went away" in w.status[-1][0]
 
 
 class TestNoThreadEscapesTheSuite:
@@ -151,3 +179,112 @@ class TestNoThreadEscapesTheSuite:
         t.start()
         t.join()
         assert "main thread is not in main loop" in seen["err"]
+
+
+def _make_launcher(mod):
+    """Construct the real launcher window.
+
+    Skips only when Tk reports no display. Any other TclError is retried, then
+    raised, so an intermittent Tk initialisation failure cannot turn into a
+    silent skip."""
+    last = None
+    for _ in range(3):
+        try:
+            return mod.Launcher()
+        except mod.tk.TclError as e:
+            if "display" in str(e).lower():
+                pytest.skip(f"no display for tkinter: {e}")
+            last = e
+            time.sleep(0.2)
+    raise last
+
+
+def _real_launcher(mod, monkeypatch, *, sync=None, models=("probe-model",)):
+    """Build the real launcher window with the models-folder scan stubbed.
+
+    *sync* is what ``sync_models_dir_safe`` returns."""
+    monkeypatch.setattr(mod, "sync_models_dir_safe",
+                        lambda: sync if sync is not None else (None, None))
+    monkeypatch.setattr(mod, "load_models", lambda: list(models))
+    app = _make_launcher(mod)
+    app.withdraw()
+    return app
+
+
+def _run_until(app, done, timeout=5.0):
+    """Run the real Tk main loop until ``done()`` is true or *timeout* passes."""
+    deadline = time.monotonic() + timeout
+
+    def check():
+        if done() or time.monotonic() > deadline:
+            app.quit()
+            return
+        app.after(50, check)
+
+    app.after(50, check)
+    app.mainloop()
+
+
+class TestScanResultReachesTheWindow:
+    def test_a_scan_that_finishes_before_the_main_loop_still_completes(
+            self, monkeypatch):
+        """An empty models folder scans fast enough to finish while the window
+        is still being built. The result must still reach the window: the
+        ticker stops and Launch is usable again."""
+        mod = _load_launcher()
+        thread_errors = []
+        monkeypatch.setattr(threading, "excepthook",
+                            lambda args: thread_errors.append(args.exc_value))
+        app = _real_launcher(mod, monkeypatch)
+        try:
+            # Startup work between the scan starting and mainloop() running.
+            time.sleep(1.5)
+            _run_until(app, lambda: not app._ticker_active)
+            assert not app._ticker_active, (
+                "the scan finished but its result never reached the window; "
+                f"status stuck at: {app.status.cget('text')!r}")
+            assert str(app.launch_btn.cget("state")) == "normal"
+            assert "probe-model" in app.model_box["values"]
+            assert thread_errors == []
+        finally:
+            app.destroy()
+
+    def test_a_scan_failure_is_reported_not_shown_as_up_to_date(
+            self, monkeypatch):
+        mod = _load_launcher()
+        app = _real_launcher(
+            mod, monkeypatch,
+            sync=(None, "PermissionError: [Errno 13] models folder"))
+        try:
+            _run_until(app, lambda: not app._ticker_active)
+            text = app.status.cget("text")
+            assert "Could not check the models folder" in text, text
+            assert str(app.launch_btn.cget("state")) == "normal"
+        finally:
+            app.destroy()
+
+    def test_closing_the_window_during_a_scan_raises_nothing(self, monkeypatch):
+        mod = _load_launcher()
+        thread_errors = []
+        monkeypatch.setattr(threading, "excepthook",
+                            lambda args: thread_errors.append(args.exc_value))
+        release = threading.Event()
+        started = threading.Event()
+        workers = []
+
+        def slow_scan():
+            workers.append(threading.current_thread())
+            started.set()
+            release.wait(5)
+            return None, None
+
+        monkeypatch.setattr(mod, "sync_models_dir_safe", slow_scan)
+        monkeypatch.setattr(mod, "load_models", lambda: [])
+        app = _make_launcher(mod)
+        app.withdraw()
+        assert started.wait(5)
+        app.destroy()
+        release.set()
+        workers[0].join(5)
+        assert not workers[0].is_alive()
+        assert thread_errors == []
