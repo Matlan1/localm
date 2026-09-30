@@ -39,9 +39,9 @@ dependencies = [
     # setup-llama verifies its GitHub downloads against certifi's CA bundle, not
     # the OS cert store (which Python's TLS does not keep current on Windows, so a
     # fresh box fails the runtime download with CERTIFICATE_VERIFY_FAILED). It is
-    # already pulled in transitively by requests, but setup_llama imports it
+    # already pulled in transitively by requests, but localm/http_ssl.py imports it
     # directly, so it is declared directly: never rely on a transitive package
-    # staying present. See localm/setup_llama.py _ssl_context.
+    # staying present. See localm/http_ssl.py.
     "certifi>=2026.7.22",
     # The coder's `grep` and `search_replace` tools compile a regex the MODEL
     # supplies, so the pattern is attacker-influenced and a nested quantifier

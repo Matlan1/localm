@@ -683,9 +683,9 @@ def prepare_bump_branch(worktree: Path, candidate: str, *, pin: str = "llama") -
 def commit_and_push(worktree: Path, branch: str, candidate: str, old_tag: str,
                     *, message: "str | None" = None) -> None:
     """Stages every TRACKED modification (`git add -u`), not a hardcoded file
-    list. run_bump() always touches setup_llama.py/_api.py/CHANGELOG.md, but
+    list. run_bump() always touches setup_llama/pins.py/_api.py/CHANGELOG.md, but
     a bump can also require a manual follow-on fix to a safety-relevant
-    constant elsewhere in setup_llama.py plus its own tests (see the
+    constant elsewhere in the setup_llama package plus its own tests (see the
     b11118 cuda-13 13.3->13.4 toolkit rename) - a hardcoded list silently
     drops such a fix from the commit, so the PR would pass locally (the
     working tree has the fix) and then fail on CI (the commit does not).

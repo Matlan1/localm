@@ -2074,7 +2074,7 @@ def _native_backend_has_vulkan() -> bool:
     way.
 
     Checks the actual shipped DLL/SO set, NOT the ``.localm-backend``
-    provisioning marker (setup_llama.py): the marker can be absent (a
+    provisioning marker (setup_llama): the marker can be absent (a
     ``--from`` build, an install predating the marker) or generic (e.g.
     ``"custom"`` for a ``--url``/``--sha256`` provision) - the real file set
     is always authoritative for which backend will actually be loaded."""

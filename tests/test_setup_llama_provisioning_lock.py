@@ -26,7 +26,7 @@ from localm import setup_llama as sl
 # The holder subprocess is a script run by path, which does NOT get cwd inserted
 # onto sys.path (only -m and -c do), so PYTHONPATH is forced explicitly to make
 # it import the SAME localm tree this test process resolved `sl` from.
-_REPO_ROOT = str(Path(sl.__file__).resolve().parents[1])
+_REPO_ROOT = str(Path(sl.__file__).resolve().parents[2])
 
 # A fixed, argv-driven holder script (no string interpolation into code: every
 # value crosses the process boundary as a plain argv element, never templated

@@ -209,7 +209,7 @@ def pip_cache_dir() -> Path:
     """localm's OWN pip cache, inside the data dir.
 
     Shared by every pip subprocess localm drives itself - plugin-extra installs
-    (plugins/deps.py), the native runtime wheel (setup_llama.py), and managed-ComfyUI
+    (plugins/deps.py), the native runtime wheel (setup_llama/), and managed-ComfyUI
     provisioning (media/managed_comfy_provision.py delegates here) - so wheels are
     cached once, contained, and removed with the data dir. Left unset, pip caches to a
     per-user location OUTSIDE the data dir (``%LOCALAPPDATA%\\pip\\cache`` on Windows,
@@ -234,7 +234,7 @@ def contained_pip_env(base: Optional[dict] = None) -> dict:
     """A subprocess environment with pip's AND uv's caches pinned inside the data dir.
 
     *base* defaults to a copy of the current process environment. localm's package
-    installers (plugins/deps.py, setup_llama.py) shell out to ``uv pip install`` first
+    installers (plugins/deps.py, setup_llama/) shell out to ``uv pip install`` first
     and ``python -m pip install`` second; BOTH tools cache to a per-user location
     outside the data dir when left to their defaults, so BOTH ``PIP_CACHE_DIR`` and
     ``UV_CACHE_DIR`` are set here - pinning only one still leaks via the other. Both

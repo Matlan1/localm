@@ -849,7 +849,7 @@ def test_close_stale_pr_raises_infra_error_when_gh_pr_list_fails(tmp_path, monke
 
 
 def test_commit_and_push_stages_every_tracked_modification_not_just_the_bump_files(tmp_path):
-    """run_bump() always touches setup_llama.py/_api.py/CHANGELOG.md, but a
+    """run_bump() always touches setup_llama/pins.py/_api.py/CHANGELOG.md, but a
     bump can also require a manual follow-on fix elsewhere in the tree (a
     safety-relevant constant plus its own tests - see the b11118 cuda-13
     13.3->13.4 toolkit rename). commit_and_push must stage that too, or the
@@ -868,7 +868,7 @@ def test_commit_and_push_stages_every_tracked_modification_not_just_the_bump_fil
 
     # README.md is a real TRACKED file (committed by _init_bare_origin_and_clone)
     # that is nowhere on the old hardcoded list - the exact shape of "a follow-on
-    # fix outside setup_llama.py/_api.py/CHANGELOG.md".
+    # fix outside setup_llama/pins.py/_api.py/CHANGELOG.md".
     (worktree / "README.md").write_text("scratch\nfollow-on fix\n", encoding="utf-8")
     (worktree / "CHANGELOG.md").write_text("## [Unreleased]\n- bumped\n", encoding="utf-8")
 
