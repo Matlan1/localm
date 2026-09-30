@@ -579,7 +579,12 @@ class TestForgetProject:
         a = tmp_path / "CaseProj"; a.mkdir()
         record_project(a, "log")
         stored = _listed_paths()[0]
+        # Folder removed: resolve() then cannot restore the on-disk letter case
+        # of the missing part, so only the comparison itself can match it.
+        a.rmdir()
         swapped = stored.swapcase()
+        assert str(Path(swapped).resolve()) != stored, (
+            "precondition: resolve() alone must not already undo the case change")
         folds = os.path.normcase(stored) == os.path.normcase(swapped)
         assert forget_project(swapped) is folds
         assert (_listed_paths() == []) is folds
