@@ -226,12 +226,13 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     server either.
 
     Returns True only once the window actually LOADED the page, via pywebview's
-    ``window.events.loaded`` (a plain threading.Event with .wait(timeout)),
-    watched from a short-lived helper thread since the calling thread is busy
-    inside the blocking webview.start() call by then. Returns False whenever a
-    real, loaded window cannot be confirmed (extra absent, WebView2/WebKitGTK
-    missing or broken, window never loaded) so the caller can fall back to
-    webbrowser.open. NEVER raises.
+    ``window.events.loaded`` (a plain threading.Event with .wait(timeout)). A
+    short-lived helper thread waits up to 8 seconds for it while the calling
+    thread is busy inside the blocking webview.start() call; a page that loads
+    later still counts, because the event is read once more when the window
+    loop returns. Returns False whenever a real, loaded window cannot be
+    confirmed (extra absent, WebView2/WebKitGTK missing or broken, window never
+    loaded) so the caller can fall back to webbrowser.open. NEVER raises.
     """
     global _native_window
     if "pytest" in sys.modules:
@@ -329,7 +330,8 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         return False
     finally:
         _native_window = None
-    return loaded["v"]
+    # A page that loaded after the helper's wait ended still counts.
+    return loaded["v"] or bool(window.events.loaded.wait(timeout=0))
 
 
 def show_native_window() -> bool:

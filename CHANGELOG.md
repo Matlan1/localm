@@ -158,6 +158,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A slow-to-load app window no longer makes a stopped localm open a browser
+  tab.** When the app window took longer than about 8 seconds to load its first
+  page, stopping localm with a termination signal, or closing the window with
+  "Quit when the app window is closed" on, opened a browser tab onto the server
+  that had just stopped, and closing the window of a `localm gui` attached to an
+  already-running instance opened a tab as well. A slow first load now counts as
+  loaded, and no tab opens once the server has stopped.
 - **A model whose load just failed is no longer loaded again on every request.**
   When a request needed something the selected model lacks (for example tool
   calls in the coder) and the model chosen to answer it crashed or failed while
@@ -184,6 +191,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the first failed Open instead of reading as installed. The setting's help
   no longer claims the system engine uses your logged-in sessions: both
   engines start with a fresh, empty profile.
+- **A multi-GPU load no longer puts the output layer on a GPU too small for
+  it.** Without a configured split, llama.cpp spreads layers over every GPU by
+  free memory and puts the output layer, plus a logits buffer that can reach
+  several GB for a large vocabulary, on the last GPU in its list, even when
+  that card has little free memory. localm now checks what each GPU would
+  hold and leaves out a GPU that cannot hold its share, saying which one and
+  why. A crash while creating the context is reported as that, with advice
+  about the context size and the split, instead of telling you to repair the
+  runtime. Bug reports list every GPU with its memory, write "not detected"
+  instead of leaving the NVIDIA driver and CUDA version blank, include the
+  multi-GPU settings, and keep llama.cpp's out-of-memory lines. The load
+  error names this platform's library file instead of always `llama.dll`.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm

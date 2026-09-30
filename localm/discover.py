@@ -768,6 +768,14 @@ def last_known_gpus() -> list:
     return list(_gpu_last_good or [])
 
 
+def last_gpu_reading() -> Optional[list]:
+    """A copy of the most recent :func:`list_gpus` reading a probe in THIS
+    process completed, or ``None`` when none has. Never probes, never blocks
+    on a probe in flight beyond the lock."""
+    with _gpu_probe_lock:
+        return list(_gpu_last_good) if _gpu_last_good is not None else None
+
+
 def _reset_gpu_probe_cache() -> None:
     """Test hook: drop the last-known-good GPU reading + in-flight flag, and
     INVALIDATE any probe still in flight so it cannot bleed into the next test.
@@ -1830,6 +1838,9 @@ def _list_gpus_probe() -> list:
                         # every process (that is what it exists to report), so
                         # unlike the torch path above it needs no correction.
                         "free_scope": FREE_SCOPE_DEVICE,
+                        # nvidia-smi numbers devices in its own order, which
+                        # need not match the CUDA runtime's device ordinals.
+                        "source": GPU_SOURCE_NVIDIA_SMI,
                     })
                 except ValueError:
                     continue   # a malformed line never hides the rest
@@ -1860,6 +1871,10 @@ def _list_gpus_probe() -> list:
 # must know the difference; a caller that only wants a fit CEILING ("total") does not.
 FREE_SCOPE_DEVICE = "device"    # every process's VRAM is counted - the number is the board's
 FREE_SCOPE_PROCESS = "process"  # ONLY this process's own allocations are counted (see below)
+
+# ``source`` tag on a list_gpus() entry read from nvidia-smi rather than torch.
+# Its ``index`` is nvidia-smi's own numbering, not a CUDA device ordinal.
+GPU_SOURCE_NVIDIA_SMI = "nvidia-smi"
 
 # Probe budget below which a COLD (not-yet-opened) device-global source is skipped
 # rather than risk overrunning the probe deadline. The cold open costs about
@@ -2667,6 +2682,14 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
     ``None``/empty keeps the config-driven behavior byte-identical to before
     the kwarg existed.
 
+    A ``{device_index: share}`` MAPPING as ``ratios_override`` names its own
+    devices and applies without any configured ``gpu_split_indices``: the
+    parent's per-device fit for the implicit split
+    (``_sizing.VramSizingMixin._implicit_split_fit``) computed it from a fresh
+    probe, so its indices are not re-probed here. An index absent from the
+    mapping gets a zero share, which llama.cpp reads as "place no layers
+    there". Fewer than 2 entries applies no split.
+
     Returns the ctypes float array backing ``mp.tensor_split`` (or ``None``
     when no split was applied) - the CALLER MUST keep this referenced until
     after the ``llama_load_model_from_file()`` call that consumes *mp*:
@@ -2675,8 +2698,12 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
     call, not the loaded model's lifetime."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
-    ratios = ratios_override if ratios_override else cfg.get("gpu_split_ratios")
-    pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), ratios)
+    if isinstance(ratios_override, dict):
+        pairs = resolve_gpu_split(list(ratios_override.keys()),
+                                  list(ratios_override.values()), gpus=[])
+    else:
+        ratios = ratios_override if ratios_override else cfg.get("gpu_split_ratios")
+        pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), ratios)
     if len(pairs) < 2:
         return None
 
@@ -3034,12 +3061,42 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
     Never raises."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
-    if cfg.get("gpu_split_indices"):
+    devices = _implicit_split_readings(cfg, wait_for_inflight)
+    if devices is None:
         return {}
+    frees = [d["free"] for d in devices]
+    totals = [d["total"] for d in devices]
+    out = {"free": sum(frees), "total": sum(totals), "devices": len(devices)}
+    # Logged at INFO on the SUCCESS path only, matching resolve_auto_split_ratios'
+    # own "auto GPU split: distributing by free VRAM" line: WHICH budget was used
+    # and which per-device readings produced it. The decline paths above return
+    # {} without logging.
+    #
+    # This runs per LOAD, not per poll: the callers are the backend's load-time
+    # preflights (_check_vram, _auto_gpu_layers, _auto_ctx_max), and the GUI's
+    # polling routes reach sysstats.estimate_vram instead, which borrows only
+    # the pure _bytes_per_token helper and never this.
+    logger.info(
+        "implicit GPU split: sizing against %d devices by free VRAM - %s "
+        "(combined %.1f GB free / %.1f GB total)",
+        out["devices"],
+        ", ".join(f"device {d.get('index')}: {f / 1024 ** 3:.1f} GB free"
+                  for d, f in zip(devices, frees)),
+        out["free"] / 1024 ** 3, out["total"] / 1024 ** 3)
+    return out
+
+
+def _implicit_split_readings(cfg: dict, wait_for_inflight: bool) -> Optional[list]:
+    """The per-device readings behind :func:`implicit_split_capacity`: every
+    device llama.cpp's default layer split spreads over, each carrying integer
+    ``free`` and ``total``, or ``None`` in every case that function answers
+    ``{}`` for."""
+    if cfg.get("gpu_split_indices"):
+        return None
     if _native_gpu_index_space_is_opaque():
         devices = native_gpu_devices()
         if not devices:
-            return {}
+            return None
         # DISCRETE GPUs ONLY. llama.cpp's device list SKIPS accelerators
         # outright and appends integrated GPUs only when no discrete GPU was
         # found, so a box with a discrete card AND an iGPU must not have the
@@ -3069,34 +3126,45 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
         devices, status = _list_gpus_kw(return_status=True,
                                         wait_for_inflight=wait_for_inflight)
         if status != GPU_PROBE_OK or not devices:
-            return {}
+            return None
     if len(devices) < 2:
-        return {}
-    frees, totals = [], []
+        return None
     for d in devices:
         free = d.get("free") if isinstance(d, dict) else None
         total = d.get("total") if isinstance(d, dict) else None
         if not isinstance(free, int) or not isinstance(total, int):
-            return {}
-        frees.append(free)
-        totals.append(total)
-    out = {"free": sum(frees), "total": sum(totals), "devices": len(devices)}
-    # Logged at INFO on the SUCCESS path only, matching resolve_auto_split_ratios'
-    # own "auto GPU split: distributing by free VRAM" line: WHICH budget was used
-    # and which per-device readings produced it. The decline paths above return
-    # {} without logging.
-    #
-    # This runs per LOAD, not per poll: the callers are the backend's load-time
-    # preflights (_check_vram, _auto_gpu_layers, _auto_ctx_max), and the GUI's
-    # polling routes reach sysstats.estimate_vram instead, which borrows only
-    # the pure _bytes_per_token helper and never this.
-    logger.info(
-        "implicit GPU split: sizing against %d devices by free VRAM - %s "
-        "(combined %.1f GB free / %.1f GB total)",
-        out["devices"],
-        ", ".join(f"device {d.get('index')}: {f / 1024 ** 3:.1f} GB free"
-                  for d, f in zip(devices, frees)),
-        out["free"] / 1024 ** 3, out["total"] / 1024 ** 3)
+            return None
+    return list(devices)
+
+
+def implicit_split_devices(config: Optional[dict] = None, *,
+                           wait_for_inflight: bool = False) -> Optional[list]:
+    """``[{"index", "free", "total"}, ...]`` for every device llama.cpp's
+    default layer split spreads over, with each ``index`` usable as a
+    ``tensor_split`` slot, or ``None`` when no implicit split applies, a
+    reading is missing, or the indices are not the native runtime's own device
+    ordinals (a reading taken from nvidia-smi - see
+    :data:`GPU_SOURCE_NVIDIA_SMI`). Same probe and freshness rules as
+    :func:`implicit_split_capacity`. Never raises."""
+    from localm.config import load_config
+    try:
+        cfg = config if config is not None else load_config()
+        devices = _implicit_split_readings(cfg, wait_for_inflight)
+    except Exception as e:
+        logger.debug("implicit split devices unavailable (%s)", type(e).__name__)
+        return None
+    if devices is None:
+        return None
+    if any(d.get("source") == GPU_SOURCE_NVIDIA_SMI for d in devices):
+        return None
+    out = []
+    for d in devices:
+        idx = d.get("index")
+        if not isinstance(idx, int) or idx < 0 or idx > _MAX_GPU_SPLIT_INDEX:
+            return None
+        out.append({"index": idx, "free": d["free"], "total": d["total"]})
+    if len({d["index"] for d in out}) != len(out):
+        return None
     return out
 
 
