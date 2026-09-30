@@ -158,6 +158,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **An app window that loads slowly now gets its copy and paste shortcuts.** On
+  Windows, when the window's first page took longer than about 8 seconds to
+  load, its copy, paste and right-click menu shortcuts were never turned on, so
+  text in that window could not be selected and copied. They now turn on as soon
+  as the page has loaded, however long that takes, and the window comes to the
+  front then (unless you already closed it to the tray).
+- **Quitting from an app window that never finished loading no longer opens a
+  browser tab.** With "Quit when the app window is closed" on, closing a window
+  whose page never loaded opened a browser tab onto the localm that was shutting
+  down.
 - **A slow-to-load app window no longer makes a stopped localm open a browser
   tab.** When the app window took longer than about 8 seconds to load its first
   page, stopping localm with a termination signal, or closing the window with
