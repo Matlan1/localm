@@ -2133,7 +2133,9 @@ $("persona-delete").onclick = () => {
  *  `X-Localm-Model-Routing` response header): which model answered, which
  *  model the request asked for, which capabilities drove the choice (`gaps`,
  *  the ones the answering model provides) and which it still lacks (`unmet`).
- *  Returns null when the header is absent or unparseable. */
+ *  `note` is present when the server says why a model that could have
+ *  answered was skipped or failed to load. Returns null when the header is
+ *  absent or unparseable. */
 export function parseRoutingHeader(resp) {
   try {
     const raw = resp && resp.headers && resp.headers.get
@@ -2150,6 +2152,7 @@ export function parseRoutingHeader(resp) {
       gaps: data.gaps && typeof data.gaps === "object"
         ? Object.keys(data.gaps).filter((g) => !unmet.includes(g)) : [],
       unmet,
+      ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
     };
   } catch { return null; }
 }
@@ -2450,7 +2453,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // that literal marker in its own prior turn on the next request).
   const answeredBy = (routing && routing.routed && routing.resolved) || modelName;
   const routedNote = routing && routing.routed
-    ? { from: routing.requested || modelName, gaps: routing.gaps } : null;
+    ? { from: routing.requested || modelName, gaps: routing.gaps }
+    : (routing && !routing.pinned && routing.note
+      ? { fallback: routing.note, gaps: [] } : null);
   if (aborted) {
     renderMarkdown(liveBody,
       (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +
