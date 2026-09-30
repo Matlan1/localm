@@ -122,6 +122,38 @@ test("a reply that was not routed records the selected model and no chip", async
   assert.equal(doc.querySelector(".routed-chip"), null);
 });
 
+test("a reply answered by the selected model because a capable model was skipped says why", async () => {
+  const note = "kept plain (tool_use=absent); big was skipped because its last load "
+    + "failed at 14:08 (the native model-loading process crashed); it is tried "
+    + "again after 14:18 or when its load settings change";
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "plain", requested: "plain", routed: false, pinned: false,
+    gaps: { tool_use: "absent" }, unmet: ["tool_use"],
+    skipped: [{ model: "big", failed_at: 1, retry_at: 2, reason: "crashed" }], note } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const reply = conv.messages[conv.messages.length - 1];
+  assert.equal(reply.model, "plain");
+  assert.deepEqual(JSON.parse(JSON.stringify(reply.routed)), { fallback: note, gaps: [] });
+  const chip = doc.querySelector(".routed-chip");
+  assert.ok(chip, "a fallback to a model that may lack the capability is not silent");
+  assert.match(chip.textContent, /capable model was not used/);
+  assert.equal(chip.title, note, "the chip carries the server's explanation");
+});
+
+test("an unpinned reply with nothing skipped and nothing failed shows no chip", async () => {
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "plain", requested: "plain", routed: false, pinned: false,
+    gaps: { tool_use: "absent" }, unmet: ["tool_use"] } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const reply = conv.messages[conv.messages.length - 1];
+  assert.equal(reply.routed, undefined);
+  assert.equal(doc.querySelector(".routed-chip"), null);
+});
+
 test("parseRoutingHeader reads the header and survives junk", () => {
   const { window } = setup();
   const resp = (raw) => ({ headers: { get: () => raw } });

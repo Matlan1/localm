@@ -49,15 +49,23 @@ def _image_part(ref: str) -> dict:
 def routing_note(decision) -> Optional[str]:
     """One line naming the model that answered and why, and what that model
     still lacks when no installed model had every need, for a routed
-    *decision*; None when it was not routed."""
-    if decision is None or not decision.routed:
+    *decision*, with the models skipped because their last load failed. For a
+    decision that was not routed, the line says why no other model answered
+    when a model was skipped or failed to load; None otherwise."""
+    if decision is None:
         return None
+    if not decision.routed:
+        if decision.pinned or not (decision.skipped or decision.load_errors):
+            return None
+        return f"[{decision.describe()}]"
     needs = ", ".join(_CAPABILITY_WORDS.get(g, g) for g in sorted(decision.gaps))
     note = (f"answered by {decision.resolved}: {decision.current} lacks "
             f"{needs or 'what this request needed'}")
     if decision.unmet:
         lacking = ", ".join(_CAPABILITY_WORDS.get(u, u) for u in decision.unmet)
         note += f"; {decision.resolved} lacks {lacking}"
+    if decision.skipped:
+        note += f"; {decision.describe_skipped()}"
     return f"[{note}]"
 
 

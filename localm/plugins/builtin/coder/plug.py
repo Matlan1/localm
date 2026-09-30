@@ -369,6 +369,10 @@ def _tool_capability_note(model_name: str, pinned: bool = True) -> str:
             from localm.inference import http_server as _hs
             decision = _hs.plan_capability_route(
                 model_name, [], [_caps.TOOL_USE], pin_model=False)
+            if not decision.routed and decision.skipped:
+                return (f"{model_name} is not confirmed to format structured "
+                        f"tool calls, and it answers this session's requests: "
+                        f"{decision.describe_skipped()}.")
             if not decision.routed:
                 return ""
             return (f"{model_name} is not confirmed to format structured tool "

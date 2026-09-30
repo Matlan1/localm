@@ -47,12 +47,16 @@ from localm.inference.backends.base import (
 )
 from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
+from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
     ChatChunk, ChatResponse,
     FullChoice, Message, STATUS_CODE_BY_TEXT, UsageInfo,
     WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
 
+# Models whose last load failed; capability routing leaves them out of its
+# candidates (see localm.inference.routing_latch).
+_routing_latch = RoutingLatch()
 # Map of display name -> Engine instance
 _engines: dict[str, Engine] = {}
 # Order of model usage (display names, MRU at the end)
@@ -941,8 +945,12 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
     set event of an earlier superseded switch. See
     test_api_load_of_reused_engine_after_preempted_switch_succeeds. Only an
     explicit switch (*preempt*) publishes it as ``_switch_cancel`` for the
-    duration of the load, so only a newer explicit switch can abort it."""
+    duration of the load, so only a newer explicit switch can abort it.
+
+    A load that raises is recorded in ``_routing_latch`` (a cancelled or
+    superseded one is not) and a load that succeeds clears the model's record."""
     global _switch_cancel, _switch_loading
+    fingerprint = _routing_latch.fingerprint(name)
     cancel = threading.Event()
     if hasattr(engine, "set_load_cancel"):
         engine.set_load_cancel(cancel)
@@ -956,11 +964,17 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
             return {"status": "superseded", "model": name, "by": _switch_desired}
         return {"status": "cancelled", "model": name, "reason": str(e)}
     except RuntimeError as exc:
+        _routing_latch.record_failure(name, exc, fingerprint=fingerprint)
         raise HTTPException(503, f"Failed to load '{name}': {exc}") from exc
+    except Exception as exc:
+        _routing_latch.record_failure(name, f"{type(exc).__name__}: {exc}",
+                                      fingerprint=fingerprint)
+        raise
     finally:
         if preempt and _switch_cancel is cancel:
             _switch_cancel = None
             _switch_loading = None
+    _routing_latch.record_success(name)
     return None
 
 
@@ -1035,7 +1049,11 @@ def plan_capability_route(model_name: str | None, messages: list,
     images does not count vision as a gap, whatever the registry records.
 
     Models with an accepted peer route count as resident, since answering with
-    one loads nothing here."""
+    one loads nothing here.
+
+    A model whose last load failed is left out of the candidates while
+    ``_routing_latch`` holds it, and the decision's ``skipped`` names it. The
+    model the request names, or the active one, is never affected."""
     from localm import peer_routing
     from localm.inference import capability_routing as _cr
     from localm.model_manager import capabilities as _caps
@@ -1057,8 +1075,9 @@ def plan_capability_route(model_name: str | None, messages: list,
     if (cur_engine is not None and getattr(cur_engine, "loaded", False)
             and getattr(cur_engine, "supports_images", False) is True):
         known[_caps.VISION] = True
+    skip = None if pinned or needs.is_empty() else _routing_latch.skipped()
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                          current_known=known)
+                          current_known=known, skip=skip)
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
@@ -3648,6 +3667,7 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
     _inference_sems.clear()
     _embedder_sem = None
     _last_activity_per_model.clear()
+    _routing_latch.clear()
     # A fresh app boot must never carry over a name remembered from a
     # previous create_app() call in the same process (test reuse, a restart) -
     # see _last_active_model_name's own docstring for why it exists at all.
@@ -4862,7 +4882,11 @@ def _capability_route_header(route) -> dict:
     Compact ASCII JSON, header-safe:
     ``{"resolved","requested","routed","pinned","gaps":{cap:"absent"|"unknown"},
     "unmet":[...]}``, plus ``"load_errors":[...]`` (each cut to 200
-    characters) when every capable model failed to load."""
+    characters) when every capable model failed to load, and, when a model was
+    left out because its last load failed, ``"skipped":[{"model","failed_at",
+    "retry_at","reason"}]`` (the times in epoch seconds). ``"note"`` carries
+    the decision's one-line description (cut to 600 characters) whenever either
+    is present."""
     if route is None or not getattr(route, "has_gap", False):
         return {}
     payload = {
@@ -4877,6 +4901,14 @@ def _capability_route_header(route) -> dict:
     load_errors = getattr(route, "load_errors", ())
     if load_errors:
         payload["load_errors"] = [str(e)[:200] for e in load_errors]
+    skipped = getattr(route, "skipped", ())
+    if skipped:
+        payload["skipped"] = [
+            {"model": s.model, "failed_at": int(s.failed_at),
+             "retry_at": int(s.retry_at), "reason": s.reason}
+            for s in skipped]
+    if load_errors or skipped:
+        payload["note"] = route.describe()[:600]
     try:
         blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):
