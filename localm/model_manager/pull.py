@@ -1400,12 +1400,6 @@ def _pull_gguf_file(
     def _remote(part: str) -> str:
         return f"{remote_dir}/{part}" if remote_dir else part
 
-    # Taken before any huggingface_hub call: its local-dir path helpers create
-    # the repo folder under base_dir. See
-    # test_lands_under_its_bare_name_and_leaves_no_folder.
-    remote_dir_path = base_dir / remote_dir if remote_dir else None
-    remote_dir_existed = remote_dir_path is not None and remote_dir_path.exists()
-
     # Split GGUF: normalise to the full ordered part list. llama.cpp loads
     # the model from the first part, so that's what gets registered. A
     # non-split, non-gguf file (e.g. a .safetensors) is just a one-element list.
@@ -1553,8 +1547,11 @@ def _pull_gguf_file(
         already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
 
     def _drop_created_repo_folder() -> None:
-        if remote_dir_path is not None and not remote_dir_existed:
-            _remove_empty_dirs(remote_dir_path, base_dir)
+        # huggingface_hub stages a download under base_dir/<repo folder>/;
+        # the folder chain is removed while empty, including one an
+        # interrupted earlier pull left behind.
+        if remote_dir:
+            _remove_empty_dirs(base_dir / remote_dir, base_dir)
 
     if not _mm._check_disk_space(base_dir, max(0, total_size - already_have)):
         _drop_created_repo_folder()

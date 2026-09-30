@@ -221,6 +221,18 @@ class TestRepoFolderSpec:
         assert keep.read_text() == "user file"
         assert (dest_dir / "ace_step_v1_3.5b.safetensors").is_file()
 
+    def test_an_empty_folder_an_interrupted_pull_left_is_removed(
+            self, fake_registry, tmp_path, monkeypatch):
+        self._record_downloads(monkeypatch)
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+        (dest_dir / "all_in_one").mkdir(parents=True)
+
+        assert mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
+                                  dest_dir=dest_dir, register=False) is True
+
+        assert not (dest_dir / "all_in_one").exists()
+        assert (dest_dir / "ace_step_v1_3.5b.safetensors").is_file()
+
     def test_a_failed_download_removes_the_folder_it_created(
             self, fake_registry, tmp_path, monkeypatch):
         def _failing_download(repo_id, filename, local_dir, **kw):
