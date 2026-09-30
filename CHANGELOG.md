@@ -100,6 +100,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   graphical installer cannot be closed while it uninstalls, and
   `setup-gui.bat` / `setup-gui.sh` say when something you asked to delete was
   kept or the uninstall did not finish.
+- **The graphical installer follows your system's dark or light mode.**
+  `setup-gui.bat` / `setup-gui.sh` now open in LocaLM's own dark or light
+  colours to match Windows, macOS or GNOME, including a dark title bar on
+  Windows. Set `LOCALM_THEME=dark` or `LOCALM_THEME=light` to choose one
+  yourself.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
