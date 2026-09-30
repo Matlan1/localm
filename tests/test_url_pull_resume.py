@@ -398,6 +398,38 @@ class TestUrlPartIdentity:
         assert [g.get("Range") for g in third.gets] == ["bytes=8-"]
         assert ok is True
 
+    def test_a_retry_that_fails_before_any_byte_keeps_the_partial_and_its_record(
+            self, url_env, monkeypatch):
+        import requests
+        models, _ = url_env
+        _interrupt_pull(monkeypatch, models, URL_A, 10, b"AAAAA")
+
+        def _refused(method, url, **kwargs):
+            if method == "HEAD":
+                return MagicMock(status_code=200, headers={"content-length": "10"})
+            resp = MagicMock()
+            resp.status_code = 503
+            err = requests.HTTPError("503 Service Unavailable")
+            err.response = resp
+            raise err
+
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _refused)
+        failed = mm._pull_url(URL_A, "mymodel")
+        kept = sorted(p.name for p in models.iterdir())
+        kept_bytes = (models / "model.gguf.part").read_bytes()
+        server = _RangeServer(_A)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", server)
+
+        ok = mm._pull_url(URL_A, "mymodel")
+
+        assert kept == ["model.gguf.part", "model.gguf.part.json"]
+        assert kept_bytes == b"AAAAA"
+        assert failed is False
+        dest = models / "model.gguf"
+        assert dest.is_file() and dest.read_bytes() == _A
+        assert [g.get("Range") for g in server.gets] == ["bytes=5-"]
+        assert ok is True
+
     def test_a_redirect_target_that_changes_each_pull_still_resumes(
             self, url_env, monkeypatch):
         models, _ = url_env
