@@ -741,11 +741,13 @@ def _vram_info_double(payload, status=GPU_PROBE_OK):
 class TestStatsEndpoint:
     """The hardware-monitor stats feed."""
 
-    def test_system_stats_never_raises_and_is_a_dict(self):
+    def test_system_stats_never_raises_and_is_a_dict(self, monkeypatch):
         from localm.sysstats import system_stats
-        # wait_first_vram=True: blocks for the real probe (incl. its native
-        # per-device fallback) to actually land, so it cannot outlive this
-        # test as a background straggler - see _reset_vram_probe_cache.
+        # The per-device native fallback reports no devices; wait_first_vram=True
+        # blocks until the real VRAM probe has landed.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.native_device_inventory",
+            lambda: [])
         stats = system_stats(wait_first_vram=True)  # must not raise on any box
         assert isinstance(stats, dict)
         # Whatever sections are present must have a sane shape.
