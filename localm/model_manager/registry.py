@@ -264,7 +264,7 @@ _SHORTCUT_SIZES: dict[str, str] = {
 class ComfySource:
     """A known-good HuggingFace download source for one exact ComfyUI workflow
     model filename."""
-    spec: str            # "owner/repo:filename" - fed straight to pull_model()
+    spec: str            # "owner/repo:path/in/repo" - fed straight to pull_model()
     model_type: str       # "diffusion-unet" | "text-encoder" | "vae" | "lora"
     comfy_subfolder: str  # ComfyUI models/<subfolder> this file belongs in
     size_bytes: int
@@ -297,6 +297,20 @@ COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
     "ae.safetensors": ComfySource(
         "black-forest-labs/FLUX.1-schnell:ae.safetensors",
         "vae", "vae", 335_304_388),
+    "ace_step_v1_3.5b.safetensors": ComfySource(
+        "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors",
+        "diffusion-unet", "checkpoints", 7_699_743_341),
+    "wan2.2_ti2v_5B_fp16.safetensors": ComfySource(
+        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
+        "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+        "diffusion-unet", "unet", 9_999_658_848),
+    "umt5_xxl_fp8_e4m3fn_scaled.safetensors": ComfySource(
+        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
+        "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "text-encoder", "clip", 6_735_906_897),
+    "wan2.2_vae.safetensors": ComfySource(
+        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:split_files/vae/wan2.2_vae.safetensors",
+        "vae", "vae", 1_409_400_960),
 }
 
 
