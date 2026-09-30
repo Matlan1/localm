@@ -111,8 +111,8 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
     # Fallback: the release listing was unavailable, so the asset name has to
     # come from somewhere else.
     #
-    # PREFER A REAL NAME WE ALREADY KNOW over a constructed one. For a tag this
-    # file pins, _PINNED_FALLBACK_SHA256 IS that release's asset list, so the
+    # PREFER A REAL NAME WE ALREADY KNOW over a constructed one. For a tag
+    # pins.py pins, _PINNED_FALLBACK_SHA256 IS that release's asset list, so the
     # exact filename is in hand and needs no guessing. Matchers are tried in
     # their declared order, because that order encodes a preference the names
     # alone do not: linux sycl lists the fp16 build first and a bare

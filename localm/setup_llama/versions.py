@@ -379,8 +379,8 @@ def _recent_tags(limit: int = 10) -> list:
             if isinstance(tag, str) and _RELEASE_TAG_RE.match(tag) and rel.get("assets"):
                 out.append(tag)
     except Exception as e:
-        # Best-effort like its two siblings (_release_assets, _pypi_wheel_url_
-        # and_sha), and logged like them: every caller has a pinned fallback, so
+        # Best-effort like its two siblings (assets._release_assets,
+        # cuda._pypi_wheel_url_and_sha), and logged like them: every caller has a pinned fallback, so
         # this must not raise, but "the lookup was unavailable" must stay
         # discoverable - a refused downgrade redirect here would otherwise leave
         # no trace at all.
