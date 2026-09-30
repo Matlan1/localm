@@ -94,7 +94,7 @@ async def imagine(req: ImagineRequest, request: Request):
     if not req.prompt.strip():
         raise HTTPException(400, "Empty prompt")
     from localm.debuglog import logger
-    logger.info("imagine: prompt=%r", req.prompt)
+    logger.info("imagine: %d-char prompt", len(req.prompt))
     input_image = None
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)

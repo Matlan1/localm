@@ -20,6 +20,7 @@ by default.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import time
@@ -73,9 +74,7 @@ def _video_path(name: str) -> Path:
 async def video(req: VideoRequest, request: Request):
     if not req.prompt.strip():
         raise HTTPException(400, "Empty prompt")
-    from localm.debuglog import logger
-    logger.info("video: prompt=%r (seconds=%ds)", req.prompt, req.seconds)
-    if req.seconds <= 0 or req.seconds > 20:
+    if not math.isfinite(req.seconds) or req.seconds <= 0 or req.seconds > 20:
         raise HTTPException(400, "Duration must be between 1 and 20 seconds")
     if req.fps <= 0 or req.fps > 60:
         raise HTTPException(400, "FPS must be between 1 and 60")
@@ -85,6 +84,8 @@ async def video(req: VideoRequest, request: Request):
         raise HTTPException(400, "Height must be between 16 and 4096")
     if req.steps is not None and not (1 <= req.steps <= 200):
         raise HTTPException(400, "Steps must be between 1 and 200")
+    from localm.debuglog import logger
+    logger.info("video: %d-char prompt (seconds=%g)", len(req.prompt), req.seconds)
     input_image = None
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)

@@ -507,6 +507,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   document's or archive member's name in the activity log that a bug report
   carries.** The warning that a safety limit was hit still shows; only the
   name is withheld.
+- **Web searches, fetched page addresses, and image, music and video prompts no
+  longer appear in the activity log that a bug report carries.** Those log
+  entries now hold only the text's length and numeric settings, never the text.
+  A music or video request whose duration is NaN is now refused instead of
+  starting a job.
 - **Loading a model on some AMD GPUs could repeatedly report the VRAM check as
   inconclusive, trigger an automatic server restart, and occasionally fail to
   come back up on the same port.** Once the GPU runtime is loaded, torch can no
