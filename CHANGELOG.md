@@ -44,6 +44,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   by a task instead of a checkpoint id (`-r "some task"`, which is read as
   the id, not as the task) now warns with the two ways to combine a resume
   with a task instead of crashing.
+  A session resumed with `--resume` stays saved until its next turn runs, so
+  leaving the REPL before sending anything no longer removes it from
+  `/sessions` and the GUI's past sessions.
 - **`localm setup-browser`** downloads the Chromium build the automated browser
   needs. Previously this required a separate, undocumented-in-app
   `python -m playwright install chromium` step after installing the browser
