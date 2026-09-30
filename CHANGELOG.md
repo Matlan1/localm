@@ -100,6 +100,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   graphical installer cannot be closed while it uninstalls, and
   `setup-gui.bat` / `setup-gui.sh` say when something you asked to delete was
   kept or the uninstall did not finish.
+- **Delete past coder sessions and remove projects from the coder's session
+  list.** Each past session in the list has a delete button, and each project
+  has a remove button that forgets the project and deletes its saved sessions.
+  Both ask first. Removing a project deletes only the coder's saved sessions
+  for it; the project folder and your files in it are left alone. A session
+  that is open, or a project with an open session, has to be ended first.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.

@@ -17,6 +17,7 @@ whole history.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -134,6 +135,42 @@ def list_projects() -> list:
             available = False
         out.append({**e, "available": available})
     return out
+
+
+def _key(path: str) -> str:
+    return os.path.normcase(path)
+
+
+def forget_project(cwd) -> bool:
+    """Remove *cwd* from the list. Returns True when an entry was removed.
+
+    An entry matches when its stored path equals *cwd* expanded and resolved,
+    the form ``record_project`` stores, or *cwd* expanded as given. Both sides
+    are compared through ``os.path.normcase``, the same folding the per-project
+    checkpoint digest uses, so on Windows a difference in letter case alone
+    still matches. A UNC or device path is matched as given, never resolved.
+
+    The file is rewritten only when something was removed. Raises OSError when
+    it could not be rewritten, or when a matching entry is still listed after
+    the rewrite.
+    """
+    raw = Path(cwd).expanduser()
+    keys = {_key(str(raw))}
+    if not is_unc_or_device_path(str(raw)):
+        keys.add(_key(str(raw.resolve())))
+
+    def _matches(e) -> bool:
+        return isinstance(e, dict) and _key(str(e.get("path") or "")) in keys
+
+    entries = _load()
+    kept = [e for e in entries if not _matches(e)]
+    if len(kept) == len(entries):
+        return False
+    p = _store()
+    p.write_text(json.dumps(kept, indent=2), encoding="utf-8")
+    if any(_matches(e) for e in _load()):
+        raise OSError(f"{p.name} still lists {raw} after removing it")
+    return True
 
 
 def forget_all() -> None:

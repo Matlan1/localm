@@ -27,6 +27,8 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   DELETE /api/coder/sessions/{id}               - terminate the session
   GET    /api/coder/history                     - browse past session audit logs
   GET    /api/coder/history/{name}              - read one past audit log
+  DELETE /api/coder/checkpoints                 - delete one past session
+  DELETE /api/coder/projects                    - forget a project, delete its past sessions
   GET    /api/coder/episodes                    - stored lessons for a project
 
 The REPL's own session controls have a web form here for the same reason
@@ -166,6 +168,19 @@ class EpisodeTargetRequest(BaseModel):
     is one someone can be walked into.
     """
     cwd: str
+
+
+class CheckpointTargetRequest(BaseModel):
+    """Which saved session to delete: its project and its checkpoint id, the
+    ``path`` and ``id`` of a /api/coder/dormant row."""
+    cwd: str
+    checkpoint_id: str
+
+
+class ProjectTargetRequest(BaseModel):
+    """Which remembered project to remove: the ``path`` of a
+    /api/coder/dormant project row."""
+    path: str
 
 
 class SetModelRequest(BaseModel):
@@ -1533,6 +1548,114 @@ async def coder_dormant(request: Request, cwd: str = ""):
     loop = asyncio.get_running_loop()
     projects = await loop.run_in_executor(get_plugin_executor(), _collect)
     return {"projects": projects, "privacy_note": _PRIVACY_NOTE}
+
+
+def _local_path(value: str, field: str) -> Path:
+    """*value* expanded to a Path. Refuses an empty value and UNC or device
+    syntax, checked on the expanded string before any filesystem call."""
+    if not value.strip():
+        raise HTTPException(400, f"{field} is required")
+    try:
+        p = Path(value).expanduser()
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, f"Invalid {field}")
+    if _is_unc_or_device_path(str(p)):
+        raise HTTPException(
+            400, f"'{field}' must be a local directory path, not a UNC or device path.")
+    return p
+
+
+def _live_sessions(request: Request) -> list:
+    """Every live coder session, across every principal; empty when the GUI
+    session services are absent."""
+    mgr = getattr(request.app.state, "coder_sessions", None)
+    return mgr.snapshot() if mgr is not None else []
+
+
+async def _saved_session_op(fn):
+    """Run a saved-session delete off the event loop. An HTTPException passes
+    through; any other failure becomes a 500 that names it."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(get_plugin_executor(), fn)
+    except HTTPException:
+        raise
+    except Exception as e:                                     # noqa: BLE001
+        raise HTTPException(
+            500, f"Could not delete the saved session data: "
+                 f"{type(e).__name__}: {e}")
+
+
+@_router.delete("/api/coder/checkpoints")
+async def coder_checkpoint_delete(request: Request, req: CheckpointTargetRequest):
+    """Delete ONE past session: the checkpoint file a /api/coder/dormant row
+    names. Owner-only. Not reversible.
+
+    409 while a live session holds that checkpoint, since the live session
+    would write it again. 404 when there is no such saved session. Success is
+    reported only after the file is confirmed gone.
+    """
+    if not _is_owner(request):
+        raise HTTPException(403, "Owner only")
+    root = _local_path(req.cwd, "cwd")
+    from localm.plugins.coder.agent.checkpoint import (
+        delete_checkpoint, is_valid_checkpoint_id,
+    )
+    if not is_valid_checkpoint_id(req.checkpoint_id):
+        raise HTTPException(400, "Invalid checkpoint id")
+    live = _live_sessions(request)
+
+    def _delete():
+        if any(s.checkpoint_id == req.checkpoint_id for s in live):
+            raise HTTPException(
+                409, "This conversation is open in a live coder session. End "
+                     "that session first, then delete it.")
+        if not delete_checkpoint(root, req.checkpoint_id):
+            raise HTTPException(
+                404, f"No saved session {req.checkpoint_id} for this project")
+        return {"deleted": req.checkpoint_id}
+
+    return await _saved_session_op(_delete)
+
+
+@_router.delete("/api/coder/projects")
+async def coder_project_delete(request: Request, req: ProjectTargetRequest):
+    """Remove ONE project from the coder's list and delete every saved session
+    for it. Owner-only. Not reversible.
+
+    The project directory itself is left alone: of it, only the legacy saved
+    session file ``.localcoder/checkpoint.json`` is removed. 409 while a live
+    session is open in the project. 404 when the project is neither listed nor
+    has any saved session. Success is reported only after the list entry and
+    every saved session are confirmed gone.
+    """
+    if not _is_owner(request):
+        raise HTTPException(403, "Owner only")
+    root = _local_path(req.path, "path")
+    live = _live_sessions(request)
+
+    def _remove():
+        from localm.plugins.coder.agent.checkpoint import (
+            _legacy_checkpoint_path_for, _legacy_home_checkpoint_path_for,
+            _project_dir_for, delete_project_checkpoints,
+        )
+        from localm.plugins.coder.projects import forget_project
+        key = os.path.normcase(str(root.resolve()))
+        if any(os.path.normcase(str(s.cwd)) == key for s in live):
+            raise HTTPException(
+                409, "A coder session is open in this project. End it first, "
+                     "then remove the project.")
+        had_data = any(os.path.lexists(p) for p in (
+            _project_dir_for(root), _legacy_home_checkpoint_path_for(root),
+            _legacy_checkpoint_path_for(root)))
+        deleted = delete_project_checkpoints(root)
+        forgotten = forget_project(root)
+        if not (had_data or forgotten):
+            raise HTTPException(404, f"No such project: {req.path}")
+        return {"removed": req.path, "sessions_deleted": deleted,
+                "forgotten": forgotten}
+
+    return await _saved_session_op(_remove)
 
 
 # ------------------------------------------------------------------ #

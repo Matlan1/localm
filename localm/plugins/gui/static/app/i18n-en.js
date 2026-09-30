@@ -497,6 +497,13 @@ export const I18N_EN = {
   "coder.rail.open": "Open",
   "coder.rail.otherProjects": "Other projects",
   "coder.rail.pastHere": "Past sessions here",
+  "coder.rail.projectRemoved": "Project removed",
+  "coder.rail.removeProjectConfirmBody":
+    "Remove \"{name}\" from the list and delete its saved sessions? This cannot be undone. The project folder ({path}) and your files in it are left alone.",
+  "coder.rail.removeProjectConfirmLabel": "Remove project",
+  "coder.rail.removeProjectConfirmTitle": "Remove project?",
+  "coder.rail.removeProjectFailed": "Could not remove the project: ",
+  "coder.rail.removeProjectTitle": "Remove this project and its saved sessions",
   "coder.rail.saveSideFailed": "Could not save which side the session list sits on",
   "coder.rail.sessionsHeading": "Sessions",
   "coder.remote.badge": "remote: {host}",
@@ -513,6 +520,13 @@ export const I18N_EN = {
   "coder.session.continueLastDetail": "Continue last session ({turns} turns, {when})",
   "coder.session.continueTitle": "Continue this session",
   "coder.session.daysAgo": "{days}d ago",
+  "coder.session.deleteConfirmBody":
+    "Delete the saved session \"{title}\"? It cannot be continued afterwards. Your files in the project are left alone.",
+  "coder.session.deleteConfirmLabel": "Delete",
+  "coder.session.deleteConfirmTitle": "Delete this session?",
+  "coder.session.deleteFailed": "Could not delete the session: ",
+  "coder.session.deleteTitle": "Delete this saved session",
+  "coder.session.deleted": "Session deleted",
   "coder.session.earlier": "earlier",
   "coder.session.endAndContinue": "End it and continue",
   "coder.session.foundButUnreadable":
