@@ -151,6 +151,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A slow-to-load app window no longer makes a stopped localm open a browser
+  tab.** When the app window took longer than about 8 seconds to load its first
+  page, stopping localm afterwards (from the tray, from Settings, or by closing
+  the window with "Quit when the app window is closed" on) opened a browser tab
+  onto the server that had just stopped, and closing the window of a `localm gui`
+  attached to an already-running instance opened a tab as well. A slow first
+  load now counts as loaded, and no tab opens once the server has stopped.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm
