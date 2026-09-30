@@ -510,6 +510,20 @@ def test_an_unidentifiable_holder_is_taken_over_only_after_the_waiter_sees_it_si
         f"for {window:.2f}s")
 
 
+def test_a_reclaim_leaves_a_lock_whose_heartbeat_moved_since_it_was_judged(base):
+    """A heartbeat that moved between the staleness judgement and the reclaim
+    means the holder beat, even when the new mtime still reads as old (a
+    holder whose clock runs behind this one), so the lock is left alone."""
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    rec, judged = cl._read_record(lp)
+    later = judged + 100
+    os.utime(lp, (later, later))
+
+    assert cl._reclaim(lp, rec, judged, 60.0, quiet=3600.0) is False
+    assert lp.exists() and json.loads(lp.read_text(encoding="utf-8")) == rec
+
+
 def test_this_processs_own_lock_is_alive_only_while_it_is_held(base):
     """A record naming this process is alive while the acquisition that wrote
     it holds the lock, and dead once it has been released."""
