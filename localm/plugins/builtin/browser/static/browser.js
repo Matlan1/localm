@@ -202,8 +202,13 @@ export function register(ctx) {
   document.addEventListener("localm:language", paintKeysHint);
   const status = el("div", "browser-status", "No browser open.");
   const refused = el("ul", "browser-refused");
+  // What the configured browser needs before it can start: the download action
+  // for the bundled browser, or the list of browsers looked for. Empty and
+  // hidden while the browser can start.
+  const setup = el("div", "browser-setup");
+  setup.hidden = true;
 
-  view.append(el("h2", "", "Browser"), bar, status, shot, keysHint, refused);
+  view.append(el("h2", "", "Browser"), bar, setup, status, shot, keysHint, refused);
 
   let jobId = null;
   let abort = null;
@@ -269,6 +274,139 @@ export function register(ctx) {
   }
   function setBusy(on) { busy = on; applyControls(); }
 
+  // True while this tab streams a download it started; paintSetup leaves the
+  // setup area alone meanwhile.
+  let downloadingHere = false;
+  let engineTimer = null;
+
+  function setupText(text) {
+    setup.appendChild(el("p", "browser-setup-text", text));
+  }
+
+  function setupButton(text, onClick) {
+    const btn = el("button", "btn-primary", text);
+    btn.type = "button";
+    btn.onclick = () => onClick(btn);
+    setup.appendChild(btn);
+    return btn;
+  }
+
+  /** Show what the configured browser engine needs, from GET /api/browser/engine
+   *  (null hides the area: the route is absent or the browser can start). */
+  function paintSetup(st) {
+    if (downloadingHere) return;
+    if (engineTimer) { clearTimeout(engineTimer); engineTimer = null; }
+    setup.replaceChildren();
+    setup.hidden = true;
+    if (!st || st.ready) return;
+    if (st.problem === "bundled_missing") {
+      setupText(tr("browser.setup.bundledMissing",
+        "The bundled browser has not been downloaded yet. It is a one-time " +
+        "download, separate from the localm install."));
+      if (st.downloading) {
+        setupText(tr("browser.setup.alreadyDownloading",
+          "A download is already running."));
+        engineTimer = setTimeout(refreshEngine, 3000);
+      } else if (st.can_download) {
+        setupButton(tr("browser.setup.download", "Download browser"),
+                    downloadBrowser);
+      } else if (st.download_blocked === "network") {
+        setupText(tr("browser.setup.downloadBlockedNetwork",
+          "Network access is off, which blocks the download. Turn network " +
+          "access on, or allow model downloads while it is off, in Settings > " +
+          "Server & network."));
+      } else {
+        setupText(tr("browser.setup.downloadBlockedPermission",
+          "Downloading the browser needs permission to change settings."));
+      }
+    } else if (st.problem === "system_missing") {
+      setupText(tr("browser.setup.systemMissing",
+        "No supported browser was found on this computer. localm looked for " +
+        "{names}.", { names: (st.looked_for || []).join(", ") }));
+      setupButton(tr("browser.setup.useBundled",
+                     "Use the bundled browser instead"), useBundled);
+    } else if (st.problem === "playwright_missing") {
+      setupText(tr("browser.setup.playwrightMissing",
+        "The browser automation extra is not installed. Install it with:  " +
+        "pip install \"localm[browser]\""));
+    }
+    setup.hidden = setup.childElementCount === 0;
+  }
+
+  async function refreshEngine() {
+    let st = null;
+    try {
+      const r = await fetch(API + "/engine", { headers: authHeaders() });
+      if (r.ok) st = await r.json();
+    } catch (e) { /* the setup area stays hidden */ }
+    paintSetup(st);
+    return st;
+  }
+
+  /** Download the bundled browser and stream its progress into the setup area. */
+  async function downloadBrowser(button) {
+    downloadingHere = true;
+    button.disabled = true;
+    button.textContent = tr("browser.setup.downloading",
+                            "Downloading the browser...");
+    const log = el("div", "browser-setup-log");
+    setup.appendChild(log);
+    let lastLine = "";
+    let ok = false;
+    try {
+      const r = await fetch(API + "/download",
+                            { method: "POST", headers: authHeaders() });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        lastLine = typeof data.detail === "string" ? data.detail : "HTTP " + r.status;
+      } else if (data.status === "already_installed") {
+        ok = true;
+      } else if (data.job_id) {
+        await watchFrames(data.job_id, {
+          authHeaders,
+          onLine: (text) => { lastLine = text; log.textContent = text; },
+        });
+      }
+    } catch (e) {
+      lastLine = (e && e.message) || String(e);
+    }
+    downloadingHere = false;
+    const st = await refreshEngine();
+    ok = ok || !!(st && st.ready);
+    if (ok) {
+      status.textContent = tr("browser.setup.downloadDone",
+        "The browser is downloaded and ready.");
+      toast(status.textContent, false);
+    } else {
+      status.textContent = tr("browser.setup.downloadFailed",
+        "The download did not finish: {detail}",
+        { detail: lastLine.replace(/^error:\s*/i, "") });
+      toast(status.textContent, true);
+    }
+  }
+
+  /** Set the browser engine to the bundled browser, then re-check it. */
+  async function useBundled(button) {
+    button.disabled = true;
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ browser_engine: "bundled" }),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error(typeof data.detail === "string" ? data.detail
+                                                        : "HTTP " + r.status);
+      }
+      status.textContent = tr("browser.setup.switchedToBundled",
+                              "Switched to the bundled browser.");
+    } catch (e) {
+      status.textContent = (e && e.message) || String(e);
+      toast(status.textContent, true);
+    }
+    await refreshEngine();
+  }
+
   function showFrame(data) {
     const src = frameSrc(data);
     if (src) { shot.src = src; shot.hidden = false; }
@@ -295,6 +433,7 @@ export function register(ctx) {
         if (failed) {
           status.textContent = lastLine || ("Browser stopped: " + ev.status);
           toast(status.textContent, true);
+          refreshEngine();
         } else {
           status.textContent = "Browser closed.";
         }
@@ -587,6 +726,7 @@ export function register(ctx) {
     if (prev) prev(name);
     if (name === "browser") {
       refreshAgentOffer();
+      refreshEngine();
       if (jobId) poll();
     }
   };

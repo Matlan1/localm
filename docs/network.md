@@ -156,7 +156,11 @@ instead of silently dropped. WebSocket connections are refused rather than
 relayed. `browser_navigate`, `browser_click`, and `browser_fill` confirm in
 `ask` mode like `fetch_url`/`web_search` above; the read-only tools do not.
 Off by default - install the `browser` extra, download the browser it
-drives, and switch it on in Settings. An API key needs the separate
+drives (the Download browser button under Settings > Server & network, or
+`localm setup-browser`), and switch it on in Settings. The `system` engine
+runs a Chrome, Chromium, Edge or Brave already installed on the machine
+instead of the download; either engine starts with a fresh, empty profile,
+so none of your logged-in sessions are used. An API key needs the separate
 `browser` scope (see [SECURITY.md](../SECURITY.md)), independent of the
 coding agent's shell access, so you can grant one without the other.
 
