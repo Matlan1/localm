@@ -35,6 +35,9 @@ from ._structs import (
     set_use_mmap)
 
 
+# Held by _quiet_stderr for its whole block. Lock order: a LlamaCpp's _gen_lock
+# is taken before _stderr_lock, never after, and no _quiet_stderr block contains
+# a yield. See test_close_during_a_suspended_grammar_generation_does_not_deadlock.
 _stderr_lock = threading.Lock()
 _devnull_fd: Optional[int] = None
 
@@ -79,16 +82,12 @@ def _quiet_stderr():
             os.close(saved_fd)
 
 
-def _stderr_ctx_for_generate(verbose: bool, grammar_active: bool = False):
-    """Return the context manager used to wrap generation stderr.
-
-    Returns nullcontext when verbose is True, _quiet_stderr when grammar_active
-    is True, and dedup_native_stderr otherwise.
-    """
+def _stderr_ctx_for_generate(verbose: bool):
+    """Return the context manager used to wrap generation stderr:
+    nullcontext when verbose is True, dedup_native_stderr otherwise, with or
+    without a grammar."""
     if verbose:
         return contextlib.nullcontext
-    if grammar_active:
-        return _quiet_stderr
     from localm.debuglog import dedup_native_stderr
     return dedup_native_stderr
 
@@ -991,6 +990,7 @@ class LlamaCpp:
         # free that crashes the GPU driver. The decode loop holds _gen_lock
         # around each native step; close()/_free_native take it too, after
         # setting _stop so an in-flight generation bails at its next step.
+        # Lock order: _gen_lock before the module-level _stderr_lock.
         self._gen_lock    = threading.RLock()
         self._stop        = threading.Event()
         self._inference_lock = threading.Lock()
@@ -1555,9 +1555,7 @@ class LlamaCpp:
             # minimal reply cannot fit any more.
             max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
 
-            _ctx = _stderr_ctx_for_generate(
-                self._verbose, grammar_active=bool(grammar or grammar_lazy)
-            )
+            _ctx = _stderr_ctx_for_generate(self._verbose)
 
             # If unlimited (<= 0), allocate a modest chunk up front and grow later
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
@@ -1652,9 +1650,8 @@ class LlamaCpp:
                 # background reader thread, so re-entering it per-token would
                 # both reset its dedup state every time (defeating grouping
                 # across tokens) and pay thread-creation cost per token. The
-                # native calls below run unwrapped inside this single scope;
-                # the yield in between is safe to leave wrapped too, since
-                # inference is already serialized process-wide.
+                # native calls below run unwrapped inside this single scope,
+                # and so does the yield: dedup_native_stderr holds no lock.
                 with _ctx():
                     while max_new_tokens <= 0 or tokens_generated < max_new_tokens:
                         # --- locked native region 1: sample the next token ---
