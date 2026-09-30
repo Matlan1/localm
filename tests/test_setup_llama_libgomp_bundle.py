@@ -5,7 +5,7 @@ Upstream's Linux `cpu`/`vulkan` llama.cpp release tarballs link OpenMP
 dynamically (libggml-base.so.0 and every libggml-cpu-*.so NEED
 libgomp.so.1) and ship no copy of their own, so a bare/minimal Linux image
 without a system libgomp cannot load the runtime - see
-_bundle_missing_native_deps's own docstring in setup_llama.py for the full
+_bundle_missing_native_deps's own docstring in setup_llama/native_deps.py for the full
 mechanism.
 
 Covers, each against the REAL code path rather than a mock of it:

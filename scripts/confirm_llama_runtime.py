@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Confirm a llama.cpp release LOADS AND GENERATES before it is pinned.
 
-``localm/setup_llama.py`` installs ``_PINNED_TAG`` - one release we decided on -
+``localm setup-llama`` installs ``_PINNED_TAG`` - one release we decided on -
 rather than whatever upstream published most recently. This script is what earns
 that word "confirmed": a build that merely LOADS is not confirmed, because a
 release can load fine for upstream and still be refused by localm's own ABI gate.

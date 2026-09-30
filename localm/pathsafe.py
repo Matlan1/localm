@@ -216,7 +216,8 @@ def confined_absolute_or_under(base: Path, raw: str) -> Path:
 
 def is_unc_or_device_path(raw: str) -> bool:
     """True if *raw* is Windows UNC or device-namespace syntax: ``\\\\host\\share``,
-    ``\\\\.\\PhysicalDrive0``, ``\\\\?\\C:\\``, or the ``//host/share`` spelling.
+    ``\\\\.\\PhysicalDrive0``, ``\\\\?\\C:\\``, the ``//host/share`` spelling, or
+    an NT object-namespace path such as ``\\??\\UNC\\host\\share``.
 
     Judged by WINDOWS rules on EVERY host, and NOT gated on ``os.name``. This is
     a question about what the string MEANS, not about where it is being
@@ -243,6 +244,11 @@ def is_unc_or_device_path(raw: str) -> bool:
     everywhere" requires, and it is authoritative for spellings not enumerated
     here."""
     if raw[:2] in ("\\\\", "//", "\\/", "/\\"):
+        return True
+    # The NT object-namespace prefix "\??\", which Win32 hands to the kernel
+    # unchanged and ntpath.splitdrive reports no drive for, with every
+    # separator mix. See test_nt_object_namespace_prefix_is_device_syntax.
+    if len(raw) >= 4 and raw[0] in "\\/" and raw[1:3] == "??" and raw[3] in "\\/":
         return True
     # Any non-empty drive that is not the "X:" form is a UNC or device root.
     drive = ntpath.splitdrive(raw)[0]

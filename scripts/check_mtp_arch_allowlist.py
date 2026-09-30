@@ -53,7 +53,7 @@ from typing import Optional
 REPO = Path(__file__).resolve().parent.parent
 
 API_PATH = REPO / "localm" / "inference" / "backends" / "llamacpp" / "_api.py"
-SETUP_PATH = REPO / "localm" / "setup_llama.py"
+SETUP_PATH = REPO / "localm" / "setup_llama" / "pins.py"
 
 # The detector every MTP decision must go through, and the constant it must read.
 DETECTOR = "llama_model_mtp_support"

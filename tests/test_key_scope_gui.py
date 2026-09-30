@@ -10,6 +10,7 @@ tabs the CURRENT key may show (so a tab the key can't use is never rendered).
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -165,7 +166,8 @@ class TestBaselineRoutesStayOpen:
         and can learn its own capabilities - both are baseline (any valid key)."""
         from localm import auth
         narrow = auth.create_key("narrow", [S.MCP])["key"]
-        with TestClient(scoped_app) as c:
+        with patch("localm.sysstats.system_stats", return_value={}), \
+                TestClient(scoped_app) as c:
             assert c.get("/api/stats", headers=_hdr(narrow)).status_code == 200
             assert c.get("/api/capabilities", headers=_hdr(narrow)).status_code == 200
 
