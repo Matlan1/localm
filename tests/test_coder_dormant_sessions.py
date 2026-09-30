@@ -272,3 +272,319 @@ class TestTheListing:
         # Refused on the string, before any filesystem call - a stat on a UNC
         # path is an SMB dial that authenticates as the logged-in user.
         assert r.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+#  Deleting a past session, removing a project                                 #
+# --------------------------------------------------------------------------- #
+
+def _ckpt(cwd, checkpoint_id):
+    from localm.plugins.coder.agent.checkpoint import _checkpoint_path_for
+    return _checkpoint_path_for(Path(cwd), checkpoint_id)
+
+
+def _ended(app, client, cwd, title):
+    """A past session: saved for *cwd*, then ended so no live session holds
+    it. Returns its checkpoint id."""
+    a = client.post("/api/coder/sessions", headers=OWNER,
+                    json={"cwd": str(cwd), "mode": "log"})
+    cid = _seed(app, a.json()["id"], [{"role": "user", "content": title}], title)
+    app.state.coder_sessions.remove(a.json()["id"])
+    assert _ckpt(cwd, cid).is_file(), "precondition: the session was saved"
+    return cid
+
+
+def _listed_paths():
+    from localm.plugins.coder.projects import list_projects
+    return [e["path"] for e in list_projects()]
+
+
+def _scoped_headers():
+    from localm import auth
+    return {"Authorization": f"Bearer {auth.create_key('phone', ['coder'])['key']}"}
+
+
+class TestDeletingOnePastSession:
+    def test_deletes_that_checkpoint_file_and_no_other(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        with TestClient(app) as client:
+            gone = _ended(app, client, proj, "delete me")
+            kept = _ended(app, client, proj, "keep me")
+            r = client.request("DELETE", "/api/coder/checkpoints", headers=OWNER,
+                               json={"cwd": str(proj), "checkpoint_id": gone})
+            listing = client.get("/api/coder/dormant", headers=OWNER,
+                                 params={"cwd": str(proj)}).json()
+
+        # The file on disk first: a 200 alone is also what a route that deleted
+        # nothing would answer.
+        assert not _ckpt(proj, gone).exists(), "the deleted session is still on disk"
+        assert _ckpt(proj, kept).is_file(), "another session of the project was deleted"
+        assert r.status_code == 200, r.text
+        assert r.json() == {"deleted": gone}
+        assert [s["id"] for s in listing["projects"][0]["sessions"]] == [kept]
+
+    def test_an_unknown_id_is_404_and_deletes_nothing(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        with TestClient(app) as client:
+            kept = _ended(app, client, proj, "keep me")
+            r = client.request("DELETE", "/api/coder/checkpoints", headers=OWNER,
+                               json={"cwd": str(proj), "checkpoint_id": "deadbeef0000"})
+        assert _ckpt(proj, kept).is_file()
+        assert r.status_code == 404
+
+    @pytest.mark.parametrize("bad", ["../../outside", "a.json", "", "x" * 65])
+    def test_an_invalid_id_is_400(self, tmp_path, monkeypatch, bad):
+        proj = tmp_path / "proj"; proj.mkdir()
+        outside = tmp_path / ".localm" / "outside.json"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_text("{}", encoding="utf-8")
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        with TestClient(app) as client:
+            r = client.request("DELETE", "/api/coder/checkpoints", headers=OWNER,
+                               json={"cwd": str(proj), "checkpoint_id": bad})
+        assert outside.is_file(), "a traversal id reached a file outside the store"
+        assert r.status_code == 400
+
+    def test_the_checkpoint_of_a_live_session_is_409(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        with TestClient(app) as client:
+            a = client.post("/api/coder/sessions", headers=OWNER,
+                            json={"cwd": str(proj), "mode": "log"})
+            live = _seed(app, a.json()["id"], [{"role": "user", "content": "open"}],
+                         "open")
+            r = client.request("DELETE", "/api/coder/checkpoints", headers=OWNER,
+                               json={"cwd": str(proj), "checkpoint_id": live})
+            assert _ckpt(proj, live).is_file(), (
+                "deleted the checkpoint a live session is still writing")
+            assert r.status_code == 409, r.text
+
+    def test_a_scoped_key_cannot_delete_the_owners_session(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        with TestClient(app) as client:
+            cid = _ended(app, client, proj, "the owner's own words")
+            r = client.request("DELETE", "/api/coder/checkpoints",
+                               headers=_scoped_headers(),
+                               json={"cwd": str(proj), "checkpoint_id": cid})
+        assert _ckpt(proj, cid).is_file(), "a scoped key deleted the owner's session"
+        assert r.status_code == 403
+
+    def test_a_delete_that_leaves_the_file_is_not_reported_as_success(
+            self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        with TestClient(app) as client:
+            cid = _ended(app, client, proj, "stubborn")
+            target = _ckpt(proj, cid)
+            real_unlink = Path.unlink
+            calls = []
+
+            def no_op_unlink(self, *a, **kw):
+                if self == target:
+                    calls.append(self)
+                    return None
+                return real_unlink(self, *a, **kw)
+
+            with monkeypatch.context() as m:
+                m.setattr(Path, "unlink", no_op_unlink)
+                r = client.request("DELETE", "/api/coder/checkpoints", headers=OWNER,
+                                   json={"cwd": str(proj), "checkpoint_id": cid})
+        assert calls, "the injected failure never fired"
+        assert target.is_file()
+        assert r.status_code == 500, r.text
+        assert "deleted" not in r.json()
+
+
+class TestRemovingAProject:
+    def test_forgets_it_and_deletes_its_sessions_but_not_its_files(
+            self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        other = tmp_path / "other"; other.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        from localm.plugins.coder.agent.checkpoint import (
+            _legacy_checkpoint_path_for, _legacy_home_checkpoint_path_for,
+            _project_dir_for, _project_map_path_for,
+        )
+        with TestClient(app) as client:
+            one = _ended(app, client, proj, "first")
+            two = _ended(app, client, proj, "second")
+            elsewhere = _ended(app, client, other, "in another project")
+            # Every saved-session shape this project can have.
+            _project_map_path_for(proj).write_text("{}", encoding="utf-8")
+            legacy_home = _legacy_home_checkpoint_path_for(proj)
+            legacy_home.write_text("{}", encoding="utf-8")
+            legacy_local = _legacy_checkpoint_path_for(proj)
+            legacy_local.parent.mkdir(parents=True, exist_ok=True)
+            legacy_local.write_text("{}", encoding="utf-8")
+            # The user's own files, which must survive.
+            (proj / "keep.txt").write_text("user work", encoding="utf-8")
+            (proj / ".localcoder" / "config.toml").write_text("x = 1", encoding="utf-8")
+            (proj / "src").mkdir()
+            (proj / "src" / "main.py").write_text("print(1)", encoding="utf-8")
+            before = {p.relative_to(proj): p.read_bytes()
+                      for p in proj.rglob("*") if p.is_file() and p != legacy_local}
+            assert str(proj.resolve()) in _listed_paths(), "precondition: listed"
+
+            r = client.request("DELETE", "/api/coder/projects", headers=OWNER,
+                               json={"path": str(proj.resolve())})
+
+        assert not _project_dir_for(proj).exists(), "the saved sessions are still on disk"
+        assert not legacy_home.exists() and not legacy_local.exists()
+        assert str(proj.resolve()) not in _listed_paths(), "the project is still listed"
+        after = {p.relative_to(proj): p.read_bytes()
+                 for p in proj.rglob("*") if p.is_file()}
+        assert after == before, "a file in the project folder was changed or removed"
+        assert (proj / "keep.txt").read_text(encoding="utf-8") == "user work"
+        # The other project is untouched.
+        assert _ckpt(other, elsewhere).is_file()
+        assert str(other.resolve()) in _listed_paths()
+        assert r.status_code == 200, r.text
+        assert r.json()["sessions_deleted"] == 4, (one, two)
+        assert r.json()["forgotten"] is True
+
+    def test_a_project_whose_folder_is_gone_can_still_be_removed(
+            self, tmp_path, monkeypatch):
+        gone = tmp_path / "gone"; gone.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(tmp_path)
+        from localm.plugins.coder.agent.checkpoint import _project_dir_for
+        with TestClient(app) as client:
+            _ended(app, client, gone, "work")
+            path = str(gone.resolve())
+            gone.rmdir()
+            r = client.request("DELETE", "/api/coder/projects", headers=OWNER,
+                               json={"path": path})
+            listing = client.get("/api/coder/dormant", headers=OWNER).json()
+        assert not _project_dir_for(Path(path)).exists()
+        assert path not in _listed_paths()
+        assert not any(p["path"] == path for p in listing["projects"])
+        assert r.status_code == 200, r.text
+
+    def test_a_project_with_a_live_session_is_409(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        from localm.plugins.coder.agent.checkpoint import _project_dir_for
+        with TestClient(app) as client:
+            past = _ended(app, client, proj, "past")
+            client.post("/api/coder/sessions", headers=OWNER,
+                        json={"cwd": str(proj), "mode": "log"})
+            r = client.request("DELETE", "/api/coder/projects", headers=OWNER,
+                               json={"path": str(proj.resolve())})
+            assert _ckpt(proj, past).is_file()
+            assert _project_dir_for(proj).is_dir()
+            assert str(proj.resolve()) in _listed_paths()
+            assert r.status_code == 409, r.text
+
+    def test_a_scoped_key_cannot_remove_a_project(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        with TestClient(app) as client:
+            cid = _ended(app, client, proj, "the owner's")
+            r = client.request("DELETE", "/api/coder/projects",
+                               headers=_scoped_headers(),
+                               json={"path": str(proj.resolve())})
+        assert _ckpt(proj, cid).is_file()
+        assert str(proj.resolve()) in _listed_paths()
+        assert r.status_code == 403
+
+    def test_an_unknown_project_is_404(self, tmp_path, monkeypatch):
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(tmp_path)
+        with TestClient(app) as client:
+            r = client.request("DELETE", "/api/coder/projects", headers=OWNER,
+                               json={"path": str(tmp_path / "never-used")})
+        assert r.status_code == 404
+
+    def test_a_removal_that_leaves_sessions_is_not_reported_as_success(
+            self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        app.state.root_dir = str(proj)
+        import shutil
+        calls = []
+        with TestClient(app) as client:
+            cid = _ended(app, client, proj, "stubborn")
+            with monkeypatch.context() as m:
+                m.setattr(shutil, "rmtree", lambda p, *a, **kw: calls.append(p))
+                r = client.request("DELETE", "/api/coder/projects", headers=OWNER,
+                                   json={"path": str(proj.resolve())})
+        assert calls, "the injected failure never fired"
+        assert _ckpt(proj, cid).is_file()
+        assert str(proj.resolve()) in _listed_paths(), (
+            "forgot the project although its sessions are still on disk")
+        assert r.status_code == 500, r.text
+
+
+@pytest.mark.parametrize("method,body", [
+    ("DELETE /api/coder/checkpoints", {"checkpoint_id": "abc123"}),
+    ("DELETE /api/coder/projects", {}),
+])
+@pytest.mark.parametrize("bad", [r"\\192.0.2.1\share", "//192.0.2.1/share",
+                                 r"\\.\PhysicalDrive0"])
+def test_unc_or_device_paths_are_refused_before_any_filesystem_call(
+        tmp_path, monkeypatch, method, body, bad):
+    real = {"resolve": Path.resolve, "is_dir": Path.is_dir, "exists": Path.exists}
+    fired = []
+
+    def make_spy(name):
+        def spy(self, *a, **kw):
+            s = str(self)
+            if s[:2] in ("\\\\", "//", "\\/", "/\\"):
+                fired.append((name, s))
+                raise AssertionError(f"Path.{name}() reached the filesystem with {s!r}")
+            return real[name](self, *a, **kw)
+        return spy
+
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    verb, url = method.split(" ", 1)
+    field = "path" if url.endswith("/projects") else "cwd"
+    with TestClient(app) as client:
+        for name in real:
+            monkeypatch.setattr(Path, name, make_spy(name))
+        r = client.request(verb, url, headers=OWNER, json={**body, field: bad})
+    assert fired == []
+    assert r.status_code == 400, r.text
+
+
+class TestForgetProject:
+    def test_removes_only_the_matching_entry(self, tmp_path, monkeypatch):
+        _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        from localm.plugins.coder.projects import forget_project, record_project
+        a = tmp_path / "a"; a.mkdir()
+        b = tmp_path / "b"; b.mkdir()
+        record_project(a, "log")
+        record_project(b, "log")
+        assert forget_project(a) is True
+        assert _listed_paths() == [str(b.resolve())]
+        assert forget_project(a) is False, "a second forget finds nothing"
+
+    def test_letter_case_matches_where_the_platform_ignores_it(
+            self, tmp_path, monkeypatch):
+        import os
+        _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+        from localm.plugins.coder.projects import forget_project, record_project
+        a = tmp_path / "CaseProj"; a.mkdir()
+        record_project(a, "log")
+        stored = _listed_paths()[0]
+        # Folder removed: resolve() then cannot restore the on-disk letter case
+        # of the missing part, so only the comparison itself can match it.
+        a.rmdir()
+        swapped = stored.swapcase()
+        assert str(Path(swapped).resolve()) != stored, (
+            "precondition: resolve() alone must not already undo the case change")
+        folds = os.path.normcase(stored) == os.path.normcase(swapped)
+        assert forget_project(swapped) is folds
+        assert (_listed_paths() == []) is folds

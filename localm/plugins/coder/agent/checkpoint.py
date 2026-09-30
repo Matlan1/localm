@@ -200,6 +200,61 @@ def checkpoint_info(cwd) -> Optional[dict]:
         return {"unreadable": True}
     return None
 
+def delete_checkpoint(cwd, checkpoint_id: str) -> bool:
+    """Delete one saved session: ``HOME/checkpoints/<project-digest>/<id>.json``.
+
+    Returns True when the file was removed, False when there was no such file.
+    Nothing else is touched: not the project map beside it, not another
+    session's checkpoint, not the project directory.
+
+    Raises ValueError for an id that fails ``is_valid_checkpoint_id``, and
+    OSError when the file could not be removed or is still present afterwards.
+    """
+    import os
+    p = _checkpoint_path_for(cwd, checkpoint_id)
+    if not os.path.lexists(p):
+        return False
+    p.unlink()
+    if os.path.lexists(p):
+        raise OSError(f"{p.name} is still present after deleting it")
+    return True
+
+
+def delete_project_checkpoints(cwd) -> int:
+    """Delete every saved session for *cwd*. Returns how many checkpoint files
+    were removed.
+
+    Removes the per-project directory ``HOME/checkpoints/<project-digest>/``
+    (every checkpoint in it and the project map beside them) and both legacy
+    checkpoint files. Of the project directory itself, only
+    ``.localcoder/checkpoint.json`` is removed; every other file in it is left
+    alone. A per-project directory that is a symlink or junction is refused, not
+    followed.
+
+    Raises OSError when any of those paths could not be removed or is still
+    present afterwards.
+    """
+    import os
+    import shutil
+    removed = 0
+    d = _project_dir_for(cwd)
+    if os.path.lexists(d):
+        if d.is_dir():
+            removed += sum(1 for p in d.glob("*.json") if p.name != "projectmap.json")
+        shutil.rmtree(d)
+    for p in (_legacy_home_checkpoint_path_for(cwd), _legacy_checkpoint_path_for(cwd)):
+        if os.path.lexists(p):
+            p.unlink()
+            removed += 1
+    remaining = [p for p in (d, _legacy_home_checkpoint_path_for(cwd),
+                             _legacy_checkpoint_path_for(cwd))
+                 if os.path.lexists(p)]
+    if remaining:
+        raise OSError("still present after deleting: "
+                      + ", ".join(str(p) for p in remaining))
+    return removed
+
+
 def _first_user_text(messages: list) -> str:
     """The first user message's raw text, or "" - the fallback title source
     ``resume_checkpoint`` uses for a checkpoint saved before "title" existed."""
