@@ -44,6 +44,38 @@ _MTP_STOPPED = frozenset({
     "context-refused", "no-ctx-type-field",
 })
 
+# The worker's message when llama_init_from_model returned NULL: the runtime
+# loaded the weights, then could not create the context.
+_CONTEXT_FAILED_MSG = "Failed to create llama context"
+
+
+def _load_failure_message(exc: BaseException, hint: str = "") -> str:
+    """The user-facing text for a failed native load, from the worker's error
+    *exc*, plus *hint* (extra sentences, may be empty).
+
+    Advice to provision or repair the runtime is added only when nothing shows
+    the runtime works: a crash the runner placed in context creation, or a
+    context the runtime created as NULL after loading the weights, is about the
+    model's context size, split or memory instead. A crash report from the
+    runner already carries its own advice, so none is appended to it."""
+    from .llamacpp._loader import lib_filename
+    from .llamacpp._runner import NativeLoadCrashError
+    reason = str(exc).strip()
+    if reason and reason[-1] not in ".!?":
+        reason += "."
+    if isinstance(exc, NativeLoadCrashError):
+        prefix = ("The model failed to load" if exc.phase == "context"
+                  else "Native llama runtime failed to load")
+        return f"{prefix}: {reason}{hint}"
+    if reason.startswith(_CONTEXT_FAILED_MSG):
+        return (f"The model failed to load: {reason} The weights loaded, so the "
+                f"runtime itself works; the context did not fit - try a smaller "
+                f"context (n_ctx), fewer GPUs (gpu_split_indices) or fewer GPU "
+                f"layers (n_gpu_layers).{hint}")
+    return (f"Native llama runtime failed to load: {reason}{hint}\n"
+            f"Provision or repair it with  localm setup-llama  "
+            f"(or set LLAMA_CPP_LIB to a working {lib_filename()}).")
+
 
 class GgufBackend(VramSizingMixin, BaseBackend):
     """
@@ -119,6 +151,64 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # One-time guard for the RAM-offload notice in _check_context_fit.
         # load() clears it, so the hint fires once per loaded-model session.
         self._ram_kv_hint_shown = False
+        # The implicit split's unresolved per-device shortfall for the current
+        # load, appended to a load-failure message. Set in _load_native.
+        self._split_fit_note = ""
+
+    def _report_split_fit(self, plan) -> None:
+        """Tell the user what the implicit split's per-device fit decided:
+        which devices were left out, or which device is short of memory when
+        no split fits. Sets ``_split_fit_note`` for the unresolved case."""
+        from localm.debuglog import logger as _dbg
+        gb = 1024 ** 3
+        short = [c for c in plan.default if not c.fits]
+
+        def _what(c) -> str:
+            parts = []
+            if c.layers:
+                parts.append(f"{c.layers} layer{'s' if c.layers != 1 else ''}")
+            if c.holds_output:
+                parts.append(f"the output layer and a {c.logits / gb:.1f} GB "
+                             f"logits buffer")
+            return " plus ".join(parts) or "no layers"
+
+        _dbg.info(
+            "implicit GPU split fit: %s",
+            "; ".join(f"device {c.index}: {c.free / gb:.1f} GB free, needs "
+                      f"{c.need / gb:.1f} GB ({c.layers} layers "
+                      f"{c.weights / gb:.1f}, output {c.output / gb:.2f}, kv "
+                      f"{c.kv / gb:.2f}, logits {c.logits / gb:.2f}, reserve "
+                      f"{c.reserve / gb:.1f})" for c in plan.default))
+        if plan.tensor_split:
+            left_out = ", ".join(str(i) for i in plan.excluded)
+            kept = ", ".join(str(i) for i in plan.tensor_split)
+            short_ids = {c.index for c in short}
+            parts = [f"device {c.index} has {c.free / gb:.1f} GB free but would "
+                     f"hold about {c.need / gb:.1f} GB ({_what(c)})"
+                     for c in short if c.index in plan.excluded]
+            parts += [f"device {i} would then be short of memory as well"
+                      for i in plan.excluded if i not in short_ids]
+            detail = "; ".join(parts)
+            _dbg.info("implicit GPU split fit: leaving out device(s) %s, "
+                      "splitting over %s", left_out, kept)
+            console.print(
+                f"[yellow]  gpu split:[/yellow] leaving device {left_out} out "
+                f"of the split - {detail}. Splitting over devices {kept} "
+                f"instead. Set gpu_split_indices to choose the devices yourself.")
+            return
+        detail = "; ".join(
+            f"device {c.index} has {c.free / gb:.1f} GB free but the split "
+            f"would place about {c.need / gb:.1f} GB on it ({_what(c)})"
+            for c in short)
+        self._split_fit_note = (
+            f"{detail[0].upper()}{detail[1:]}. Set gpu_split_indices to leave "
+            f"it out, or lower n_ctx or n_gpu_layers.")
+        _dbg.warning("implicit GPU split fit: no split fits every device: %s",
+                     detail)
+        console.print(
+            f"[yellow]⚠ gpu split:[/yellow] {detail}; creating the context may "
+            f"fail. Set gpu_split_indices to leave it out, or lower n_ctx or "
+            f"n_gpu_layers.")
 
     def set_load_cancel(self, event) -> None:
         """Install (or clear with None) the cancel event honoured by load() via
@@ -227,12 +317,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         " The GPU is low on memory - free VRAM or retry with "
                         "fewer GPU layers (-g 24, or -g 0 for CPU)."
                     )
-            # The isolated worker failed or crashed loading the model.
-            raise RuntimeError(
-                f"Native llama runtime failed to load: {exc}.{vram_hint}\n"
-                "Provision or repair it with  localm setup-llama  "
-                "(or set LLAMA_CPP_LIB to a working llama.dll)."
-            ) from exc
+            split_note = getattr(self, "_split_fit_note", "")
+            if split_note:
+                vram_hint += f" {split_note}"
+            raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
 
     def _load_native(self) -> None:
         """Load by spawning an isolated worker process and handing it the
@@ -279,6 +367,15 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         from localm.config import load_config
         from localm.discover import resolve_auto_split_ratios, resolve_gpu_split
         auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
+        worker_split = auto_ratios
+        self._split_fit_note = ""
+        if not auto_ratios:
+            plan = self._implicit_split_fit(gpu_layers)
+            if plan is not None and plan.tensor_split:
+                worker_split = plan.tensor_split
+                self._report_split_fit(plan)
+            elif plan is not None and not plan.default_fits:
+                self._report_split_fit(plan)
 
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through
@@ -288,7 +385,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         cfg = load_config()
         _display_ratios = auto_ratios if auto_ratios else cfg.get("gpu_split_ratios")
         _pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), _display_ratios)
-        if len(_pairs) >= 2:
+        if isinstance(worker_split, dict):
+            self.applied_gpu_split = {
+                "source": "auto",
+                "devices": [{"index": i, "share": s}
+                            for i, s in worker_split.items()],
+            }
+        elif len(_pairs) >= 2:
             _total = sum(r for _, r in _pairs) or 1.0
             self.applied_gpu_split = {
                 "source": ("auto" if auto_ratios
@@ -310,7 +413,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # Give the worker's own _check_context_fit the same reserved overhead
             # this parent resolved, rather than the class-level default.
             vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
-            gpu_split_ratios=auto_ratios,
+            gpu_split_ratios=worker_split,
             n_cpu_moe=self.n_cpu_moe,
             mtp_enabled=self.mtp_enabled,
         )

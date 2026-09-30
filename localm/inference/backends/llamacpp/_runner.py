@@ -96,6 +96,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue as _queue
+import re
 import threading
 import time
 from typing import Callable, Optional
@@ -127,7 +128,9 @@ class RunnerBusy(Exception):
 # Fault-injection hook, honoured by the child ONLY when this environment
 # variable is set; never set in production. Values: "abort" (a genuine
 # uncatchable native abort), "exit" (a hard process exit, no Python traceback),
-# "hang" (a wedged native call). Checked at the top of every command dispatch.
+# "hang" (a wedged native call), "abort-in-context" (an abort from a frame
+# named like the context-creation entry point). Checked at the top of every
+# command dispatch.
 _FAULT_ENV = "LOCALM_GGUF_FAULT_FOR_TEST"
 
 
@@ -137,6 +140,10 @@ def _simulate_fault(mode: str) -> None:
             time.sleep(3600)
     if mode == "exit":
         os._exit(134)                            # vanish with no Python traceback
+    if mode == "abort-in-context":
+        def llama_init_from_model() -> None:     # the frame name the trace shows
+            os.abort()
+        llama_init_from_model()
     os.abort()                                    # genuine uncatchable native abort
 
 
@@ -507,6 +514,63 @@ class _RunnerTornDown(Exception):
     the model while it was loading" rather than a broken native runtime."""
 
 
+class NativeLoadCrashError(RuntimeError):
+    """The worker process died during a load, with no envelope.
+
+    ``phase`` names the native call that was running when it died, read from
+    the captured fault trace: ``"context"`` (``llama_init_from_model``, after
+    the weights loaded), ``"weights"`` (``llama_load_model_from_file``), or
+    ``None`` when no trace was captured or the trace names neither."""
+
+    def __init__(self, message: str, phase: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.phase = phase
+
+
+# The native entry points a crashed load can die inside, keyed by the function
+# name faulthandler prints for its frame, mapped to the load phase they run.
+_CRASH_PHASE_BY_FRAME = {
+    "llama_init_from_model": "context",
+    "llama_load_model_from_file": "weights",
+}
+
+_TRACE_CURRENT_THREAD_RE = re.compile(r"^Current thread\b")
+_TRACE_FRAME_RE = re.compile(
+    r'^\s+File "[^"\n]*", line \d+ in ([A-Za-z_][A-Za-z0-9_]*)\s*$')
+
+
+def crash_phase_from_trace(trace: str) -> Optional[str]:
+    """The load phase whose native call was running on the crashing thread of
+    a faulthandler *trace*, or ``None`` when the trace has no "Current thread"
+    block or none of its frames is a known entry point. Frames are read from
+    the innermost outward and the first known entry point wins."""
+    in_current = False
+    for line in (trace or "").splitlines():
+        if not in_current:
+            in_current = bool(_TRACE_CURRENT_THREAD_RE.match(line))
+            continue
+        m = _TRACE_FRAME_RE.match(line)
+        if m is None:
+            if line.strip():
+                break
+            continue
+        phase = _CRASH_PHASE_BY_FRAME.get(m.group(1))
+        if phase is not None:
+            return phase
+    return None
+
+
+def _load_crash_advice(phase: Optional[str]) -> str:
+    """What to try after a worker died loading a model, for the phase it died in."""
+    if phase == "context":
+        return (" It crashed while creating the context, after the weights had "
+                "loaded, so the runtime itself works. Creating the context "
+                "allocates the KV cache and compute buffers on every GPU the "
+                "model is split across: try a smaller context (n_ctx), fewer "
+                "GPUs (gpu_split_indices) or fewer GPU layers (n_gpu_layers).")
+    return " Retry the load, or repair the runtime with 'localm setup-llama'."
+
+
 class ModelRunner:
     """Parent-side handle to one isolated GGUF worker process. One instance
     per loaded ``GgufBackend`` - never a module-level singleton."""
@@ -532,6 +596,9 @@ class ModelRunner:
         # parent via debuglog.child_crash_trace_path and set in _spawn(); None
         # before the first spawn.
         self._crash_trace_path = None
+        # The load phase read from the last consumed fault trace (see
+        # crash_phase_from_trace); None when none was captured.
+        self._last_crash_phase = None
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
@@ -583,6 +650,7 @@ class ModelRunner:
         with its traceback by ``_runner_entry``, but a hard ``os._exit``
         produces no exception and therefore no traceback."""
         trace = self._native_crash_trace()
+        self._last_crash_phase = crash_phase_from_trace(trace)
         native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
             return native, " No native fault trace was captured for this exit."
@@ -719,12 +787,14 @@ class ModelRunner:
                     raise ModelLoadCancelled(
                         "the model was unloaded while it was still loading")
                 if not self._proc.is_alive():
-                    raise RuntimeError(
+                    self._last_crash_phase = None
+                    detail = self._crash_detail()
+                    phase = self._last_crash_phase
+                    raise NativeLoadCrashError(
                         f"The native model-loading process crashed (exit code "
                         f"{self._exit_reason()}) while loading. The server stayed up."
-                        + self._crash_detail() +
-                        " Retry the load, or repair the runtime with "
-                        "'localm setup-llama'."
+                        + detail + _load_crash_advice(phase),
+                        phase=phase,
                     )
             else:
                 # A NON-TERMINAL envelope reports that the load is still running,

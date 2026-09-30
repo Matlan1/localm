@@ -1288,6 +1288,82 @@ def gguf_input_layer_bytes(
     return total
 
 
+def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
+    """``(block_count, n_vocab)`` from *path*'s GGUF metadata, or ``None`` when
+    either is missing or the header does not parse. ``n_vocab`` is the length
+    of the ``tokenizer.ggml.tokens`` array. Never raises."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return None
+            _tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
+            architecture = None
+            scalars: dict = {}
+            n_vocab = 0
+            for _ in range(kv_count):
+                key = _gguf_read_string_stream(f)
+                (vtype,) = struct.unpack("<I", f.read(4))
+                if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                    architecture = _gguf_read_string_stream(f)
+                    continue
+                if key == "tokenizer.ggml.tokens" and vtype == _GGUF_TYPE_ARRAY:
+                    (elem_type,) = struct.unpack("<I", f.read(4))
+                    (count,) = struct.unpack("<Q", f.read(8))
+                    if elem_type != _GGUF_TYPE_STRING:
+                        return None
+                    n_vocab = count
+                    for _ in range(count):
+                        _gguf_read_string_stream(f)
+                    continue
+                if key.endswith(".block_count") and vtype in _GGUF_SCALAR_FORMATS:
+                    fmt = _GGUF_SCALAR_FORMATS[vtype]
+                    (scalars[key],) = struct.unpack(fmt, f.read(_GGUF_FIXED_TYPE_SIZES[vtype]))
+                    continue
+                _gguf_skip_value_stream(f, vtype)
+    except (OSError, struct.error, IndexError, UnicodeDecodeError,
+            ValueError) as exc:
+        logger.debug("gguf split-layout probe: could not parse %s (%s)",
+                     path.name, type(exc).__name__)
+        return None
+    block_count = scalars.get(f"{architecture}.block_count") if architecture else None
+    if not isinstance(block_count, int) or block_count <= 0 or n_vocab <= 0:
+        return None
+    return block_count, n_vocab
+
+
+def gguf_split_layout(path: Path) -> Optional[dict]:
+    """What llama.cpp's layer split places, read from *path*'s own GGUF
+    header(s): ``{"block_count", "n_vocab", "tensor_bytes"}``, where
+    ``tensor_bytes`` maps every tensor name to its size in bytes, summed over
+    every part of a split GGUF.
+
+    ``block_count`` includes any MTP / nextn layers (llama.cpp's
+    ``n_layer_all``). Sizes are offset deltas, as in
+    ``_gguf_tensor_offset_entries``. Returns ``None`` - never raises - when
+    the metadata or any part's tensor section does not parse, or a part of a
+    split model is missing."""
+    meta = _gguf_split_layout_meta(path)
+    if meta is None:
+        return None
+    parts = split_gguf_parts(path.name)
+    paths = [path.parent / p for p in parts] if parts else [path]
+    tensor_bytes: dict = {}
+    for part in paths:
+        if not part.is_file():
+            return None
+        parsed = _gguf_tensor_offset_entries(part)
+        if parsed is None:
+            return None
+        entries, file_size, data_start = parsed
+        for idx, (name, offset) in enumerate(entries):
+            nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
+            tensor_bytes[name] = max(0, nxt - offset)
+    return {"block_count": meta[0], "n_vocab": meta[1], "tensor_bytes": tensor_bytes}
+
+
 def _gguf_declared_min_size(path: Path) -> Optional[int]:
     """The smallest *path* could possibly be and still hold every tensor its
     own GGUF header declares: the byte offset, from the start of the file, at
