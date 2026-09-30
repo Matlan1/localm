@@ -614,7 +614,7 @@ def _command_output(argv: List[str], timeout: float = 2.0) -> Optional[str]:
 def detect_theme(env=None, platform: Optional[str] = None,
                  read_windows: Optional[Callable[[], object]] = None,
                  run: Optional[Callable[[List[str]], Optional[str]]] = None) -> str:
-    """"dark" or "light" for the setup window.
+    """Return "dark" or "light" for the setup window.
 
     LOCALM_THEME wins when it is "dark" or "light" (any case). Otherwise:
     Windows reads AppsUseLightTheme (0 is dark), macOS reads
