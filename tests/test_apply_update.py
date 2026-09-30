@@ -257,7 +257,7 @@ def test_post_swap_command_runtime_uses_absolute_interpreter_not_bare_localm():
     the default native LocaLM.exe launcher (see the live repro below), which then
     mis-invokes and rolls back every "runtime"-class update. Must go through
     sys.executable + "-m localm" instead, same as every other self-invocation site
-    (setup_llama.py, applaunch.py, http_server.py, ...)."""
+    (setup_llama/, applaunch.py, http_server.py, ...)."""
     cmd = au.post_swap_command("runtime", backend="cuda")
     assert cmd[0] == sys.executable
     assert cmd[1:3] == ["-m", "localm"]

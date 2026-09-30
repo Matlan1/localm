@@ -10,7 +10,7 @@ loaded AND generated on every backend named by ``--require``.
 WHAT IT REWRITES (with ``--write``; without it, a unified diff is printed and
 nothing is touched):
 
-  localm/setup_llama.py
+  localm/setup_llama/pins.py
     _PINNED_TAG                   the target tag
     _PINNED_FALLBACK_SHA256       the upstream block only: every asset of the
                                   target release with the sha256 digest the
@@ -62,7 +62,7 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SETUP_PATH = REPO / "localm" / "setup_llama.py"
+SETUP_PATH = REPO / "localm" / "setup_llama" / "pins.py"
 API_PATH = REPO / "localm" / "inference" / "backends" / "llamacpp" / "_api.py"
 MTP_SCRIPT = REPO / "scripts" / "check_mtp_arch_allowlist.py"
 
@@ -186,7 +186,7 @@ def measured_backends(setup_text: str) -> set:
     """Backends whose _PIN_CONFIRMATION entry claims a measurement."""
     m = re.search(r"_PIN_CONFIRMATION = \{\n(?P<body>.*?)\n\}", setup_text, re.S)
     if not m:
-        raise Refused("_PIN_CONFIRMATION not found in setup_llama.py")
+        raise Refused("_PIN_CONFIRMATION not found in localm/setup_llama/pins.py")
     measured = set()
     for entry in re.finditer(r'^\s+"([^"]+)":\s*((?:"[^"]*"\s*)+),', m.group("body"), re.M):
         note = "".join(re.findall(r'"([^"]*)"', entry.group(2)))
@@ -237,7 +237,7 @@ def set_mtp_set(api_text: str, archs: set) -> str:
 
 def rewrite(setup_text: str, api_text: str, tag: str, digests: dict,
             archs: set) -> "tuple[str, str]":
-    """(new setup_llama.py text, new _api.py text)."""
+    """(new pins.py text, new _api.py text)."""
     setup_text = set_sha_block(set_pin(setup_text, tag), tag, digests)
     api_text = set_mtp_set(set_mtp_tag(api_text, tag), archs)
     return setup_text, api_text
@@ -269,7 +269,7 @@ def checklist(tag: str) -> str:
         f"  3. python scripts/check_pretokenizer_redos.py --ref {tag}",
         "       needs MSVC: run it on a Windows box with Build Tools, or dispatch",
         "       .github/workflows/pin-currency.yml with candidate_tag",
-        "  4. _PIN_CONFIRMATION in setup_llama.py: re-read every entry against the receipt",
+        "  4. _PIN_CONFIRMATION in localm/setup_llama/pins.py: re-read every entry against the receipt",
         "       (which backends generated, on what hardware); a backend not in the",
         "       receipt must still say 'NOT measured'",
         "  5. pytest tests/test_llama_pin_constant_and_currency.py tests/test_mtp_arch_allowlist.py",

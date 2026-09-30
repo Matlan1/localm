@@ -51,7 +51,7 @@ on:
   push:
     # NARROW, DELIBERATE EXCEPTION to the no-automatic-CI policy above,
     # decided 2026-08-19: schedule (weekly) + a paths filter on
-    # localm/inference/backends/llamacpp/** and localm/setup_llama.py +
+    # localm/inference/backends/llamacpp/** and localm/setup_llama/** +
     # workflow_dispatch. NOT on every push.
     #
     # A push that touches the native llama.cpp binding runs the ABI-drift
@@ -64,7 +64,7 @@ on:
     # triggers a run through this block.
     paths:
       - "localm/inference/backends/llamacpp/**"
-      - "localm/setup_llama.py"
+      - "localm/setup_llama/**"
   workflow_dispatch:
     inputs:
       run_abi:
@@ -423,7 +423,7 @@ jobs:
     # `inputs.run_abi` is undefined (falsy) for push and schedule events, so
     # the schedule arm and the push arm are what keep the drift coverage
     # outside a manual dispatch. The push arm fires only for the narrow,
-    # paths-scoped push trigger above (llamacpp backend + setup_llama.py) -
+    # paths-scoped push trigger above (llamacpp backend + setup_llama/) -
     # GitHub Actions has already filtered the run to those paths before this
     # condition is even evaluated.
     if: github.event_name == 'schedule' || inputs.run_abi || github.event_name == 'push'
