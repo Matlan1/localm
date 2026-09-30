@@ -414,7 +414,33 @@ class TestIsUncOrDevicePath:
             "corpus error: Windows does not consider this a drive/UNC root")
 
     @pytest.mark.parametrize("raw", [
+        r"\??\UNC\192.0.2.1\share",
+        r"\??\unc\192.0.2.1\share",
+        r"\??\Q:\dir",
+        "\\??/Q:/dir",
+        "/??\\Q:\\dir",
+        "/??/UNC/192.0.2.1/share",
+    ])
+    def test_nt_object_namespace_prefix_is_device_syntax(self, raw):
+        """Win32 hands a path starting with the NT object-namespace prefix to
+        the kernel unchanged, while ntpath.splitdrive reports no drive for it."""
+        assert is_unc_or_device_path(raw)
+
+    @pytest.mark.skipif(os.name != "nt", reason="asks Windows' own path resolution")
+    def test_every_nt_prefix_spelling_windows_resolves_is_refused(self):
+        """Each spelling of the system folder that Windows itself resolves is
+        refused, and the plain drive path stays allowed."""
+        root = os.environ.get("SystemRoot", r"C:\Windows")
+        spellings = ["\\??\\" + root, "\\??\\" + root[0].lower() + root[1:],
+                     "\\??/" + root, "/??\\" + root, "/??/" + root]
+        resolved = [s for s in spellings if os.path.exists(s)]
+        assert resolved, "Windows resolved none of the NT-prefix spellings"
+        assert [s for s in resolved if not is_unc_or_device_path(s)] == []
+        assert os.path.exists(root) and not is_unc_or_device_path(root)
+
+    @pytest.mark.parametrize("raw", [
         "/nonexistent/x", "relative/x", "a.png", "", "   ", "Q:/x", r"Q:\x",
+        "/??x/dir", "??/dir", r"\?\Q:\dir",
         "Q://models/x.gguf",     # drive + DOUBLED slash: the drive-vs-scheme edge
         "Q:x",                   # drive-RELATIVE - not UNC (confined_under still
                                  # rejects it as a component; different question)
