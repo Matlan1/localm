@@ -376,6 +376,28 @@ def start_identity_differs(recorded, current) -> bool:
     return False
 
 
+def start_identity_matches(recorded, current) -> bool:
+    """True only when *recorded* and *current* are start identities of the
+    same shape that name one process: the same start tick under the same boot
+    id, or creation times at most a second apart.
+
+    Anything missing, malformed, of different shapes, or ticks under different
+    or unknown boot ids returns False. Never True together with
+    :func:`start_identity_differs`.
+    """
+    if not isinstance(recorded, dict) or not isinstance(current, dict):
+        return False
+    rt, ct = recorded.get("ticks"), current.get("ticks")
+    if type(rt) is int and type(ct) is int:
+        rb, cb = recorded.get("boot"), current.get("boot")
+        return isinstance(rb, str) and isinstance(cb, str) and rb == cb and rt == ct
+    rc, cc = recorded.get("created"), current.get("created")
+    if type(rc) in (int, float) and type(cc) in (int, float):
+        if math.isfinite(rc) and math.isfinite(cc):
+            return abs(rc - cc) <= 1.0
+    return False
+
+
 def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
     """Direct-process fallback for ``localm stop`` when a graceful HTTP shutdown
     (POST /v1/server/shutdown) could not be confirmed - the server did not
