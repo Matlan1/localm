@@ -146,6 +146,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **The desktop launcher's API server mode starts without a model selected.**
+  Choosing "(no model - choose later)" used to stop with "Pick or import a
+  model first" even though the server runs fine with nothing loaded. `localm
+  serve` likewise no longer requires a model name: `localm serve --no-model`
+  starts with nothing loaded, and `localm serve` alone picks a registered chat
+  model the same way `localm gui` does.
 - **The desktop launcher no longer gets stuck on "Checking models folder".**
   When the models folder scan finished before the launcher window was fully
   up, which happens easily with an empty or small models folder, its result
