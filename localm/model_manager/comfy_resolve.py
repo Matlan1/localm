@@ -317,7 +317,7 @@ def _matches(rows: list, filename: str) -> list[tuple[str, str, int]]:
 
 def _rank(match: tuple[str, str, int]) -> tuple:
     repo, path, downloads = match
-    return (repo.split("/", 1)[0] != COMFY_ORG, -downloads, path.count("/"), repo, path)
+    return (-downloads, path.count("/"), repo, path)
 
 
 def _hf_candidates(filename: str, token: Optional[str]) -> list[tuple[str, str, int]]:
