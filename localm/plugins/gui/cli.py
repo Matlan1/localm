@@ -1178,8 +1178,9 @@ def _serve_beside_native_window(serve, plan: _BindPlan, open_url: str, *, on_qui
     Stop signals are routed to the server thread while the window holds this
     thread (portmux.route_stop_signals). The window opens once the port accepts
     a connection, after 20 s, or once *server_stopped* is set; its quit action
-    is *on_quit*. When the window cannot open, a browser tab opens instead and
-    "browser" is recorded for a restart. Returns once the server thread has
+    is *on_quit*. When the window cannot open while the server is still running,
+    a browser tab opens instead and "browser" is recorded for a restart; once
+    the server has stopped, no tab opens. Returns once the server thread has
     ended."""
     import socket
     from localm import appface, portmux
@@ -1195,8 +1196,9 @@ def _serve_beside_native_window(serve, plan: _BindPlan, open_url: str, *, on_qui
                     break
             except OSError:
                 time.sleep(0.25)
-        if not appface.run_native_window(open_url, on_quit=on_quit,
-                                         server_stopped=server_stopped):
+        window_loaded = appface.run_native_window(
+            open_url, on_quit=on_quit, server_stopped=server_stopped)
+        if not window_loaded and not server_stopped.is_set():
             hs.set_restart_ui("browser")
             webbrowser.open(open_url)
         # Returns only once the server thread has ended.
