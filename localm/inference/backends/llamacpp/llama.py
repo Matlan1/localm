@@ -15,6 +15,7 @@ from __future__ import annotations
 import codecs
 import contextlib
 import ctypes
+import functools
 import os
 import re
 import tempfile
@@ -35,9 +36,12 @@ from ._structs import (
     set_use_mmap)
 
 
-# Held by _quiet_stderr for its whole block. Lock order: a LlamaCpp's _gen_lock
-# is taken before _stderr_lock, never after, and no _quiet_stderr block contains
-# a yield. See test_close_during_a_suspended_grammar_generation_does_not_deadlock.
+# Held by _quiet_stderr for its whole block, and by generation's
+# dedup_native_stderr only while it redirects or restores fd 2. Lock order: a
+# LlamaCpp's _gen_lock is taken before _stderr_lock, never after; no block that
+# holds it contains a yield; no fd-2 redirect is entered inside another on the
+# same thread. See test_close_during_a_suspended_grammar_generation_does_not_deadlock
+# and test_abandoning_a_generation_during_close_restores_fd2_in_order.
 _stderr_lock = threading.Lock()
 _devnull_fd: Optional[int] = None
 
@@ -84,12 +88,12 @@ def _quiet_stderr():
 
 def _stderr_ctx_for_generate(verbose: bool):
     """Return the context manager used to wrap generation stderr:
-    nullcontext when verbose is True, dedup_native_stderr otherwise, with or
-    without a grammar."""
+    nullcontext when verbose is True, otherwise dedup_native_stderr with
+    _stderr_lock as its swap lock, with or without a grammar."""
     if verbose:
         return contextlib.nullcontext
     from localm.debuglog import dedup_native_stderr
-    return dedup_native_stderr
+    return functools.partial(dedup_native_stderr, swap_lock=_stderr_lock)
 
 
 # llama.cpp's own load-time report of where each backend's share of the model's
@@ -1651,7 +1655,8 @@ class LlamaCpp:
                 # both reset its dedup state every time (defeating grouping
                 # across tokens) and pay thread-creation cost per token. The
                 # native calls below run unwrapped inside this single scope,
-                # and so does the yield: dedup_native_stderr holds no lock.
+                # and so does the yield: dedup_native_stderr holds _stderr_lock
+                # only while it redirects or restores fd 2.
                 with _ctx():
                     while max_new_tokens <= 0 or tokens_generated < max_new_tokens:
                         # --- locked native region 1: sample the next token ---

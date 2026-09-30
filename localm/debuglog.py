@@ -727,51 +727,95 @@ class _GrammarTraceFolder:
     matches. ``<piece>`` and ``<text>`` are generated text and may contain
     newlines, so one record can span several lines.
 
-    :meth:`consume` returns True for every line of such a record, continuation
-    lines included, and False for any other line. The awaiting records are
-    counted and passed to *record* once, as
+    :meth:`feed` consumes the lines of such records, continuation lines
+    included, and passes every other line to *forward* in arrival order. The
+    awaiting records are counted and passed to *record* once, as
     ``Grammar still awaiting trigger after N token(s)``, when a triggered record
     arrives or at :meth:`flush`. A triggered record is passed to *record* as
-    ``Grammar triggered on regex``. A record whose closing delimiter has not
-    arrived after _MAX_CONTINUATION_LINES further lines is treated as ended."""
+    ``Grammar triggered on regex``.
 
+    An awaiting record ends at a line ending in "`)", but a piece can itself
+    contain "`)" before a newline. So after such a line the following lines are
+    held: a line of at most _MAX_TAIL characters that ends in "`)" and does not
+    start with "Grammar " is taken, together with the held lines, as the rest
+    of the piece; a line starting with "Grammar ", a longer line, :meth:`flush`,
+    or _MAX_CONTINUATION_LINES held lines release the held lines to *forward*.
+    A triggered record ends at the first of its lines that ends in "'". A
+    record whose closing delimiter has not arrived after
+    _MAX_CONTINUATION_LINES further lines is treated as ended."""
+
+    _TRACE_PREFIX = "Grammar "
     _AWAITING = "Grammar still awaiting trigger after token "
     _AWAITING_ID = re.compile(r"-?\d+ \(`")
+    _AWAITING_CLOSER = "`)"
     _TRIGGERED = "Grammar triggered on regex: '"
+    _TRIGGERED_CLOSER = "'"
     _MAX_CONTINUATION_LINES = 64
+    _MAX_TAIL = 256
 
-    def __init__(self, record) -> None:
+    def __init__(self, record, forward) -> None:
         self._record = record
+        self._forward = forward
         self._awaiting = 0
         self._closer: Optional[str] = None
         self._continuations = 0
+        self._settling = False
+        self._held: list = []
 
-    def consume(self, line: str) -> bool:
+    def feed(self, line: str) -> None:
         text = line.rstrip("\r")
         if self._closer is not None:
             self._continuations += 1
-            if (text.endswith(self._closer)
-                    or self._continuations >= self._MAX_CONTINUATION_LINES):
+            if text.endswith(self._closer):
+                self._close()
+            elif self._continuations >= self._MAX_CONTINUATION_LINES:
                 self._closer = None
-            return True
+            return
+        if self._settling:
+            if (text.startswith(self._TRACE_PREFIX)
+                    or len(text) > self._MAX_TAIL):
+                self._release()
+            elif text.endswith(self._AWAITING_CLOSER):
+                self._held.clear()
+                return
+            else:
+                self._held.append(line)
+                if len(self._held) >= self._MAX_CONTINUATION_LINES:
+                    self._release()
+                return
+        if not self._start(text):
+            self._forward(line)
+
+    def _start(self, text: str) -> bool:
         if text.startswith(self._AWAITING):
             opening = self._AWAITING_ID.match(text, len(self._AWAITING))
             if opening is None:
                 return False
             self._awaiting += 1
-            self._open(text[opening.end():], "`)")
+            self._open(text[opening.end():], self._AWAITING_CLOSER)
             return True
         if text.startswith(self._TRIGGERED):
             self._record_awaiting()
             self._record("Grammar triggered on regex")
-            self._open(text[len(self._TRIGGERED):], "'")
+            self._open(text[len(self._TRIGGERED):], self._TRIGGERED_CLOSER)
             return True
         return False
 
     def _open(self, payload: str, closer: str) -> None:
-        if not payload.endswith(closer):
-            self._closer = closer
-            self._continuations = 0
+        self._closer = closer
+        self._continuations = 0
+        if payload.endswith(closer):
+            self._close()
+
+    def _close(self) -> None:
+        self._settling = self._closer == self._AWAITING_CLOSER
+        self._closer = None
+
+    def _release(self) -> None:
+        self._settling = False
+        held, self._held = self._held, []
+        for line in held:
+            self._forward(line)
 
     def _record_awaiting(self) -> None:
         if self._awaiting:
@@ -780,15 +824,16 @@ class _GrammarTraceFolder:
             self._awaiting = 0
 
     def flush(self) -> None:
-        self._record_awaiting()
+        self._release()
         self._closer = None
+        self._record_awaiting()
 
 
 _READER_JOIN_TIMEOUT = 30.0
 
 
 @contextlib.contextmanager
-def dedup_native_stderr():
+def dedup_native_stderr(swap_lock=None):
     """
     Redirect native (llama.cpp/ggml) stderr through a background reader that
     collapses consecutive IDENTICAL lines into "line(N)" before re-emitting -
@@ -823,6 +868,9 @@ def dedup_native_stderr():
     call, never re-enter it per native call / per token, or both the
     dedup grouping (state resets on every entry) and the per-entry thread
     overhead break.
+
+    *swap_lock*, when given, is held while fd 2 is redirected on entry and
+    while it is restored on exit, and is not held in between.
     """
     # _stable_console_stream() MUST run before fd 2 is redirected below: it
     # duplicates sys.stderr.fileno() (= fd 2) to get a handle that survives
@@ -831,12 +879,14 @@ def dedup_native_stderr():
     # would then loop straight back into the same pipe the reader thread is
     # draining, which reads it again and re-emits it forever: a silent,
     # CPU-spinning infinite loop with no forward progress.
-    console = _stable_console_stream()
+    guard = swap_lock if swap_lock is not None else contextlib.nullcontext()
+    with guard:
+        console = _stable_console_stream()
 
-    saved_fd = os.dup(2)
-    read_fd, write_fd = os.pipe()
-    os.dup2(write_fd, 2)
-    os.close(write_fd)
+        saved_fd = os.dup(2)
+        read_fd, write_fd = os.pipe()
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
 
     debug_fd = native_stderr_target()
 
@@ -869,11 +919,8 @@ def dedup_native_stderr():
         record_native_line(text)
 
     grouper = _LineGrouper(_emit)
-    grammar_trace = _GrammarTraceFolder(lambda text: record_native_line(text))
-
-    def _feed(line: str) -> None:
-        if not grammar_trace.consume(line):
-            grouper.feed(line)
+    grammar_trace = _GrammarTraceFolder(lambda text: record_native_line(text),
+                                        lambda line: grouper.feed(line))
 
     def _reader() -> None:
         buf = b""
@@ -889,22 +936,23 @@ def dedup_native_stderr():
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
                     _write_debug(raw + b"\n")
-                    _feed(raw.decode("utf-8", errors="replace"))
+                    grammar_trace.feed(raw.decode("utf-8", errors="replace"))
         finally:
             with contextlib.suppress(OSError):
                 os.close(read_fd)
         if buf:
             _write_debug(buf)
-            _feed(buf.decode("utf-8", errors="replace"))
-        grouper.flush()
+            grammar_trace.feed(buf.decode("utf-8", errors="replace"))
         grammar_trace.flush()
+        grouper.flush()
 
     thread = threading.Thread(target=_reader, name="native-stderr-dedup", daemon=True)
     thread.start()
     try:
         yield
     finally:
-        os.dup2(saved_fd, 2)
+        with guard:
+            os.dup2(saved_fd, 2)
         thread.join(timeout=_READER_JOIN_TIMEOUT)
         os.close(saved_fd)
         if thread.is_alive():
