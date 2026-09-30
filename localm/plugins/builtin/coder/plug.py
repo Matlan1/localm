@@ -1572,18 +1572,17 @@ def _live_sessions(request: Request) -> list:
     return mgr.snapshot() if mgr is not None else []
 
 
-async def _saved_session_op(fn):
+async def _saved_session_op(fn, failure: str):
     """Run a saved-session delete off the event loop. An HTTPException passes
-    through; any other failure becomes a 500 that names it."""
+    through; any other failure becomes a 500 whose detail is *failure*
+    followed by the error."""
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(get_plugin_executor(), fn)
     except HTTPException:
         raise
     except Exception as e:                                     # noqa: BLE001
-        raise HTTPException(
-            500, f"Could not delete the saved session data: "
-                 f"{type(e).__name__}: {e}")
+        raise HTTPException(500, f"{failure}: {type(e).__name__}: {e}")
 
 
 @_router.delete("/api/coder/checkpoints")
@@ -1591,9 +1590,8 @@ async def coder_checkpoint_delete(request: Request, req: CheckpointTargetRequest
     """Delete ONE past session: the checkpoint file a /api/coder/dormant row
     names. Owner-only. Not reversible.
 
-    409 while a live session holds that checkpoint, since the live session
-    would write it again. 404 when there is no such saved session. Success is
-    reported only after the file is confirmed gone.
+    409 while a live session holds that checkpoint. 404 when there is no such
+    saved session. Success is reported only after the file is confirmed gone.
     """
     if not _is_owner(request):
         raise HTTPException(403, "Owner only")
@@ -1615,7 +1613,7 @@ async def coder_checkpoint_delete(request: Request, req: CheckpointTargetRequest
                 404, f"No saved session {req.checkpoint_id} for this project")
         return {"deleted": req.checkpoint_id}
 
-    return await _saved_session_op(_delete)
+    return await _saved_session_op(_delete, "Could not delete the saved session")
 
 
 @_router.delete("/api/coder/projects")
@@ -1655,7 +1653,7 @@ async def coder_project_delete(request: Request, req: ProjectTargetRequest):
         return {"removed": req.path, "sessions_deleted": deleted,
                 "forgotten": forgotten}
 
-    return await _saved_session_op(_remove)
+    return await _saved_session_op(_remove, "Could not remove the project")
 
 
 # ------------------------------------------------------------------ #

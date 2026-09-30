@@ -366,7 +366,7 @@
   "coder.rail.otherProjects": "Andere Projekte",
   "coder.rail.pastHere": "Vergangene Sitzungen hier",
   "coder.rail.projectRemoved": "Projekt entfernt",
-  "coder.rail.removeProjectConfirmBody": "\"{name}\" aus der Liste entfernen und seine gespeicherten Sitzungen löschen? Das kann nicht rückgängig gemacht werden. Der Projektordner ({path}) und Ihre Dateien darin bleiben unverändert.",
+  "coder.rail.removeProjectConfirmBody": "\"{name}\" aus der Liste entfernen und seine gespeicherten Sitzungen löschen? Das kann nicht rückgängig gemacht werden. Ihre Projektdateien in {path} bleiben unverändert.",
   "coder.rail.removeProjectConfirmLabel": "Projekt entfernen",
   "coder.rail.removeProjectConfirmTitle": "Projekt entfernen?",
   "coder.rail.removeProjectFailed": "Projekt konnte nicht entfernt werden: ",

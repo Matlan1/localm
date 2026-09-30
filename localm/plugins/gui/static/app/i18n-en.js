@@ -499,7 +499,7 @@ export const I18N_EN = {
   "coder.rail.pastHere": "Past sessions here",
   "coder.rail.projectRemoved": "Project removed",
   "coder.rail.removeProjectConfirmBody":
-    "Remove \"{name}\" from the list and delete its saved sessions? This cannot be undone. The project folder ({path}) and your files in it are left alone.",
+    "Remove \"{name}\" from the list and delete its saved sessions? This cannot be undone. Your project files in {path} are left alone.",
   "coder.rail.removeProjectConfirmLabel": "Remove project",
   "coder.rail.removeProjectConfirmTitle": "Remove project?",
   "coder.rail.removeProjectFailed": "Could not remove the project: ",
