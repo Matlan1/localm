@@ -741,11 +741,13 @@ def _vram_info_double(payload, status=GPU_PROBE_OK):
 class TestStatsEndpoint:
     """The hardware-monitor stats feed."""
 
-    def test_system_stats_never_raises_and_is_a_dict(self):
+    def test_system_stats_never_raises_and_is_a_dict(self, monkeypatch):
         from localm.sysstats import system_stats
-        # wait_first_vram=True: blocks for the real probe (incl. its native
-        # per-device fallback) to actually land, so it cannot outlive this
-        # test as a background straggler - see _reset_vram_probe_cache.
+        # The per-device native fallback reports no devices; wait_first_vram=True
+        # blocks until the real VRAM probe has landed.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.native_device_inventory",
+            lambda: [])
         stats = system_stats(wait_first_vram=True)  # must not raise on any box
         assert isinstance(stats, dict)
         # Whatever sections are present must have a sane shape.
@@ -1127,6 +1129,33 @@ class TestVramEstimate:
         assert data["weights"] == os.path.getsize(model_file)
 
 
+def _arm_native_tripwires(monkeypatch):
+    """Replace _loader.load_lib (in-process native load) and _loader._probe_roundtrip
+    (isolated probe daemon) with recorders and return the list they append
+    ``(boundary, thread name)`` to. A recorder raises RuntimeError instead of
+    loading or spawning anything. A call from a localm-vram-probe thread that was
+    already running when this was armed is passed through to the real function."""
+    from localm.inference.backends.llamacpp import _loader
+    hits = []
+    earlier_probes = {t for t in threading.enumerate()
+                      if t.name == "localm-vram-probe"}
+
+    def _tripwire(name):
+        real = getattr(_loader, name)
+
+        def _recorder(*args, **kwargs):
+            thread = threading.current_thread()
+            if thread in earlier_probes:
+                return real(*args, **kwargs)
+            hits.append((f"_loader.{name}", thread.name))
+            raise RuntimeError(f"_loader.{name} reached from a hardware-free test")
+        monkeypatch.setattr(_loader, name, _recorder)
+
+    _tripwire("load_lib")
+    _tripwire("_probe_roundtrip")
+    return hits
+
+
 class TestStatsVramTrust:
     """The status-bar VRAM figure (/api/stats -> sysstats._vram) shows used/percent
     ONLY when the reading is a FRESH, DEVICE-GLOBAL measurement. A stale or
@@ -1136,32 +1165,44 @@ class TestStatsVramTrust:
 
     sysstats._vram() is throttled/single-flighted (see test_sysstats.py): the
     real vram_capacity() call runs on a background thread and the FIRST poll
-    after a cache reset returns before it lands. So _stats_vram resets the
-    cache, polls once to kick the probe off, waits for it to land, then polls
-    again to read the now-cached reading - same wait-then-read idiom
-    test_sysstats.py's _wait_for_vram_cache uses, including its poll deadline
-    (VRAM_POLL_DEADLINE, imported from there so the two can never drift
-    apart)."""
+    after a cache reset returns before it lands. So _drive installs a fresh
+    sysstats._vram_ready, polls once to kick the probe off, waits on that event
+    (bounded by VRAM_POLL_DEADLINE, imported from test_sysstats.py so the two
+    never drift apart), then polls again to read the now-cached reading.
 
-    def _stats_vram(self, app, reading, status, monkeypatch):
+    Every case runs hardware-free: list_gpus, the native device inventory and
+    sysstats._gpu_util are doubled, and the native-runtime entry points
+    (_arm_native_tripwires) record and refuse any reach. _stats_vram fails the
+    case, naming the boundary, when one is recorded."""
+
+    def _drive(self, app, reading, status, monkeypatch, *, stub_inventory=True):
         from localm import sysstats
+        ready = threading.Event()
         monkeypatch.setattr(sysstats, "_vram_last", None)
         monkeypatch.setattr(sysstats, "_vram_last_at", None)
         monkeypatch.setattr(sysstats, "_vram_inflight", False)
-        # Keeps _compute_vram()'s per-device native fallback a no-op here - see
-        # tests/test_sysstats.py's TestPerDeviceVramAnyBackend for the tests
-        # that exercise that fallback deliberately, with their own fake data.
+        monkeypatch.setattr(sysstats, "_vram_ready", ready)
+        hits = _arm_native_tripwires(monkeypatch)
+        # The per-device native fallback in _compute_vram() returns no devices.
+        inventory = (patch("localm.inference.backends.llamacpp._loader."
+                           "native_device_inventory", return_value=[])
+                     if stub_inventory else contextlib.nullcontext())
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double([reading], status)), \
-             patch("localm.inference.backends.llamacpp._loader."
-                   "native_device_inventory", return_value=[]):
+             patch("localm.sysstats._gpu_util", return_value={}) as gpu_util, \
+             inventory:
             with TestClient(app) as client:
                 r = client.get("/api/stats")           # kicks off the probe
                 assert r.status_code == 200
-                deadline = time.monotonic() + VRAM_POLL_DEADLINE
-                while sysstats._vram_last is None and time.monotonic() < deadline:
-                    time.sleep(0.01)
+                landed = ready.wait(timeout=VRAM_POLL_DEADLINE)
                 r = client.get("/api/stats")            # now served from cache
+        return r, hits, landed, gpu_util
+
+    def _stats_vram(self, app, reading, status, monkeypatch):
+        r, hits, landed, gpu_util = self._drive(app, reading, status, monkeypatch)
+        assert hits == [], f"the VRAM probe reached the native runtime: {hits}"
+        assert gpu_util.called, "/api/stats never read the stubbed GPU-load section"
+        assert landed, f"the VRAM probe did not land within {VRAM_POLL_DEADLINE}s"
         assert r.status_code == 200
         return r.json().get("vram", {})
 
@@ -1190,6 +1231,54 @@ class TestStatsVramTrust:
         vram = self._stats_vram(app, blind, GPU_PROBE_OK, monkeypatch)
         assert vram.get("total") == 24 * _GB
         assert "used" not in vram
+
+    def test_an_unstubbed_native_inventory_is_recorded_not_loaded(
+            self, gui_app, monkeypatch):
+        """With the native device inventory left real, the per-device fallback in
+        _compute_vram() reaches the in-process loader from the probe thread. The
+        tripwire records that reach and the native runtime is never loaded."""
+        app, _ = gui_app
+        _, hits, landed, _ = self._drive(
+            app, _DEVICE_GPU, GPU_PROBE_OK, monkeypatch, stub_inventory=False)
+        assert hits == [("_loader.load_lib", "localm-vram-probe")]
+        assert landed
+
+    def test_the_isolated_probe_daemon_is_recorded_not_spawned(self, monkeypatch):
+        """gpu_devices_isolated() reaches the probe daemon through
+        _probe_roundtrip. The tripwire records that reach and no daemon starts."""
+        from localm.inference.backends.llamacpp import _loader
+        hits = _arm_native_tripwires(monkeypatch)
+        raised = None
+        try:
+            _loader.gpu_devices_isolated()
+        except RuntimeError as e:
+            raised = e
+        assert [boundary for boundary, _ in hits] == ["_loader._probe_roundtrip"]
+        assert raised is not None
+
+    def test_a_probe_thread_from_an_earlier_test_is_passed_through(self, monkeypatch):
+        """A localm-vram-probe thread already running when the tripwires are armed
+        reaches the real function and is not recorded."""
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "load_lib", lambda: "real")
+        release = threading.Event()
+        results = []
+
+        def _earlier_probe():
+            release.wait(timeout=5)
+            results.append(_loader.load_lib())
+
+        thread = threading.Thread(target=_earlier_probe, name="localm-vram-probe",
+                                  daemon=True)
+        thread.start()
+        try:
+            hits = _arm_native_tripwires(monkeypatch)
+            release.set()
+            thread.join(timeout=5)
+        finally:
+            release.set()
+        assert hits == []
+        assert results == ["real"]
 
 
 class TestGpusEndpoint:

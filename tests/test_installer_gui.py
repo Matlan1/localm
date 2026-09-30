@@ -1235,6 +1235,10 @@ def test_a_repair_says_when_the_data_folder_in_use_is_unavailable(gui, installed
         warning = [t for t in texts if "is not available right now" in t]
         assert len(warning) == 1 and warning[0].startswith("[!]")
         assert str(custom) in warning[0]
+        styles = [str(w.cget("style")) for w in location.winfo_children()
+                  if w.winfo_class() == "TLabel"
+                  and "is not available right now" in w.cget("text")]
+        assert styles == ["Warn.TLabel"]
     finally:
         root.destroy()
 
@@ -1246,3 +1250,443 @@ def test_a_repair_with_its_data_folder_present_shows_no_warning(uninstall_wizard
     texts = [w.cget("text") for w in location.winfo_children()
              if w.winfo_class() == "TLabel"]
     assert not any("is not available right now" in t for t in texts)
+
+
+# --------------------------------------------------------------------------- #
+#  Following the system's dark or light mode                                   #
+# --------------------------------------------------------------------------- #
+
+_MAC_STYLE = ("defaults", "read", "-g", "AppleInterfaceStyle")
+_GNOME_SCHEME = ("gsettings", "get", "org.gnome.desktop.interface", "color-scheme")
+_GNOME_GTK = ("gsettings", "get", "org.gnome.desktop.interface", "gtk-theme")
+
+
+def _runner(outputs, calls=None):
+    """A command runner answering from outputs (argv tuple -> stdout); None
+    for any other command."""
+    def run(argv):
+        if calls is not None:
+            calls.append(tuple(argv))
+        return outputs.get(tuple(argv))
+    return run
+
+
+class TestThemeDetection:
+    def test_windows_dark_apps_mean_dark(self, gui):
+        assert gui.detect_theme(env={}, platform="win32",
+                                read_windows=lambda: 0) == "dark"
+
+    def test_windows_light_apps_mean_light(self, gui):
+        assert gui.detect_theme(env={}, platform="win32",
+                                read_windows=lambda: 1) == "light"
+
+    def test_windows_without_the_setting_means_light(self, gui):
+        def missing():
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        assert gui.detect_theme(env={}, platform="win32",
+                                read_windows=missing) == "light"
+
+    def test_macos_dark_mode_means_dark(self, gui):
+        calls = []
+        run = _runner({_MAC_STYLE: "Dark\n"}, calls)
+        assert gui.detect_theme(env={}, platform="darwin", run=run) == "dark"
+        assert calls == [_MAC_STYLE]
+
+    def test_macos_without_the_setting_means_light(self, gui):
+        assert gui.detect_theme(env={}, platform="darwin",
+                                run=_runner({})) == "light"
+
+    def test_gnome_prefer_dark_means_dark(self, gui):
+        run = _runner({_GNOME_SCHEME: "'prefer-dark'\n"})
+        assert gui.detect_theme(env={}, platform="linux", run=run) == "dark"
+
+    def test_gnome_prefer_light_means_light_whatever_the_gtk_theme(self, gui):
+        run = _runner({_GNOME_SCHEME: "'prefer-light'\n",
+                       _GNOME_GTK: "'Adwaita-dark'\n"})
+        assert gui.detect_theme(env={}, platform="linux", run=run) == "light"
+
+    @pytest.mark.parametrize("scheme", ["'default'\n", None])
+    def test_a_dark_gtk_theme_means_dark_without_a_colour_scheme(self, gui, scheme):
+        outputs = {_GNOME_GTK: "'Adwaita-Dark'\n"}
+        if scheme is not None:
+            outputs[_GNOME_SCHEME] = scheme
+        assert gui.detect_theme(env={}, platform="linux",
+                                run=_runner(outputs)) == "dark"
+
+    def test_no_dark_setting_means_light(self, gui):
+        run = _runner({_GNOME_SCHEME: "'default'\n", _GNOME_GTK: "'Adwaita'\n"})
+        assert gui.detect_theme(env={}, platform="linux", run=run) == "light"
+        assert gui.detect_theme(env={}, platform="linux",
+                                run=_runner({})) == "light"
+
+    @pytest.mark.parametrize("value,expected", [("dark", "dark"),
+                                                ("LIGHT", "light"),
+                                                (" Dark ", "dark")])
+    def test_localm_theme_wins_without_asking_the_system(self, gui, value, expected):
+        asked = []
+
+        def read():
+            asked.append(True)
+            return 0 if expected == "light" else 1
+
+        assert gui.detect_theme(env={gui.THEME_ENV: value}, platform="win32",
+                                read_windows=read) == expected
+        assert asked == []
+
+    @pytest.mark.parametrize("value", ["", "blue", "auto"])
+    def test_any_other_localm_theme_value_is_ignored(self, gui, value):
+        assert gui.detect_theme(env={gui.THEME_ENV: value}, platform="win32",
+                                read_windows=lambda: 0) == "dark"
+
+    def test_the_real_environment_is_read(self, gui, monkeypatch):
+        monkeypatch.setenv("LOCALM_THEME", "dark")
+        assert gui.detect_theme(platform="win32", read_windows=lambda: 1) == "dark"
+        monkeypatch.setenv("LOCALM_THEME", "light")
+        assert gui.detect_theme(platform="win32", read_windows=lambda: 0) == "light"
+
+    @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+    def test_a_reader_that_fails_means_light(self, gui, platform):
+        def broken(*_args):
+            raise RuntimeError("reader broke")
+        assert gui.detect_theme(env={}, platform=platform, read_windows=broken,
+                                run=broken) == "light"
+
+
+class TestCommandOutput:
+    def test_the_output_of_a_command_that_succeeds(self, gui):
+        out = gui._command_output([sys.executable, "-c", "print('Dark')"])
+        assert out is not None and out.strip() == "Dark"
+
+    def test_a_command_that_fails_gives_none(self, gui):
+        assert gui._command_output(
+            [sys.executable, "-c", "import sys; print('Dark'); sys.exit(1)"]) is None
+
+    def test_a_missing_program_gives_none(self, gui, tmp_path):
+        assert gui._command_output([str(tmp_path / "no-such-program")]) is None
+
+    def test_a_command_that_hangs_gives_none_at_the_timeout(self, gui):
+        import time
+        started = time.monotonic()
+        assert gui._command_output(
+            [sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.5) is None
+        assert time.monotonic() - started < 30
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="reads the Windows registry")
+def test_the_windows_reader_matches_the_registry(gui):
+    import subprocess
+    proc = subprocess.run(
+        ["reg", "query",
+         r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+         "/v", "AppsUseLightTheme"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        with pytest.raises(OSError):
+            gui._apps_use_light_theme()
+        assert gui.detect_theme(env={}) == "light"
+        return
+    expected = int(proc.stdout.split()[-1], 16)
+    assert gui._apps_use_light_theme() == expected
+    assert gui.detect_theme(env={}) == ("dark" if expected == 0 else "light")
+
+
+def _luminance(colour):
+    """WCAG relative luminance of a #rrggbb colour."""
+    channels = []
+    for i in (1, 3, 5):
+        c = int(colour[i:i + 2], 16) / 255
+        channels.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a, b):
+    """WCAG contrast ratio between two #rrggbb colours."""
+    hi, lo = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+_TEXT_PAIRS = [("text", "bg"), ("dim", "bg"), ("warn", "bg"),
+               ("text", "surface"), ("text", "field"), ("on_accent", "accent")]
+_CONTROL_PAIRS = [("outline", "bg"), ("accent", "field"), ("accent", "bg")]
+
+
+class TestPalettes:
+    def test_the_contrast_helper_gives_known_ratios(self):
+        assert _contrast("#000000", "#ffffff") == pytest.approx(21.0)
+        assert _contrast("#ffffff", "#777777") == pytest.approx(4.48, abs=0.01)
+        assert _contrast("#123456", "#123456") == pytest.approx(1.0)
+
+    def test_both_themes_name_the_same_colours(self, gui):
+        assert set(gui.PALETTES) == {"dark", "light"}
+        assert set(gui.PALETTES["dark"]) == set(gui.PALETTES["light"])
+
+    def test_the_dark_theme_is_dark_and_the_light_theme_is_light(self, gui):
+        dark, light = gui.PALETTES["dark"], gui.PALETTES["light"]
+        assert _luminance(dark["bg"]) < 0.05 < _luminance(dark["text"])
+        assert _luminance(light["bg"]) > 0.8 > _luminance(light["text"])
+
+    @pytest.mark.parametrize("theme", ["dark", "light"])
+    @pytest.mark.parametrize("fg,bg", _TEXT_PAIRS)
+    def test_text_is_readable(self, gui, theme, fg, bg):
+        p = gui.PALETTES[theme]
+        ratio = _contrast(p[fg], p[bg])
+        assert ratio >= 4.5, f"{theme}: {fg} on {bg} is {ratio:.2f}:1"
+
+    @pytest.mark.parametrize("theme", ["dark", "light"])
+    @pytest.mark.parametrize("fg,bg", _CONTROL_PAIRS)
+    def test_control_edges_and_marks_are_visible(self, gui, theme, fg, bg):
+        p = gui.PALETTES[theme]
+        ratio = _contrast(p[fg], p[bg])
+        assert ratio >= 3.0, f"{theme}: {fg} on {bg} is {ratio:.2f}:1"
+
+
+def _tk_root():
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    root.withdraw()
+    return root
+
+
+def _all_widgets(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _all_widgets(child)
+
+
+@pytest.fixture(params=["dark", "light"])
+def themed(request, gui):
+    """A real Tk wizard built with each theme forced: (wizard, style, palette)."""
+    from tkinter import filedialog, ttk
+    import tkinter as tk
+    root = _tk_root()
+    try:
+        wizard = gui.Wizard(root, tk, ttk, filedialog, theme=request.param)
+        yield wizard, ttk.Style(root), gui.PALETTES[request.param]
+    finally:
+        root.destroy()
+
+
+class TestThemedWindow:
+    def test_the_window_uses_clam(self, themed):
+        _, style, _ = themed
+        assert style.theme_use() == "clam"
+
+    def test_the_window_and_its_frames_take_the_background(self, themed):
+        wizard, style, p = themed
+        assert str(wizard.root.cget("background")) == p["bg"]
+        assert style.lookup("TFrame", "background") == p["bg"]
+        assert style.lookup("TLabel", "background") == p["bg"]
+        assert style.lookup("TLabel", "foreground") == p["text"]
+
+    def test_the_dim_and_warning_label_styles(self, themed):
+        _, style, p = themed
+        assert style.lookup("Dim.TLabel", "foreground") == p["dim"]
+        assert style.lookup("Dim.TLabel", "background") == p["bg"]
+        assert style.lookup("Warn.TLabel", "foreground") == p["warn"]
+        assert style.lookup("Warn.TLabel", "background") == p["bg"]
+
+    def test_no_label_keeps_a_fixed_colour(self, themed):
+        wizard, _, _ = themed
+        labels = [w for w in _all_widgets(wizard.root) if w.winfo_class() == "TLabel"]
+        assert labels
+        fixed = [(w.cget("text"), str(w.cget("foreground"))) for w in labels
+                 if str(w.cget("foreground"))]
+        assert fixed == []
+
+    def test_subheadings_and_the_folder_path_use_the_dim_style(self, themed):
+        wizard, _, _ = themed
+        dim = [w.cget("text") for w in _all_widgets(wizard.root)
+               if w.winfo_class() == "TLabel" and str(w.cget("style")) == "Dim.TLabel"]
+        assert any(t.startswith("Both of these can stay inside this folder") for t in dim)
+        assert any(t.endswith("home") for t in dim)
+
+    def test_the_log_and_the_uninstall_list_use_the_palette(self, themed):
+        wizard, _, p = themed
+        for text in (wizard.log, wizard.plan_text):
+            assert str(text.cget("background")) == p["surface"]
+            assert str(text.cget("foreground")) == p["text"]
+            assert str(text.cget("insertbackground")) == p["text"]
+            assert str(text.cget("selectbackground")) == p["accent"]
+            assert str(text.cget("selectforeground")) == p["on_accent"]
+
+    def test_controls_use_the_palette(self, themed):
+        _, style, p = themed
+        assert style.lookup("TButton", "background") == p["surface"]
+        assert style.lookup("TButton", "foreground") == p["text"]
+        assert style.lookup("TEntry", "fieldbackground") == p["field"]
+        assert style.lookup("TEntry", "foreground") == p["text"]
+        assert style.lookup("TProgressbar", "background") == p["accent"]
+        assert style.lookup("TProgressbar", "troughcolor") == p["field"]
+        assert style.lookup("TScrollbar", "troughcolor") == p["bg"]
+        for cls in ("TCheckbutton", "TRadiobutton"):
+            assert style.lookup(cls, "foreground") == p["text"]
+            assert style.lookup(cls, "indicatorbackground") == p["field"]
+            assert style.lookup(cls, "indicatorforeground") == p["accent"]
+
+    def test_hovered_pressed_and_disabled_controls_stay_in_the_palette(self, themed):
+        _, style, p = themed
+        for cls in ("TCheckbutton", "TRadiobutton", "TLabel", "TFrame"):
+            assert style.lookup(cls, "background", ["active"]) == p["bg"]
+        assert style.lookup("TButton", "background", ["active"]) == p["field"]
+        assert style.lookup("TButton", "background", ["pressed"]) == p["border"]
+        assert style.lookup("TButton", "background", ["disabled"]) == p["bg"]
+        assert style.lookup("TButton", "foreground", ["disabled"]) == p["outline"]
+        assert style.lookup("TScrollbar", "background", ["active"]) == p["field"]
+        assert style.lookup("TEntry", "bordercolor", ["focus"]) == p["accent"]
+
+    def test_every_widget_class_in_the_window_is_one_the_theme_styles(self, themed):
+        wizard, _, _ = themed
+        styled = {"TFrame", "TLabel", "TButton", "TCheckbutton", "TRadiobutton",
+                  "TEntry", "TProgressbar", "TScrollbar", "Text"}
+        classes = {w.winfo_class() for w in _all_widgets(wizard.root)}
+        assert classes <= styled, f"not themed: {sorted(classes - styled)}"
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_the_feature_list_warning_uses_the_warning_style(gui, monkeypatch, theme):
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+    monkeypatch.setattr(gui, "plugin_choices", lambda: [])
+    root = _tk_root()
+    try:
+        wizard = gui.Wizard(root, tk, ttk, filedialog, theme=theme)
+        features = dict(wizard.pages)["Optional features"]
+        warnings = [w for w in features.winfo_children()
+                    if w.winfo_class() == "TLabel"
+                    and "could not be read" in w.cget("text")]
+        assert len(warnings) == 1
+        assert str(warnings[0].cget("style")) == "Warn.TLabel"
+    finally:
+        root.destroy()
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_the_window_follows_localm_theme_when_no_theme_is_given(
+        gui, monkeypatch, theme):
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+    monkeypatch.setenv("LOCALM_THEME", theme)
+    root = _tk_root()
+    try:
+        wizard = gui.Wizard(root, tk, ttk, filedialog)
+        assert wizard.theme == theme
+        assert ttk.Style(root).lookup("TFrame", "background") == \
+            gui.PALETTES[theme]["bg"]
+    finally:
+        root.destroy()
+
+
+@pytest.mark.parametrize("theme,dark", [("dark", True), ("light", False)])
+def test_the_window_asks_for_a_matching_title_bar(gui, monkeypatch, theme, dark):
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+    asked = []
+    monkeypatch.setattr(gui, "set_title_bar_theme",
+                        lambda root, want: asked.append((root, want)) or True)
+    root = _tk_root()
+    try:
+        gui.Wizard(root, tk, ttk, filedialog, theme=theme)
+        assert asked == [(root, dark)]
+    finally:
+        root.destroy()
+
+
+class _FakeRoot:
+    def __init__(self, idle_error=None):
+        self.idle_error = idle_error
+        self.idle = 0
+
+    def update_idletasks(self):
+        self.idle += 1
+        if self.idle_error is not None:
+            raise self.idle_error
+
+    def winfo_id(self):
+        return 4242
+
+
+class _FakeWindll:
+    """ctypes.windll stand-in recording DwmSetWindowAttribute calls as
+    (hwnd, attribute, value, size)."""
+
+    def __init__(self, parent=777, results=(0,), parent_error=None):
+        self.calls = []
+        self.parent_of = None
+        fake = self
+
+        class User32:
+            def GetParent(self, window_id):
+                if parent_error is not None:
+                    raise parent_error
+                fake.parent_of = window_id
+                return parent
+
+        class Dwmapi:
+            def DwmSetWindowAttribute(self, hwnd, attribute, value, size):
+                fake.calls.append((hwnd.value, attribute, value._obj.value, size))
+                return results[min(len(fake.calls), len(results)) - 1]
+
+        self.user32 = User32()
+        self.dwmapi = Dwmapi()
+
+
+_E_INVALIDARG = -2147024809
+
+
+class TestTitleBar:
+    @pytest.mark.parametrize("dark,value", [(True, 1), (False, 0)])
+    def test_the_frame_window_is_asked_for_the_theme(self, gui, dark, value):
+        root, windll = _FakeRoot(), _FakeWindll(parent=777)
+        assert gui.set_title_bar_theme(root, dark, windll=windll) is True
+        assert root.idle == 1
+        assert windll.parent_of == 4242
+        assert windll.calls == [(777, 20, value, 4)]
+
+    def test_the_older_attribute_is_tried_when_the_current_one_is_refused(self, gui):
+        windll = _FakeWindll(results=(_E_INVALIDARG, 0))
+        assert gui.set_title_bar_theme(_FakeRoot(), True, windll=windll) is True
+        assert [c[1] for c in windll.calls] == [20, 19]
+
+    def test_a_title_bar_that_cannot_be_set_is_reported_not_raised(self, gui):
+        refused = _FakeWindll(results=(_E_INVALIDARG,))
+        assert gui.set_title_bar_theme(_FakeRoot(), True, windll=refused) is False
+        assert [c[1] for c in refused.calls] == [20, 19]
+
+        no_parent = _FakeWindll(parent_error=OSError("GetParent failed"))
+        assert gui.set_title_bar_theme(_FakeRoot(), True, windll=no_parent) is False
+
+        assert gui.set_title_bar_theme(
+            _FakeRoot(idle_error=RuntimeError("window gone")), True,
+            windll=_FakeWindll()) is False
+
+    def test_no_frame_window_means_nothing_is_set(self, gui):
+        windll = _FakeWindll(parent=0)
+        assert gui.set_title_bar_theme(_FakeRoot(), True, windll=windll) is False
+        assert windll.calls == []
+
+    def test_other_systems_do_not_try(self, gui, monkeypatch):
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        root = _FakeRoot()
+        assert gui.set_title_bar_theme(root, True) is False
+        assert root.idle == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows title bars only")
+@pytest.mark.parametrize("dark", [True, False])
+def test_the_title_bar_setting_reaches_the_real_window(gui, dark):
+    import ctypes
+    root = _tk_root()
+    try:
+        assert gui.set_title_bar_theme(root, dark) is True
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        value = ctypes.c_int(-1)
+        hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            ctypes.c_void_p(hwnd), 20, ctypes.byref(value), ctypes.sizeof(value))
+        assert hr == 0
+        assert value.value == int(dark)
+    finally:
+        root.destroy()

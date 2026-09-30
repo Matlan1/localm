@@ -100,6 +100,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   graphical installer cannot be closed while it uninstalls, and
   `setup-gui.bat` / `setup-gui.sh` say when something you asked to delete was
   kept or the uninstall did not finish.
+- **The graphical installer follows your system's dark or light mode.**
+  `setup-gui.bat` / `setup-gui.sh` now open in LocaLM's own dark or light
+  colours to match Windows, macOS or GNOME, including a dark title bar on
+  Windows. Set `LOCALM_THEME=dark` or `LOCALM_THEME=light` to choose one
+  yourself.
+- **Delete past coder sessions and remove projects from the coder's session
+  list.** Each past session in the list has a delete button, and each project
+  has a remove button that forgets the project and deletes its saved sessions.
+  Both ask first. Removing a project deletes only the coder's saved sessions
+  for it, including an older one kept in the project's `.localcoder` folder;
+  your project files are left alone. A session that is open, or a project
+  with an open session, has to be ended first.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
@@ -152,6 +164,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   serve` likewise no longer requires a model name: `localm serve --no-model`
   starts with nothing loaded, and `localm serve` alone picks a registered chat
   model the same way `localm gui` does.
+- **The coder REPL no longer loses a saved session when a turn fails.** Each
+  new message, and `/resume`, deleted the saved session before the turn ran,
+  so a turn that failed with an error (for example, an unreachable model
+  server) left nothing to resume. The last saved state now stays until a turn
+  finishes or is interrupted. Ctrl-C also no longer reports progress as saved
+  when it could not be written, and in privacy mode no longer says `/resume`
+  is unavailable while a resumed session is still saved.
 - **The desktop launcher no longer gets stuck on "Checking models folder".**
   When the models folder scan finished before the launcher window was fully
   up, which happens easily with an empty or small models folder, its result

@@ -120,3 +120,78 @@ class TestListing:
         d = tmp_path / "p"
         d.mkdir()
         assert projects.record_project(d, "log") is True
+
+
+class TestConcurrentWriters:
+    """record_project and forget_project run on different executor threads;
+    each read-modify-write of the store must see the other's result."""
+
+    def test_a_removal_racing_a_new_session_keeps_both_results(
+            self, tmp_path, monkeypatch):
+        import threading
+        import time
+
+        kept = [tmp_path / f"kept{i}" for i in range(3)]
+        gone = tmp_path / "gone"
+        newcomer = tmp_path / "newcomer"
+        for d in kept + [gone, newcomer]:
+            d.mkdir()
+        for d in kept + [gone]:
+            assert projects.record_project(d, "log") is True
+
+        real_load = projects._load
+
+        def slow_load():
+            entries = real_load()
+            time.sleep(0.05)
+            return entries
+
+        monkeypatch.setattr(projects, "_load", slow_load)
+        start = threading.Barrier(2)
+        errors = []
+
+        def run(fn):
+            try:
+                start.wait(5)
+                fn()
+            except Exception as e:                             # noqa: BLE001
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=run, args=(lambda: projects.forget_project(gone),)),
+            threading.Thread(target=run,
+                             args=(lambda: projects.record_project(newcomer, "log"),)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        assert errors == []
+
+        listed = {e["path"] for e in json.loads(
+            (tmp_path / "coder-projects.json").read_text("utf-8"))}
+        assert str(gone.resolve()) not in listed, "the removed project came back"
+        missing = {str(d.resolve()) for d in kept + [newcomer]} - listed
+        assert missing == set(), f"a concurrent write dropped {missing}"
+
+    def test_a_failed_rewrite_leaves_the_old_list_whole(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+
+        a, b = tmp_path / "a", tmp_path / "b"
+        for d in (a, b):
+            d.mkdir()
+            assert projects.record_project(d, "log") is True
+        store = tmp_path / "coder-projects.json"
+        before = store.read_bytes()
+
+        def refuse(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cfg, "_replace_atomic", refuse)
+        with pytest.raises(OSError, match="disk full"):
+            projects.forget_project(a)
+
+        assert store.read_bytes() == before, "a failed rewrite changed the list"
+        assert [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"] == []
+        assert projects.record_project(b, "log") is False
+        assert store.read_bytes() == before
