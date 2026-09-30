@@ -35,7 +35,7 @@ retested.
 KNOWN LIMITATION: needs an MSVC toolchain (Visual Studio Build Tools, via
 ``vswhere``) and network access. It has no Linux/macOS path and is not part
 of the pytest suite - run it by hand when re-assessing the pin, or after a
-``_PINNED_TAG`` bump in ``setup_llama.py``.
+``_PINNED_TAG`` bump in ``setup_llama/pins.py``.
 
 Usage:
     python scripts/check_pretokenizer_redos.py                  # the pinned tag

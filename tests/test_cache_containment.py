@@ -5,7 +5,7 @@ localm shells out to package installers in three places, each trying ``uv pip
 install`` first and ``python -m pip install`` second:
 
   * plugins/deps.py::_run_pip          - a plugin's declared pip extras
-  * setup_llama.py::_install_runtime_wheel - the native llama runtime wheel
+  * setup_llama/runtime_dir.py::_install_runtime_wheel - the native llama runtime wheel
   * media/managed_comfy_provision.py   - the managed ComfyUI venv
 
 Left to their defaults BOTH tools cache to a per-user location OUTSIDE the data
@@ -135,7 +135,7 @@ def test_deps_run_pip_hands_the_contained_env_to_the_child(monkeypatch):
 
 
 def test_setup_llama_runtime_wheel_hands_the_contained_env_to_the_child(monkeypatch):
-    """setup_llama.py::_install_runtime_wheel launches pip/uv with the contained
+    """setup_llama/runtime_dir.py::_install_runtime_wheel launches pip/uv with the contained
     cache env, same as the plugin-extra installer."""
     from localm import setup_llama
     captured = {}
@@ -214,7 +214,7 @@ def test_runtime_wheel_install_skipped_when_importable(monkeypatch):
 
     The editable install would target site-packages itself, and `-m pip` is
     absent from a uv-created venv, so reaching the installer here is the bug.
-    setup_llama.py names this test; it did not exist until now."""
+    setup_llama/runtime_dir.py names this test; it did not exist until now."""
     from localm import setup_llama
 
     calls = []

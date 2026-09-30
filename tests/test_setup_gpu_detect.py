@@ -259,7 +259,7 @@ def test_darwin_branch_checked_after_vendor_tools_in_source():
 # The "probe failed" fallback (fires only if `python -m localm.hwdetect`
 # itself produced no known backend token) must not recommend "vulkan" for a
 # GPU value of "metal" - localm has no vulkan build for darwin at all (see
-# setup_llama.py's _BACKEND_ASSETS), so that fallback would recommend a
+# setup_llama's _BACKEND_ASSETS), so that fallback would recommend a
 # backend nothing can ever provision on Apple Silicon.
 # ---------------------------------------------------------------------------
 

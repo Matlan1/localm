@@ -149,7 +149,7 @@ def pip_cache_dir() -> Path:
     re-provision would otherwise re-download all of it. The cache lives inside
     the data dir and is removed with it. Delegates to ``config.pip_cache_dir()``
     so the pip-cache location has ONE definition shared with the other
-    localm-driven pip subprocesses (plugins/deps.py, setup_llama.py)."""
+    localm-driven pip subprocesses (plugins/deps.py, setup_llama/)."""
     return config.pip_cache_dir()
 
 

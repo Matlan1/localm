@@ -456,7 +456,7 @@ def test_only_stable_ggml_device_type_constants_are_declared():
         b6000                       CPU 0, GPU 1, ACCEL 2
         b8100 .. b9870 .. master    CPU 0, GPU 1, IGPU 2, ACCEL 3, META 4
 
-    IGPU was inserted AHEAD of ACCEL. setup_llama.py resolves the llama.cpp tag
+    IGPU was inserted AHEAD of ACCEL. setup_llama resolves the llama.cpp tag
     dynamically and a box may hold an older runtime, so ACCEL has no single
     correct value here; declared as 2, it means INTEGRATED GPU on a current
     runtime. This guards its removal: re-adding a constant for any member past
