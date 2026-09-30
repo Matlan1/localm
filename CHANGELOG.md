@@ -146,6 +146,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A change of the system clock no longer lets a second writer into a knowledge
+  collection that is being indexed.** After the clock jumped (a laptop waking, a VM
+  or WSL resyncing its clock), a `localm rag add`, a scheduled re-sync or a memory
+  write could decide that a run still writing the same collection had crashed and
+  write alongside it. A run localm can see is still going now keeps the collection
+  whatever the clock does, and a run it cannot check is only taken over after the
+  waiting command has itself watched it stay silent.
 - **The desktop launcher no longer gets stuck on "Checking models folder".**
   When the models folder scan finished before the launcher window was fully
   up, which happens easily with an empty or small models folder, its result
