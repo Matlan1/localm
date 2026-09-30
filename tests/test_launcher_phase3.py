@@ -180,6 +180,26 @@ def test_serve_expose_still_binds_network(launcher_mod):
     assert "gui" in cmd and "--api-mode" in cmd and "-H" in cmd and "0.0.0.0" in cmd
 
 
+def test_serve_starts_with_no_model(launcher_mod):
+    """API server mode launches with the no-model entry or an empty model box,
+    passing --no-model instead of refusing."""
+    for model in (launcher_mod.NO_MODEL_LABEL, ""):
+        fake = _build_fake(launcher_mod, mode="serve", model=model)
+        cmd = launcher_mod.Launcher._build_command(fake)
+        assert fake.messages == [], (model, fake.messages)
+        assert cmd is not None, model
+        assert cmd[cmd.index("gui"):cmd.index("gui") + 4] == [
+            "gui", "--api-mode", "--no-browser", "--no-model"], cmd
+        assert launcher_mod.NO_MODEL_LABEL not in cmd
+
+
+def test_chat_and_coder_still_need_a_model(launcher_mod):
+    for mode in ("chat", "coder"):
+        fake = _build_fake(launcher_mod, mode=mode, model=launcher_mod.NO_MODEL_LABEL)
+        assert launcher_mod.Launcher._build_command(fake) is None, mode
+        assert fake.messages == [("Pick or import a model first", True)], mode
+
+
 def test_keep_diagnostics_checkbox_passes_flag(launcher_mod):
     """The Privacy-card "Keep diagnostics" checkbox passes --keep-diagnostics for
     gui and serve, and nothing when it is off."""

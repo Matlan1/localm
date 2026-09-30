@@ -7,7 +7,7 @@ This page documents the full localm command-line interface. For a quick introduc
 ```bash
 localm run MODEL [opts]          # chat or single prompt
 localm gui [MODEL] [opts]        # browser GUI (chat + coder + plugin tabs)
-localm serve MODEL [opts]        # OpenAI-compatible server
+localm serve [MODEL] [opts]      # OpenAI-compatible server
 localm benchmark MODEL [opts]    # TTFT and tok/s at increasing prompt sizes
 localm coder [TASK] [opts]       # AI coding agent (coder plugin)
 localm job ... [opts]            # scheduled recurring jobs (jobs plugin)
@@ -72,6 +72,7 @@ Chat, the coder agent, model management, and any enabled plugin tabs in one page
 
 ```bash
 localm serve mymodel
+localm serve --no-model                     # start with nothing loaded; load a model later over the API
 localm serve mymodel --port 8650            # explicit port (must be free, else errors)
 localm serve mymodel --ctx 8192             # context window
 localm serve mymodel --gpu-layers 99        # GPU layers

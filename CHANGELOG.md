@@ -100,12 +100,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   graphical installer cannot be closed while it uninstalls, and
   `setup-gui.bat` / `setup-gui.sh` say when something you asked to delete was
   kept or the uninstall did not finish.
+- **The graphical installer follows your system's dark or light mode.**
+  `setup-gui.bat` / `setup-gui.sh` now open in LocaLM's own dark or light
+  colours to match Windows, macOS or GNOME, including a dark title bar on
+  Windows. Set `LOCALM_THEME=dark` or `LOCALM_THEME=light` to choose one
+  yourself.
 - **Delete past coder sessions and remove projects from the coder's session
   list.** Each past session in the list has a delete button, and each project
   has a remove button that forgets the project and deletes its saved sessions.
   Both ask first. Removing a project deletes only the coder's saved sessions
-  for it; the project folder and your files in it are left alone. A session
-  that is open, or a project with an open session, has to be ended first.
+  for it, including an older one kept in the project's `.localcoder` folder;
+  your project files are left alone. A session that is open, or a project
+  with an open session, has to be ended first.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
@@ -152,6 +158,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **The desktop launcher's API server mode starts without a model selected.**
+  Choosing "(no model - choose later)" used to stop with "Pick or import a
+  model first" even though the server runs fine with nothing loaded. `localm
+  serve` likewise no longer requires a model name: `localm serve --no-model`
+  starts with nothing loaded, and `localm serve` alone picks a registered chat
+  model the same way `localm gui` does.
+- **The coder REPL no longer loses a saved session when a turn fails.** Each
+  new message, and `/resume`, deleted the saved session before the turn ran,
+  so a turn that failed with an error (for example, an unreachable model
+  server) left nothing to resume. The last saved state now stays until a turn
+  finishes or is interrupted. Ctrl-C also no longer reports progress as saved
+  when it could not be written, and in privacy mode no longer says `/resume`
+  is unavailable while a resumed session is still saved.
 - **The desktop launcher no longer gets stuck on "Checking models folder".**
   When the models folder scan finished before the launcher window was fully
   up, which happens easily with an empty or small models folder, its result
@@ -351,7 +370,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A lone vision projector in a folder is no longer attached to a model it was not made for.** A projector beside a model is attached when its name matches the model, or when its name names no model (`mmproj-F16.gguf`, `mmproj-model-f16.gguf`) and no other model in the folder could use it: other quantizations of the same model and its multi-token-prediction head do not count, and a model with a different embedding width is ruled out. A projector named after another model in the folder is left for that model unless that model's embedding width rules it out. `localm pull` applies the same naming rules to the repo's file list, which carries no model headers.
 - **Pulling a vision model no longer attaches a different model's vision projector just because the two repos happen to name it the same.** Several HuggingFace vendors ship a vision-language release with an identically named projector file (`mmproj-model-f16.gguf` and similar); a same-named file already in the models folder from an earlier pull is now confirmed to be the repo currently being pulled (its published sha256, or, when that is not published, a matching GGUF embedding width) before it is reused, matching the check the local `--store` import already applies to a filename collision. A confirmed mismatch downloads the new projector under a numbered name instead of attaching the wrong one or touching the earlier model's own file. Covers both the automatic same-repo projector detection and an explicit `--mmproj`.
 - **Adding a model with `--store move` or `--store copy` no longer leaves its vision projector behind.** Every projector next to the model that may belong to it now comes along, including generically named ones such as `mmproj-F16.gguf`, instead of only one localm recognises by name. A projector another model in the same folder may also use is copied rather than moved, so that model keeps its vision, and the projector the model is paired with is recorded on its entry, so vision still works in a models folder that holds several projectors. When projectors came along but none is attached, a note names them with the `--mmproj` path to use one. When a single file is added, a same-named projector already in the models folder is reused if identical and otherwise stored under a numbered name, instead of failing the import. A projector path recorded on another model's entry now follows the file when it moves. The same applies when a single file is added with `--on-duplicate copy` / `move`, and importing a folder with `--on-duplicate move` no longer registers a projector at the location it was just moved out of.
-- **Grammar-constrained generation no longer floods the console with repetitive "Grammar still awaiting trigger" messages.** Generation wrapped with grammar or lazy-grammar sampling restores `_quiet_stderr` during inference so per-token trigger status lines from the llama.cpp sampler do not spam stderr.
+- **Grammar-constrained generation no longer floods the console with repetitive "Grammar still awaiting trigger" messages.** The llama.cpp sampler's per-token trigger status lines, which also carried the generated text, are kept off the console, while its other warnings and errors during generation still appear there.
 - **Selecting the SYCL llama.cpp backend on an Intel GPU now correctly applies
   a configured Main GPU or GPU split.** The real device numbering on a Vulkan
   or SYCL install lives in that backend's own registry, not in the generic

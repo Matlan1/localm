@@ -4,6 +4,7 @@ parallel tool dispatch. Mixed into Agent (see core.py)."""
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -528,15 +529,25 @@ class _LoopMixin:
         except KeyboardInterrupt:
             if interactive and self._messages:
                 if self.mode == SessionMode.PRIVACY:
-                    print_info(
-                        "(interrupted - privacy mode, no checkpoint saved; "
-                        "/resume is unavailable.)"
-                    )
-                else:
-                    self.save_checkpoint()
+                    if os.path.isfile(self._checkpoint_path):
+                        print_info(
+                            "(interrupted - privacy mode, this turn was not saved; "
+                            "/resume returns to the last saved point.)"
+                        )
+                    else:
+                        print_info(
+                            "(interrupted - privacy mode, no checkpoint saved; "
+                            "/resume is unavailable.)"
+                        )
+                elif self.save_checkpoint():
                     print_info(
                         "(interrupted - progress saved. "
                         "Type /resume to continue or start a new task.)"
+                    )
+                else:
+                    print_warning(
+                        "(interrupted - progress could not be saved; "
+                        "/resume will not return to this point.)"
                     )
             raise
 
