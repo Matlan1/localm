@@ -180,9 +180,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   usual places on Linux, macOS and Windows, not only Chrome at its default
   path; if none is found it lists what it looked for and offers the bundled
   browser. A browser that cannot start for missing system libraries now says
-  so and names them. The setting's help no longer claims the system engine
-  uses your logged-in sessions: both engines start with a fresh, empty
-  profile.
+  so and names them. A download interrupted partway is offered again after
+  the first failed Open instead of reading as installed. The setting's help
+  no longer claims the system engine uses your logged-in sessions: both
+  engines start with a fresh, empty profile.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm
