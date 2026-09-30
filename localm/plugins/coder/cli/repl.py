@@ -166,8 +166,9 @@ def _repl(agent: Agent) -> None:
             continue
 
         try:
-            # Starting a fresh task - discard any stale checkpoint
-            agent.clear_checkpoint()
+            # The saved checkpoint stays until this turn finishes (cleared),
+            # is interrupted (rewritten), or fails (left as it was). See
+            # test_a_failed_turn_after_an_interrupted_one_keeps_the_saved_progress.
             if agent.goal_cmd is not None:
                 before = {f["path"]: f["writes"] for f in agent.changed_files()}
                 try:
@@ -178,7 +179,8 @@ def _repl(agent: Agent) -> None:
             else:
                 agent.chat(user_input)
         except KeyboardInterrupt:
-            # Checkpoint was already saved inside _loop; just swallow here
+            # _loop has already saved the checkpoint (or said why not); swallow
+            # the interrupt here.
             pass
         except CoderAuthError:
             # Must raise here to bypass generic Exception block and bubble up to main
@@ -296,7 +298,6 @@ def _handle_command(raw: str, agent: Agent) -> bool:
                 print_info("No interrupted session found.")
         else:
             agent.resume_checkpoint(ckpt)
-            agent.clear_checkpoint()
             ts    = ckpt.get("interrupted_at", "unknown time")
             turns = ckpt.get("turns", "?")
             title = ckpt.get("title")
