@@ -157,6 +157,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   serve` likewise no longer requires a model name: `localm serve --no-model`
   starts with nothing loaded, and `localm serve` alone picks a registered chat
   model the same way `localm gui` does.
+- **The coder REPL no longer loses a saved session when a turn fails.** Each
+  new message, and `/resume`, deleted the saved session before the turn ran,
+  so a turn that failed with an error (for example, an unreachable model
+  server) left nothing to resume. The last saved state now stays until a turn
+  finishes or is interrupted. Ctrl-C also no longer reports progress as saved
+  when it could not be written, and in privacy mode no longer says `/resume`
+  is unavailable while a resumed session is still saved.
 - **The desktop launcher no longer gets stuck on "Checking models folder".**
   When the models folder scan finished before the launcher window was fully
   up, which happens easily with an empty or small models folder, its result
