@@ -1370,10 +1370,14 @@ function _offerModelDownload(missingModel, log, plugin) {
       resolve(value);
     };
     openModal(t("common.modelDownload.title", { filename }), (body) => {
-      body.appendChild(el("p", "",
-        t("common.modelDownload.body", { filename, size: fmtBytes(source.size_bytes) })));
+      body.appendChild(el("p", "", source.size_bytes
+        ? t("common.modelDownload.body", { filename, size: fmtBytes(source.size_bytes) })
+        : t("common.modelDownload.bodyNoSize", { filename })));
       body.appendChild(el("p", "",
         t("common.modelDownload.source", { repo: source.repo, file: source.file })));
+      if (source.origin === "huggingface") {
+        body.appendChild(el("p", "sub", t("common.modelDownload.foundOnHf")));
+      }
       const row = el("div", "actions");
       const skip = el("button", "btn-secondary", t("common.modelDownload.notNow"));
       skip.onclick = () => finish(true);
@@ -1383,7 +1387,11 @@ function _offerModelDownload(missingModel, log, plugin) {
         try {
           const r = await fetch("/api/models/pull-comfy-source", {
             method: "POST", headers: authHeaders(),
-            body: JSON.stringify({ filename, plugin: plugin || null }),
+            body: JSON.stringify({
+              filename, plugin: plugin || null,
+              class_type: missingModel.class_type || null,
+              input_name: missingModel.input_name || null,
+            }),
           });
           const data = await r.json();
           if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -1416,20 +1424,94 @@ function _offerModelDownload(missingModel, log, plugin) {
   });
 }
 
-/** Report ONE missing model that has NO curated download source: an honest,
- *  distinct state instead of vanishing silently behind checkModelsBeforeGenerate's
- *  curated-only filter. Generic over class_type/input_name - not LoRA-specific -
- *  so the same message covers any future non-curated model type (a checkpoint or
- *  VAE outside the pinned few also hits this, not just a LoRA). Never blocks:
- *  the real generate call's own preflight_models() gate remains authoritative. */
-function _reportUncuratedMiss(missingModel, log) {
-  const { filename, class_type, input_name } = missingModel;
-  const msg = t("common.modelDownload.uncuratedMissing", { filename, class_type, input_name });
+/** Report ONE missing model localm cannot download: a toast and a log line
+ *  naming the file and the workflow input that needs it. *status* is the
+ *  source lookup's outcome ("not_found", "offline", "failed") when a search
+ *  ran; otherwise missingModel.reason ("format", "folder", "name") picks the
+ *  message. Never blocks: the real generate call's own preflight_models()
+ *  gate remains authoritative. */
+function _reportUncuratedMiss(missingModel, log, status) {
+  const { filename, class_type, input_name, reason } = missingModel;
+  const key = {
+    format: "common.modelDownload.unsupportedFormat",
+    folder: "common.modelDownload.unknownFolder",
+    name: "common.modelDownload.genericName",
+    not_found: "common.modelDownload.notFoundOnHf",
+    offline: "common.modelDownload.searchOffline",
+    failed: "common.modelDownload.searchFailed",
+  }[status || reason] || "common.modelDownload.uncuratedMissing";
+  const msg = t(key, { filename, class_type, input_name });
   toast(msg, true);
   if (log) {
     log.style.display = "block";
     log.textContent += msg + "\n";
   }
+}
+
+/** Offer to search HuggingFace for ONE missing model that has no known source
+ *  yet (preflight said it is "searchable"). Nothing is sent until the user
+ *  clicks Search. A found file is then offered through _offerModelDownload,
+ *  which shows its repository and asks again before downloading; any other
+ *  outcome is reported through _reportUncuratedMiss. Resolves like
+ *  _offerModelDownload: true to proceed, false only when a requested download
+ *  failed. */
+function _offerModelSearch(missingModel, log, plugin) {
+  const { filename, class_type, input_name } = missingModel;
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const close = () => {
+      if (watch) clearInterval(watch);
+      watch = null;
+      $("modal").style.display = "none";
+    };
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      close();
+      resolve(value);
+    };
+    openModal(t("common.modelDownload.title", { filename }), (body) => {
+      body.appendChild(el("p", "",
+        t("common.modelDownload.searchBody", { filename, class_type, input_name })));
+      const row = el("div", "actions");
+      const skip = el("button", "btn-secondary", t("common.modelDownload.notNow"));
+      skip.onclick = () => finish(true);
+      const search = el("button", "btn-secondary", t("common.modelDownload.search"));
+      search.onclick = async () => {
+        search.disabled = true; skip.disabled = true;
+        search.textContent = t("common.modelDownload.searching");
+        let data;
+        try {
+          const r = await fetch("/api/models/comfy-source/lookup", {
+            method: "POST", headers: authHeaders(),
+            body: JSON.stringify({ filename, class_type, input_name, plugin: plugin || null }),
+          });
+          data = await r.json();
+          if (!r.ok) throw new Error(data.detail || r.statusText);
+        } catch (e) {
+          toast(t("common.modelDownload.searchError", { message: e.message }), true);
+          finish(true);
+          return;
+        }
+        if (data.status === "found" && data.source) {
+          settled = true;
+          close();
+          resolve(await _offerModelDownload(
+            { ...missingModel, source: data.source, dest_dir: data.dest_dir }, log, plugin));
+          return;
+        }
+        _reportUncuratedMiss({ ...missingModel, reason: data.reason }, log, data.status);
+        finish(true);
+      };
+      row.appendChild(skip);
+      row.appendChild(search);
+      body.appendChild(row);
+    });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(true);
+    }, 200);
+  });
 }
 
 /** Report that the pre-check itself could not run for *kind* (the server's
@@ -1447,11 +1529,12 @@ function _reportPreflightUnavailable(kind, log) {
 }
 
 /** Pre-generate model-existence check: calls the read-only preflight endpoint
- *  for *kind* ("image" | "video" | "music"). A missing model WITH a curated
- *  download source is offered via _offerModelDownload; one WITHOUT gets an
- *  honest _reportUncuratedMiss instead of disappearing - the user learns what's
- *  missing and where to put it before submitting, not only from the real
- *  generate call's later preflight_models() failure. When the server reports
+ *  for *kind* ("image" | "video" | "music"). A missing model with a known
+ *  download source is offered via _offerModelDownload; one the server can
+ *  search for is offered via _offerModelSearch; any other gets
+ *  _reportUncuratedMiss - the user learns what's missing and where to put it
+ *  before submitting, not only from the real generate call's later
+ *  preflight_models() failure. When the server reports
  *  status "unavailable" (the check itself could not run), that is reported
  *  too via _reportPreflightUnavailable rather than read as "nothing missing".
  *  Always resolves true (proceed) - no path here blocks generation on its own
@@ -1475,6 +1558,7 @@ export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
   const missing = (data && data.missing) || [];
   for (const m of missing) {
     if (m.source) await _offerModelDownload(m, log, kind);
+    else if (m.searchable) await _offerModelSearch(m, log, kind);
     else _reportUncuratedMiss(m, log);
   }
   return true;

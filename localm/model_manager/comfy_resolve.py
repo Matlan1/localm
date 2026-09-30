@@ -10,8 +10,8 @@ A HuggingFace match is offered only for a file whose format cannot run code
 on load (``SAFE_EXTENSIONS``), whose workflow slot maps to a known ComfyUI
 models folder (``comfy_slot_folder``), and whose name is specific enough to
 identify one model (``is_specific_model_name``). Gated, private and disabled
-repositories are skipped, and among the rest the most-downloaded repository
-wins.
+repositories are skipped. A match in a ``COMFY_ORG`` repository wins; among
+the rest the most-downloaded repository wins.
 """
 
 from __future__ import annotations
@@ -51,8 +51,16 @@ _GENERIC_STEMS = frozenset({
 })
 _MIN_SPECIFIC_STEM = 5
 
+COMFY_ORG = "Comfy-Org"
+_COMFY_ORG_LIMIT = 100
+_COMFY_ORG_TTL = 1800.0
 _SEARCH_LIMIT = 20
-_MAX_QUERIES = 4
+_MAX_PREFIX_QUERIES = 2
+# Most HuggingFace requests one lookup makes: the COMFY_ORG listing, every
+# query from _search_queries, and the size read.
+MAX_HF_REQUESTS = 1 + (1 + _MAX_PREFIX_QUERIES + 1) + 1
+_MIN_TOKEN_QUERY = 5
+_EXPAND = ["siblings", "downloads", "gated", "private", "disabled"]
 _REPO_ID_RE = re.compile(r"\A[\w.-]+/[\w.-]+\Z")
 _PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 _SEPARATOR_RE = re.compile(r"[\s_.\-]+")
@@ -83,6 +91,7 @@ _FAILED_TTL = 60.0
 _CACHE_MAX = 128
 _cache: dict[str, tuple[float, "ComfyLookup"]] = {}
 _cache_lock = threading.Lock()
+_org_rows: Optional[tuple[float, list]] = None
 
 
 @dataclass(frozen=True)
@@ -153,17 +162,21 @@ def is_specific_model_name(filename: str) -> bool:
 
 
 def _search_queries(filename: str) -> list[str]:
-    """HuggingFace search strings for *filename*: its full stem, then the stem
-    cut back at each separator, longest first, at most ``_MAX_QUERIES``."""
-    stem = _stem(filename)
-    cuts = [m.start() for m in _SEPARATOR_RE.finditer(stem)]
+    """HuggingFace search strings for *filename*, in order: its full stem; the
+    ``_MAX_PREFIX_QUERIES`` shortest leading parts of the stem that span at
+    least two words and ``_MIN_TOKEN_QUERY`` characters; its longest word when
+    that has at least ``_MIN_TOKEN_QUERY`` characters. Duplicates (ignoring
+    case) are dropped."""
+    stem = _stem(filename).strip(" _.-")
+    prefixes = [stem[:m.start()] for m in _SEPARATOR_RE.finditer(stem)]
+    multi = [p for p in prefixes
+             if len(p) >= _MIN_TOKEN_QUERY and len(_SEPARATOR_RE.split(p)) >= 2]
+    words = sorted((w for w in _SEPARATOR_RE.split(stem) if w), key=len, reverse=True)
+    longest = [words[0]] if words and len(words[0]) >= _MIN_TOKEN_QUERY else []
     out: list[str] = []
-    for candidate in [stem] + [stem[:i] for i in reversed(cuts)]:
-        candidate = candidate.strip(" _.-")
+    for candidate in [stem] + multi[:_MAX_PREFIX_QUERIES] + longest:
         if len(candidate) >= 3 and candidate.lower() not in (o.lower() for o in out):
             out.append(candidate)
-        if len(out) >= _MAX_QUERIES:
-            break
     return out
 
 
@@ -195,6 +208,15 @@ def _check_request(filename: str, class_type: str, input_name: str
             LOOKUP_UNSUPPORTED, reason=REASON_NAME,
             detail="The file name is too generic to identify one model.")
     return folder, None
+
+
+def search_refusal(filename: str, class_type: str, input_name: str
+                   ) -> Optional[ComfyLookup]:
+    """The ``LOOKUP_UNSUPPORTED`` outcome ``lookup_comfy_download`` gives for
+    this slot without searching, or None when it would search. Never touches
+    the network."""
+    return _check_request((filename or "").strip(), class_type or "",
+                          input_name or "")[1]
 
 
 def curated_comfy_download(filename: str) -> Optional[ComfyDownload]:
@@ -235,9 +257,11 @@ def _cache_put(key: str, lookup: ComfyLookup) -> None:
 
 
 def clear_lookup_cache() -> None:
-    """Forget every cached HuggingFace lookup."""
+    """Forget every cached HuggingFace lookup and repository listing."""
+    global _org_rows
     with _cache_lock:
         _cache.clear()
+        _org_rows = None
 
 
 def cached_comfy_download(filename: str, class_type: str,
@@ -251,35 +275,68 @@ def cached_comfy_download(filename: str, class_type: str,
     return lookup.download if lookup is not None else None
 
 
-def _hf_candidates(filename: str, token: Optional[str]) -> list[tuple[int, str, str]]:
-    """``(downloads, repo_id, path)`` for every public, ungated HuggingFace
-    model repository file named exactly *filename* found by the searches from
-    ``_search_queries``. Raises ``discover.DiscoverError``."""
+def _comfy_org_rows(token: Optional[str]) -> list:
+    """The ``COMFY_ORG`` repositories with their file lists, most downloaded
+    first, fetched at most once per ``_COMFY_ORG_TTL`` seconds. Raises
+    ``discover.DiscoverError``."""
+    global _org_rows
     from localm import discover
-    seen: dict[tuple[str, str], int] = {}
-    for query in _search_queries(filename):
-        rows = discover._get(f"{discover.HF_API}/api/models", {
-            "search": query, "limit": _SEARCH_LIMIT, "sort": "downloads",
-            "direction": "-1",
-            "expand[]": ["siblings", "downloads", "gated", "private", "disabled"],
-        }, token=token)
-        if not isinstance(rows, list):
+    with _cache_lock:
+        if _org_rows is not None and time.monotonic() < _org_rows[0]:
+            return _org_rows[1]
+    rows = discover._get(f"{discover.HF_API}/api/models", {
+        "author": COMFY_ORG, "limit": _COMFY_ORG_LIMIT, "sort": "downloads",
+        "direction": "-1", "expand[]": _EXPAND,
+    }, token=token)
+    rows = rows if isinstance(rows, list) else []
+    with _cache_lock:
+        _org_rows = (time.monotonic() + _COMFY_ORG_TTL, rows)
+    return rows
+
+
+def _matches(rows: list, filename: str) -> list[tuple[str, str, int]]:
+    """``(repo_id, path, downloads)`` for every file named exactly *filename*
+    in a public, ungated, enabled repository among *rows*."""
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            repo = row.get("id")
-            if (not isinstance(repo, str) or not _REPO_ID_RE.match(repo)
-                    or row.get("gated") or row.get("private") or row.get("disabled")):
-                continue
-            for sib in row.get("siblings") or []:
-                path = sib.get("rfilename") if isinstance(sib, dict) else None
-                if (isinstance(path, str) and path.rsplit("/", 1)[-1] == filename
-                        and _safe_repo_path(path)):
-                    downloads = row.get("downloads")
-                    seen[(repo, path)] = downloads if isinstance(downloads, int) else 0
-    return sorted(((d, r, p) for (r, p), d in seen.items()),
-                  key=lambda c: (-c[0], c[2].count("/"), c[1], c[2]))
+        repo = row.get("id")
+        if (not isinstance(repo, str) or not _REPO_ID_RE.match(repo)
+                or row.get("gated") or row.get("private") or row.get("disabled")):
+            continue
+        downloads = row.get("downloads")
+        downloads = downloads if isinstance(downloads, int) else 0
+        for sib in row.get("siblings") or []:
+            path = sib.get("rfilename") if isinstance(sib, dict) else None
+            if (isinstance(path, str) and path.rsplit("/", 1)[-1] == filename
+                    and _safe_repo_path(path)):
+                out.append((repo, path, downloads))
+    return out
+
+
+def _rank(match: tuple[str, str, int]) -> tuple:
+    repo, path, downloads = match
+    return (repo.split("/", 1)[0] != COMFY_ORG, -downloads, path.count("/"), repo, path)
+
+
+def _hf_candidates(filename: str, token: Optional[str]) -> list[tuple[str, str, int]]:
+    """``(repo_id, path, downloads)`` for every public, ungated HuggingFace
+    model repository file named exactly *filename*, best first (``_rank``).
+    Looks in the ``COMFY_ORG`` repositories first and stops there on a match;
+    otherwise runs the searches from ``_search_queries``. Raises
+    ``discover.DiscoverError``."""
+    from localm import discover
+    found = _matches(_comfy_org_rows(token), filename)
+    if not found:
+        for query in _search_queries(filename):
+            rows = discover._get(f"{discover.HF_API}/api/models", {
+                "search": query, "limit": _SEARCH_LIMIT, "sort": "downloads",
+                "direction": "-1", "expand[]": _EXPAND,
+            }, token=token)
+            found.extend(_matches(rows if isinstance(rows, list) else [], filename))
+    unique = {(r, p): (r, p, d) for r, p, d in found}
+    return sorted(unique.values(), key=_rank)
 
 
 def _hf_file_size(repo: str, path: str, token: Optional[str]) -> Optional[int]:
@@ -344,7 +401,7 @@ def lookup_comfy_download(filename: str, class_type: str, input_name: str
             detail="No public HuggingFace repository has a file with this name.")
         _cache_put(key, lookup)
         return lookup
-    _downloads, repo, path = candidates[0]
+    repo, path, _downloads = candidates[0]
     download = ComfyDownload(f"{repo}:{path}", folder_model_type(folder), folder,
                              _hf_file_size(repo, path, token), ORIGIN_HUGGINGFACE)
     lookup = ComfyLookup(LOOKUP_FOUND, download)

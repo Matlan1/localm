@@ -78,6 +78,30 @@ export const I18N_EN = {
   "common.imageProxy.unreachable": "This localm could not reach it.",
   "common.modal.cancel": "Cancel",
   "common.modal.ok": "OK",
+  "common.modelDownload.bodyNoSize":
+    "This workflow needs '{filename}', which isn't installed.",
+  "common.modelDownload.foundOnHf":
+    "Found on Hugging Face by its file name. It is not from localm's own catalog, so check the repository before you download it.",
+  "common.modelDownload.genericName":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). Its name is too generic for localm to find the right model automatically. Add it to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.notFoundOnHf":
+    "'{filename}' is missing (needed by {class_type}.{input_name}) and no public Hugging Face repository has a file with exactly that name. Add it to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.search":
+    "Search Hugging Face",
+  "common.modelDownload.searchBody":
+    "This workflow needs '{filename}' (for {class_type}.{input_name}), which isn't installed and isn't in localm's catalog. localm can search Hugging Face for a file with exactly this name.",
+  "common.modelDownload.searchError":
+    "Could not search for the model: {message}",
+  "common.modelDownload.searchFailed":
+    "Could not search Hugging Face for '{filename}'. Check your connection and try again, or add the file to your ComfyUI installation's matching models folder.",
+  "common.modelDownload.searchOffline":
+    "Could not search for '{filename}': network access is off. Turn it on, or allow downloads only, in Settings → Network.",
+  "common.modelDownload.searching":
+    "Searching…",
+  "common.modelDownload.unknownFolder":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). localm does not know which ComfyUI models folder this node reads from. Add the file to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.unsupportedFormat":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). localm downloads only .safetensors and .gguf model files automatically. Add this file to your ComfyUI installation's matching models folder, then try again.",
   "common.modelDownload.body": "This workflow needs '{filename}' ({size}), which isn't installed.",
   "common.modelDownload.download": "Download",
   "common.modelDownload.failed": "Download failed: {message}",

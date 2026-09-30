@@ -430,14 +430,28 @@ class MediaPreflightRequest(BaseModel):
 
 
 class ComfyPullRequest(BaseModel):
-    # Only a filename the client saw in a preceding preflight response, never a
-    # client-supplied repo or path. The server re-resolves everything else from
-    # COMFY_MODEL_SOURCES itself.
+    # Only a filename the client saw in a preceding preflight or lookup response,
+    # never a client-supplied repo or path. The server re-resolves the source
+    # itself (comfy_resolve.lookup_comfy_download).
     filename: str
     # Which plugin's per-plugin comfy.workdir to prefer when resolving the download
     # destination. A selector into the server's own per-plugin config, never a path.
     # Validated against the known plugin set server-side; an unrecognized value is
     # treated as None and falls back to the global key.
+    plugin: str | None = None
+    # The workflow input the file is for, as the preflight response named it. Only
+    # selects a ComfyUI models folder from comfy_resolve's own table.
+    class_type: str | None = None
+    input_name: str | None = None
+
+
+class ComfySourceLookupRequest(BaseModel):
+    # A missing workflow model file and the workflow input that needs it, as a
+    # preflight response named them.
+    filename: str
+    class_type: str
+    input_name: str
+    # Same selector as ComfyPullRequest.plugin.
     plugin: str | None = None
 
 
