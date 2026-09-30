@@ -379,8 +379,10 @@ def main(
                     else:
                         print_warning("No interrupted session found to resume.")
                 else:
+                    # The checkpoint stays on disk until the next turn clears or
+                    # rewrites it. See
+                    # test_leaving_the_repl_right_after_resume_keeps_the_session.
                     agent.resume_checkpoint(ckpt)
-                    agent.clear_checkpoint()
                     ts = ckpt.get("interrupted_at", "unknown time")
                     turns = ckpt.get("turns", "?")
                     title = ckpt.get("title")
