@@ -7,6 +7,7 @@ from localm import instances
 
 import contextlib
 import errno
+import hashlib
 import json
 import os
 import re
@@ -2304,6 +2305,18 @@ def _pull_url(
         return False
 
 
+def _url_part_identity(url: str, expected_sha256: Optional[str],
+                       total: int) -> dict:
+    """The record a direct-URL ``.part`` is resumed against: a SHA256 of *url*
+    as the caller gave it (the record never holds the URL itself), the expected
+    SHA256 lower-cased, and the size the size HEAD reported (None when it
+    reported none)."""
+    return {"source": "url",
+            "url_sha256": hashlib.sha256(url.encode("utf-8")).hexdigest(),
+            "sha256": expected_sha256.lower() if expected_sha256 else None,
+            "size": total or None}
+
+
 def _pull_url_locked(
     url: str,
     name: str,
@@ -2316,6 +2329,13 @@ def _pull_url_locked(
 
     Split out so the lock can wrap every exit path through a single ``with``
     instead of a ``try/finally`` wrapped around the whole download.
+
+    The download goes to ``<filename>.part``; ``<filename>.part.json`` beside it
+    records which URL, digest and size that partial holds (see
+    :func:`_url_part_identity`). A partial is appended to only when its record
+    matches this pull, and is truncated otherwise. A transfer that stops early
+    keeps both for the next pull; the record is removed once the partial is
+    moved into place or discarded.
     """
     import requests
     from localm.netpolicy import NetworkPolicyError
@@ -2367,9 +2387,6 @@ def _pull_url_locked(
 
     _mm.ensure_dirs()
 
-    # Determine how much we already have (from a prior interrupted download)
-    already_have = part_file.stat().st_size if part_file.exists() else 0
-
     # Resolve the redirect chain with each hop validated, then use the final
     # CHECKED URL for both the size HEAD and the streaming GET with redirects
     # OFF, so no unchecked hop can bounce the download into an internal host.
@@ -2397,6 +2414,11 @@ def _pull_url_locked(
         logger.debug("size HEAD failed for %s (non-fatal, size unknown): %s", dl_url, e)
         total = 0
 
+    # Bytes already on disk from an earlier pull of this same URL.
+    identity = _url_part_identity(url, expected_sha256, total)
+    already_have = (part_file.stat().st_size
+                    if _part_is_resumable(part_file, identity) else 0)
+
     remaining = max(0, total - already_have)
     if not _mm._check_disk_space(_mm.MODELS_DIR, remaining):
         return False
@@ -2423,10 +2445,7 @@ def _pull_url_locked(
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
-            try:
-                part_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                          timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):
@@ -2459,9 +2478,13 @@ def _pull_url_locked(
     # already_have and report a stuck 100% for the whole transfer.
     total_display = (already_have + content_length) if content_length else None
 
+    # Opened, and truncated on a restart, before either progress reporter below
+    # reads the partial's size. See
+    # test_a_restart_over_another_urls_partial_reports_progress_from_zero.
+    f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
+
     def _write_chunks(on_chunk=None):
-        mode = "ab" if already_have else "wb"
-        with open(part_file, mode) as f:
+        with f:
             for chunk in r.iter_content(65536):
                 f.write(chunk)
                 if on_chunk is not None:
@@ -2494,6 +2517,7 @@ def _pull_url_locked(
 
     # Atomically rename on successful completion
     part_file.rename(dest)
+    _unlink_quiet(_part_record_path(part_file))
 
     # SHA256 verification. `actual` is a hashlib hexdigest; expected_sha256 is
     # the raw --sha256 value, with no charset validation upstream. Both are
