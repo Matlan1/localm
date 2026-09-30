@@ -12,6 +12,7 @@ call back before that check.
 """
 
 import threading
+import time
 
 import pytest
 
@@ -20,7 +21,7 @@ from localm.browser.session import BrowserUnavailableError
 OWNER = "parallel-open-a"
 OTHER = "parallel-open-b"
 WAIT = 10.0
-GRACE = 0.5
+GRACE = 2.0
 URL_A = "https://example.com/a"
 URL_B = "https://example.com/b"
 
@@ -65,6 +66,8 @@ class _Fleet:
         self.failure = None
         self.checked = set()
         self.both_checked = threading.Event()
+        self.hold_late_checks = False
+        self._first_checker = None
         self._gates = {}
         self._entered = {}
         self._lock = threading.Lock()
@@ -89,6 +92,21 @@ class _Fleet:
             if len(self.checked) >= 2:
                 self.both_checked.set()
 
+    def hold_after_check(self, ident, sid):
+        """With hold_late_checks on, park every caller but the first right after its
+        registry check found no browser, until a browser is registered under sid."""
+        from localm.browser import session as bsession
+        if not self.hold_late_checks:
+            return
+        with self._lock:
+            if self._first_checker is None:
+                self._first_checker = ident
+            if ident == self._first_checker:
+                return
+        deadline = time.monotonic() + WAIT
+        while bsession.get(sid) is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+
     def open_every_gate(self):
         with self._lock:
             gates = list(self._gates.values())
@@ -111,6 +129,8 @@ def fleet(monkeypatch):
         live = real_existing(session)
         if live is None:
             fleet.found_none(threading.get_ident())
+            fleet.hold_after_check(threading.get_ident(),
+                                   "coder-" + session.job_owner)
         return live
 
     monkeypatch.setattr(bt, "_existing", existing)
@@ -163,6 +183,22 @@ class TestCallsMadeTogetherShareOneBrowser:
         assert bsession.get(sid) is fleet.built[0]
         assert not [b for b in fleet.built if b is not bsession.get(sid)
                     and not b.stopped], "a browser was left running unregistered"
+        assert all(getattr(r, "ok", False) for r in results), [
+            getattr(r, "output", r) for r in results]
+        assert sorted(fleet.built[0].visited) == sorted([URL_A, URL_B])
+
+    def test_a_call_parked_after_its_registry_check_still_shares_the_browser(
+            self, tmp_path, fleet):
+        from localm.browser import session as bsession
+        sid = "coder-" + OWNER
+        fleet.hold_late_checks = True
+        threads, results = _navigate_from_threads(tmp_path, OWNER, [URL_A, URL_B])
+        fleet.both_checked.wait(GRACE)
+        fleet.gate(sid).set()
+        _join(threads)
+        assert len(fleet.built) == 1, (
+            "%d browsers were started for one coder session" % len(fleet.built))
+        assert bsession.get(sid) is fleet.built[0]
         assert all(getattr(r, "ok", False) for r in results), [
             getattr(r, "output", r) for r in results]
         assert sorted(fleet.built[0].visited) == sorted([URL_A, URL_B])
