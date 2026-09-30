@@ -59,9 +59,9 @@ MODES = [
 PRIVACY_MODES = ["privacy", "log", "full"]
 USE_GLOBAL = "(use global)"
 
-# Dropdown sentinel: open the Web GUI with nothing loaded (pick a model in the
-# GUI). Only valid for the Web GUI mode; chat/serve/coder need a real model.
-NO_MODEL_LABEL = "(no model - choose later in the GUI)"
+# Dropdown sentinel: start the Web GUI or the API server with nothing loaded.
+# Chat and coder modes need a real model.
+NO_MODEL_LABEL = "(no model - choose later)"
 
 #: Milliseconds between checks for a background task's result.
 _POLL_MS = 100
@@ -958,10 +958,10 @@ class Launcher(tk.Tk):
     def _build_command(self) -> list | None:
         mode = self.mode.get()
         model = self.model.get().strip()
-        # The Web GUI can open with no model (you add or switch on the Models
-        # page); chat / serve / coder need a real model to run.
+        # The Web GUI and the API server can start with no model; chat and
+        # coder need a real model to run.
         no_model = (not model) or (model == NO_MODEL_LABEL)
-        if no_model and mode != "gui":
+        if no_model and mode not in ("gui", "serve"):
             self.status_msg("Pick or import a model first", error=True)
             return None
 

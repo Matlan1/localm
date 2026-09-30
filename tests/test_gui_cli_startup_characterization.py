@@ -237,9 +237,9 @@ class _Startup:
 
     # -- the run ------------------------------------------------------- #
 
-    def invoke(self, *args):
+    def invoke(self, *args, command=None):
         self._before = set(threading.enumerate())
-        result = CliRunner().invoke(guicli.main, list(args))
+        result = CliRunner().invoke(command or guicli.main, list(args))
         for t in self._new_threads():
             t.join(10.0)
         self.leaked = [t.name for t in self._new_threads() if t.is_alive()]
@@ -606,6 +606,17 @@ class TestServeAndSurfaces:
         assert _banner(r.flat, "localm API server", f"http://127.0.0.1:{port}/")
         assert f"API base: http://127.0.0.1:{port}/" in r.flat
         assert "model: none yet - add one with `localm pull <name>`" in r.flat
+
+    def test_serve_starts_the_api_server_with_no_model(self, gui):
+        r = gui.invoke("serve", "--no-model", command=localm.cli.main)
+        assert r.exit_code == 0, r.output
+        port = gui.serve["port"]
+        assert gui.gui_mounts == []
+        [entry] = gui.own_entries(gui.serve["entries"])
+        assert entry["mode"] == "api"
+        assert _banner(r.flat, "localm API server", f"http://127.0.0.1:{port}/")
+        assert "Starting with no model loaded." in r.flat
+        assert "Missing argument" not in r.flat
 
     def test_no_browser_opens_no_surface_and_records_none(self, gui):
         gui.native = True

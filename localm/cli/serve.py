@@ -12,7 +12,7 @@ from ._core import (
 # ------------------------------------------------------------------ #
 
 @main.command()
-@click.argument("model", shell_complete=_complete_model_name)
+@click.argument("model", default="", required=False, shell_complete=_complete_model_name)
 @click.option("-H", "--host",        default=None,
               help="Bind address (0.0.0.0 for LAN) [default: config "
                    "'bind_host' (127.0.0.1)].")
@@ -21,6 +21,8 @@ from ._core import (
                    "explicit --port must be free or startup errors].")
 @click.option("-c", "--ctx",         default=None,        type=int)
 @click.option("-g", "--gpu-layers",  default=None,        type=click.IntRange(0, 1000))
+@click.option("--no-model", is_flag=True,
+              help="Start with no model loaded (load one later over the API).")
 @click.option("--mmproj",            default=None)
 @click.option("--device",            default=None)
 @click.option("--no-tls", is_flag=True,
@@ -54,7 +56,7 @@ from ._core import (
               help="Session persistence [default: config 'mode', else privacy]. "
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
-def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
+def serve(model, host, port, ctx, gpu_layers, no_model, mmproj, device, no_tls, tls_cert,
           tls_key, insecure, project, force_new, isolated, debug, mode):
     """Start an OpenAI-compatible inference server.
 
@@ -77,7 +79,7 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
         ctx=ctx,
         gpu_layers=gpu_layers,
         no_browser=True,
-        no_model=False,
+        no_model=no_model,
         pull_spec=None,
         debug=debug,
         mode=mode,
