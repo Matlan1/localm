@@ -2729,6 +2729,72 @@ def _pull_civitai_file_locked(
     return True
 
 
+def _civitai_owners(dest: Path) -> "list[tuple[str, str]]":
+    """``(name, source)`` of every registry entry whose path is *dest*."""
+    reg = _mm.load_registry()
+    return [(n, str(reg[n].get("source") or ""))
+            for n in find_aliases_by_path(dest, reg)]
+
+
+def _civitai_registered_as(owners: "list[tuple[str, str]]") -> str:
+    """*owners* as ``'name' (source)``, escaped for console markup."""
+    from rich.markup import escape
+    return ", ".join(f"'{escape(n)}' ({escape(s or 'no source recorded')})"
+                     for n, s in owners)
+
+
+def _civitai_next_step(others: "list[tuple[str, str]]") -> str:
+    """How to replace a file that no registry entry points at (empty *others*)
+    or that the entries *others*, recorded from another source, point at."""
+    from rich.markup import escape
+    if not others:
+        return "Pull again with --redownload to replace it."
+    removals = " and ".join(f"localm rm {escape(n)}" for n, _ in others)
+    return (f"Remove it from the registry first ({removals}), then pull again "
+            "with --redownload to replace the file.")
+
+
+def _civitai_unproven_reason(dest: Path, resolved: Any,
+                             owners: "list[tuple[str, str]]") -> Optional[str]:
+    """Why the file at *dest* cannot be taken as *resolved*'s when there is no
+    SHA256 to check it against, or None when the registry records it as that
+    version and its size equals the size CivitAI lists."""
+    from rich.markup import escape
+    if not any(source == resolved.source_tag for _, source in owners):
+        if owners:
+            return (f"it is registered as {_civitai_registered_as(owners)}, "
+                    f"not as {escape(resolved.source_tag)}")
+        return ("it is not in the model registry, so nothing shows which "
+                "version it belongs to")
+    if resolved.size_bytes:
+        try:
+            on_disk = dest.stat().st_size
+        except OSError as e:
+            return f"its size could not be read ({escape(str(e))})"
+        if on_disk != resolved.size_bytes:
+            return (f"it is {on_disk} bytes and CivitAI lists "
+                    f"{resolved.size_bytes}")
+    return None
+
+
+def _civitai_refuse_replacing(dest: Path, resolved: Any) -> bool:
+    """True, after saying why, when *dest* exists and a registry entry recorded
+    from another source than *resolved*'s points at it, so that replacing it
+    would change what that entry loads."""
+    from rich.markup import escape
+    if not dest.exists():
+        return False
+    others = [o for o in _civitai_owners(dest) if o[1] != resolved.source_tag]
+    if not others:
+        return False
+    console.print(
+        f"[red]Refusing to replace {escape(str(dest))}:[/red] it is registered "
+        f"as {_civitai_registered_as(others)}, and {escape(resolved.source_tag)} "
+        "would change what that entry loads. Nothing was changed.")
+    console.print(f"[dim]{_civitai_next_step(others)}[/dim]")
+    return True
+
+
 def _pull_civitai_file(
     version_id: str,
     name: Optional[str],
@@ -2756,9 +2822,14 @@ def _pull_civitai_file(
     fetched through the same per-hop SSRF-guarded path _pull_url uses
     (_ssrf_resolve_final_url), never a hardcoded-trusted-host shortcut.
 
-    A file already at the destination is checked again after the part lock on
-    its name is taken; the transfer itself runs in
-    :func:`_pull_civitai_file_locked` under that lock.
+    A file already at the destination is used as this version's only when its
+    SHA256 matches (CivitAI's, else *expected_sha256*) or, with no SHA256 to
+    compare, when the registry records it as this version and its size equals
+    the size CivitAI lists; any other file is left as it is and the pull is
+    refused. *redownload* replaces the file, but is refused while a registry
+    entry recorded from another source points at it. Both checks are repeated
+    after the part lock on the file's name is taken; the transfer itself runs
+    in :func:`_pull_civitai_file_locked` under that lock.
     """
     from rich.markup import escape
 
@@ -2805,6 +2876,22 @@ def _pull_civitai_file(
     model_name = _sanitize_name(name or Path(filename).stem)
 
     def _already_here() -> bool:
+        if not verify_digest:
+            owners = _civitai_owners(dest)
+            reason = _civitai_unproven_reason(dest, resolved, owners)
+            if reason:
+                others = [o for o in owners if o[1] != resolved.source_tag]
+                console.print(
+                    f"[red]Refusing to use the file already at "
+                    f"{escape(str(dest))} as {escape(resolved.source_tag)}:"
+                    f"[/red] {reason}. CivitAI lists no SHA256 to check it "
+                    "against, so it was left as it is.")
+                step = _civitai_next_step(others)
+                if not others:
+                    step += (" Or pass --sha256 with the digest CivitAI shows "
+                             "for this file to check the one already here.")
+                console.print(f"[dim]{step}[/dim]")
+                return False
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         if verify_digest:
             on_disk = _verify_digest(dest, purpose="to check the file already here")
@@ -2814,6 +2901,11 @@ def _pull_civitai_file(
                     f"{escape(filename)} ({escape(on_disk[:16])}…) does not "
                     f"match the expected digest ({escape(verify_digest[:16])}…)."
                 )
+                owners = _civitai_owners(dest)
+                others = [o for o in owners if o[1] != resolved.source_tag]
+                held = (f"It is registered as {_civitai_registered_as(owners)}. "
+                        if owners else "")
+                console.print(f"[dim]{held}{_civitai_next_step(others)}[/dim]")
                 return False
         if register:
             _mm._register_with_dedup(model_name, dest, resolved.source_tag,
@@ -2832,6 +2924,8 @@ def _pull_civitai_file(
             # test_a_file_another_pull_finished_first_is_kept.
             if dest.exists() and not redownload:
                 return _already_here()
+            if redownload and _civitai_refuse_replacing(dest, resolved):
+                return False
             return _pull_civitai_file_locked(
                 version_id, resolved, dest, verify_digest=verify_digest,
                 register=register, model_name=model_name, reg_type=reg_type)
