@@ -298,6 +298,31 @@ def test_start_identity_matches_only_one_comparable_start(recorded, current,
                 and instances.start_identity_differs(recorded, current))
 
 
+def test_thread_start_identity_names_a_running_thread_of_that_process_only():
+    """A running thread of the given process has a start identity that reads
+    the same every time; the same thread id under another process, or the
+    thread once it has finished, has none."""
+    import threading
+    release = threading.Event()
+    t = threading.Thread(target=release.wait)
+    t.start()
+    other = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                             stdin=subprocess.PIPE)
+    try:
+        ident = instances.thread_start_identity(os.getpid(), t.native_id)
+        if not (sys.platform.startswith("linux") or sys.platform == "win32"):
+            assert ident is None
+            pytest.skip(f"no thread start identity on {sys.platform}")
+        assert isinstance(ident, dict) and ident
+        assert instances.thread_start_identity(os.getpid(), t.native_id) == ident
+        assert instances.thread_start_identity(other.pid, t.native_id) is None
+    finally:
+        release.set()
+        t.join(timeout=10)
+        other.communicate(timeout=30)
+    assert instances.thread_start_identity(os.getpid(), t.native_id) is None
+
+
 def test_a_live_process_matches_its_own_start_identity():
     ident = instances.process_start_identity(os.getpid())
     if ident is None:
