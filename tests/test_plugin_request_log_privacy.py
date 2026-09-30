@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The web, image, music and video request routes never log the user's query,
-URL, prompt, tags or lyrics into the always-on activity ring that a bug report
-carries, and in privacy mode no log record at any level carries them. Their
-INFO lines carry the request's length and numeric parameters only, and a
-non-finite duration is refused before anything is logged."""
+URL, prompt, tags or lyrics: not into the always-on activity ring that a bug
+report carries, and not at any level, whether or not the debug-content gate is
+open. Their INFO lines carry the request's length and numeric parameters only,
+and a non-finite duration is refused before anything is logged."""
 
 from __future__ import annotations
 
@@ -147,10 +147,9 @@ def test_web_query_and_url_never_reach_the_activity_ring(
     for needle in ("SENTINEL-web-query-7Q4M", "SENTINEL-web-url-7Q4M"):
         assert needle not in ring, (
             f"{needle!r} reached the always-on activity ring:\n{ring}")
-    if session_mode == "privacy":
-        for needle in ("SENTINEL-web-query-7Q4M", "SENTINEL-web-url-7Q4M"):
-            leaked = _records_carrying(caplog, needle)
-            assert not leaked, f"{needle!r} was logged in privacy mode: {leaked}"
+    for needle in ("SENTINEL-web-query-7Q4M", "SENTINEL-web-url-7Q4M"):
+        leaked = _records_carrying(caplog, needle)
+        assert not leaked, f"{needle!r} was logged in {session_mode} mode: {leaked}"
 
     # Each route still logs that it ran, with non-content parameters only.
     assert f"web retrieve: {len(_QUERY)}-char query" in ring
@@ -201,11 +200,10 @@ def test_media_prompt_never_reaches_the_activity_ring(
     for needle in sentinels:
         assert needle not in ring, (
             f"{plugin}: {needle!r} reached the always-on activity ring:\n{ring}")
-    if session_mode == "privacy":
-        for needle in sentinels:
-            leaked = _records_carrying(caplog, needle)
-            assert not leaked, (
-                f"{plugin}: {needle!r} was logged in privacy mode: {leaked}")
+    for needle in sentinels:
+        leaked = _records_carrying(caplog, needle)
+        assert not leaked, (
+            f"{plugin}: {needle!r} was logged in {session_mode} mode: {leaked}")
 
     assert info_line.format(n=len(body[text_field])) in ring, ring
     assert app.state.jobs.started == [route.rsplit("/", 1)[-1]]
