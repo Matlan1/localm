@@ -717,6 +717,73 @@ class _LineGrouper:
         self._pending.clear()
 
 
+class _GrammarTraceFolder:
+    """Takes llama.cpp's lazy-grammar trace out of a native stderr line stream
+    and records it as counted lines that carry no generated text.
+
+    While a lazy grammar waits for its trigger, llama.cpp logs
+    ``Grammar still awaiting trigger after token <id> (`<piece>`)`` for every
+    sampled token, and ``Grammar triggered on regex: '<text>'`` once the trigger
+    matches. ``<piece>`` and ``<text>`` are generated text and may contain
+    newlines, so one record can span several lines.
+
+    :meth:`consume` returns True for every line of such a record, continuation
+    lines included, and False for any other line. The awaiting records are
+    counted and passed to *record* once, as
+    ``Grammar still awaiting trigger after N token(s)``, when a triggered record
+    arrives or at :meth:`flush`. A triggered record is passed to *record* as
+    ``Grammar triggered on regex``. A record whose closing delimiter has not
+    arrived after _MAX_CONTINUATION_LINES further lines is treated as ended."""
+
+    _AWAITING = "Grammar still awaiting trigger after token "
+    _AWAITING_ID = re.compile(r"-?\d+ \(`")
+    _TRIGGERED = "Grammar triggered on regex: '"
+    _MAX_CONTINUATION_LINES = 64
+
+    def __init__(self, record) -> None:
+        self._record = record
+        self._awaiting = 0
+        self._closer: Optional[str] = None
+        self._continuations = 0
+
+    def consume(self, line: str) -> bool:
+        text = line.rstrip("\r")
+        if self._closer is not None:
+            self._continuations += 1
+            if (text.endswith(self._closer)
+                    or self._continuations >= self._MAX_CONTINUATION_LINES):
+                self._closer = None
+            return True
+        if text.startswith(self._AWAITING):
+            opening = self._AWAITING_ID.match(text, len(self._AWAITING))
+            if opening is None:
+                return False
+            self._awaiting += 1
+            self._open(text[opening.end():], "`)")
+            return True
+        if text.startswith(self._TRIGGERED):
+            self._record_awaiting()
+            self._record("Grammar triggered on regex")
+            self._open(text[len(self._TRIGGERED):], "'")
+            return True
+        return False
+
+    def _open(self, payload: str, closer: str) -> None:
+        if not payload.endswith(closer):
+            self._closer = closer
+            self._continuations = 0
+
+    def _record_awaiting(self) -> None:
+        if self._awaiting:
+            self._record(
+                f"Grammar still awaiting trigger after {self._awaiting} token(s)")
+            self._awaiting = 0
+
+    def flush(self) -> None:
+        self._record_awaiting()
+        self._closer = None
+
+
 _READER_JOIN_TIMEOUT = 30.0
 
 
@@ -736,6 +803,11 @@ def dedup_native_stderr():
       - appended to the always-on recent-activity ring buffer via
         record_native_line(), so the GUI status window's log tail (which
         already polls that same buffer) shows the identical grouped view.
+
+    llama.cpp's lazy-grammar trace (one record per sampled token while a lazy
+    grammar awaits its trigger, carrying the generated text) is taken out of
+    both live views by _GrammarTraceFolder and recorded in the ring buffer as
+    counted lines without that text.
 
     Nothing is SILENTLY lost from the persisted record: in debug mode, every
     RAW (ungrouped) line is ALSO appended to the debug log file
@@ -797,6 +869,11 @@ def dedup_native_stderr():
         record_native_line(text)
 
     grouper = _LineGrouper(_emit)
+    grammar_trace = _GrammarTraceFolder(lambda text: record_native_line(text))
+
+    def _feed(line: str) -> None:
+        if not grammar_trace.consume(line):
+            grouper.feed(line)
 
     def _reader() -> None:
         buf = b""
@@ -812,14 +889,15 @@ def dedup_native_stderr():
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
                     _write_debug(raw + b"\n")
-                    grouper.feed(raw.decode("utf-8", errors="replace"))
+                    _feed(raw.decode("utf-8", errors="replace"))
         finally:
             with contextlib.suppress(OSError):
                 os.close(read_fd)
         if buf:
             _write_debug(buf)
-            grouper.feed(buf.decode("utf-8", errors="replace"))
+            _feed(buf.decode("utf-8", errors="replace"))
         grouper.flush()
+        grammar_trace.flush()
 
     thread = threading.Thread(target=_reader, name="native-stderr-dedup", daemon=True)
     thread.start()
