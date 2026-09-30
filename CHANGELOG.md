@@ -833,6 +833,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
+- **Windows network-share paths written with the `\??\` prefix are refused like
+  any other network path.** A path such as `\??\UNC\host\share` got past the
+  checks that stop localm from reaching network shares and device paths
+  (folder fields, coder project paths, model and plugin file names), and
+  Windows would then open the share. It is now refused before any file access.
 - **A malicious search result or fetched web page could still attempt to forge a model role
   marker.** Web content was already stripped of literal control-token text before reaching the
   model; the chat now also marks exactly which characters of a search result or page came from
