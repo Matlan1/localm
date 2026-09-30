@@ -18,6 +18,8 @@ page content is registered with ``untrusted_output=True``.
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +27,14 @@ from .base import ToolResult, _confine
 
 #: Live browser sessions by agent job_owner.
 _OWNED: dict = {}
+
+#: Browser starts in flight by agent job_owner. Every call made while one runs
+#: waits on its Future for the outcome.
+_STARTING: dict = {}
+
+#: Guards _STARTING and the registry check that decides which call starts the
+#: browser. Never held across a start.
+_STARTING_LOCK = threading.Lock()
 
 
 def _disabled() -> ToolResult:
@@ -48,12 +58,38 @@ def _existing(session):
 
 
 def _open_session(session, *, headless: bool = True):
-    """Return this coder session's browser, starting one if needed."""
-    from localm.browser import session as bsession
-    live = _existing(session)
-    if live is not None:
-        return live
+    """Return this coder session's browser, starting one if needed.
+
+    Calls made while no browser is open share one start: the first launches it,
+    the rest wait for it and get the same browser or raise the same error.
+    """
     owner = _owner_of(session)
+    with _STARTING_LOCK:
+        live = _existing(session)
+        if live is not None:
+            return live
+        starting = _STARTING.get(owner)
+        leader = starting is None
+        if leader:
+            starting = _STARTING[owner] = Future()
+    if not leader:
+        return starting.result()
+    try:
+        live = _start_browser(owner, headless)
+    except BaseException as exc:
+        starting.set_exception(exc)
+        raise
+    else:
+        starting.set_result(live)
+        return live
+    finally:
+        with _STARTING_LOCK:
+            del _STARTING[owner]
+
+
+def _start_browser(owner: str, headless: bool):
+    """Launch a browser for *owner* and register it."""
+    from localm.browser import session as bsession
     sid = "coder-" + owner
     cfg = _browser_config()
     live = bsession.BrowserSession(
