@@ -14,6 +14,7 @@ verified.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import sys
 import threading
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 _INSTALL_TIMEOUT_S = 1200
 
 PIP_INSTALL_HINT = 'pip install "localm[browser]"'
+
+#: Terminal colour and style sequences the installer prints.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 #: A caller-supplied progress sink for one output line at a time. Mirrors
 #: managed_comfy_provision's on_progress shape.
@@ -75,6 +79,14 @@ def is_chromium_installed() -> bool:
     return path is not None and path.exists()
 
 
+def download_allowed() -> bool:
+    """Whether the network policy lets an explicit download start now: always
+    outside ``net_mode=off``, and under it only when
+    ``net_allow_model_downloads`` exempts explicit downloads."""
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    return network_mode() != "off" or downloads_allowed_when_off()
+
+
 def _stream_install(cmd: list, *, on_progress: ProgressCb,
                     timeout: int) -> tuple[Optional[int], list]:
     """Run *cmd*, streaming its combined output to *on_progress* as each line
@@ -95,7 +107,7 @@ def _stream_install(cmd: list, *, on_progress: ProgressCb,
     def _read_stdout() -> None:
         try:
             for raw_line in proc.stdout:
-                line = raw_line.rstrip("\r\n")
+                line = _ANSI.sub("", raw_line.rstrip("\r\n"))
                 lines.append(line)
                 if on_progress is not None:
                     try:
@@ -164,8 +176,7 @@ def install_chromium(*, force: bool = False,
             message=f"Chromium is already installed at "
                     f"{chromium_executable_path()}.")
 
-    from localm.netpolicy import downloads_allowed_when_off, network_mode
-    if network_mode() == "off" and not downloads_allowed_when_off():
+    if not download_allowed():
         return ProvisionResult(
             ok=False,
             message="Network access is disabled (net_mode=off). Enable it "

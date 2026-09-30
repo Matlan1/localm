@@ -435,3 +435,383 @@ class TestTheManifest:
         parse_spec(Path("localm/plugins/builtin/browser"), builtin=True,
                    warnings=warns)
         assert warns == [], warns
+
+
+# --------------------------------------------------------------------------- #
+#  Setting the browser up: what the engine needs, and the bundled download    #
+# --------------------------------------------------------------------------- #
+
+def _machine(monkeypatch, *, playwright=True, bundled=False, system=()):
+    """Make this machine's browser situation exactly what the test says."""
+    from localm.browser import discovery, provision
+    from localm.plugins.builtin.browser import plug
+    monkeypatch.setattr(plug, "_playwright_installed", lambda: playwright)
+    monkeypatch.setattr(provision, "is_chromium_installed", lambda: bundled)
+    monkeypatch.setattr(
+        discovery, "find_system_browsers",
+        lambda: [discovery.SystemBrowser(n, "/fake/" + n) for n in system])
+
+
+def _config_keys(name: str, *, write: bool):
+    from localm import auth
+    from localm import scopes as S
+    scope_list = [S.BROWSER] + ([S.CONFIG_WRITE] if write else [])
+    return auth.create_key(name, scope_list, allow_privileged=True)["key"]
+
+
+def _job_events(client, job_id, headers=None):
+    import json
+    text = client.get(f"/api/jobs/{job_id}/events", headers=headers or {}).text
+    return [json.loads(line[5:].strip()) for line in text.splitlines()
+            if line.startswith("data:")]
+
+
+class TestEngineStatus:
+    def test_the_bundled_engine_without_its_build_needs_the_download(
+            self, app, monkeypatch):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["engine"] == "bundled"
+        assert body["ready"] is False
+        assert body["problem"] == "bundled_missing"
+        assert body["bundled_installed"] is False
+        assert body["can_download"] is True
+        assert body["download_blocked"] is None
+        assert body["downloading"] is False
+
+    def test_the_bundled_engine_with_its_build_is_ready(self, app, monkeypatch):
+        _machine(monkeypatch, bundled=True)
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["ready"] is True
+        assert body["problem"] is None
+        assert body["can_download"] is False
+        assert body["download_blocked"] is None
+
+    def test_the_system_engine_is_ready_when_a_browser_is_found(
+            self, app, monkeypatch):
+        _machine(monkeypatch, bundled=False, system=("Google Chrome", "Brave"))
+        _set(browser_engine="system")
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["engine"] == "system"
+        assert body["ready"] is True
+        assert body["problem"] is None
+        assert body["system_browsers"] == ["Google Chrome", "Brave"]
+
+    def test_the_system_engine_with_no_browser_lists_what_was_looked_for(
+            self, app, monkeypatch):
+        _machine(monkeypatch, bundled=False, system=())
+        _set(browser_engine="system")
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["ready"] is False
+        assert body["problem"] == "system_missing"
+        assert body["looked_for"] == ["Google Chrome", "Chromium",
+                                      "Microsoft Edge", "Brave"]
+
+    def test_without_the_browser_extra_there_is_nothing_to_download(
+            self, app, monkeypatch):
+        _machine(monkeypatch, playwright=False)
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["ready"] is False
+        assert body["problem"] == "playwright_missing"
+        assert body["can_download"] is False
+        assert body["download_blocked"] is None
+
+    def test_network_access_off_blocks_the_download_and_says_why(
+            self, app, monkeypatch):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["problem"] == "bundled_missing"
+        assert body["can_download"] is False
+        assert body["download_blocked"] == "network"
+
+    def test_the_config_exemption_lets_a_download_through_while_off(
+            self, app, monkeypatch):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        _set(net_allow_model_downloads=True)
+        with TestClient(app) as c:
+            body = c.get("/api/browser/engine").json()
+
+        assert body["can_download"] is True
+        assert body["download_blocked"] is None
+
+    def test_a_key_that_cannot_change_settings_cannot_download(
+            self, app, monkeypatch):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        weak = _config_keys("weak", write=False)
+        strong = _config_keys("strong", write=True)
+        with TestClient(app) as c:
+            weak_body = c.get("/api/browser/engine", headers=_h(weak)).json()
+            strong_body = c.get("/api/browser/engine", headers=_h(strong)).json()
+
+        assert weak_body["can_download"] is False
+        assert weak_body["download_blocked"] == "permission"
+        assert strong_body["can_download"] is True
+
+    def test_it_answers_while_the_browser_setting_is_off(self, app, monkeypatch):
+        _machine(monkeypatch, bundled=False)
+        with TestClient(app) as c:
+            assert c.get("/api/browser/state").json()["enabled"] is False
+            assert c.get("/api/browser/engine").status_code == 200
+
+
+class _Installer:
+    """Stands in for provision.install_chromium: records its calls, reports
+    progress, and can be held until the test releases it."""
+
+    def __init__(self, result=None, raises=None, hold=False):
+        from localm.browser import provision
+        self.calls = 0
+        self.release = threading.Event()
+        self._hold = hold
+        self._raises = raises
+        self._result = result or provision.ProvisionResult(
+            ok=True, message="Chromium installed at /fake/chrome.")
+
+    def __call__(self, *, force=False, on_progress=None):
+        self.calls += 1
+        if on_progress is not None:
+            on_progress("downloading 10%")
+            on_progress("downloading 100%")
+        if self._hold:
+            self.release.wait(10)
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+
+@pytest.fixture
+def installer(monkeypatch):
+    from localm.browser import provision
+    from localm.plugins.builtin.browser import plug
+
+    def install(**kw):
+        fake = _Installer(**kw)
+        monkeypatch.setattr(provision, "install_chromium", fake)
+        return fake
+
+    yield install
+    with plug._download_lock:
+        plug._download = None
+
+
+class TestDownloadRoute:
+    def _wait_done(self, app, job_id):
+        return _wait_until(
+            lambda: _job_status(app, job_id) in ("done", "failed"), timeout=10)
+
+    def test_a_download_runs_as_a_job_and_streams_its_progress(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download")
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "started"
+            job_id = r.json()["job_id"]
+            assert self._wait_done(app, job_id)
+            events = _job_events(c, job_id)
+
+        lines = [e["text"] for e in events if e.get("type") == "line"]
+        assert _job_status(app, job_id) == "done"
+        assert fake.calls == 1
+        assert lines[0].startswith("Downloading the browser")
+        assert "downloading 10%" in lines and "downloading 100%" in lines
+        assert lines[-1] == "Ready: Chromium installed at /fake/chrome."
+
+    def test_an_installed_browser_is_not_downloaded_again(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=True)
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download")
+
+        assert r.status_code == 200, r.text
+        assert r.json() == {"status": "already_installed"}
+        assert fake.calls == 0
+
+    def test_network_access_off_refuses_before_anything_is_downloaded(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download")
+
+        assert r.status_code == 409, r.text
+        assert "net_mode=off" in r.json()["detail"]
+        assert fake.calls == 0
+
+    def test_the_off_refusal_yields_to_the_download_exemption(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        _set(net_allow_model_downloads=True)
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download")
+            assert r.status_code == 200, r.text
+            assert self._wait_done(app, r.json()["job_id"])
+
+        assert fake.calls == 1
+
+    def test_a_key_without_config_write_is_refused(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        weak = _config_keys("weak", write=False)
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download", headers=_h(weak))
+
+        assert r.status_code == 403, r.text
+        assert "config:write" in r.json()["detail"]
+        assert fake.calls == 0
+
+    def test_without_the_browser_extra_the_route_says_how_to_get_it(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, playwright=False)
+        fake = installer()
+        with TestClient(app) as c:
+            r = c.post("/api/browser/download")
+
+        assert r.status_code == 409, r.text
+        assert "localm[browser]" in r.json()["detail"]
+        assert fake.calls == 0
+
+    def test_it_works_while_the_browser_setting_is_off(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        installer()
+        with TestClient(app) as c:
+            assert c.get("/api/browser/state").json()["enabled"] is False
+            r = c.post("/api/browser/download")
+            assert r.status_code == 200, r.text
+            assert self._wait_done(app, r.json()["job_id"])
+
+    def test_a_failed_install_fails_the_job_with_the_reason(
+            self, app, monkeypatch, installer):
+        from localm.browser import provision
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        installer(result=provision.ProvisionResult(
+            ok=False, message="Could not install Chromium: the installer exited "
+                              "with code 1."))
+        with TestClient(app) as c:
+            job_id = c.post("/api/browser/download").json()["job_id"]
+            assert self._wait_done(app, job_id)
+            lines = [e["text"] for e in _job_events(c, job_id)
+                     if e.get("type") == "line"]
+
+        assert _job_status(app, job_id) == "failed"
+        assert lines[-1] == ("error: Could not install Chromium: the installer "
+                             "exited with code 1.")
+
+    def test_a_crashing_install_fails_the_job_and_frees_the_next_download(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        fake = installer(raises=RuntimeError("driver exploded"))
+        with TestClient(app) as c:
+            first = c.post("/api/browser/download").json()["job_id"]
+            assert self._wait_done(app, first)
+            second = c.post("/api/browser/download")
+            assert second.status_code == 200, second.text
+            assert second.json()["status"] == "started"
+            assert second.json()["job_id"] != first
+            assert self._wait_done(app, second.json()["job_id"])
+
+        assert _job_status(app, first) == "failed"
+        assert fake.calls == 2
+
+    def test_a_second_request_from_the_same_key_joins_the_running_download(
+            self, app, monkeypatch, installer):
+        from localm.plugins.builtin.browser import plug
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        fake = installer(hold=True)
+        key = _config_keys("owner", write=True)
+        with TestClient(app) as c:
+            first = c.post("/api/browser/download", headers=_h(key))
+            assert _wait_until(lambda: fake.calls == 1)
+            status_during = c.get("/api/browser/engine", headers=_h(key)).json()
+            second = c.post("/api/browser/download", headers=_h(key))
+            fake.release.set()
+            assert self._wait_done(app, first.json()["job_id"])
+            after = c.get("/api/browser/engine", headers=_h(key)).json()
+
+        assert second.status_code == 200, second.text
+        assert second.json() == {"job_id": first.json()["job_id"],
+                                 "status": "running"}
+        assert fake.calls == 1, "two installers ran at once"
+        assert status_during["downloading"] is True
+        assert _wait_until(lambda: plug._download is None)
+        assert after["downloading"] is False
+
+    def test_another_key_cannot_join_someone_elses_download(
+            self, app, monkeypatch, installer):
+        _machine(monkeypatch, bundled=False)
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        fake = installer(hold=True)
+        a = _config_keys("a", write=True)
+        b = _config_keys("b", write=True)
+        with TestClient(app) as c:
+            first = c.post("/api/browser/download", headers=_h(a))
+            assert _wait_until(lambda: fake.calls == 1)
+            other = c.post("/api/browser/download", headers=_h(b))
+            fake.release.set()
+            assert self._wait_done(app, first.json()["job_id"])
+
+        assert other.status_code == 409, other.text
+        assert "already running" in other.json()["detail"]
+        assert fake.calls == 1
+
+
+class TestStateNamesTheBrowser:
+    def test_an_open_browser_reports_which_one_it_is(self, app):
+        from localm.browser import session as bsession
+
+        class _Open:
+            session_id = "gui-owner"
+            headless = True
+            engine = "system"
+            browser_name = "Microsoft Edge"
+
+            def blocked_requests(self):
+                return []
+
+            def allowed_requests(self):
+                return []
+
+            def console_messages(self):
+                return []
+
+            def stop(self):
+                pass
+
+        bsession.register(_Open())
+        try:
+            with TestClient(app) as c:
+                body = c.get("/api/browser/state").json()
+        finally:
+            bsession.close_all()
+
+        assert body["open"] is True
+        assert body["browser"] == "Microsoft Edge"

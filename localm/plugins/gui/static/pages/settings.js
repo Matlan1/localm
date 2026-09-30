@@ -1529,6 +1529,113 @@ export async function saveSettingsSection(secId) {
   }
 }
 
+/** The "Browser setup" box under Settings > Network: whether the configured
+ *  browser engine can start a browser, the one-time download of the bundled
+ *  browser when that is what is missing, and a switch to the bundled browser
+ *  when no installed browser was found. */
+export function buildBrowserSetupBox() {
+  const box = el("div", "media-comfy-box browser-setup-box");
+  box.appendChild(subCardHead(t("browser.setup.heading"), "web", "cat-cyan"));
+  const statusLine = el("div", "sub browser-setup-status", t("browser.setup.checking"));
+  const log = el("div", "sub browser-setup-log");
+  const actions = el("div", "actions");
+  actions.style.marginTop = "0.5rem";
+  box.append(statusLine, actions, log);
+  let downloading = false;
+
+  const button = (text, onClick) => {
+    const btn = el("button", "btn-secondary browser-setup-btn", text);
+    btn.type = "button";
+    btn.onclick = () => onClick(btn);
+    actions.appendChild(btn);
+  };
+
+  const refresh = async () => {
+    if (downloading) return null;
+    actions.replaceChildren();
+    let st = null;
+    try {
+      const r = await fetch("/api/browser/engine", { headers: authHeaders() });
+      if (r.ok) st = await r.json();
+    } catch { /* reported below */ }
+    if (!st) {
+      statusLine.textContent = t("browser.setup.checkFailed");
+      return null;
+    }
+    if (st.ready) {
+      statusLine.textContent = st.engine === "system"
+        ? t("browser.setup.readySystem", { browser: (st.system_browsers || [])[0] || "" })
+        : t("browser.setup.readyBundled");
+    } else if (st.problem === "bundled_missing") {
+      statusLine.textContent = t("browser.setup.bundledMissing");
+      if (st.downloading) {
+        statusLine.textContent += " " + t("browser.setup.alreadyDownloading");
+      } else if (st.can_download) {
+        button(t("browser.setup.download"), download);
+      } else if (st.download_blocked === "network") {
+        statusLine.textContent += " " + t("browser.setup.downloadBlockedNetwork");
+      } else {
+        statusLine.textContent += " " + t("browser.setup.downloadBlockedPermission");
+      }
+    } else if (st.problem === "system_missing") {
+      statusLine.textContent = t("browser.setup.systemMissing",
+        { names: (st.looked_for || []).join(", ") });
+      button(t("browser.setup.useBundled"), useBundled);
+    } else {
+      statusLine.textContent = t("browser.setup.playwrightMissing");
+    }
+    return st;
+  };
+
+  const download = async (btn) => {
+    downloading = true;
+    btn.disabled = true;
+    btn.textContent = t("browser.setup.downloading");
+    log.textContent = "";
+    let lastLine = "";
+    try {
+      const r = await fetch("/api/browser/download",
+                            { method: "POST", headers: authHeaders() });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : r.statusText);
+      if (d.job_id) {
+        await streamJob(d.job_id, (line) => { lastLine = line; log.textContent = line; });
+      }
+    } catch (err) {
+      lastLine = "error: " + (err.message || err);
+    }
+    downloading = false;
+    log.textContent = "";
+    const st = await refresh();
+    if (st && st.ready) {
+      toast(t("browser.setup.downloadDone"));
+    } else {
+      toast(t("browser.setup.downloadFailed",
+        { detail: lastLine.replace(/^error:\s*/i, "") }), true);
+    }
+  };
+
+  const useBundled = async (btn) => {
+    btn.disabled = true;
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ browser_engine: "bundled" }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : r.statusText);
+      toast(t("browser.setup.switchedToBundled"));
+      refreshSettingsPage();
+    } catch (err) {
+      toast(err.message || String(err), true);
+      btn.disabled = false;
+    }
+  };
+
+  refresh();
+  return box;
+}
+
 export async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
   _dirtySettings.clear();   // R10: a fresh render is a clean baseline
@@ -1698,6 +1805,11 @@ export async function refreshSettingsPage() {
           await updateSttStatus();
         }
       };
+    }
+
+    if (sec.label === "Network"
+        && sec.ctrls.some((c) => c.field && c.field.key === "browser_engine")) {
+      panel.appendChild(buildBrowserSetupBox());
     }
 
     const actions = el("div", "actions");

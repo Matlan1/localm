@@ -14,6 +14,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from localm.browser import provision as bprovision
 
 
@@ -190,6 +192,69 @@ def test_force_failure_warns_browser_now_uninstalled(cli_runner, monkeypatch):
 
     assert result.ok is False
     assert "no Chromium build is installed right now" in result.message
+
+
+# --------------------------------------------------------------------------- #
+#  The installer's output, line by line                                       #
+# --------------------------------------------------------------------------- #
+
+def test_installer_output_reaches_the_progress_sink_without_colour_codes():
+    # A real child process that prints what playwright's installer prints:
+    # dimmed text around a URL, then a progress bar line.
+    script = (
+        "import sys\n"
+        "sys.stdout.write('Downloading Chrome \\x1b[2mfrom https://cdn.example/x.zip"
+        "\\x1b[22m\\n')\n"
+        "sys.stdout.write('|\\x1b[32m####\\x1b[0m    |  50% of 10 MiB\\n')\n")
+    seen = []
+
+    code, lines = bprovision._stream_install(
+        [sys.executable, "-c", script], on_progress=seen.append, timeout=60)
+
+    assert code == 0
+    expected = ["Downloading Chrome from https://cdn.example/x.zip",
+                "|####    |  50% of 10 MiB"]
+    assert seen == expected
+    assert lines == expected
+
+
+def test_a_failing_installers_tail_carries_no_colour_codes(monkeypatch):
+    _stub_playwright_importable(monkeypatch)
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    monkeypatch.setattr(bprovision, "is_chromium_installed", lambda: False)
+    script = "import sys; sys.stdout.write('\\x1b[31mError: boom\\x1b[39m\\n'); sys.exit(3)"
+    real_stream = bprovision._stream_install
+    monkeypatch.setattr(
+        bprovision, "_stream_install",
+        lambda cmd, **kw: real_stream([sys.executable, "-c", script], **kw))
+
+    result = bprovision.install_chromium()
+
+    assert result.ok is False
+    assert "Error: boom" in result.message
+    assert "\x1b" not in result.message
+
+
+# --------------------------------------------------------------------------- #
+#  download_allowed: the policy answer the GUI route shares with the CLI      #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("mode", ["ask", "allow"])
+def test_downloads_are_allowed_whenever_network_access_is_not_off(monkeypatch, mode):
+    monkeypatch.setenv("LOCALM_NET_MODE", mode)
+    assert bprovision.download_allowed() is True
+
+
+def test_downloads_are_refused_when_network_access_is_off(monkeypatch):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    assert bprovision.download_allowed() is False
+
+
+def test_downloads_are_allowed_while_off_when_the_config_exempts_them(monkeypatch):
+    from localm.config import update_config
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    update_config(lambda c: c.update({"net_allow_model_downloads": True}))
+    assert bprovision.download_allowed() is True
 
 
 # --------------------------------------------------------------------------- #

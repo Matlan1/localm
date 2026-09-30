@@ -170,6 +170,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   not used", the coder session feed and `localm coder` print why, the MCP tools
   add a note, and the `X-Localm-Model-Routing` header and the debug log name the
   skipped model, when its load failed and the reason.
+- **The automated browser can be set up from the GUI, and it starts on Linux.**
+  When the bundled browser had not been downloaded, opening it failed with
+  a message telling you to run `playwright install`, which localm does not
+  give you. The Browser tab and Settings > Server & network now show a
+  Download browser button (a one-time download that respects the network
+  policy) and errors name localm's own remedy instead. The system engine
+  looks for Google Chrome, Chromium, Microsoft Edge and Brave in their
+  usual places on Linux, macOS and Windows, not only Chrome at its default
+  path; if none is found it lists what it looked for and offers the bundled
+  browser. A browser that cannot start for missing system libraries now says
+  so and names them. The setting's help no longer claims the system engine
+  uses your logged-in sessions: both engines start with a fresh, empty
+  profile.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm
