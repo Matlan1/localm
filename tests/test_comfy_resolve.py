@@ -122,7 +122,12 @@ class TestRefusedWithoutNetwork:
         ("custom_thing_v2.safetensors", "SomeCustomNode", "weird_input", cr.REASON_FOLDER),
         ("model.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_NAME),
         ("sub/dir.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_NAME),
-        ("..\\x_model_v2.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_NAME),
+        ("..\\x_model_v2.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_PATH),
+        ("a/../x_model_v2.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_PATH),
+        ("bad<name>_v2.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_PATH),
+        ("C:x_model_v2.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_PATH),
+        ("trailing_dot_v2.safetensors.", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_PATH),
+        (" lead_space_v2.safetensors", "CheckpointLoaderSimple", "ckpt_name", cr.REASON_PATH),
     ])
     def test_unsupported(self, hf, filename, class_type, input_name, reason):
         lookup = cr.lookup_comfy_download(filename, class_type, input_name)
@@ -236,13 +241,58 @@ class TestOutcomesAndCache:
         hf.org = [_repo("Comfy-Org/x", [WAN])]
         assert cr.lookup_comfy_download(WAN, "UNETLoader", "unet_name").status == cr.LOOKUP_FOUND
 
-    def test_a_failed_request_is_failed_not_not_found(self, hf):
+    def test_a_failed_request_is_failed_not_not_found_and_not_cached(self, hf):
         hf.error = discover.DiscoverError("HuggingFace request failed: timed out")
         lookup = cr.lookup_comfy_download(WAN, "UNETLoader", "unet_name")
         assert lookup.status == cr.LOOKUP_FAILED
         assert "timed out" in lookup.detail
+        hf.error = None
+        hf.org = [_repo("Comfy-Org/x", [WAN])]
+        assert cr.lookup_comfy_download(WAN, "UNETLoader", "unet_name").status == cr.LOOKUP_FOUND
 
 
-def test_lookup_timeout_covers_every_request_timing_out():
+class TestSubfolderNames:
+    @pytest.mark.parametrize("value,expected", [
+        ("plain_model_v2.safetensors", ("", "plain_model_v2.safetensors")),
+        ("SDXL/model_v2.safetensors", ("SDXL", "model_v2.safetensors")),
+        ("SDXL\\model_v2.safetensors", ("SDXL", "model_v2.safetensors")),
+        ("a/b c/My LoRA (v2).safetensors", ("a/b c", "My LoRA (v2).safetensors")),
+        ("a/../x.safetensors", None),
+        ("/abs_model_v2.safetensors", None),
+        ("a//x_model_v2.safetensors", None),
+        ("a/b:c/x_model_v2.safetensors", None),
+    ])
+    def test_split_model_name(self, value, expected):
+        assert cr.split_model_name(value) == expected
+
+    def test_a_subfolder_name_is_searched_by_its_file_name_and_keeps_the_subfolder(self, hf):
+        hf.org = [_repo("Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+                        [f"split_files/diffusion_models/{WAN}"])]
+        lookup = cr.lookup_comfy_download(f"wan\\{WAN}", "UNETLoader", "unet_name")
+        assert lookup.status == cr.LOOKUP_FOUND
+        d = lookup.download
+        assert (d.path, d.subdir, d.comfy_subfolder) == (
+            f"split_files/diffusion_models/{WAN}", "wan", "unet")
+        assert cr.cached_comfy_download(f"wan\\{WAN}", "UNETLoader", "unet_name") == d
+        assert cr.cached_comfy_download(WAN, "UNETLoader", "unet_name") is None
+
+    def test_a_curated_file_in_a_subfolder_keeps_the_subfolder(self, hf):
+        lookup = cr.lookup_comfy_download("flux/flux1-dev-Q8_0.gguf", "UnetLoaderGGUF",
+                                          "unet_name")
+        assert hf.calls == []
+        d = lookup.download
+        assert (d.origin, d.subdir, d.path) == (cr.ORIGIN_CURATED, "flux", "flux1-dev-Q8_0.gguf")
+
+    def test_a_spaced_name_is_searched_and_matched_exactly(self, hf):
+        name = "My Style LoRA (v2).safetensors"
+        assert cr.search_refusal(name, "LoraLoader", "lora_name") is None
+        hf.searches = {cr._stem(name): [
+            _repo("a/b", [f"loras/{name}"], downloads=3),
+            _repo("c/d", [f"bad folder/{name}"], downloads=99)]}
+        d = cr.lookup_comfy_download(name, "LoraLoader", "lora_name").download
+        assert (d.repo, d.path, d.comfy_subfolder) == ("a/b", f"loras/{name}", "loras")
+
+
+def test_lookup_timeout_exceeds_the_per_request_timeouts_of_one_lookup_combined():
     from localm.plugins.gui.routes.models import acquisition
     assert acquisition._LOOKUP_TIMEOUT > cr.MAX_HF_REQUESTS * discover._TIMEOUT

@@ -6,6 +6,7 @@ destination, and refuse rather than silently fall back to MODELS_DIR when
 dest_dir is paired with a spec that does not dispatch to the single-file
 backend."""
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -138,15 +139,20 @@ class TestPullGgufFileDestDir:
 
 class TestRepoFolderSpec:
     """``owner/repo:dir/file`` names a file inside a folder of the repository;
-    it is fetched from that path and saved under its bare filename."""
+    it is fetched from that path, staged under the destination's hidden
+    ``.cache/localm-staging`` and saved under its bare filename."""
 
     SPEC = "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors"
 
     def _record_downloads(self, monkeypatch, body=b"ace-bytes"):
+        """Fake huggingface_hub.hf_hub_download the way the real one behaves
+        for a local_dir download: the file's folder is created when the
+        download starts, and the finished file is moved into it without
+        creating it again."""
         calls = []
 
         def _fake_download(repo_id, filename, local_dir, **kw):
-            calls.append((repo_id, filename))
+            calls.append((repo_id, filename, Path(local_dir)))
             p = Path(local_dir) / filename
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(body)
@@ -157,8 +163,7 @@ class TestRepoFolderSpec:
 
         def _fake_head(url, allow_redirects=None, timeout=None):
             # An ETag, as HuggingFace sends, so the resume check runs
-            # huggingface_hub's real local-dir path helpers, which create the
-            # repo folder under the destination.
+            # huggingface_hub's real local-dir path helpers.
             h = MagicMock()
             h.history = []
             h.headers = {"content-length": str(len(body)), "ETag": '"0123abcd"'}
@@ -167,20 +172,7 @@ class TestRepoFolderSpec:
         monkeypatch.setattr("requests.head", _fake_head)
         return calls
 
-    def test_a_refused_download_removes_the_folder_it_created(
-            self, fake_registry, tmp_path, monkeypatch):
-        calls = self._record_downloads(monkeypatch)
-        monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: False)
-        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
-
-        ok = mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
-                                dest_dir=dest_dir, register=False)
-
-        assert not (dest_dir / "all_in_one").exists(), "the repo folder was left behind"
-        assert calls == []
-        assert ok is False
-
-    def test_lands_under_its_bare_name_and_leaves_no_folder(
+    def test_lands_under_its_bare_name_with_no_repo_folder_in_the_destination(
             self, fake_registry, tmp_path, monkeypatch):
         calls = self._record_downloads(monkeypatch)
         dest_dir = tmp_path / "comfyui-models" / "checkpoints"
@@ -189,9 +181,10 @@ class TestRepoFolderSpec:
                                 dest_dir=dest_dir, register=False)
 
         assert (dest_dir / "ace_step_v1_3.5b.safetensors").read_bytes() == b"ace-bytes"
-        assert not (dest_dir / "all_in_one").exists(), "the repo folder was left behind"
+        assert not (dest_dir / "all_in_one").exists(), "a repo folder appeared in the destination"
         assert calls == [("Comfy-Org/ACE-Step_ComfyUI_repackaged",
-                          "all_in_one/ace_step_v1_3.5b.safetensors")]
+                          "all_in_one/ace_step_v1_3.5b.safetensors",
+                          dest_dir / ".cache" / "localm-staging")]
         assert ok is True
 
     def test_the_digest_is_looked_up_by_the_path_in_the_repo(
@@ -207,33 +200,80 @@ class TestRepoFolderSpec:
         assert asked == [("Comfy-Org/ACE-Step_ComfyUI_repackaged",
                           "all_in_one/ace_step_v1_3.5b.safetensors")]
 
-    def test_a_folder_that_already_existed_is_kept(
+    def test_a_same_named_folder_in_the_destination_is_left_alone(
             self, fake_registry, tmp_path, monkeypatch):
         self._record_downloads(monkeypatch)
         dest_dir = tmp_path / "comfyui-models" / "checkpoints"
         keep = dest_dir / "all_in_one" / "mine.txt"
         keep.parent.mkdir(parents=True)
         keep.write_text("user file")
+        empty = dest_dir / "all_in_one" / "empty"
+        empty.mkdir()
 
         assert mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
                                   dest_dir=dest_dir, register=False) is True
 
         assert keep.read_text() == "user file"
+        assert empty.is_dir()
         assert (dest_dir / "ace_step_v1_3.5b.safetensors").is_file()
 
-    def test_an_empty_folder_an_interrupted_pull_left_is_removed(
+    def test_two_pulls_sharing_a_repo_folder_do_not_break_each_other(
             self, fake_registry, tmp_path, monkeypatch):
-        self._record_downloads(monkeypatch)
-        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
-        (dest_dir / "all_in_one").mkdir(parents=True)
+        import threading
 
-        assert mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
-                                  dest_dir=dest_dir, register=False) is True
+        dest_dir = tmp_path / "comfyui-models" / "vae"
+        b_started = threading.Event()
+        a_done = threading.Event()
+
+        def _fake_download(repo_id, filename, local_dir, **kw):
+            p = Path(local_dir) / filename
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if filename.endswith("b_vae_v1.safetensors"):
+                b_started.set()
+                assert a_done.wait(10), "pull A never finished"
+            if not p.parent.is_dir():
+                raise FileNotFoundError(f"[Errno 2] No such file or directory: {p}")
+            p.write_bytes(filename.encode())
+            return str(p)
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(history=[], headers={}))
+
+        results = {}
+
+        def _pull_b():
+            results["b"] = mm._pull_gguf_file(
+                "Comfy-Org/x:split_files/vae/b_vae_v1.safetensors", None,
+                model_type="vae", dest_dir=dest_dir, register=False)
+
+        t = threading.Thread(target=_pull_b)
+        t.start()
+        assert b_started.wait(10)
+        results["a"] = mm._pull_gguf_file(
+            "Comfy-Org/x:split_files/vae/a_vae_v1.safetensors", None,
+            model_type="vae", dest_dir=dest_dir, register=False)
+        a_done.set()
+        t.join(10)
+
+        assert (dest_dir / "a_vae_v1.safetensors").is_file()
+        assert (dest_dir / "b_vae_v1.safetensors").is_file(), "pull B lost its folder to pull A"
+        assert results == {"a": True, "b": True}
+
+    def test_a_refused_download_creates_nothing_in_the_destination(
+            self, fake_registry, tmp_path, monkeypatch):
+        calls = self._record_downloads(monkeypatch)
+        monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: False)
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+
+        ok = mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
+                                dest_dir=dest_dir, register=False)
 
         assert not (dest_dir / "all_in_one").exists()
-        assert (dest_dir / "ace_step_v1_3.5b.safetensors").is_file()
+        assert calls == []
+        assert ok is False
 
-    def test_a_failed_download_removes_the_folder_it_created(
+    def test_a_failed_download_creates_nothing_in_the_destination(
             self, fake_registry, tmp_path, monkeypatch):
         def _failing_download(repo_id, filename, local_dir, **kw):
             (Path(local_dir) / filename).parent.mkdir(parents=True, exist_ok=True)
@@ -241,19 +281,21 @@ class TestRepoFolderSpec:
 
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _failing_download)
-        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(headers={}))
+        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(history=[], headers={}))
         dest_dir = tmp_path / "comfyui-models" / "checkpoints"
 
         assert mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
                                   dest_dir=dest_dir, register=False) is False
 
         assert not (dest_dir / "all_in_one").exists()
+        assert not (dest_dir / "ace_step_v1_3.5b.safetensors").exists()
 
     @pytest.mark.parametrize("spec", [
         "owner/repo:../evil.safetensors",
         "owner/repo:a/../../evil.safetensors",
         "owner/repo:./evil.safetensors",
         "owner/repo:a//evil.safetensors",
+        "owner/repo:/evil.safetensors",
         "owner/repo:a\\b/evil.safetensors",
         "owner/repo:C:/evil.safetensors",
         "owner/repo:.hidden/evil.safetensors",
@@ -268,6 +310,30 @@ class TestRepoFolderSpec:
 
         assert calls == [], "an unsafe spec reached the downloader"
         assert not any(p.name == "evil.safetensors" for p in tmp_path.rglob("*"))
+        assert ok is False
+
+    def test_a_repo_folder_that_resolves_outside_the_staging_folder_is_refused(
+            self, fake_registry, tmp_path, monkeypatch):
+        calls = self._record_downloads(monkeypatch)
+        dest_dir = tmp_path / "comfyui-models" / "checkpoints"
+        staging = dest_dir / ".cache" / "localm-staging"
+        staging.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        link = staging / "linked"
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(outside), str(link))
+        else:
+            os.symlink(outside, link, target_is_directory=True)
+        assert link.resolve() == outside.resolve(), "precondition: the link points outside"
+
+        ok = mm._pull_gguf_file("owner/repo:linked/evil_model_v1.safetensors", None,
+                                model_type="diffusion-unet", dest_dir=dest_dir,
+                                register=False)
+
+        assert calls == [], "a folder resolving outside the staging folder was used"
+        assert list(outside.iterdir()) == []
         assert ok is False
 
 

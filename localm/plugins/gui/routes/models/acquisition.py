@@ -214,6 +214,16 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 "size_bytes": download.size_bytes, "model_type": download.model_type,
                 "origin": download.origin}
 
+    def _download_dest(download, plugin):
+        """The ComfyUI folder *download* goes into for *plugin*
+        (``models/<comfy_subfolder>/<subdir>``), or None when no ComfyUI folder
+        is configured (managed_comfy.comfy_models_dest_dir)."""
+        from localm.media.managed_comfy import comfy_models_dest_dir
+        base = comfy_models_dest_dir(download.comfy_subfolder, plugin=plugin)
+        if base is None or not download.subdir:
+            return base
+        return base.joinpath(*download.subdir.split("/"))
+
     @app.post("/api/media/{kind}/preflight",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def media_preflight(kind: str, req: MediaPreflightRequest):
@@ -236,7 +246,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 raise HTTPException(400, "Invalid LoRA name")
             req.lora_name = stripped
         from localm.media.comfy_client import describe_missing_models
-        from localm.media.managed_comfy import comfy_models_dest_dir, resolve_comfy_target
+        from localm.media.managed_comfy import resolve_comfy_target
         from localm.model_manager.comfy_resolve import (
             cached_comfy_download, curated_comfy_download, search_refusal,
         )
@@ -272,7 +282,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 if download is not None:
                     # Stays inside this offloaded call. See
                     # tests/test_comfy_media_routes_offloaded.py.
-                    dest_dir = comfy_models_dest_dir(download.comfy_subfolder, plugin=kind)
+                    dest_dir = _download_dest(download, kind)
                     entry["source"] = _source_json(download)
                     entry["dest_dir"] = str(dest_dir) if dest_dir is not None else None
                 else:
@@ -298,7 +308,6 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         Returns {"status", "source", "dest_dir", "reason", "detail"}. status is
         one of comfy_resolve's LOOKUP_* values; source and dest_dir are set only
         when it is "found", and reason only when it is "unsupported"."""
-        from localm.media.managed_comfy import comfy_models_dest_dir
         from localm.model_manager.comfy_resolve import lookup_comfy_download
         from localm.plugins.media_config import MEDIA_PLUGINS
         for value in (req.filename, req.class_type, req.input_name):
@@ -312,8 +321,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                    "reason": lookup.reason, "detail": lookup.detail}
             if lookup.download is not None:
                 out["source"] = _source_json(lookup.download)
-                dest = comfy_models_dest_dir(lookup.download.comfy_subfolder,
-                                             plugin=plugin)
+                dest = _download_dest(lookup.download, plugin)
                 out["dest_dir"] = str(dest) if dest is not None else None
             return out
 
@@ -329,13 +337,14 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         folder. The source comes from the curated table, else, when
         class_type and input_name are given, from
         comfy_resolve.lookup_comfy_download for that slot; the client never
-        names a repository or path. 400 when neither has a source.
+        names a repository or path. 400 when neither has a source. When the
+        client sends the repo and file it showed the user, 409 when the source
+        resolved now differs from them, and nothing is downloaded.
 
         Requires host filesystem access, the same gate /api/models/scan uses on
         the same folder: the destination is `<comfy_workdir>/models/<subfolder>`
         unless the managed ComfyUI instance is active, and comfy_workdir may be
         a UNC path."""
-        from localm.media.managed_comfy import comfy_models_dest_dir
         from localm.model_manager.comfy_resolve import (
             curated_comfy_download, lookup_comfy_download,
         )
@@ -356,14 +365,18 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             source = lookup.download
         if source is None:
             raise HTTPException(400, f"No download source for: {req.filename}")
+        if ((req.repo is not None and req.repo != source.repo)
+                or (req.file is not None and req.file != source.path)):
+            raise HTTPException(
+                409, f"The download source for {req.filename} changed since it was "
+                     f"shown; it is now {source.repo} / {source.path}. Search again.")
         # req.plugin is a selector into the server's own per-plugin config, not a
         # path; an unrecognized value falls back to no plugin context (the global
         # comfy_workdir).
         plugin = req.plugin if req.plugin in MEDIA_PLUGINS else None
         try:
             dest_dir = await run_in_threadpool_bounded(
-                comfy_models_dest_dir, source.comfy_subfolder, plugin=plugin,
-                timeout=20.0)
+                _download_dest, source, plugin, timeout=20.0)
         except ThreadCallTimeout as e:
             raise HTTPException(
                 504, f"Resolving the ComfyUI download destination timed out: {e}")

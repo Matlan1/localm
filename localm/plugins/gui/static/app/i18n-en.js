@@ -100,6 +100,8 @@ export const I18N_EN = {
     "Searching…",
   "common.modelDownload.unknownFolder":
     "'{filename}' is missing (needed by {class_type}.{input_name}). localm does not know which ComfyUI models folder this node reads from. Add the file to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.unusableName":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). Its name has characters localm cannot save a file under, so it cannot be downloaded automatically. Add it to your ComfyUI installation's matching models folder, then try again.",
   "common.modelDownload.unsupportedFormat":
     "'{filename}' is missing (needed by {class_type}.{input_name}). localm downloads only .safetensors and .gguf model files automatically. Add this file to your ComfyUI installation's matching models folder, then try again.",
   "common.modelDownload.body": "This workflow needs '{filename}' ({size}), which isn't installed.",

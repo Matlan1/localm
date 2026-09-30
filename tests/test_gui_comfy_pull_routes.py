@@ -199,7 +199,7 @@ class TestPreflightRoute:
         assert r.status_code == 200, r.text
         assert captured.get("lora_name") == "my_style.safetensors"
 
-    def test_reports_uncurated_missing_file_with_null_source(self, scoped_app, tmp_path):
+    def test_reports_uncurated_missing_file_with_null_source(self, scoped_app, tmp_path, no_hf):
         fake_info = {
             "CheckpointLoaderSimple": {
                 "input": {"required": {"ckpt_name": [["other.safetensors"], {}]}}
@@ -396,6 +396,35 @@ class TestPullComfySourceFromASearch:
                 "filename": WAN, "class_type": "UNETLoader", "input_name": "unet_name"})
         assert captured == {}
         assert r.status_code == 400
+
+    def test_a_source_that_changed_since_it_was_shown_is_409_and_nothing_starts(
+            self, scoped_app, tmp_path, monkeypatch, wan_on_hf):
+        _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        body = {"filename": WAN, "class_type": "UNETLoader", "input_name": "unet_name"}
+        with TestClient(scoped_app) as c:
+            stale = c.post("/api/models/pull-comfy-source", json={
+                **body, "repo": "someone/older-copy", "file": WAN})
+            same = c.post("/api/models/pull-comfy-source", json={
+                **body, "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "file": WAN_PATH})
+        assert stale.status_code == 409
+        assert "Comfy-Org/Wan_2.1_ComfyUI_repackaged" in stale.json()["detail"]
+        assert same.status_code == 200, same.text
+        assert captured["args"][-1] == f"Comfy-Org/Wan_2.1_ComfyUI_repackaged:{WAN_PATH}"
+
+    def test_a_file_in_a_workflow_subfolder_goes_into_that_subfolder(
+            self, scoped_app, tmp_path, monkeypatch, wan_on_hf):
+        workdir = _workdir(tmp_path)
+        captured = _capture_start_cli(monkeypatch)
+        with TestClient(scoped_app) as c:
+            found = c.post("/api/models/comfy-source/lookup",
+                           json={**LOOKUP, "filename": f"wan\\{WAN}"}).json()
+            r = c.post("/api/models/pull-comfy-source", json={
+                "filename": f"wan\\{WAN}", "plugin": "video",
+                "class_type": "UNETLoader", "input_name": "unet_name"})
+        assert found["dest_dir"] == str(workdir / "models" / "unet" / "wan")
+        assert captured["args"][4] == str(workdir / "models" / "unet" / "wan")
+        assert r.status_code == 200, r.text
 
     def test_a_curated_file_needs_no_search(self, scoped_app, tmp_path, monkeypatch, no_hf):
         workdir = _workdir(tmp_path)

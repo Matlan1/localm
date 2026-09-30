@@ -439,10 +439,15 @@ class ComfyPullRequest(BaseModel):
     # Validated against the known plugin set server-side; an unrecognized value is
     # treated as None and falls back to the global key.
     plugin: str | None = None
-    # The workflow input the file is for, as the preflight response named it. Only
-    # selects a ComfyUI models folder from comfy_resolve's own table.
+    # The workflow input the file is for, as the preflight response named it.
+    # Selects the ComfyUI models folder from comfy_resolve's own table and lets
+    # the server search HuggingFace for a file with no curated source.
     class_type: str | None = None
     input_name: str | None = None
+    # The repository and path the user was shown and confirmed. Compared with
+    # the source the server resolves; never used as the source.
+    repo: str | None = None
+    file: str | None = None
 
 
 class ComfySourceLookupRequest(BaseModel):

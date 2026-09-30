@@ -518,6 +518,7 @@
   "common.modelDownload.searchOffline": "Suche nach '{filename}' nicht möglich: Der Netzwerkzugriff ist aus. Schalten Sie ihn ein oder erlauben Sie nur Downloads unter Einstellungen → Netzwerk.",
   "common.modelDownload.searching": "Suche läuft…",
   "common.modelDownload.unknownFolder": "'{filename}' fehlt (benötigt von {class_type}.{input_name}). localm weiß nicht, aus welchem ComfyUI-Modellordner dieser Knoten liest. Fügen Sie die Datei dem passenden Modellordner Ihrer ComfyUI-Installation hinzu und versuchen Sie es erneut.",
+  "common.modelDownload.unusableName": "'{filename}' fehlt (benötigt von {class_type}.{input_name}). Der Name enthält Zeichen, unter denen localm keine Datei speichern kann, daher kann sie nicht automatisch heruntergeladen werden. Fügen Sie sie dem passenden Modellordner Ihrer ComfyUI-Installation hinzu und versuchen Sie es erneut.",
   "common.modelDownload.unsupportedFormat": "'{filename}' fehlt (benötigt von {class_type}.{input_name}). localm lädt nur .safetensors- und .gguf-Modelldateien automatisch herunter. Fügen Sie die Datei dem passenden Modellordner Ihrer ComfyUI-Installation hinzu und versuchen Sie es erneut.",
   "common.modelDownload.body": "Dieser Workflow benötigt '{filename}' ({size}), das nicht installiert ist.",
   "common.modelDownload.download": "Herunterladen",

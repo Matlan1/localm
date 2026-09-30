@@ -389,13 +389,16 @@ def _hf_incomplete_path(base_dir: Path, rel: str, etag: str) -> "Path | None":
 _REPO_PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 
 
+# The folder under a destination that a download of a file inside a repo
+# folder is staged in before it is moved into the destination.
+_REPO_FOLDER_STAGING = Path(".cache") / "localm-staging"
+
+
 def _safe_repo_subdir(remote_dir: str, base_dir: Path) -> bool:
     """True when *remote_dir* (the folder part of an ``owner/repo:dir/file``
     spec) is a plain relative path whose every component matches
     ``_REPO_PATH_PART_RE`` and is not ``.``/``..``, and which stays inside
-    *base_dir* when joined to it. huggingface_hub writes a local-dir download
-    to ``base_dir/remote_dir/<file>`` before it is moved, so this bounds that
-    write."""
+    *base_dir* when joined to it and resolved."""
     comps = remote_dir.split("/")
     if not comps or any(c in ("", ".", "..") or not _REPO_PATH_PART_RE.match(c)
                         for c in comps):
@@ -405,20 +408,6 @@ def _safe_repo_subdir(remote_dir: str, base_dir: Path) -> bool:
         return (base / remote_dir).resolve().is_relative_to(base)
     except (OSError, ValueError):
         return False
-
-
-def _remove_empty_dirs(start: Path, stop: Path) -> None:
-    """Remove *start* and each parent up to (not including) *stop* while they
-    are empty directories. Stops at the first one that is not empty or cannot
-    be removed."""
-    cur = Path(start)
-    stop = Path(stop)
-    while cur != stop and stop in cur.parents:
-        try:
-            cur.rmdir()
-        except OSError:
-            return
-        cur = cur.parent
 
 
 def _etag_from_head(resp: Any) -> "str | None":
@@ -1386,10 +1375,14 @@ def _pull_gguf_file(
     else:
         parts = spec.rsplit("/", 1)
         repo_id, remote = parts[0], parts[1]
-    # "owner/repo:sub/dir/file" names a file inside a repo folder; it is saved
-    # under its bare filename in base_dir.
+    # "owner/repo:sub/dir/file" names a file inside a repo folder. huggingface_hub
+    # writes it to <stage_dir>/sub/dir/file, which is then moved to
+    # base_dir/file; stage_dir is under base_dir's hidden .cache so no folder of
+    # the repo's layout appears in base_dir. A root-level file stages in
+    # base_dir itself.
     remote_dir, in_folder, filename = remote.rpartition("/")
-    if in_folder and not _safe_repo_subdir(remote_dir, base_dir):
+    stage_dir = base_dir / _REPO_FOLDER_STAGING if in_folder else base_dir
+    if in_folder and not _safe_repo_subdir(remote_dir, stage_dir):
         console.print(
             f"[red]Unsafe repository path:[/red] {escape(remote)}\n"
             "A folder inside the repository may only use letters, digits and "
@@ -1541,20 +1534,12 @@ def _pull_gguf_file(
         etag = etags.get(part)
         if not etag:
             continue
-        inc = _hf_incomplete_path(base_dir, _remote(part), etag)
+        inc = _hf_incomplete_path(stage_dir, _remote(part), etag)
         if inc is None:
             continue
         already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
 
-    def _drop_created_repo_folder() -> None:
-        # huggingface_hub stages a download under base_dir/<repo folder>/;
-        # the folder chain is removed while empty, including one an
-        # interrupted earlier pull left behind.
-        if remote_dir:
-            _remove_empty_dirs(base_dir / remote_dir, base_dir)
-
     if not _mm._check_disk_space(base_dir, max(0, total_size - already_have)):
-        _drop_created_repo_folder()
         return False
 
     # TAG-INJECTION site: repo_id/filename sit directly inside OPEN
@@ -1578,30 +1563,27 @@ def _pull_gguf_file(
                       f"[bold]{escape(filename)}[/bold]")
 
     with _download_progress([base_dir / p for p in missing], total_size,
-                            base_dir=base_dir,
+                            base_dir=stage_dir,
                             rel_parts=[_remote(p) for p in missing],
                             etags={_remote(p): e for p, e in etags.items()}) as _prog:
-        try:
-            for part in missing:
-                try:
-                    local = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=_remote(part),
-                        local_dir=str(base_dir),
-                        endpoint=_HF_ENDPOINT,
-                    )
-                    final = base_dir / part
-                    if Path(local) != final:
-                        shutil.move(local, final)
-                except Exception as e:
-                    console.print(f"[red]Download failed[/red] ({escape(part)}): "
-                                  f"{escape(str(e))}")
-                    # WITHOUT _prog.ok(): this return unwinds the context manager
-                    # cleanly, and only the absence of ok() stops it announcing
-                    # 100% for a download that failed.
-                    return False
-        finally:
-            _drop_created_repo_folder()
+        for part in missing:
+            try:
+                local = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=_remote(part),
+                    local_dir=str(stage_dir),
+                    endpoint=_HF_ENDPOINT,
+                )
+                final = base_dir / part
+                if Path(local) != final:
+                    shutil.move(local, final)
+            except Exception as e:
+                console.print(f"[red]Download failed[/red] ({escape(part)}): "
+                              f"{escape(str(e))}")
+                # WITHOUT _prog.ok(): this return unwinds the context manager
+                # cleanly, and only the absence of ok() stops it announcing 100%
+                # for a download that failed.
+                return False
         _prog.ok()
 
     # Verify the downloaded first part against the digest we will register it

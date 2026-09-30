@@ -30,7 +30,8 @@ function sseResponse(events) {
   };
 }
 
-function makeFetch({ missing, pulls, status = "verified", lookups = [], lookup = null }) {
+function makeFetch({ missing, pulls, status = "verified", lookups = [], lookup = null,
+                     lookupGate = null, lookupOk = true }) {
   return async (url, opts = {}) => {
     const method = opts.method || "GET";
     if (url === "/api/media/image/preflight" && method === "POST") {
@@ -38,7 +39,9 @@ function makeFetch({ missing, pulls, status = "verified", lookups = [], lookup =
     }
     if (url === "/api/models/comfy-source/lookup" && method === "POST") {
       lookups.push(JSON.parse(opts.body));
-      return { ok: true, status: 200, json: async () => lookup };
+      if (lookupGate) await lookupGate;
+      return { ok: lookupOk, status: lookupOk ? 200 : 500, statusText: "error",
+               json: async () => lookup };
     }
     if (url === "/api/models/pull-comfy-source" && method === "POST") {
       pulls.push(JSON.parse(opts.body));
@@ -152,7 +155,8 @@ test("missing WITH a curated source: shows repo/file/size, offers Download", asy
   const proceed = await proceedPromise;
   assert.equal(proceed, true);
   assert.deepEqual(pulls, [{ filename: "flux1-dev-Q8_0.gguf", plugin: "image",
-                             class_type: "UnetLoaderGGUF", input_name: "unet_name" }]);
+                             class_type: "UnetLoaderGGUF", input_name: "unet_name",
+                             repo: "city96/FLUX.1-dev-gguf", file: "flux1-dev-Q8_0.gguf" }]);
 });
 
 test("Not now skips the download without any pull POST", async () => {
@@ -225,7 +229,9 @@ test("searchable miss: nothing is sent until Search is clicked, then a found fil
   await tick(); await tick(); await tick();
   assert.equal(await proceedPromise, true);
   assert.deepEqual(pulls, [{ filename: "wan2.1_t2v_1.3B_fp16.safetensors", plugin: "image",
-                             class_type: "CheckpointLoaderSimple", input_name: "ckpt_name" }]);
+                             class_type: "CheckpointLoaderSimple", input_name: "ckpt_name",
+                             repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+                             file: "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors" }]);
 });
 
 test("searchable miss: Not now sends neither a search nor a download", async () => {
@@ -271,6 +277,7 @@ for (const [status, phrase] of [
 }
 
 for (const [reason, phrase] of [
+  ["path", "cannot save a file under"],
   ["format", ".safetensors and .gguf"],
   ["folder", "which comfyui models folder"],
   ["name", "too generic"],
@@ -311,4 +318,70 @@ test("a source with no known size says so instead of printing a blank size", asy
   assert.ok(!text.includes("()"), "no empty size in parentheses");
   click(win, "Not now");
   assert.equal(await proceedPromise, true);
+});
+
+const FOUND = {
+  status: "found", reason: "", detail: "", dest_dir: "D:\\comfy\\models\\unet",
+  source: { repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+            file: "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+            size_bytes: 2838303560, model_type: "diffusion-unet", origin: "huggingface" },
+};
+
+test("closing the search dialog while the search runs: a late result opens nothing", async () => {
+  const pulls = [];
+  const lookups = [];
+  let release;
+  const lookupGate = new Promise((r) => { release = r; });
+  const { window: win } = loadApp({
+    fetchImpl: makeFetch({ missing: SEARCHABLE, pulls, lookups, lookup: FOUND, lookupGate }) });
+  await tick();
+  const proceedPromise = win.checkModelsBeforeGenerate("image", null);
+  await tick();
+  click(win, "Search Hugging Face");
+  await tick();
+  assert.equal(lookups.length, 1, "the search is in flight");
+  win.document.querySelector("#modal").style.display = "none";
+  assert.equal(await proceedPromise, true, "closing the dialog lets generation proceed");
+
+  release();
+  await new Promise((r) => setTimeout(r, 50));
+  await tick(); await tick();
+  assert.notEqual(win.document.querySelector("#modal").style.display, "flex",
+    "a dismissed search reopened as a download dialog");
+  assert.deepEqual(pulls, []);
+});
+
+test("a search request that fails is reported and nothing is downloaded", async () => {
+  const pulls = [];
+  const lookups = [];
+  const { window: win } = loadApp({
+    fetchImpl: makeFetch({ missing: SEARCHABLE, pulls, lookups, lookupOk: false,
+                           lookup: { detail: "Looking up the model source timed out" } }) });
+  await tick();
+  const proceedPromise = win.checkModelsBeforeGenerate("image", null);
+  await tick();
+  click(win, "Search Hugging Face");
+  await tick(); await tick(); await tick();
+  assert.equal(await proceedPromise, true);
+  assert.deepEqual(pulls, []);
+  const toastEl = win.document.getElementById("toast");
+  assert.ok(toastEl.textContent.includes("Looking up the model source timed out"),
+    toastEl.textContent);
+});
+
+test("an unsupported lookup result is explained by its reason", async () => {
+  const pulls = [];
+  const lookups = [];
+  const lookup = { status: "unsupported", reason: "path", detail: "x",
+                   source: null, dest_dir: null };
+  const { window: win } = loadApp({
+    fetchImpl: makeFetch({ missing: SEARCHABLE, pulls, lookups, lookup }) });
+  await tick();
+  const proceedPromise = win.checkModelsBeforeGenerate("image", null);
+  await tick();
+  click(win, "Search Hugging Face");
+  await tick(); await tick(); await tick();
+  assert.equal(await proceedPromise, true);
+  const toastEl = win.document.getElementById("toast");
+  assert.ok(toastEl.textContent.includes("cannot save a file under"), toastEl.textContent);
 });

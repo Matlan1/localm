@@ -38,6 +38,9 @@ LOOKUP_FAILED = "failed"
 REASON_FORMAT = "format"
 REASON_FOLDER = "folder"
 REASON_NAME = "name"
+REASON_PATH = "path"
+
+_RESERVED_NAME_CHARS = frozenset('<>:"|?*')
 
 SAFE_EXTENSIONS = (".safetensors", ".sft", ".gguf")
 
@@ -87,7 +90,6 @@ _FOLDER_MODEL_TYPES = {
 
 _FOUND_TTL = 1800.0
 _MISS_TTL = 300.0
-_FAILED_TTL = 60.0
 _CACHE_MAX = 128
 _cache: dict[str, tuple[float, "ComfyLookup"]] = {}
 _cache_lock = threading.Lock()
@@ -97,13 +99,16 @@ _org_rows: Optional[tuple[float, list]] = None
 @dataclass(frozen=True)
 class ComfyDownload:
     """Where to download one ComfyUI workflow model file from, and where it
-    goes. ``spec`` is ``owner/repo:path/in/repo`` as ``pull_model`` takes it;
-    ``size_bytes`` is None when the size could not be read."""
+    goes: ``models/<comfy_subfolder>/<subdir>/``. ``spec`` is
+    ``owner/repo:path/in/repo`` as ``pull_model`` takes it; ``size_bytes`` is
+    None when the size could not be read; ``subdir`` is ``""`` or the
+    ``/``-joined subfolder the workflow names the file under."""
     spec: str
     model_type: str
     comfy_subfolder: str
     size_bytes: Optional[int]
     origin: str
+    subdir: str = ""
 
     @property
     def repo(self) -> str:
@@ -181,29 +186,57 @@ def _search_queries(filename: str) -> list[str]:
 
 
 def _safe_repo_path(path: str) -> bool:
-    parts = path.split("/")
-    return all(p not in (".", "..") and _PATH_PART_RE.match(p) for p in parts)
+    """True when every folder part of the repository path *path* matches
+    ``_PATH_PART_RE`` and is not ``.``/``..``, and its file name is a usable
+    name part (``_is_name_part``)."""
+    *folders, name = path.split("/")
+    return (all(p not in (".", "..") and _PATH_PART_RE.match(p) for p in folders)
+            and _is_name_part(name))
+
+
+def _is_name_part(part: str) -> bool:
+    """True for one folder or file name localm can create on Windows, macOS
+    and Linux: not empty, not ``.``/``..``, no control character or any of
+    ``<>:"|?*``, and no leading or trailing space or trailing dot."""
+    return (bool(part) and part not in (".", "..")
+            and not any(ord(ch) < 32 or ch in _RESERVED_NAME_CHARS for ch in part)
+            and part == part.strip() and not part.endswith("."))
+
+
+def split_model_name(filename: str) -> Optional[tuple[str, str]]:
+    """``(subfolder, file name)`` for a workflow model value such as
+    ``SDXL/model_v2.safetensors`` or ``SDXL\\model_v2.safetensors`` (ComfyUI
+    reports a file in a subfolder of its models folder that way), with the
+    subfolder ``/``-joined and ``""`` when there is none. None when any part
+    is not a usable name (``_is_name_part``)."""
+    parts = (filename or "").replace("\\", "/").split("/")
+    if not all(_is_name_part(p) for p in parts):
+        return None
+    return "/".join(parts[:-1]), parts[-1]
 
 
 def _check_request(filename: str, class_type: str, input_name: str
                    ) -> tuple[Optional[str], Optional[ComfyLookup]]:
     """``(folder, None)`` when *filename* may be searched for, else
     ``(None, unsupported-lookup)``."""
-    if "/" in filename or "\\" in filename or not _PATH_PART_RE.match(filename):
-        return None, ComfyLookup(LOOKUP_UNSUPPORTED, reason=REASON_NAME,
-                                 detail="The file name is not a plain file name.")
-    if not filename.lower().endswith(SAFE_EXTENSIONS):
+    split = split_model_name(filename)
+    if split is None:
+        return None, ComfyLookup(
+            LOOKUP_UNSUPPORTED, reason=REASON_PATH,
+            detail="The file name has characters localm cannot save a file under.")
+    name = split[1]
+    if not name.lower().endswith(SAFE_EXTENSIONS):
         return None, ComfyLookup(
             LOOKUP_UNSUPPORTED, reason=REASON_FORMAT,
-            detail="localm downloads only .safetensors and .gguf model files "
-                   "automatically.")
+            detail="localm downloads only .safetensors, .sft and .gguf model "
+                   "files automatically.")
     folder = comfy_slot_folder(class_type, input_name)
     if folder is None:
         return None, ComfyLookup(
             LOOKUP_UNSUPPORTED, reason=REASON_FOLDER,
             detail=f"localm does not know which ComfyUI models folder "
                    f"{class_type}.{input_name} reads from.")
-    if not is_specific_model_name(filename):
+    if not is_specific_model_name(name):
         return None, ComfyLookup(
             LOOKUP_UNSUPPORTED, reason=REASON_NAME,
             detail="The file name is too generic to identify one model.")
@@ -215,17 +248,21 @@ def search_refusal(filename: str, class_type: str, input_name: str
     """The ``LOOKUP_UNSUPPORTED`` outcome ``lookup_comfy_download`` gives for
     this slot without searching, or None when it would search. Never touches
     the network."""
-    return _check_request((filename or "").strip(), class_type or "",
+    return _check_request(filename or "", class_type or "",
                           input_name or "")[1]
 
 
 def curated_comfy_download(filename: str) -> Optional[ComfyDownload]:
-    """The curated-table download for *filename*, or None."""
-    source = resolve_comfy_model_source(filename)
+    """The curated-table download for the file name of *filename*, placed in
+    the same subfolder *filename* names (``split_model_name``), or None."""
+    split = split_model_name(filename)
+    if split is None:
+        return None
+    source = resolve_comfy_model_source(split[1])
     if source is None:
         return None
     return ComfyDownload(source.spec, source.model_type, source.comfy_subfolder,
-                         source.size_bytes, ORIGIN_CURATED)
+                         source.size_bytes, ORIGIN_CURATED, split[0])
 
 
 def _cache_key(filename: str, folder: str) -> str:
@@ -245,8 +282,7 @@ def _cache_get(key: str) -> Optional[ComfyLookup]:
 
 
 def _cache_put(key: str, lookup: ComfyLookup) -> None:
-    ttl = {LOOKUP_FOUND: _FOUND_TTL, LOOKUP_NOT_FOUND: _MISS_TTL,
-           LOOKUP_FAILED: _FAILED_TTL}.get(lookup.status)
+    ttl = {LOOKUP_FOUND: _FOUND_TTL, LOOKUP_NOT_FOUND: _MISS_TTL}.get(lookup.status)
     if ttl is None:
         return
     with _cache_lock:
@@ -365,12 +401,15 @@ def lookup_comfy_download(filename: str, class_type: str, input_name: str
     """Find where to download the ComfyUI model file *filename*, needed by the
     workflow input ``class_type.input_name``.
 
-    The curated table answers first. Otherwise, when the request passes the
-    checks in the module docstring, HuggingFace is searched; its result is
-    cached per slot folder (see ``cached_comfy_download``). Network policy
-    refusing the search gives ``LOOKUP_OFFLINE`` and any other search failure
-    ``LOOKUP_FAILED``; neither is reported as ``LOOKUP_NOT_FOUND``."""
-    filename = (filename or "").strip()
+    *filename* may name a subfolder (``split_model_name``); the source is
+    looked up by its file name and the subfolder is kept in the result's
+    ``subdir``. The curated table answers first. Otherwise, when the request
+    passes the checks in the module docstring, HuggingFace is searched; a found
+    file or a miss is cached per slot folder (see ``cached_comfy_download``).
+    Network policy refusing the search gives ``LOOKUP_OFFLINE`` and any other
+    search failure ``LOOKUP_FAILED``; neither is cached nor reported as
+    ``LOOKUP_NOT_FOUND``."""
+    filename = filename or ""
     curated = curated_comfy_download(filename)
     if curated is not None:
         return ComfyLookup(LOOKUP_FOUND, curated)
@@ -381,20 +420,19 @@ def lookup_comfy_download(filename: str, class_type: str, input_name: str
     cached = _cache_get(key)
     if cached is not None:
         return cached
+    subdir, name = split_model_name(filename)
 
     from localm import discover
     from localm.model_source_credentials import get_hf_token
     token = get_hf_token()
     try:
         discover._ensure_online()
-        candidates = _hf_candidates(filename, token)
+        candidates = _hf_candidates(name, token)
     except discover.DiscoverError as e:
         if e.off:
             return ComfyLookup(LOOKUP_OFFLINE, detail=str(e))
         logger.debug("HuggingFace model-file search failed: %s", e)
-        lookup = ComfyLookup(LOOKUP_FAILED, detail=str(e))
-        _cache_put(key, lookup)
-        return lookup
+        return ComfyLookup(LOOKUP_FAILED, detail=str(e))
     if not candidates:
         lookup = ComfyLookup(
             LOOKUP_NOT_FOUND,
@@ -403,7 +441,8 @@ def lookup_comfy_download(filename: str, class_type: str, input_name: str
         return lookup
     repo, path, _downloads = candidates[0]
     download = ComfyDownload(f"{repo}:{path}", folder_model_type(folder), folder,
-                             _hf_file_size(repo, path, token), ORIGIN_HUGGINGFACE)
+                             _hf_file_size(repo, path, token), ORIGIN_HUGGINGFACE,
+                             subdir)
     lookup = ComfyLookup(LOOKUP_FOUND, download)
     _cache_put(key, lookup)
     return lookup

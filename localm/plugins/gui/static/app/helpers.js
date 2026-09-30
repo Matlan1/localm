@@ -1391,6 +1391,7 @@ function _offerModelDownload(missingModel, log, plugin) {
               filename, plugin: plugin || null,
               class_type: missingModel.class_type || null,
               input_name: missingModel.input_name || null,
+              repo: source.repo, file: source.file,
             }),
           });
           const data = await r.json();
@@ -1427,19 +1428,21 @@ function _offerModelDownload(missingModel, log, plugin) {
 /** Report ONE missing model localm cannot download: a toast and a log line
  *  naming the file and the workflow input that needs it. *status* is the
  *  source lookup's outcome ("not_found", "offline", "failed") when a search
- *  ran; otherwise missingModel.reason ("format", "folder", "name") picks the
- *  message. Never blocks: the real generate call's own preflight_models()
- *  gate remains authoritative. */
+ *  ran; when it is absent or "unsupported", missingModel.reason ("format",
+ *  "folder", "name", "path") picks the message. Never blocks: the real
+ *  generate call's own preflight_models() gate remains authoritative. */
 function _reportUncuratedMiss(missingModel, log, status) {
   const { filename, class_type, input_name, reason } = missingModel;
   const key = {
     format: "common.modelDownload.unsupportedFormat",
     folder: "common.modelDownload.unknownFolder",
     name: "common.modelDownload.genericName",
+    path: "common.modelDownload.unusableName",
     not_found: "common.modelDownload.notFoundOnHf",
     offline: "common.modelDownload.searchOffline",
     failed: "common.modelDownload.searchFailed",
-  }[status || reason] || "common.modelDownload.uncuratedMissing";
+  }[status && status !== "unsupported" ? status : reason]
+    || "common.modelDownload.uncuratedMissing";
   const msg = t(key, { filename, class_type, input_name });
   toast(msg, true);
   if (log) {
@@ -1490,10 +1493,13 @@ function _offerModelSearch(missingModel, log, plugin) {
           data = await r.json();
           if (!r.ok) throw new Error(data.detail || r.statusText);
         } catch (e) {
+          if (settled) return;
           toast(t("common.modelDownload.searchError", { message: e.message }), true);
           finish(true);
           return;
         }
+        // The dialog was closed while the search ran; its caller has moved on.
+        if (settled) return;
         if (data.status === "found" && data.source) {
           settled = true;
           close();
