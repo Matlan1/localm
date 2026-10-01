@@ -3287,18 +3287,40 @@ def _runtime_device_registry() -> Optional[list]:
             _loader.stop_probe_daemon()
 
 
-def _torch_split_slots(kept: list, every: list) -> "tuple[Optional[list], str]":
+def _registry_mismatch(devices: list) -> str:
+    """``""`` when the runtime's registry (:func:`_runtime_device_registry`)
+    lists exactly as many discrete GPUs as *devices*, with each one's total
+    memory matching the same position in *devices*; otherwise the reason."""
+    registry = _runtime_device_registry()
+    if registry is None:
+        return "the llama.cpp runtime's device list could not be read"
+    from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
+    native = [d for d in registry
+              if isinstance(d, dict) and d.get("type") == GGML_DEV_TYPE_GPU]
+    if len(native) != len(devices):
+        return (f"the llama.cpp runtime lists {len(native)} discrete GPU(s) where "
+                f"torch reports {len(devices)}")
+    for pos, (d, n) in enumerate(zip(devices, native)):
+        n_total = n.get("total")
+        tolerance = max(_SPLIT_TOTAL_MATCH_MIN_BYTES,
+                        int(d["total"] * _SPLIT_TOTAL_MATCH_FRACTION))
+        if not isinstance(n_total, int) or abs(n_total - d["total"]) > tolerance:
+            return (f"llama.cpp's device {pos} reports {n_total} bytes of memory "
+                    f"where torch reports {d['total']} for it")
+    return ""
+
+
+def _torch_split_slots(kept: list, every: list, *,
+                       check_runtime: bool = True) -> "tuple[Optional[list], str]":
     """``(devices, "")`` with each torch device in *kept* renumbered to its
     position in llama.cpp's own device list, or ``(None, reason)`` when the
     torch reading cannot be proven to match that list. *every* is the whole
     torch reading *kept* was filtered from.
 
     Proven when no reading came from nvidia-smi, torch numbered its devices
-    0..N-1 with none missing and reported whether each is integrated, every
-    kept device is discrete with a device-global free reading, and the
-    runtime's registry (:func:`_runtime_device_registry`) lists exactly as many
-    discrete GPUs as were kept, with matching total memory position by
-    position."""
+    0..N-1 with none missing and reported whether each is integrated, and
+    every kept device is discrete with a device-global free reading; with
+    *check_runtime*, also when :func:`_registry_mismatch` finds no mismatch."""
     if any(d.get("source") == GPU_SOURCE_NVIDIA_SMI for d in every):
         return None, "the GPU readings came from nvidia-smi, whose numbering is its own"
     indices = sorted(d.get("index") for d in every if isinstance(d.get("index"), int))
@@ -3311,30 +3333,37 @@ def _torch_split_slots(kept: list, every: list) -> "tuple[Optional[list], str]":
         return None, "the split would include an integrated GPU"
     if any(d.get("free_scope") != FREE_SCOPE_DEVICE for d in kept):
         return None, "a GPU's free-memory reading does not count other processes"
-    registry = _runtime_device_registry()
-    if registry is None:
-        return None, "the llama.cpp runtime's device list could not be read"
-    from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
-    native = [d for d in registry
-              if isinstance(d, dict) and d.get("type") == GGML_DEV_TYPE_GPU]
-    if len(native) != len(kept):
-        return None, (f"the llama.cpp runtime lists {len(native)} discrete GPU(s) "
-                      f"where torch reports {len(kept)}")
-    out = []
-    for pos, (t, n) in enumerate(zip(kept, native)):
-        n_total = n.get("total")
-        tolerance = max(_SPLIT_TOTAL_MATCH_MIN_BYTES,
-                        int(t["total"] * _SPLIT_TOTAL_MATCH_FRACTION))
-        if not isinstance(n_total, int) or abs(n_total - t["total"]) > tolerance:
-            return None, (f"llama.cpp's device {pos} does not match torch's "
-                          f"device {t['index']} (total memory {n_total} vs "
-                          f"{t['total']} bytes)")
-        out.append({"index": pos, "free": t["free"], "total": t["total"]})
+    out = [{"index": pos, "free": t["free"], "total": t["total"]}
+           for pos, t in enumerate(kept)]
+    if check_runtime:
+        reason = _registry_mismatch(out)
+        if reason:
+            return None, reason
     return out, ""
 
 
+def runtime_split_devices_match(devices: list) -> bool:
+    """True when *devices*, as :func:`implicit_split_devices` numbered them
+    with ``check_runtime=False``, are the active runtime's own device list:
+    always on a build whose index space is opaque, otherwise when
+    :func:`_registry_mismatch` finds no mismatch. A mismatch is logged at INFO
+    with its reason. Never raises."""
+    try:
+        if _native_gpu_index_space_is_opaque():
+            return True
+        reason = _registry_mismatch(devices)
+    except Exception as e:
+        reason = f"the check failed ({type(e).__name__}: {e})"
+    if reason:
+        logger.info("implicit GPU split fit: not applied - %s; keeping "
+                    "llama.cpp's default split", reason)
+        return False
+    return True
+
+
 def implicit_split_devices(config: Optional[dict] = None, *,
-                           wait_for_inflight: bool = False) -> Optional[list]:
+                           wait_for_inflight: bool = False,
+                           check_runtime: bool = True) -> Optional[list]:
     """``[{"index", "free", "total"}, ...]`` for every device llama.cpp's
     default layer split spreads over, each ``index`` being the device's
     position in llama.cpp's own device list (its ``tensor_split`` slot and its
@@ -3344,8 +3373,11 @@ def implicit_split_devices(config: Optional[dict] = None, *,
     On a build whose index space is opaque (vulkan or sycl) the readings come
     from the native registry and are already numbered that way. Otherwise they
     are torch's, used only when :func:`_torch_split_slots` proves the match; a
-    failed proof is logged at INFO with its reason. Same probe and freshness
-    rules as :func:`implicit_split_capacity`. Never raises."""
+    failed proof is logged at INFO with its reason. ``check_runtime=False``
+    skips the part of that proof that reads the runtime's registry, and the
+    caller then runs :func:`runtime_split_devices_match` on the answer before
+    acting on it. Same probe and freshness rules as
+    :func:`implicit_split_capacity`. Never raises."""
     from localm.config import load_config
     try:
         cfg = config if config is not None else load_config()
@@ -3354,7 +3386,8 @@ def implicit_split_devices(config: Optional[dict] = None, *,
             return None
         devices, every = readings
         if every is not None:
-            out, reason = _torch_split_slots(devices, every)
+            out, reason = _torch_split_slots(devices, every,
+                                             check_runtime=check_runtime)
             if out is None:
                 logger.info("implicit GPU split fit: not applied - %s; keeping "
                             "llama.cpp's default split", reason)

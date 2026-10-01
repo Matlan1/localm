@@ -91,9 +91,10 @@ def _torch_box(gpus, registry, *, daemon_running=True):
         yield reg, stop
 
 
-def _load_capturing(b, gpus, registry):
+def _load_capturing(b, gpus, registry, registry_reads=None):
     """Run the backend's real ``_load_native`` on a torch box and return the
-    params handed to the worker."""
+    params handed to the worker. Appends the number of registry reads to
+    *registry_reads* when given."""
     captured = {}
 
     def _fake_spawn(self_runner, params, cancel_event=None, timeout=None,
@@ -101,7 +102,7 @@ def _load_capturing(b, gpus, registry):
         captured.update(params)
         return {"n_layers": 4}
 
-    with _torch_box(gpus, registry), \
+    with _torch_box(gpus, registry) as (reg, _stop), \
             mock.patch.object(discover, "list_gpus", return_value=([], "ok")), \
             mock.patch.object(_loader, "native_lib_loaded", return_value=False), \
             mock.patch.object(discover, "resolve_auto_split_ratios", return_value=None), \
@@ -111,6 +112,8 @@ def _load_capturing(b, gpus, registry):
             mock.patch("localm.model_meta.store_n_layers"):
         b.effective_gpu_layers = 99
         b._load_native()
+    if registry_reads is not None:
+        registry_reads.append(reg.call_count)
     return captured
 
 
@@ -352,6 +355,12 @@ class TestGgufSplitLayout:
 
 class TestBackendWiring:
     """The parent computes the plan and hands the worker the mapping."""
+
+    @pytest.fixture(autouse=True)
+    def _numbering_confirmed(self):
+        with mock.patch.object(discover, "runtime_split_devices_match",
+                               return_value=True):
+            yield
 
     # 4 blocks (the last one nextn): with shares 50 / 50 / 30 the default split
     # puts blocks 0-1 on device 0, blocks 2-3 on device 1 and the output layer
@@ -625,10 +634,24 @@ class TestTorchNumberingMatchesLlamaCpp:
     def test_two_discrete_gpus_that_fit_keep_the_default_split(self, tmp_path):
         gpus = _torch_readings((20.0, False), (20.0, False))
         b = self._backend(tmp_path)
-        params = _load_capturing(b, gpus, _registry(gpus))
+        reads = []
+        params = _load_capturing(b, gpus, _registry(gpus), reads)
         assert params["gpu_split_ratios"] is None
         assert _worker_view(params) == (discover._LLAMA_SPLIT_MODE_LAYER, 0, None)
         assert b.applied_gpu_split is None
+        assert reads == [0], "a plan that changes nothing must not read the registry"
+
+    def test_a_plan_is_dropped_when_the_runtime_lists_other_gpus(self, tmp_path, capsys):
+        # Without the registry check this layout writes {1: .5, 2: .5}.
+        gpus = _torch_readings((0.45, False), (23.0, False), (23.0, False))
+        registry = _registry(gpus)[1:]
+        b = self._backend(tmp_path)
+        reads = []
+        params = _load_capturing(b, gpus, registry, reads)
+        assert params["gpu_split_ratios"] is None
+        assert b._split_fit_note == ""
+        assert "gpu split" not in capsys.readouterr().out
+        assert reads == [1]
 
 
 class TestTorchProbeReportsIntegrated:
