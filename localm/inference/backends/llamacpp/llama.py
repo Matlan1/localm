@@ -1035,7 +1035,10 @@ class LlamaCpp:
         # llama.cpp's device numbering when given; leaves the native default
         # (device 0) untouched when unset. See discover.apply_main_gpu.
         from localm.discover import apply_gpu_split, apply_main_gpu
-        apply_main_gpu(mp, slot=main_gpu)
+        if main_gpu is not None:
+            apply_main_gpu(mp, slot=main_gpu)
+        else:
+            apply_main_gpu(mp)
         # Multi-GPU tensor-split: spreads the model across 2+ configured
         # devices when gpu_split_indices is set, or loads it on the one device
         # a 1-entry ratios mapping from the parent names (see

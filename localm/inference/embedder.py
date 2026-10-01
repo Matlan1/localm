@@ -565,7 +565,10 @@ class GGUFEmbedder:
         # llama_load_model_from_file below. VRAM preflight lives in the PARENT
         # (IsolatedEmbedder, below), not here.
         from localm.discover import apply_gpu_split, apply_main_gpu
-        apply_main_gpu(mp, slot=main_gpu)
+        if main_gpu is not None:
+            apply_main_gpu(mp, slot=main_gpu)
+        else:
+            apply_main_gpu(mp)
         # gpu_split_ratios: the PARENT's already-resolved effective ratios, or
         # its {llama.cpp device: share} placement. This isolated child must not
         # probe for them itself (discover.resolve_auto_split_ratios).
