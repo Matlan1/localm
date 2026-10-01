@@ -231,8 +231,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   free memory and puts the output layer, plus a logits buffer that can reach
   several GB for a large vocabulary, on the last GPU in its list, even when
   that card has little free memory. localm now checks what each GPU would
-  hold and leaves out a GPU that cannot hold its share, saying which one and
-  why. A crash while creating the context is reported as that, with advice
+  hold and leaves out a GPU that cannot hold its share, or loads the model on
+  one GPU when only that one can hold it, saying which one and why. A GPU
+  that would receive nothing is no longer reported as short of memory. The
+  check only changes the split when localm can match its GPU numbering to
+  llama.cpp's; otherwise llama.cpp's own split is kept. On a computer with
+  integrated graphics beside a discrete GPU, the integrated GPU's memory is
+  no longer counted when sizing a model, since llama.cpp does not use it
+  then. Setting `gpu_split_indices` to a single GPU now loads a GGUF model on
+  that GPU only, instead of still spreading it over every GPU. A crash while
+  creating the context is reported as that, with advice
   about the context size and the split, instead of telling you to repair the
   runtime. Bug reports list every GPU with its memory, write "not detected"
   instead of leaving the NVIDIA driver and CUDA version blank, include the

@@ -108,8 +108,9 @@ class VramSizingMixin:
 
     @staticmethod
     def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
-        """(free, total) bytes on the configured main GPU device (device 0 when
-        unset - see main_gpu_index / discover.resolve_main_gpu_index), or
+        """(free, total) bytes on the device a load's single-device readings
+        come from (``discover.resolve_load_gpu_index``: the one device a 1-entry
+        gpu_split_indices names, else main_gpu_index, device 0 when unset), or
         (None, None) when not measurable. Shared by _free_vram_bytes() and
         _total_vram_bytes() so both read the same device in one call.
 
@@ -217,9 +218,8 @@ class VramSizingMixin:
             return None, None
         try:
             if torch.cuda.is_available():
-                from localm.config import load_config
-                from localm.discover import resolve_main_gpu_index
-                idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+                from localm.discover import resolve_load_gpu_index
+                idx = resolve_load_gpu_index()
                 free, total = torch.cuda.mem_get_info(idx)
                 return int(free), int(total)
         except Exception as e:
@@ -293,9 +293,8 @@ class VramSizingMixin:
                                           raw_reading_is_process_scoped)
             if not raw_reading_is_process_scoped():
                 return None
-            from localm.config import load_config
-            from localm.discover import resolve_main_gpu_index
-            idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+            from localm.discover import resolve_load_gpu_index
+            idx = resolve_load_gpu_index()
             used = device_global_used_bytes([{"index": idx, "total": total}])
             u = used.get(idx)
             if u is None:
@@ -456,8 +455,9 @@ class VramSizingMixin:
         ``gpu_split_indices`` and no ``n_cpu_moe``, on 2+ devices whose
         readings :func:`localm.discover.implicit_split_devices` returns, for a
         model whose GGUF header :func:`localm.model_manager.gguf.gguf_split_layout`
-        reads. Each device is charged its layers' weights and KV cache and
-        ``_VRAM_OVERHEAD_BYTES``; the device that receives the output layer is
+        reads. Each device that receives a layer or the output layer is charged
+        its layers' weights and KV cache and ``_VRAM_OVERHEAD_BYTES``; the device
+        that receives the output layer is
         also charged the output weights and the logits buffer (twice when an
         MTP draft context will be created). The weights of MTP / nextn layers
         are charged only when MTP is enabled, since llama.cpp skips loading
@@ -519,8 +519,8 @@ class VramSizingMixin:
                 logits_bytes=logits, reserve_bytes=int(self._VRAM_OVERHEAD_BYTES))
         except Exception as e:
             from localm.debuglog import logger as _dbg
-            _dbg.debug("implicit split fit unavailable (%s); keeping llama.cpp's "
-                       "default split", type(e).__name__)
+            _dbg.debug("implicit split fit unavailable (%s: %s); keeping "
+                       "llama.cpp's default split", type(e).__name__, e)
             return None
 
     # The MTP draft context is never created larger than this many tokens

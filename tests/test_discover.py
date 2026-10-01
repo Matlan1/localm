@@ -1343,6 +1343,9 @@ class TestListGpusTimeoutStatus:
         (status OK) - the real no-torch/no-nvidia-smi box - and must NOT be
         conflated with a timeout."""
         monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: [])
+        # An earlier test in the process may have loaded a HIP llama.cpp runtime.
+        monkeypatch.setattr("localm.discover._torch_gpu_probe_known_doomed",
+                            lambda: False)
         gpus, status = list_gpus(deadline=3.0, return_status=True)
         assert gpus == []
         assert status == GPU_PROBE_OK
@@ -2470,12 +2473,23 @@ class TestSyclBackendIndexPassthrough:
 class TestApplyGpuSplit:
     _GPUS = [{"index": 0}, {"index": 1}, {"index": 2}]
 
+    def test_one_valid_entry_selects_single_gpu_mode_on_that_device(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        mp = SimpleNamespace(main_gpu=0, tensor_split="SENTINEL_TS",
+                             split_mode="SENTINEL_SM")
+        result = apply_gpu_split(
+            mp, config={"gpu_split_indices": [2], "gpu_split_ratios": None})
+        assert result is None
+        assert mp.tensor_split == "SENTINEL_TS"
+        assert mp.split_mode == 0
+        assert mp.main_gpu == 2
+
     def test_fewer_than_two_valid_entries_leaves_mp_untouched(self, monkeypatch):
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
         mp = SimpleNamespace(main_gpu=0, tensor_split="SENTINEL_TS",
                              split_mode="SENTINEL_SM")
         result = apply_gpu_split(
-            mp, config={"gpu_split_indices": [0], "gpu_split_ratios": None})
+            mp, config={"gpu_split_indices": [0, 9], "gpu_split_ratios": None})
         assert result is None
         assert mp.tensor_split == "SENTINEL_TS"
         assert mp.split_mode == "SENTINEL_SM"

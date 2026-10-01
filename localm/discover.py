@@ -1535,8 +1535,10 @@ def _torch_is_resident() -> bool:
 def _torch_gpus_resident() -> list:
     """torch's device list, read IN THIS PROCESS. Only safe to call when
     :func:`_torch_is_resident` - see :mod:`localm._torch_gpu_probe` for why a
-    COLD import here freezes every thread in the process."""
+    COLD import here freezes every thread in the process. Same entry shape as
+    :func:`localm._torch_gpu_probe._enumerate`."""
     import torch
+    from localm._torch_gpu_probe import integrated_flag
     if not torch.cuda.is_available():
         return []
     out = []
@@ -1549,8 +1551,11 @@ def _torch_gpus_resident() -> list:
             name = torch.cuda.get_device_name(i)
         except Exception:
             name = f"GPU {i}"
-        out.append({"index": i, "name": name,
-                    "total": int(total), "free": int(free)})
+        entry = {"index": i, "name": name, "total": int(total), "free": int(free)}
+        integrated = integrated_flag(torch, i)
+        if integrated is not None:
+            entry["integrated"] = integrated
+        out.append(entry)
     return out
 
 
@@ -2331,6 +2336,8 @@ def apply_main_gpu(mp, *, config: Optional[dict] = None) -> None:
 # split individual tensors and generally need fast inter-GPU interconnect to
 # be worthwhile).
 _LLAMA_SPLIT_MODE_LAYER = 1
+# llama.cpp's LLAMA_SPLIT_MODE_NONE: the load uses only device ``main_gpu``.
+_LLAMA_SPLIT_MODE_NONE = 0
 
 # Fallback tensor_split array capacity when llama_max_devices() cannot be
 # probed (an older build without the symbol). Matches LLAMA_MAX_DEVICES from
@@ -2366,12 +2373,13 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
 
     Mirrors :func:`resolve_main_gpu_index`'s posture: an index that does not
     match a currently-detected device is dropped with a WARNING rather than
-    trusted blindly - a stale config
-    referencing a since-removed GPU degrades to single-GPU instead of
-    mis-targeting VRAM or crashing a load. Duplicate indices keep their first
-    occurrence. Fewer than 2 valid indices after validation means "no split"
-    (returns ``[]``) - the single-GPU path driven by ``apply_main_gpu`` is
-    unaffected. This validation is SKIPPED (indices pass through unchecked)
+    trusted blindly - a stale config referencing a since-removed GPU does not
+    mis-target VRAM or crash a load. Duplicate indices keep their first
+    occurrence. Fewer than 2 valid indices after validation means "no
+    explicit split" (returns ``[]``): :func:`apply_gpu_split` then loads on
+    the one device a 1-entry list names (:func:`single_gpu_index`), and
+    otherwise leaves llama.cpp's own default, an implicit layer split over
+    every GPU. This validation is SKIPPED (indices pass through unchecked)
     when the active native backend's device enumeration is opaque to
     list_gpus() - see :func:`_native_gpu_index_space_is_opaque` (vulkan or
     sycl): list_gpus() cannot see those devices, so on such a backend a
@@ -2462,6 +2470,51 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
         ratios = [1.0] * len(valid)
 
     return list(zip(valid, ratios))
+
+
+def single_gpu_index(configured_indices, *, gpus: Optional[list] = None) -> Optional[int]:
+    """The device a 1-entry ``gpu_split_indices`` names, or ``None`` when the
+    value is not a 1-entry list or its index is unusable.
+
+    Validated like one :func:`resolve_gpu_split` entry: a non-integer,
+    negative or above-ceiling index, or one that is not among the devices
+    ``list_gpus()`` (or the injected *gpus*) detects, is WARNED and answers
+    ``None``. Detection is skipped when it is unmeasurable or the native
+    index space is opaque (:func:`_native_gpu_index_space_is_opaque`)."""
+    if not isinstance(configured_indices, (list, tuple)) or len(configured_indices) != 1:
+        return None
+    try:
+        idx = int(configured_indices[0])
+    except (TypeError, ValueError):
+        logger.warning("gpu_split_indices=%r is not a list of integers; ignoring it",
+                       configured_indices)
+        return None
+    if idx < 0 or idx > _MAX_GPU_SPLIT_INDEX:
+        logger.warning("gpu_split_indices=%r names an index outside 0..%d; "
+                       "ignoring it", configured_indices, _MAX_GPU_SPLIT_INDEX)
+        return None
+    if gpus is None:
+        gpus = list_gpus()
+    if gpus and not _native_gpu_index_space_is_opaque() and not any(
+            g.get("index") == idx for g in gpus):
+        logger.warning("gpu_split_indices names device %d, which is not one of "
+                       "the %d GPU(s) detected right now; ignoring it",
+                       idx, len(gpus))
+        return None
+    return idx
+
+
+def resolve_load_gpu_index(config: Optional[dict] = None) -> int:
+    """The device a GGUF load's single-device VRAM readings are taken from:
+    the one device a 1-entry ``gpu_split_indices`` names
+    (:func:`single_gpu_index`), else :func:`resolve_main_gpu_index` of the
+    configured ``main_gpu_index``."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    single = single_gpu_index(cfg.get("gpu_split_indices"))
+    if single is not None:
+        return single
+    return resolve_main_gpu_index(cfg.get("main_gpu_index"))
 
 
 def resolve_auto_split_ratios(config: Optional[dict] = None, *,
@@ -2656,18 +2709,23 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
                     ratios_override: Optional[list] = None):
     """Set ``mp.split_mode``/``mp.tensor_split`` from the configured
     ``gpu_split_indices``/``gpu_split_ratios``, validated via
-    :func:`resolve_gpu_split`. Leaves ``split_mode``/``tensor_split`` at their
-    native defaults when fewer than 2 valid devices are configured. Shared by
-    the llama.cpp chat backend and the embedder, same as ``apply_main_gpu``.
+    :func:`resolve_gpu_split`. Shared by the llama.cpp chat backend and the
+    embedder, same as ``apply_main_gpu``.
+
+    A 1-entry ``gpu_split_indices`` whose device :func:`single_gpu_index`
+    accepts loads on that device alone: ``split_mode =
+    LLAMA_SPLIT_MODE_NONE`` and ``main_gpu`` = that device, with no
+    ``tensor_split``. Anything else with fewer than 2 valid devices leaves
+    ``split_mode``/``tensor_split`` at their native defaults.
 
     THOSE NATIVE DEFAULTS ARE NOT A SINGLE-GPU LOAD.
     ``llama_model_default_params()`` sets
     ``split_mode = LLAMA_SPLIT_MODE_LAYER`` with ``tensor_split = NULL``, and
     llama.cpp confines a load to ``main_gpu`` only under
-    ``LLAMA_SPLIT_MODE_NONE`` - which nothing here ever sets. So leaving the
-    defaults alone yields an IMPLICIT layer split across every registered GPU,
-    distributed by each device's free memory. Anything sizing or budgeting a
-    load must account for that: see :func:`implicit_split_capacity`.
+    ``LLAMA_SPLIT_MODE_NONE``. So leaving the defaults alone yields an
+    IMPLICIT layer split across every registered GPU, distributed by each
+    device's free memory. Anything sizing or budgeting a load must account
+    for that: see :func:`implicit_split_capacity`.
 
     ``ratios_override`` (when non-empty) replaces the config's
     ``gpu_split_ratios`` for THIS load: it carries the PARENT's already-
@@ -2688,22 +2746,39 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
     (``_sizing.VramSizingMixin._implicit_split_fit``) computed it from a fresh
     probe, so its indices are not re-probed here. An index absent from the
     mapping gets a zero share, which llama.cpp reads as "place no layers
-    there". Fewer than 2 entries applies no split.
+    there". A 1-entry mapping loads on that device alone, the same way as a
+    1-entry ``gpu_split_indices``.
+
+    ``main_gpu`` is moved onto the device(s) the load uses when it is not one
+    of them, with a WARNING when ``main_gpu_index`` was configured (or
+    ``main_gpu`` is not the native default 0), else at debug.
 
     Returns the ctypes float array backing ``mp.tensor_split`` (or ``None``
-    when no split was applied) - the CALLER MUST keep this referenced until
-    after the ``llama_load_model_from_file()`` call that consumes *mp*:
-    llama.cpp copies ``tensor_split``'s contents at load time (it is not held
-    as a live pointer afterward), so the buffer only needs to survive that one
-    call, not the loaded model's lifetime."""
+    when no ``tensor_split`` was written) - the CALLER MUST keep this
+    referenced until after the ``llama_load_model_from_file()`` call that
+    consumes *mp*: llama.cpp copies ``tensor_split``'s contents at load time
+    (it is not held as a live pointer afterward), so the buffer only needs to
+    survive that one call, not the loaded model's lifetime."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
+    main_chosen = cfg.get("main_gpu_index") is not None or mp.main_gpu != 0
     if isinstance(ratios_override, dict):
+        if len(ratios_override) == 1:
+            idx = _single_mapping_index(ratios_override)
+            if idx is not None:
+                _apply_single_gpu(mp, idx, main_chosen, "the per-device split fit chose")
+            return None
         pairs = resolve_gpu_split(list(ratios_override.keys()),
                                   list(ratios_override.values()), gpus=[])
+        split_label = "the devices this load is split over"
     else:
+        single = single_gpu_index(cfg.get("gpu_split_indices"))
+        if single is not None:
+            _apply_single_gpu(mp, single, main_chosen, "gpu_split_indices names")
+            return None
         ratios = ratios_override if ratios_override else cfg.get("gpu_split_ratios")
         pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), ratios)
+        split_label = "the configured gpu_split_indices"
     if len(pairs) < 2:
         return None
 
@@ -2718,13 +2793,47 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
     split_indices = {idx for idx, _ in pairs}
     if mp.main_gpu not in split_indices:
         new_main = pairs[0][0]
-        logger.warning(
-            "main_gpu_index=%d is not one of the configured gpu_split_indices "
-            "%s; using device %d (the first split device) as the primary "
-            "instead", mp.main_gpu, sorted(split_indices), new_main)
+        if main_chosen:
+            logger.warning(
+                "main_gpu_index=%d is not one of %s %s; using device %d (the "
+                "first split device) as the primary instead", mp.main_gpu,
+                split_label, sorted(split_indices), new_main)
+        else:
+            logger.debug("primary GPU: device %d, the first of %s %s",
+                         new_main, split_label, sorted(split_indices))
         mp.main_gpu = new_main
 
     return arr
+
+
+def _single_mapping_index(mapping: dict) -> Optional[int]:
+    """The device a 1-entry ``{device_index: share}`` mapping names, or
+    ``None`` (WARNED) when its index is not an integer in
+    ``0.._MAX_GPU_SPLIT_INDEX`` or its share is not positive."""
+    (key, share), = mapping.items()
+    try:
+        idx, value = int(key), float(share)
+    except (TypeError, ValueError):
+        idx, value = -1, 0.0
+    if idx < 0 or idx > _MAX_GPU_SPLIT_INDEX or not value > 0:
+        logger.warning("single-device placement %r is not usable; leaving "
+                       "llama.cpp's default split", mapping)
+        return None
+    return idx
+
+
+def _apply_single_gpu(mp, idx: int, main_chosen: bool, source: str) -> None:
+    """Confine the load to device *idx* (``LLAMA_SPLIT_MODE_NONE``,
+    ``main_gpu`` = *idx*). *source* names what chose the device."""
+    if mp.main_gpu != idx:
+        if main_chosen:
+            logger.warning("main_gpu_index=%d is not the device %s; loading on "
+                           "device %d", mp.main_gpu, source, idx)
+        else:
+            logger.debug("primary GPU: device %d, which %s", idx, source)
+    mp.main_gpu = idx
+    mp.split_mode = _LLAMA_SPLIT_MODE_NONE
+    logger.info("GPU placement: loading on device %d only (%s it)", idx, source)
 
 
 def _list_gpus_kw(*, deadline: Optional[float] = None, return_status: bool = False,
@@ -3086,13 +3195,31 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
     return out
 
 
-def _implicit_split_readings(cfg: dict, wait_for_inflight: bool) -> Optional[list]:
+def _llama_visible_torch_devices(devices: list) -> list:
+    """The entries of a torch reading that llama.cpp's device list keeps: the
+    discrete GPUs, when every entry reports ``integrated`` and at least one is
+    discrete. Any other reading is returned unchanged."""
+    flags = [d.get("integrated") if isinstance(d, dict) else None for d in devices]
+    if not flags or not all(isinstance(f, bool) for f in flags):
+        return list(devices)
+    discrete = [d for d, f in zip(devices, flags) if not f]
+    return discrete if discrete else list(devices)
+
+
+def _implicit_split_readings(cfg: dict, wait_for_inflight: bool, *,
+                             with_every: bool = False):
     """The per-device readings behind :func:`implicit_split_capacity`: every
     device llama.cpp's default layer split spreads over, each carrying integer
     ``free`` and ``total``, or ``None`` in every case that function answers
-    ``{}`` for."""
+    ``{}`` for. A torch reading drops integrated GPUs when a discrete GPU is
+    present (:func:`_llama_visible_torch_devices`).
+
+    With *with_every*, answers ``(devices, every)`` instead, where *every* is
+    the whole torch reading before that filter, or ``None`` on a build whose
+    index space is opaque."""
     if cfg.get("gpu_split_indices"):
         return None
+    every = None
     if _native_gpu_index_space_is_opaque():
         devices = native_gpu_devices()
         if not devices:
@@ -3127,6 +3254,8 @@ def _implicit_split_readings(cfg: dict, wait_for_inflight: bool) -> Optional[lis
                                         wait_for_inflight=wait_for_inflight)
         if status != GPU_PROBE_OK or not devices:
             return None
+        every = list(devices)
+        devices = _llama_visible_torch_devices(devices)
     if len(devices) < 2:
         return None
     for d in devices:
@@ -3134,28 +3263,105 @@ def _implicit_split_readings(cfg: dict, wait_for_inflight: bool) -> Optional[lis
         total = d.get("total") if isinstance(d, dict) else None
         if not isinstance(free, int) or not isinstance(total, int):
             return None
-    return list(devices)
+    return (list(devices), every) if with_every else list(devices)
+
+
+# How far a torch device's total memory may differ from the runtime registry's
+# reading for the same position and still count as the same device: the larger
+# of this fraction of the torch total and _SPLIT_TOTAL_MATCH_MIN_BYTES.
+_SPLIT_TOTAL_MATCH_FRACTION = 0.02
+_SPLIT_TOTAL_MATCH_MIN_BYTES = 64 * 1024 ** 2
+
+
+def _runtime_device_registry() -> Optional[list]:
+    """The active native runtime's own non-CPU device inventory, in registry
+    order (``_loader.gpu_devices_isolated``), or ``None`` when it cannot be
+    read. Stops the probe daemon afterwards when this call started it. See
+    test_the_registry_read_stops_a_probe_daemon_it_started."""
+    from localm.inference.backends.llamacpp import _loader
+    started = not _loader.probe_daemon_running()
+    try:
+        return _loader.gpu_devices_isolated()
+    finally:
+        if started:
+            _loader.stop_probe_daemon()
+
+
+def _torch_split_slots(kept: list, every: list) -> "tuple[Optional[list], str]":
+    """``(devices, "")`` with each torch device in *kept* renumbered to its
+    position in llama.cpp's own device list, or ``(None, reason)`` when the
+    torch reading cannot be proven to match that list. *every* is the whole
+    torch reading *kept* was filtered from.
+
+    Proven when no reading came from nvidia-smi, torch numbered its devices
+    0..N-1 with none missing and reported whether each is integrated, every
+    kept device is discrete with a device-global free reading, and the
+    runtime's registry (:func:`_runtime_device_registry`) lists exactly as many
+    discrete GPUs as were kept, with matching total memory position by
+    position."""
+    if any(d.get("source") == GPU_SOURCE_NVIDIA_SMI for d in every):
+        return None, "the GPU readings came from nvidia-smi, whose numbering is its own"
+    indices = sorted(d.get("index") for d in every if isinstance(d.get("index"), int))
+    if indices != list(range(len(every))):
+        return None, (f"torch did not report every GPU (indices "
+                      f"{[d.get('index') for d in every]})")
+    if not all(isinstance(d.get("integrated"), bool) for d in every):
+        return None, "torch did not report which GPUs are integrated"
+    if any(d["integrated"] for d in kept):
+        return None, "the split would include an integrated GPU"
+    if any(d.get("free_scope") != FREE_SCOPE_DEVICE for d in kept):
+        return None, "a GPU's free-memory reading does not count other processes"
+    registry = _runtime_device_registry()
+    if registry is None:
+        return None, "the llama.cpp runtime's device list could not be read"
+    from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
+    native = [d for d in registry
+              if isinstance(d, dict) and d.get("type") == GGML_DEV_TYPE_GPU]
+    if len(native) != len(kept):
+        return None, (f"the llama.cpp runtime lists {len(native)} discrete GPU(s) "
+                      f"where torch reports {len(kept)}")
+    out = []
+    for pos, (t, n) in enumerate(zip(kept, native)):
+        n_total = n.get("total")
+        tolerance = max(_SPLIT_TOTAL_MATCH_MIN_BYTES,
+                        int(t["total"] * _SPLIT_TOTAL_MATCH_FRACTION))
+        if not isinstance(n_total, int) or abs(n_total - t["total"]) > tolerance:
+            return None, (f"llama.cpp's device {pos} does not match torch's "
+                          f"device {t['index']} (total memory {n_total} vs "
+                          f"{t['total']} bytes)")
+        out.append({"index": pos, "free": t["free"], "total": t["total"]})
+    return out, ""
 
 
 def implicit_split_devices(config: Optional[dict] = None, *,
                            wait_for_inflight: bool = False) -> Optional[list]:
     """``[{"index", "free", "total"}, ...]`` for every device llama.cpp's
-    default layer split spreads over, with each ``index`` usable as a
-    ``tensor_split`` slot, or ``None`` when no implicit split applies, a
-    reading is missing, or the indices are not the native runtime's own device
-    ordinals (a reading taken from nvidia-smi - see
-    :data:`GPU_SOURCE_NVIDIA_SMI`). Same probe and freshness rules as
-    :func:`implicit_split_capacity`. Never raises."""
+    default layer split spreads over, each ``index`` being the device's
+    position in llama.cpp's own device list (its ``tensor_split`` slot and its
+    ``main_gpu`` number), or ``None`` when no implicit split applies, a reading
+    is missing, or the readings cannot be matched to that list.
+
+    On a build whose index space is opaque (vulkan or sycl) the readings come
+    from the native registry and are already numbered that way. Otherwise they
+    are torch's, used only when :func:`_torch_split_slots` proves the match; a
+    failed proof is logged at INFO with its reason. Same probe and freshness
+    rules as :func:`implicit_split_capacity`. Never raises."""
     from localm.config import load_config
     try:
         cfg = config if config is not None else load_config()
-        devices = _implicit_split_readings(cfg, wait_for_inflight)
+        readings = _implicit_split_readings(cfg, wait_for_inflight, with_every=True)
+        if readings is None:
+            return None
+        devices, every = readings
+        if every is not None:
+            out, reason = _torch_split_slots(devices, every)
+            if out is None:
+                logger.info("implicit GPU split fit: not applied - %s; keeping "
+                            "llama.cpp's default split", reason)
+            return out
     except Exception as e:
-        logger.debug("implicit split devices unavailable (%s)", type(e).__name__)
-        return None
-    if devices is None:
-        return None
-    if any(d.get("source") == GPU_SOURCE_NVIDIA_SMI for d in devices):
+        logger.debug("implicit split devices unavailable (%s: %s)",
+                     type(e).__name__, e)
         return None
     out = []
     for d in devices:
