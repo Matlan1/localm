@@ -28,11 +28,22 @@ import json
 import sys
 
 
+def integrated_flag(torch, index: int):
+    """Whether torch reports device *index* as an integrated GPU (the driver's
+    ``integrated`` device property), or ``None`` when it does not say."""
+    try:
+        value = torch.cuda.get_device_properties(index).is_integrated
+    except Exception:
+        return None
+    return bool(value) if isinstance(value, int) else None
+
+
 def _enumerate() -> list:
     """torch's CUDA/HIP device list, or [] when torch cannot answer.
 
     Mirrors the in-process branch of ``discover._list_gpus_probe`` field for
-    field, so a caller cannot tell which path produced a reading."""
+    field, so a caller cannot tell which path produced a reading. An entry
+    carries ``integrated`` only when torch reports it (:func:`integrated_flag`)."""
     import torch
     if not torch.cuda.is_available():
         return []
@@ -46,8 +57,11 @@ def _enumerate() -> list:
             name = torch.cuda.get_device_name(i)
         except Exception:
             name = f"GPU {i}"
-        out.append({"index": i, "name": name,
-                    "total": int(total), "free": int(free)})
+        entry = {"index": i, "name": name, "total": int(total), "free": int(free)}
+        integrated = integrated_flag(torch, i)
+        if integrated is not None:
+            entry["integrated"] = integrated
+        out.append(entry)
     return out
 
 

@@ -153,8 +153,10 @@ _NOT_DETECTED = "not detected"
 
 def _gpu_inventory() -> list:
     """Every GPU in this process's last completed ``discover.list_gpus``
-    reading, one line each: index, name, and free / total memory, in the index
-    space the load-time "implicit GPU split" log line uses. Never probes: a
+    reading, one line each: index, name, and free / total memory, numbered as
+    torch numbers them (nvidia-smi's own order for a line marked "via
+    nvidia-smi"). That is not llama.cpp's device numbering on a Vulkan or
+    SYCL build, nor when an integrated GPU sits beside a discrete one. Never probes: a
     process that has not read its GPUs yet gets one ``not measured`` line, and
     an empty reading one ``not detected`` line. Never raises."""
     try:

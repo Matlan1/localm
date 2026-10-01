@@ -223,7 +223,7 @@ several. This applies to `n_gpu_layers`/GGUF loading, not to media generation
 
 ```bash
 localm config main_gpu_index 0          # which device to load onto (blank = device 0)
-localm config gpu_split_indices 0,1     # which devices to split across (2+ needed)
+localm config gpu_split_indices 0,1     # which devices to split across (one = a GGUF chat model on only that device)
 localm config gpu_split_ratios 3,1      # relative weight per device, same order/length
 ```
 

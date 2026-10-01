@@ -465,7 +465,9 @@ cuda = _Cuda()
         devices = json.loads(lines[0])
         assert isinstance(devices, list)
         for d in devices:
-            assert set(d) == {"index", "name", "total", "free"}
+            required = {"index", "name", "total", "free"}
+            assert required <= set(d) <= required | {"integrated"}
+            assert isinstance(d.get("integrated", False), bool)
             assert isinstance(d["index"], int) and isinstance(d["name"], str)
             assert d["total"] > 0 and d["free"] >= 0
         if torch.cuda.is_available():

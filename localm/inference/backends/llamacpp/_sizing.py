@@ -108,8 +108,9 @@ class VramSizingMixin:
 
     @staticmethod
     def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
-        """(free, total) bytes on the configured main GPU device (device 0 when
-        unset - see main_gpu_index / discover.resolve_main_gpu_index), or
+        """(free, total) bytes on the device a load's single-device readings
+        come from (``discover.resolve_load_gpu_index``: the one device a 1-entry
+        gpu_split_indices names, else main_gpu_index, device 0 when unset), or
         (None, None) when not measurable. Shared by _free_vram_bytes() and
         _total_vram_bytes() so both read the same device in one call.
 
@@ -217,9 +218,8 @@ class VramSizingMixin:
             return None, None
         try:
             if torch.cuda.is_available():
-                from localm.config import load_config
-                from localm.discover import resolve_main_gpu_index
-                idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+                from localm.discover import resolve_load_gpu_index
+                idx = resolve_load_gpu_index()
                 free, total = torch.cuda.mem_get_info(idx)
                 return int(free), int(total)
         except Exception as e:
@@ -293,9 +293,8 @@ class VramSizingMixin:
                                           raw_reading_is_process_scoped)
             if not raw_reading_is_process_scoped():
                 return None
-            from localm.config import load_config
-            from localm.discover import resolve_main_gpu_index
-            idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+            from localm.discover import resolve_load_gpu_index
+            idx = resolve_load_gpu_index()
             used = device_global_used_bytes([{"index": idx, "total": total}])
             u = used.get(idx)
             if u is None:
@@ -344,7 +343,9 @@ class VramSizingMixin:
         """``(free, total, devices)`` summed across the 2+ devices this load
         will actually spread over, or ``(None, None, 0)`` when no combined
         budget applies and the caller must fall back to the single-device
-        readings above.
+        readings above. With no ``gpu_split_indices``, ``devices`` is 1 when
+        ``discover.implicit_split_capacity`` answers for the one discrete GPU
+        left beside integrated ones.
 
         BOTH SPLITS COUNT. A CONFIGURED ``gpu_split_indices`` writes an
         explicit ``tensor_split`` (``discover.apply_gpu_split``). An UNSET one
@@ -398,7 +399,7 @@ class VramSizingMixin:
                 info = implicit_split_capacity(cfg, wait_for_inflight=True)
                 free, total = info.get("free"), info.get("total")
                 devices = info.get("devices") or 0
-                if devices < 2 or free is None or total is None:
+                if devices < 1 or free is None or total is None:
                     return None, None, 0
                 return int(free), int(total), int(devices)
             from localm.discover import GPU_PROBE_OK, vram_capacity
@@ -456,12 +457,16 @@ class VramSizingMixin:
         ``gpu_split_indices`` and no ``n_cpu_moe``, on 2+ devices whose
         readings :func:`localm.discover.implicit_split_devices` returns, for a
         model whose GGUF header :func:`localm.model_manager.gguf.gguf_split_layout`
-        reads. Each device is charged its layers' weights and KV cache and
-        ``_VRAM_OVERHEAD_BYTES``; the device that receives the output layer is
+        reads. Each device that receives a layer or the output layer is charged
+        its layers' weights and KV cache and ``_VRAM_OVERHEAD_BYTES``; the device
+        that receives the output layer is
         also charged the output weights and the logits buffer (twice when an
         MTP draft context will be created). The weights of MTP / nextn layers
         are charged only when MTP is enabled, since llama.cpp skips loading
-        them otherwise. Must run off the event loop (it probes). Never raises."""
+        them otherwise. A plan that writes a split or reports a shortfall is
+        returned only when :func:`localm.discover.runtime_split_devices_match`
+        confirms the device numbering. Must run off the event loop (it probes).
+        Never raises."""
         if gpu_layers == 0 or (getattr(self, "n_cpu_moe", 0) or 0) > 0:
             return None
         from localm.inference.backends.llamacpp import _loader
@@ -469,7 +474,8 @@ class VramSizingMixin:
             return None
         try:
             from localm.config import load_config
-            from localm.discover import implicit_split_devices
+            from localm.discover import (implicit_split_devices,
+                                         runtime_split_devices_match)
             from localm.inference.backends.llamacpp._split_fit import (
                 logits_buffer_bytes, plan_split)
             from localm.model_manager.gguf import (
@@ -481,7 +487,8 @@ class VramSizingMixin:
             layout = gguf_split_layout(path)
             if layout is None:
                 return None
-            devices = implicit_split_devices(cfg, wait_for_inflight=True)
+            devices = implicit_split_devices(cfg, wait_for_inflight=True,
+                                             check_runtime=False)
             if not devices:
                 return None
             n_layer_all = int(layout["block_count"])
@@ -513,14 +520,18 @@ class VramSizingMixin:
             logits = logits_buffer_bytes(layout["n_vocab"], self.n_ctx,
                                          max_batch=self._MAX_BATCH,
                                          contexts=2 if mtp_on else 1)
-            return plan_split(
+            plan = plan_split(
                 devices, layer_bytes=layer_bytes, output_bytes=int(output_bytes),
                 layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
                 logits_bytes=logits, reserve_bytes=int(self._VRAM_OVERHEAD_BYTES))
+            if (plan.tensor_split or not plan.default_fits) and \
+                    not runtime_split_devices_match(devices):
+                return None
+            return plan
         except Exception as e:
             from localm.debuglog import logger as _dbg
-            _dbg.debug("implicit split fit unavailable (%s); keeping llama.cpp's "
-                       "default split", type(e).__name__)
+            _dbg.debug("implicit split fit unavailable (%s: %s); keeping "
+                       "llama.cpp's default split", type(e).__name__, e)
             return None
 
     # The MTP draft context is never created larger than this many tokens

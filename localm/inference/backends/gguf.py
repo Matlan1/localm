@@ -157,8 +157,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     def _report_split_fit(self, plan) -> None:
         """Tell the user what the implicit split's per-device fit decided:
-        which devices were left out, or which device is short of memory when
-        no split fits. Sets ``_split_fit_note`` for the unresolved case."""
+        which devices were left out (and, for a single kept device, that the
+        load runs on it alone), or which device is short of memory when no
+        plan fits. Sets ``_split_fit_note`` for the unresolved case."""
         from localm.debuglog import logger as _dbg
         gb = 1024 ** 3
         short = [c for c in plan.default if not c.fits]
@@ -189,6 +190,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             parts += [f"device {i} would then be short of memory as well"
                       for i in plan.excluded if i not in short_ids]
             detail = "; ".join(parts)
+            if len(plan.tensor_split) == 1:
+                _dbg.info("implicit GPU split fit: leaving out device(s) %s, "
+                          "loading on device %s only", left_out, kept)
+                console.print(
+                    f"[yellow]  gpu split:[/yellow] loading on device {kept} "
+                    f"only - {detail}. Set gpu_split_indices to choose the "
+                    f"devices yourself.")
+                return
             _dbg.info("implicit GPU split fit: leaving out device(s) %s, "
                       "splitting over %s", left_out, kept)
             console.print(
@@ -361,15 +370,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # worker: with gpu_split_ratios unset this is the auto
         # free-VRAM-proportional split, and None when no split is configured, the
         # ratios are pinned, or per-device free is unmeasurable (the worker then
-        # keeps the config-driven equal/pinned behavior). By-symbol,
-        # function-scoped import so the resolver stays patchable.
+        # keeps the config-driven equal/pinned behavior). Otherwise a 1-entry
+        # gpu_split_indices becomes a {llama.cpp device: 1.0} mapping, or the
+        # implicit split fit's plan applies. By-symbol, function-scoped import
+        # so the resolver stays patchable.
         # wait_for_inflight=True requires running off the event loop.
         from localm.config import load_config
-        from localm.discover import resolve_auto_split_ratios, resolve_gpu_split
+        from localm.discover import (resolve_auto_split_ratios, resolve_gpu_split,
+                                     single_gpu_load_slot)
         auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
         worker_split = auto_ratios
         self._split_fit_note = ""
-        if not auto_ratios:
+        slot = (single_gpu_load_slot(wait_for_inflight=True)
+                if not auto_ratios and gpu_layers != 0 else None)
+        if slot is not None:
+            worker_split = {slot: 1.0}
+        elif not auto_ratios:
             plan = self._implicit_split_fit(gpu_layers)
             if plan is not None and plan.tensor_split:
                 worker_split = plan.tensor_split
@@ -390,7 +406,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 "source": "auto",
                 "devices": [{"index": i, "share": s}
                             for i, s in worker_split.items()],
-            }
+            } if len(worker_split) >= 2 else None
         elif len(_pairs) >= 2:
             _total = sum(r for _, r in _pairs) or 1.0
             self.applied_gpu_split = {

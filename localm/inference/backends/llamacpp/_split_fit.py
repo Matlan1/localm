@@ -7,7 +7,8 @@ device that receives the LAST share. The context it creates then reserves the
 logits buffer (``n_vocab * n_outputs`` floats) on that same device. This
 module predicts that placement from the model's tensor sizes and each device's
 free reading, charges every device what it would hold, and, when a device
-cannot hold its charge, picks an explicit split that leaves it out.
+cannot hold its charge, picks an explicit split that leaves it out, or a
+single device that holds the whole charge.
 
 Pure functions only: no probing, no native calls.
 """
@@ -38,8 +39,12 @@ def layer_devices(shares: Sequence[float], n_layer_all: int,
     offloaded when ``il >= n_layer_all + 1 - n_gpu_layers``, and placed on the
     first device whose cumulative share is greater than
     ``(il - i_gpu_start) / act_gpu_layers``; the output layer is layer index
-    ``n_layer_all``. A zero share gives a device no layers. Answers all-CPU
-    when *shares* is empty or sums to zero."""
+    ``n_layer_all``. A zero share gives a device no layers. A negative
+    *n_gpu_layers* offloads every layer, as llama.cpp's own
+    ``llama_model::n_gpu_layers`` reads it. Answers all-CPU when *shares* is
+    empty or sums to zero."""
+    if n_gpu_layers < 0:
+        n_gpu_layers = n_layer_all + 1
     n = len(shares)
     cum: List[float] = []
     total = _f32(0.0)
@@ -93,8 +98,9 @@ class SplitFitPlan:
     """The outcome of :func:`plan_split`.
 
     ``tensor_split`` is ``None`` when llama.cpp's default split already fits
-    every device, or when no split over two or more devices fits; otherwise it
-    maps each device index to keep to its share. ``excluded`` lists the device
+    every device, or when no plan fits; otherwise it maps each device index to
+    keep to its share. A single entry means the load runs on that device alone
+    (``discover.apply_gpu_split`` sets single-GPU mode). ``excluded`` lists the device
     indices left out. ``default`` is the charge of every device under the
     default split; ``chosen`` the charge under ``tensor_split`` (empty when
     ``tensor_split`` is ``None``)."""
@@ -115,8 +121,9 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
     """Charge each device in *devices* (``{"index", "free"}``, in split order)
     for what a layer split weighted by *shares* places on it: its layers'
     weights and KV cache, the output layer's weights and the logits buffer on
-    the device holding the output layer, and *reserve_bytes* per device with a
-    non-zero share. *layer_kv_bytes* is each layer's KV cache, parallel to
+    the device holding the output layer, and *reserve_bytes* per device that
+    receives a layer or the output layer. A device that receives neither is
+    charged nothing. *layer_kv_bytes* is each layer's KV cache, parallel to
     *layer_bytes*."""
     n_layer_all = len(layer_bytes)
     positions, out_pos = layer_devices(shares, n_layer_all, n_gpu_layers)
@@ -134,7 +141,7 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
         charges[out_pos].logits += int(logits_bytes)
         charges[out_pos].holds_output = True
     for c in charges:
-        if c.share > 0:
+        if c.layers or c.holds_output:
             c.reserve = int(reserve_bytes)
     return charges
 
@@ -160,8 +167,9 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     The default split weights devices by free memory. While some device with a
     non-zero share cannot hold its charge, the one with the least free memory
     among them gets a zero share and the rest are re-weighted by free memory.
-    A plan keeps at least two devices; when none fits, ``tensor_split`` is
-    ``None`` and only ``default`` reports the shortfall."""
+    When one device remains, the plan is that device alone (``tensor_split``
+    ``{index: 1.0}``) if it holds the whole charge. When no plan fits,
+    ``tensor_split`` is ``None`` and only ``default`` reports the shortfall."""
     kw = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
               n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
               logits_bytes=logits_bytes, reserve_bytes=reserve_bytes)
@@ -177,11 +185,14 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
             break
         victim = min(over, key=lambda pos: (frees[pos], pos))
         shares[victim] = 0.0
-        if sum(1 for s in shares if s > 0) < 2:
+        remaining = sum(1 for s in shares if s > 0)
+        if remaining == 0:
             return SplitFitPlan(tensor_split=None, excluded=[], default=default)
         total = sum(shares)
         shares = [s / total for s in shares]
         charges = charge_devices(devices, shares, **kw)
+        if remaining == 1 and not all(c.fits for c in charges):
+            return SplitFitPlan(tensor_split=None, excluded=[], default=default)
     kept = {int(d["index"]): s for d, s in zip(devices, shares) if s > 0}
     excluded = [int(d["index"]) for d, s in zip(devices, shares) if s <= 0]
     return SplitFitPlan(tensor_split=kept, excluded=excluded, default=default,

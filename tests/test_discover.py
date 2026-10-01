@@ -1343,6 +1343,9 @@ class TestListGpusTimeoutStatus:
         (status OK) - the real no-torch/no-nvidia-smi box - and must NOT be
         conflated with a timeout."""
         monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: [])
+        # An earlier test in the process may have loaded a HIP llama.cpp runtime.
+        monkeypatch.setattr("localm.discover._torch_gpu_probe_known_doomed",
+                            lambda: False)
         gpus, status = list_gpus(deadline=3.0, return_status=True)
         assert gpus == []
         assert status == GPU_PROBE_OK

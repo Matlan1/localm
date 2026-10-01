@@ -1129,6 +1129,26 @@ def _probe_roundtrip(request: str, parse) -> "Optional[object]":
             return None
 
 
+def probe_daemon_running() -> bool:
+    """True while the probe daemon is alive."""
+    with _PROBE_LOCK:
+        return _PROBE_PROC is not None and _PROBE_PROC.poll() is None
+
+
+def stop_probe_daemon(wait: float = 5.0) -> None:
+    """Stop the probe daemon, if one is running, waiting up to *wait* seconds
+    for it to exit. The next query spawns a fresh one. Never raises."""
+    with _PROBE_LOCK:
+        proc = _PROBE_PROC
+        _kill_and_clear_probe()
+        if proc is not None:
+            try:
+                proc.wait(timeout=wait)
+            except Exception as e:
+                logger.debug("vram-probe: stopped daemon did not exit within "
+                             "%.1fs (%s)", wait, type(e).__name__)
+
+
 def _kill_and_clear_probe() -> None:
     """Caller holds _PROBE_LOCK. Best-effort kill of a dead/hung/desynced daemon
     so the NEXT gpu_memory_isolated() call spawns a fresh one."""
