@@ -360,16 +360,21 @@ DEFAULT_CONFIG: dict = {
     # the dedicated on-device embedder (a separate, purpose-built path).
     "hf_embed_max_texts": 256,
     "hf_embed_max_chars": 200_000,
-    # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
-    # explicit selection (device 0). A stale index falls back to device 0 with
-    # a logged warning, not a wrong/out-of-range GPU (see
+    # Primary GPU device on a multi-GPU box, and the device VRAM is read from.
+    # None = no explicit selection (device 0). For a GGUF model it does not
+    # confine the load to that device: without gpu_split_indices llama.cpp
+    # still spreads the layers over every GPU. A stale index falls back to
+    # device 0 with a logged warning, not a wrong/out-of-range GPU (see
     # discover.resolve_main_gpu_index).
     "main_gpu_index": None,
-    # Split a model too big for one card across 2+ GPUs (GGUF: llama.cpp
-    # layer-split; HF: accelerate device_map restricted to these devices).
-    # None/empty/1 entry = off (today's single-GPU behavior via
-    # main_gpu_index, unchanged). A device no longer detected at load time is
-    # dropped with a logged warning, not trusted blindly (see
+    # Which GPUs a model may use (GGUF: llama.cpp layer split; HF: accelerate
+    # device_map restricted to these devices). 2+ entries split the model
+    # across them. GGUF chat model: 1 entry loads it on that one GPU only, when
+    # the device can be matched to llama.cpp's own device list
+    # (discover.single_gpu_load_slot); None/empty leaves llama.cpp's default,
+    # a layer split over every GPU by free memory. HF: fewer than 2 entries is
+    # ignored (main_gpu_index applies when set). A device no longer detected
+    # at load time is dropped with a logged warning, not trusted blindly (see
     # discover.resolve_gpu_split).
     "gpu_split_indices": None,
     # Optional relative weight per entry in gpu_split_indices (same length,
