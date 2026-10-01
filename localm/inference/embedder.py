@@ -524,7 +524,8 @@ class GGUFEmbedder:
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
                  pooling_type: object = _POOLING_DEFAULT,
-                 gpu_split_ratios: Optional[list] = None) -> None:
+                 gpu_split_ratios: Optional[list] = None,
+                 main_gpu: Optional[int] = None) -> None:
         from localm.inference.backends.llamacpp import _api as api
         from localm.inference.backends.llamacpp._structs import (
             llama_pos, llama_seq_id, llama_token)
@@ -564,10 +565,10 @@ class GGUFEmbedder:
         # llama_load_model_from_file below. VRAM preflight lives in the PARENT
         # (IsolatedEmbedder, below), not here.
         from localm.discover import apply_gpu_split, apply_main_gpu
-        apply_main_gpu(mp)
-        # gpu_split_ratios: the PARENT's already-resolved effective ratios. This
-        # isolated child must not probe for them itself
-        # (discover.resolve_auto_split_ratios).
+        apply_main_gpu(mp, slot=main_gpu)
+        # gpu_split_ratios: the PARENT's already-resolved effective ratios, or
+        # its {llama.cpp device: share} placement. This isolated child must not
+        # probe for them itself (discover.resolve_auto_split_ratios).
         _tensor_split_keepalive = apply_gpu_split(
             mp, ratios_override=gpu_split_ratios)
         # One contiguous scope over both native calls below, entered once per
@@ -950,17 +951,25 @@ class IsolatedEmbedder(VramSizingMixin):
         # gpu_split_ratios is unset) is resolved HERE and carried into the
         # child, which must not probe for it. Skipped when this embedder is
         # CPU-bound anyway (cpu_only, or zero GPU layers).
-        from localm.discover import resolve_auto_split_ratios
+        from localm.discover import (configured_split_placement,
+                                     resolve_auto_split_ratios)
         cpu_only = self.gpu_fallback_reason is not None
         auto_ratios = None
+        placement = None
         if not cpu_only and self.n_gpu_layers != 0:
             # wait_for_inflight: loads run off the event loop, so a
             # heartbeat-probe collision joins instead of declining auto into
             # the equal fallback.
             auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
+            placement = configured_split_placement(ratios=auto_ratios,
+                                                   wait_for_inflight=True)
         params = dict(model_path=self.model_path, n_gpu_layers=self.n_gpu_layers,
                       n_ctx=self._requested_n_ctx, pooling_type=self._pooling_type,
                       cpu_only=cpu_only, gpu_split_ratios=auto_ratios)
+        if placement is not None:
+            params["gpu_split_ratios"] = placement.mapping
+            if placement.main_gpu is not None:
+                params["main_gpu"] = placement.main_gpu
         self._runner = EmbedderRunner()
         meta = self._runner.spawn_and_load(params)
         self.dim = meta["dim"]

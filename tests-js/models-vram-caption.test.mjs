@@ -70,6 +70,19 @@ test("vramBasisCaption: duplicate split indices dedup like resolve_gpu_split -> 
   assert.match(msg, /main GPU's 16 GB/);
 });
 
+test("vramBasisCaption: one GPU chosen in gpu_split_indices -> names that GPU, not the main GPU", () => {
+  const cap = caption();
+  // A 1-entry gpu_split_indices loads a GGUF model on that GPU, and
+  // vram_capacity() then reports that GPU's VRAM.
+  const msg = cap(24 * GIB, {
+    gpus: [{ index: 0, total: 8 * GIB }, { index: 1, total: 24 * GIB }],
+    gpu_split_indices: [1],
+  });
+  assert.match(msg, /24 GB of GPU 1/);
+  assert.doesNotMatch(msg, /main GPU/);
+  assert.doesNotMatch(msg, /combined/);
+});
+
 test("vramBasisCaption: empty/failed gpu info -> plain caption, never crashes", () => {
   const cap = caption();
   assert.match(cap(8 * GIB, { gpus: [], gpu_split_indices: [] }), /your 8 GB VRAM/);

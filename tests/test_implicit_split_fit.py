@@ -817,13 +817,12 @@ class TestOneGpuWhenOnlyOneFits:
         assert _worker_view(params) == (discover._LLAMA_SPLIT_MODE_NONE, slot, None)
         assert b.applied_gpu_split is None
 
-    @pytest.mark.parametrize("case", ["integrated-gpu", "runtime-differs"])
+    @pytest.mark.parametrize("case", ["integrated-gpu-unproven", "runtime-differs"])
     def test_an_unmatched_single_gpu_keeps_the_default(self, tmp_path, case, caplog):
         gpus = _torch_readings((2.0, True), (20.0, False))
         registry = _registry(gpus)
-        index = 0 if case == "integrated-gpu" else 1
-        if case == "runtime-differs":
-            registry.append(dict(registry[1], index=2))
+        index = 0 if case == "integrated-gpu-unproven" else 1
+        registry.append(dict(registry[1], index=2))
         with caplog.at_level("INFO", logger="localm"):
             _b, params = self._one_entry_load(tmp_path, gpus, registry, index)
         assert params["gpu_split_ratios"] is None

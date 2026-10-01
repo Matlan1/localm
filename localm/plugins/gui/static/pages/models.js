@@ -726,7 +726,9 @@ async function _splitGpus() { return (await _gpuInfo()).gpus; }
 
 /** Caption naming what the fit-badge VRAM number is. Mirrors
  *  discover.vram_capacity: the number is COMBINED only when 2+ configured split
- *  indices map to detected devices; otherwise it is the single main GPU's.
+ *  indices map to detected devices; a 1-entry gpu_split_indices naming a
+ *  detected device makes it that GPU's (discover.resolve_load_gpu_index);
+ *  otherwise it is the single main GPU's.
  *  `gpuInfo` is {gpus, gpu_split_indices} from _gpuInfo(). */
 export function vramBasisCaption(totalBytes, gpuInfo) {
   const gib = (totalBytes / GIB).toFixed(0);
@@ -737,6 +739,9 @@ export function vramBasisCaption(totalBytes, gpuInfo) {
   const split = [...new Set(rawSplit.filter((i) => gpus.some((g) => g.index === i)))];
   if (split.length >= 2) {
     return t("models.vramBasis.combined", { gib, count: split.length });
+  }
+  if (rawSplit.length === 1 && split.length === 1 && gpus.length > 1) {
+    return t("models.vramBasis.oneGpu", { gib, index: split[0] });
   }
   if (gpus.length > 1) {
     return t("models.vramBasis.mainGpu", { gib, count: gpus.length });
