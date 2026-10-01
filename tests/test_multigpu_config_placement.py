@@ -138,28 +138,36 @@ class TestConfiguredSplitInLlamaCppNumbering:
     def test_a_split_naming_the_integrated_gpu_is_refused(self, tmp_path):
         gpus = _torch_readings((2.0, True), (20.0, False), (20.0, False))
         cfg = _config(gpu_split_indices=[0, 1], gpu_split_ratios=None)
-        spawned = []
-        with pytest.raises(discover.GpuSplitConfigError) as ei, \
-                mock.patch("localm.inference.backends.llamacpp._runner."
-                           "ModelRunner.spawn_and_load",
-                           side_effect=lambda *a, **k: spawned.append(1)):
-            _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
-        assert spawned == [], "a refused split must not reach the worker"
-        assert "GPU 0" in str(ei.value) and "integrated" in str(ei.value)
+        params, exc = None, None
+        try:
+            params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
+        except discover.GpuSplitConfigError as e:
+            exc = e
+        assert params is None, f"a refused split reached the worker: {params}"
+        assert exc is not None
+        assert "GPU 0" in str(exc) and "integrated" in str(exc)
 
     def test_the_refusal_reaches_the_caller_without_runtime_advice(self, tmp_path):
         gpus = _torch_readings((2.0, True), (20.0, False), (20.0, False))
         cfg = _config(gpu_split_indices=[0, 1, 2], gpu_split_ratios=None)
         b = _backend(tmp_path)
+        spawned, exc = [], None
         with _box(gpus, _registry(gpus)), \
                 mock.patch("localm.config.load_config", return_value=cfg), \
                 mock.patch.object(_loader, "native_lib_loaded", return_value=False), \
                 mock.patch.object(GgufBackend, "_effective_gpu_layers", return_value=99), \
-                mock.patch.object(GgufBackend, "_check_vram"):
-            with pytest.raises(RuntimeError) as ei:
+                mock.patch.object(GgufBackend, "_check_vram"), \
+                mock.patch("localm.inference.backends.llamacpp._runner."
+                           "ModelRunner.spawn_and_load",
+                           side_effect=lambda *a, **k: spawned.append(1) or {}), \
+                mock.patch("localm.model_meta.store_n_layers"):
+            try:
                 b.load()
-        assert isinstance(ei.value, discover.GpuSplitConfigError)
-        assert "setup-llama" not in str(ei.value)
+            except RuntimeError as e:
+                exc = e
+        assert spawned == [], "a refused split must not reach the worker"
+        assert isinstance(exc, discover.GpuSplitConfigError)
+        assert "setup-llama" not in str(exc)
 
     def test_an_unproven_numbering_keeps_llamacpps_default_split(self, tmp_path, caplog):
         gpus = _torch_readings((2.0, True), (20.0, False), (20.0, False))
