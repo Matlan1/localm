@@ -552,15 +552,20 @@ def test_a_dead_holders_lock_is_taken_over_after_the_clock_was_set_back(
 
 
 def test_an_unidentifiable_holders_lock_is_taken_over_after_the_clock_was_set_back(
-        base, monkeypatch):
+        base, monkeypatch, capsys):
     """The same for a holder whose liveness cannot be checked: the waiter's own
-    watch of a silence longer than the staleness window is enough."""
+    watch of a silence longer than the staleness window is enough, and the
+    reclaim note reports that watched silence rather than the clock's."""
     monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(), silent_for=-3600)
 
     assert _acquired_pid(lp, timeout=5.0, stale_after=1.0) == os.getpid(), (
         "an abandoned lock stayed wedged after the clock was set back")
+    note = _flat(capsys.readouterr().err)
+    assert "reclaimed the write lock" in note, note
+    assert "had not reported for 0s" not in note, note
+    assert "last heartbeat 0s ago" not in note, note
 
 
 def test_short_waits_in_one_process_take_over_an_abandoned_lock_between_them(
@@ -607,18 +612,79 @@ def test_a_heartbeat_between_short_waits_restarts_their_watch(base, monkeypatch)
         "the restarted watch never completed")
 
 
-def test_a_wait_shorter_than_the_confirm_window_says_so(base):
-    """A refusal from a wait too short to take over a lock that has stopped
-    reporting names that as the reason."""
+_HINT = "only after watching it for"
+
+
+def _refusal_text(lp, **kw) -> str:
+    """The message of the refusal a wait on *lp* ends in."""
+    with pytest.raises(CollectionLockedError) as e:
+        with collection_write_lock(lp, collection="kb", op="a test", **kw):
+            pass
+    return _flat(str(e.value))
+
+
+def test_a_wait_shorter_than_the_confirm_window_says_so(base, monkeypatch):
+    """A refusal from a configured wait too short to take over a lock that has
+    stopped reporting names that as the reason."""
+    monkeypatch.setenv(cl.ENV_WAIT, "0.5")
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(), silent_for=3600)
-    with pytest.raises(CollectionLockedError) as e:
-        with collection_write_lock(lp, collection="kb", op="a test",
-                                   timeout=0.5):
-            pass
-    msg = _flat(str(e.value))
-    assert "only after watching it for 15s" in msg, msg
+    msg = _refusal_text(lp)
     assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == 999_999
+    assert _HINT + " 15s" in msg, msg
+
+
+@pytest.mark.parametrize("case", ["explicit-timeout", "fresh-heartbeat",
+                                  "holder-running", "watched-long-enough"])
+def test_a_refusal_names_the_short_wait_only_when_it_is_the_reason(
+        base, monkeypatch, case):
+    """No hint when the wait was set by the caller rather than
+    LOCALM_RAG_LOCK_WAIT, when the holder is still reporting, when it is proven
+    running, or when this process has already watched it for the whole window."""
+    monkeypatch.setenv(cl.ENV_WAIT, "0.5")
+    lp = lock_path_for(base / "kb")
+    if case == "explicit-timeout":
+        _hold(lp, _record(), silent_for=3600)
+        assert _HINT not in _refusal_text(lp, timeout=0.5)
+    elif case == "fresh-heartbeat":
+        _hold(lp, _record())
+        assert _HINT not in _refusal_text(lp)
+    elif case == "holder-running":
+        start_identity_of(os.getpid())
+        with collection_write_lock(lp, collection="kb", op="a hold", timeout=5.0):
+            when = time.time() - 3600
+            os.utime(lp, (when, when))
+            msg = _refusal_text(lp)
+        assert _HINT not in msg, msg
+    else:
+        monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.5)
+        monkeypatch.setenv(cl.ENV_STALE, "3600")
+        _hold(lp, _record(), silent_for=100)
+        assert _acquired_pid(lp, timeout=0) is None
+        time.sleep(cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL * 2)
+        msg = _refusal_text(lp)
+        assert _HINT not in msg, msg
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="time.monotonic counts system sleep on Windows only")
+def test_a_system_sleep_between_short_waits_is_not_counted_as_silence(
+        base, monkeypatch):
+    """A system sleep between two waits (time.monotonic, GetTickCount64 on
+    Windows, counts it; the holder could not beat during it) does not count as
+    the holder staying silent."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    before = lp.read_text(encoding="utf-8")
+    assert _acquired_pid(lp, timeout=0) is None
+
+    real = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real() + 7200.0)
+    taken = _acquired_pid(lp, timeout=0)
+    assert lp.read_text(encoding="utf-8") == before, (
+        "a system sleep was counted as the holder's silence")
+    assert taken is None
 
 
 def test_a_beating_holder_is_never_taken_over_even_when_judged_dead(

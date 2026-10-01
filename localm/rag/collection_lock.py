@@ -274,11 +274,38 @@ _watches: dict = {}
 _watches_lock = threading.Lock()
 
 
+_unbiased_clock = None
+
+
+def _watch_clock() -> float:
+    """Seconds on a clock that does not advance while the system sleeps or
+    hibernates: QueryUnbiasedInterruptTime on Windows, time.monotonic
+    elsewhere. See test_a_system_sleep_between_short_waits_is_not_counted_as_silence."""
+    global _unbiased_clock
+    if sys.platform == "win32":
+        if _unbiased_clock is None:
+            try:
+                import ctypes
+                fn = ctypes.WinDLL("kernel32").QueryUnbiasedInterruptTime
+                fn.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+                fn.restype = ctypes.c_int
+                _unbiased_clock = (ctypes, fn)
+            except (OSError, AttributeError) as e:
+                _log.debug("rag lock: QueryUnbiasedInterruptTime unavailable (%s)", e)
+                _unbiased_clock = False
+        if _unbiased_clock:
+            ctypes, fn = _unbiased_clock
+            value = ctypes.c_ulonglong()
+            if fn(ctypes.byref(value)):
+                return value.value / 1e7
+    return time.monotonic()
+
+
 def _watch(lockpath: Path, seen) -> float:
-    """Seconds, on the monotonic clock, for which waiters in this process have
-    read *lockpath* as *seen* (its ``(token, mtime)``) without a change, across
+    """Seconds, on _watch_clock, for which waiters in this process have read
+    *lockpath* as *seen* (its ``(token, mtime)``) without a change, across
     every wait. 0.0 when *seen* differs from what was read before."""
-    now = time.monotonic()
+    now = _watch_clock()
     key = os.fspath(lockpath)
     with _watches_lock:
         prev = _watches.get(key)
@@ -568,6 +595,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
     """Acquire, hold and release *lockpath* under *token* for
     :func:`collection_write_lock`, which takes the same arguments."""
     from localm import instances
+    configured_wait = timeout is None
     timeout = _env_float(ENV_WAIT, WAIT_TIMEOUT) if timeout is None else timeout
     stale_after = (_env_float(ENV_STALE, STALE_AFTER)
                    if stale_after is None else stale_after)
@@ -588,10 +616,17 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
     attempt = 0
     window = CONFIRM_BEATS * HEARTBEAT_INTERVAL
 
-    def _refusal(rec, waited, mtime):
-        """The error for a wait that ran out of budget."""
-        short = (timeout < window and mtime is not None
-                 and time.time() - mtime > min(DEAD_HOLDER_GRACE, stale_after))
+    def _refusal(rec, waited, mtime, quiet=None):
+        """The error for a wait that ran out of budget. It names the wait as
+        the reason only when the wait came from LOCALM_RAG_LOCK_WAIT and is
+        shorter than *window*, this process has watched the lock for less than
+        *window*, the heartbeat is older than the shorter staleness limit, and
+        the holder is not proven running."""
+        short = (configured_wait and timeout < window and quiet is not None
+                 and quiet < window and mtime is not None
+                 and time.time() - mtime > min(DEAD_HOLDER_GRACE, stale_after)
+                 and (not isinstance(rec, dict)
+                      or _holder_liveness(rec) != "alive"))
         return CollectionLockedError(collection, rec, waited, mtime, lockpath,
                                      kind=kind, watch_needed=window if short else None)
 
@@ -642,7 +677,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             # ever consulting the deadline.
             waited = time.time() - started_waiting
             if time.time() >= deadline:
-                raise _refusal(rec, waited, mtime)
+                raise _refusal(rec, waited, mtime, quiet)
             if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
                 announced = True
                 on_wait(f"waiting for the write lock on '{collection}': "
@@ -741,9 +776,13 @@ def _reclaim(lockpath: Path, rec: Optional[dict], mtime: Optional[float],
         _note(f"the write lock on '{(rec or {}).get('collection', lockpath.stem)}' "
               f"looks abandoned but could not be removed ({e}); waiting instead.")
         return False
-    age = max(time.time() - current_mtime, quiet)
+    wall_age = time.time() - current_mtime
+    # The heartbeat time is named only when the wall clock shows at least the
+    # watched silence.
+    last_alive = current_mtime if wall_age >= quiet else None
     _note(f"reclaimed the write lock on "
           f"'{(rec or {}).get('collection', lockpath.stem)}': its holder "
-          f"({describe_holder(rec, current_mtime)}) had not reported for "
-          f"{_duration(age)}, so it appears to have crashed without releasing it.")
+          f"({describe_holder(rec, last_alive)}) had not reported for "
+          f"{_duration(max(wall_age, quiet))}, so it appears to have crashed "
+          f"without releasing it.")
     return True

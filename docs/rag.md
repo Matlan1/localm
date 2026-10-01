@@ -292,7 +292,9 @@ policy as an interactive add. Full details in
   server that restarted in place on Linux). A holder that keeps reporting is never
   taken over, whatever the system clock does. If the clock was set back after the
   holder stopped, a holder localm cannot check keeps the lock until the clock
-  catches up, unless the wait is longer than a minute. A holder localm can see is
+  catches up, or until one wait, or the attempts of one running localm together,
+  have watched it for more than a minute. Time the computer spends asleep does
+  not count as watching. A holder localm can see is
   still holding the lock keeps it even when it has stopped reporting (suspended,
   or paused in a debugger); the message shows how long ago it last reported, and
   ending that process releases the lock. The one case that needs you is a lock file
