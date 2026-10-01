@@ -508,6 +508,7 @@ def test_a_missing_bundled_executable_is_remembered_until_it_exists(
     full.write_bytes(b"")
     shell = tmp_path / "shell" / "chrome-headless-shell"
     monkeypatch.setattr(provision, "chromium_executable_path", lambda: full)
+    monkeypatch.setattr(provision, "launch_build_locations", lambda: None)
     sess = _session("bundled", RuntimeError(
         BUNDLED_MISSING_LINUX.replace(HEADLESS_SHELL, str(shell))))
     assert provision.is_chromium_installed() is True
@@ -527,6 +528,7 @@ def test_a_failure_with_another_cause_does_not_mark_the_browser_not_installed(
     full.parent.mkdir()
     full.write_bytes(b"")
     monkeypatch.setattr(provision, "chromium_executable_path", lambda: full)
+    monkeypatch.setattr(provision, "launch_build_locations", lambda: None)
     sess = _session("bundled", RuntimeError(MISSING_LIBRARY_LINUX))
 
     with pytest.raises(bsession.BrowserUnavailableError):
@@ -537,14 +539,22 @@ def test_a_failure_with_another_cause_does_not_mark_the_browser_not_installed(
 
 def test_the_real_missing_headless_shell_marks_a_half_installed_build(
         tmp_path, monkeypatch):
-    """Only the full browser is on disk: a headless launch names the headless
-    shell as the missing executable, and the build stops counting as installed."""
+    """Only the full browser's executable is on disk. Without playwright's
+    install markers the build does not count as installed at all; with both
+    markers present, a headless launch names the headless shell as the missing
+    executable and the build stops counting as installed."""
     async_api = pytest.importorskip("playwright.async_api")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
     full = provision.chromium_executable_path()
     assert full is not None
     full.parent.mkdir(parents=True)
     full.write_bytes(b"")
+    assert provision.is_chromium_installed() is False
+    builds = provision.launch_build_locations()
+    assert builds is not None and set(builds) == {"chromium", "chromium-headless-shell"}
+    for directory in builds.values():
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "INSTALLATION_COMPLETE").write_text("")
     assert provision.is_chromium_installed() is True
     sess = bsession.BrowserSession("t-half", engine="bundled", headless=True)
 
