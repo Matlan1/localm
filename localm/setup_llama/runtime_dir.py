@@ -138,6 +138,24 @@ def installed_build() -> "Optional[str]":
     return _sl._provisioned_build(_sl._repo_runtime_lib())
 
 
+def installed_runtime_identity() -> list:
+    """What is provisioned in the runtime lib dir right now, as a list that
+    differs whenever a provision ran there: the recorded backend and build
+    (None when not recorded), then the size and modification time of the
+    backend marker and of the runtime library (None for a file that cannot be
+    read). Replacing one ``--from`` or ``--url`` build with another records the
+    same backend and build, so the file entries are what tell them apart."""
+    target = _sl._repo_runtime_lib()
+    identity = [_sl._provisioned_backend(target), _sl._provisioned_build(target)]
+    for path in (target / _BACKEND_MARKER, target / _sl._lib_name()):
+        try:
+            st = path.stat()
+            identity += [st.st_size, st.st_mtime_ns]
+        except OSError:
+            identity += [None, None]
+    return identity
+
+
 def _repo_runtime_lib() -> Path:
     """The localm-llama-runtime wheel's lib/ dir."""
     try:

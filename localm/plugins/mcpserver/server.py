@@ -280,23 +280,30 @@ class EngineCache:
         model it would use lacks (an image, structured tool calls, a longer
         conversation than it was trained for) resolves to an installed model
         that has it. A model whose last load failed is left out of the
-        candidates while ``routing_latch()`` holds it. Raises ValueError for a
-        name that is not registered."""
+        candidates while ``routing_latch()`` holds it, unless another
+        instance's copy of it is in use. The latch is read only once the
+        request has a gap and is not pinned. Raises ValueError for a name that
+        is not registered."""
         from localm.inference import capability_routing as cr
         from localm.model_manager import capabilities as caps
         current = self.resolve_model(requested)
         pinned = bool(requested) if pinned is None else bool(pinned)
         needs = cr.request_needs(messages or [], required=required)
-        skip = None if pinned or needs.is_empty() else self.routing_latch().skipped()
         known = {}
         with self._lock:
             eng = self._engines.get(current)
-            resident = list(self._lru) + list(self._peers)
+            peers = set(self._peers)
+            resident = list(self._lru) + list(peers)
         if (eng is not None and getattr(eng, "loaded", False)
                 and getattr(eng, "supports_images", False) is True):
             known[caps.VISION] = True
+
+        def skip_set():
+            return {n: s for n, s in self.routing_latch().skipped().items()
+                    if n not in peers}
+
         return cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                             current_known=known, skip=skip)
+                             current_known=known, skip=skip_set)
 
     def get_chat(self, name: str):
         """The engine to answer a chat with model *name*: this server's own

@@ -15,7 +15,8 @@ A record stops applying when any of these happens:
 - its backoff elapses. The delay starts at ``BACKOFF_BASE_S`` and doubles with
   each consecutive failure under an unchanged fingerprint, up to
   ``BACKOFF_MAX_S``. The record is kept while it is due, so a failed retry
-  lengthens the next delay.
+  lengthens the next delay. Failures recorded while the record is still inside
+  its backoff count once together.
 
 Only routing consults the latch. A load the user asked for by name never does.
 """
@@ -28,7 +29,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Iterable, Optional
 
 from localm.inference.capability_routing import SkippedCandidate
 
@@ -69,8 +70,10 @@ def _file_identity(path: object) -> list:
 def load_fingerprint(name: str) -> str:
     """A short digest of what decides whether loading model *name* can work:
     its model and projector files (path, size, modification time), the
-    load-related config keys (``LOAD_CONFIG_KEYS``) and the newest entry of
-    ``llama_runtime_history``.
+    load-related config keys (``LOAD_CONFIG_KEYS``), the newest entry of
+    ``llama_runtime_history`` and the identity of the provisioned runtime
+    directory (``installed_runtime_identity``), which also changes when
+    ``setup-llama --from`` or ``--url`` replaces the runtime.
 
     Never raises. A part that cannot be read contributes the marker
     ``"unreadable"``, so an unreadable state still yields a stable digest."""
@@ -87,6 +90,13 @@ def load_fingerprint(name: str) -> str:
     except Exception as exc:
         logger.debug("routing latch: load config unreadable for %s: %s", name, exc)
         parts["config"] = parts["runtime"] = "unreadable"
+    try:
+        from localm.setup_llama import installed_runtime_identity
+        parts["runtime_dir"] = installed_runtime_identity()
+    except Exception as exc:
+        logger.debug("routing latch: runtime directory unreadable for %s: %s",
+                     name, exc)
+        parts["runtime_dir"] = "unreadable"
     try:
         from localm.model_manager import get_model_info, get_model_mmproj
         info = get_model_info(name)
@@ -145,12 +155,20 @@ class RoutingLatch:
 
         *fingerprint* is the one taken when the load started; omitted, it is
         taken now. A failure under the fingerprint already recorded adds to
-        ``attempts``; under a different one it starts again at 1."""
+        ``attempts`` once that record's backoff has elapsed; while it is still
+        inside its backoff the failure refreshes ``failed_at``, ``reason`` and
+        ``retry_at`` and leaves ``attempts`` unchanged. Under a different
+        fingerprint ``attempts`` starts again at 1."""
         fp = fingerprint if fingerprint is not None else self._fingerprint(name)
         now = self._clock()
         with self._lock:
             prior = self._records.get(name)
-            attempts = prior.attempts + 1 if prior and prior.fingerprint == fp else 1
+            if prior is None or prior.fingerprint != fp:
+                attempts = 1
+            elif now < prior.retry_at:
+                attempts = prior.attempts
+            else:
+                attempts = prior.attempts + 1
             record = LoadFailure(
                 model=name, fingerprint=fp, failed_at=now,
                 reason=short_reason(reason), attempts=attempts,
@@ -174,16 +192,20 @@ class RoutingLatch:
         with self._lock:
             return self._records.get(name)
 
-    def skipped(self) -> Dict[str, SkippedCandidate]:
+    def skipped(self, names: Optional[Iterable[str]] = None
+                ) -> Dict[str, SkippedCandidate]:
         """The models routing must leave out right now, keyed by name: recorded
         failures still inside their backoff whose recorded fingerprint matches
-        the current one. A record whose fingerprint changed is dropped.
+        the current one. A record whose fingerprint changed is dropped. With
+        *names*, only the records of those models are examined.
 
         Costs nothing when nothing has failed: no config or file is read."""
+        wanted = None if names is None else set(names)
         with self._lock:
             if not self._records:
                 return {}
-            pending = list(self._records.values())
+            pending = [r for r in self._records.values()
+                       if wanted is None or r.model in wanted]
         now = self._clock()
         out: Dict[str, SkippedCandidate] = {}
         stale = []
