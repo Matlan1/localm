@@ -197,8 +197,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   usual places on Linux, macOS and Windows, not only Chrome at its default
   path; if none is found it lists what it looked for and offers the bundled
   browser. A browser that cannot start for missing system libraries now says
-  so and names them. A download interrupted partway is offered again after
-  the first failed Open instead of reading as installed. The setting's help
+  so and names them. A download that did not finish, or a build missing its
+  headless part, is offered for download again instead of reading as
+  installed, in the GUI and in `localm setup-browser`. The setting's help
   no longer claims the system engine uses your logged-in sessions: both
   engines start with a fresh, empty profile.
 - **A multi-GPU load no longer puts the output layer on a GPU too small for
