@@ -29,6 +29,16 @@ def _stub_playwright_importable(monkeypatch):
     monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
 
 
+_REAL_LAUNCH_BUILD_LOCATIONS = bprovision.launch_build_locations
+
+
+@pytest.fixture(autouse=True)
+def _builds_cannot_be_listed(monkeypatch):
+    """By default the build listing is unavailable, so is_chromium_installed
+    checks only the full build's executable. Tests of the listing replace it."""
+    monkeypatch.setattr(bprovision, "launch_build_locations", lambda: None)
+
+
 # --------------------------------------------------------------------------- #
 #  install_chromium: the playwright package itself is missing                 #
 # --------------------------------------------------------------------------- #
@@ -292,6 +302,155 @@ def test_an_install_that_does_not_supply_the_missing_executable_is_not_success(
 
     assert result.ok is False
     assert "still not on disk" in result.message
+
+
+# --------------------------------------------------------------------------- #
+#  Both launch builds must have finished installing                          #
+# --------------------------------------------------------------------------- #
+
+_DRY_RUN_WINDOWS = r"""Chrome for Testing 149.0.7827.55 (playwright chromium v1228)
+  Install location:    C:\Users\u\AppData\Local\ms-playwright\chromium-1228
+  Download url:        https://cdn.playwright.dev/builds/cft/149.0.7827.55/win64/chrome-win64.zip
+
+FFmpeg (playwright ffmpeg v1011)
+  Install location:    C:\Users\u\AppData\Local\ms-playwright\ffmpeg-1011
+  Download url:        https://cdn.playwright.dev/builds/ffmpeg/1011/ffmpeg-win64.zip
+  Download fallback 1: https://playwright.download.prss.microsoft.com/ffmpeg-win64.zip
+
+Chrome Headless Shell 149.0.7827.55 (playwright chromium-headless-shell v1228)
+  Install location:    C:\Users\u\AppData\Local\ms-playwright\chromium_headless_shell-1228
+  Download url:        https://cdn.playwright.dev/builds/cft/149.0.7827.55/win64/chrome-headless-shell-win64.zip
+"""
+
+_DRY_RUN_LINUX = """Chrome for Testing 150.0.7839.4 (playwright chromium v1243)
+  Install location:    /home/u/.cache/ms-playwright/chromium-1243
+  Download url:        https://cdn.playwright.dev/builds/cft/150.0.7839.4/linux64/chrome-linux64.zip
+
+Chrome Headless Shell 150.0.7839.4 (playwright chromium-headless-shell v1243)
+  Install location:    /home/u/.cache/ms-playwright/chromium_headless_shell-1243
+  Download url:        https://cdn.playwright.dev/builds/cft/150.0.7839.4/linux64/chrome-headless-shell-linux64.zip
+"""
+
+
+def test_the_dry_run_listing_maps_each_build_to_its_location():
+    found = bprovision.parse_install_locations(_DRY_RUN_WINDOWS)
+
+    assert set(found) == {"chromium", "ffmpeg", "chromium-headless-shell"}
+    assert str(found["chromium-headless-shell"]) == (
+        r"C:\Users\u\AppData\Local\ms-playwright\chromium_headless_shell-1228")
+    assert str(found["chromium"]) == r"C:\Users\u\AppData\Local\ms-playwright\chromium-1228"
+
+
+def test_a_linux_install_location_is_read_whole():
+    found = bprovision.parse_install_locations(_DRY_RUN_LINUX)
+
+    assert found["chromium"] == bprovision.Path("/home/u/.cache/ms-playwright/chromium-1243")
+    assert found["chromium-headless-shell"] == bprovision.Path(
+        "/home/u/.cache/ms-playwright/chromium_headless_shell-1243")
+
+
+def _builds(tmp_path, *, full_done=True, shell_done=True, shell_dir=True):
+    full = tmp_path / "registry" / "chromium-1"
+    shell = tmp_path / "registry" / "chromium_headless_shell-1"
+    full.mkdir(parents=True)
+    if full_done:
+        (full / "INSTALLATION_COMPLETE").write_text("")
+    if shell_dir:
+        shell.mkdir()
+        if shell_done:
+            (shell / "INSTALLATION_COMPLETE").write_text("")
+    return {"chromium": full, "chromium-headless-shell": shell}
+
+
+def test_a_missing_headless_shell_is_not_installed(monkeypatch, tmp_path):
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    builds = _builds(tmp_path, shell_dir=False)
+    monkeypatch.setattr(bprovision, "launch_build_locations", lambda: builds)
+
+    assert bprovision.is_chromium_installed() is False
+
+
+def test_a_build_whose_install_did_not_finish_is_not_installed(monkeypatch, tmp_path):
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    builds = _builds(tmp_path, shell_done=False)
+    monkeypatch.setattr(bprovision, "launch_build_locations", lambda: builds)
+
+    assert bprovision.is_chromium_installed() is False
+
+
+def test_both_builds_finished_is_installed(monkeypatch, tmp_path):
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    builds = _builds(tmp_path)
+    monkeypatch.setattr(bprovision, "launch_build_locations", lambda: builds)
+
+    assert bprovision.is_chromium_installed() is True
+
+
+def test_setup_runs_the_installer_when_only_the_headless_shell_is_missing(
+        monkeypatch, tmp_path):
+    _stub_playwright_importable(monkeypatch)
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    builds = _builds(tmp_path, shell_dir=False)
+    monkeypatch.setattr(bprovision, "launch_build_locations", lambda: builds)
+    ran = []
+
+    def fake_install(cmd, **kw):
+        ran.append(cmd)
+        builds["chromium-headless-shell"].mkdir()
+        (builds["chromium-headless-shell"] / "INSTALLATION_COMPLETE").write_text("")
+        return 0, ["downloaded the headless shell"]
+    monkeypatch.setattr(bprovision, "_stream_install", fake_install)
+
+    result = bprovision.install_chromium()
+
+    assert ran, "a build without its headless shell was reported as already installed"
+    assert result.ok is True, result.message
+    assert result.already_installed is False
+
+
+def test_an_install_that_leaves_a_build_unfinished_is_not_success(monkeypatch, tmp_path):
+    _stub_playwright_importable(monkeypatch)
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    _the_full_build_is_there(monkeypatch, tmp_path)
+    builds = _builds(tmp_path, shell_done=False)
+    monkeypatch.setattr(bprovision, "launch_build_locations", lambda: builds)
+    monkeypatch.setattr(bprovision, "_stream_install",
+                        lambda cmd, **kw: (0, ["interrupted"]))
+
+    result = bprovision.install_chromium()
+
+    assert result.ok is False
+
+
+def test_a_failed_dry_run_is_logged_and_lists_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(bprovision, "launch_build_locations", _REAL_LAUNCH_BUILD_LOCATIONS)
+    monkeypatch.setattr(
+        bprovision.subprocess, "run",
+        lambda *a, **kw: bprovision.subprocess.CompletedProcess(
+            a[0], 2, stdout="", stderr="unknown option --dry-run"))
+
+    with caplog.at_level("WARNING", logger=bprovision.logger.name):
+        assert bprovision.launch_build_locations() is None
+    assert "unknown option --dry-run" in caplog.text
+
+
+def test_without_a_listing_only_the_full_build_is_checked(monkeypatch, tmp_path):
+    _the_full_build_is_there(monkeypatch, tmp_path)
+
+    assert bprovision.is_chromium_installed() is True
+
+
+def test_the_real_driver_lists_both_launch_builds(monkeypatch):
+    pytest.importorskip("playwright")
+    monkeypatch.setattr(bprovision, "launch_build_locations", _REAL_LAUNCH_BUILD_LOCATIONS)
+
+    found = bprovision.launch_build_locations()
+
+    assert found is not None
+    assert set(found) == {"chromium", "chromium-headless-shell"}
+    for path in found.values():
+        assert path.is_absolute()
 
 
 # --------------------------------------------------------------------------- #

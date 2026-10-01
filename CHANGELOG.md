@@ -176,6 +176,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the clock does: the waiting command takes a collection over only after it has
   itself watched the other run stay silent. When localm can see that run has
   exited, a clock set back after it stopped no longer keeps its collection locked.
+- **An app window that loads slowly now gets its copy and paste shortcuts.** On
+  Windows, when the window's first page took longer than about 8 seconds to
+  load, its keyboard shortcuts for copy, paste and select all, and its
+  right-click menu, were never turned on and did not work in that window. They
+  now turn on as soon as the page has loaded, however long that takes, and the
+  window comes to the front then (unless you already closed it to the tray).
+- **Quitting from an app window that never finished loading no longer opens a
+  browser tab.** With "Quit when the app window is closed" on, closing a window
+  whose page never loaded opened a browser tab onto the localm that was shutting
+  down.
 - **A slow-to-load app window no longer makes a stopped localm open a browser
   tab.** When the app window took longer than about 8 seconds to load its first
   page, stopping localm with a termination signal, or closing the window with
@@ -205,8 +215,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   usual places on Linux, macOS and Windows, not only Chrome at its default
   path; if none is found it lists what it looked for and offers the bundled
   browser. A browser that cannot start for missing system libraries now says
-  so and names them. A download interrupted partway is offered again after
-  the first failed Open instead of reading as installed. The setting's help
+  so and names them. A download that did not finish, or a build missing its
+  headless part, is offered for download again instead of reading as
+  installed, in the GUI and in `localm setup-browser`. The setting's help
   no longer claims the system engine uses your logged-in sessions: both
   engines start with a fresh, empty profile.
 - **A multi-GPU load no longer puts the output layer on a GPU too small for
