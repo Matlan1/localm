@@ -290,7 +290,7 @@ def _watch_clock() -> float:
                 fn.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
                 fn.restype = ctypes.c_int
                 _unbiased_clock = (ctypes, fn)
-            except (OSError, AttributeError) as e:
+            except (ImportError, OSError, AttributeError) as e:
                 _log.debug("rag lock: QueryUnbiasedInterruptTime unavailable (%s)", e)
                 _unbiased_clock = False
         if _unbiased_clock:
