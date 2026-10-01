@@ -86,15 +86,23 @@ def _torch_box(gpus, registry, *, daemon_running=True):
             mock.patch.object(_loader, "gpu_devices_isolated",
                               return_value=registry) as reg, \
             mock.patch.object(_loader, "probe_daemon_running",
-                              return_value=daemon_running, create=True), \
-            mock.patch.object(_loader, "stop_probe_daemon", create=True) as stop:
+                              return_value=daemon_running), \
+            mock.patch.object(_loader, "stop_probe_daemon") as stop:
         yield reg, stop
 
 
-def _load_capturing(b, gpus, registry, registry_reads=None):
+def _config(**overrides):
+    """The real config with *overrides* applied."""
+    from localm.config import load_config
+    cfg = dict(load_config())
+    cfg.update(overrides)
+    return cfg
+
+
+def _load_capturing(b, gpus, registry, registry_reads=None, cfg=None):
     """Run the backend's real ``_load_native`` on a torch box and return the
     params handed to the worker. Appends the number of registry reads to
-    *registry_reads* when given."""
+    *registry_reads* when given. *cfg* replaces the loaded config."""
     captured = {}
 
     def _fake_spawn(self_runner, params, cancel_event=None, timeout=None,
@@ -102,8 +110,13 @@ def _load_capturing(b, gpus, registry, registry_reads=None):
         captured.update(params)
         return {"n_layers": 4}
 
-    with _torch_box(gpus, registry) as (reg, _stop), \
-            mock.patch.object(discover, "list_gpus", return_value=([], "ok")), \
+    cfg_patch = (mock.patch("localm.config.load_config", return_value=cfg)
+                 if cfg is not None else contextlib.nullcontext())
+    def _no_gpus(*_a, **kw):
+        return ([], "ok") if kw.get("return_status") else []
+
+    with _torch_box(gpus, registry) as (reg, _stop), cfg_patch, \
+            mock.patch.object(discover, "list_gpus", side_effect=_no_gpus), \
             mock.patch.object(_loader, "native_lib_loaded", return_value=False), \
             mock.patch.object(discover, "resolve_auto_split_ratios", return_value=None), \
             mock.patch.object(GgufBackend, "_effective_ctx_max", return_value=4096), \
@@ -582,9 +595,43 @@ class TestTorchNumberingMatchesLlamaCpp:
             info = discover.implicit_split_capacity({})
         assert info["devices"] == 2
         assert info["free"] == gpus[1]["free"] + gpus[2]["free"]
-        lone = _torch_readings((23.0, False), (0.45, True))
-        with _torch_box(lone, _registry(lone)):
-            assert discover.implicit_split_capacity({}) == {}
+
+    @pytest.mark.parametrize("igpu_first", [True, False])
+    def test_one_discrete_gpu_beside_an_integrated_one_is_what_sizing_reads(
+            self, igpu_first):
+        specs = [(2.0, True), (23.0, False)]
+        if not igpu_first:
+            specs.reverse()
+        gpus = _torch_readings(*specs)
+        dgpu = next(g for g in gpus if not g["integrated"])
+        with _torch_box(gpus, _registry(gpus)):
+            assert discover.implicit_split_capacity({}) == {
+                "free": dgpu["free"], "total": dgpu["total"], "devices": 1}
+            with mock.patch("localm.config.load_config", return_value=_config(
+                    gpu_split_indices=None)), \
+                    mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+                assert GgufBackend._split_free_total_bytes() == (
+                    dgpu["free"], dgpu["total"], 1)
+            assert discover.implicit_split_devices({}) is None
+
+    def test_a_split_after_an_integrated_gpu_is_written_in_llamacpps_numbering(
+            self, tmp_path):
+        # Torch ordinal 0 is an iGPU; the discrete GPUs (ordinals 1-3) are
+        # llama.cpp devices 0-2. The default split puts the output layer and a
+        # 41 MB logits buffer on the 30 MB device, which is left out.
+        b = GgufBackend(str(_tiny_model(tmp_path, vocab=5000)), n_ctx=4096,
+                        n_gpu_layers=99)
+        b._VRAM_OVERHEAD_BYTES = 1000
+        b._gguf_kv_bpt = 10
+        frees = [(2_000_000_000, True), (50_000_000, False), (50_000_000, False),
+                 (30_000_000, False)]
+        gpus = [{"index": i, "name": f"gpu{i}", "free": f, "total": f + 10,
+                 "free_scope": discover.FREE_SCOPE_DEVICE, "integrated": ig}
+                for i, (f, ig) in enumerate(frees)]
+        params = _load_capturing(b, gpus, _registry(gpus))
+        split_mode, main_gpu, values = _worker_view(params)
+        assert values == pytest.approx([0.5, 0.5, 0, 0, 0, 0, 0, 0])
+        assert (split_mode, main_gpu) == (discover._LLAMA_SPLIT_MODE_LAYER, 0)
 
     def test_discrete_gpus_are_renumbered_into_llamacpps_list(self):
         gpus = _torch_readings((0.45, True), (20.0, False), (10.0, False))
@@ -748,34 +795,61 @@ class TestOneGpuWhenOnlyOneFits:
         assert plan.chosen[0].holds_output and plan.chosen[0].layers == 8
         assert plan_split(_devices([5.0, 2.0]), **kw).tensor_split is None
 
-    def test_a_one_entry_gpu_split_indices_loads_on_that_gpu_alone(self):
+    def _one_entry_load(self, tmp_path, gpus, registry, index):
+        b = GgufBackend(str(_tiny_model(tmp_path)), n_ctx=4096, n_gpu_layers=99)
+        b._VRAM_OVERHEAD_BYTES = int(1.5e9)
+        b._gguf_kv_bpt = 10
+        params = _load_capturing(b, gpus, registry,
+                                 cfg=_config(gpu_split_indices=[index],
+                                             gpu_split_ratios=None))
+        return b, params
+
+    @pytest.mark.parametrize("specs,index,slot", [
+        ([(20.0, False), (20.0, False)], 1, 1),
+        ([(2.0, True), (20.0, False)], 1, 0),
+        ([(2.0, True), (20.0, False), (20.0, False)], 2, 1),
+    ])
+    def test_a_one_entry_gpu_split_indices_loads_on_that_gpu_alone(
+            self, tmp_path, specs, index, slot):
+        gpus = _torch_readings(*specs)
+        b, params = self._one_entry_load(tmp_path, gpus, _registry(gpus), index)
+        assert params["gpu_split_ratios"] == {slot: 1.0}
+        assert _worker_view(params) == (discover._LLAMA_SPLIT_MODE_NONE, slot, None)
+        assert b.applied_gpu_split is None
+
+    @pytest.mark.parametrize("case", ["integrated-gpu", "runtime-differs"])
+    def test_an_unmatched_single_gpu_keeps_the_default(self, tmp_path, case, caplog):
+        gpus = _torch_readings((2.0, True), (20.0, False))
+        registry = _registry(gpus)
+        index = 0 if case == "integrated-gpu" else 1
+        if case == "runtime-differs":
+            registry.append(dict(registry[1], index=2))
+        with caplog.at_level("INFO", logger="localm"):
+            _b, params = self._one_entry_load(tmp_path, gpus, registry, index)
+        assert params["gpu_split_ratios"] is None
+        assert _worker_view(params) == (discover._LLAMA_SPLIT_MODE_LAYER, 0, None)
+        assert any("keeping llama.cpp's default split" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_the_worker_never_applies_a_one_entry_config_itself(self):
         class _MP:
             tensor_split = None
             split_mode = discover._LLAMA_SPLIT_MODE_LAYER
             main_gpu = 0
         mp = _MP()
         with mock.patch.object(discover, "list_gpus",
-                               return_value=[{"index": 0}, {"index": 1}]), \
-                mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
+                               return_value=[{"index": 0}, {"index": 1}]),                 mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
                                   return_value=False):
             assert discover.apply_gpu_split(
                 mp, config={"gpu_split_indices": [1]}) is None
         assert (mp.split_mode, mp.main_gpu, mp.tensor_split) == (
-            discover._LLAMA_SPLIT_MODE_NONE, 1, None)
+            discover._LLAMA_SPLIT_MODE_LAYER, 0, None)
 
-    def test_an_undetected_single_index_keeps_the_default(self, caplog):
-        class _MP:
-            tensor_split = None
-            split_mode = discover._LLAMA_SPLIT_MODE_LAYER
-            main_gpu = 0
-        mp = _MP()
-        with caplog.at_level("WARNING", logger="localm"), \
-                mock.patch.object(discover, "list_gpus",
-                                  return_value=[{"index": 0}, {"index": 1}]), \
-                mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
+    def test_an_undetected_single_index_is_warned_and_unused(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"),                 mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
                                   return_value=False):
-            discover.apply_gpu_split(mp, config={"gpu_split_indices": [3]})
-        assert (mp.split_mode, mp.main_gpu) == (discover._LLAMA_SPLIT_MODE_LAYER, 0)
+            assert discover.single_gpu_index(
+                [3], gpus=[{"index": 0}, {"index": 1}]) is None
         assert any("not one of the 2 GPU(s)" in r.getMessage() for r in caplog.records)
 
     def test_sizing_reads_the_gpu_a_one_entry_list_names(self):
@@ -789,3 +863,46 @@ class TestOneGpuWhenOnlyOneFits:
                 {"gpu_split_indices": [0, 1], "main_gpu_index": 1}) == 1
             assert discover.resolve_load_gpu_index(
                 {"gpu_split_indices": None, "main_gpu_index": None}) == 0
+
+
+    def test_the_torch_free_read_uses_that_gpu(self):
+        cuda = mock.Mock()
+        cuda.is_available.return_value = True
+        cuda.mem_get_info.side_effect = lambda i: (i * 100, i * 1000)
+        with mock.patch.dict("sys.modules", {"torch": mock.Mock(cuda=cuda)}),                 mock.patch.object(discover, "resolve_load_gpu_index", return_value=1):
+            assert GgufBackend._torch_free_total_uncapped() == (100, 1000)
+        cuda.mem_get_info.assert_called_once_with(1)
+
+    def test_the_device_global_correction_uses_that_gpu(self):
+        seen = []
+
+        def _used(entries):
+            seen.extend(e["index"] for e in entries)
+            return {1: 400}
+
+        with mock.patch("localm.gpu_usage.raw_reading_is_process_scoped",
+                        return_value=True),                 mock.patch("localm.gpu_usage.device_global_used_bytes", _used),                 mock.patch.object(discover, "resolve_load_gpu_index", return_value=1):
+            assert GgufBackend._device_global_free_bytes(1000) == 600
+        assert seen == [1]
+
+
+class TestProbeDaemonStop:
+    def test_stop_ends_a_running_daemon_process(self, monkeypatch):
+        import subprocess
+        import sys
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+        try:
+            monkeypatch.setattr(_loader, "_PROBE_PROC", proc)
+            assert _loader.probe_daemon_running()
+            _loader.stop_probe_daemon(wait=10.0)
+            assert proc.poll() is not None
+            assert _loader._PROBE_PROC is None
+            assert not _loader.probe_daemon_running()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+            for stream in (proc.stdin, proc.stdout):
+                stream.close()

@@ -343,7 +343,9 @@ class VramSizingMixin:
         """``(free, total, devices)`` summed across the 2+ devices this load
         will actually spread over, or ``(None, None, 0)`` when no combined
         budget applies and the caller must fall back to the single-device
-        readings above.
+        readings above. With no ``gpu_split_indices``, ``devices`` is 1 when
+        ``discover.implicit_split_capacity`` answers for the one discrete GPU
+        left beside integrated ones.
 
         BOTH SPLITS COUNT. A CONFIGURED ``gpu_split_indices`` writes an
         explicit ``tensor_split`` (``discover.apply_gpu_split``). An UNSET one
@@ -397,7 +399,7 @@ class VramSizingMixin:
                 info = implicit_split_capacity(cfg, wait_for_inflight=True)
                 free, total = info.get("free"), info.get("total")
                 devices = info.get("devices") or 0
-                if devices < 2 or free is None or total is None:
+                if devices < 1 or free is None or total is None:
                     return None, None, 0
                 return int(free), int(total), int(devices)
             from localm.discover import GPU_PROBE_OK, vram_capacity

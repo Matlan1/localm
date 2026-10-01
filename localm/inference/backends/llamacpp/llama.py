@@ -1036,7 +1036,7 @@ class LlamaCpp:
         apply_main_gpu(mp)
         # Multi-GPU tensor-split: spreads the model across 2+ configured
         # devices when gpu_split_indices is set, or loads it on the one device
-        # a 1-entry list or a 1-entry ratios mapping names (see
+        # a 1-entry ratios mapping from the parent names (see
         # discover.apply_gpu_split).
         # gpu_split_ratios carries the PARENT's already-resolved effective
         # ratios (auto free-VRAM-proportional distribution,

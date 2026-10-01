@@ -370,15 +370,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # worker: with gpu_split_ratios unset this is the auto
         # free-VRAM-proportional split, and None when no split is configured, the
         # ratios are pinned, or per-device free is unmeasurable (the worker then
-        # keeps the config-driven equal/pinned behavior). By-symbol,
-        # function-scoped import so the resolver stays patchable.
+        # keeps the config-driven equal/pinned behavior). Otherwise a 1-entry
+        # gpu_split_indices becomes a {llama.cpp device: 1.0} mapping, or the
+        # implicit split fit's plan applies. By-symbol, function-scoped import
+        # so the resolver stays patchable.
         # wait_for_inflight=True requires running off the event loop.
         from localm.config import load_config
-        from localm.discover import resolve_auto_split_ratios, resolve_gpu_split
+        from localm.discover import (resolve_auto_split_ratios, resolve_gpu_split,
+                                     single_gpu_load_slot)
         auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
         worker_split = auto_ratios
         self._split_fit_note = ""
-        if not auto_ratios:
+        slot = (single_gpu_load_slot(wait_for_inflight=True)
+                if not auto_ratios and gpu_layers != 0 else None)
+        if slot is not None:
+            worker_split = {slot: 1.0}
+        elif not auto_ratios:
             plan = self._implicit_split_fit(gpu_layers)
             if plan is not None and plan.tensor_split:
                 worker_split = plan.tensor_split

@@ -238,8 +238,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   llama.cpp's; otherwise llama.cpp's own split is kept. On a computer with
   integrated graphics beside a discrete GPU, the integrated GPU's memory is
   no longer counted when sizing a model, since llama.cpp does not use it
-  then. Setting `gpu_split_indices` to a single GPU now loads a GGUF model on
-  that GPU only, instead of still spreading it over every GPU. A crash while
+  then. Setting `gpu_split_indices` to a single GPU now loads a GGUF chat
+  model on that GPU only, instead of still spreading it over every GPU, when
+  localm can match that GPU to llama.cpp's own device list. A crash while
   creating the context is reported as that, with advice
   about the context size and the split, instead of telling you to repair the
   runtime. Bug reports list every GPU with its memory, write "not detected"
