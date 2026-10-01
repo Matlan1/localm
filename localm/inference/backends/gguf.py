@@ -126,6 +126,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # ({"source": "auto"|"pinned"|"equal", "devices": [{"index", "share"}, ...]}),
         # or None when no split applied. Set in _load_native.
         self.applied_gpu_split: Optional[dict] = None
+        # The GPU (list_gpus numbering) the last load ran on alone, or None when
+        # it did not run on one GPU chosen by a 1-entry gpu_split_indices or the
+        # implicit split fit. Set in _load_native.
+        self.load_gpu_index: Optional[int] = None
         # How many of the model's transformer layers ended up on the GPU, and the
         # model's true total. None until a load has completed, or when the true
         # layer count is unknowable for this load.
@@ -309,9 +313,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # _load_native both read the same value.
         self.effective_gpu_layers = self._effective_gpu_layers()
         self._check_vram()
+        from localm.discover import GpuSplitConfigError
         try:
             self._load_native()
-        except (ModelLoadCancelled, PretokenizerUnusableModelError):
+        except (ModelLoadCancelled, PretokenizerUnusableModelError,
+                GpuSplitConfigError):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
@@ -363,35 +369,59 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             except Exception:
                 vram_before, vram_before_status = [], None
 
-        ctx_max = self._effective_ctx_max()
-        self.effective_ctx_max = ctx_max
-
         # Resolve the effective split distribution parent-side and pin it into the
         # worker: with gpu_split_ratios unset this is the auto
         # free-VRAM-proportional split, and None when no split is configured, the
         # ratios are pinned, or per-device free is unmeasurable (the worker then
-        # keeps the config-driven equal/pinned behavior). Otherwise a 1-entry
-        # gpu_split_indices becomes a {llama.cpp device: 1.0} mapping, or the
-        # implicit split fit's plan applies. By-symbol, function-scoped import
-        # so the resolver stays patchable.
+        # keeps the config-driven equal/pinned behavior). A configured split on
+        # a box whose integrated GPUs llama.cpp leaves out is renumbered into
+        # llama.cpp's devices (configured_split_placement); a 1-entry
+        # gpu_split_indices becomes a {llama.cpp device: 1.0} mapping; otherwise
+        # the implicit split fit's plan applies. By-symbol, function-scoped
+        # imports so the resolvers stay patchable.
         # wait_for_inflight=True requires running off the event loop.
         from localm.config import load_config
-        from localm.discover import (resolve_auto_split_ratios, resolve_gpu_split,
-                                     single_gpu_load_slot)
+        from localm.discover import (configured_split_placement,
+                                     resolve_auto_split_ratios, resolve_gpu_split,
+                                     single_gpu_placement)
         auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
         worker_split = auto_ratios
+        main_gpu = None
         self._split_fit_note = ""
-        slot = (single_gpu_load_slot(wait_for_inflight=True)
-                if not auto_ratios and gpu_layers != 0 else None)
-        if slot is not None:
-            worker_split = {slot: 1.0}
+        self.load_gpu_index = None
+        placement = None
+        plan = None
+        if gpu_layers != 0:
+            placement = configured_split_placement(ratios=auto_ratios,
+                                                   wait_for_inflight=True)
+            if placement is None and not auto_ratios:
+                placement = single_gpu_placement(wait_for_inflight=True)
+        if placement is not None:
+            worker_split, main_gpu = placement.mapping, placement.main_gpu
+            if len(placement.mapping) == 1:
+                from localm.discover import single_gpu_index
+                self.load_gpu_index = single_gpu_index(
+                    load_config().get("gpu_split_indices"), gpus=[], quiet=True)
         elif not auto_ratios:
             plan = self._implicit_split_fit(gpu_layers)
             if plan is not None and plan.tensor_split:
                 worker_split = plan.tensor_split
                 self._report_split_fit(plan)
+                if len(plan.tensor_split) == 1:
+                    (slot,) = plan.tensor_split
+                    self.load_gpu_index = getattr(
+                        self, "_fit_source_index", {}).get(slot, slot)
             elif plan is not None and not plan.default_fits:
                 self._report_split_fit(plan)
+
+        # The context ceiling is sized from the devices this load uses: a fit
+        # that leaves devices out bounds it by the devices it keeps.
+        ctx_budget = None
+        if plan is not None and plan.tensor_split:
+            used = [c for c in plan.default if c.index in plan.tensor_split]
+            ctx_budget = (sum(c.free for c in used), len(used))
+        ctx_max = self._effective_ctx_max(split_budget=ctx_budget)
+        self.effective_ctx_max = ctx_max
 
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through
@@ -401,7 +431,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         cfg = load_config()
         _display_ratios = auto_ratios if auto_ratios else cfg.get("gpu_split_ratios")
         _pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), _display_ratios)
-        if isinstance(worker_split, dict):
+        if placement is not None and not placement.mapping:
+            self.applied_gpu_split = None
+        elif isinstance(worker_split, dict) and placement is None:
             self.applied_gpu_split = {
                 "source": "auto",
                 "devices": [{"index": i, "share": s}
@@ -433,6 +465,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             n_cpu_moe=self.n_cpu_moe,
             mtp_enabled=self.mtp_enabled,
         )
+        if main_gpu is not None:
+            params["main_gpu"] = main_gpu
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"

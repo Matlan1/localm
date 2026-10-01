@@ -294,15 +294,24 @@ def _model_file_size(name: str) -> Optional[int]:
 
 
 def _current_gpu_index() -> int:
-    """The configured main GPU device index (0 when unset/unconfigured) - see
-    ``main_gpu_index`` / ``discover.resolve_main_gpu_index``, the same
-    resolution ``vram_info()`` and the GGUF backend's own VRAM check use."""
+    """The device the next GGUF load reads its VRAM from (0 when nothing
+    selects one) - ``discover.resolve_load_gpu_index``, the same resolution
+    ``vram_info()`` and the GGUF backend's own VRAM check use."""
     try:
         from localm.config import load_config
-        from localm.discover import resolve_main_gpu_index
-        return resolve_main_gpu_index(load_config().get("main_gpu_index"))
+        from localm.discover import resolve_load_gpu_index
+        return resolve_load_gpu_index(load_config(), quiet=True)
     except Exception:
         return 0
+
+
+def _loaded_gpu_index(name: Optional[str]) -> Optional[int]:
+    """The device loaded model *name* runs on alone (its backend's
+    ``load_gpu_index``), or None when it is not loaded on one device or that
+    is not recorded."""
+    engine = _engines.get(name) if name else None
+    idx = getattr(getattr(engine, "_backend", None), "load_gpu_index", None)
+    return idx if isinstance(idx, int) and not isinstance(idx, bool) else None
 
 
 def _loaded_model_identities() -> list:
@@ -345,6 +354,9 @@ def _gpu_registry_sync() -> None:
         sizes = [_model_file_size(n) for n in (loaded or ([model] if model else []))]
         if sizes and all(sz is not None for sz in sizes):
             vram_bytes = int(sum(sizes) * 1.2)
+        gpu_index = _loaded_gpu_index(model)
+        if gpu_index is None:
+            gpu_index = _current_gpu_index()
         gpu_registry.write_entry(
             gpu_registry.registry_dir(),
             instance_id=_gpu_coord["instance_id"],
@@ -354,7 +366,7 @@ def _gpu_registry_sync() -> None:
             scheme=_gpu_coord.get("scheme") or "http",
             model=model,
             vram_estimate_bytes=vram_bytes,
-            gpu_index=_current_gpu_index(),
+            gpu_index=gpu_index,
             coordination_token=_gpu_coord["token"],
             models=_loaded_model_identities(),
         )

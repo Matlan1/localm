@@ -488,9 +488,12 @@ class VramSizingMixin:
             if layout is None:
                 return None
             devices = implicit_split_devices(cfg, wait_for_inflight=True,
-                                             check_runtime=False)
+                                             check_runtime=False,
+                                             with_source_index=True)
             if not devices:
                 return None
+            self._fit_source_index = {d["index"]: d.get("source_index", d["index"])
+                                      for d in devices}
             n_layer_all = int(layout["block_count"])
             sizes = layout["tensor_bytes"]
             arch, nextn = gguf_nextn_predict_layers(path)
@@ -739,9 +742,9 @@ class VramSizingMixin:
         resident while loading a second one)."""
         try:
             from localm.config import load_config
-            from localm.discover import resolve_main_gpu_index
+            from localm.discover import resolve_load_gpu_index
             from localm import gpu_registry
-            idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+            idx = resolve_load_gpu_index(load_config(), quiet=True)
             peers = gpu_registry.list_gpu_peers()
             holder = next(
                 (p for p in peers
@@ -988,7 +991,8 @@ class VramSizingMixin:
     _AUTO_CTX_MAX = 65536
     _AUTO_CTX_FALLBACK = 16384   # no GPU visibility - match common practice
 
-    def _auto_ctx_max(self, capped: bool = True) -> int:
+    def _auto_ctx_max(self, capped: bool = True,
+                      split_budget: "Optional[tuple[int, int]]" = None) -> int:
         """
         Derive a context ceiling from available resources.
 
@@ -1013,8 +1017,15 @@ class VramSizingMixin:
         reservation is deducted from that combined budget - a GPU-placed
         embedder is itself tensor-split across the same devices, so its
         footprint draws on the combined pool.
+
+        ``split_budget`` = ``(free, devices)``, when given, replaces that
+        reading: the free VRAM summed over the devices the load uses and how
+        many there are (the implicit split fit's kept devices).
         """
-        free, _split_total, split_devices = self._split_free_total_bytes()
+        if split_budget is not None:
+            free, split_devices = split_budget
+        else:
+            free, _split_total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
             split_devices = 1   # single-device reading - the flat overhead
@@ -1032,17 +1043,19 @@ class VramSizingMixin:
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
         return int(max(self._AUTO_CTX_MIN, hi))
 
-    def _effective_ctx_max(self) -> Optional[int]:
+    def _effective_ctx_max(self, split_budget: "Optional[tuple[int, int]]" = None
+                           ) -> Optional[int]:
         """The context ceiling to use for this load (auto or configured).
 
         ctx_auto sizes the ceiling from free VRAM. n_ctx_max==0 means the user
         asked for NO fixed ceiling ("grow until VRAM"); combined with ctx_auto
         that lifts the conservative _AUTO_CTX_MAX safety clamp so the window can
         use the full VRAM-derived budget. When ctx_auto is off, n_ctx_max is used
-        verbatim (0/None already mean unlimited downstream)."""
+        verbatim (0/None already mean unlimited downstream). ``split_budget`` is
+        passed to :meth:`_auto_ctx_max`."""
         if self.ctx_auto:
             unlimited = (self.n_ctx_max == 0)
-            auto = self._auto_ctx_max(capped=not unlimited)
+            auto = self._auto_ctx_max(capped=not unlimited, split_budget=split_budget)
             extra = "; no max (n_ctx_max=0)" if unlimited else ""
             console.print(
                 f"[dim]  ctx auto : window may grow to {auto:,} tokens "
