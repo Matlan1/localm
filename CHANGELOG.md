@@ -168,6 +168,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A change of the system clock no longer lets a second writer into a knowledge
+  collection that is being indexed.** After the clock jumped (a laptop waking, a VM
+  or WSL resyncing its clock), a `localm rag add`, a scheduled re-sync or a memory
+  write could decide that a run still writing the same collection had crashed and
+  write alongside it. A run that is still writing now keeps the collection whatever
+  the clock does: the waiting command takes a collection over only after it has
+  itself watched the other run stay silent. When localm can see that run has
+  exited, a clock set back after it stopped no longer keeps its collection locked.
 - **An app window that loads slowly now gets its copy and paste shortcuts.** On
   Windows, when the window's first page took longer than about 8 seconds to
   load, its keyboard shortcuts for copy, paste and select all, and its

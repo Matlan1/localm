@@ -284,15 +284,29 @@ policy as an interactive add. Full details in
   how long it has been running. Let that run finish and repeat the command; a
   scheduled job that hits this says so in its output and picks the folder up on
   its next run. If the holder is gone (the machine lost power mid-index, say), the
-  lock is reclaimed by itself about a minute after that process stopped reporting,
-  so a crash cannot wedge a collection. The one case that needs you is a lock file
+  lock is reclaimed by itself, so with the default wait a crash cannot wedge a
+  collection. A waiting command takes it over only after it has watched the
+  holder stay silent for fifteen seconds (a running localm keeps watching across
+  its own attempts), and once the holder has been silent for twenty seconds when
+  localm can see that process has exited, or for a minute otherwise (including a
+  server that restarted in place on Linux). A holder that keeps reporting is never
+  taken over, whatever the system clock does. If the clock was set back after the
+  holder stopped, a holder localm cannot check keeps the lock until the clock
+  catches up, or until one wait, or the attempts of one running localm together,
+  have watched it for more than a minute. Time the computer spends asleep does
+  not count as watching. A holder localm can see is
+  still holding the lock keeps it even when it has stopped reporting (suspended,
+  or paused in a debugger); the message shows how long ago it last reported, and
+  ending that process releases the lock. The one case that needs you is a lock file
   localm cannot even read the timestamp of, which means something is wrong with
   the file itself (permissions, a damaged filesystem): the message then names the
   file, and deleting it releases the collection once you are sure no localm
   process is using it. Two environment variables tune this for unusual setups:
-  `LOCALM_RAG_LOCK_WAIT` (seconds to wait before refusing, default 30) and
-  `LOCALM_RAG_LOCK_STALE` (seconds without a heartbeat before a holder counts as
-  crashed, default 60; raise it on a very slow or heavily contended disk).
+  `LOCALM_RAG_LOCK_WAIT` (seconds to wait before refusing, default 30; below 15 a
+  command run on its own never takes a lock over, and its refusal says so) and
+  `LOCALM_RAG_LOCK_STALE` (seconds without a heartbeat before a holder localm
+  cannot check counts as crashed, default 60; raise it on a very slow or heavily
+  contended disk).
 - **"Semantic search is degraded".** localm checked the stored vector index
   against the chunks and refused to use it (unreadable, malformed, or no longer
   lining up), and answered lexically instead. Nothing is deleted to make that go
