@@ -741,9 +741,15 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
 
     ``vram_capacity`` is given the full CLI deadline on this first call and
     joins a probe already in flight (``wait_for_inflight``); joining is only
-    safe because the call runs in an executor thread."""
+    safe because the call runs in an executor thread.
+
+    For a GGUF load (``budget.check_split_fit``) with no configured split, a
+    fresh reading of 2+ GPUs llama.cpp's default split spreads over is judged
+    by their summed free VRAM (``discover.implicit_split_free``, the budget
+    the backend sizes the load against), and the probe is marked
+    ``implicit_split``."""
     from localm import discover
-    from localm.discover import gpu_split_shortfall, vram_capacity
+    from localm.discover import gpu_split_shortfall, implicit_split_free, vram_capacity
 
     v_info, probe_status = await loop.run_in_executor(
         None, functools.partial(
@@ -752,6 +758,12 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
             wait_for_inflight=True))
     free = v_info.get("free")
     process_scoped = v_info.get("free_scope") == discover.FREE_SCOPE_PROCESS
+    implicit = None
+    if budget.check_split_fit and probe_status == discover.GPU_PROBE_OK:
+        implicit = await loop.run_in_executor(None, implicit_split_free)
+    if implicit is not None:
+        free = implicit["free"]
+        process_scoped = implicit.get("free_scope") == discover.FREE_SCOPE_PROCESS
     shortfall, shares_adaptive = (
         await loop.run_in_executor(
             None, functools.partial(
@@ -761,7 +773,26 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
     return switch_admission.VramProbe(
         free=free, probe_ok=probe_status == discover.GPU_PROBE_OK,
         process_scoped=process_scoped, shortfall=shortfall,
-        shares_adaptive=shares_adaptive)
+        shares_adaptive=shares_adaptive, implicit_split=implicit is not None)
+
+
+def _probe_free_reader(probe: switch_admission.VramProbe):
+    """A callable re-reading free VRAM as the same quantity as ``probe.free``:
+    the summed free of llama.cpp's default-split GPUs for an
+    ``implicit_split`` probe (None when a fresh reading of them is not
+    available), else ``vram_capacity()``'s free."""
+    from localm import discover
+
+    if not probe.implicit_split:
+        return lambda: discover.vram_capacity().get("free")
+
+    def _read() -> Optional[int]:
+        gpus, status = discover._list_gpus_reading()
+        if status != discover.GPU_PROBE_OK:
+            return None
+        info = discover.implicit_split_free(gpus=gpus)
+        return info.get("free") if info is not None else None
+    return _read
 
 
 async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
@@ -830,7 +861,6 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     Sets ``attempt.embedder_attempted`` once a loaded embedder is found, so it
     is tried at most once per load attempt. ``reset_embedder(force=False)``
     checks for in-flight requests and clears in one locked step."""
-    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     embedder_dim = await loop.run_in_executor(None, embedder_mod.loaded_dim)
@@ -845,8 +875,7 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
         await loop.run_in_executor(
             None,
             lambda: wait_for_vram_release(
-                lambda: vram_capacity().get("free"),
-                before_bytes=probe.free))
+                _probe_free_reader(probe), before_bytes=probe.free))
     return True
 
 
@@ -953,7 +982,6 @@ async def _switch_free_victim(loop, victim: str, engine,
     for its VRAM to be released when *probe* was measurable, so the next
     reading is not stale. *victim* is in ``_evicting_names`` for the whole
     free, and is removed again even when ``unload()`` raises."""
-    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     _evicting_names.add(victim)
@@ -963,7 +991,7 @@ async def _switch_free_victim(loop, victim: str, engine,
             await loop.run_in_executor(
                 None,
                 lambda: wait_for_vram_release(
-                    lambda: vram_capacity().get("free"), before_bytes=probe.free))
+                    _probe_free_reader(probe), before_bytes=probe.free))
     finally:
         _evicting_names.discard(victim)
 

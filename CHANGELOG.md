@@ -250,7 +250,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   shown in the GUI, the memory check before a load and the GPU this
   instance reports to other localm instances now describe the GPU a
   single-GPU load actually runs on, and the automatic context limit only
-  counts the GPUs a load uses when GPUs are left out. A crash while
+  counts the GPUs a load uses when GPUs are left out. With no split
+  configured, the memory check before loading a GGUF model on several GPUs
+  now counts the free memory of every GPU llama.cpp spreads it over, instead
+  of GPU 0's alone, so it no longer unloads other models or asks for
+  confirmation when the model fits across them. A crash while
   creating the context is reported as that, with advice
   about the context size and the split, instead of telling you to repair the
   runtime. Bug reports list every GPU with its memory, write "not detected"

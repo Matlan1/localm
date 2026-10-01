@@ -27,13 +27,15 @@ GiB = 1024 ** 3
 @contextlib.contextmanager
 def _box(gpus, registry):
     """A CUDA/HIP build whose torch probe reports *gpus* (through every probe
-    entry point) and whose native registry reports *registry*."""
+    entry point, and as the last completed reading) and whose native registry
+    reports *registry*."""
     def _list(*_a, **kw):
         return (list(gpus), discover.GPU_PROBE_OK) if kw.get("return_status") else list(gpus)
 
     with mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
                            return_value=False), \
             mock.patch.object(discover, "list_gpus", _list), \
+            mock.patch.object(discover, "last_gpu_reading", lambda: list(gpus)), \
             mock.patch.object(_loader, "gpu_devices_isolated",
                               return_value=registry) as reg, \
             mock.patch.object(_loader, "probe_daemon_running", return_value=True), \
@@ -337,6 +339,79 @@ class TestReadingsFollowTheLoadDevice:
                        _config(gpu_split_indices=None, main_gpu_index=None))
         assert params["gpu_split_ratios"] == {0: 1.0}
         assert b.load_gpu_index == 1
+
+
+class TestAdmissionJudgesTheDefaultSplit:
+    """With no configured split, llama.cpp spreads a GGUF load over every
+    discrete GPU, and the backend sizes it against their summed free VRAM. The
+    check before the load judges the same budget, so a model that fits across
+    the GPUs, or on one GPU other than GPU 0, does not trigger evictions or a
+    degraded-load prompt."""
+
+    @staticmethod
+    def _budget(gguf=True):
+        from localm.inference import switch_admission
+        return switch_admission.LoadBudget(
+            name="m", vram_required=10 * GiB, headroom=GiB, resident_cap=None,
+            pinned=frozenset(), check_split_fit=gguf)
+
+    @staticmethod
+    def _gpus(*specs):
+        return [{"index": i, "name": f"gpu{i}", "free": int(f * GiB),
+                 "total": int((f + 4) * GiB), "free_scope": discover.FREE_SCOPE_DEVICE,
+                 "integrated": ig}
+                for i, (f, ig) in enumerate(specs)]
+
+    def _probe(self, gpus, budget):
+        from localm.inference import http_server
+
+        async def _run():
+            return await http_server._switch_probe_vram(
+                asyncio.get_running_loop(), budget)
+
+        with _box(gpus, _registry(gpus)), \
+                mock.patch("localm.config.load_config", return_value=_config(
+                    gpu_split_indices=None, main_gpu_index=None)):
+            return asyncio.run(_run())
+
+    def test_a_model_that_fits_across_the_gpus_is_admitted(self):
+        from localm.inference import switch_admission
+        budget = self._budget()
+        gpus = self._gpus((4.0, False), (20.0, False))
+        probe = self._probe(gpus, budget)
+        decision = switch_admission.decide_admission(probe, budget, [], {})
+        assert decision.action == switch_admission.ADMIT, (
+            f"judged against one GPU: {probe.free / GiB:.1f} GB free")
+        assert probe.free == 24 * GiB and probe.implicit_split
+
+    def test_integrated_gpus_are_not_summed(self):
+        budget = self._budget()
+        gpus = self._gpus((30.0, True), (4.0, False), (4.0, False))
+        probe = self._probe(gpus, budget)
+        assert probe.free == 8 * GiB and probe.implicit_split
+
+    def test_an_hf_load_is_still_judged_by_one_gpu(self):
+        budget = self._budget(gguf=False)
+        gpus = self._gpus((4.0, False), (20.0, False))
+        probe = self._probe(gpus, budget)
+        assert probe.free == 4 * GiB and not probe.implicit_split
+
+    def test_one_gpu_is_judged_by_its_own_reading(self):
+        budget = self._budget()
+        gpus = self._gpus((20.0, False))
+        probe = self._probe(gpus, budget)
+        assert probe.free == 20 * GiB and not probe.implicit_split
+
+    def test_the_release_wait_reads_the_same_sum(self):
+        from localm.inference import http_server, switch_admission
+        gpus = self._gpus((4.0, False), (20.0, False))
+        probe = switch_admission.VramProbe(
+            free=24 * GiB, probe_ok=True, process_scoped=False, shortfall=[],
+            shares_adaptive=False, implicit_split=True)
+        with _box(gpus, _registry(gpus)), \
+                mock.patch("localm.config.load_config", return_value=_config(
+                    gpu_split_indices=None)):
+            assert http_server._probe_free_reader(probe)() == 24 * GiB
 
 
 class TestContextCeilingFollowsTheFit:

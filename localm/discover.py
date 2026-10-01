@@ -3431,6 +3431,45 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
     return out
 
 
+def implicit_split_free(config: Optional[dict] = None, *,
+                        gpus: Optional[list] = None) -> Optional[dict]:
+    """``{"free", "devices", "free_scope"?}`` summed over the 2+ GPUs of a
+    torch reading that llama.cpp's default layer split spreads a GGUF load
+    over (integrated GPUs beside a discrete one left out,
+    :func:`_llama_visible_torch_devices`), or ``None`` when a
+    ``gpu_split_indices`` is configured, fewer than 2 such GPUs are read, any
+    of them lacks an integer ``free``, or the index space is opaque (vulkan or
+    sycl).
+
+    The reading is *gpus*, else :func:`last_gpu_reading`, so this never
+    probes. ``free_scope`` is :data:`FREE_SCOPE_DEVICE` when every summed GPU
+    reports it, :data:`FREE_SCOPE_PROCESS` when any reports another scope, and
+    absent when none reports one."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    if cfg.get("gpu_split_indices"):
+        return None
+    readings = gpus if gpus is not None else last_gpu_reading()
+    if not isinstance(readings, list) or len(readings) < 2:
+        return None
+    kept = _llama_visible_torch_devices(readings)
+    if len(kept) < 2:
+        return None
+    frees = [d.get("free") if isinstance(d, dict) else None for d in kept]
+    if not all(isinstance(f, int) and not isinstance(f, bool) for f in frees):
+        return None
+    if _native_gpu_index_space_is_opaque():
+        return None
+    out = {"free": sum(frees), "devices": len(kept)}
+    scopes = [d.get("free_scope") for d in kept if d.get("free_scope")]
+    if scopes:
+        out["free_scope"] = (FREE_SCOPE_DEVICE
+                             if len(scopes) == len(kept)
+                             and all(s == FREE_SCOPE_DEVICE for s in scopes)
+                             else FREE_SCOPE_PROCESS)
+    return out
+
+
 def _llama_visible_torch_devices(devices: list) -> list:
     """The entries of a torch reading that llama.cpp's device list keeps: the
     discrete GPUs, when every entry reports ``integrated`` and at least one is
