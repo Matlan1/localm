@@ -179,12 +179,14 @@ def _run_gui_startup(monkeypatch, *, native, window_loads=True, args=(),
     A server running beside the app window keeps running until the window
     returns True or a browser tab is opened. With *stop_first* the window
     instead stops the server, waits for the stop to be signalled, and then
-    returns *window_loads*. With *quit_first* the window calls its quit action
-    and returns *window_loads* at once; the shutdown it starts (recorded in
-    *shutdowns* when given) stops the server 0.3 seconds later."""
+    returns *window_loads*. With *quit_first* the window starts its quit action
+    on its own thread, waits until the shutdown that action starts is running,
+    and returns *window_loads*; that shutdown (recorded in *shutdowns* when
+    given) stops the server 0.3 seconds after it starts."""
     import contextlib
     import socket
     import threading
+    import time
 
     from click.testing import CliRunner
 
@@ -198,18 +200,22 @@ def _run_gui_startup(monkeypatch, *, native, window_loads=True, args=(),
         if threading.current_thread() is not threading.main_thread():
             server_may_stop.wait(10.0)
 
-    timers = []
+    quit_threads = []
+    shutdown_started = threading.Event()
 
     def do_shutdown(**kwargs):
         if shutdowns is not None:
             shutdowns.append(kwargs)
-        timer = threading.Timer(0.3, server_may_stop.set)
-        timer.start()
-        timers.append(timer)
+        shutdown_started.set()
+        time.sleep(0.3)
+        server_may_stop.set()
 
     def run_native_window(url, *a, on_quit=None, server_stopped=None, **k):
         if quit_first:
-            on_quit()
+            quit_thread = threading.Thread(target=on_quit, daemon=True)
+            quit_thread.start()
+            quit_threads.append(quit_thread)
+            shutdown_started.wait(10.0)
         elif stop_first:
             server_may_stop.set()
             server_stopped.wait(10.0)
@@ -246,8 +252,8 @@ def _run_gui_startup(monkeypatch, *, native, window_loads=True, args=(),
         if t.name == "open-browser":
             t.join(10.0)
             assert not t.is_alive(), "the browser-open thread did not finish"
-    for timer in timers:
-        timer.join(10.0)
+    for quit_thread in quit_threads:
+        quit_thread.join(10.0)
     assert result.exit_code == 0, result.output
     assert len(at_serve) == 1, "the server was not started exactly once"
     return recorded, opened, at_serve[0]
