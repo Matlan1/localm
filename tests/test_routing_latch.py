@@ -943,3 +943,52 @@ class TestTheLatchIsReadOnlyWhenARequestHasAGap:
         crashing.registry["plain"]["tool_use"] = False
         _ask(crashing)
         assert calls == ["big"], "a request with a gap must read the latch"
+
+
+class TestScheduledJobsFollowTheSameRules:
+    def _job(self, **kw):
+        from localm.plugins.builtin.jobs.store import Job
+        return Job(name="nightly", prompt="summarise", **kw)
+
+    def test_jobs_waiting_on_a_crashing_load_do_not_repeat_it(
+            self, crashing, monkeypatch):
+        from localm.plugins.builtin.jobs import runner
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled",
+                            lambda: True)
+        world = crashing
+        world.load_behaviour["big"] = "hold"
+        planned = []
+        real_plan = hs.plan_capability_route
+
+        def counting_plan(*args, **kwargs):
+            decision = real_plan(*args, **kwargs)
+            planned.append(decision)
+            return decision
+
+        monkeypatch.setattr(hs, "plan_capability_route", counting_plan)
+        live = world.engines["plain"]
+        engines = []
+        threads = [threading.Thread(
+            target=lambda: engines.append(runner._served_engine(self._job(), live)))
+            for _ in range(3)]
+        threads[0].start()
+        assert world.loading.wait(10), "the first job never started the load"
+        for t in threads[1:]:
+            t.start()
+        assert _wait(lambda: len(planned) == 3), "the other jobs were not planned"
+        assert all(d.routed for d in planned), "the jobs were not routed to big"
+        time.sleep(0.5)
+        world.release.set()
+        for t in threads:
+            t.join(30)
+        assert engines == [live, live, live]
+        assert _attempts(world, "big") == 1, (
+            "jobs that waited for the model repeated its crashing load")
+
+    def test_a_job_that_names_the_model_still_attempts_the_load(self, crashing):
+        from localm.plugins.builtin.jobs import runner
+        _ask(crashing)
+        assert _attempts(crashing, "big") == 1
+        with pytest.raises(RuntimeError, match="could not load big"):
+            runner._served_engine(self._job(model="big"), crashing.engines["plain"])
+        assert _attempts(crashing, "big") == 2
