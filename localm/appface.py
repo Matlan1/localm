@@ -220,10 +220,10 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     hide_on_close=False's plain close - or the window fails to load at all.
 
     *server_stopped*, when given, is set by the caller once the server the
-    window fronts has stopped, before it calls close_native_window(). When it
-    is already set before the window's loop starts, no window is shown and
-    True is returned at once, so the caller opens no browser tab for a stopped
-    server either.
+    window fronts has stopped or has begun to stop (the window's quit action),
+    before it calls close_native_window(). When it is already set before the
+    window's loop starts, no window is shown and True is returned at once, so
+    the caller opens no browser tab for a stopped server either.
 
     Returns True only once the window actually LOADED the page, via pywebview's
     ``window.events.loaded`` (read through its .wait(timeout)). A helper thread
