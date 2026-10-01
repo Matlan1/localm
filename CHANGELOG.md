@@ -205,6 +205,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   not used", the coder session feed and `localm coder` print why, the MCP tools
   add a note, and the `X-Localm-Model-Routing` header and the debug log name the
   skipped model, when its load failed and the reason.
+  Requests that were already waiting for the model when its load failed no
+  longer repeat the load, and the overlapping failures count as one, so the
+  delay no longer grows with the number of requests. A model another localm
+  instance already serves still answers through that instance after a failed
+  local load, and replacing the runtime with `setup-llama --from` or `--url`
+  lets a failed model be tried again.
 - **The automated browser can be set up from the GUI, and it starts on Linux.**
   When the bundled browser had not been downloaded, opening it failed with
   a message telling you to run `playwright install`, which localm does not

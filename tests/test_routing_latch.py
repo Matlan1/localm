@@ -14,6 +14,9 @@ that load was attempted, read from the engine itself.
 import asyncio
 import json
 import logging
+import os
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -71,10 +74,35 @@ class TestRoutingLatch:
         for _ in range(12):
             rec = latch.record_failure("big", "boom")
             delays.append(rec.retry_at - rec.failed_at)
+            clock.now = rec.retry_at
         assert delays[:3] == [rl.BACKOFF_BASE_S, rl.BACKOFF_BASE_S * 2,
                               rl.BACKOFF_BASE_S * 4]
         assert delays[-1] == rl.BACKOFF_MAX_S
         assert max(delays) == rl.BACKOFF_MAX_S
+
+    def test_failures_recorded_inside_the_backoff_count_once(self):
+        latch, clock, _ = _latch()
+        first = latch.record_failure("big", "first")
+        clock.now += 5
+        second = latch.record_failure("big", "second")
+        third = latch.record_failure("big", "third")
+        assert (first.attempts, second.attempts, third.attempts) == (1, 1, 1)
+        assert third.reason == "third"
+        assert third.failed_at == clock.now
+        assert third.retry_at == clock.now + rl.BACKOFF_BASE_S
+        clock.now = third.retry_at
+        assert latch.record_failure("big", "fourth").attempts == 2
+
+    def test_skipped_examines_only_the_named_models(self):
+        calls = []
+        latch = rl.RoutingLatch(clock=_Clock(),
+                                fingerprint=lambda n: calls.append(n) or "fp")
+        latch.record_failure("a", "boom")
+        latch.record_failure("b", "boom")
+        calls.clear()
+        assert list(latch.skipped(["a"])) == ["a"]
+        assert calls == ["a"]
+        assert sorted(latch.skipped()) == ["a", "b"]
 
     def test_a_failed_retry_keeps_counting_after_the_backoff_elapsed(self):
         latch, clock, _ = _latch()
@@ -173,6 +201,39 @@ class TestLoadFingerprint:
         before = rl.load_fingerprint("m")
         world.cfg["llama_runtime_history"] = [
             {"backend": "cuda", "tag": "b11118", "at": 1.0}]
+        assert rl.load_fingerprint("m") != before
+
+    @pytest.fixture
+    def runtime(self, world, monkeypatch, tmp_path):
+        import localm.setup_llama as sl
+        d = tmp_path / "runtime-lib"
+        d.mkdir()
+        lib = d / sl._lib_name()
+        lib.write_bytes(b"first build")
+        marker = d / sl._BACKEND_MARKER
+        marker.write_text("custom\n", encoding="utf-8")
+        monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: d)
+        return SimpleNamespace(dir=d, lib=lib, marker=marker)
+
+    def test_it_is_stable_while_the_runtime_directory_is_unchanged(self, world, runtime):
+        assert rl.load_fingerprint("m") == rl.load_fingerprint("m")
+
+    def test_replacing_one_custom_runtime_with_another_changes_it(self, world, runtime):
+        before = rl.load_fingerprint("m")
+        runtime.lib.write_bytes(b"second build, a different size")
+        assert runtime.marker.read_text(encoding="utf-8") == "custom\n"
+        assert rl.load_fingerprint("m") != before
+
+    def test_a_provision_that_records_the_same_backend_again_changes_it(
+            self, world, runtime):
+        before = rl.load_fingerprint("m")
+        st = runtime.marker.stat()
+        os.utime(runtime.marker, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        assert rl.load_fingerprint("m") != before
+
+    def test_a_marker_naming_a_different_backend_changes_it(self, world, runtime):
+        before = rl.load_fingerprint("m")
+        runtime.marker.write_text("cuda b11118\n", encoding="utf-8")
         assert rl.load_fingerprint("m") != before
 
     def test_a_replaced_model_file_changes_it(self, world):
@@ -331,6 +392,10 @@ class _Engine:
     def load(self):
         self.load_attempts += 1
         behaviour = self._world.load_behaviour.get(self.display_name)
+        if behaviour == "hold":
+            self._world.loading.set()
+            self._world.release.wait(30)
+            raise RuntimeError(CRASH_TEXT)
         if behaviour == "crash":
             raise RuntimeError(CRASH_TEXT)
         if behaviour == "cancel":
@@ -357,7 +422,7 @@ class _Engine:
 def _build_world(monkeypatch, tmp_path, registry):
     world = SimpleNamespace(
         registry=registry, engines={}, load_behaviour={}, clock=_Clock(),
-        cfg={})
+        cfg={}, loading=threading.Event(), release=threading.Event())
     files = {}
     for name in registry:
         f = tmp_path / f"{name}.gguf"
@@ -712,7 +777,218 @@ class TestTheCoderIsNotMadeToWaitOnACrashingLoad:
             be.chat([{"role": "user", "content": "list files"}])
         assert len(be.notes) == 2, be.notes
         assert "SIGSEGV" in be.notes[0]
-        assert "no capable model could be loaded" in be.notes[0]
+        assert "no capable model could answer" in be.notes[0]
         assert "big was skipped because its last load failed" in be.notes[1]
         assert "SIGSEGV" in be.notes[1]
         assert be.routing_note == be.notes[1]
+
+
+# --------------------------------------------------------------------------- #
+#  Follow-up: overlapping requests, peer routes, runtime swaps, the event loop  #
+# --------------------------------------------------------------------------- #
+
+class TestOverlappingRoutedRequestsLoadTheModelOnce:
+    def test_requests_waiting_on_a_crashing_load_do_not_repeat_it(
+            self, crashing, monkeypatch):
+        world = crashing
+        world.load_behaviour["big"] = "hold"
+        planned = []
+        real_plan = hs.plan_capability_route
+
+        def counting_plan(*args, **kwargs):
+            decision = real_plan(*args, **kwargs)
+            planned.append(decision)
+            return decision
+
+        monkeypatch.setattr(hs, "plan_capability_route", counting_plan)
+        responses = []
+        threads = [threading.Thread(target=lambda: responses.append(_ask(world)))
+                   for _ in range(3)]
+        threads[0].start()
+        assert world.loading.wait(10), "the first request never started the load"
+        for t in threads[1:]:
+            t.start()
+        assert _wait(lambda: len(planned) == 3), "the other requests were not planned"
+        assert all(not d.skipped for d in planned), "the latch was not empty when planned"
+        time.sleep(0.5)
+        world.release.set()
+        for t in threads:
+            t.join(30)
+        assert len(responses) == 3 and all(r.status_code == 200 for r in responses)
+        assert _attempts(world, "big") == 1, (
+            "requests that waited for the model repeated its crashing load")
+        assert world.engines["plain"].answered == 3
+        blobs = [_blob(r) for r in responses]
+        assert sum("load_errors" in b for b in blobs) == 1
+        waited = [b for b in blobs if "skipped" in b]
+        assert len(waited) == 2
+        assert all(b["skipped"][0]["model"] == "big" for b in waited)
+
+    def test_overlapping_loads_the_user_asked_for_count_as_one_failure(self, crashing):
+        world = crashing
+        world.load_behaviour["big"] = "hold"
+
+        def load():
+            world.client.post("/api/models/load", json={"model": "big"})
+
+        threads = [threading.Thread(target=load) for _ in range(3)]
+        threads[0].start()
+        assert world.loading.wait(10)
+        for t in threads[1:]:
+            t.start()
+        time.sleep(0.5)
+        world.release.set()
+        for t in threads:
+            t.join(30)
+        assert _attempts(world, "big") == 3, "a load the user asked for must run"
+        rec = hs._routing_latch.failure("big")
+        assert rec is not None and rec.attempts == 1
+        assert rec.retry_at - rec.failed_at == rl.BACKOFF_BASE_S
+
+
+class TestAPeerRoutedModelIsNotSkipped:
+    def test_a_latched_model_with_an_accepted_peer_route_is_forwarded(
+            self, crashing, monkeypatch):
+        from localm import peer_routing
+        _ask(crashing)
+        assert hs._routing_latch.failure("big") is not None
+        sent = []
+
+        class Resp:
+            status_code = 200
+            headers = {"content-type": "application/json"}
+
+            def iter_content(self, chunk_size=None):
+                return iter([b'{"model": "big", "choices": []}'])
+
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None,
+                      verify=None):
+            sent.append(json.loads(data))
+            return Resp()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        peer_routing.set_route(peer_routing.PeerRoute(
+            model="big", instance_id="p", host="127.0.0.1", port=1,
+            scheme="http", api_key=""))
+        try:
+            r = _ask(crashing)
+        finally:
+            peer_routing.clear_route("big")
+        assert r.status_code == 200
+        assert sent and sent[0]["model"] == "big", "the peer was not asked"
+        assert crashing.engines["plain"].answered == 1
+        assert _attempts(crashing, "big") == 1
+        blob = _blob(r)
+        assert blob["routed"] is True and blob["resolved"] == "big"
+        assert "skipped" not in blob
+
+
+class TestAProvisionedRuntimeSwapClearsTheLatch:
+    def test_replacing_a_custom_runtime_with_another_is_attempted_again(
+            self, crashing, monkeypatch, tmp_path):
+        import localm.setup_llama as sl
+        d = tmp_path / "runtime-lib"
+        d.mkdir()
+        lib = d / sl._lib_name()
+        lib.write_bytes(b"first build")
+        (d / sl._BACKEND_MARKER).write_text("custom\n", encoding="utf-8")
+        monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: d)
+        _ask(crashing)
+        _ask(crashing)
+        assert _attempts(crashing, "big") == 1
+        lib.write_bytes(b"second build, a different size")
+        _ask(crashing)
+        assert _attempts(crashing, "big") == 2
+
+
+class TestTheFingerprintIsNotComputedOnTheEventLoop:
+    def test_no_load_path_computes_it_on_the_loop_thread(self, crashing, monkeypatch):
+        calls = []
+        on_loop = []
+        real = hs._routing_latch._fingerprint
+
+        def spy(name):
+            calls.append(name)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                on_loop.append(name)
+            return real(name)
+
+        monkeypatch.setattr(hs._routing_latch, "_fingerprint", spy)
+        _ask(crashing)
+        _ask(crashing)
+        crashing.client.post("/api/models/load", json={"model": "big"})
+        assert _attempts(crashing, "big") == 2
+        assert len(calls) >= 3, "the spy saw too few fingerprints to mean anything"
+        assert on_loop == [], f"fingerprint computed on the event loop for {on_loop}"
+
+
+class TestTheLatchIsReadOnlyWhenARequestHasAGap:
+    def test_a_request_the_current_model_satisfies_computes_no_fingerprint(
+            self, crashing, monkeypatch):
+        _ask(crashing)
+        assert hs._routing_latch.failure("big") is not None
+        crashing.registry["plain"]["tool_use"] = True
+        calls = []
+        real = hs._routing_latch._fingerprint
+        monkeypatch.setattr(hs._routing_latch, "_fingerprint",
+                            lambda name: calls.append(name) or real(name))
+        r = _ask(crashing)
+        assert r.status_code == 200
+        assert "X-Localm-Model-Routing" not in r.headers
+        assert calls == []
+        crashing.registry["plain"]["tool_use"] = False
+        _ask(crashing)
+        assert calls == ["big"], "a request with a gap must read the latch"
+
+
+class TestScheduledJobsFollowTheSameRules:
+    def _job(self, **kw):
+        from localm.plugins.builtin.jobs.store import Job
+        return Job(name="nightly", prompt="summarise", **kw)
+
+    def test_jobs_waiting_on_a_crashing_load_do_not_repeat_it(
+            self, crashing, monkeypatch):
+        from localm.plugins.builtin.jobs import runner
+        monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled",
+                            lambda: True)
+        world = crashing
+        world.load_behaviour["big"] = "hold"
+        planned = []
+        real_plan = hs.plan_capability_route
+
+        def counting_plan(*args, **kwargs):
+            decision = real_plan(*args, **kwargs)
+            planned.append(decision)
+            return decision
+
+        monkeypatch.setattr(hs, "plan_capability_route", counting_plan)
+        live = world.engines["plain"]
+        engines = []
+        threads = [threading.Thread(
+            target=lambda: engines.append(runner._served_engine(self._job(), live)))
+            for _ in range(3)]
+        threads[0].start()
+        assert world.loading.wait(10), "the first job never started the load"
+        for t in threads[1:]:
+            t.start()
+        assert _wait(lambda: len(planned) == 3), "the other jobs were not planned"
+        assert all(d.routed for d in planned), "the jobs were not routed to big"
+        time.sleep(0.5)
+        world.release.set()
+        for t in threads:
+            t.join(30)
+        assert engines == [live, live, live]
+        assert _attempts(world, "big") == 1, (
+            "jobs that waited for the model repeated its crashing load")
+
+    def test_a_job_that_names_the_model_still_attempts_the_load(self, crashing):
+        from localm.plugins.builtin.jobs import runner
+        _ask(crashing)
+        assert _attempts(crashing, "big") == 1
+        with pytest.raises(RuntimeError, match="could not load big"):
+            runner._served_engine(self._job(model="big"), crashing.engines["plain"])
+        assert _attempts(crashing, "big") == 2

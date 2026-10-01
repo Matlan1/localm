@@ -107,8 +107,8 @@ from localm.setup_llama.library_files import (
 from localm.setup_llama.runtime_dir import (
     _platform_key, _lib_name, _BACKEND_MARKER, _record_provisioned_backend,
     _read_marker, _provisioned_backend, _provisioned_build, installed_backend,
-    installed_build, _repo_runtime_lib, _runtime_pkg_dir, _install_runtime_wheel,
-    _PRESERVED_TARGET_FILES, RuntimeInUseError, _clearable_files, _files_in_use,
+    installed_build, installed_runtime_identity, _repo_runtime_lib, _runtime_pkg_dir,
+    _install_runtime_wheel, _PRESERVED_TARGET_FILES, RuntimeInUseError, _clearable_files, _files_in_use,
     _clear_target, _clear_target_or_refuse, _exit_runtime_in_use, _PROVISION_LOCK_OWNER,
     ProvisioningBusyError, _provision_lock_path, _provision_lock_holder_pid,
     _provisioning_lock, _exit_provisioning_busy,
@@ -163,6 +163,7 @@ __all__ = [
     "_files_in_use", "_floor_at_pinned_tag", "_FLOOR_TAG_DESCRIPTION", "_flush_stdin",
     "_has_vendor_library", "_human_mb", "_informative_error_line",
     "_install_runtime_wheel", "installed_backend", "installed_build",
+    "installed_runtime_identity",
     "_is_abi_rejection", "is_safe_tag", "_is_supported_archive", "_is_wanted",
     "_KNOWN_SHARED_LIB_PACKAGES", "_latest_tag", "_lib_name", "_LIBGOMP_DEB_MIN_BYTES",
     "_LIBGOMP_DEB_SHA256", "_LIBGOMP_DEB_URL", "_LIBGOMP_LICENSE_NOTICE",

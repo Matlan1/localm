@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field, replace
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 from localm.model_manager import capabilities as caps
 from localm.model_manager.registry import is_llm
@@ -82,6 +82,13 @@ class SkippedCandidate:
     retry_at: float
     reason: str
 
+    def describe(self) -> str:
+        """One clause: when the model's last load failed, why, and when routing
+        tries it again."""
+        return (f"{self.model} was skipped because its last load failed at "
+                f"{_clock_text(self.failed_at)} ({self.reason}); it is tried again "
+                f"after {_clock_text(self.retry_at)} or when its load settings change")
+
 
 def _clock_text(epoch: float) -> str:
     """*epoch* as local ``HH:MM``."""
@@ -91,11 +98,7 @@ def _clock_text(epoch: float) -> str:
 def _skipped_text(skipped: Sequence[SkippedCandidate]) -> str:
     """One clause per skipped model: when its last load failed, why, and when
     routing tries it again."""
-    return "; ".join(
-        f"{s.model} was skipped because its last load failed at "
-        f"{_clock_text(s.failed_at)} ({s.reason}); it is tried again after "
-        f"{_clock_text(s.retry_at)} or when its load settings change"
-        for s in skipped)
+    return "; ".join(s.describe() for s in skipped)
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,11 @@ class RoutingDecision:
         return replace(self, resolved=self.current, unmet=tuple(sorted(self.gaps)),
                        load_errors=tuple(load_errors))
 
+    def with_skipped(self, more: Sequence[SkippedCandidate]) -> "RoutingDecision":
+        """This decision with *more* added to ``skipped``: models found to be
+        skipped after the decision was made."""
+        return replace(self, skipped=self.skipped + tuple(more))
+
     @property
     def routed(self) -> bool:
         # Deliberately NOT gated on current being set. With no model resolved at
@@ -182,7 +190,7 @@ class RoutingDecision:
             return f"kept pinned {self.current} ({gap_text})"
         if self.load_errors:
             return (f"kept {self.current} ({gap_text}); no capable model could "
-                    f"be loaded: {'; '.join(self.load_errors)}{skipped}")
+                    f"answer: {'; '.join(self.load_errors)}{skipped}")
         if self.skipped:
             return f"kept {self.current} ({gap_text}){skipped}"
         if self.unmet:
@@ -320,7 +328,8 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
                pinned: bool, resident: Sequence[str] = (),
                reg: Optional[dict] = None,
                current_known: Optional[Dict[str, bool]] = None,
-               skip: Optional[Mapping[str, SkippedCandidate]] = None
+               skip: Union[Mapping[str, SkippedCandidate],
+                           Callable[[], Mapping[str, SkippedCandidate]], None] = None
                ) -> RoutingDecision:
     """Decide which model should answer a request needing *needs*.
 
@@ -341,7 +350,9 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
 
     *skip* maps a model name to why it must not be tried: a model in it is
     left out of the candidates, is never chosen, and is reported in the
-    decision's ``skipped`` when it would otherwise have qualified.
+    decision's ``skipped`` when it would otherwise have qualified. It may be
+    a callable returning that mapping, called only once a request that is not
+    pinned has a gap.
 
     When no model meets every need, a model is still chosen when the current
     one cannot take the request at all (an image it cannot read, a confirmed
@@ -380,7 +391,7 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         ctx = caps.model_context_length(n, reg=reg) or 0
         return (0 if n in resident_set else 1, -ctx, n)
 
-    skip = skip or {}
+    skip = (skip() if callable(skip) else skip) or {}
 
     def split_skipped(names):
         usable = [n for n in names if n not in skip]

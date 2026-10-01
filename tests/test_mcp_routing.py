@@ -405,6 +405,43 @@ class TestAFailedLoadIsNotRetriedByRouting:
         pinned = engines.route("tooly", [], required=("tool_use",), pinned=True)
         assert pinned.resolved == "tooly" and pinned.skipped == ()
 
+    def test_a_copy_another_instance_serves_is_not_left_out(self, reg):
+        from localm.plugins.mcpserver.tools.chat import answer_with
+        engines = self._crashing(reg, {"tooly"})
+        self._coder(engines)
+        assert engines.routing_latch().failure("tooly") is not None
+        peer_copy = _Engine("tooly")
+        engines.share_loaded = True
+        engines._peers["tooly"] = peer_copy
+        with patch.object(EngineCache, "_peer_still_answers", lambda self, name: True), \
+                patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            decision = engines.route(None, [], required=("tool_use",), pinned=False)
+            assert decision.resolved == "tooly" and decision.skipped == ()
+            result, answered = answer_with(
+                engines, decision, lambda engine, name: (name, engine))
+        assert result == ("tooly", peer_copy), "the peer's copy did not answer"
+        assert answered.resolved == "tooly"
+        assert engines.loads.count("tooly") == 1, "the model was loaded here again"
+
+    def test_a_candidate_that_fails_to_answer_is_not_said_to_have_failed_to_load(
+            self, reg):
+        from localm.plugins.mcpserver.tools.chat import answer_with, routing_note
+        engines = self._crashing(reg, set())
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert decision.routed and decision.candidates
+
+        def run(engine, name):
+            if name != decision.current:
+                raise RuntimeError("generation exploded")
+            return "plain answered"
+
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            result, answered = answer_with(engines, decision, run)
+        assert result == "plain answered"
+        note = routing_note(answered)
+        assert note is not None and "generation exploded" in note
+        assert "could be loaded" not in note
+
 
 class TestPullModel:
     def test_a_pulled_model_that_fails_to_load_is_not_kept_as_resident(self, reg):

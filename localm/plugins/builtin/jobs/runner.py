@@ -256,7 +256,9 @@ def _served_engine(job: Job, live):
     last_error = None
     for name in names:
         fut = asyncio.run_coroutine_threadsafe(
-            hs.get_engine(name, activate=False), loop)
+            hs.get_engine(name, activate=False,
+                          skip_if_latched=decision.routed and name != decision.current),
+            loop)
         try:
             return fut.result(timeout=_SERVED_LOAD_TIMEOUT_S)
         except Exception as e:
