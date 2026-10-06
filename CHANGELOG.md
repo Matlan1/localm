@@ -168,6 +168,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`localm setup-llama --help` no longer says the newest upstream build is the
+  default.** The default installs the llama.cpp build this localm release
+  confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
+  `--tag default` and `--rollback` accurately.
 - **Two browser calls in one coder turn no longer open two browsers.** With no
   browser open yet, a turn that called `browser_navigate` twice at once started
   a browser for each call. The second replaced the first in the session's
