@@ -324,16 +324,26 @@ _ACTION_VERBS: frozenset[str] = frozenset({
     "update", "upgrade", "verify", "write",
 })
 
-# Signals that a request is about THIS project, not programming in the abstract:
-# an explicit path, a file extension, or a workspace noun. Either a verb OR one of
-# these is enough - see implies_action().
-_WORKSPACE_HINT = (
-    r"(?:[\w./\\-]+\.[A-Za-z0-9]{1,6}\b"          # something.ext
-    r"|[~./\\][\w./\\-]+"                          # a path-looking token
-    r"|\b(?:file|files|folder|directory|dir|repo|repository|project|codebase"
-    r"|workspace|script|module|package|test|tests|suite|branch|commit"
-    r"|readme|config|source|sources)\b)"
-)
+# Verbs that make a request an action only when used as an imperative: too common
+# in ordinary prose to count anywhere in a text.
+_IMPERATIVE_ONLY_VERBS: frozenset[str] = frozenset({
+    "analyse", "analyze", "audit", "cd", "count", "describe", "explore", "go",
+    "locate", "review", "scan", "summarise", "summarize", "take", "try", "use",
+})
+
+# Words that may precede an imperative verb without changing what it is
+# ("please run the tests", "then fix it").
+_IMPERATIVE_LEADS: frozenset[str] = frozenset({
+    "please", "pls", "kindly", "now", "then", "also", "and", "just", "ok",
+    "okay", "so", "first", "next", "finally", "hey", "hi", "yes", "yeah",
+    "sure", "great", "thanks", "thank", "you", "quickly", "again", "carefully",
+    "simply", "actually", "well", "alright", "cool", "good", "perfect", "right",
+})
+
+# Suffixes that make a dotted token a domain name, not a file name.
+_NON_FILE_SUFFIXES: frozenset[str] = frozenset({
+    "com", "org", "net", "io", "dev", "edu", "gov", "co", "uk", "de", "eu",
+})
 
 # Two finals at least this similar (difflib ratio) count as the model restating
 # itself instead of progressing.

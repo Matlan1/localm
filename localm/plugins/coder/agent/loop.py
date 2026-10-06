@@ -17,17 +17,116 @@ from ..display import (
     print_tool_call, print_tool_error, print_tool_result, print_turn_divider,
     safe_markup,
 )
-from ..parser import looks_like_tool_attempt, split_response
+from ..parser import looks_like_tool_attempt, split_response, strip_orphan_closers
 from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
-    _ACTION_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
+    _ACTION_VERBS, _IMPERATIVE_LEADS, _IMPERATIVE_ONLY_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
+    _NON_FILE_SUFFIXES,
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
-    _SKILL_STATE_TOOLS, _WORKSPACE_HINT,
+    _SKILL_STATE_TOOLS,
 )
 from localm.textguard import compose, compose_join
 
-_RE_WORKSPACE = None      # compiled on first use
+_RE_CLAUSE_SPLIT = re.compile(r"[,!?:;\n]+|\.+(?=\s|$)")
+_RE_WORD = re.compile(r"[a-z']+")
+_RE_POLITE_VERB = re.compile(
+    r"\b(?:(?:can|could|would|will)\s+you(?:\s+mind)?"
+    r"|please|pls|kindly|let'?s|go\s+ahead\s+and|go\s+and|try\s+to|be\s+sure\s+to"
+    r"|don'?t\s+forget\s+to|feel\s+free\s+to"
+    r"|(?:i|we)(?:'d|\s+would|\s+will)?\s+(?:like|want|need)(?:\s+you)?\s+to"
+    r"|you\s+(?:need|have|should|must)\s+to|(?:i\s+)?(?:need|want)\s+to)"
+    r"(?:\s+(?:also|just|please|kindly|now|then|quickly|first|simply))*"
+    r"\s+(?=([a-z]+)\b)", re.IGNORECASE)
+_RE_NO_TOOL_NEEDED = re.compile(r"\s*\[no tool needed\][ \t]*", re.IGNORECASE)
+_QUESTION_OPENERS = frozenset({
+    "why", "what", "whats", "what's", "how", "when", "where", "who", "which",
+    "is", "are", "was", "were", "does", "do", "did", "has", "have", "had",
+    "should", "shall", "isn't", "aren't", "doesn't", "didn't",
+    "explain", "tell", "clarify",
+})
+_RE_PATH_TOKEN_SPLIT = re.compile(r"[\s`'\"()\[\]{}<>,;*|]+")
+_RE_FILE_NAME = re.compile(r"[\w.-]*[\w-]\.([A-Za-z0-9]{1,8})")
+_RE_SEPARATED_PATH = re.compile(r"(?:~|\.{1,2})?[/\\][\w.-]+|[\w.-]+[/\\][\w.-]+")
+_RE_WORKSPACE_NOUN = re.compile(
+    r"\b(?:file|files|folder|directory|dir|repo|repository|project|codebase"
+    r"|workspace|script|module|package|test|tests|suite|branch|commit"
+    r"|readme|config|source|sources)\b", re.IGNORECASE)
+
+
+def _names_a_path(text: str) -> bool:
+    """True when *text* contains a token that is a file name with an extension
+    or a path with a separator. A domain name (``github.com``), a version number
+    (``3.12``), an abbreviation (``e.g``) and a bare ellipsis are not paths."""
+    for token in _RE_PATH_TOKEN_SPLIT.split(text):
+        token = token.rstrip(".,:;!?")
+        if not token or "://" in token:
+            continue
+        m = _RE_FILE_NAME.fullmatch(token)
+        if m is not None:
+            ext = m.group(1)
+            if (any(c.isalpha() for c in ext)
+                    and ext.lower() not in _NON_FILE_SUFFIXES
+                    and token.lower() not in ("e.g", "i.e")):
+                return True
+        if _RE_SEPARATED_PATH.fullmatch(token):
+            return True
+    return False
+
+
+def _is_question(text: str) -> bool:
+    """True when *text* ends with a question mark or opens with an interrogative
+    word."""
+    stripped = (text or "").strip()
+    if stripped.endswith("?"):
+        return True
+    words = _RE_WORD.findall(stripped.lower()[:40])
+    return bool(words) and words[0] in _QUESTION_OPENERS
+
+
+def _is_action_verb(word: str) -> bool:
+    return word in _ACTION_VERBS or word in _IMPERATIVE_ONLY_VERBS
+
+
+def demands_action(text: str) -> bool:
+    """True when *text* tells the agent to DO something.
+
+    An action verb counts when it is used as an imperative: it starts a clause
+    (clauses split on commas, sentence ends, colons and line breaks; a leading
+    "now", "yes" or "quickly" is skipped), or it follows a request prefix such as
+    "please", "can you", "I'd like you to", "try to". A text that is a question
+    (ends with a question mark or opens with an interrogative) demands an action
+    only through such a request prefix, so "search fails with a 500, why?" does
+    not.
+
+    Pure and module-level, so it can be tested directly on request strings."""
+    lowered = (text or "").lower()
+    if not lowered.strip():
+        return False
+    for m in _RE_POLITE_VERB.finditer(lowered):
+        word = m.group(1)
+        if _is_action_verb(word) or (
+                word.endswith("ing") and (_is_action_verb(word[:-3])
+                                          or _is_action_verb(word[:-3] + "e"))):
+            return True
+    if _is_question(text):
+        return False
+    for clause in _RE_CLAUSE_SPLIT.split(lowered):
+        for word in _RE_WORD.findall(clause):
+            if word in _IMPERATIVE_LEADS:
+                continue
+            if _is_action_verb(word):
+                return True
+            break
+    return False
+
+
+def _asks_a_question(response: str) -> bool:
+    """True when *response* is a short plain-text question: its last line ends
+    with a question mark and it holds no code block."""
+    body = (response or "").strip()
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    return bool(lines) and lines[-1].endswith("?") and len(body) <= 600 and "```" not in body
 
 
 def implies_action(text: str) -> bool:
@@ -35,30 +134,25 @@ def implies_action(text: str) -> bool:
     explanation - the precondition for escalating a turn that produced no tool
     call.
 
-    Two independent signals, either of which is enough: an imperative action
-    verb (``_ACTION_VERBS``), or a reference to this workspace - a path, a
-    filename with an extension, or a project noun (``_WORKSPACE_HINT``). Read
-    verbs count: "show me what is in config.py" needs read_file exactly as much
-    as "write config.py" needs write_file.
-
-    THE BAR IS LOW, and leans toward firing. A false POSITIVE costs one extra
-    turn whose re-prompt states that a plain answer is acceptable if no tool is
-    needed, so the model can decline and the loop finishes normally. A false
-    NEGATIVE silently answers the request with prose and does nothing.
+    True for an imperative (:func:`demands_action`), for a named file or path
+    (``main.py``, ``src/app``), and, for a text that is not a question, for an
+    action word anywhere in it or a workspace noun ("the repo", "the tests"). A
+    question without a file or an imperative ("why does web search sometimes
+    fail?") is not an action request. Read verbs count: "show me what is in
+    config.py" needs read_file exactly as much as "write config.py" needs
+    write_file.
 
     Pure and module-level, so it can be tested directly on request strings
     without constructing an Agent."""
-    global _RE_WORKSPACE
     if not text:
         return False
-    lowered = text.lower()
-    import re
-    if _RE_WORKSPACE is None:
-        _RE_WORKSPACE = re.compile(_WORKSPACE_HINT, re.IGNORECASE)
-    for word in re.findall(r"[a-z]+", lowered):
-        if word in _ACTION_VERBS:
-            return True
-    return bool(_RE_WORKSPACE.search(text))
+    if demands_action(text) or _names_a_path(text):
+        return True
+    if _is_question(text):
+        return False
+    if any(w in _ACTION_VERBS for w in _RE_WORD.findall(text.lower())):
+        return True
+    return bool(_RE_WORKSPACE_NOUN.search(text))
 
 
 # A fenced code block's body.
@@ -280,7 +374,7 @@ class _LoopMixin:
                              # Zero-tool-call escalation: how many rungs of the
                              # ladder this task has used, and whether the model
                              # has produced any call yet.
-                             nocall_escalation=0, tool_calls_made=0,
+                             nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
                              writes_at_start=self._write_total(),
                              # The one-shot re-prompt for code that is not in
                              # the file the reply names (unfounded_code).
@@ -470,7 +564,8 @@ class _LoopMixin:
                 # Capped at _MAX_TOOL_REPAIRS: the notice's own example text is
                 # itself tool-call-shaped, so a model echoing it back would
                 # re-trigger the notice every turn.
-                leftover = "".join(seg for seg in segments if isinstance(seg, str))
+                leftover = strip_orphan_closers(
+                    "".join(seg for seg in segments if isinstance(seg, str)))
                 if looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
                         st.partial_notice_count += 1
@@ -675,9 +770,15 @@ class _LoopMixin:
         # Zero-attempt escalation: the model produced nothing tool-shaped on a
         # request that needs a tool. Every branch above is reached only via
         # looks_like_tool_attempt().
-        escalated = self._escalate_no_tool_attempt(response, interactive, st)
-        if escalated is not None:
-            return escalated
+        declined = (_RE_NO_TOOL_NEEDED.match(response)
+                    if st.nocall_escalation >= 1 else None)
+        if declined is not None:
+            st.nocall_declined = True
+            response = response[declined.end():]
+        else:
+            escalated = self._escalate_no_tool_attempt(response, interactive, st)
+            if escalated is not None:
+                return escalated
 
         # Code shown for a workspace file that defines names the file does not
         # contain is invented file content, whatever the reply says it read.
@@ -735,7 +836,9 @@ class _LoopMixin:
         # a call. Reached when the rungs are exhausted, when forcing is
         # unavailable, or when turns ran out mid-ladder.
         enforcement = ""
-        if st.nocall_escalation and not self._used_tools_this_task(st):
+        if (st.nocall_escalation and not st.nocall_declined
+                and not self._used_tools_this_task(st)
+                and demands_action(getattr(self, "_last_user_request", "") or "")):
             why = ("" if self.can_force_tool_calls() else
                    " Constrained sampling, which would have forced one, is not "
                    "available here (this backend cannot enforce a grammar, or "
@@ -812,6 +915,13 @@ class _LoopMixin:
              pick a different model: which model to run is the user's choice
              and this code's job is to make their choice work.
 
+        Rung 1 offers an explicit way out: a reply that begins with
+        "[no tool needed]" is accepted as the answer (handled by the caller,
+        which strips the marker). Only an imperative request
+        (:func:`demands_action`) climbs past rung 1 or is reported as failed
+        enforcement. A short plain-text question from the model stands as the
+        answer.
+
         Deliberately NOT gated on the response's wording. Every phrasing-based
         check inherits the unreliability of the self-report it is reading (see
         _grounding_footer); "did the harness parse a call" is an observable
@@ -819,12 +929,18 @@ class _LoopMixin:
         the user's own text, so neither can be talked past."""
         if self._used_tools_this_task(st):
             return None                      # this model calls tools fine
-        if not implies_action(getattr(self, "_last_user_request", "") or ""):
+        request = getattr(self, "_last_user_request", "") or ""
+        if not implies_action(request):
             return None                      # a question, not an action
+        demanded = demands_action(request)
+        if _asks_a_question(response):
+            return None                      # a clarifying question is the answer
         if self._turns >= self.max_turns:
             return None                      # no turns left to escalate into
         if st.nocall_escalation >= _MAX_NOCALL_ESCALATIONS:
             return None                      # ladder exhausted; caller reports below
+        if st.nocall_escalation >= 1 and not demanded:
+            return None                      # rung 1 allowed a prose answer; accept it
 
         st.nocall_escalation += 1
         rung = st.nocall_escalation
@@ -846,8 +962,9 @@ class _LoopMixin:
                 "</tool_call>\n"
                 "Use one of the available tools by its exact name, with valid "
                 "JSON args. Emit one call now and I will run it and give you the "
-                "result. If this genuinely needs no tool at all, say so in one "
-                "sentence and I will accept that as your answer."
+                "result. If this genuinely needs no tool at all, begin your reply "
+                'with "[no tool needed]" and answer in plain text, and I will '
+                "accept that as your answer."
             )
             if interactive:
                 print_info("(no tool call: re-prompting with the tool-call format)")

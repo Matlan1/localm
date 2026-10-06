@@ -174,6 +174,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **The coder answers a question in plain text instead of forcing a tool call.** A
+  message such as "why does web search sometimes fail?" used to count as a request
+  to act because it contained a word like "search" or "check", and the coder then
+  re-prompted the model and finally forced it to emit a tool call, so it ran a
+  pointless command and drew a conclusion from it. Only an instruction ("search the
+  repo for X", "please run the tests") is now treated as a request to act, and a
+  question the model asks you back is accepted as its answer.
+- **The `[TOOL_CALLS]` marker that some models write out as text no longer shows up
+  in replies.** It is removed from chat and coder output, a reply that repeats it
+  hundreds of times is cut short, and a tool call written as
+  `[TOOL_CALLS][tool_call]{...}</tool_call>` or `[TOOL_CALLS][{...}]` is run like any
+  other. The coder also no longer tells the model that a call it just ran "was NOT
+  run" when the call was wrapped that way.
 - **A chat no longer switches models for an ordinary reply just because the model's tool
   support has never been checked.** With web tools on, an unpinned chat could move
   from the model you had loaded to a different one for a plain text turn, which
