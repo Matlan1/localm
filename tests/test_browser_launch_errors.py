@@ -21,6 +21,7 @@ import logging
 import subprocess
 import sys
 import threading
+import time
 import types
 
 import pytest
@@ -678,21 +679,41 @@ class _LateEvent(threading.Event):
         return False
 
 
+class _WidenedCheck(threading.Event):
+    """An event whose is_set() lets the launch finish after it has computed its
+    answer and before the caller acts on that answer."""
+
+    def __init__(self, launch):
+        super().__init__()
+        self._launch = launch
+
+    def is_set(self):
+        answer = super().is_set()
+        self._launch.gate.set()
+        self._launch.done.wait(10)
+        time.sleep(0.05)
+        return answer
+
+
 class _Launch:
     """A launch that finishes when the test opens its gate, and a teardown that
     is recorded instead of run."""
 
     def __init__(self, monkeypatch, fail=None):
         self.gate = threading.Event()
+        self.done = threading.Event()
         self.teardowns = []
         self.sessions = []
-        gate, teardowns = self.gate, self.teardowns
+        gate, done, teardowns = self.gate, self.done, self.teardowns
 
         async def launch(session):
-            while not gate.is_set():
-                await asyncio.sleep(0.005)
-            if fail is not None:
-                raise fail
+            try:
+                while not gate.is_set():
+                    await asyncio.sleep(0.005)
+                if fail is not None:
+                    raise fail
+            finally:
+                done.set()
 
         async def teardown(session):
             teardowns.append(session.session_id)
@@ -785,6 +806,20 @@ def test_start_proceeds_when_the_launch_finishes_as_the_timeout_fires(make_launc
         f"start() gave up on a launch that had already finished: {raised}")
     assert running and closed_by_start == []
     assert launch.teardowns == ["t-race"]
+    assert not sess._thread.is_alive()
+
+
+def test_start_giving_up_and_the_launch_finishing_cannot_both_win(make_launch):
+    launch = make_launch()
+    sess = launch.session("t-exclusive")
+    sess._ready = _WidenedCheck(launch)
+
+    with pytest.raises(bsession.BrowserUnavailableError):
+        sess.start(timeout=0.2)
+    sess._thread.join(timeout=10)
+
+    assert launch.teardowns == ["t-exclusive"], (
+        "a launch that finished while start() was giving up was left running")
     assert not sess._thread.is_alive()
 
 
