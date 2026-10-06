@@ -2338,7 +2338,6 @@ class LlamaCpp:
             self._mtp_ctx_ptr = None
         self._mtp_ctx_capacity = 0
         self._mtp_draft_stale = False
-        self._pending_h = None
         failure = self._create_mtp_context(n_ctx, offload_kqv, self._n_threads)
         if failure:
             self._disable_mtp(failure, "the draft context could not be recreated "
