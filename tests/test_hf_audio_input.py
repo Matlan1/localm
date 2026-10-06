@@ -67,6 +67,8 @@ class _RecordingProcessor:
     def __init__(self):
         self.calls = []
 
+    chat_template = "{{ messages }}"
+
     def apply_chat_template(self, *args, **kwargs):
         return "PROMPT"
 
@@ -123,6 +125,8 @@ class _MismatchAwareProcessor:
         setattr(self, attr, _FakeAudioExtractor(rate))
         self.called = False
 
+    chat_template = "{{ messages }}"
+
     def apply_chat_template(self, *args, **kwargs):
         return "PROMPT"
 
@@ -159,6 +163,8 @@ class _UnreadableRateProcessor:
 
     def __init__(self):
         self.feature_extractor = object()
+
+    chat_template = "{{ messages }}"
 
     def apply_chat_template(self, *args, **kwargs):
         return "PROMPT"
