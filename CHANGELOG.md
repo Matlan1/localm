@@ -234,6 +234,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `huggingface-cli login` keeps working, and a location you set yourself with
   `HF_HOME`, `HF_HUB_CACHE`, `HF_XET_CACHE` or `HF_TOKEN_PATH` is used as you set it.
   Files already in the old location are left where they are.
+- **Loading a model on an AMD GPU no longer leaves compiler caches in your user
+  profile.** The AMD GPU runtime wrote its compiled-kernel cache to
+  `%LOCALAPPDATA%\comgr` and, for convolution models, `~/.miopen`, outside the data
+  folder, so "delete saved data" never removed them. They now go to `cache/comgr`
+  and `cache/miopen` inside the data folder. A location you set yourself with
+  `AMD_COMGR_CACHE_DIR`, `MIOPEN_USER_DB_PATH` or `MIOPEN_CUSTOM_CACHE_DIR` is used
+  as you set it. Files already in the old location are left where they are.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",
