@@ -200,9 +200,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   so the earlier conversation was replaced by a one-line note and the model lost
   track of what you were talking about. The summary is now written with
   reasoning turned off, and if it still cannot be written the earlier messages
-  are kept as short excerpts instead of being dropped. The messages kept as they
-  are always start with one of your own messages, so your latest request is never
-  lost and the conversation no longer shows two assistant replies in a row. The
+  are kept as short excerpts instead of being dropped. Your latest request is
+  always kept word for word, and the conversation no longer shows two assistant
+  replies in a row. The
   same applies to the coder, which also keeps your current request when it
   compacts a long session. Closing the request while a server-side compaction is
   running now stops the summary instead of letting it run to the end.
