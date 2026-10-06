@@ -76,10 +76,18 @@ class ToolCall:
 # CLOSER rather than as one opener-body-closer regex, which keeps the scan linear
 # (see _iter_xml_tool_calls).
 _RE_XML_OPEN = re.compile(
-    r"<tool_call(?:\s+name=['\"](?P<name_attr>[^'\"]+)['\"])?>",
+    r"(?:\[TOOL_CALLS\][ \t\r\n]*)?"
+    r"(?:<tool_call(?:\s+name=['\"](?P<name_attr>[^'\"]+)['\"])?>|\[tool_call\])",
     re.IGNORECASE,
 )
-_RE_XML_CLOSE = re.compile(r"</tool_call>", re.IGNORECASE)
+_RE_XML_CLOSE = re.compile(r"</tool_call>|\[/tool_call\]", re.IGNORECASE)
+
+# Mistral's native form: the [TOOL_CALLS] token followed by a JSON list of call
+# objects (or one object), with no closing tag.
+_RE_MISTRAL_OPEN = re.compile(r"\[TOOL_CALLS\][ \t\r\n]*")
+_RE_MISTRAL_ATTEMPT = re.compile(r"\[TOOL_CALLS\]\s*(?:\[\s*)?\{")
+# A closing wrapper tag with no opener of its own.
+_RE_CLOSER = re.compile(r"<\|?/tool_call\|?>|<tool_call\|>|\[/tool_call\]", re.IGNORECASE)
 
 # Marker-variant wrapper. Finetunes mangle the canonical <tool_call> tags in the
 # wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or <|/tool_call>, an
@@ -105,7 +113,7 @@ _EXACT_CALL_KEY_SETS = (frozenset({"name", "args"}), frozenset({"name", "argumen
 
 # Signals that the model TRIED to call a tool even when nothing parsed. Fires a
 # one-shot repair turn instead of printing the broken call as the final answer.
-_RE_TOOL_MARKER = re.compile(r"<\|?/?tool_call\|?>", re.IGNORECASE)
+_RE_TOOL_MARKER = re.compile(r"<\|?/?tool_call\|?>|\[/?tool_call\]", re.IGNORECASE)
 # The optional "call:NAME" prefix some finetunes put before the JSON body.
 _RE_CALL_PREFIX = re.compile(r"call:(\w+)")
 _RE_TOOL_FENCE = re.compile(r"```[ \t]*(?:tool_call|tool_code)\b", re.IGNORECASE)
@@ -125,7 +133,8 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
     this project's ``<tool_call>{"name": ...}`` wrapper. A false hit costs one
     repair re-prompt, which tells the model to give its plain-text final answer
     if it did not mean to call a tool."""
-    if _RE_TOOL_MARKER.search(text) or _RE_TOOL_FENCE.search(text):
+    if (_RE_TOOL_MARKER.search(text) or _RE_TOOL_FENCE.search(text)
+            or _RE_MISTRAL_ATTEMPT.search(text)):
         return True
     if _RE_NAME_KEY.search(text) and _RE_ARGS_KEY.search(text):
         return True
@@ -136,6 +145,13 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
         if pattern.search(text):
             return True
     return False
+
+
+def strip_orphan_closers(text: str) -> str:
+    """*text* with every closing tool-call tag removed (``</tool_call>``,
+    ``<|/tool_call>``, ``[/tool_call]``). The leftover of a response whose
+    calls were consumed can hold such a tag; it is not an attempt at a call."""
+    return _RE_CLOSER.sub("", text)
 
 
 def _detriple_quoted(s: str) -> str:
@@ -480,6 +496,82 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
         pos = closer.end()
 
 
+# Cap on the failed list scans one _iter_mistral_calls call may make. A list that
+# never closes is rescanned from the next [TOOL_CALLS]; past the budget the scan
+# stops, which bounds the cost of a flood of unbalanced markers.
+_MAX_MISTRAL_SCANS = 32
+
+
+def _list_end_from(text: str, i: int) -> int:
+    """Index just past the bracket-balanced JSON list starting at *i*, or -1."""
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(i, len(text)):
+        c = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+
+def _iter_mistral_calls(text: str):
+    """Yield ``(start, end, [(name, args), ...])`` for each ``[TOOL_CALLS]``
+    token followed by a JSON list of call objects, or by one call object. A
+    closing ``</tool_call>`` / ``[/tool_call]`` after the body is part of the
+    span."""
+    pos = 0
+    scans_left = _MAX_MISTRAL_SCANS
+    last_close = text.rfind("}")
+    while True:
+        opener = _RE_MISTRAL_OPEN.search(text, pos)
+        if opener is None:
+            return
+        i = opener.end()
+        if i >= len(text) or text[i] not in "[{":
+            pos = opener.end()
+            continue
+        if text[i] == "[":
+            body_end = _list_end_from(text, i)
+            inner_from, inner_to = i + 1, body_end - 1
+        else:
+            body_end = _object_end_from(text, i, last_close)
+            inner_from, inner_to = i, body_end
+        if body_end < 0:
+            if scans_left <= 0:
+                return
+            scans_left -= 1
+            pos = opener.end()
+            continue
+        items = []
+        for _s, _e, chunk in _iter_top_level_json_objects(text[inner_from:inner_to]):
+            parsed = _try_parse_body(chunk, None)
+            if parsed is not None:
+                items.append(parsed)
+        end = body_end
+        j = end
+        while j < len(text) and text[j].isspace():
+            j += 1
+        closer = _RE_CLOSER.match(text, j)
+        if closer is not None:
+            end = closer.end()
+        if items:
+            yield opener.start(), end, items
+        pos = max(end, opener.end())
+
+
 def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCall]:
     """Extract all tool calls from a model response string.
 
@@ -562,6 +654,15 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
             parsed = (prefix_name, args) if args is not None else None
         if parsed is not None:
             _accept(parsed[0], parsed[1], text[start:end], start, end)
+
+    # 3b. Mistral [TOOL_CALLS] token followed by a JSON list or object. The
+    #     calls after the first sit at the end of the wrapper with no span.
+    for start, end, items in _iter_mistral_calls(text):
+        if _overlaps(start, end):
+            continue
+        _accept(items[0][0], items[0][1], text[start:end], start, end)
+        for name, args in items[1:]:
+            calls.append(ToolCall(name=name, args=args, raw="", start=end, end=end))
 
     # 4. Bare top-level JSON object - name-gated, opt-in via tool_names
     if tool_names is not None:

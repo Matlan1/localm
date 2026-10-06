@@ -196,6 +196,7 @@ _TURN_MARKERS = [
     "<|start|>assistant",
     "<|channel|>",
     "<unused7>",
+    "[TOOL_CALLS]",
 ]
 
 
@@ -248,6 +249,48 @@ class TestTurnOpenMarkers:
         for marker in _TURN_MARKERS:
             once = scrub_text(f"{marker}reply")
             assert scrub_text(once) == once
+
+
+class TestToolCallsToken:
+    """Mistral's ``[TOOL_CALLS]`` token written out as plain text."""
+
+    def test_token_is_removed_from_text(self):
+        assert scrub_text("[TOOL_CALLS] The grep found no matches") == " The grep found no matches"
+        assert scrub_text("[TOOL_CALLS][TOOL_CALLS]x") == "x"
+
+    def test_other_bracketed_text_survives(self):
+        for safe in ("[tool_calls]", "[TOOL_CALL]", "[TOOL_CALLS", "[1] [link](u)"):
+            assert scrub_text(f"keep {safe} keep") == f"keep {safe} keep"
+
+    def test_a_flood_is_cut_and_the_source_is_closed(self):
+        from localm.textnorm import _MARKER_FLOOD_LIMIT, scrub_stream
+
+        pulled = []
+
+        def source():
+            try:
+                for i in range(300):
+                    pulled.append(i)
+                    yield "[TOOL_CALLS]"
+            finally:
+                pulled.append("closed")
+
+        out = "".join(scrub_stream(source()))
+        assert out == ""
+        assert pulled[-1] == "closed"
+        assert len(pulled) < 40, len(pulled)
+        assert _MARKER_FLOOD_LIMIT < 40
+
+    def test_text_before_a_flood_is_kept(self):
+        text = "Here you go." + "[TOOL_CALLS] " * 300
+        out = _scrub([text[i:i + 7] for i in range(0, len(text), 7)])
+        assert out.startswith("Here you go.")
+        assert "[TOOL_CALLS]" not in out
+        assert len(out) < 100
+
+    def test_a_few_markers_are_not_a_flood(self):
+        text = "a[TOOL_CALLS]b[TOOL_CALLS]c"
+        assert _scrub([text]) == "abc"
 
 
 class TestThinkExitMarker:

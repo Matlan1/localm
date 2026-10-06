@@ -57,6 +57,7 @@ _MARKER_RE = re.compile(
     r"|<\|tool>|<tool\|>"                                     # Gemma 4 tool declarations
     r"|<\|think\|>|<think\|>"                                 # Gemma 4 thinking enable token
     r"|<unused\d+>?"                                          # Gemma reserved tokens
+    r"|\[TOOL_CALLS\]"                                        # Mistral tool-call token
     # A turn-OPEN marker carries the role word, so the role suffix is matched
     # with it - removing the marker alone leaves a bare "model" / "assistant" at
     # the head of the reply. The matching turn-CLOSE markers are not listed
@@ -235,6 +236,35 @@ class ThinkSplitter:
         return buf, ""
 
 
+# How many ``[TOOL_CALLS]`` tokens one reply may emit before the stream is cut.
+_MARKER_FLOOD_LIMIT = 16
+_TOOL_CALLS_RE = re.compile(r"\[TOOL_CALLS\]")
+
+
+def _cut_marker_flood(chunk: str, seen: int) -> tuple[str, int, bool]:
+    """``(chunk, seen, flooded)``: *chunk* cut before the marker that exceeds
+    ``_MARKER_FLOOD_LIMIT`` (counting the *seen* markers of earlier chunks)."""
+    for m in _TOOL_CALLS_RE.finditer(chunk):
+        seen += 1
+        if seen > _MARKER_FLOOD_LIMIT:
+            return chunk[:m.start()], seen, True
+    return chunk, seen, False
+
+
+def _close_source(pieces: Iterator[str]) -> None:
+    """Close *pieces* when it is a generator, which stops its generation."""
+    close = getattr(pieces, "close", None)
+    if close is not None:
+        close()
+
+
+def _note_marker_flood() -> None:
+    from localm.debuglog import logger
+    logger.warning(
+        "model emitted [TOOL_CALLS] more than %d times in one reply; "
+        "the reply was cut", _MARKER_FLOOD_LIMIT)
+
+
 def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     """Normalise/remove internal model markers in a text stream.
 
@@ -242,9 +272,14 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     (or its optional role suffix, e.g. ``<|turn>model``) can straddle two
     pieces - scrubbing them too early would strip the marker head and leak its
     tail as text. Only the committed region is scrubbed and yielded; the cut
-    never lands inside a potential marker (markers start with ``<``).
+    never lands inside a potential marker (markers start with ``<`` or ``[``).
+
+    A stream that emits ``[TOOL_CALLS]`` more than ``_MARKER_FLOOD_LIMIT`` times
+    is cut at that marker and the source iterator is closed, ending the
+    generation.
     """
     buf = ""
+    seen = 0
     for piece in pieces:
         buf += piece
         cut = len(buf) - _MARKER_HOLD
@@ -252,15 +287,25 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
             continue
         # Back the cut up to the last '<' before the boundary so a marker
         # straddling it stays whole in the buffer.
-        lt = buf.rfind("<", max(0, cut - _MARKER_HOLD), cut)
+        lo = max(0, cut - _MARKER_HOLD)
+        lt = max(buf.rfind("<", lo, cut), buf.rfind("[", lo, cut))
         if lt != -1:
             cut = lt
         if cut <= 0:
             continue
-        out = scrub_text(buf[:cut])
+        chunk = buf[:cut]
         buf = buf[cut:]
+        chunk, seen, flooded = _cut_marker_flood(chunk, seen)
+        out = scrub_text(chunk)
         if out:
             yield out
-    buf = scrub_text(buf)
+        if flooded:
+            _note_marker_flood()
+            _close_source(pieces)
+            return
+    chunk, seen, flooded = _cut_marker_flood(buf, seen)
+    buf = scrub_text(chunk)
     if buf:
         yield buf
+    if flooded:
+        _note_marker_flood()

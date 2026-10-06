@@ -17,7 +17,7 @@ from ..display import (
     print_tool_call, print_tool_error, print_tool_result, print_turn_divider,
     safe_markup,
 )
-from ..parser import looks_like_tool_attempt, split_response
+from ..parser import looks_like_tool_attempt, split_response, strip_orphan_closers
 from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
@@ -515,7 +515,8 @@ class _LoopMixin:
                 # Capped at _MAX_TOOL_REPAIRS: the notice's own example text is
                 # itself tool-call-shaped, so a model echoing it back would
                 # re-trigger the notice every turn.
-                leftover = "".join(seg for seg in segments if isinstance(seg, str))
+                leftover = strip_orphan_closers(
+                    "".join(seg for seg in segments if isinstance(seg, str)))
                 if looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
                         st.partial_notice_count += 1

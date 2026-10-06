@@ -7,7 +7,9 @@ zero tool calls parsed - the finetune wraps valid JSON in broken markers.
 
 import pytest
 
-from localm.plugins.coder.parser import looks_like_tool_attempt, parse_tool_calls
+from localm.plugins.coder.parser import (
+    looks_like_tool_attempt, parse_tool_calls, split_response, strip_orphan_closers,
+)
 
 
 class TestCanonicalStillWorks:
@@ -582,3 +584,68 @@ class TestNonStringName:
         calls = parse_tool_calls(text)
         assert len(calls) == 1
         assert calls[0].name == "read_file"
+
+
+class TestMistralToolCallsToken:
+    """The [TOOL_CALLS] token and the [tool_call] bracket tag as call wrappers."""
+
+    NAMES = {"web_search", "grep"}
+    CALL = '{"name": "web_search", "args": {"query": "q"}}'
+
+    def _leftover(self, text, calls):
+        return "".join(s for s in split_response(text, calls) if isinstance(s, str))
+
+    def test_token_with_bracket_tag_and_closing_tag_is_one_call(self):
+        text = f"[TOOL_CALLS][tool_call]\n{self.CALL}\n</tool_call>"
+        calls = parse_tool_calls(text, tool_names=self.NAMES)
+        assert [(c.name, c.args, c.lenient) for c in calls] == [
+            ("web_search", {"query": "q"}, False)]
+        leftover = strip_orphan_closers(self._leftover(text, calls))
+        assert leftover.strip() == ""
+        assert not looks_like_tool_attempt(leftover, self.NAMES)
+
+    def test_bracket_tag_pair_is_a_call(self):
+        text = f"[tool_call]\n{self.CALL}\n[/tool_call]"
+        calls = parse_tool_calls(text, tool_names=self.NAMES)
+        assert [c.name for c in calls] == ["web_search"]
+        assert self._leftover(text, calls) == ""
+
+    def test_native_list_yields_every_call_with_no_leftover(self):
+        text = ('[TOOL_CALLS] [{"name": "web_search", "arguments": {"query": "q"}}, '
+                '{"name": "grep", "arguments": {"pattern": "a]b"}}]')
+        calls = parse_tool_calls(text, tool_names=self.NAMES)
+        assert [(c.name, c.args) for c in calls] == [
+            ("web_search", {"query": "q"}), ("grep", {"pattern": "a]b"})]
+        assert self._leftover(text, calls) == ""
+
+    def test_native_single_object(self):
+        calls = parse_tool_calls(f"[TOOL_CALLS]{self.CALL}", tool_names=self.NAMES)
+        assert [c.name for c in calls] == ["web_search"]
+
+    def test_text_around_the_wrapper_is_kept(self):
+        text = f"Sure.\n[TOOL_CALLS][{self.CALL}]\nDone."
+        calls = parse_tool_calls(text, tool_names=self.NAMES)
+        assert self._leftover(text, calls) == "Sure.\n\nDone."
+
+    @pytest.mark.parametrize("text", [
+        "[TOOL_CALLS]" * 5,
+        "[TOOL_CALLS] The grep found no matches",
+        "[TOOL_CALLS] [1] and [2] are references",
+    ])
+    def test_token_without_a_call_is_neither_a_call_nor_an_attempt(self, text):
+        assert parse_tool_calls(text, tool_names=self.NAMES) == []
+        assert not looks_like_tool_attempt(text, self.NAMES)
+
+    def test_token_followed_by_unparseable_json_is_still_an_attempt(self):
+        text = '[TOOL_CALLS] [{"name": "web_search", "arguments": {broken}]'
+        assert parse_tool_calls(text, tool_names=self.NAMES) == []
+        assert looks_like_tool_attempt(text, self.NAMES)
+
+    def test_many_unbalanced_lists_are_scanned_a_bounded_number_of_times(self):
+        text = '[TOOL_CALLS] [{"a": ' * 3000
+        assert parse_tool_calls(text, tool_names=self.NAMES) == []
+
+    def test_orphan_closers_are_stripped_but_a_broken_opener_is_not(self):
+        assert strip_orphan_closers("a </tool_call> b [/tool_call] c") == "a  b  c"
+        broken = '<tool_call>{"name": 1}</tool_call>'
+        assert looks_like_tool_attempt(strip_orphan_closers(broken), self.NAMES)
