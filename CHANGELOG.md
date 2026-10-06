@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Older vision models whose projector file does not say what kind of projector
+  it is now read images.** LLaVA 1.5 projectors (`mmproj-model-f16.gguf` from
+  the original LLaVA 1.5 GGUF releases) predate that field, and the bundled
+  llama.cpp runtime refused them, so the model stayed text-only. localm now works
+  out the projector type from the file's contents and loads a corrected copy
+  kept in its cache folder; your own file is never changed.
 - **Missing ComfyUI models can be downloaded even when localm has no built-in
   source for them.** When an image, video or music workflow needs a model file
   that is not installed, localm now offers to search Hugging Face for a file with
@@ -173,10 +179,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   decided the projector did not fit and left it off: the model was not shown as
   able to read images, and a `--store` copy or move left the projector behind.
   localm now reads the projector's real width from its weights, the same way
-  llama.cpp does. LLaVA 1.5 projectors, which do not record their projector
-  type and were refused by the bundled runtime, now load too: localm uses a copy
-  in its cache folder that records the type, and your own file is left
-  untouched.
+  llama.cpp does.
+- **Asking a vision model about an image no longer crashes it on the Vulkan
+  runtime when the optional GPU extras are installed.** The model process loaded
+  a second copy of a runtime library during the request and exited with "The
+  model process exited unexpectedly (worker exit 3)"; it now answers.
 - **Two machines sharing one data folder no longer take over each other's
   knowledge-base write lock.** Two machines with the same host name (on Windows,
   or on Linux hosts) read each other's lock records as their own process table,
