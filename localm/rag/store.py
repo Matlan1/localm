@@ -76,11 +76,14 @@ def _warn_numpy_degrade(exc: Exception, operation: str) -> None:
     if _NUMPY_DEGRADE_LOGGED:
         return
     _NUMPY_DEGRADE_LOGGED.add(True)
+    # The log record carries the exception's text, never the exception object.
+    # See test_the_notice_does_not_keep_the_callers_frames_alive.
+    reason = str(exc)
     if _numpy is None:
         # Absent: logged at debug, never as a warning. Branches on the MODULE
         # STATE, never on the exception's text.
         _log.debug("numpy is not installed; using the pure-Python %s (%s: %s).",
-                   operation, type(exc).__name__, exc)
+                   operation, type(exc).__name__, reason)
         return
     if _NUMPY_IS_STUB:
         _log.warning(
@@ -90,12 +93,12 @@ def _warn_numpy_degrade(exc: Exception, operation: str) -> None:
             "partially-removed install; find and remove it. Falling back to "
             "pure-Python %s (%s: %s).",
             getattr(_numpy, "__path__", None) or "an unknown path",
-            operation, type(exc).__name__, exc)
+            operation, type(exc).__name__, reason)
     else:
         _log.warning(
             "numpy is present but unusable (%s: %s); falling back to pure-Python %s. "
             "Results are identical, it is slower on large collections.",
-            type(exc).__name__, exc, operation)
+            type(exc).__name__, reason, operation)
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25, ENGLISH_STOP_WORDS
 from .collection_lock import (CollectionLockedError, collection_write_lock,

@@ -27,8 +27,10 @@ prints the same thing.
 
 from __future__ import annotations
 
+import gc
 import logging
 import types
+import weakref
 
 import pytest
 
@@ -126,3 +128,37 @@ def test_the_three_states_do_not_share_a_message(monkeypatch, caplog):
     assert len(set(seen)) == 3, (
         "two of the three numpy states produced the SAME message:\n  "
         + "\n  ".join(seen))
+
+
+class _Payload:
+    """Stands in for a collection held by the frame that caught the error."""
+
+
+@pytest.mark.parametrize("mod_kind", ["absent", "stub", "real"])
+def test_the_notice_does_not_keep_the_callers_frames_alive(monkeypatch, caplog, mod_kind):
+    """A handler that keeps log records (pytest's capture, a test harness) must
+    not keep the caller's frames, and what they reference, alive through the
+    notice."""
+    fake = types.ModuleType("numpy")
+    if mod_kind == "stub":
+        fake.__path__ = ["/stray/numpy"]
+    elif mod_kind == "real":
+        fake.__file__ = "/real/numpy/__init__.py"
+    monkeypatch.setattr(store, "_numpy", None if mod_kind == "absent" else fake)
+    monkeypatch.setattr(store, "_NUMPY_IS_STUB", mod_kind == "stub")
+
+    def caller():
+        payload = _Payload()
+        try:
+            raise ImportError("numpy is not installed")
+        except ImportError as e:
+            store._warn_numpy_degrade(e, "vector validation")
+        return weakref.ref(payload)
+
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        ref = caller()
+    gc.collect()
+
+    assert ref() is None, "the logged notice keeps the caller's frame alive"
+    assert caplog.records, "the notice was not logged at all"
+    assert "numpy is not installed" in " ".join(_messages(caplog))
