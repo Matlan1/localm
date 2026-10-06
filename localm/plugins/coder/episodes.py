@@ -682,12 +682,18 @@ class EpisodeStore:
                 except Exception:
                     cos = []
 
+        from localm.memory.relevance import generic_tokens, lexical_match
+        q_set = set(q_content.split())
+        ep_sets = [set(_content_tokens(t).split()) for t in texts]
+        generic = generic_tokens(ep_sets)
         scored = []
         for i, e in enumerate(eps):
             b = bm[i]
             c = cos[i] if cos else 0.0
-            # ABSOLUTE relevance gates: lexical OR semantic match, else drop it.
-            if b > _MIN_SCORE or c > _COS_MIN:
+            # ABSOLUTE relevance gates: lexical (BM25 floor AND distinctive shared
+            # words) OR semantic match, else drop it.
+            if (b > _MIN_SCORE and lexical_match(q_set, ep_sets[i], generic)) \
+                    or c > _COS_MIN:
                 rel = 0.5 * (b / bm_top if bm_top > 0 else 0.0) + 0.5 * c
                 scored.append((rel, i, e))
         scored.sort(key=lambda t: (-t[0], t[1]))
