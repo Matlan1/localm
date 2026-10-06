@@ -193,6 +193,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   collections table drops a stale "re-embed needed" badge as soon as the switch
   or the model download finishes. Opening or deleting a large collection no
   longer stalls the rest of the server while it loads.
+- **`/model` in the coder REPL loads the model before it says it switched.** A name the
+  server does not have is refused with the server's explanation instead of failing every
+  turn afterwards, and the coder sizes its history to the new model's context window
+  instead of keeping the previous model's.
 - **The coder answers a question in plain text instead of forcing a tool call.** A
   message such as "why does web search sometimes fail?" used to count as a request
   to act because it contained a word like "search" or "check", and the coder then

@@ -97,6 +97,9 @@ def register(app: FastAPI, ctx) -> None:
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_hs._engine, "effective_ctx_max", None) if _hs._engine else None
         cfg["effective_ctx_max"] = eff_ctx if isinstance(eff_ctx, int) else None
+        # The model that ceiling belongs to.
+        ctx_model = getattr(_hs._engine, "display_name", None) if _hs._engine else None
+        cfg["effective_ctx_model"] = ctx_model if isinstance(ctx_model, str) else None
         # A stable per-data-directory id, so the GUI can tell a restart of this
         # install apart from a different install that shares the browser origin
         # (localStorage is scoped by origin only, not by data directory).
