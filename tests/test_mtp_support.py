@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for Multi-Token Prediction (MTP) model support."""
 
+import contextlib
 import ctypes
 import inspect
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -767,6 +769,114 @@ def test_mtp_carried_token_is_not_dropped_at_the_token_budget_boundary():
 
     assert tokens == [200, 202]
     _assert_chain_matches_output(rec, tokens)
+
+
+# --- _gen_lock is never held across a yield ---------------------------------
+
+_LOCK_WAIT_S = 2.0
+
+
+@contextlib.contextmanager
+def _suspended_on_an_accepted_draft():
+    """Yield (llm, gen, mock_api) with *gen* suspended at the yield of an
+    accepted draft token, on the calling thread."""
+    rec = _SpecRecorder(head=[100, _SpecRecorder.EOG], draft=[101], verify=[101])
+    llm = make_bare_llama(
+        _model_ptr=ctypes.c_void_p(1),
+        _ctx_ptr=ctypes.c_void_p(2),
+        _mtp_ctx_ptr=ctypes.c_void_p(3),
+        supports_mtp=True,
+    )
+    _arm_drafting(llm)
+    llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
+    llm._fit_generation_budget = lambda n_prompt, max_new: max_new
+    llm._can_reuse_kv = lambda needed: False
+    llm._prefill_fresh_context = MagicMock()
+    llm._create_batch = MagicMock(return_value=MagicMock())
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api, \
+         patch("localm.inference.backends.llamacpp.llama._build_sampler",
+               return_value=rec.main_sampler):
+        mock_api.llama_sampler_init_greedy.return_value = rec.draft_sampler
+        mock_api.llama_sampler_sample.side_effect = rec.sample
+        mock_api.llama_sampler_accept.side_effect = rec.accept
+        mock_api.llama_decode.side_effect = rec.decode
+        gen = llm._generate(
+            prompt_tokens=[1, 2], max_new_tokens=4, temperature=0.8,
+            top_k=40, top_p=0.95, repeat_penalty=1.1)
+        try:
+            assert next(gen) == 100
+            assert next(gen) == 101
+            yield llm, gen, mock_api
+        finally:
+            gen.close()
+
+
+def _on_thread(fn):
+    """Run *fn* on a daemon thread; return (thread, outcome dict)."""
+    outcome = {}
+
+    def _run():
+        try:
+            outcome["value"] = fn()
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+def test_gen_lock_is_free_while_a_draft_token_is_suspended_at_the_yield():
+    """A consumer holding the generator at an accepted draft token must not
+    hold _gen_lock, or every other thread's native call waits on the consumer."""
+    with _suspended_on_an_accepted_draft() as (llm, gen, _api):
+        def _try_lock():
+            if llm._gen_lock.acquire(timeout=_LOCK_WAIT_S):
+                llm._gen_lock.release()
+                return True
+            return False
+
+        thread, outcome = _on_thread(_try_lock)
+        thread.join(_LOCK_WAIT_S + 3)
+
+        assert outcome.get("value") is True, (
+            "another thread could not take _gen_lock while the generator was "
+            f"suspended at a yielded draft token: {outcome}")
+
+
+def test_close_from_another_thread_frees_native_state_while_suspended_at_a_draft_token():
+    """close() on a second thread returns promptly and frees the native
+    context even though the generator is parked at an accepted draft token."""
+    with _suspended_on_an_accepted_draft() as (llm, gen, mock_api):
+        thread, outcome = _on_thread(llm.close)
+        thread.join(_LOCK_WAIT_S + 3)
+
+        assert llm._ctx_ptr is None and llm._model_ptr is None, (
+            "close() did not free the native state while the generator was "
+            "suspended at a yielded draft token")
+        mock_api.llama_free.assert_called()
+        assert not thread.is_alive()
+        assert "error" not in outcome, outcome
+
+
+def test_a_draft_token_generator_can_be_resumed_on_another_thread():
+    """Resuming a generator suspended at an accepted draft token on a thread
+    other than the one that suspended it does not fail on lock ownership."""
+    with _suspended_on_an_accepted_draft() as (llm, gen, _api):
+        def _resume():
+            try:
+                return ("token", next(gen))
+            except StopIteration:
+                return ("done", None)
+
+        thread, outcome = _on_thread(_resume)
+        thread.join(_LOCK_WAIT_S + 3)
+
+        assert not thread.is_alive()
+        assert "error" not in outcome, (
+            f"resuming on another thread raised: {outcome.get('error')!r}")
+        assert outcome["value"] == ("done", None)
 
 
 # --- Real end-to-end proof, against a real MTP-head GGUF ---------------------

@@ -281,6 +281,27 @@ class TestTheGuardExemptsTheRealCertStoreProbe:
         result.stdout.fnmatch_lines(["*touched a real system path*"])
 
 
+class TestTheGuardExemptsTheMachineIdRead:
+    """localm.instances.pid_space_id() reads /etc/machine-id on Linux."""
+
+    @pytest.mark.skipif(os.name == "nt",
+                        reason="the /etc marker, and this read, are POSIX-only")
+    def test_reading_the_machine_id_does_not_trip_the_guard(self, pytester):
+        _with_real_conftest(pytester)
+        pytester.makepyfile("""
+            def test_reads_the_machine_id():
+                try:
+                    open("/etc/machine-id", encoding="ascii").read()
+                except OSError:
+                    pass
+        """)
+        result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider")
+        assert result.ret == 0, (
+            "reading /etc/machine-id tripped the system-path guard:\n"
+            + result.stdout.str())
+        result.assert_outcomes(passed=1)
+
+
 class TestTheGuardDoesNotFalsePositive:
     """The quiet cases: paths that must NOT be flagged."""
 

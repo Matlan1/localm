@@ -93,9 +93,10 @@ _HOLDER = '''
     import os, sys
     from pathlib import Path
     import localm.rag.collection_lock as cl
+    from localm import instances
     cl.HEARTBEAT_INTERVAL = float(sys.argv[2])
     if sys.argv[3] != "-":
-        cl._machine_id_cache = sys.argv[3]
+        instances._PID_SPACE = sys.argv[3]
     with cl.collection_write_lock(Path(sys.argv[1]), collection="kb",
                                   op="a long index", timeout=30):
         print("HELD", os.getpid(), flush=True)
@@ -311,10 +312,10 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
 
     # The hold is recorded under another pid space, so the waiter below cannot
     # check its liveness and only the heartbeat keeps it.
-    monkeypatch.setattr(cl, "_machine_id_cache", "another-pid-space")
+    monkeypatch.setattr(instances, "_PID_SPACE", "another-pid-space")
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
-        monkeypatch.setattr(cl, "_machine_id_cache", None)
+        monkeypatch.setattr(instances, "_PID_SPACE", None)
         # TWO windows, not four, to bound how long this test occupies heavy_slot,
         # which is box-wide across xdist workers. Crossing the staleness
         # threshold twice proves the same property: a REFRESHED record survives
@@ -408,13 +409,50 @@ def test_a_pid_from_another_pid_space_is_never_judged_dead(base):
             pass
 
 
+def test_a_record_from_another_machine_with_this_host_name_is_never_taken_over(
+        base, monkeypatch):
+    """Two machines that share a host name and a data folder: the record names
+    a pid that is not alive here, but the machine that wrote it is another one,
+    so its liveness cannot be judged here and its heartbeat, 30s old, is within
+    the staleness window."""
+    other, pid = _idle_process()
+    recorded_start = started_an_hour_earlier(start_identity_of(pid))
+    _release(other)
+
+    with monkeypatch.context() as m:
+        m.setattr(instances, "_PID_SPACE", None)
+        m.setattr(instances, "machine_guid", lambda: "another-machine")
+        m.setattr(instances, "linux_machine_id", lambda: "another-machine")
+        remote_space = cl._machine_id()
+    assert remote_space != cl._machine_id(), "the other machine got this id"
+
+    rec = _record(pid=pid, start=recorded_start, machine=remote_space)
+    assert cl._holder_liveness(rec) == "unknown"
+    lp = lock_path_for(base / "kb")
+    _hold(lp, rec, silent_for=30)
+    assert cl.DEAD_HOLDER_GRACE < 30 < cl.STALE_AFTER
+    before = lp.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    refused = None
+    try:
+        with collection_write_lock(lp, collection="kb", op="a waiter",
+                                   timeout=1.5):
+            pass
+    except CollectionLockedError as e:
+        refused = e
+    assert lp.exists() and lp.read_text(encoding="utf-8") == before, (
+        "a lock recorded on another machine with this host name was taken over")
+    assert refused is not None
+
+
 def test_the_machine_id_separates_two_pid_spaces_on_one_host(monkeypatch):
     """The id must not be the hostname alone, or WSL and Windows on one box
     (same hostname, unrelated pid tables) would trust each other's pids."""
-    monkeypatch.setattr(cl, "_machine_id_cache", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(cl.sys, "platform", "win32")
     win = cl._machine_id()
-    monkeypatch.setattr(cl, "_machine_id_cache", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(cl.sys, "platform", "linux")
     lin = cl._machine_id()
     assert win != lin, "one hostname on two platforms produced one machine id"

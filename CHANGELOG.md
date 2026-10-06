@@ -168,6 +168,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Two machines sharing one data folder no longer take over each other's
+  knowledge-base write lock.** Two machines with the same host name (on Windows,
+  or on Linux hosts) read each other's lock records as their own process table,
+  found the holder's process absent and handed the lock over while the other
+  machine was still writing. The lock now tells machines apart by the machine's
+  own identifier, as the model download lock already did. A lock written by an
+  earlier version reads as another machine's and is released by its heartbeat
+  going quiet rather than by its process exiting.
+- **A coder session's log file can be deleted after the session ends, even when
+  saving the session's lessons failed.** A failure while storing a finished
+  session's episode used to skip closing its audit log, which on Windows left the
+  file locked until the server stopped.
+- **Pulling a model again over a file it already names now updates that entry's
+  source and checksum.** After `localm pull civitai:... --redownload` replaced a
+  file with different bytes, or a pull recreated a file that had been deleted by
+  hand, the model's entry still named the old version and its checksum, which
+  peer routing and duplicate detection trust. A CivitAI pull whose entry cannot
+  be saved under the requested name now reports that instead of saying it
+  finished.
+- **Closing a coder session while its browser is still starting no longer
+  leaves the browser running.** A browser that finishes starting after its coder
+  session has closed is now stopped instead of staying open, with its cookies and
+  storage, until localm exits.
 - **`localm setup-llama --help` no longer says the newest upstream build is the
   default.** The default installs the llama.cpp build this localm release
   confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
@@ -218,6 +241,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `huggingface-cli login` keeps working, and a location you set yourself with
   `HF_HOME`, `HF_HUB_CACHE`, `HF_XET_CACHE` or `HF_TOKEN_PATH` is used as you set it.
   Files already in the old location are left where they are.
+- **Loading a model on an AMD GPU no longer leaves compiler caches in your user
+  profile.** The AMD GPU runtime wrote its compiled-kernel cache to
+  `%LOCALAPPDATA%\comgr` and, for convolution models, `~/.miopen`, outside the data
+  folder, so "delete saved data" never removed them. They now go to `cache/comgr`
+  and `cache/miopen` inside the data folder. A location you set yourself with
+  `AMD_COMGR_CACHE_DIR`, `MIOPEN_USER_DB_PATH` or `MIOPEN_CUSTOM_CACHE_DIR` is used
+  as you set it. Files already in the old location are left where they are.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",
@@ -1009,6 +1039,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
+- **Privacy mode no longer leaves the start of tool-enabled replies in the debug
+  log.** With `--debug`, `LOCALM_DEBUG` or `keep_diagnostics` on, the text a model
+  wrote before a tool call (coder turns, web-enabled chat, jobs) was copied into
+  the debug log token by token through llama.cpp's grammar trace, even in privacy
+  mode. The log now keeps only the token ids there unless the session mode allows
+  chat content in the debug log.
+- **A coder session set to privacy by its project's `.localcoder/config.toml` no
+  longer leaves model output in the debug log.** With debug logging on, the model
+  worker process still wrote the model's raw output (and the grammar trace) to the
+  debug log for such a session, because it could not see that the session was
+  private. The worker now follows the coder sessions' privacy state.
 - **Windows network-share paths written with the `\??\` prefix are refused like
   any other network path.** A path such as `\??\UNC\host\share` got past the
   checks that stop localm from reaching network shares and device paths

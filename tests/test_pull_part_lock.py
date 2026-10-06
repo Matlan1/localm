@@ -440,19 +440,6 @@ def _exited_pid() -> int:
     return p.pid
 
 
-def _exited_holder():
-    """The pid and start identity of a process that has exited, read while it
-    was alive."""
-    p = subprocess.Popen(
-        [sys.executable, "-c",
-         "import os, sys; print(os.getpid(), flush=True); sys.stdin.read()"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    pid = int(p.stdout.readline())
-    start = start_identity_of(pid)
-    _release(p)
-    return pid, start
-
-
 @pytest.mark.parametrize("pid_state", ["alive", "dead"])
 def test_a_record_from_another_pid_space_is_never_reclaimed(home, pid_state):
     """A record written in another pid space (another pid namespace, the
@@ -551,11 +538,12 @@ def test_a_holder_in_another_pid_namespace_keeps_its_lock(home):
 
 
 def test_the_pid_space_id_differs_between_platforms_on_one_host(monkeypatch):
+    from localm import instances
     from localm.model_manager import pull
-    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "win32")
     windows = pull._pid_space_id()
-    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "linux")
     linux = pull._pid_space_id()
     assert windows != linux
@@ -587,6 +575,7 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
     Windows its MachineGuid gives it another pid space; on Linux the pid space
     matches but its start identity carries another boot id. Either way the
     lock stays."""
+    from localm import instances
     from localm.model_manager import pull
     other = _idle_child()
     try:
@@ -597,8 +586,9 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
                             "boot": "00000000-0000-0000-0000-000000000000"}
         else:
             with monkeypatch.context() as m:
-                m.setattr(pull, "_PID_SPACE", None)
-                m.setattr(pull, "_machine_guid", lambda: "another-machine-guid")
+                m.setattr(instances, "_PID_SPACE", None)
+                m.setattr(instances, "machine_guid",
+                          lambda: "another-machine-guid")
                 remote_space = pull._pid_space_id()
             # The injection took: the same host name, another MachineGuid.
             assert remote_space != this_pid_space()
@@ -625,8 +615,8 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
 @pytest.mark.skipif(sys.platform != "win32",
                     reason="MachineGuid is a Windows registry value")
 def test_the_windows_machine_guid_is_read():
-    from localm.model_manager.pull import _machine_guid
-    assert _machine_guid(), "no MachineGuid was read"
+    from localm.instances import machine_guid
+    assert machine_guid(), "no MachineGuid was read"
 
 
 def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
@@ -810,11 +800,24 @@ GUARD = '''
 '''
 
 
+def _stale_owner_fields() -> dict:
+    """Record fields for a holder that exited, in this pid space.
+
+    The record carries the start identity of a process that began an hour
+    before this test process, so a later process that is handed the exited
+    holder's pid reads as a different process and the lock stays stale. Where
+    the platform has no start identity the record carries none.
+    """
+    from localm.instances import process_start_identity
+    ident = process_start_identity(os.getpid())
+    return {"start": started_an_hour_earlier(ident) if ident else None,
+            "started": 0.0}
+
+
 def _write_stale_lock():
     """A lock left by a holder that has exited, in this pid space."""
     d = _part_lock_dir("m.gguf")
-    pid, start = _exited_holder()
-    _write_owner(d, pid, start=start, started=0.0)
+    _write_owner(d, _exited_pid(), **_stale_owner_fields())
     return d
 
 
@@ -1010,8 +1013,7 @@ def test_two_spellings_of_one_file_name_share_one_reclaim_guard(home):
 def test_a_stale_lock_with_the_longest_lockable_name_is_taken_over(home):
     longest = "m" * 240 + ".gguf"
     d = _part_lock_dir(longest)
-    pid, start = _exited_holder()
-    _write_owner(d, pid, start=start, started=0.0)
+    _write_owner(d, _exited_pid(), **_stale_owner_fields())
     with _part_lock(longest):
         assert json.loads(_record(d))["pid"] == os.getpid()
 
@@ -1404,8 +1406,8 @@ def test_leftovers_of_earlier_crashes_are_removed(home):
     tomb.mkdir()
     (tomb / "junk").write_text("x", encoding="utf-8")
     (locks / ".pull-acq-empty").mkdir()
-    pid, start = _exited_holder()
-    _write_owner(locks / ".pull-acq-dead", pid, start=start)
+    _write_owner(locks / ".pull-acq-dead", _exited_pid(),
+                 **_stale_owner_fields())
     live = _idle_child()
     try:
         _write_owner(locks / ".pull-acq-live", live.pid)

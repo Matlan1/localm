@@ -32,8 +32,11 @@ _OWNED: dict = {}
 #: waits on its Future for the outcome.
 _STARTING: dict = {}
 
-#: Guards _STARTING and the registry check that decides which call starts the
-#: browser. Never held across a start.
+#: Owners whose coder session closed while their browser was starting.
+_ABORTED: set = set()
+
+#: Guards _STARTING, _ABORTED and _OWNED, and the registry check that decides
+#: which call starts the browser. Never held across a start.
 _STARTING_LOCK = threading.Lock()
 
 
@@ -85,6 +88,7 @@ def _open_session(session, *, headless: bool = True):
     finally:
         with _STARTING_LOCK:
             del _STARTING[owner]
+            _ABORTED.discard(owner)
 
 
 def _start_browser(owner: str, headless: bool):
@@ -100,8 +104,15 @@ def _start_browser(owner: str, headless: bool):
         engine=cfg["engine"],
     )
     live.start()
-    bsession.register(live)
-    _OWNED[owner] = sid
+    with _STARTING_LOCK:
+        aborted = owner in _ABORTED
+        if not aborted:
+            bsession.register(live)
+            _OWNED[owner] = sid
+    if aborted:
+        live.stop()
+        raise RuntimeError(
+            "The coder session closed while its browser was starting.")
     return live
 
 
@@ -260,12 +271,19 @@ def tool_browser_close(cwd: Path, _session=None) -> ToolResult:
 
 def close_for_owner(owner: str) -> bool:
     """Close the browser belonging to *owner*, if any. Used at session teardown
-    so a browser never outlives the coder session that opened it."""
+    so a browser never outlives the coder session that opened it. A browser still
+    starting is stopped when its start finishes. True when a browser was closed
+    or a start was cancelled."""
     from localm.browser import session as bsession
-    sid = _OWNED.pop(str(owner), None)
+    owner = str(owner)
+    with _STARTING_LOCK:
+        sid = _OWNED.pop(owner, None)
+        starting = owner in _STARTING
+        if starting:
+            _ABORTED.add(owner)
     if sid is None:
-        return False
-    return bsession.close(sid)
+        return starting
+    return bsession.close(sid) or starting
 
 
 def owned_session_id(owner: str) -> Optional[str]:
