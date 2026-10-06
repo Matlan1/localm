@@ -187,12 +187,36 @@ def _enable_clipboard_bindings(win) -> str:
     return outcome.get("err", "the settings were not applied")
 
 
+def _confine_qt_profile(path: str) -> None:
+    """Make every web engine profile pywebview's Qt backend creates keep its
+    storage and its HTTP cache inside *path*, where it would otherwise put the
+    cache in the user's cache folder. Raises when the backend does not expose
+    the profile class it is expected to."""
+    import webview.platforms.qt as qt
+    base = qt.QWebEngineProfile
+    if getattr(base, "_localm_confined_to", None) == path:
+        return
+
+    class _ConfinedProfile(base):
+        _localm_confined_to = path
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.setCachePath(os.path.join(path, "cache"))
+
+        def setPersistentStoragePath(self, _requested):
+            super().setPersistentStoragePath(path)
+
+    qt.QWebEngineProfile = _ConfinedProfile
+
+
 def _window_profile_dir() -> Optional[str]:
     """The folder inside the data folder where the app window keeps its login
-    cookie and page storage, created when missing. None when the window cannot
-    keep a profile there: pywebview's macOS backend has no storage path option,
-    and a data folder that cannot hold the folder logs a warning. The caller
-    then runs the window private, keeping nothing. Never raises."""
+    cookie, page storage and web cache, created when missing. None when the
+    window cannot keep a profile there: pywebview's macOS backend has no storage
+    path option, and a data folder that cannot hold the folder, or a Qt backend
+    whose cache cannot be moved into it, logs a warning. The caller then runs the
+    window private, keeping nothing. Never raises."""
     if sys.platform == "darwin":
         return None
     try:
@@ -201,9 +225,11 @@ def _window_profile_dir() -> Optional[str]:
         path.mkdir(parents=True, exist_ok=True)
         if not os.access(path, os.W_OK):
             raise PermissionError(f"{path} is not writable")
+        if sys.platform.startswith("linux"):
+            _confine_qt_profile(str(path))
         return str(path)
     except Exception:
-        logger.warning("appface: could not create the app window profile folder "
+        logger.warning("appface: could not set up the app window profile folder "
                        "app-window in the data folder; the window keeps no login "
                        "or page data between launches", exc_info=True)
         return None

@@ -24,6 +24,7 @@ faked "webview" module below is a plain MagicMock, never a real window.
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -689,11 +690,36 @@ def test_start_app_face_creates_no_status_window_when_told_not_to(monkeypatch):
     window.start.assert_not_called()
 
 
-def _start_kwargs(monkeypatch, platform):
+class _FakeQtProfile:
+    """The part of pywebview's QWebEngineProfile that the app window relies on."""
+
+    def __init__(self, name=None):
+        self.name = name
+        self.cache_path = None
+        self.storage_path = None
+
+    def setCachePath(self, path):
+        self.cache_path = path
+
+    def setPersistentStoragePath(self, path):
+        self.storage_path = path
+
+
+def _fake_qt_backend(monkeypatch):
+    """Install a stand-in for webview.platforms.qt and return it."""
+    qt = SimpleNamespace(QWebEngineProfile=_FakeQtProfile)
+    monkeypatch.setitem(sys.modules, "webview.platforms", SimpleNamespace(qt=qt))
+    monkeypatch.setitem(sys.modules, "webview.platforms.qt", qt)
+    return qt
+
+
+def _start_kwargs(monkeypatch, platform, qt=None):
     """The keyword arguments run_native_window hands webview.start on *platform*."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     fake, _ = _fake_webview(loaded=True)
     monkeypatch.setitem(sys.modules, "webview", fake)
+    if qt is not None:
+        fake.platforms = SimpleNamespace(qt=qt)
     monkeypatch.setattr(appface.sys, "platform", platform)
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"desktop_window_mode": "auto"})
@@ -705,7 +731,7 @@ def _start_kwargs(monkeypatch, platform):
 @pytest.mark.parametrize("platform", ["win32", "linux"])
 def test_the_app_window_keeps_its_profile_inside_the_data_folder(monkeypatch, platform):
     from localm.config import home_dir
-    kwargs = _start_kwargs(monkeypatch, platform)
+    kwargs = _start_kwargs(monkeypatch, platform, _fake_qt_backend(monkeypatch))
 
     assert kwargs.get("storage_path") == str(home_dir() / "app-window")
     assert (home_dir() / "app-window").is_dir()
@@ -735,6 +761,46 @@ def test_an_uncreatable_profile_folder_runs_the_window_private_and_says_so(
 
     with caplog.at_level("WARNING", logger="localm"):
         kwargs = _start_kwargs(monkeypatch, "win32")
+
+    assert "storage_path" not in kwargs
+    assert kwargs["private_mode"] is True
+    assert any("app-window" in r.getMessage() and r.levelname == "WARNING"
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_the_qt_web_cache_and_storage_stay_inside_the_data_folder(monkeypatch):
+    """pywebview's Qt backend builds its own profile, keeps the HTTP cache in the
+    user's cache folder, and points the storage at its shared folder; every
+    profile it builds afterwards must use the app-window folder for both."""
+    from localm.config import home_dir
+    qt = _fake_qt_backend(monkeypatch)
+    _start_kwargs(monkeypatch, "linux", qt)
+    profile_dir = str(home_dir() / "app-window")
+
+    profile = qt.QWebEngineProfile("pywebview")
+    profile.setPersistentStoragePath("shared-pywebview-folder")
+
+    assert profile.name == "pywebview"
+    assert profile.cache_path == str(Path(profile_dir) / "cache")
+    assert profile.storage_path == profile_dir
+
+
+def test_confining_the_qt_profile_twice_wraps_it_once(monkeypatch):
+    qt = _fake_qt_backend(monkeypatch)
+    _start_kwargs(monkeypatch, "linux", qt)
+    confined = qt.QWebEngineProfile
+    _start_kwargs(monkeypatch, "linux", qt)
+
+    assert qt.QWebEngineProfile is confined
+
+
+def test_a_qt_backend_that_cannot_be_confined_runs_the_window_private_and_says_so(
+        monkeypatch, caplog):
+    """No webview.platforms.qt to wrap: the web cache would land outside the
+    data folder, so the window keeps nothing instead."""
+    monkeypatch.setitem(sys.modules, "webview.platforms.qt", None)
+    with caplog.at_level("WARNING", logger="localm"):
+        kwargs = _start_kwargs(monkeypatch, "linux")
 
     assert "storage_path" not in kwargs
     assert kwargs["private_mode"] is True
