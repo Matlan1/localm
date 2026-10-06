@@ -1366,6 +1366,17 @@ async def rag_remove_doc(name: str, req: RagRemoveDocRequest, request: Request):
     return {"status": "removed", "path": req.path}
 
 
+def _extract_refusal(message: str, filename: str) -> str:
+    """The 422 text for /api/rag/extract. This route never describes images, so
+    an image refusal must not suggest loading a vision model."""
+    import os
+    from localm.rag.extract import _IMAGE_SUFFIXES
+    if os.path.splitext(filename)[1].lower() in _IMAGE_SUFFIXES and "vision" in message:
+        return (f"No extractable text in {filename}. Images are not converted to "
+                "text here; attach them in Chat with a vision model.")
+    return message
+
+
 @_router.post("/api/rag/extract")
 async def rag_extract(req: RagExtractRequest):
     """Uploaded chat attachment -> plain text, entirely in memory."""
@@ -1389,7 +1400,7 @@ async def rag_extract(req: RagExtractRequest):
         text = await loop.run_in_executor(
             get_plugin_executor(), extract_bytes, data, req.filename)
     except ExtractError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, _extract_refusal(str(e), req.filename))
     # No cap unless one was asked for; the 30 MB byte guard above is the memory bound.
     if req.max_chars is None:
         return {"filename": req.filename, "text": text,
