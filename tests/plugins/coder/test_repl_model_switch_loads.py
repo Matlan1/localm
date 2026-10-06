@@ -156,3 +156,33 @@ def test_repl_model_command_loads_the_model_and_budgets_against_it(server, tmp_p
     assert state.load_calls == ["model-b"]
     assert agent.backend.model_id == "model-b"
     assert agent.backend.context_capacity() == 8192
+
+
+def test_config_route_names_the_model_the_context_ceiling_belongs_to(tmp_path, monkeypatch):
+    import types
+
+    from fastapi.testclient import TestClient
+
+    import localm.config as cfg
+    from localm.inference import http_server as hs
+    from localm.inference.http_server import create_app
+
+    home = tmp_path / ".localm"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-test")
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    auth = {"Authorization": "Bearer owner-key-for-test"}
+    with TestClient(create_app(None)) as c:
+        monkeypatch.setattr(hs, "_engine", types.SimpleNamespace(
+            effective_ctx_max=8192, display_name="model-b"))
+        body = c.get("/v1/config", headers=auth).json()
+        assert body["effective_ctx_max"] == 8192
+        assert body["effective_ctx_model"] == "model-b"
+        monkeypatch.setattr(hs, "_engine", None)
+        body = c.get("/v1/config", headers=auth).json()
+        assert body["effective_ctx_max"] is None
+        assert body["effective_ctx_model"] is None
