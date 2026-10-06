@@ -276,10 +276,12 @@ class _SessionMixin:
         Returns the path of the Markdown file, or None.
         Called automatically by the CLI's ``finally`` block.
         """
-        self._maybe_store_episode()
-        self._audit.close()
-        if self.parent is None:
-            unregister_coder_session_mode(self.mode)
+        try:
+            self._maybe_store_episode()
+        finally:
+            self._audit.close()
+            if self.parent is None:
+                unregister_coder_session_mode(self.mode)
         if self.mode == SessionMode.FULL:
             return self._write_session_markdown()
         return None
