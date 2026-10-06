@@ -88,7 +88,7 @@ DATA_DIRS = frozenset({
     "plugins", "rag", "memory", "chats", "coder", "checkpoints", "jobs",
     "activity", "uploads", "share_inbox", "gui_images", "gui_video", "gui_music",
     "gallery_index", "workflows", "mcp-images", "comfyui", "comfyui-models",
-    "skills", "app-window",
+    "skills",
 })
 DATA_ENTRIES = frozenset({DATA_MARKER}) | DATA_FILES | DATA_DIRS
 _DATA_PATTERNS = ("comfy-launch-*.log",)
