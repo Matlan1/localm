@@ -364,6 +364,7 @@ def main(
                 print_error("--estimate requires a TASK to estimate.")
                 sys.exit(2 if ci else 1)
             _run_estimate(agent, task, output_format)
+            return
         if resume is not None:
             ckpt_id = resume.strip() or None
             from ..agent.checkpoint import is_valid_checkpoint_id
