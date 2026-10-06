@@ -174,6 +174,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A chat no longer switches models for an ordinary reply just because the model's tool
+  support has never been checked.** With web tools on, an unpinned chat could move
+  from the model you had loaded to a different one for a plain text turn, which
+  unloaded and reloaded large models. A model whose tool support is unknown now
+  keeps the turn; only a model known to lack a needed capability is swapped out.
+  Image and context-length routing are unchanged.
 - **Small talk no longer ends up in the remembered facts, and one common word no
   longer pulls old session summaries into every chat turn.** A session with
   nothing lasting in it (a greeting, a passing remark, a one-off request) now
