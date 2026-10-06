@@ -181,6 +181,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`localm coder --estimate` stops after printing the plan.** It used to print the
+  plan and then run the task anyway, writing files and, with `--yes`, running shell
+  commands; with `--output-format json` it also printed a second JSON document.
 - **The coder answers a question in plain text instead of forcing a tool call.** A
   message such as "why does web search sometimes fail?" used to count as a request
   to act because it contained a word like "search" or "check", and the coder then
