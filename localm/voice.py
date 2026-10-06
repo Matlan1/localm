@@ -66,8 +66,8 @@ class VoiceError(Exception):
     """Transcription failed; the message says why and what to install.
 
     ``code`` carries the failure CLASS as a stable machine-readable tag (the
-    worker's own structured tags - "needs-faster-whisper", "decode", "empty",
-    "load", "transcribe" - plus the manager-side "spawn", "timeout", "crash",
+    worker's own structured tags - "needs-faster-whisper", "decode",
+    "decoder-fault", "empty", "load", "transcribe" - plus the manager-side "spawn", "timeout", "crash",
     "no-speech"), so an HTTP endpoint can pick a status by class instead of
     substring-matching the human message: rewording a message must never flip
     a status code."""
@@ -295,6 +295,34 @@ def _silence_native_crash_dialogs() -> None:
         pass
 
 
+def _is_media_error(exc: BaseException) -> bool:
+    """True when ``exc`` means the recording itself could not be decoded.
+
+    Media errors are PyAV's ``FFmpegError`` family (e.g. ``InvalidDataError``)
+    and the ``OSError`` / ``ValueError`` / ``EOFError`` a truncated or odd
+    stream raises. Anything else (``TypeError``, ``AttributeError``,
+    ``ImportError`` ...) is a fault in the decoder library or its call."""
+    try:
+        from av.error import FFmpegError
+        if isinstance(exc, FFmpegError):
+            return True
+    except Exception:                            # av missing: fall through to builtins
+        pass
+    return isinstance(exc, (OSError, ValueError, EOFError))
+
+
+def _decode_or_error(data: bytes, decode_audio):
+    """Decode ``data`` with ``decode_audio``; return ``(audio, None)`` or
+    ``(None, (tag, detail))`` where tag is "decode" for a bad recording and
+    "decoder-fault" for a decoder library/runtime error."""
+    import io
+    try:
+        return decode_audio(io.BytesIO(data)), None
+    except Exception as e:
+        tag = "decode" if _is_media_error(e) else "decoder-fault"
+        return None, (tag, f"{type(e).__name__}: {e}")
+
+
 def _simulate_fault(mode: str) -> None:
     """Test-only: reproduce a genuine uncatchable native fault on demand.
 
@@ -357,11 +385,9 @@ def _worker_main(req_q, resp_q) -> None:
             resp_q.put(("error", "needs-faster-whisper", str(e)))
             continue
 
-        import io
-        try:
-            audio = decode_audio(io.BytesIO(data))
-        except Exception as e:
-            resp_q.put(("error", "decode", str(e)))
+        audio, err = _decode_or_error(data, decode_audio)
+        if err is not None:
+            resp_q.put(("error", err[0], err[1]))
             continue
         if audio is None or len(audio) == 0:
             resp_q.put(("error", "empty", ""))
@@ -521,6 +547,11 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
     if tag == "decode":
         raise VoiceError(
             f"Could not decode the recording (corrupt or unsupported audio): {detail}",
+            code=tag)
+    if tag == "decoder-fault":
+        raise VoiceError(
+            "The audio decoder failed with a library error, not a problem with "
+            f"the recording (check the installed PyAV / faster-whisper versions): {detail}",
             code=tag)
     if tag == "empty":
         raise VoiceError("No audio in the recording (it was empty or zero-length).",
