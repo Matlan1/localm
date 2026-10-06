@@ -545,19 +545,14 @@ class VramSizingMixin:
                        "llama.cpp's default split", type(e).__name__, e)
             return None
 
-    # The MTP draft context is never created larger than this many tokens
-    # regardless of the main n_ctx - matches llama.py's own
-    # cp_mtp.n_ctx = min(n_ctx, 2048).
-    _MTP_DRAFT_CTX_CAP = 2048
-
     def _mtp_draft_context_vram_bytes(self) -> int:
         """Extra VRAM llama.py's MTP draft context (cp_mtp) will need beyond
         the shared model weights, for THIS load - 0 when ``mtp_enabled`` is
         off or this GGUF is not eligible for one.
 
-        Two charges: the draft context's own KV cache, sized to its capped
-        n_ctx (``min(self.n_ctx, _MTP_DRAFT_CTX_CAP)``) and its own
-        nextn/draft layer count rather than the whole stack; and a flat
+        Two charges: the draft context's own KV cache, sized to the main
+        ``self.n_ctx`` (the draft context is created at the main context's size)
+        and its own nextn/draft layer count rather than the whole stack; and a flat
         compute-buffer charge of ``_VRAM_OVERHEAD_BYTES``, the same constant
         the main context's own KV-cache-plus-compute-buffer overhead already
         uses - the draft context's n_batch/n_ubatch are set to its own n_ctx
@@ -585,10 +580,10 @@ class VramSizingMixin:
             path = Path(self.model_path)
             arch, nextn_layers = gguf_nextn_predict_layers(path)
             if arch in MTP_GRAPH_ARCHITECTURES and nextn_layers > 0:
-                draft_ctx = min(self.n_ctx, self._MTP_DRAFT_CTX_CAP)
                 kv_per_token = gguf_mtp_draft_kv_bytes_per_token(
                     path, nextn_layers)
-                charge = draft_ctx * kv_per_token + self._VRAM_OVERHEAD_BYTES
+                self._mtp_draft_kv_per_token_cached = int(kv_per_token)
+                charge = self.n_ctx * kv_per_token + self._VRAM_OVERHEAD_BYTES
         except Exception as exc:
             from localm.debuglog import logger as _dbg
             _dbg.debug("mtp draft-context VRAM probe failed (%s); charging "
@@ -596,6 +591,13 @@ class VramSizingMixin:
             charge = 0
         self._mtp_draft_vram_bytes_cached = charge
         return charge
+
+    def _mtp_draft_kv_per_token(self) -> int:
+        """Draft-context KV bytes per token of context, 0 when this load has no
+        MTP draft context. The draft context grows with the main one, so a
+        context-growth decision charges this on top of the main KV per token."""
+        self._mtp_draft_context_vram_bytes()
+        return int(getattr(self, "_mtp_draft_kv_per_token_cached", 0) or 0)
 
     @staticmethod
     def _vram_levels() -> list:
@@ -955,6 +957,7 @@ class VramSizingMixin:
         if gpu_layers < self._DEFAULT_GPU_LAYERS:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             per_token = int(per_token * min(1.0, gpu_layers / layers))
+        per_token += self._mtp_draft_kv_per_token()
         if per_token <= 0:
             return None
         # How much NEW KV must land in VRAM to grow to n_ctx depends on WHERE the
