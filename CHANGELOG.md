@@ -168,6 +168,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Pulling a model again over a file it already names now updates that entry's
+  source and checksum.** After `localm pull civitai:... --redownload` replaced a
+  file with different bytes, or a pull recreated a file that had been deleted by
+  hand, the model's entry still named the old version and its checksum, which
+  peer routing and duplicate detection trust. A CivitAI pull whose entry cannot
+  be saved under the requested name now reports that instead of saying it
+  finished.
 - **`localm setup-llama --help` no longer says the newest upstream build is the
   default.** The default installs the llama.cpp build this localm release
   confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
