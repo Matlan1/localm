@@ -2483,12 +2483,17 @@ def _pull_url_locked(
     # test_a_restart_over_another_urls_partial_reports_progress_from_zero.
     f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
 
+    stream_error: list = []
+
     def _write_chunks(on_chunk=None):
         with f:
-            for chunk in r.iter_content(65536):
-                f.write(chunk)
-                if on_chunk is not None:
-                    on_chunk(len(chunk))
+            try:
+                for chunk in r.iter_content(65536):
+                    f.write(chunk)
+                    if on_chunk is not None:
+                        on_chunk(len(chunk))
+            except requests.RequestException as e:
+                stream_error.append(e)
 
     if os.environ.get("LOCALM_PROGRESS_JSON") == "1":
         # GUI mode: stream JSON progress polled from the .part file on disk,
@@ -2502,7 +2507,8 @@ def _pull_url_locked(
                 return 0
         with _snapshot_progress(_part_bytes, total_display or 0) as _prog:
             _write_chunks()
-            _prog.ok()
+            if not stream_error:
+                _prog.ok()
     else:
         with Progress(
             TextColumn("[bold blue]{task.description}"),
@@ -2514,6 +2520,12 @@ def _pull_url_locked(
         ) as prog:
             task = prog.add_task(filename, total=total_display, completed=already_have)
             _write_chunks(lambda n: prog.update(task, advance=n))
+
+    if stream_error:
+        console.print(
+            f"[red]Download interrupted:[/red] {escape(str(stream_error[0]))}\n"
+            "The partial download is kept; pull the same URL again to continue.")
+        return False
 
     # Atomically rename on successful completion
     part_file.rename(dest)
