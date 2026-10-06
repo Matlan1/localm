@@ -275,7 +275,8 @@ class TestToolCallsToken:
             finally:
                 pulled.append("closed")
 
-        out = "".join(scrub_stream(source()))
+        held = source()
+        out = "".join(scrub_stream(held))
         assert out == ""
         assert pulled[-1] == "closed"
         assert len(pulled) < 40, len(pulled)
