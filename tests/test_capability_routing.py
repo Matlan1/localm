@@ -98,17 +98,54 @@ class TestPlanRoute:
         assert d.resolved == "current"
         assert d.unmet == ("tool_use",)
 
-    def test_a_gap_records_unknown_and_absent_distinctly(self):
-        """An unmeasured current model gaps (routing prefers certainty) but is
-        recorded as None, never False - it is not a model known to lack tools."""
+    def test_an_unknown_capability_never_moves_an_unpinned_request(self):
+        """An unmeasured current model is not a gap: only a confirmed absence
+        routes. A confirmed-capable model is installed and resident, so every
+        incentive to swap is present."""
         reg = _reg(unmeasured={}, tooly={"tool_use": True})
         d = cr.plan_route("unmeasured",
                           cr.CapabilityNeeds(capabilities=("tool_use",)),
-                          pinned=False, reg=reg)
-        assert d.resolved == "tooly"
+                          pinned=False, resident=["tooly"], reg=reg)
+        assert d.resolved == "unmeasured"
+        assert d.routed is False
+        assert d.has_gap is False
+        assert d.describe() == "no capability gap"
+
+    def test_a_pinned_request_still_reports_an_unknown_as_none(self):
+        """A pinned model keeps the suggestion surface: the unknown is recorded
+        as None, never False - it is not a model known to lack tools."""
+        reg = _reg(unmeasured={}, tooly={"tool_use": True})
+        d = cr.plan_route("unmeasured",
+                          cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=True, reg=reg)
+        assert d.resolved == "unmeasured"
+        assert d.routed is False
         assert d.gaps == {"tool_use": None}
         assert d.gaps["tool_use"] is not False
         assert "unknown" in d.describe()
+
+    def test_an_unknown_vision_capability_still_routes(self, monkeypatch):
+        """Vision is needed to answer at all, so an unconfirmed model does not
+        keep an image request. "unmeasured" sits on an unreachable path (vision
+        unknown); "seer" resolves a projector (vision confirmed)."""
+        monkeypatch.setattr("localm.model_manager.registry.get_model_mmproj",
+                            lambda name, **kw: "Z:/models/proj.gguf"
+                            if name == "seer" else None)
+        reg = _reg(unmeasured={}, seer={"mmproj": "Z:/models/proj.gguf"})
+        d = cr.plan_route("unmeasured", cr.CapabilityNeeds(capabilities=("vision",)),
+                          pinned=False, reg=reg)
+        assert d.resolved == "seer"
+        assert d.gaps == {"vision": None}
+
+    def test_an_unknown_tool_use_does_not_hide_a_confirmed_context_shortfall(self):
+        reg = _reg(unmeasured={"context_length": 4096},
+                   tooly={"tool_use": True, "context_length": 131072})
+        d = cr.plan_route(
+            "unmeasured", cr.CapabilityNeeds(capabilities=("tool_use",),
+                                             min_context=100000),
+            pinned=False, reg=reg)
+        assert d.resolved == "tooly"
+        assert d.gaps == {"context_length": False}
 
     def test_unknown_context_is_not_a_shortfall(self):
         """Context gaps only on a CONFIRMED shortfall. Treating an unmeasured
@@ -241,14 +278,9 @@ class FakeEngine:
         return 8192
 
 
-@pytest.fixture
-def server(monkeypatch):
-    """A running server with two REGISTERED models: the loaded one has no
-    tool-call template, a second one does."""
-    registry = _reg(
-        plain={"tool_use": False, "context_length": 8192},
-        tooly={"tool_use": True, "context_length": 32768},
-    )
+def _serve(monkeypatch, registry):
+    """A running server over *registry*, with "plain" loaded as the startup
+    model. Yields ``(client, engines)``."""
     engines: dict[str, FakeEngine] = {}
 
     def factory(name):
@@ -275,6 +307,26 @@ def server(monkeypatch):
         yield client, engines
 
 
+@pytest.fixture
+def server(monkeypatch):
+    """Two REGISTERED models: the loaded one has no tool-call template, a
+    second one does."""
+    yield from _serve(monkeypatch, _reg(
+        plain={"tool_use": False, "context_length": 8192},
+        tooly={"tool_use": True, "context_length": 32768},
+    ))
+
+
+@pytest.fixture
+def server_unmeasured(monkeypatch):
+    """Two REGISTERED models: the loaded one has never been inspected for tool
+    use, a second one is confirmed to have it."""
+    yield from _serve(monkeypatch, _reg(
+        plain={"context_length": 8192},
+        tooly={"tool_use": True, "context_length": 32768},
+    ))
+
+
 def _ask(client, **body):
     body.setdefault("messages", [{"role": "user", "content": "hi"}])
     body.setdefault("stream", False)
@@ -295,6 +347,30 @@ class TestRoutingOverHTTP:
         assert r.status_code == 200
         assert _answering_model(engines) == ["tooly"]
         assert engines["plain"].answered == 0
+
+    def test_unpinned_request_on_an_unmeasured_model_is_not_rerouted(
+            self, server_unmeasured):
+        """The GUI sends tool_use on every turn with web tools on. A model
+        nobody has inspected keeps a plain text turn: the reply comes from the
+        engine that was loaded, the other model is never even constructed, and
+        no routing header is written."""
+        client, engines = server_unmeasured
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert "answered-by-plain" in r.text
+        assert "tooly" not in engines
+        assert "X-Localm-Model-Routing" not in r.headers
+        assert r.status_code == 200
+
+    def test_a_pinned_unmeasured_model_still_reports_the_unknown(
+            self, server_unmeasured):
+        client, engines = server_unmeasured
+        r = _ask(client, model="plain", required_capabilities=["tool_use"])
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert _answering_model(engines) == ["plain"]
+        assert blob["pinned"] is True
+        assert blob["routed"] is False
+        assert blob["gaps"] == {"tool_use": "unknown"}
 
     def test_explicit_pin_is_NEVER_overridden(self, server):
         """THE binding constraint, end to end.
@@ -862,3 +938,168 @@ class TestServerCompactionHeader:
         r = _ask(client, messages=self.LONG)
         assert r.status_code == 200
         assert "X-Localm-Context-Compacted" not in r.headers
+
+
+# --------------------------------------------------------------------------- #
+#  The model_autoswitch setting                                                #
+# --------------------------------------------------------------------------- #
+
+TOOLS = cr.CapabilityNeeds(capabilities=("tool_use",))
+UNMEASURED = _reg(unmeasured={}, tooly={"tool_use": True, "context_length": 32768})
+
+
+class TestAutoswitchModes:
+    def test_off_never_moves_a_request_with_a_confirmed_gap(self):
+        d = cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY,
+                          resident=["tooly"], mode="off")
+        assert d.resolved == "plain"
+        assert d.routed is False
+        assert d.suggested is None
+        assert d.gaps == {"tool_use": False}
+        assert d.describe() == "kept plain (tool_use=absent); model autoswitch is off"
+
+    def test_ask_keeps_the_model_and_names_the_one_it_would_use(self):
+        d = cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY, mode="ask")
+        assert d.resolved == "plain"
+        assert d.routed is False
+        assert d.suggested == "tooly"
+        assert d.candidates == ()
+        assert "tooly would answer if you switch" in d.describe()
+
+    def test_ask_has_no_suggestion_when_nothing_qualifies(self):
+        reg = _reg(a={"tool_use": False}, b={"tool_use": False})
+        d = cr.plan_route("a", TOOLS, pinned=False, reg=reg, mode="ask")
+        assert d.suggested is None
+        assert d.unmet == ("tool_use",)
+
+    def test_ask_has_no_suggestion_without_a_confirmed_gap(self):
+        d = cr.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
+                          mode="ask")
+        assert d.has_gap is False
+        assert d.suggested is None
+
+    def test_loaded_routes_only_to_a_resident_model(self):
+        reg = _reg(plain={"tool_use": False},
+                   cold={"tool_use": True, "context_length": 131072},
+                   warm={"tool_use": True, "context_length": 8192})
+        d = cr.plan_route("plain", TOOLS, pinned=False, resident=["warm"], reg=reg,
+                          mode="loaded")
+        assert d.resolved == "warm"
+        assert d.candidates == ("warm",)
+
+    def test_loaded_stays_when_the_capable_model_is_not_loaded(self):
+        d = cr.plan_route("plain", TOOLS, pinned=False, resident=[],
+                          reg=TOOLS_ONLY, mode="loaded")
+        assert d.resolved == "plain"
+        assert d.routed is False
+        assert d.unmet == ("tool_use",)
+        assert "no loaded model provides tool_use" in d.describe()
+
+    def test_auto_moves_on_a_confirmed_gap_only(self):
+        assert cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY,
+                             mode="auto").resolved == "tooly"
+        assert cr.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
+                             mode="auto").resolved == "unmeasured"
+
+    def test_eager_also_moves_on_an_unknown_capability(self):
+        d = cr.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
+                          mode="eager")
+        assert d.resolved == "tooly"
+        assert d.gaps == {"tool_use": None}
+
+    @pytest.mark.parametrize("mode", cr.AUTOSWITCH_MODES)
+    def test_a_pinned_request_is_never_moved_in_any_mode(self, mode):
+        d = cr.plan_route("plain", TOOLS, pinned=True, reg=TOOLS_ONLY,
+                          resident=["tooly"], mode=mode)
+        assert d.resolved == "plain"
+        assert d.routed is False
+        assert d.suggested is None
+
+    @pytest.mark.parametrize("mode", ["off", "ask"])
+    def test_an_image_request_keeps_the_model_under_off_and_ask(self, mode):
+        reg = _reg(plain={}, seer={"mmproj": "Z:/models/proj.gguf"})
+        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("vision",)),
+                          pinned=False, reg=reg, mode=mode)
+        assert d.resolved == "plain"
+        assert d.routed is False
+
+    def test_an_unrecognised_mode_reads_as_auto(self):
+        d = cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY, mode="bogus")
+        assert d.resolved == "tooly"
+        assert d.policy == "auto"
+
+
+class TestConfiguredMode:
+    @pytest.mark.parametrize("raw,expected", [
+        ("off", "off"), ("ASK", "ask"), (" loaded ", "loaded"),
+        ("eager", "eager"), ("auto", "auto")])
+    def test_reads_the_setting(self, monkeypatch, raw, expected):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"model_autoswitch": raw})
+        assert cr.configured_mode() == expected
+
+    @pytest.mark.parametrize("raw", [None, "", "sometimes", 3, True])
+    def test_an_unreadable_value_reads_as_auto(self, monkeypatch, raw):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"model_autoswitch": raw})
+        assert cr.configured_mode() == "auto"
+
+    def test_the_shipped_default_is_auto_and_the_schema_offers_every_mode(self):
+        from localm import config, settings_schema
+        field = next(f for f in settings_schema.CORE_FIELDS
+                     if f.key == "model_autoswitch")
+        assert config.DEFAULT_CONFIG["model_autoswitch"] == "auto"
+        assert tuple(field.options) == cr.AUTOSWITCH_MODES
+
+
+@pytest.fixture
+def mode_server(server, monkeypatch):
+    def set_mode(mode):
+        monkeypatch.setattr(cr, "configured_mode", lambda: mode)
+    return server, set_mode
+
+
+class TestAutoswitchOverHTTP:
+    def test_off_answers_with_the_loaded_model_though_a_capable_one_exists(
+            self, mode_server):
+        (client, engines), set_mode = mode_server
+        set_mode("off")
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert "tooly" not in engines
+        assert r.status_code == 200
+
+    def test_ask_answers_with_the_loaded_model_and_header_names_the_suggestion(
+            self, mode_server):
+        (client, engines), set_mode = mode_server
+        set_mode("ask")
+        r = _ask(client, required_capabilities=["tool_use"])
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert _answering_model(engines) == ["plain"]
+        assert "tooly" not in engines
+        assert blob["routed"] is False
+        assert blob["pinned"] is False
+        assert blob["resolved"] == "plain"
+        assert blob["suggested"] == "tooly"
+        assert r.status_code == 200
+
+    def test_loaded_does_not_load_a_model_that_is_not_resident(self, mode_server):
+        (client, engines), set_mode = mode_server
+        set_mode("loaded")
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert "tooly" not in engines
+        assert r.status_code == 200
+
+    def test_auto_still_routes_to_the_capable_model(self, mode_server):
+        (client, engines), set_mode = mode_server
+        set_mode("auto")
+        _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["tooly"]
+
+    def test_eager_routes_off_an_unmeasured_model(self, server_unmeasured,
+                                                  monkeypatch):
+        client, engines = server_unmeasured
+        monkeypatch.setattr(cr, "configured_mode", lambda: "eager")
+        _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["tooly"]

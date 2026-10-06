@@ -1161,7 +1161,8 @@ def plan_capability_route(model_name: str | None, messages: list,
                 if n not in peer_routes}
 
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                          current_known=known, skip=skip_set)
+                          current_known=known, skip=skip_set,
+                          mode=_cr.configured_mode())
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
@@ -4453,44 +4454,8 @@ async def _stream_sse(
         if isinstance(capacity, int) and capacity > 0 and len(messages) > 3:
             buffer = max(2048, int(capacity * 0.10))
             if capacity - prompt_tokens < buffer:
-                from localm.inference.compact import compact_messages
-                # A disconnect during compaction must stop the native call, not
-                # just unpin around it: run_in_executor's own .cancel() is a
-                # no-op once the thread has started, so without this the
-                # summarization generation (up to ~1024 tokens, holding the
-                # per-model inference lock the whole time) runs to completion
-                # regardless of the client having gone away - the same
-                # early-exit check the main generation loop below already
-                # does per token, applied here too.
-                _compact_cancel = threading.Event()
-                residency.register_cancel(engine.display_name, _compact_cancel)
-                def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                    parts = []
-                    gen = engine.chat_stream(ms, max_tokens=max_t, temperature=0.3)
-                    try:
-                        for tok in gen:
-                            if _compact_cancel.is_set():
-                                break
-                            parts.append(tok)
-                    finally:
-                        gen.close()
-                    return "".join(parts)
-                # Off the event loop: compact_messages runs a FULL summarization
-                # generation (engine.chat_stream holds the per-model inference lock for
-                # up to ~1024 tokens). Run directly on the single-threaded loop it would
-                # freeze every other request, the heartbeat, and the disconnect watchers
-                # for its whole duration, so offload it exactly as the real
-                # generation below is.
-                _loop = asyncio.get_running_loop()
-                try:
-                    try:
-                        new_messages, changed = await _loop.run_in_executor(
-                            None, compact_messages, messages, _gen_for_compact)
-                    except (asyncio.CancelledError, GeneratorExit):
-                        _compact_cancel.set()
-                        raise
-                finally:
-                    residency.unregister_cancel(engine.display_name, _compact_cancel)
+                new_messages, changed, _gone = await _compact_for_capacity(
+                    engine, messages)
                 if changed:
                     messages = list(new_messages)
                     prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -4871,6 +4836,96 @@ async def _stream_sse_completion(
     yield "data: [DONE]\n\n"
 
 
+COMPACTION_DISCONNECT_DETAIL = (
+    "Client closed the request while the conversation was being compacted.")
+
+
+def _resolve_disconnect_poll(request):
+    """The async "has the client gone?" poll for *request*, or ``None``.
+
+    Prefers the poll ``_DisconnectSignalMiddleware`` publishes under
+    ``scope[_DISCONNECT_POLL_KEY]`` and falls back to
+    ``request.is_disconnected`` for a request without that middleware. ``None``
+    when *request* is ``None``."""
+    if request is None:
+        return None
+    poll = None
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        poll = scope.get(_DISCONNECT_POLL_KEY)
+    if poll is None:
+        poll = getattr(request, "is_disconnected", None)
+    return poll
+
+
+async def _compact_for_capacity(engine, messages: list, request=None
+                                ) -> tuple[list, bool, bool]:
+    """Compact *messages* with ``compact_messages``, the summary written by
+    *engine* with its reasoning channel off.
+
+    Runs in an executor. The summariser generation stops early, and the
+    compaction falls back to its digest, when the client disconnects (polled
+    through *request* every 0.1 s), when residency broadcasts a cancel for
+    this model, or when this coroutine is cancelled (the cancellation is then
+    re-raised).
+
+    Returns ``(messages, changed, disconnected)``; *disconnected* is True when
+    a client disconnect was observed while compacting."""
+    from localm.inference.compact import compact_messages
+    loop = asyncio.get_running_loop()
+    cancel = threading.Event()
+    residency.register_cancel(engine.display_name, cancel)
+    poll = _resolve_disconnect_poll(request)
+    disconnected = {"v": False}
+
+    def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+        parts = []
+        gen = engine.chat_stream(ms, max_tokens=max_t, temperature=0.3,
+                                 thinking=False)
+        try:
+            for tok in gen:
+                if cancel.is_set():
+                    break
+                parts.append(tok)
+        finally:
+            gen.close()
+        if cancel.is_set():
+            raise RuntimeError("summarisation cancelled")
+        return "".join(parts)
+
+    fut = loop.run_in_executor(None, compact_messages, messages, _gen_for_compact)
+
+    async def _watch() -> None:
+        try:
+            while not fut.done():
+                if poll is not None and await poll():
+                    disconnected["v"] = True
+                    cancel.set()
+                    return
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("compaction disconnect watcher failed")
+
+    watcher = asyncio.ensure_future(_watch())
+    try:
+        try:
+            new_messages, changed = await fut
+        except (asyncio.CancelledError, GeneratorExit):
+            cancel.set()
+            raise
+    finally:
+        watcher.cancel()
+        try:
+            await watcher
+        except (asyncio.CancelledError, Exception):
+            pass
+        residency.unregister_cancel(engine.display_name, cancel)
+    return new_messages, changed, disconnected["v"]
+
+
 async def _generate_full(engine, messages: list, request=None, *,
                          timing: Optional[dict] = None, **gen_kwargs) -> str:
     """Consume a whole (non-streaming) generation in an executor while watching for
@@ -4903,20 +4958,7 @@ async def _generate_full(engine, messages: list, request=None, *,
     loop = asyncio.get_running_loop()
     cancel_event = threading.Event()
     residency.register_cancel(engine.display_name, cancel_event)
-
-    # Resolve a working disconnect poll. In the real server the endpoint sits
-    # behind BaseHTTPMiddleware, which makes request.is_disconnected() permanently
-    # False (its synthetic receive never yields http.disconnect), so
-    # _DisconnectSignalMiddleware publishes one bound to the raw receive under
-    # scope[_DISCONNECT_POLL_KEY]. Fall back to request.is_disconnected for a bare
-    # request (no middleware - unit tests, or a caller that never disconnects).
-    poll = None
-    if request is not None:
-        scope = getattr(request, "scope", None)
-        if isinstance(scope, dict):
-            poll = scope.get(_DISCONNECT_POLL_KEY)
-        if poll is None:
-            poll = getattr(request, "is_disconnected", None)
+    poll = _resolve_disconnect_poll(request)
 
     def _run() -> str:
         _log_assembled_prompt(messages)
@@ -4994,7 +5036,8 @@ def _capability_route_header(route) -> dict:
     must be able to tell them apart, so they are not flattened into one flag.
     Compact ASCII JSON, header-safe:
     ``{"resolved","requested","routed","pinned","gaps":{cap:"absent"|"unknown"},
-    "unmet":[...]}``, plus ``"load_errors":[...]`` (each cut to 200
+    "unmet":[...]}``, plus ``"suggested":<model>`` when model autoswitch is
+    ``ask`` and another model would have answered, plus ``"load_errors":[...]`` (each cut to 200
     characters) when every capable model failed to load, and, when a model was
     left out because its last load failed, ``"skipped":[{"model","failed_at",
     "retry_at","reason"}]`` (the times in epoch seconds). ``"note"`` carries
@@ -5011,6 +5054,9 @@ def _capability_route_header(route) -> dict:
                  for c, s in route.gaps.items()},
         "unmet": list(route.unmet),
     }
+    suggested = getattr(route, "suggested", None)
+    if suggested:
+        payload["suggested"] = suggested
     load_errors = getattr(route, "load_errors", ())
     if load_errors:
         payload["load_errors"] = [str(e)[:200] for e in load_errors]
@@ -5175,14 +5221,10 @@ async def _complete(
         if isinstance(capacity, int) and capacity > 0 and len(messages) > 3:
             buffer = max(2048, int(capacity * 0.10))
             if capacity - prompt_tokens < buffer:
-                from localm.inference.compact import compact_messages
-                def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                    return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-                # Off the event loop (see the same fix in _stream_sse): compaction runs a
-                # full generation and must not block the single-threaded loop.
-                _loop = asyncio.get_running_loop()
-                new_messages, changed = await _loop.run_in_executor(
-                    None, compact_messages, messages, _gen_for_compact)
+                new_messages, changed, gone = await _compact_for_capacity(
+                    engine, messages, request)
+                if gone:
+                    raise HTTPException(499, COMPACTION_DISCONNECT_DETAIL)
                 if changed:
                     messages = list(new_messages)
                     prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)

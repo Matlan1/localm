@@ -426,6 +426,42 @@ class TestPartialParseSurfacing:
         assert _final_answer(result) == "Done."
         assert self._partial_notices(agent) == []
 
+    @pytest.mark.parametrize("wrapped", [
+        '[TOOL_CALLS][tool_call]\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>',
+        '[TOOL_CALLS][{"name": "read_file", "arguments": {"path": "a.py"}}]',
+        '[tool_call]\n{"name": "read_file", "args": {"path": "a.py"}}\n[/tool_call]',
+        '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>\n</tool_call>',
+        '[{"name": "read_file", "arguments": {"path": "a.py"}}]',
+    ])
+    def test_a_call_that_ran_is_never_reported_as_not_run(self, tmp_path, wrapped):
+        agent = _make_agent(tmp_path)
+        responses = iter([wrapped, "Done."])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          return_value=["<result>ok</result>"]) as ex:
+            result = agent.run_task("read a file")
+        (dispatched,), _ = ex.call_args
+        assert [c.name for c in dispatched] == ["read_file"]
+        assert dispatched[0].args == {"path": "a.py"}
+        assert dispatched[0].lenient is False
+        assert self._partial_notices(agent) == []
+        assert _final_answer(result) == "Done."
+
+    def test_an_unparsed_call_with_only_a_closing_tag_is_still_reported(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        responses = iter([
+            '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>\n'
+            'call:write_file{path:"b",content:"c"}</tool_call>',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          return_value=["<result>ok</result>"]):
+            agent.run_task("read a file")
+        assert len(self._partial_notices(agent)) == 1
+
 
 class TestGroundingFooter:
     """The final answer must carry a factual "what actually happened" line

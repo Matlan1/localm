@@ -301,6 +301,14 @@ CORE_FIELDS: list = [
                  "Pinning only protects an already-loaded model; it never loads "
                  "one. Blank pins nothing.",
                  group="Engine", applies=Applies.NEXT_LOAD),
+    SettingField("model_autoswitch", Widget.SELECT, "Model autoswitch",
+                 "off = never switch models; ask = keep the model and offer one "
+                 "that has what the chat needs; loaded = switch only to a model "
+                 "that is already loaded; auto = switch to an installed model "
+                 "that has it; eager = also switch when the model has never been "
+                 "checked. A chat pinned to a model is never switched.",
+                 group="Models",
+                 options=["off", "ask", "loaded", "auto", "eager"]),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "
                  "(0 = never; the model stays resident). The next message reloads "

@@ -123,10 +123,12 @@ class HttpEngine:
                     grammar: Optional[str] = None,
                     seed: Optional[int] = None,
                     min_context: Optional[int] = None,
-                    on_status: Optional[Callable[[str], None]] = None) -> Iterator[str]:
+                    on_status: Optional[Callable[[str], None]] = None,
+                    thinking: Optional[bool] = None) -> Iterator[str]:
         """Stream assistant tokens from the server's ``/v1/chat/completions``.
         *min_context* asks for a model whose trained window holds that many
         tokens; it only has an effect when ``pin_model`` is False.
+        ``thinking=False`` is sent as ``chat_template_kwargs.enable_thinking``.
 
         Raises :class:`UnsupportedInputError` when the server refuses image input on
         a text-only model (so the REPL shows the same vision guidance as in-process),
@@ -147,6 +149,8 @@ class HttpEngine:
                          ("grammar", grammar)):
             if val is not None:
                 body[key] = val
+        if thinking is not None:
+            body["chat_template_kwargs"] = {"enable_thinking": bool(thinking)}
         if not self.pin_model:
             body["pin_model"] = False
             if min_context:

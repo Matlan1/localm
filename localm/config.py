@@ -849,6 +849,15 @@ DEFAULT_CONFIG: dict = {
     # reload_llm_after_imagine is a SEPARATE axis (eager-vs-lazy reload AFTER a
     # gen, not this unload-before decision).
     "model_swap_policy": "auto",
+    # When a chat request that does not pin its model may be answered by another
+    # installed model (capability_routing.AUTOSWITCH_MODES):
+    #   off    = never; the selected or loaded model always answers
+    #   ask    = never on its own; the reply offers the model it would switch to
+    #   loaded = only to a model that is already loaded (nothing is loaded or evicted)
+    #   auto   = to an installed model when the current one is confirmed to lack
+    #            a capability the request needs (default)
+    #   eager  = as auto, and also when the current model's capability is unknown
+    "model_autoswitch": "auto",
     # Free the loaded model from VRAM after this many idle seconds, so a running
     # server stops holding the GPU; the next request reloads it lazily. 0 =
     # disabled (default): resident until an explicit unload or swap. Measured from

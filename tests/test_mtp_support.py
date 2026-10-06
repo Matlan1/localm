@@ -349,7 +349,7 @@ def test_the_stopped_statuses_are_ones_the_child_can_actually_report():
 
     src = Path(inspect.getfile(LlamaCppModule)).read_text(encoding="utf-8")
     for status in sorted(gguf_mod._MTP_STOPPED):
-        assert f'"{status}"' in src, (
+        assert f'"{status}' in src, (
             f"{status!r} is treated as a permanent stop but llama.py never "
             "reports it, so the entry is dead")
 
@@ -452,14 +452,21 @@ def _arm_drafting(llm):
     return llm
 
 
-def _run_generate(recorder, *, max_new_tokens, **kwargs):
-    """Run _generate against *recorder*; return (yielded tokens, the mock api)."""
+def _run_generate(recorder, *, max_new_tokens, decode=None, llm_holder=None, **kwargs):
+    """Run _generate against *recorder*; return (yielded tokens, the mock api).
+
+    *decode* replaces the recorder's decode; *llm_holder*, a list, receives the
+    LlamaCpp the run used.
+    """
     llm = make_bare_llama(
         _model_ptr=ctypes.c_void_p(1),
         _ctx_ptr=ctypes.c_void_p(2),
         _mtp_ctx_ptr=ctypes.c_void_p(3),
         supports_mtp=True,
+        mtp_status="ok:qwen35",
     )
+    if llm_holder is not None:
+        llm_holder.append(llm)
     _arm_drafting(llm)
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
     llm._fit_generation_budget = lambda n_prompt, max_new: max_new
@@ -473,7 +480,7 @@ def _run_generate(recorder, *, max_new_tokens, **kwargs):
         mock_api.llama_sampler_init_greedy.return_value = recorder.draft_sampler
         mock_api.llama_sampler_sample.side_effect = recorder.sample
         mock_api.llama_sampler_accept.side_effect = recorder.accept
-        mock_api.llama_decode.side_effect = recorder.decode
+        mock_api.llama_decode.side_effect = decode or recorder.decode
         tokens = list(llm._generate(
             prompt_tokens=[1, 2],
             max_new_tokens=max_new_tokens,
@@ -1064,8 +1071,6 @@ def test_mtp_draft_vram_is_zero_when_no_nextn_layers_are_declared():
 
 
 def test_mtp_draft_vram_charges_kv_plus_the_flat_overhead_when_eligible():
-    # n_ctx below the 2048 cap, so this test is about the arithmetic alone -
-    # see test_mtp_draft_vram_caps_the_draft_context_at_2048_tokens for the cap.
     b = _mtp_sizing_backend(n_ctx=1024)
     with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
                return_value=("qwen35", 1)), \
@@ -1075,16 +1080,16 @@ def test_mtp_draft_vram_charges_kv_plus_the_flat_overhead_when_eligible():
     assert charge == 1024 * 1000 + GgufBackend._VRAM_OVERHEAD_BYTES
 
 
-def test_mtp_draft_vram_caps_the_draft_context_at_2048_tokens():
-    # The main n_ctx is far above the 2048 cap llama.py's own
-    # cp_mtp.n_ctx = min(n_ctx, 2048) actually allocates.
+def test_mtp_draft_vram_scales_with_the_main_context_past_2048_tokens():
+    # The draft context is created at the main context's size, so its KV charge
+    # is not capped.
     b = _mtp_sizing_backend(n_ctx=65536)
     with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
                return_value=("qwen35", 1)), \
          patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
                return_value=1000):
         charge = b._mtp_draft_context_vram_bytes()
-    assert charge == 2048 * 1000 + GgufBackend._VRAM_OVERHEAD_BYTES
+    assert charge == 65536 * 1000 + GgufBackend._VRAM_OVERHEAD_BYTES
 
 
 def test_mtp_draft_vram_is_memoised_per_instance():
@@ -1376,3 +1381,338 @@ def test_bench_mtp_never_writes_the_setting(cli_runner):
 
     assert res.exit_code == 0, res.output
     assert load_config()["mtp_enabled"] is False
+
+
+# --------------------------------------------------------------------------- #
+#  Draft context sized to the main context; per-call stop; status kinds       #
+# --------------------------------------------------------------------------- #
+
+def _context_params():
+    return SimpleNamespace(ctx_type=0, n_ctx=0, n_batch=0, n_ubatch=0,
+                           offload_kqv=True, n_threads=0, n_threads_batch=0,
+                           n_rs_seq=0)
+
+
+def _context_factory(mock_api, refuse_draft=False):
+    """Make llama_init_from_model record each context's params; the context
+    asked for with ctx_type MTP is the draft one."""
+    made = []
+
+    def init(model, cp):
+        is_draft = cp.ctx_type == LLAMA_CONTEXT_TYPE_MTP
+        ptr = None if (is_draft and refuse_draft) else ctypes.c_void_p(100 + len(made))
+        made.append(SimpleNamespace(draft=is_draft, n_ctx=cp.n_ctx, n_batch=cp.n_batch,
+                                    offload_kqv=cp.offload_kqv, ptr=ptr))
+        return ptr
+
+    mock_api.llama_context_default_params.side_effect = _context_params
+    mock_api.llama_init_from_model.side_effect = init
+    mock_api.llama_set_embeddings_nextn.return_value = True
+    mock_api.llama_model_n_embd.return_value = 4
+    mock_api.llama_model_mtp_support.return_value = (True, "ok:qwen35")
+    mock_api.llama_decode.return_value = 0
+    return made
+
+
+def _growing_llama(target):
+    llm = make_bare_llama(
+        _model_ptr=ctypes.c_void_p(1),
+        _ctx_ptr=ctypes.c_void_p(2),
+        _mtp_ctx_ptr=ctypes.c_void_p(3),
+        supports_mtp=True,
+        mtp_status="ok:qwen35",
+    )
+    _arm_drafting(llm)
+    llm._mtp_ctx_capacity = 2048
+    llm._target_ctx = lambda needed: target
+    llm._capture_h = lambda row=-1: True
+    return llm
+
+
+def test_a_grown_main_context_gets_a_draft_context_of_the_same_size():
+    """The draft context is recreated at the main context's size, so a prompt
+    longer than 2048 tokens still speculates on the next request."""
+    llm = _growing_llama(target=8192)
+    batches = []
+    llm._create_batch = lambda tokens, pos, **kw: (
+        batches.append((len(tokens), pos)) or SimpleNamespace())
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        made = _context_factory(mock_api)
+        llm._prefill_fresh_context(list(range(2335)), 2400)
+
+    main, draft = made
+    assert (main.draft, main.n_ctx) == (False, 8192)
+    assert (draft.draft, draft.n_ctx) == (True, 8192), made
+    assert draft.n_batch == 2048
+    assert llm._mtp_ctx_capacity == 8192
+    assert llm._mtp_ctx_ptr is draft.ptr
+    # The 2335-token prompt was mirrored into the draft cache in two chunks.
+    draft_decodes = [c for c in mock_api.llama_decode.call_args_list
+                     if c.args[0] is draft.ptr]
+    assert len(draft_decodes) == 2
+    assert (llm.supports_mtp, llm._mtp_usable, llm.mtp_status) == (True, True, "ok:qwen35")
+
+
+def test_the_main_context_exposes_its_hidden_state_before_its_first_decode():
+    """A recreated main context has to be told to expose the next-n state again,
+    or no draft after the growth has a hidden state to read."""
+    llm = _growing_llama(target=8192)
+    llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace()
+    order = []
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        _context_factory(mock_api)
+        mock_api.llama_set_embeddings_nextn.side_effect = (
+            lambda ctx, *a: order.append(("expose", ctx.value)) or True)
+        mock_api.llama_decode.side_effect = (
+            lambda ctx, batch: order.append(("decode", ctx.value)) or 0)
+        llm._prefill_fresh_context([1, 2, 3], 10)
+
+    main_ptr = llm._ctx_ptr.value
+    assert order.index(("expose", main_ptr)) < order.index(("decode", main_ptr)), order
+
+
+def test_a_draft_context_that_cannot_be_recreated_stops_speculation_and_says_why():
+    llm = _growing_llama(target=8192)
+    llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace()
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        _context_factory(mock_api, refuse_draft=True)
+        llm._prefill_fresh_context([1, 2, 3], 10)
+
+    assert llm._mtp_ctx_ptr is None
+    assert llm.mtp_status == "context-refused"
+    assert (llm.supports_mtp, llm._mtp_usable) == (False, False)
+
+
+def test_the_draft_context_follows_the_main_contexts_kv_placement():
+    llm = _growing_llama(target=8192)
+    llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace()
+    llm._vram_check = lambda target, current: False
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        made = _context_factory(mock_api)
+        llm._prefill_fresh_context([1, 2, 3], 10)
+
+    assert [m.offload_kqv for m in made] == [False, False]
+
+
+def test_a_draft_cache_left_stale_by_a_failed_reply_is_refilled_from_the_whole_prompt():
+    def run(stale):
+        llm = _growing_llama(target=4096)
+        llm._mtp_ctx_capacity = 4096
+        llm._mtp_draft_stale = stale
+        llm._cached_tokens = [1, 2, 3]
+        llm._can_reuse_kv = lambda needed: True
+        decoded = {}
+        llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace(tokens=list(tokens), pos=pos)
+        with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+            mock_api.llama_memory_seq_rm.return_value = True
+            mock_api.llama_decode.side_effect = (
+                lambda ctx, batch: decoded.__setitem__(ctx.value, (batch.tokens, batch.pos)) or 0)
+            llm._prefill_with_reuse([1, 2, 3, 4])
+        return llm, decoded
+
+    llm, decoded = run(stale=True)
+    assert decoded[3] == ([1, 2, 3, 4], 0)       # draft cache refilled from position 0
+    assert decoded[2] == ([4], 3)                # main cache keeps its prefix
+    assert llm._mtp_draft_stale is False
+
+    _, decoded = run(stale=False)
+    assert decoded[3] == ([4], 3)                # control: a synced draft cache gets the suffix
+
+
+def _decode_that_fails_the_draft(recorder, fail_from, how):
+    """A decode that serves the recorder, except the draft context's decodes from
+    number *fail_from* on, which return 1 or raise. Draft-context decodes are the
+    draft step and, after an accepted draft, its mirror."""
+    seen = {"draft": 0}
+
+    def decode(ctx, batch):
+        if ctx.value == 3:
+            seen["draft"] += 1
+            if seen["draft"] >= fail_from:
+                if how == "raise":
+                    raise RuntimeError("draft decode blew up")
+                return 1
+        return recorder.decode(ctx, batch)
+
+    return decode, seen
+
+
+@pytest.mark.parametrize("how, status", [
+    ("return", "draft-decode-failed:1"),
+    ("raise", "draft-decode-error:RuntimeError"),
+])
+def test_a_draft_decode_failing_mid_reply_stops_drafting_and_reports_it(how, status):
+    rec = _SpecRecorder(head=[500, 502, 504, _SpecRecorder.EOG],
+                        draft=[501, 503], verify=[501])
+    decode, seen = _decode_that_fails_the_draft(rec, fail_from=3, how=how)
+    llm_holder = []
+
+    tokens, _ = _run_generate(rec, max_new_tokens=8, decode=decode, llm_holder=llm_holder)
+
+    llm = llm_holder[0]
+    assert tokens == [500, 501, 502, 504], tokens          # data before the flags
+    assert seen["draft"] == 3, "drafting continued after the draft decode failed"
+    assert llm.mtp_active_this_call is False
+    assert llm.mtp_call_status == status
+    # The model keeps its capability: only this reply stopped speculating.
+    assert (llm.supports_mtp, llm._mtp_usable, llm.mtp_status) == (True, True, "ok:qwen35")
+    assert llm._mtp_draft_stale is True
+
+
+def test_a_reply_that_never_fails_a_draft_reports_no_stop():
+    rec = _SpecRecorder(head=[500, _SpecRecorder.EOG], draft=[501], verify=[501])
+    llm_holder = []
+
+    _run_generate(rec, max_new_tokens=8, llm_holder=llm_holder)
+
+    assert llm_holder[0].mtp_call_status == ""
+    assert llm_holder[0].mtp_active_this_call is True
+
+
+def test_a_new_reply_drafts_again_after_one_that_stopped():
+    rec = _SpecRecorder(head=[500, 502, _SpecRecorder.EOG], draft=[501], verify=[501])
+    decode, _ = _decode_that_fails_the_draft(rec, fail_from=3, how="return")
+    llm_holder = []
+    _run_generate(rec, max_new_tokens=8, decode=decode, llm_holder=llm_holder)
+    llm = llm_holder[0]
+    assert llm.mtp_call_status != ""
+
+    rec2 = _SpecRecorder(head=[600, _SpecRecorder.EOG], draft=[601], verify=[601])
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api, \
+         patch("localm.inference.backends.llamacpp.llama._build_sampler",
+               return_value=rec2.main_sampler):
+        mock_api.llama_sampler_init_greedy.return_value = rec2.draft_sampler
+        mock_api.llama_sampler_sample.side_effect = rec2.sample
+        mock_api.llama_sampler_accept.side_effect = rec2.accept
+        mock_api.llama_decode.side_effect = rec2.decode
+        tokens = list(llm._generate(prompt_tokens=[1, 2], max_new_tokens=8,
+                                    temperature=0.8, top_k=40, top_p=0.95,
+                                    repeat_penalty=1.1))
+
+    assert tokens == [600, 601], tokens
+    assert "DRAFT" in rec2.shapes()
+    assert llm.mtp_active_this_call is True
+    assert llm.mtp_call_status == ""
+
+
+@pytest.mark.parametrize("status", [
+    "draft-prefill-failed:-1", "draft-prefill-failed:2",
+    "draft-prefill-error:OSError", "draft-trim-error:RuntimeError",
+])
+def test_a_suffixed_permanent_status_latches_supports_mtp_off(status):
+    backend = GgufBackend("test_model.gguf")
+    backend._loaded = True
+    backend._supports_mtp = True
+
+    backend._record_mtp({"mtp_status": status, "mtp_active": False})
+
+    assert backend.supports_mtp is False
+    assert backend.last_mtp_status == status
+
+
+def test_every_status_the_child_disables_mtp_with_is_in_the_stop_set():
+    """The reverse of the vocabulary pin above: a status _disable_mtp can set
+    that the parent does not latch leaves supports_mtp True forever."""
+    import ast
+    from pathlib import Path
+
+    from localm.inference.backends import gguf as gguf_mod
+
+    tree = ast.parse(Path(inspect.getfile(LlamaCppModule)).read_text(encoding="utf-8"))
+    kinds = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_disable_mtp" and node.args):
+            arg = node.args[0]
+            if isinstance(arg, ast.BinOp):
+                arg = arg.left
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                kinds.add(arg.value.split(":", 1)[0])
+    assert kinds, "found no _disable_mtp call sites to check"
+    assert kinds <= gguf_mod._MTP_STOPPED, sorted(kinds - gguf_mod._MTP_STOPPED)
+
+
+def test_a_per_call_stop_is_recorded_without_latching_the_model_off():
+    backend = GgufBackend("test_model.gguf")
+    backend._loaded = True
+    backend._supports_mtp = True
+
+    backend._record_mtp({"mtp_status": "ok:qwen35", "mtp_active": False,
+                         "mtp_call_status": "draft-decode-failed:1"})
+
+    assert backend.last_mtp_call_status == "draft-decode-failed:1"
+    assert backend.last_mtp_active is False
+    assert backend.supports_mtp is True
+
+    backend._record_mtp({"mtp_status": "ok:qwen35", "mtp_active": True})
+    assert backend.last_mtp_call_status == ""
+
+
+def test_the_done_envelope_carries_the_per_call_stop():
+    import inspect as _inspect
+
+    from localm.inference.backends.llamacpp import _runner, _worker
+
+    assert '"mtp_call_status": worker.mtp_call_status' in _inspect.getsource(_runner)
+    w = _worker.GgufWorker.__new__(_worker.GgufWorker)
+    w._llm = SimpleNamespace(mtp_call_status="draft-decode-failed:1")
+    assert w.mtp_call_status == "draft-decode-failed:1"
+    w._llm = None
+    assert w.mtp_call_status == ""
+
+
+def test_the_draft_context_is_created_at_the_size_it_is_asked_for():
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        made = _context_factory(mock_api)
+        assert llm._create_mtp_context(16384) == ""
+
+    assert [(m.draft, m.n_ctx, m.n_batch) for m in made] == [(True, 16384, 2048)]
+    assert llm._mtp_ctx_capacity == 16384
+
+
+def test_a_small_context_gets_a_batch_no_larger_than_itself():
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        made = _context_factory(mock_api)
+        llm._create_mtp_context(1024)
+
+    assert (made[0].n_ctx, made[0].n_batch) == (1024, 1024)
+
+
+def test_a_context_growth_charges_the_draft_contexts_kv_too():
+    def decision(draft_per_token):
+        b = _mtp_sizing_backend(n_ctx=4096)
+        b.effective_gpu_layers = 99
+        b._kv_bytes_per_token = lambda: 1000
+        b._mtp_draft_kv_per_token = lambda: draft_per_token
+        # Room for the main KV growth (4096 * 1000) but not for the draft's too.
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=6_000_000):
+            return b._check_context_fit(8192, current_ctx=4096)
+
+    assert decision(0) is True
+    assert decision(1000) is False
+
+
+def test_the_draft_kv_per_token_is_the_probed_value_when_eligible_and_zero_otherwise():
+    b = _mtp_sizing_backend(n_ctx=4096)
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)), \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=1234):
+        assert b._mtp_draft_kv_per_token() == 1234
+    assert _mtp_sizing_backend(mtp_enabled=False)._mtp_draft_kv_per_token() == 0
+
+
+def test_a_draft_context_is_never_created_for_a_model_without_an_mtp_graph():
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        made = _context_factory(mock_api)
+        mock_api.llama_model_mtp_support.return_value = (False, "no-mtp-graph")
+        assert llm._create_mtp_context(4096) == "no-mtp-graph"
+
+    assert made == []

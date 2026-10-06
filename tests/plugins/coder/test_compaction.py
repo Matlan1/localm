@@ -126,16 +126,17 @@ class TestCompactHistory:
         assert len(agent._messages) < before
         assert len(agent._messages) == 6
 
-    def test_returns_false_on_backend_exception(self):
+    def test_backend_exception_keeps_a_digest_of_the_removed_messages(self):
         agent = _make_agent()
         agent._messages = _messages(6)
         agent.backend.chat.side_effect = RuntimeError("backend down")
 
         result = agent._compact_history()
 
-        assert result is False
-        # messages unchanged on failure
-        assert len(agent._messages) == 6
+        assert result is True
+        assert "message 0" in agent._messages[0]["content"]
+        assert "message 1" in agent._messages[0]["content"]
+        assert agent._messages[-4:] == _messages(6)[-4:]
 
     def test_multipart_content_handled(self):
         """Messages with list-type content should not raise."""
@@ -368,3 +369,101 @@ def test_compaction_marks_the_body_on_the_grammar_path_too():
     covered = "".join(str(sent[0]["content"])[a:b]
                       for a, b in untrusted_spans_of(sent[0]["content"]))
     assert _EXOTIC in covered
+
+
+# ---------------------------------------------------------------------------
+#  The tail is well formed and the pending request survives
+# ---------------------------------------------------------------------------
+
+_TOOL_SESSION = [
+    {"role": "user", "content": "old question"},
+    {"role": "assistant", "content": "old answer"},
+    {"role": "user", "content": "im asking you to diagnose the web search issue"},
+    {"role": "assistant", "content": '[TOOL_CALLS] web_search {"query": "x"}'},
+    {"role": "user", "content": "<tool_result>x</tool_result>"},
+    {"role": "assistant", "content": "ok"},
+    {"role": "user", "content": "can you figure out what is broken?"},
+]
+
+
+def _roles_alternate(messages):
+    roles = [m["role"] for m in messages]
+    return roles[0] == "user" and all(a != b for a, b in zip(roles, roles[1:]))
+
+
+class TestTailAndPendingRequest:
+    def test_tool_session_alternates_and_keeps_the_request(self):
+        agent = _make_agent()
+        agent.backend.supports_grammar = False
+        agent.backend.chat.return_value = "Generic summary."
+        agent._messages = [dict(m) for m in _TOOL_SESSION]
+        agent._last_user_request = "im asking you to diagnose the web search issue"
+
+        assert agent._compact_history() is True
+
+        assert _roles_alternate(agent._messages), [m["role"] for m in agent._messages]
+        joined = "\n".join(str(m["content"]) for m in agent._messages)
+        assert "im asking you to diagnose the web search issue" in joined
+        assert agent._messages[-1]["content"] == "can you figure out what is broken?"
+        assert not str(agent._messages[2]["content"]).startswith("<tool_result")
+
+    def test_the_request_is_carried_into_the_summary_when_it_was_removed(self):
+        agent = _make_agent()
+        agent.backend.supports_grammar = False
+        agent.backend.chat.return_value = "Generic summary."
+        msgs = [{"role": "user", "content": "fix the parser please"}]
+        for i in range(6):
+            msgs.append({"role": "assistant", "content": f"[TOOL_CALLS] read_file {i}"})
+            msgs.append({"role": "user", "content": f"<tool_result>{i}</tool_result>"})
+        agent._messages = msgs
+        agent._last_user_request = "fix the parser please"
+
+        assert agent._compact_history() is True
+
+        summary = str(agent._messages[0]["content"])
+        assert "Current request (verbatim):\nfix the parser please" in summary
+        assert _roles_alternate(agent._messages)
+        prompt = str(agent.backend.chat.call_args[0][0][0]["content"])
+        assert "fix the parser please" in prompt
+
+    def test_summariser_runs_with_thinking_off_and_a_larger_budget(self):
+        agent = _make_agent()
+        agent._messages = _messages(8)
+        agent._compact_history()
+        kwargs = agent.backend.chat.call_args.kwargs
+        assert kwargs["thinking"] is False
+        assert kwargs["max_tokens"] == 1024
+
+    def test_an_empty_summary_keeps_a_digest(self):
+        agent = _make_agent()
+        agent.backend.supports_grammar = False
+        agent.backend.chat.return_value = ""
+        agent._messages = _messages(8)
+        assert agent._compact_history() is True
+        assert "message 0" in str(agent._messages[0]["content"])
+
+
+class TestHttpBackendThinking:
+    def _backend(self, local):
+        from localm.plugins.coder.backends.http import HTTPBackend
+        b = object.__new__(HTTPBackend)
+        b.anthropic = False
+        b._model = "m"
+        b._extra = {}
+        b.native_tools = False
+        b._tool_defs = []
+        b._is_local_server = local
+        b.model_pinned = True
+        b.required_capabilities = None
+        b._with_untrusted_spans = lambda msgs: msgs
+        return b
+
+    def test_a_localm_server_gets_chat_template_kwargs(self):
+        body = self._backend(True)._body([], stream=False, thinking=False, max_tokens=5)
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert "thinking" not in body
+
+    def test_another_server_gets_no_thinking_field(self):
+        body = self._backend(False)._body([], stream=False, thinking=False)
+        assert "thinking" not in body
+        assert "chat_template_kwargs" not in body

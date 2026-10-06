@@ -316,7 +316,8 @@ def _headless_routed_model(job: Job) -> Optional[str]:
             required.append("tool_use")
     needs = cr.request_needs(
         [{"role": "user", "content": job.prompt or ""}], required=required)
-    decision = cr.plan_route(current, needs, pinned=bool(job.model))
+    decision = cr.plan_route(current, needs, pinned=bool(job.model),
+                             mode=cr.configured_mode())
     return decision.resolved
 
 

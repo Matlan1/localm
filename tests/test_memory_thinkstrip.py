@@ -167,7 +167,7 @@ def test_compaction_summary_never_contains_think():
     assert "Talked about turns." in joined
 
 
-def test_compaction_all_think_summary_falls_back_to_trim():
+def test_compaction_all_think_summary_falls_back_to_a_digest():
     from localm.inference.compact import compact_messages
     msgs = [{"role": "system", "content": "sys"}] + [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
@@ -177,7 +177,7 @@ def test_compaction_all_think_summary_falls_back_to_trim():
     assert changed
     joined = json.dumps(out)
     assert "<think" not in joined
-    assert "removed to fit the context window" in joined
+    assert "condensed to fit the context window" in joined
 
 
 # -------------------------------------------------------- coder reflection #
