@@ -40,7 +40,7 @@ HASHES = {"x_grants": "aaaaaaaaaaaa", "x_normalize": "bbbbbbbbbbbb"}
 
 def _results(mutants: dict[str, str], hashes: dict[str, str] | None = None,
              module: str = MOD) -> dict:
-    return {module: {"mutants": dict(mutants), "function_hashes": dict(hashes or HASHES)}}
+    return {module: {"mutants": dict(mutants), "function_hashes": dict(HASHES if hashes is None else hashes)}}
 
 
 def _baseline(mutants: dict, floor: float = 100.0, hashes: dict | None = None,
@@ -62,7 +62,7 @@ def _write_meta(root: Path, module: str, exit_codes: dict, hashes: dict | None =
     meta.parent.mkdir(parents=True, exist_ok=True)
     meta.write_text(json.dumps({
         "exit_code_by_key": exit_codes,
-        "hash_by_function_name": dict(hashes or HASHES),
+        "hash_by_function_name": dict(HASHES if hashes is None else hashes),
         "type_check_error_by_key": {},
         "durations_by_key": {},
         "estimated_durations_by_key": {},
@@ -117,6 +117,22 @@ class TestParsing:
         meta.write_text("{not json", encoding="utf-8")
         results, problems = cmf.load_results(tmp_path, [MOD])
         assert results == {} and len(problems) == 1 and "could not read" in problems[0]
+
+    @pytest.mark.parametrize("meta", [
+        {"exit_code_by_key": []},
+        {"exit_code_by_key": {M1: 1}},
+        {"exit_code_by_key": {M1: 1}, "hash_by_function_name": []},
+        {"exit_code_by_key": {M1: [1]}, "hash_by_function_name": {}},
+        {"hash_by_function_name": {}},
+        [],
+    ])
+    def test_load_results_reports_every_malformed_meta_as_could_not_read(self, tmp_path, meta):
+        path = tmp_path / (MOD + ".meta")
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        results, problems = cmf.load_results(tmp_path, [MOD])
+        assert results == {}
+        assert len(problems) == 1 and MOD in problems[0] and "could not read" in problems[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +275,40 @@ class TestCheck:
         problems, warnings, _ = cmf.check(res, base, [MOD])
         assert problems == []
         assert len(warnings) == 1 and "changed or were removed" in warnings[0] and M3 in warnings[0]
+
+    def test_missing_function_hashes_is_a_problem_not_a_pass(self):
+        res = _results({M1: "killed"}, hashes={})
+        base = _baseline({M1: "killed", M3: "survived"}, floor=50.0)
+        problems, warnings, rows = cmf.check(res, base, [MOD])
+        assert len(problems) == 1 and "no function hashes" in problems[0]
+        assert not any("changed or were removed" in w for w in warnings)
+        assert not rows or rows[0]["score"] != 100.0
+
+    def test_empty_results_module_is_a_problem(self):
+        res = _results({}, hashes={})
+        base = _baseline({M1: "killed", M3: "survived"}, floor=50.0)
+        problems, warnings, rows = cmf.check(res, base, [MOD])
+        assert len(problems) == 1 and "hold no mutants" in problems[0]
+        assert rows == []
+
+    def test_empty_results_with_full_hashes_is_a_problem(self):
+        res = _results({})
+        base = _baseline({M1: "killed"}, floor=100.0)
+        problems, _, rows = cmf.check(res, base, [MOD])
+        assert len(problems) == 1 and "hold no mutants" in problems[0] and rows == []
+
+    def test_non_mutant_key_is_a_named_problem_not_a_crash(self):
+        res = _results({"localm.scopes.some_helper": "killed", M1: "killed"})
+        base = _baseline({M1: "killed"})
+        problems, _, _ = cmf.check(res, base, [MOD])
+        assert len(problems) == 1 and MOD in problems[0] and "some_helper" in problems[0]
+
+    def test_non_mutant_control_id_is_a_named_problem_not_a_crash(self):
+        res = _results({M1: "killed"})
+        base = _baseline({M1: "killed"}, controls={
+            "c": {"module": MOD, "mutant": "localm.scopes.some_helper"}})
+        problems, _, _ = cmf.check(res, base, [MOD])
+        assert len(problems) == 1 and "control 'c'" in problems[0] and "some_helper" in problems[0]
 
     def test_module_without_a_baseline_entry_fails(self):
         res = _results({M1: "killed"})
@@ -581,6 +631,33 @@ class TestMain:
         assert cmf.main(argv) == 1
         text = summary.read_text(encoding="utf-8")
         assert "### Mutation floors" in text and "**FAILED**" in text and M1 in text
+
+    def test_real_baseline_with_one_emptied_module_fails(self, tmp_path, capsys):
+        """The committed baseline with every module reproducing its recorded
+        outcomes except one whose meta is empty must not pass."""
+        real = json.loads((SCRIPTS / "mutation_baseline.json").read_text(encoding="utf-8"))
+        modules = cmf.only_mutate_modules((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        victim = "localm/auth.py"
+        assert victim in modules
+        mutants = tmp_path / "mutants"
+        for module in modules:
+            entry = real["modules"][module]
+            if module == victim:
+                path = mutants / (module + ".meta")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"exit_code_by_key": {}}), encoding="utf-8")
+                continue
+            codes = {m: (0 if cmf._disposition(v)[0] == "survived" else 1)
+                     for m, v in entry["mutants"].items()}
+            _write_meta(mutants, module, codes, hashes=entry["function_hashes"])
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(f"[tool.mutmut]\nonly_mutate = {json.dumps(modules)}\n",
+                             encoding="utf-8")
+        argv = ["--mutants", str(mutants), "--baseline", str(SCRIPTS / "mutation_baseline.json"),
+                "--pyproject", str(pyproject)]
+        assert cmf.main(argv) == 1
+        err = capsys.readouterr().err
+        assert victim in err and "could not read" in err
 
     def test_empty_only_mutate_exits_one(self, tmp_path, capsys):
         argv = self._setup(tmp_path, {M1: 1}, _baseline({M1: "killed"}))
