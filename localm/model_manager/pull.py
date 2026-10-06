@@ -1964,7 +1964,7 @@ def _pull_hf_snapshot(
     # then the download has written real bytes to disk.
     registered = _mm._register_with_dedup(
         model_name, dest, f"hf:{repo_id}",
-        model_type=_resolve_snapshot_type(dest, model_type))
+        model_type=_resolve_snapshot_type(dest, model_type), refresh=True)
     if not registered:
         # TAG-INJECTION site: repo_id/dest sit directly inside the OPEN
         # [yellow]...[/yellow] tag. model_name is _sanitize_name()-derived and
@@ -2817,8 +2817,16 @@ def _pull_civitai_file_locked(
         console.print(f"[dim]SHA256: {escape(actual)}[/dim]")
 
     if register:
-        _mm._register_with_dedup(model_name, dest, resolved.source_tag,
-                                 digest=actual, model_type=reg_type)
+        registered = _mm._register_with_dedup(
+            model_name, dest, resolved.source_tag, digest=actual,
+            model_type=reg_type, refresh=True)
+        if not registered:
+            console.print(
+                f"[yellow]{escape(filename)} was downloaded to {escape(str(dest))}, "
+                f"but could not be registered as '{escape(model_name)}'[/yellow] "
+                "(see message above) - the file is on disk. Retry with a "
+                "different -n name, or 'localm alias' it in.")
+            return False
     _report_success(
         f"[green]✓[/green] [bold]{escape(model_name)}[/bold] downloaded to "
         f"{escape(str(dest))}",

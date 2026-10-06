@@ -2580,6 +2580,7 @@ def _register_with_dedup(
     architecture: Optional[str] = None,
     expert_count: Optional[int] = None,
     attached_projector_only: bool = False,
+    refresh: bool = False,
 ) -> bool:
     """
     Register a model, detecting duplicates first.
@@ -2603,6 +2604,12 @@ def _register_with_dedup(
     recorded on the new entry when no *mmproj* was given, and on a move also on
     every other name that pointed at *p* and has none.
 
+    *refresh* is for a caller that has just written *p*'s bytes (a pull): an
+    entry of the same name already holding *p* then takes *source* and *digest*
+    from this call, and drops its stored sha256 when no *digest* is given. Every
+    other key on the entry is kept. Without it that same-file case only
+    backfills what is missing and never rewrites an entry's provenance.
+
     Returns True when *model_name* ends up correctly registered for *p*
     (freshly registered, aliased, deduped, or already correct) - False for
     every path where nothing was written: a real name/content conflict
@@ -2622,10 +2629,30 @@ def _register_with_dedup(
     # Same name, same file - true no-op (but backfill a fresh digest / mmproj /
     # architecture / expert_count)
     if model_name in aliases:
-        console.print(
-            f"[yellow]'{escape(model_name)}' is already registered for this exact "
-            f"file[/yellow] [dim]({escape(str(p))})[/dim]"
-        )
+        entry = reg[model_name]
+        need_refresh = refresh and (
+            entry.get("source") != source
+            or (entry.get("sha256") or None) != (digest.lower() if digest else None))
+        if need_refresh:
+            def _refresh(r: dict) -> None:       # atomic RMW
+                e = r.get(model_name)
+                if not isinstance(e, dict):
+                    return
+                e["source"] = source
+                if digest:
+                    e["sha256"] = digest.lower()
+                else:
+                    e.pop("sha256", None)
+            _mm.update_registry(_refresh)
+            reg = _mm.load_registry()
+            console.print(
+                f"[green]✓[/green] Updated [bold]{escape(model_name)}[/bold] "
+                f"to {escape(source)}")
+        else:
+            console.print(
+                f"[yellow]'{escape(model_name)}' is already registered for this exact "
+                f"file[/yellow] [dim]({escape(str(p))})[/dim]"
+            )
         need_sha_backfill = bool(digest) and not reg[model_name].get("sha256")
         need_mmproj_backfill = bool(mmproj) and not reg[model_name].get("mmproj")
         # "key" not in e (not a truthiness check): expert_count=0 is a real,
