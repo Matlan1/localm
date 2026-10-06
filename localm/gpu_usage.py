@@ -668,9 +668,11 @@ def raw_reading_is_process_scoped() -> bool:
     while a fresh import is the known-doomed native-runtime DLL conflict
     (``discover._torch_gpu_probe_known_doomed``): a second thread blocking on
     CPython's per-module import lock behind such an import can hard-crash the
-    process on this platform's ROCm native preload. In those two cases, and when
-    a permitted fresh import itself fails, the resident-HIP-runtime signal
-    answers. Reuses discover's probe-tracking lock. Never raises."""
+    process on this platform's ROCm native preload. Never imports torch either
+    in a process that has loaded the native llama.cpp runtime
+    (``_loader.native_lib_loaded``). In those three cases, and when a permitted fresh import itself fails, the
+    resident-HIP-runtime signal answers. Reuses discover's probe-tracking lock.
+    Never raises."""
     import sys
     if sys.platform != "win32":
         return False
@@ -686,6 +688,13 @@ def raw_reading_is_process_scoped() -> bool:
                 # The resident-runtime signal answers instead of importing torch.
                 return _known_blind_without_torch(
                     "a fresh torch import here is the known-doomed DLL conflict")
+            from localm.inference.backends.llamacpp import _loader
+            if _loader.native_lib_loaded():
+                # Torch is never imported into a process that holds the native
+                # llama.cpp runtime. See
+                # test_raw_reading_never_imports_torch_beside_the_native_runtime.
+                return _known_blind_without_torch(
+                    "the native llama.cpp runtime is loaded in this process")
             try:
                 import torch
             except Exception as e:

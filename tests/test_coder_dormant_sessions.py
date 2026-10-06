@@ -8,6 +8,7 @@ checkpoint - so the assertions here are on WHICH conversation came back, never
 on the `resumed` flag alone. A boolean cannot tell those two apart.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -544,6 +545,41 @@ class TestRemovingAProject:
         assert str(proj.resolve()) in _listed_paths(), (
             "forgot the project although its sessions are still on disk")
         assert r.status_code == 500, r.text
+
+
+def _link_dir(link, target):
+    """Make *link* a directory symlink (POSIX) or junction (Windows)."""
+    import os
+    import subprocess
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                       check=True, capture_output=True)
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_a_linked_project_checkpoint_dir_is_refused_and_its_target_left_intact(
+        tmp_path, monkeypatch):
+    import localm.config as _cfg
+    from localm.plugins.coder.agent.checkpoint import (
+        _project_dir_for, delete_project_checkpoints,
+    )
+    home = tmp_path / ".localm"
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    proj = tmp_path / "proj"; proj.mkdir()
+    target = tmp_path / "precious"; target.mkdir()
+    (target / "a.json").write_text("{}", encoding="utf-8")
+    (target / "notes.txt").write_text("keep me", encoding="utf-8")
+    d = _project_dir_for(proj)
+    d.parent.mkdir(parents=True)
+    _link_dir(d, target)
+
+    with pytest.raises(OSError):
+        delete_project_checkpoints(proj)
+
+    assert sorted(p.name for p in target.iterdir()) == ["a.json", "notes.txt"]
+    assert (target / "notes.txt").read_text(encoding="utf-8") == "keep me"
+    assert os.path.lexists(d), "the link itself was removed"
 
 
 @pytest.mark.parametrize("method,body", [

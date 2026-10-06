@@ -516,3 +516,13 @@ def test_extract_handles_n_files_independently(api_mode_app):
         assert d["truncated"] is False
         for other in "ABC".replace(name[0].upper(), ""):
             assert other * 3 + "-CANARY" not in d["text"], f"{name} bled into another file"
+
+
+def test_extract_refuses_an_image_without_telling_the_user_to_load_a_vision_model(api_mode_app):
+    """This route never describes images, so loading a vision model cannot help."""
+    with TestClient(api_mode_app) as c:
+        r = _extract(c, "Screenshot.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    detail = r.json().get("detail", "")
+    assert "load a vision" not in detail and "projector" not in detail
+    assert "Screenshot.png" in detail and "Chat" in detail
+    assert r.status_code == 422

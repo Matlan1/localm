@@ -471,7 +471,7 @@ _SAFE_CONFIG_KEYS = (
 # packages are simply skipped, so this stays correct across install profiles.
 _REPORTED_DISTS = (
     "localm", "localm-llama-runtime", "llama-cpp-python", "torch", "transformers",
-    "huggingface-hub", "fastapi", "uvicorn", "ctranslate2", "faster-whisper",
+    "huggingface-hub", "fastapi", "uvicorn", "ctranslate2", "faster-whisper", "av",
 )
 
 

@@ -121,13 +121,16 @@ def _voice_error_status(e: VoiceError) -> tuple[int, str]:
     """Map the structured failure class to a status code. 501 = the capability
     is not installed; 409 = the model download is blocked by the network policy
     (a state conflict another request - the download action, a config change -
-    can resolve, not a defect in this recording); everything else is a 422 on
+    can resolve, not a defect in this recording); 500 = the decoder library
+    itself failed (not the recording's fault); everything else is a 422 on
     this input."""
     code = getattr(e, "code", "")
     if code == "needs-faster-whisper":
         return 501, str(e)
     if code == "download-blocked":
         return 409, str(e)
+    if code == "decoder-fault":
+        return 500, str(e)
     return 422, str(e)
 
 
