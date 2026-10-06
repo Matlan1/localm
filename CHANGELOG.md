@@ -49,8 +49,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   You can now change the model powering an active coder session in place without
   starting a new session or losing history. In the GUI, click the session model
   badge in the session bar or use the Model section in session controls; switching
-  the active model in the sidebar also updates local coder sessions that were not
-  started with a chosen model.
+  the active model in the sidebar also updates every local coder session that was not
+  started with a chosen model (a busy one once its task ends), and never a session on
+  another backend such as Ollama on localhost. A model switch made from a coder session
+  now refreshes the sidebar model list straight away.
   When loading the chosen model would evict a model that is in use, or would only
   partly fit in VRAM, the coder asks first, as the sidebar model picker does. If
   the load does not complete, starting a session reports why instead of starting
