@@ -181,6 +181,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A very large request no longer stays in memory through the activity log.** The 
+  recent-activity log (shown in the control window and attached to bug reports) now 
+  keeps at most 2000 characters of each entry, marked as truncated, so a multi-megabyte 
+  query or prompt cannot pin its full text in memory or slow the window and bug-report 
+  saving.
 - **The coder answers a question in plain text instead of forcing a tool call.** A
   message such as "why does web search sometimes fail?" used to count as a request
   to act because it contained a word like "search" or "check", and the coder then
