@@ -938,6 +938,23 @@ class LlamaCpp:
     _pending_h = None            # the hidden state the next draft will read
     _h_buf = None                # reusable copy target for it
     _n_embd = 0
+    # The prompt the image path last evaluated into the KV cache, one
+    # (key, n_pos) pair per unit: a text token id with n_pos 1, or a media
+    # chunk's key with its n_pos. The reply decoded after it is not recorded.
+    # None when the KV cache does not start with such a prompt.
+    _vision_kv: Optional[List[Tuple[object, int]]] = None
+
+    @property
+    def _cached_tokens(self) -> List[int]:
+        """Tokens the text path holds in the KV cache.
+
+        Assigning it also drops the image path's record (``_vision_kv``)."""
+        return self._text_kv_tokens
+
+    @_cached_tokens.setter
+    def _cached_tokens(self, tokens: List[int]) -> None:
+        self._text_kv_tokens = tokens
+        self._vision_kv = None
 
     def __init__(
         self,
@@ -1973,10 +1990,12 @@ class LlamaCpp:
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s).
 
-        The image+text prompt is evaluated into the KV cache by mtmd (CPU clip);
-        sampling then continues exactly like the text loop. Grammar is not applied
-        on the image path. mtmd fills the KV from scratch, so the text KV-reuse
-        cache is invalidated afterwards.
+        The image+text prompt is evaluated into the KV cache by
+        :meth:`_prefill_vision`, which keeps the part of the cache an earlier
+        image turn left that still matches; sampling then continues exactly like
+        the text loop. Grammar is not applied on the image path. The text path's
+        KV record (``_cached_tokens``) is left empty, so the next text turn
+        prefills from scratch.
 
         BOUNDARY LOGGING: same scheme as _generate (prefill start/complete,
         decode entered, complete/aborted with phase and token count). The
@@ -1997,8 +2016,6 @@ class LlamaCpp:
             # embeddings arrive in that same slot.
             self.mtp_active_this_call = False
             logger.info("gguf generate (vision): prefill starting")
-            if on_status:
-                on_status("Encoding image (GPU)..." if getattr(self._mtmd, "on_gpu", False) else "Encoding image (CPU)...")
             _t0 = time.monotonic()
             tokens_generated = 0
             in_decode = False
@@ -2016,19 +2033,6 @@ class LlamaCpp:
                 # text path gets in _Tokenizer.encode.
                 pretokenizer_guard.check_text(self._tokenizer._pre_type, prompt)
 
-                # mtmd fills the KV from scratch every call (no reuse across
-                # turns - see the class docstring), and llama.cpp fails a batch
-                # that does not fit its context ("failed to find a memory slot")
-                # instead of growing to make room - identically on GPU and CPU,
-                # since it is a KV-capacity limit, not a compute-backend fault.
-                # Left unsized, that failure is indistinguishable from the
-                # unrelated gfx1030/RDNA2 hipBLAS bug below, wasting a CPU retry
-                # before still failing. Counting first also gives an oversized
-                # image/conversation the same graceful ContextCapacityExceededError
-                # _generate's text path already gives instead of a native abort.
-                n_prompt = self._mtmd.count_tokens(prompt, images, add_special=add_special)
-                max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
-
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd
                 # prefill AND AGAIN INSIDE THE PER-TOKEN LOOP (the llama_decode
@@ -2041,48 +2045,49 @@ class LlamaCpp:
                 # path needs the same per-call-not-per-token restructuring
                 # _generate() has.
                 _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
-                self.last_finish_reason = "stop"
                 with self._gen_lock:
                     if self._stop.is_set() or self._ctx_ptr is None:
                         return
                     with _ctx():
-                        # If unlimited (<= 0), reserve the same modest chunk
-                        # _generate does rather than sizing for a runaway reply.
-                        initial_budget = max_new_tokens if max_new_tokens > 0 else 512
-                        needed = n_prompt + initial_budget + 64
-                        if needed > self._ctx_capacity:
-                            # Too small for this turn - grow it. This also
-                            # leaves a fresh, empty KV, so no separate reset.
-                            self._prefill_fresh_context([], needed)
-                        else:
-                            # Already big enough: just clear any prior turn's KV
-                            # so the mtmd prefill from position 0 is valid on a
-                            # reused context.
-                            self._reset_kv_for_image()
-                        from .mtmd import MtmdGpuEncodeFailed
+                        vprompt = self._mtmd.tokenize(prompt, images, add_special=add_special)
                         try:
-                            pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
-                                                       add_special=add_special)
-                        except MtmdGpuEncodeFailed:
-                            # The projector runs on the GPU now; a GPU encode that fails
-                            # mid-flight (the documented gfx1030 / RDNA2 hipBLAS BF16
-                            # case) is worth exactly one CPU retry before the request
-                            # fails. The KV must be reset again first: the failed
-                            # evaluation already wrote into it. Rebuilding is latched in
-                            # the MtmdContext, so this costs one retry per model load,
-                            # not one per image.
-                            if not self._mtmd.retry_on_cpu():
-                                raise
-                            if on_status:
-                                from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
-                                on_status(VISION_CPU_FALLBACK_STATUS)
-                            self._reset_kv_for_image()
-                            pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
-                                                       add_special=add_special)
+                            # Sizes the context from the tokenized prompt before
+                            # any evaluation; a prompt over n_ctx_max raises
+                            # ContextCapacityExceededError here.
+                            n_prompt = vprompt.n_tokens
+                            max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
+                            encoded_before = self._mtmd.encode_count
+                            self.last_finish_reason = "stop"
+                            # If unlimited (<= 0), reserve the same modest chunk
+                            # _generate does rather than sizing for a runaway reply.
+                            initial_budget = max_new_tokens if max_new_tokens > 0 else 512
+                            needed = n_prompt + initial_budget + 64
+                            from .mtmd import MtmdGpuEncodeFailed
+                            try:
+                                pos, reused = self._prefill_vision(vprompt, needed, on_status)
+                            except MtmdGpuEncodeFailed:
+                                # One CPU retry per model load: retry_on_cpu()
+                                # returns False once the projector is on the CPU.
+                                # The retry re-tokenizes and evaluates from an
+                                # empty KV cache.
+                                if not self._mtmd.retry_on_cpu():
+                                    raise
+                                if on_status:
+                                    from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+                                    on_status(VISION_CPU_FALLBACK_STATUS)
+                                vprompt.free()
+                                vprompt = self._mtmd.tokenize(
+                                    prompt, images, add_special=add_special)
+                                self._vision_kv = None
+                                pos, reused = self._prefill_vision(vprompt, needed)
+                        finally:
+                            vprompt.free()
 
                 logger.info(
                     "gguf generate (vision): prefill complete in %.2fs, "
-                    "%d image(s)", time.monotonic() - _t0, len(images))
+                    "%d image(s), %d image chunk(s) encoded, %d of %d position(s) "
+                    "reused", time.monotonic() - _t0, len(images),
+                    self._mtmd.encode_count - encoded_before, reused, pos)
                 if on_status:
                     on_status("Generating response...")
 
@@ -2124,6 +2129,7 @@ class LlamaCpp:
                             ret = api.llama_decode(self._ctx_ptr, batch)
                         if ret != 0:
                             self.last_finish_reason = "length"
+                            self._vision_kv = None
                             api.llama_batch_free(batch)
                             break
                         api.llama_batch_free(batch)
@@ -2158,6 +2164,109 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
+
+    def _prefill_vision(self, vprompt, needed: int,
+                        on_status: Optional[Callable[[str], None]] = None) -> Tuple[int, int]:
+        """Evaluate the tokenized image prompt *vprompt* (an ``MtmdPrompt``) into
+        the KV cache and return ``(n_past, reused)``.
+
+        Keeps the longest prefix of the cache that ``_vision_kv`` shows matches
+        *vprompt* (text tokens by id, media chunks by key), stopping at least one
+        token or image short of the whole prompt, and evaluates only the rest; *reused* is the
+        number of positions kept. Nothing is kept when the context has to grow to
+        *needed* tokens, when ``_can_reuse_kv`` refuses, when there is no record,
+        or when the cache cannot drop its tail. Media chunks go through
+        ``MtmdContext.eval_media_chunk``, so an image whose embeddings are cached
+        is not encoded again, and the cache then keeps only this prompt's images.
+
+        Emits ``"Encoding image (GPU)..."`` or ``"Encoding image (CPU)..."``
+        through *on_status* when an image has to be encoded, else
+        ``"Processing prompt..."``. Raises ``MtmdGpuEncodeFailed`` or
+        ``VisionInputError`` when evaluation fails, leaving ``_vision_kv`` None.
+        Caller must hold ``_gen_lock``."""
+        from localm.inference.backends.base import VisionInputError
+
+        units: List[Tuple[object, int]] = []
+        starts: List[int] = []
+        for chunk in vprompt.chunks:
+            starts.append(len(units))
+            if chunk.tokens is not None:
+                units.extend((tok, 1) for tok in chunk.tokens)
+            else:
+                key = chunk.key if chunk.key is not None else object()
+                units.append((key, chunk.n_pos))
+
+        keep = 0
+        if needed > self._ctx_capacity:
+            self._prefill_fresh_context([], needed)
+        elif self._vision_kv is not None and self._can_reuse_kv(needed):
+            keep = min(_common_prefix_len(self._vision_kv, units), len(units) - 1)
+            if keep > 0:
+                keep_pos = sum(n_pos for _, n_pos in units[:keep])
+                mem = api.llama_get_memory(self._ctx_ptr)
+                if not api.llama_memory_seq_rm(mem, 0, keep_pos, -1):
+                    keep = 0
+            if keep <= 0:
+                keep = 0
+                self._reset_kv_for_image()
+        else:
+            self._reset_kv_for_image()
+        self._vision_kv = None
+
+        if on_status:
+            encoding = any(
+                chunk.tokens is None and start >= keep
+                and not self._mtmd.has_embedding(chunk.key)
+                for chunk, start in zip(vprompt.chunks, starts))
+            if not encoding:
+                on_status("Processing prompt...")
+            elif self._mtmd.on_gpu:
+                on_status("Encoding image (GPU)...")
+            else:
+                on_status("Encoding image (CPU)...")
+
+        n_ctx = api.llama_n_ctx(self._ctx_ptr)
+        n_batch = min(n_ctx, 2048) if n_ctx else 512
+        reused = sum(n_pos for _, n_pos in units[:keep])
+        pos = reused
+        for chunk, start in zip(vprompt.chunks, starts):
+            if chunk.tokens is not None:
+                rest = chunk.tokens[min(max(keep - start, 0), len(chunk.tokens)):]
+                if rest:
+                    pos = self._decode_vision_text(rest, pos, n_batch)
+            elif start >= keep:
+                pos = self._mtmd.eval_media_chunk(self._ctx_ptr, chunk, pos, n_batch)
+        if pos <= 0 or (n_ctx and pos > n_ctx):
+            raise VisionInputError(
+                f"the image prompt ended at an implausible position "
+                f"(n_past={pos}, context size={n_ctx}) - refusing to generate "
+                f"from a likely-corrupted KV state")
+        self._vision_kv = units
+        self._mtmd.retain_embeddings(
+            chunk.key for chunk in vprompt.chunks if chunk.key is not None)
+        return pos, reused
+
+    def _decode_vision_text(self, tokens, pos: int, n_batch: int) -> int:
+        """Decode the prompt *tokens* at positions starting at *pos*, *n_batch* at
+        a time, and return the position after them. A failed decode raises
+        ``MtmdGpuEncodeFailed`` while the projector is on the GPU, else
+        ``VisionInputError``."""
+        from localm.inference.backends.base import VisionInputError
+
+        from .mtmd import MtmdGpuEncodeFailed
+        for i in range(0, len(tokens), n_batch):
+            piece = list(tokens[i:i + n_batch])
+            batch = self._create_batch(piece, pos, logits_at_last_only=True)
+            try:
+                ret = api.llama_decode(self._ctx_ptr, batch)
+            finally:
+                api.llama_batch_free(batch)
+            if ret != 0:
+                exc = MtmdGpuEncodeFailed if self._mtmd.on_gpu else VisionInputError
+                raise exc(f"the image prompt could not be evaluated "
+                          f"(llama_decode rc={ret})")
+            pos += len(piece)
+        return pos
 
     def _fit_generation_budget(self, n_prompt: int, max_new_tokens: int) -> int:
         """
@@ -2367,6 +2476,7 @@ class LlamaCpp:
         Prefill keeping the common prefix with the previous call in the KV
         cache: remove diverging cached tokens, decode only the new suffix.
         """
+        self._vision_kv = None
         mem = api.llama_get_memory(self._ctx_ptr)
 
         prefix = _common_prefix_len(self._cached_tokens, prompt_tokens)
@@ -2545,11 +2655,9 @@ class LlamaCpp:
         self._cached_tokens = list(prompt_tokens)
 
     def _reset_kv_for_image(self) -> None:
-        """Empty the KV cache so a multimodal eval (which prefills from position 0)
-        is valid on a REUSED context. mtmd_helper_eval_chunks does its own prefill
-        at n_past=0, so a prior turn's tokens must be cleared first - otherwise a
-        second image chat evaluates over stale KV and faults. Uses the memory API
-        when present, else recreates an empty context (older builds)."""
+        """Empty the KV cache (and the MTP draft cache) so an image prefill can
+        start at position 0 on a REUSED context. Uses the memory API when
+        present, else recreates an empty context (older builds)."""
         self._cached_tokens = []
         if self._memory_api_available():
             try:

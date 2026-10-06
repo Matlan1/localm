@@ -144,41 +144,6 @@ def test_vision_input_error_is_not_a_runtime_error():
     assert not issubclass(VisionInputError, RuntimeError)
 
 
-def test_eval_into_raises_vision_input_error_on_a_nonzero_tokenize_rc():
-    """Sited on eval_into, which is where the rc is turned into an exception."""
-    ctx = lmtmd.MtmdContext.__new__(lmtmd.MtmdContext)
-    ctx._ctx = 0x2000
-    ctx._input_text_class = lmtmd._MtmdInputTextV2
-
-    class _M:
-        def mtmd_bitmap_init(self, w, h, rgb):
-            return 0x3000
-
-        def mtmd_bitmap_free(self, b):
-            pass
-
-        def mtmd_input_chunks_init(self):
-            return 0x4000
-
-        def mtmd_input_chunks_free(self, c):
-            pass
-
-        def mtmd_tokenize(self, *a):
-            return 2
-
-    ctx._m = _M()
-
-    import localm.inference.backends.llamacpp._api as api
-    orig = api.llama_n_ctx
-    api.llama_n_ctx = lambda _c: 4096
-    try:
-        with pytest.raises(VisionInputError):
-            ctx.eval_into(0x5000, "prompt <__media__>", [(4, 4, b"\0" * 48)],
-                          add_special=True)
-    finally:
-        api.llama_n_ctx = orig
-
-
 def _tokenize_failing_ctx():
     ctx = lmtmd.MtmdContext.__new__(lmtmd.MtmdContext)
     ctx._ctx = 0x2000
@@ -187,6 +152,9 @@ def _tokenize_failing_ctx():
     class _M:
         def mtmd_bitmap_init(self, w, h, rgb):
             return 0x3000
+
+        def mtmd_bitmap_set_id(self, b, id_bytes):
+            pass
 
         def mtmd_bitmap_free(self, b):
             pass
@@ -204,38 +172,39 @@ def _tokenize_failing_ctx():
     return ctx
 
 
-def test_eval_into_tokenize_failure_message_respects_debug_state(monkeypatch):
+def test_tokenize_raises_vision_input_error_on_a_nonzero_tokenize_rc():
+    """Sited on tokenize, which is where the rc is turned into an exception."""
+    with pytest.raises(VisionInputError):
+        _tokenize_failing_ctx().tokenize(
+            "prompt <__media__>", [(4, 4, b"\0" * 48)], add_special=True)
+
+
+def test_tokenize_failure_message_respects_debug_state(monkeypatch):
     """The rc!=0 message must not claim a debug log exists when debug mode is
     off, and must name one when it is on. Assertions run OUTSIDE pytest.raises
     (the exception is caught into a variable) so they execute regardless of
     which branch fires - see diff-review-discipline.md item 24a."""
-    import localm.inference.backends.llamacpp._api as api
-    orig = api.llama_n_ctx
-    api.llama_n_ctx = lambda _c: 4096
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+    exc = None
     try:
-        monkeypatch.delenv("LOCALM_DEBUG", raising=False)
-        exc = None
-        try:
-            _tokenize_failing_ctx().eval_into(
-                0x5000, "prompt <__media__>", [(4, 4, b"\0" * 48)], add_special=True)
-        except VisionInputError as e:
-            exc = e
-        assert exc is not None, "eval_into did not raise on a nonzero tokenize rc"
-        assert "debug log" not in str(exc), (
-            "must not claim a debug log exists when debug mode is off")
-        assert "--debug" in str(exc), "must say how to actually get one"
+        _tokenize_failing_ctx().tokenize(
+            "prompt <__media__>", [(4, 4, b"\0" * 48)], add_special=True)
+    except VisionInputError as e:
+        exc = e
+    assert exc is not None, "tokenize did not raise on a nonzero tokenize rc"
+    assert "debug log" not in str(exc), (
+        "must not claim a debug log exists when debug mode is off")
+    assert "--debug" in str(exc), "must say how to actually get one"
 
-        monkeypatch.setenv("LOCALM_DEBUG", "1")
-        exc = None
-        try:
-            _tokenize_failing_ctx().eval_into(
-                0x5000, "prompt <__media__>", [(4, 4, b"\0" * 48)], add_special=True)
-        except VisionInputError as e:
-            exc = e
-        assert exc is not None, "eval_into did not raise on a nonzero tokenize rc"
-        assert "full trace in the debug log" in str(exc)
-    finally:
-        api.llama_n_ctx = orig
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    exc = None
+    try:
+        _tokenize_failing_ctx().tokenize(
+            "prompt <__media__>", [(4, 4, b"\0" * 48)], add_special=True)
+    except VisionInputError as e:
+        exc = e
+    assert exc is not None, "tokenize did not raise on a nonzero tokenize rc"
+    assert "full trace in the debug log" in str(exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -321,55 +290,30 @@ def test_a_gpu_encode_failure_is_retryable_but_a_cpu_one_is_not():
     failed evaluation dirtied) can reset and try once on the CPU."""
     assert issubclass(lmtmd.MtmdGpuEncodeFailed, VisionInputError)
 
-    import localm.inference.backends.llamacpp._api as api
-
     class _M:
-        def mtmd_bitmap_init(self, w, h, rgb):
-            return 0x3000
+        def mtmd_encode_chunk(self, ctx, chunk):
+            return 5                      # a native encode failure
 
-        def mtmd_bitmap_free(self, b):
-            pass
-
-        def mtmd_input_chunks_init(self):
-            return 0x4000
-
-        def mtmd_input_chunks_free(self, c):
-            pass
-
-        def mtmd_tokenize(self, *a):
-            return 0
-
-        def mtmd_helper_eval_chunks(self, *a):
-            return 5                      # a native eval failure
-
-    orig = api.llama_n_ctx
-    api.llama_n_ctx = lambda _c: 4096
-    try:
-        for on_gpu, expected in ((True, lmtmd.MtmdGpuEncodeFailed),
-                                 (False, VisionInputError)):
-            c = _bare_ctx(_M())
-            c._ctx = 0x2000
-            c._input_text_class = lmtmd._MtmdInputTextV2
-            c.on_gpu = on_gpu
-            with pytest.raises(expected):
-                c.eval_into(0x5000, "p <__media__>", [(4, 4, b"\0" * 48)],
-                            add_special=True)
-            if not on_gpu:
-                # and it must NOT be the retryable subclass
-                try:
-                    c.eval_into(0x5000, "p <__media__>", [(4, 4, b"\0" * 48)],
-                                add_special=True)
-                except Exception as e:
-                    assert not isinstance(e, lmtmd.MtmdGpuEncodeFailed)
-    finally:
-        api.llama_n_ctx = orig
+    chunk = lmtmd.MtmdChunk(0x6000, None, None, 4, 4)
+    for on_gpu, expected in ((True, lmtmd.MtmdGpuEncodeFailed),
+                             (False, VisionInputError)):
+        c = _bare_ctx(_M())
+        c._ctx = 0x2000
+        c.on_gpu = on_gpu
+        exc = None
+        try:
+            c.eval_media_chunk(0x5000, chunk, 0, 512)
+        except VisionInputError as e:
+            exc = e
+        assert type(exc) is expected, (
+            f"on_gpu={on_gpu}: expected {expected.__name__}, got {exc!r}")
 
 
 def test_runner_dispatch_survives_an_unprocessable_image(monkeypatch):
     """THE crash regression, sited on the dispatch loop where the defect lives.
 
     _runner_main's chat_stream branch catching only InvalidGrammarError lets
-    everything else escape and kill the worker process. A test of eval_into
+    everything else escape and kill the worker process. A test of the raising code
     alone cannot see that: the collapse is in the ARRANGEMENT of except clauses
     here, not in the raising code. So drive the real dispatch loop and assert
     BOTH halves - it reports an error envelope, and it is still alive to serve

@@ -383,9 +383,10 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # it is a CHECKED status code from a native call that RETURNED
                 # NORMALLY, so nothing was corrupted and this worker keeps
                 # serving. mtmd_tokenize touches no llama context at all; a
-                # failed mtmd_helper_eval_chunks leaves the native KV populated
-                # with _cached_tokens empty, which llama.py's prefill detects
-                # and wipes, so no extra cleanup is owed here.
+                # failed vision prefill leaves the native KV populated with
+                # _cached_tokens empty and no image-path record of the cache,
+                # which llama.py's next prefill detects and wipes, so no extra
+                # cleanup is owed here.
                 resp_q.put(("error", str(e), "UnsupportedInputError"))
             # Any OTHER uncaught fault from the generator (a non-grammar native
             # fault, re-raised by GgufWorker.chat_stream) propagates OUT of this

@@ -14,6 +14,7 @@ from localm.audit import SessionMode
 from localm.cli.chat import run
 from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
 from tests._bare_llama import make_bare_llama
+from tests._fake_mtmd import fake_vision_prompt
 
 
 def _fake_cli_engine(statuses, tokens=("Hello",)):
@@ -155,7 +156,7 @@ class TestLlamaCppEmitsTheSharedFallbackConstant:
         from localm.inference.backends.llamacpp.mtmd import MtmdGpuEncodeFailed
 
         class _StopAfterRetry(Exception):
-            """Aborts the generator right after the retry eval_into call, so
+            """Aborts the generator at the retry's image evaluation, so
             the test never reaches the native decode loop."""
 
         llm = make_bare_llama(_model_ptr=111, _ctx_ptr=222)
@@ -163,12 +164,15 @@ class TestLlamaCppEmitsTheSharedFallbackConstant:
         llm._mtmd.marker = "<image>"
         llm._mtmd.on_gpu = True
         llm._mtmd.retry_on_cpu.return_value = True
-        llm._mtmd.count_tokens.return_value = 10
-        llm._mtmd.eval_into.side_effect = [MtmdGpuEncodeFailed(), _StopAfterRetry()]
+        llm._mtmd.encode_count = 0
+        llm._mtmd.tokenize.side_effect = lambda *a, **k: fake_vision_prompt(image_tokens=4)
+        llm._mtmd.has_embedding.return_value = False
+        llm._mtmd.eval_media_chunk.side_effect = [MtmdGpuEncodeFailed(), _StopAfterRetry()]
 
         mock_api = MagicMock()
         mock_api.llama_model_chat_template.return_value = None
         mock_api.has_memory_api.return_value = True
+        mock_api.llama_n_ctx.return_value = 4096
 
         messages = [{"role": "user", "content": [{"type": "text", "text": "describe"}]}]
         statuses: list = []

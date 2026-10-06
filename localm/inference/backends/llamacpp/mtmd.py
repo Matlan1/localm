@@ -33,11 +33,20 @@ across llama.cpp versions, so this binding avoids version-specific struct layout
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
-from typing import List, Optional, Tuple
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..base import VisionInputError
 from . import _api as api
+
+# mtmd_input_chunk_type: MTMD_INPUT_CHUNK_TYPE_TEXT; every other value is media.
+_CHUNK_TYPE_TEXT = 0
+
+# Upper bound on the bytes of encoded image embeddings kept between turns.
+_EMBD_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
 
 class _MtmdParams(ctypes.Structure):
@@ -204,7 +213,7 @@ class MtmdGpuEncodeFailed(VisionInputError):
     """A GPU projector encode failed at runtime. Distinct from a plain
     :class:`VisionInputError` purely so the caller knows a CPU retry is worth one
     attempt (it owns the KV cache, which the failed evaluation dirtied, so the
-    retry cannot happen inside ``eval_into``)."""
+    retry cannot happen inside ``eval_media_chunk``)."""
 
 
 def _encode_threads() -> int:
@@ -343,11 +352,38 @@ def _load_lib() -> ctypes.CDLL:
     # Exported by both ABI eras; used by the layout probe below.
     m.mtmd_helper_get_n_tokens.restype = ctypes.c_size_t
     m.mtmd_helper_get_n_tokens.argtypes = [ctypes.c_void_p]
-    m.mtmd_helper_eval_chunks.restype = ctypes.c_int32
-    m.mtmd_helper_eval_chunks.argtypes = [
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-        ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_bool,
-        ctypes.POINTER(ctypes.c_int32)]
+    try:
+        m.mtmd_bitmap_set_id.restype = None
+        m.mtmd_bitmap_set_id.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        m.mtmd_input_chunks_size.restype = ctypes.c_size_t
+        m.mtmd_input_chunks_size.argtypes = [ctypes.c_void_p]
+        m.mtmd_input_chunks_get.restype = ctypes.c_void_p
+        m.mtmd_input_chunks_get.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        m.mtmd_input_chunk_get_type.restype = ctypes.c_int
+        m.mtmd_input_chunk_get_type.argtypes = [ctypes.c_void_p]
+        m.mtmd_input_chunk_get_tokens_text.restype = ctypes.POINTER(ctypes.c_int32)
+        m.mtmd_input_chunk_get_tokens_text.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)]
+        m.mtmd_input_chunk_get_n_tokens.restype = ctypes.c_size_t
+        m.mtmd_input_chunk_get_n_tokens.argtypes = [ctypes.c_void_p]
+        m.mtmd_input_chunk_get_n_pos.restype = ctypes.c_int32
+        m.mtmd_input_chunk_get_n_pos.argtypes = [ctypes.c_void_p]
+        m.mtmd_input_chunk_get_id.restype = ctypes.c_char_p
+        m.mtmd_input_chunk_get_id.argtypes = [ctypes.c_void_p]
+        m.mtmd_encode_chunk.restype = ctypes.c_int32
+        m.mtmd_encode_chunk.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        m.mtmd_get_output_embd.restype = ctypes.c_void_p
+        m.mtmd_get_output_embd.argtypes = [ctypes.c_void_p]
+        # The trailing post-decode callback and its user data are passed as NULL.
+        # Builds whose helper predates those two parameters ignore them.
+        m.mtmd_helper_decode_image_chunk.restype = ctypes.c_int32
+        m.mtmd_helper_decode_image_chunk.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_void_p, ctypes.c_void_p]
+    except AttributeError as e:
+        raise MtmdUnavailable(
+            f"{name} lacks a function the vision path needs ({e})") from e
     _lib = m
     return m
 
@@ -384,8 +420,8 @@ def _probe_n_tokens(m: ctypes.CDLL, ctx: int, cls: type, raw: bytes) -> Optional
     the call itself failed.
 
     Text only: no marker, no bitmaps. So nothing is image-preprocessed, no llama
-    context is touched (``mtmd_tokenize`` only fills a chunk list; only
-    ``mtmd_helper_eval_chunks`` writes KV), and mtmd logs nothing - 0 markers
+    context is touched (``mtmd_tokenize`` only fills a chunk list and nothing here
+    decodes it), and mtmd logs nothing - 0 markers
     against 0 bitmaps is a match, so both eras return rc 0 and the probe is
     silent in the native log on the healthy path."""
     chunks = m.mtmd_input_chunks_init()
@@ -436,9 +472,66 @@ def _detect_input_text_class(m: ctypes.CDLL, ctx: int) -> Optional[type]:
     return _MtmdInputTextV2 if embedded > 0 else _MtmdInputTextV1
 
 
+@dataclass(frozen=True)
+class MtmdChunk:
+    """One chunk of a tokenized image prompt: a run of text tokens, or one media
+    item (an image, or one slice of a tiled image).
+
+    ``handle`` is the native ``mtmd_input_chunk*``, valid until the owning
+    :class:`MtmdPrompt` is freed. ``tokens`` holds a text chunk's token ids and is
+    None for media. ``key`` identifies a media chunk across prompts as
+    ``(content id, ordinal, n_tokens, n_pos)``, where the ordinal counts the earlier
+    media chunks of the same prompt with the same content id (the slices of one
+    tiled image share an id). ``key`` is None for text, and for media the runtime
+    returned no id for."""
+
+    handle: int
+    tokens: Optional[Tuple[int, ...]]
+    key: Optional[tuple]
+    n_tokens: int
+    n_pos: int
+
+
+class MtmdPrompt:
+    """A prompt tokenized against its images: its chunks in order, plus the native
+    chunk list and bitmaps they reference. :meth:`free` releases those exactly
+    once; the chunk handles are invalid afterwards."""
+
+    def __init__(self, chunks: List[MtmdChunk], release: Callable[[], None]) -> None:
+        self.chunks = chunks
+        self._release: Optional[Callable[[], None]] = release
+
+    @property
+    def n_tokens(self) -> int:
+        """KV cells evaluating the whole prompt needs."""
+        return sum(c.n_tokens for c in self.chunks)
+
+    @property
+    def n_images(self) -> int:
+        return sum(1 for c in self.chunks if c.tokens is None)
+
+    def free(self) -> None:
+        release, self._release = self._release, None
+        if release is not None:
+            release()
+
+
+def _image_content_id(w: int, h: int, rgb: bytes) -> str:
+    """A hex digest of an image's size and pixels."""
+    digest = hashlib.sha256(b"%dx%d:" % (w, h))
+    digest.update(rgb)
+    return digest.hexdigest()
+
+
 class MtmdContext:
     """A loaded mmproj bound to a text model, able to evaluate image prompts into
-    that model's llama context."""
+    that model's llama context.
+
+    Encoded image embeddings are kept in memory between calls, keyed by
+    :attr:`MtmdChunk.key`, so an image that is still in the conversation is not
+    encoded again. The cache holds at most :data:`_EMBD_CACHE_MAX_BYTES`, only
+    the images the caller last passed to :meth:`retain_embeddings`, and is
+    emptied by :meth:`clear_embeddings`, :meth:`retry_on_cpu` and :meth:`free`."""
 
     # Always overwritten by __init__ with the PROBED layout (and __init__ refuses
     # to construct at all when the probe is inconclusive, so this default is
@@ -456,6 +549,16 @@ class MtmdContext:
     # conservative value - it means "the device clip would have picked anyway", so
     # an instance built without __init__ pins nothing.
     _gpu_index: int = 0
+
+    # Number of media chunks this context has run through the projector.
+    encode_count: int = 0
+
+    # Encoded embeddings by MtmdChunk.key (created on first store) and their size.
+    _embd: Optional["OrderedDict[tuple, ctypes.Array]"] = None
+    _embd_bytes: int = 0
+
+    # Floats per embedding row; 0 until first needed.
+    _n_embd_inp: int = 0
 
     def __init__(self, mmproj_path: str, model_ptr: int,
                  gpu_index: int = 0) -> None:
@@ -609,124 +712,166 @@ class MtmdContext:
             pass
         self._ctx = None
         self.on_gpu = False
+        self.clear_embeddings()
         self._ctx = self._open(use_gpu=False)
         return bool(self._ctx)
 
-    def _tokenize_into_chunks(self, prompt: str, images: List[Tuple[int, int, bytes]], *,
-                              add_special: bool) -> Tuple[int, List[int]]:
-        """Build bitmaps for *images* and tokenize *prompt* (which contains one
-        ``self.marker`` per image, in order) against them into a fresh
-        mtmd_input_chunks handle. Returns ``(chunks, bitmaps)``; the caller frees
-        both exactly once - the bitmaps only after it is done reading the chunks
-        (mtmd_helper_eval_chunks references their buffers, not copies)."""
+    def tokenize(self, prompt: str, images: List[Tuple[int, int, bytes]], *,
+                 add_special: bool) -> MtmdPrompt:
+        """Tokenize *prompt* (which contains one ``self.marker`` per image, in
+        order) against *images* (each ``(width, height, rgb_bytes)``).
+
+        Each image's bitmap carries a content id derived from its size and pixels,
+        which becomes the id of its media chunk(s). The returned prompt owns the
+        native chunk list and the bitmaps; the caller frees it exactly once with
+        :meth:`MtmdPrompt.free`. Raises :class:`VisionInputError` when a bitmap
+        cannot be created or mtmd_tokenize fails; nothing is leaked then."""
         m = self._m
-        bitmaps = []
+        bitmaps: list = []
+        chunks = None
+
+        def release() -> None:
+            if chunks:
+                m.mtmd_input_chunks_free(chunks)
+            for bmp in bitmaps:
+                m.mtmd_bitmap_free(bmp)
+
         try:
             for (w, h, rgb) in images:
                 bmp = m.mtmd_bitmap_init(w, h, rgb)
                 if not bmp:
                     raise VisionInputError("mtmd_bitmap_init failed (bad image buffer)")
                 bitmaps.append(bmp)
+                m.mtmd_bitmap_set_id(bmp, _image_content_id(w, h, rgb).encode("ascii"))
             chunks = m.mtmd_input_chunks_init()
             if not chunks:
                 raise VisionInputError("mtmd_input_chunks_init failed")
-            try:
-                raw = prompt.encode("utf-8")
-                itext = _make_input_text(self._input_text_class, raw, add_special, True)
-                arr = (ctypes.c_void_p * len(bitmaps))(*bitmaps)
-                rc = m.mtmd_tokenize(self._ctx, chunks, ctypes.addressof(itext),
-                                     arr, len(bitmaps))
-                if rc != 0:
-                    from localm.debuglog import native_fault_hint
-                    raise VisionInputError(
-                        f"the vision projector could not process this image "
-                        f"(mtmd_tokenize rc={rc}); {native_fault_hint()}.")
-            except Exception:
-                m.mtmd_input_chunks_free(chunks)
-                raise
-            return chunks, bitmaps
-        except Exception:
-            for bmp in bitmaps:
-                m.mtmd_bitmap_free(bmp)
+            raw = prompt.encode("utf-8")
+            itext = _make_input_text(self._input_text_class, raw, add_special, True)
+            arr = (ctypes.c_void_p * len(bitmaps))(*bitmaps)
+            rc = m.mtmd_tokenize(self._ctx, chunks, ctypes.addressof(itext),
+                                 arr, len(bitmaps))
+            if rc != 0:
+                from localm.debuglog import native_fault_hint
+                raise VisionInputError(
+                    f"the vision projector could not process this image "
+                    f"(mtmd_tokenize rc={rc}); {native_fault_hint()}.")
+            return MtmdPrompt(self._describe_chunks(chunks), release)
+        except BaseException:
+            release()
             raise
 
-    def count_tokens(self, prompt: str, images: List[Tuple[int, int, bytes]], *,
-                      add_special: bool) -> int:
-        """How many KV positions evaluating *prompt*+*images* will need
-        (a real tokenize pass plus ``mtmd_helper_get_n_tokens``, not an estimate).
-
-        The caller sizes the llama context for this BEFORE calling
-        :meth:`eval_into`: llama.cpp fails a batch that does not fit its
-        context ("failed to find a memory slot") instead of growing to make
-        room, on the GPU and CPU paths alike since it is a KV-capacity limit,
-        not a compute-backend fault - so undersizing looks identical to the
-        gfx1030 / RDNA2 hipBLAS bug :meth:`eval_into` retries on CPU for, wastes
-        that retry too, and still ends in the same "could not evaluate" error."""
-        chunks, bitmaps = self._tokenize_into_chunks(
-            prompt, images, add_special=add_special)
-        try:
-            return int(self._m.mtmd_helper_get_n_tokens(chunks))
-        finally:
-            self._m.mtmd_input_chunks_free(chunks)
-            for bmp in bitmaps:
-                self._m.mtmd_bitmap_free(bmp)
-
-    def eval_into(self, llama_ctx: int, prompt: str,
-                  images: List[Tuple[int, int, bytes]], *,
-                  add_special: bool, n_batch: Optional[int] = None) -> int:
-        """Tokenize *prompt* (which contains one ``self.marker`` per image, in
-        order) together with *images* (each ``(width, height, rgb_bytes)``) and
-        evaluate the resulting text+image chunks into *llama_ctx*'s KV cache from
-        position 0. Returns the new n_past (with logits at the last position, ready
-        for sampling). Raises RuntimeError on a tokenize/eval failure.
-
-        *n_batch* defaults to the LIVE context's own configured batch size (via
-        ``llama_n_ctx``, capped the same way llama.py's own context construction
-        caps it) rather than a fixed 512, so mtmd never micro-batches smaller than
-        what the context was built for. An explicit *n_batch* wins, for a caller
-        that knows its own real batch size precisely.
-
-        The caller is responsible for sizing *llama_ctx* to fit first (see
-        :meth:`count_tokens`) - this method does not grow it."""
+    def _describe_chunks(self, chunks) -> List[MtmdChunk]:
+        """Read every chunk of the native list *chunks* into an :class:`MtmdChunk`."""
         m = self._m
-        ctx_n_ctx = api.llama_n_ctx(llama_ctx)
-        if n_batch is None:
-            n_batch = min(ctx_n_ctx, 2048) if ctx_n_ctx else 512
-        chunks, bitmaps = self._tokenize_into_chunks(
-            prompt, images, add_special=add_special)
-        try:
-            new_n_past = ctypes.c_int32(0)
-            rc2 = m.mtmd_helper_eval_chunks(
-                self._ctx, llama_ctx, chunks, 0, 0, n_batch, True,
-                ctypes.byref(new_n_past))
-            if rc2 != 0:
-                # On the GPU path this is also the shape the gfx1030 / RDNA2
-                # hipBLAS BF16 failure takes, so tell the caller a CPU retry
-                # is worth one attempt rather than failing the request outright
-                # - count_tokens() having already sized the context, this should
-                # now be that GPU-specific fault rather than a capacity miss.
-                exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
-                raise exc(
-                    f"the vision projector could not evaluate this image "
-                    f"(mtmd_helper_eval_chunks rc={rc2})")
-            pos = int(new_n_past.value)
-            # The generation loop trusts this position as the base for every
-            # subsequent single-token decode with no further sanity check, so
-            # a native call that under/over-reports how many KV positions the
-            # image consumed would let generation continue from a corrupted
-            # position instead of failing loudly.
-            if pos <= 0 or (ctx_n_ctx and pos > ctx_n_ctx):
-                raise VisionInputError(
-                    f"mtmd image eval returned an implausible position "
-                    f"(new_n_past={pos}, context size={ctx_n_ctx}) - refusing "
-                    f"to generate from a likely-corrupted KV state")
-            return pos
-        finally:
-            m.mtmd_input_chunks_free(chunks)
-            for bmp in bitmaps:
-                m.mtmd_bitmap_free(bmp)
+        out: List[MtmdChunk] = []
+        seen: dict = {}
+        for i in range(int(m.mtmd_input_chunks_size(chunks))):
+            handle = m.mtmd_input_chunks_get(chunks, i)
+            if m.mtmd_input_chunk_get_type(handle) == _CHUNK_TYPE_TEXT:
+                n = ctypes.c_size_t(0)
+                ptr = m.mtmd_input_chunk_get_tokens_text(handle, ctypes.byref(n))
+                tokens = tuple(ptr[j] for j in range(n.value)) if n.value else ()
+                out.append(MtmdChunk(handle, tokens, None, len(tokens), len(tokens)))
+                continue
+            n_tokens = int(m.mtmd_input_chunk_get_n_tokens(handle))
+            n_pos = int(m.mtmd_input_chunk_get_n_pos(handle))
+            raw_id = m.mtmd_input_chunk_get_id(handle)
+            content_id = raw_id.decode("ascii", "replace") if raw_id else ""
+            key = None
+            if content_id:
+                ordinal = seen.get(content_id, 0)
+                seen[content_id] = ordinal + 1
+                key = (content_id, ordinal, n_tokens, n_pos)
+            out.append(MtmdChunk(handle, None, key, n_tokens, n_pos))
+        return out
+
+    def has_embedding(self, key: Optional[tuple]) -> bool:
+        """True when the encoded embeddings for media chunk *key* are cached."""
+        return key is not None and self._embd is not None and key in self._embd
+
+    def retain_embeddings(self, keys: Iterable[tuple]) -> None:
+        """Drop every cached embedding whose key is not in *keys*."""
+        if not self._embd:
+            return
+        keep = set(keys)
+        for key in [k for k in self._embd if k not in keep]:
+            self._embd_bytes -= ctypes.sizeof(self._embd.pop(key))
+
+    def clear_embeddings(self) -> None:
+        """Drop every cached embedding."""
+        self._embd = None
+        self._embd_bytes = 0
+
+    def _store_embedding(self, key: tuple, embd: ctypes.Array) -> None:
+        """Cache *embd* under *key*, evicting the least recently used entries
+        to stay within :data:`_EMBD_CACHE_MAX_BYTES`. An entry larger than the
+        whole budget is not cached."""
+        size = ctypes.sizeof(embd)
+        if size > _EMBD_CACHE_MAX_BYTES:
+            return
+        if self._embd is None:
+            self._embd = OrderedDict()
+        while self._embd and self._embd_bytes + size > _EMBD_CACHE_MAX_BYTES:
+            _, old = self._embd.popitem(last=False)
+            self._embd_bytes -= ctypes.sizeof(old)
+        self._embd[key] = embd
+        self._embd_bytes += size
+
+    def _embedding_width(self) -> int:
+        """Floats per embedding row, the width mtmd_helper_decode_image_chunk reads."""
+        if not self._n_embd_inp:
+            self._n_embd_inp = int(api.llama_model_n_embd_inp(self._model_ptr))
+        return self._n_embd_inp
+
+    def eval_media_chunk(self, llama_ctx: int, chunk: MtmdChunk, n_past: int,
+                         n_batch: int) -> int:
+        """Decode media *chunk* into *llama_ctx*'s KV cache at position *n_past*
+        and return the position after it.
+
+        The embeddings come from the cache when *chunk*'s key is cached; otherwise
+        the chunk is run through the projector (counted in :attr:`encode_count`)
+        and its embeddings are cached. A failed encode or decode raises
+        :class:`MtmdGpuEncodeFailed` while the projector is on the GPU, else
+        :class:`VisionInputError`; a decode that reports a position other than
+        ``n_past + chunk.n_pos`` raises :class:`VisionInputError`."""
+        m = self._m
+        exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
+        embd = None
+        if self.has_embedding(chunk.key):
+            embd = self._embd[chunk.key]
+            self._embd.move_to_end(chunk.key)
+        if embd is None:
+            self.encode_count += 1
+            rc = m.mtmd_encode_chunk(self._ctx, chunk.handle)
+            if rc != 0:
+                raise exc(f"the vision projector could not encode this image "
+                          f"(mtmd_encode_chunk rc={rc})")
+            n_floats = chunk.n_tokens * self._embedding_width()
+            out = m.mtmd_get_output_embd(self._ctx)
+            if not out or n_floats <= 0:
+                raise exc("the vision projector produced no embeddings for this image")
+            embd = (ctypes.c_float * n_floats)()
+            ctypes.memmove(embd, out, ctypes.sizeof(embd))
+            if chunk.key is not None:
+                self._store_embedding(chunk.key, embd)
+        new_n_past = ctypes.c_int32(n_past)
+        rc = m.mtmd_helper_decode_image_chunk(
+            self._ctx, llama_ctx, chunk.handle, ctypes.addressof(embd), n_past, 0,
+            n_batch, ctypes.byref(new_n_past), None, None)
+        if rc != 0:
+            raise exc(f"the vision projector could not evaluate this image "
+                      f"(mtmd_helper_decode_image_chunk rc={rc})")
+        pos = int(new_n_past.value)
+        if pos != n_past + chunk.n_pos:
+            raise VisionInputError(
+                f"mtmd image decode returned an implausible position "
+                f"(new_n_past={pos}, expected {n_past + chunk.n_pos}) - refusing "
+                f"to generate from a likely-corrupted KV state")
+        return pos
 
     def free(self) -> None:
+        self.clear_embeddings()
         if getattr(self, "_ctx", None):
             try:
                 self._m.mtmd_free(self._ctx)
