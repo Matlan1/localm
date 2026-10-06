@@ -168,6 +168,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Two browser calls in one coder turn no longer open two browsers.** With no
+  browser open yet, a turn that called `browser_navigate` twice at once started
+  a browser for each call. The second replaced the first in the session's
+  record, so the first kept running with nothing able to close it. The calls
+  now share a single start and drive the same browser; if that start fails,
+  every waiting call gets the same error.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",
