@@ -12,6 +12,26 @@ from fastapi.testclient import TestClient
 
 from localm.plugins.coder.agent import Agent
 
+
+@pytest.fixture(autouse=True)
+def _close_coder_sessions_left_open(monkeypatch):
+    """Records every CoderSession the test creates and closes the ones still
+    open when it ends, before monkeypatch restores the test's paths."""
+    from localm.plugins.coder.sessions import CoderSession
+    opened = []
+    real_init = CoderSession.__init__
+
+    def _recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        opened.append(self)
+
+    monkeypatch.setattr(CoderSession, "__init__", _recording_init)
+    yield
+    for session in opened:
+        if not session.closed:
+            session.close()
+
+
 # A non-routable RFC5737 documentation address, so nothing here can reach a real
 # host.
 _UNC = r"\\192.0.2.1\share"

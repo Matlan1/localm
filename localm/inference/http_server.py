@@ -3231,6 +3231,18 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("terminating coder background jobs during shutdown failed "
                      "(non-fatal); a job may be left running")
+    # Live GUI coder sessions are closed the way a graceful stop closes
+    # them. See test_a_failure_closing_sessions_does_not_block_the_stop.
+    try:
+        from localm.plugins.coder.sessions import close_all_for_exit
+        _sessions_closed = close_all_for_exit()
+        if _sessions_closed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("closed %d coder session(s) on shutdown", _sessions_closed)
+    except Exception:
+        _dbg_swallow("closing coder sessions during shutdown failed "
+                     "(non-fatal); a session may not record its end",
+                     level="warning")
     # Any ComfyUI instance localm itself launched (image/music/video, each
     # possibly its own api_url) runs in a detached process group so
     # stop_comfy() can kill its whole tree on demand - which also means it
@@ -3506,6 +3518,18 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     except Exception:
         _dbg_swallow("terminating coder background jobs during restart failed "
                      "(non-fatal); a job may be left running")
+    # Live GUI coder sessions are closed the way a graceful stop closes
+    # them. See test_a_failure_closing_sessions_does_not_block_the_stop.
+    try:
+        from localm.plugins.coder.sessions import close_all_for_exit
+        _sessions_closed = close_all_for_exit()
+        if _sessions_closed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("closed %d coder session(s) on restart", _sessions_closed)
+    except Exception:
+        _dbg_swallow("closing coder sessions during restart failed "
+                     "(non-fatal); a session may not record its end",
+                     level="warning")
     # Any ComfyUI instance localm itself launched runs in a detached process
     # group so stop_comfy() can kill its whole tree on demand - which also
     # means it does NOT die on its own when this process re-execs. Left
