@@ -168,6 +168,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`localm setup-llama --help` no longer says the newest upstream build is the
+  default.** The default installs the llama.cpp build this localm release
+  confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
+  `--tag default` and `--rollback` accurately.
 - **Image, music and video requests with a NaN or infinite number in a
   tuning field are now refused.** Guidance, cfg, denoise, the LoRA strengths,
   lyrics strength and shift each return a 422 instead of starting a
