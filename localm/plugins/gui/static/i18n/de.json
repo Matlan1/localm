@@ -156,6 +156,7 @@
   "cmdk.manageKeys": "Schlüssel & Geräte verwalten",
   "cmdk.placeholder": "Befehl eingeben…  (↑↓ zum Bewegen · Enter zum Ausführen · Esc zum Schließen)",
   "cmdk.toggleTheme": "Zwischen hellem und dunklem Design wechseln",
+  "coder.attach.noImages": "Der Coder kann keine Bilder verarbeiten. Fuege stattdessen den Text ein oder haenge das Bild im Chat mit einem Vision-Modell an",
   "coder.attach.readError": "Datei konnte nicht gelesen werden",
   "coder.attach.sizeSuffix": " ({kb}k Zeichen{trimmed})",
   "coder.attach.trimmedSuffix": ", gekürzt",

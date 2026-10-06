@@ -211,7 +211,7 @@ def test_resumed_session_supersedes_its_episode_instead_of_duplicating(memhome):
     conversation, so it must REPLACE that session's earlier partial episode, not add
     a second record for the same stem."""
     store = plug._chat_store()
-    _write_session(memhome, "mysession", _SETTLED, content="rust ownership please")
+    _write_session(memhome, "mysession", _SETTLED, content="rust ownership and lifetime rules please")
     c1, k1 = _summaries("Worked through Rust ownership rules and lifetime errors")
     plug._store_episodes(store, c1, embed_fn=None)
     assert k1["n"] == 1 and len(_episodes(plug._chat_store())) == 1
@@ -237,7 +237,7 @@ def test_resumed_session_with_same_story_does_not_duplicate(memhome):
     """The near-duplicate path: a resumed session whose summary is substantively the
     same must also stay at ONE episode (and must not add a second)."""
     store = plug._chat_store()
-    _write_session(memhome, "steady", _SETTLED, content="rust ownership please")
+    _write_session(memhome, "steady", _SETTLED, content="rust ownership and lifetime rules please")
     c1, _ = _summaries("Worked through Rust ownership rules and lifetime errors")
     plug._store_episodes(store, c1, embed_fn=None)
 
@@ -281,7 +281,7 @@ def test_collapse_only_touches_the_processed_stem(memhome):
         store.add(MemoryRecord(text=f"Partial {i} about rust ownership rules",
                                kind="episodic", source="synth", importance=0.4,
                                meta={"session": "dupe", "session_mtime": 1000.0 + i}))
-    _write_session(memhome, "dupe", _SETTLED, content="rust the lot")
+    _write_session(memhome, "dupe", _SETTLED, content="rust the whole toolchain")
     c, _ = _summaries("Covered the whole Rust toolchain end to end")
     plug._store_episodes(store, c, embed_fn=None)
 
@@ -294,7 +294,7 @@ def test_distinct_sessions_still_get_their_own_episodes(memhome):
     """The per-stem supersede must NOT collapse genuinely different sessions into
     one blob episode."""
     store = plug._chat_store()
-    _write_session(memhome, "s_rust", _SETTLED, content="rust ownership please")
+    _write_session(memhome, "s_rust", _SETTLED, content="rust ownership and lifetime rules please")
     _write_session(memhome, "s_hike", _SETTLED + 1, content="plan a hiking trip")
     c, _ = _summaries("Worked through Rust ownership rules and lifetime errors",
                       "Planned a hiking trip to the Alps for next month")

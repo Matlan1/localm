@@ -41,8 +41,14 @@ _count_messages_tokens_rpc_warned = False
 # not mean the next text turn will not.
 _MTP_STOPPED = frozenset({
     "rewind-unsupported", "draft-context-full", "hidden-state-refused",
-    "context-refused", "no-ctx-type-field",
+    "context-refused", "no-ctx-type-field", "draft-prefill-failed",
+    "draft-prefill-error", "draft-trim-error", "no-mtp-graph",
 })
+
+
+def _mtp_status_kind(status) -> str:
+    """The part of an MTP status before its ``:`` detail suffix."""
+    return str(status or "").split(":", 1)[0]
 
 # The worker's message when llama_init_from_model returned NULL: the runtime
 # loaded the weights, then could not create the context.
@@ -143,6 +149,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._supports_mtp = False
         self.last_mtp_status = None    # why speculation is or is not running
         self.last_mtp_active = False   # whether the last call actually speculated
+        self.last_mtp_call_status = ""  # why the last call stopped speculating partway
         # Always None in production; the real LlamaCpp instance lives in the
         # child process.
         self._llm = None
@@ -259,14 +266,15 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         grammar_unsupported uses: the child reports this call's outcome, the
         parent owns the state that has to survive across calls.
 
-        A status outside _MTP_STOPPED never re-enables anything - a model that
+        A status whose kind (the part before ':') is outside _MTP_STOPPED never re-enables anything - a model that
         stopped speculating does not start again on the next reply.
         """
         if "mtp_status" not in done:
             return          # an older child, or a path that does not report it
         self.last_mtp_status = done.get("mtp_status")
         self.last_mtp_active = bool(done.get("mtp_active"))
-        if self.last_mtp_status in _MTP_STOPPED:
+        self.last_mtp_call_status = str(done.get("mtp_call_status") or "")
+        if _mtp_status_kind(self.last_mtp_status) in _MTP_STOPPED:
             self._supports_mtp = False
 
     @property

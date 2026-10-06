@@ -3888,6 +3888,8 @@ class TestGpuUsageSourceRobustness:
         # resident. TestTorchProbeKnownDoomedSkip covers the detector itself.
         monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed",
                             lambda: False)
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
 
         class _FakeTorch:
             version = SimpleNamespace(hip="7.13", cuda=None)
@@ -4014,6 +4016,45 @@ class TestGpuUsageSourceRobustness:
             "call")
         assert result is False
 
+    @pytest.mark.parametrize("hip_resident", [False, True])
+    def test_raw_reading_never_imports_torch_beside_the_native_runtime(
+            self, monkeypatch, hip_resident):
+        """A model process on a Vulkan or CPU llama.cpp build: the native runtime
+        is loaded, no GPU probe is in flight and the known-doomed HIP conflict
+        does not apply. Importing torch there loads torch's OpenMP runtime beside
+        the build's own, and the next image encode aborts the process (OMP Error
+        #15, worker exit 3). The answer comes from the resident-HIP signal and no
+        import is started."""
+        import builtins
+        import sys as _sys
+
+        import localm.discover as _discover
+        import localm.gpu_usage as gu
+        from localm.inference.backends.llamacpp import _loader
+
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.delitem(_sys.modules, "torch", raising=False)
+        monkeypatch.setattr(_discover, "_gpu_probe_inflight", False)
+        monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(_discover, "native_hip_runtime_resident",
+                            lambda: hip_resident)
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
+
+        _real_import = builtins.__import__
+        attempted = []
+
+        def _tracking_import(name, *a, **k):
+            attempted.append(name)
+            return _real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
+
+        result = gu.raw_reading_is_process_scoped()
+        assert "torch" not in attempted, (
+            "torch was imported into a process that holds the native llama.cpp "
+            "runtime")
+        assert result is hip_resident
+
 
 class TestScopeGateAnswersWithoutTorch:
     """raw_reading_is_process_scoped() must answer from the resident-HIP-runtime
@@ -4040,6 +4081,8 @@ class TestScopeGateAnswersWithoutTorch:
                             lambda: known_doomed)
         monkeypatch.setattr(_discover, "native_hip_runtime_resident",
                             lambda: hip_resident)
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
 
         real_import = builtins.__import__
         attempted = []

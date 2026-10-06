@@ -22,7 +22,7 @@ from typing import Optional
 
 from localm.textguard import compose, compose_join, neutralise, untrusted_span
 
-from .consolidate import extract, run_consolidation, summarize_session
+from .consolidate import extract, judge_episode, run_consolidation, summarize_session
 from .corrections import PendingCorrection
 from .gating import writes_allowed
 from .record import MemoryRecord
@@ -31,7 +31,7 @@ from .store import (K_CAP, MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, MemoryStore,
 
 __all__ = [
     "MemoryRecord", "MemoryStore", "PendingCorrection", "open_store",
-    "render_memories", "run_consolidation", "extract", "summarize_session",
+    "render_memories", "run_consolidation", "extract", "summarize_session", "judge_episode",
     "writes_allowed", "principal_of",
     "namespace_hash", "namespace_file", "MAX_TEXT_LEN", "N_MAX", "K_CAP",
     "TRUSTED_SOURCES", "MAX_INJECT", "INJECT_BLOCK_CHARS", "INJECT_LINE_CHARS",

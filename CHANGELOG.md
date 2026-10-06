@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Older vision models whose projector file does not say what kind of projector
+  it is now read images.** LLaVA 1.5 projectors (`mmproj-model-f16.gguf` from
+  the original LLaVA 1.5 GGUF releases) predate that field, and the bundled
+  llama.cpp runtime refused them, so the model stayed text-only. localm now works
+  out the projector type from the file's contents and loads a corrected copy
+  kept in its cache folder; your own file is never changed.
 - **Missing ComfyUI models can be downloaded even when localm has no built-in
   source for them.** When an image, video or music workflow needs a model file
   that is not installed, localm now offers to search Hugging Face for a file with
@@ -181,15 +187,45 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `[TOOL_CALLS][tool_call]{...}</tool_call>` or `[TOOL_CALLS][{...}]` is run like any
   other. The coder also no longer tells the model that a call it just ran "was NOT
   run" when the call was wrapped that way.
+- **A chat no longer switches models for an ordinary reply just because the model's tool
+  support has never been checked.** With web tools on, an unpinned chat could move
+  from the model you had loaded to a different one for a plain text turn, which
+  unloaded and reloaded large models. A model whose tool support is unknown now
+  keeps the turn; only a model known to lack a needed capability is swapped out.
+  Image and context-length routing are unchanged.
+- **Small talk no longer ends up in the remembered facts, and one common word no
+  longer pulls old session summaries into every chat turn.** A session with
+  nothing lasting in it (a greeting, a passing remark, a one-off request) now
+  gets no session summary, and a stored session summary is recalled only when a
+  message shares at least two content words with it (or is a close paraphrase),
+  so unrelated turns carry no remembered-facts block.
+- **Common words no longer drag old chat summaries or Coder lessons into
+  unrelated turns, and small talk already stored is cleaned up.** A word that
+  appears in many of your stored session summaries (or Coder lessons) no longer
+  counts as a match, and the Coder's lesson recall needs two shared words, as the
+  chat memory now does. Session summaries saved earlier are checked once by the
+  model; those that are only small talk are removed, and a removed one can still
+  be restored from the memory archive. Greetings and thank-yous no longer count
+  as something worth summarising.
+- **The microphone button works on a fresh install again.** A new install could
+  pull in a PyAV release that faster-whisper cannot use, so every recording
+  failed. The voice extra now keeps PyAV below version 19. A failure inside the
+  audio decoder itself is now reported as a server error naming the library
+  problem instead of "corrupt or unsupported audio".
+- **Attaching an image in the Coder now says plainly that the Coder cannot take
+  images.** It used to ask you to load a vision model, which could not help.
+  Attach the image in Chat with a vision model, or paste the text instead.
+- **Multi-Token Prediction no longer switches itself off after one long prompt, and no longer stops silently partway through a reply.** The speculative-decoding helper used to be capped at 2048 tokens, so a single longer prompt turned it off for as long as the model stayed loaded, and a reply that crossed 2048 tokens stopped speculating while still being reported as active. It now grows with the conversation's context, keeps working on the next request, and a reply on which it has to stop reports that it did. A permanent stop that comes with a detail suffix, such as a failed helper prefill, is now recognised as a stop.
 - **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
   projector files record a width that is not the one the model uses, so localm
   decided the projector did not fit and left it off: the model was not shown as
   able to read images, and a `--store` copy or move left the projector behind.
   localm now reads the projector's real width from its weights, the same way
-  llama.cpp does. LLaVA 1.5 projectors, which do not record their projector
-  type and were refused by the bundled runtime, now load too: localm uses a copy
-  in its cache folder that records the type, and your own file is left
-  untouched.
+  llama.cpp does.
+- **Asking a vision model about an image no longer crashes it on the Vulkan
+  runtime when the optional GPU extras are installed.** The model process loaded
+  a second copy of a runtime library during the request and exited with "The
+  model process exited unexpectedly (worker exit 3)"; it now answers.
 - **Two machines sharing one data folder no longer take over each other's
   knowledge-base write lock.** Two machines with the same host name (on Windows,
   or on Linux hosts) read each other's lock records as their own process table,
