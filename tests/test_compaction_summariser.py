@@ -514,3 +514,23 @@ def test_maybe_compact_announces_only_a_real_compaction():
                                  on_compact=lambda: calls.append(1))
     assert changed is False
     assert calls == []
+
+
+def test_stream_recount_fault_after_compaction_ends_the_stream_with_an_error():
+    engine = _engine("Summary.")
+    counts = iter([3000])
+
+    def _count(ms):
+        try:
+            return next(counts)
+        except StopIteration:
+            raise RuntimeError("worker died during the token count")
+
+    engine.count_messages_tokens.side_effect = _count
+    r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
+    deltas = _sse_deltas(r.text)
+    text = "".join(d.get("content") or "" for d, _ in deltas)
+    assert "worker died during the token count" in text
+    assert deltas[-1][1] == "error"
+    assert r.text.rstrip().endswith("data: [DONE]")
+    assert [c for c in engine.calls if c[1].get("thinking") is not False] == []

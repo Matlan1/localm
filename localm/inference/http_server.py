@@ -4481,6 +4481,12 @@ async def _stream_sse(
                     None, engine.count_messages_tokens, messages)
             except PretokenizerUnsafeInputError as e:
                 refusal = str(e)
+                prompt_tokens = None
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.exception("token recount after compaction failed")
+                refusal = inference_error_text(e).strip()
+                prompt_tokens = None
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
                 and isinstance(prompt_tokens, int) and prompt_tokens > capacity):

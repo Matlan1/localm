@@ -447,3 +447,29 @@ def test_default_backend_is_unpinned():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@patch("requests.post")
+def test_stream_raises_on_an_error_finish(mock_post):
+    from localm.plugins.coder.backends.http import CoderServerError
+    refusal = "Prompt (9000 tokens) exceeds the model's maximum context capacity (4096 tokens)."
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.__enter__ = lambda self: self
+    resp.__exit__ = MagicMock(return_value=False)
+    resp.raise_for_status = MagicMock()
+    resp.iter_lines.return_value = _sse_lines([
+        {"choices": [{"delta": {"content": refusal}}]},
+        {"choices": [{"delta": {}, "finish_reason": "error"}]},
+    ])
+    mock_post.return_value = resp
+    backend = _make_backend()
+    got = []
+    try:
+        for piece in backend.chat_stream([{"role": "user", "content": "hi"}]):
+            got.append(piece)
+    except CoderServerError as e:
+        assert "exceeds the model's maximum context capacity" in str(e)
+    else:
+        raise AssertionError("an error finish did not raise")
+    assert got == [refusal]
