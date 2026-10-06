@@ -2060,6 +2060,7 @@ class LlamaCpp:
                                     prompt, images, add_special=add_special)
                                 self._vision_kv = None
                                 pos, reused = self._prefill_vision(vprompt, needed)
+                            encoded = self._mtmd.encode_count - encoded_before
                         finally:
                             vprompt.free()
 
@@ -2067,7 +2068,7 @@ class LlamaCpp:
                     "gguf generate (vision): prefill complete in %.2fs, "
                     "%d image(s), %d image chunk(s) encoded, %d of %d position(s) "
                     "reused", time.monotonic() - _t0, len(images),
-                    self._mtmd.encode_count - encoded_before, reused, pos)
+                    encoded, reused, pos)
                 if on_status:
                     on_status("Generating response...")
 

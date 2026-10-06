@@ -140,6 +140,18 @@ class TestFollowUpTurns:
         assert rig.kv.cells == _fresh_cells(TURN2, [IMG_A], slices=3), (
             "a slice was decoded with another slice's embeddings")
 
+    def test_an_image_no_longer_in_the_prompt_leaves_the_cache(self):
+        rig = _Rig()
+        rig.prefill(TURN1, [IMG_A])
+        key_a = next(k for k, _ in rig.llm._vision_kv if isinstance(k, tuple))
+        assert rig.llm._mtmd.has_embedding(key_a)
+
+        rig.prefill(TURN1, [IMG_B])
+
+        assert not rig.llm._mtmd.has_embedding(key_a)
+        key_b = next(k for k, _ in rig.llm._vision_kv if isinstance(k, tuple))
+        assert rig.llm._mtmd.has_embedding(key_b)
+
     def test_status_names_encoding_only_when_an_image_is_encoded(self):
         rig = _Rig()
         statuses = []
