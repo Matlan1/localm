@@ -244,6 +244,10 @@ class ChoiceDelta(BaseModel):
 # behind the per-model semaphore, before the model has started on it.
 WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."
 
+# Emitted by the SSE route while it summarises older messages to fit the
+# context window, before the reply starts.
+COMPACTING_STATUS = "Compacting conversation..."
+
 
 # Stable ids for the status strings backends pass to on_status(), keyed by the
 # exact English text. `status` always carries the English text for CLI, MCP,
@@ -256,6 +260,7 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     "Encoding image (CPU)...": "encoding_image_cpu",
     VISION_CPU_FALLBACK_STATUS: "vision_cpu_retry",
     WAITING_FOR_MODEL_STATUS: "waiting",
+    COMPACTING_STATUS: "compacting",
 }
 
 

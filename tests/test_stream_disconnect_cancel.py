@@ -170,13 +170,15 @@ def test_disconnect_during_compaction_releases_inference_lock():
         sem = asyncio.Semaphore(1)
 
         agen = _stream_sse(eng, _MSG_MANY, "lock-model", sem)
-        # _stream_sse awaits the compaction executor call BEFORE yielding the
-        # role chunk, so __anext__() cannot be awaited to completion first
-        # (unlike the other tests here) - it is suspended INSIDE compaction,
-        # never at a yield. Run it as a task so its pending await can be
-        # cancelled, mirroring how a real disconnect cancels the request
-        # task that is awaiting the generator, which Starlette then
-        # aclose()s only once that cancellation has actually unwound it.
+        role = await agen.__anext__()
+        assert "assistant" in role
+        compacting = await agen.__anext__()
+        assert '"status_code":"compacting"' in compacting
+        # The next __anext__() is suspended INSIDE compaction, never at a
+        # yield. Run it as a task so its pending await can be cancelled,
+        # mirroring how a real disconnect cancels the request task that is
+        # awaiting the generator, which Starlette then aclose()s only once
+        # that cancellation has actually unwound it.
         task = asyncio.ensure_future(agen.__anext__())
         assert await _wait(lambda: eng.entered.is_set(), True, 3.0), \
             "compaction never started a generation - fixture did not " \

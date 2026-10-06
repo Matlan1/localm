@@ -282,3 +282,24 @@ test("F5: pruneBranches returns 0 and archives nothing when every fork still rea
   assert.equal(lost, 0);
   assert.equal(conv.droppedBranches, undefined);
 });
+
+test("compaction shows a Compacting status while the summary is written, then removes it", async () => {
+  let seen = null;
+  let win = null;
+  const impl = async (url, opts = {}) => {
+    if (String(url) === "/v1/chat/completions") {
+      const ind = win.document.querySelector("#chat-messages .msg-status-indicator");
+      seen = ind ? ind.textContent : "";
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ choices: [{ message: { content: "Summary." },
+                                          finish_reason: "stop" }] }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl: impl });
+  win = window;
+  runScript(window, "chat.ctxMax = 160;");
+  await window.compactConversation(makeConv(20));
+  assert.match(seen || "", /Compacting conversation/);
+  assert.equal(window.document.querySelector("#chat-messages .msg-status-indicator"), null);
+});

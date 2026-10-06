@@ -101,6 +101,7 @@
   "chat.share.imagesIn.other": "{count} Bilder in den Chat geteilt",
   "chat.speak": "Antworten vorlesen",
   "chat.speak.title": "Liest jede fertige Antwort vor. Installieren Sie das tts-Plugin für neuronale Kokoro-Stimmen; andernfalls wird die eingebaute Offline-Stimme des Browsers verwendet. Jede Antwort des Assistenten hat außerdem eine Vorlese-Schaltfläche.",
+  "chat.status.compacting": "Unterhaltung wird verdichtet…",
   "chat.status.encodingImage": "Bild wird kodiert…",
   "chat.status.encodingImageCpu": "Bild wird kodiert (CPU)…",
   "chat.status.encodingImageGpu": "Bild wird kodiert (GPU)…",

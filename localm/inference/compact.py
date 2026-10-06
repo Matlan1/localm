@@ -176,6 +176,11 @@ def digest_messages(older: List[dict]):
     return compose_join("\n\n", [*parts, *lines])
 
 
+def compactable(messages: List[dict]) -> bool:
+    """True when ``compact_messages`` would change *messages*."""
+    return bool(_split(messages)[1])
+
+
 def compact_messages(
     messages: List[dict],
     generate: Callable[[List[dict], int], str],
@@ -241,15 +246,19 @@ def maybe_compact(
     limit_tokens: int,
     generate: Callable[[List[dict], int], str],
     count_tokens: Optional[Callable[[str], int]] = None,
+    on_compact: Optional[Callable[[], None]] = None,
 ) -> Tuple[List[dict], bool]:
     """
     Compact *messages* when they exceed COMPACT_RATIO of *limit_tokens*.
 
     limit_tokens <= 0 disables auto-compaction (unlimited window).
-    Returns (messages, compacted).
+    *on_compact*, when given, is called just before a compaction that will
+    change *messages*. Returns (messages, compacted).
     """
     if limit_tokens <= 0:
         return messages, False
     if estimate_tokens(messages, count_tokens) < COMPACT_RATIO * limit_tokens:
         return messages, False
+    if on_compact is not None and compactable(messages):
+        on_compact()
     return compact_messages(messages, generate)

@@ -284,12 +284,19 @@ def register(app: FastAPI, ctx) -> None:
                 # would otherwise be the one to report it.
                 raise HTTPException(400, str(e))
 
+            from localm.inference.compact import compactable
             capacity = engine.context_capacity()
             compacted_here = False
-            if (isinstance(capacity, int) and capacity > 0
-                    and isinstance(prompt_tokens, int) and len(messages) > 3):
-                buffer = max(2048, int(capacity * 0.10))
-                if capacity - prompt_tokens < buffer:
+            compact_in_stream = False
+            if (_hs._needs_compaction(capacity, prompt_tokens, messages)
+                    and compactable(messages)):
+                if req.stream:
+                    # The stream compacts after its role chunk, behind a
+                    # "Compacting conversation..." status, and refuses an
+                    # overflow in the stream.
+                    compact_in_stream = True
+                    compacted_here = True
+                else:
                     new_messages, changed, gone = await _hs._compact_for_capacity(
                         engine, messages, request)
                     if gone:
@@ -306,14 +313,10 @@ def register(app: FastAPI, ctx) -> None:
                             # generation, so it refuses rather than estimating.
                             raise HTTPException(400, str(e))
 
-            if (isinstance(capacity, int) and capacity > 0
+            if (not compact_in_stream and isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
                 raise HTTPException(
-                    413,
-                    f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
-                    f"context capacity ({capacity} tokens). Start a new chat, "
-                    f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
-                    f"true to size it from free VRAM).")
+                    413, _hs.context_overflow_detail(prompt_tokens, capacity))
 
             if req.stream:
                 # Ownership of the pin transfers to _pin_engine, which releases it
@@ -322,7 +325,8 @@ def register(app: FastAPI, ctx) -> None:
                 return StreamingResponse(
                     _pin_engine(engine, _stream_sse(engine, messages, reported_model, sem,
                                 audit=_audit, transcript=_transcript,
-                                pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens, **gen_kwargs)),
+                                pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens,
+                                compact=compact_in_stream, **gen_kwargs)),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",

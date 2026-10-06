@@ -50,7 +50,7 @@ from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
-    ChatChunk, ChatResponse,
+    COMPACTING_STATUS, ChatChunk, ChatResponse,
     FullChoice, Message, STATUS_CODE_BY_TEXT, UsageInfo,
     WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
@@ -4432,8 +4432,17 @@ async def _stream_sse(
     pipeline=None,
     ctx=None,
     prompt_tokens: Optional[int] = None,
+    compact: bool = False,
     **gen_kwargs,
 ) -> AsyncIterator[str]:
+    """Stream the reply to *messages* as SSE ``data:`` lines.
+
+    With *compact* (or, when *prompt_tokens* is not given, when the prompt
+    nearly fills the context), the conversation is compacted after the role
+    chunk, behind a ``COMPACTING_STATUS`` status chunk. A compacted prompt
+    that still does not fit, or whose recount is refused, ends the stream with
+    the refusal as an error reply and no generation."""
+    from localm.inference.compact import compactable
     from localm.inference.gbnf import think_exit_marker
     from localm.inference.protocol import ChoiceDelta, StreamChoice
     from localm.textnorm import ThinkSplitter
@@ -4447,18 +4456,9 @@ async def _stream_sse(
 
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
-
-        # Context-limit handling: compact_messages when close to the limit; reserve a
-        # 2048-token buffer for compaction overhead + response generation.
-        capacity = engine.context_capacity()
-        if isinstance(capacity, int) and capacity > 0 and len(messages) > 3:
-            buffer = max(2048, int(capacity * 0.10))
-            if capacity - prompt_tokens < buffer:
-                new_messages, changed, _gone = await _compact_for_capacity(
-                    engine, messages)
-                if changed:
-                    messages = list(new_messages)
-                    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
+        compact = compact or (
+            _needs_compaction(engine.context_capacity(), prompt_tokens, messages)
+            and compactable(messages))
 
     # Role announcement
     role_chunk = ChatChunk(
@@ -4468,6 +4468,35 @@ async def _stream_sse(
         choices=[StreamChoice(delta=ChoiceDelta(role="assistant"))],
     )
     yield f"data: {role_chunk.model_dump_json()}\n\n"
+
+    if compact:
+        compacting = ChatChunk.status_chunk(COMPACTING_STATUS, model_id, chunk_id, ts)
+        yield f"data: {compacting.model_dump_json()}\n\n"
+        new_messages, changed, _gone = await _compact_for_capacity(engine, messages)
+        refusal = ""
+        if changed:
+            messages = list(new_messages)
+            try:
+                prompt_tokens = await asyncio.get_running_loop().run_in_executor(
+                    None, engine.count_messages_tokens, messages)
+            except PretokenizerUnsafeInputError as e:
+                refusal = str(e)
+        capacity = engine.context_capacity()
+        if (not refusal and isinstance(capacity, int) and capacity > 0
+                and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
+            refusal = context_overflow_detail(prompt_tokens, capacity)
+        if refusal:
+            if ctx is not None:
+                ctx.outcome = "error"
+            err_chunk = ChatChunk.token(refusal, model_id, chunk_id, ts)
+            yield f"data: {err_chunk.model_dump_json()}\n\n"
+            done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error",
+                                  usage=UsageInfo(prompt_tokens=prompt_tokens or 0,
+                                                  total_tokens=prompt_tokens or 0,
+                                                  context_capacity=capacity))
+            yield f"data: {done.model_dump_json()}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
     if sem.locked():
         waiting_chunk = ChatChunk.status_chunk(
@@ -4840,6 +4869,24 @@ COMPACTION_DISCONNECT_DETAIL = (
     "Client closed the request while the conversation was being compacted.")
 
 
+def _needs_compaction(capacity, prompt_tokens, messages) -> bool:
+    """True when *prompt_tokens* leaves less than the reply buffer (2048 tokens
+    or 10% of *capacity*, whichever is larger) free in *capacity*, for a
+    conversation of more than three messages."""
+    if not (isinstance(capacity, int) and capacity > 0
+            and isinstance(prompt_tokens, int) and len(messages) > 3):
+        return False
+    return capacity - prompt_tokens < max(2048, int(capacity * 0.10))
+
+
+def context_overflow_detail(prompt_tokens: int, capacity: int) -> str:
+    """The refusal text for a prompt larger than the context capacity."""
+    return (f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
+            f"context capacity ({capacity} tokens). Start a new chat, "
+            f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
+            f"true to size it from free VRAM).")
+
+
 def _resolve_disconnect_poll(request):
     """The async "has the client gone?" poll for *request*, or ``None``.
 
@@ -4871,7 +4918,10 @@ async def _compact_for_capacity(engine, messages: list, request=None
 
     Returns ``(messages, changed, disconnected)``; *disconnected* is True when
     a client disconnect was observed while compacting."""
+    from localm.debuglog import logger as _dbg
     from localm.inference.compact import compact_messages
+    _dbg.info("compacting conversation: %d message(s) for %s",
+              len(messages), engine.display_name)
     loop = asyncio.get_running_loop()
     cancel = threading.Event()
     residency.register_cancel(engine.display_name, cancel)
@@ -4923,6 +4973,8 @@ async def _compact_for_capacity(engine, messages: list, request=None
         except (asyncio.CancelledError, Exception):
             pass
         residency.unregister_cancel(engine.display_name, cancel)
+    _dbg.info("compacted conversation: %d -> %d message(s)%s", len(messages),
+              len(new_messages), " (client disconnected)" if disconnected["v"] else "")
     return new_messages, changed, disconnected["v"]
 
 
@@ -5218,16 +5270,14 @@ async def _complete(
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
-        if isinstance(capacity, int) and capacity > 0 and len(messages) > 3:
-            buffer = max(2048, int(capacity * 0.10))
-            if capacity - prompt_tokens < buffer:
-                new_messages, changed, gone = await _compact_for_capacity(
-                    engine, messages, request)
-                if gone:
-                    raise HTTPException(499, COMPACTION_DISCONNECT_DETAIL)
-                if changed:
-                    messages = list(new_messages)
-                    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
+        if _needs_compaction(capacity, prompt_tokens, messages):
+            new_messages, changed, gone = await _compact_for_capacity(
+                engine, messages, request)
+            if gone:
+                raise HTTPException(499, COMPACTION_DISCONNECT_DETAIL)
+            if changed:
+                messages = list(new_messages)
+                prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
     # Serialise inference - only one request runs at a time
     gen_error: Exception | None = None

@@ -823,6 +823,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 messages,
                 limit_tokens=limit,
                 count_tokens=engine.count_tokens,
+                on_compact=lambda: console.print(
+                    "[dim]Compacting the conversation to free context...[/dim]"),
                 generate=lambda m, max_tok: "".join(
                     engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
                                        thinking=False)),
@@ -843,10 +845,13 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             interactive_opts["min_context"] = router.min_context
         if "on_status" not in interactive_opts:
             from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+            from localm.inference.protocol import COMPACTING_STATUS
 
             def _cli_interactive_status(s: str) -> None:
                 if s == VISION_CPU_FALLBACK_STATUS:
                     err_console.print(f"\n[yellow]{escape(s)}[/yellow]")
+                elif s == COMPACTING_STATUS:
+                    err_console.print(f"\n[dim]{escape(s)}[/dim]")
             interactive_opts["on_status"] = _cli_interactive_status
         try:
             for token in engine.chat_stream(messages, **interactive_opts):
@@ -1071,7 +1076,9 @@ def _handle_command(
         if engine is None:
             console.print("[dim]/compact not available in this mode[/dim]")
         else:
-            from ..inference.compact import compact_messages
+            from ..inference.compact import compact_messages, compactable
+            if compactable(messages):
+                console.print("[dim]Compacting the conversation...[/dim]")
             new_messages, changed = compact_messages(
                 messages,
                 generate=lambda m, max_tok: "".join(

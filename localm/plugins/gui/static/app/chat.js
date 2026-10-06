@@ -313,6 +313,14 @@ export async function compactConversation(conv, signal = null) {
   // pinned model, pinned, else the selected model as a preference.
   const pinnedModel = conv.pinnedModel || "";
   let summary = "";
+  // A placeholder assistant row shows "Compacting conversation..." until the
+  // summary request settles.
+  const box = $("chat-messages");
+  const pending = box ? addMessageRow(box, "assistant", "") : null;
+  if (pending) {
+    mountStatusIndicator(pending.body, t("chat.status.compacting"));
+    box.scrollTop = box.scrollHeight;
+  }
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -346,6 +354,12 @@ export async function compactConversation(conv, signal = null) {
       }
     }
   } catch { /* summarisation unavailable - fall back to a note below */ }
+  finally {
+    if (pending) {
+      removeStatusIndicator(pending.body);
+      pending.row.remove();
+    }
+  }
   if (signal && signal.aborted) return false;
   // R44: sanitise the summary so leaked <think>/markers never re-enter context.
   summary = stripThink(scrubMarkers(summary)).trim();

@@ -411,3 +411,100 @@ def test_route_ignores_other_template_kwargs(kwargs):
                        "chat_template_kwargs": kwargs})
     assert "thinking" not in engine.calls[-1][1]
     assert r.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+#  The stream says it is compacting                                            #
+# --------------------------------------------------------------------------- #
+
+def _sse_deltas(text: str) -> list:
+    import json
+    out = []
+    for line in text.splitlines():
+        if line.startswith("data: ") and line != "data: [DONE]":
+            obj = json.loads(line[len("data: "):])
+            for ch in obj.get("choices", []):
+                out.append((ch.get("delta") or {}, ch.get("finish_reason")))
+    return out
+
+
+def test_stream_reports_compacting_before_the_reply():
+    engine = _engine("We discussed tidal locking.")
+    r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
+    deltas = _sse_deltas(r.text)
+    codes = [d.get("status_code") for d, _ in deltas if d.get("status")]
+    first_content = next(i for i, (d, _) in enumerate(deltas) if d.get("content"))
+    compacting_at = next(i for i, (d, _) in enumerate(deltas)
+                         if d.get("status_code") == "compacting")
+    assert compacting_at < first_content
+    assert codes[0] == "compacting", codes
+    assert deltas[compacting_at][0]["status"] == "Compacting conversation..."
+    summariser = [c for c in engine.calls if c[1].get("thinking") is False]
+    assert len(summariser) == 1
+    assert r.headers.get("X-Localm-Context-Compacted") == "1"
+    assert r.status_code == 200
+
+
+def test_stream_without_compaction_has_no_compacting_status():
+    engine = _engine("unused")
+    engine.context_capacity.return_value = 100000
+    r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
+    codes = [d.get("status_code") for d, _ in _sse_deltas(r.text) if d.get("status")]
+    assert "compacting" not in codes
+    assert "X-Localm-Context-Compacted" not in r.headers
+
+
+def test_stream_overflow_after_compaction_is_reported_in_the_stream():
+    engine = _engine("Summary.")
+    engine.count_messages_tokens.side_effect = lambda ms: 5000
+    r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
+    deltas = _sse_deltas(r.text)
+    text = "".join(d.get("content") or "" for d, _ in deltas)
+    answers = [c for c in engine.calls if c[1].get("thinking") is not False]
+    assert answers == []
+    assert "exceeds the model's maximum context capacity (4096 tokens)" in text
+    assert deltas[-1][1] == "error"
+    assert r.status_code == 200
+
+
+def test_stream_recount_refusal_after_compaction_is_reported_in_the_stream():
+    from localm.inference.backends.base import PretokenizerUnsafeInputError
+    engine = _engine("Summary.")
+    counts = iter([3000])
+
+    def _count(ms):
+        try:
+            return next(counts)
+        except StopIteration:
+            raise PretokenizerUnsafeInputError("unbroken run of 9000 characters")
+
+    engine.count_messages_tokens.side_effect = _count
+    r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
+    deltas = _sse_deltas(r.text)
+    text = "".join(d.get("content") or "" for d, _ in deltas)
+    assert "unbroken run" in text
+    assert deltas[-1][1] == "error"
+    assert [c for c in engine.calls if c[1].get("thinking") is not False] == []
+
+
+def test_non_stream_overflow_is_still_413():
+    engine = _engine("Summary.")
+    engine.count_messages_tokens.side_effect = lambda ms: 5000
+    r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": False})
+    assert "exceeds the model's maximum context capacity" in r.json()["detail"]
+    assert r.status_code == 413
+
+
+def test_maybe_compact_announces_only_a_real_compaction():
+    from localm.inference.compact import maybe_compact
+    calls = []
+    long = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 400}
+            for i in range(12)]
+    out, changed = maybe_compact(long, limit_tokens=1000,
+                                 generate=lambda m, t: "S",
+                                 on_compact=lambda: calls.append(1))
+    assert changed is True and calls == [1]
+    calls.clear()
+    maybe_compact(long, limit_tokens=100000, generate=lambda m, t: "S",
+                  on_compact=lambda: calls.append(1))
+    assert calls == []
