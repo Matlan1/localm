@@ -1350,13 +1350,13 @@ class LlamaCpp:
         try:
             with _mtmd_mirror_ctx(), _mtmd_load_ctx() as captured:
                 try:
-                    from .mtmd import MtmdContext
+                    from .mtmd import MtmdContext, compatible_mmproj_path
                     # getattr, not self._main_gpu_index: this method is unit-tested
                     # directly against instances that never ran __init__ (see this
                     # docstring's note on why it was pulled out), and 0 is exactly
                     # the "leave clip's own default alone" value.
                     mt = MtmdContext(
-                        mmproj_path, self._model_ptr,
+                        compatible_mmproj_path(mmproj_path), self._model_ptr,
                         gpu_index=getattr(self, "_main_gpu_index", 0))
                 except Exception:
                     if captured is not None:

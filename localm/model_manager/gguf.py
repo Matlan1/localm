@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Callable
 from typing import List
+from typing import NamedTuple
 from typing import Optional
 from rich.progress import BarColumn
 from rich.progress import DownloadColumn
@@ -1703,6 +1704,132 @@ def gguf_n_embd(path: Path) -> Optional[int]:
         return _clip_tensor_output_width(ptype, dims)
     except (struct.error, IndexError, UnicodeDecodeError):
         return None
+
+
+_CLIP_PROJECTOR_TYPE_KEYS = ("clip.projector_type", "clip.vision.projector_type")
+_CLIP_MLP_TENSORS = frozenset({"mm.0.weight", "mm.2.weight", _CLIP_MLP_NORM_WEIGHT})
+_CLIP_LDP_PREFIX = "mm.model.mb_block."
+_CLIP_LDPV2_PREFIX = "mm.model.peg."
+
+
+class _GgufLayout(NamedTuple):
+    """Where a GGUF file's header sections end, and what they hold."""
+    version: int
+    kv_count: int
+    kv_end: int
+    info_end: int
+    alignment: int
+    architecture: Optional[str]
+    keys: frozenset
+    tensor_names: tuple
+
+
+def _gguf_header_layout(f) -> _GgufLayout:
+    """Parse the GGUF header of the open file *f* (positioned at 0) through the
+    end of its tensor-info section. ``kv_end`` and ``info_end`` are file offsets;
+    ``alignment`` is ``general.alignment`` or the format default. Raises
+    struct.error, UnicodeDecodeError or ValueError on anything that is not a
+    parseable GGUF v2+ header."""
+    if f.read(4) != b"GGUF":
+        raise struct.error("not a GGUF file")
+    (version,) = struct.unpack("<I", f.read(4))
+    if version < 2:
+        raise struct.error(f"unsupported GGUF version {version}")
+    tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
+    if tensor_count > _GGUF_MAX_TENSOR_COUNT:
+        raise struct.error(f"implausible tensor count {tensor_count}")
+    keys = set()
+    alignment = _GGUF_DEFAULT_ALIGNMENT
+    architecture = None
+    for _ in range(kv_count):
+        key = _gguf_read_string_stream(f)
+        (vtype,) = struct.unpack("<I", f.read(4))
+        keys.add(key)
+        if key == "general.alignment" and vtype == 4:
+            (alignment,) = struct.unpack("<I", f.read(4))
+            if not alignment:
+                raise struct.error("general.alignment is 0")
+            continue
+        if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+            architecture = _gguf_read_string_stream(f)
+            continue
+        _gguf_skip_value_stream(f, vtype)
+    kv_end = f.tell()
+    names = []
+    for _ in range(tensor_count):
+        names.append(_gguf_read_string_stream(f))
+        (n_dims,) = struct.unpack("<I", f.read(4))
+        if n_dims > _GGUF_MAX_TENSOR_DIMS:
+            raise struct.error(f"implausible tensor n_dims {n_dims}")
+        f.seek(8 * n_dims + 4 + 8, 1)       # dims, ggml_type, data offset
+    return _GgufLayout(version, kv_count, kv_end, f.tell(), alignment,
+                       architecture, frozenset(keys), tuple(names))
+
+
+def gguf_mmproj_inferred_projector_type(path: Path) -> Optional[str]:
+    """For a clip mmproj that records no projector type (neither
+    ``clip.projector_type`` nor ``clip.vision.projector_type``), the type older
+    llama.cpp builds loaded it as, read from its tensor names: ``"ldp"`` for
+    ``mm.model.mb_block.*`` tensors, ``"ldpv2"`` for ``mm.model.peg.*``, and
+    ``"mlp"`` for ``mm.0.weight`` / ``mm.2.weight`` / ``mm.3.weight``.
+
+    Returns None when the file records a projector type, is not a clip mmproj,
+    cannot be parsed, or has none of those tensors. Never raises."""
+    try:
+        with open(path, "rb") as f:
+            layout = _gguf_header_layout(f)
+    except (OSError, struct.error, IndexError, UnicodeDecodeError, ValueError):
+        return None
+    if layout.architecture != _GGUF_MMPROJ_ARCHITECTURE:
+        return None
+    if layout.keys.intersection(_CLIP_PROJECTOR_TYPE_KEYS):
+        return None
+    names = layout.tensor_names
+    if any(n.startswith(_CLIP_LDP_PREFIX) for n in names):
+        return "ldp"
+    if any(n.startswith(_CLIP_LDPV2_PREFIX) for n in names):
+        return "ldpv2"
+    if _CLIP_MLP_TENSORS.intersection(names):
+        return "mlp"
+    return None
+
+
+_GGUF_COPY_CHUNK_BYTES = 16 * 1024 * 1024
+
+
+def write_gguf_with_string_kv(src: Path, dst: Path, key: str, value: str) -> None:
+    """Write a copy of the GGUF *src* to *dst* with the string metadata key
+    *key* = *value* appended. Every other metadata entry, every tensor info and
+    the tensor data are copied unchanged; the tensor-info section is padded to
+    the file's alignment, so the data section starts aligned and the tensors'
+    relative offsets stay valid.
+
+    Raises ValueError when *src* already has *key* or is not a parseable GGUF v2+
+    file, and OSError on an I/O failure. *dst* may be partly written when it
+    raises."""
+    with open(src, "rb") as f:
+        try:
+            layout = _gguf_header_layout(f)
+        except (struct.error, IndexError, UnicodeDecodeError) as exc:
+            raise ValueError(f"{src.name} is not a readable GGUF file: {exc}") from exc
+        if key in layout.keys:
+            raise ValueError(f"{src.name} already has {key}")
+        data_start = layout.info_end + (-layout.info_end % layout.alignment)
+        f.seek(24)
+        kvs = f.read(layout.kv_end - 24)
+        infos = f.read(layout.info_end - layout.kv_end)
+        kb, vb = key.encode("utf-8"), value.encode("utf-8")
+        added = (struct.pack("<Q", len(kb)) + kb + struct.pack("<I", _GGUF_TYPE_STRING)
+                 + struct.pack("<Q", len(vb)) + vb)
+        head = (b"GGUF" + struct.pack("<I", layout.version)
+                + struct.pack("<QQ", len(layout.tensor_names), layout.kv_count + 1)
+                + kvs + added + infos)
+        head += b"\x00" * (-len(head) % layout.alignment)
+        f.seek(data_start)
+        with open(dst, "wb") as out:
+            out.write(head)
+            while chunk := f.read(_GGUF_COPY_CHUNK_BYTES):
+                out.write(chunk)
 
 
 def gguf_registry_metadata(path: Path, meta: Optional[dict] = None) -> dict:
