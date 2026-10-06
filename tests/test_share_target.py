@@ -10,7 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from localm.plugins.gui.web import attach_gui
+from localm.plugins.gui.web import _parse_share_entry, attach_gui
 
 
 def _make_client(tmp_path, monkeypatch, mode):
@@ -261,11 +261,29 @@ def _inject_unlink_failure(monkeypatch, fail_on_name_containing: str):
     real_unlink = Path.unlink
 
     def fake_unlink(self, *a, **kw):
-        if fail_on_name_containing in self.name:
+        if fail_on_name_containing in _parse_share_entry(self)[2]:
             raise OSError(13, "Permission denied")
         return real_unlink(self, *a, **kw)
 
     monkeypatch.setattr(Path, "unlink", fake_unlink)
+
+
+def test_unlink_injection_ignores_the_random_entry_id(tmp_path, monkeypatch):
+    """The stored name is "<random hex id>__-__<filename>". The needle is matched
+    against the filename part only, so an id that happens to contain it (hex
+    letters a-f collide easily) is not failed."""
+    colliding = tmp_path / "0abad8b0__-__good.png"
+    matching = tmp_path / "0123abcd__-__bad.png"
+    colliding.write_bytes(_PNG)
+    matching.write_bytes(_PNG)
+    _inject_unlink_failure(monkeypatch, "bad")
+
+    colliding.unlink()
+    assert not colliding.exists(), "the injection matched the random id"
+    with pytest.raises(OSError) as exc:
+        matching.unlink()
+    assert exc.value.errno == 13
+    assert matching.exists()
 
 
 def test_share_clear_reports_a_delete_that_failed(share_client, monkeypatch):
