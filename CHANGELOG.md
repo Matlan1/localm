@@ -168,6 +168,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Closing a coder session while its browser is still starting no longer
+  leaves the browser running.** A browser that finishes starting after its coder
+  session has closed is now stopped instead of staying open, with its cookies and
+  storage, until localm exits.
 - **`localm setup-llama --help` no longer says the newest upstream build is the
   default.** The default installs the llama.cpp build this localm release
   confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
