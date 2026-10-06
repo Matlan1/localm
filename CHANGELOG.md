@@ -1139,6 +1139,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Windows, and on Linux and macOS a re-download that failed checksum verification deleted
   the file that was already in place. A pull of a CivitAI file that another pull finished
   moments earlier now uses that finished file instead of failing or replacing it.
+- **`localm coder --estimate` stops after printing the plan.** It used to print the
+  plan and then run the task anyway, writing files and, with `--yes`, running shell
+  commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
 - **Privacy mode no longer leaves the start of tool-enabled replies in the debug
