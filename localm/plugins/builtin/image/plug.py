@@ -30,7 +30,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.image_gen.comfy import is_safe_lora_name
 from localm.inference.http_server import principal_id
@@ -47,16 +47,16 @@ class ImagineRequest(BaseModel):
     prompt: str
     negative_prompt: str | None = None
     seed: int | None = None
-    guidance: float | None = None
-    cfg: float | None = None          # negative-prompt CFG scale; no effect without one
+    guidance: float | None = Field(None, allow_inf_nan=False)
+    cfg: float | None = Field(None, allow_inf_nan=False)          # negative-prompt CFG scale; no effect without one
     input_image: str | None = None    # path on this machine (img2img)
-    denoise: float | None = None
+    denoise: float | None = Field(None, allow_inf_nan=False)
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
     lora_name: str | None = None              # from the live LoRA picker, or None
-    lora_strength_model: float | None = None  # None keeps generate_image()'s default (1.0)
-    lora_strength_clip: float | None = None   # None keeps generate_image()'s default (0.5)
+    lora_strength_model: float | None = Field(None, allow_inf_nan=False)  # None keeps generate_image()'s default (1.0)
+    lora_strength_clip: float | None = Field(None, allow_inf_nan=False)   # None keeps generate_image()'s default (0.5)
 
 
 class MoveFileRequest(BaseModel):

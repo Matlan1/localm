@@ -168,6 +168,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Image, music and video requests with a NaN or infinite number in a
+  tuning field are now refused.** Guidance, cfg, denoise, the LoRA strengths,
+  lyrics strength and shift each return a 422 instead of starting a
+  generation job with garbage sampler values.
 - **`localm pull civitai:<version>` no longer takes another version's file as
   already downloaded.** Versions of one CivitAI model often share a filename, and
   when CivitAI lists no SHA256 for the file, a file left by a different version was
