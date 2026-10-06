@@ -303,3 +303,20 @@ test("compaction shows a Compacting status while the summary is written, then re
   assert.match(seen || "", /Compacting conversation/);
   assert.equal(window.document.querySelector("#chat-messages .msg-status-indicator"), null);
 });
+
+test("a Stopped compaction removes its Compacting status row", async () => {
+  const ac = new AbortController();
+  const impl = async (url) => {
+    if (String(url) === "/v1/chat/completions") {
+      ac.abort();
+      throw new Error("aborted");
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 160;");
+  const ok = await window.compactConversation(makeConv(20), ac.signal);
+  assert.equal(ok, false);
+  assert.equal(window.document.querySelector("#chat-messages .msg-status-indicator"), null);
+  assert.equal(window.document.querySelectorAll("#chat-messages .msg-row").length, 0);
+});

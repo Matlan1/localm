@@ -508,3 +508,9 @@ def test_maybe_compact_announces_only_a_real_compaction():
     maybe_compact(long, limit_tokens=100000, generate=lambda m, t: "S",
                   on_compact=lambda: calls.append(1))
     assert calls == []
+    huge_but_short = [{"role": "user", "content": "x" * 40000}]
+    out, changed = maybe_compact(huge_but_short, limit_tokens=1000,
+                                 generate=lambda m, t: "S",
+                                 on_compact=lambda: calls.append(1))
+    assert changed is False
+    assert calls == []
