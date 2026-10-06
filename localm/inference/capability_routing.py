@@ -24,8 +24,9 @@ A pinned request therefore still gets a decision describing what it lacks, and
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field, replace
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 from localm.model_manager import capabilities as caps
 from localm.model_manager.registry import is_llm
@@ -71,6 +72,36 @@ class CapabilityNeeds:
 
 
 @dataclass(frozen=True)
+class SkippedCandidate:
+    """A model routing would have considered but left out because its last load
+    failed. *failed_at* and *retry_at* are epoch seconds; *reason* is the short
+    text of the failure."""
+
+    model: str
+    failed_at: float
+    retry_at: float
+    reason: str
+
+    def describe(self) -> str:
+        """One clause: when the model's last load failed, why, and when routing
+        tries it again."""
+        return (f"{self.model} was skipped because its last load failed at "
+                f"{_clock_text(self.failed_at)} ({self.reason}); it is tried again "
+                f"after {_clock_text(self.retry_at)} or when its load settings change")
+
+
+def _clock_text(epoch: float) -> str:
+    """*epoch* as local ``HH:MM``."""
+    return time.strftime("%H:%M", time.localtime(epoch))
+
+
+def _skipped_text(skipped: Sequence[SkippedCandidate]) -> str:
+    """One clause per skipped model: when its last load failed, why, and when
+    routing tries it again."""
+    return "; ".join(s.describe() for s in skipped)
+
+
+@dataclass(frozen=True)
 class RoutingDecision:
     """What routing concluded, and enough of why to audit it afterwards.
 
@@ -87,7 +118,10 @@ class RoutingDecision:
     ``unmet`` names the needs the model that answers still lacks: every gap
     when no installed model could take the request, or, when a model was chosen
     for what the request cannot be answered without (an image, the context
-    window), the other needs it lacks because no installed model has them all."""
+    window), the other needs it lacks because no installed model has them all.
+
+    ``skipped`` lists the models that meet the request's needs but were left
+    out of ``candidates`` because their last load failed."""
 
     current: Optional[str]
     resolved: Optional[str]
@@ -98,6 +132,7 @@ class RoutingDecision:
     candidates: Tuple[str, ...] = ()
     load_errors: Tuple[str, ...] = ()
     candidate_unmet: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    skipped: Tuple[SkippedCandidate, ...] = ()
 
     def answered_by(self, name: str) -> "RoutingDecision":
         """This decision with candidate *name* answering: ``resolved`` names it and
@@ -112,6 +147,11 @@ class RoutingDecision:
         return replace(self, resolved=self.current, unmet=tuple(sorted(self.gaps)),
                        load_errors=tuple(load_errors))
 
+    def with_skipped(self, more: Sequence[SkippedCandidate]) -> "RoutingDecision":
+        """This decision with *more* added to ``skipped``: models found to be
+        skipped after the decision was made."""
+        return replace(self, skipped=self.skipped + tuple(more))
+
     @property
     def routed(self) -> bool:
         # Deliberately NOT gated on current being set. With no model resolved at
@@ -123,26 +163,36 @@ class RoutingDecision:
     def has_gap(self) -> bool:
         return bool(self.gaps)
 
+    def describe_skipped(self) -> str:
+        """One clause per skipped model naming when its last load failed, why,
+        and when routing tries it again; empty when nothing was skipped."""
+        return _skipped_text(self.skipped)
+
     def describe(self) -> str:
         """One line naming what happened, for the audit log and the response
         header. Says which capability drove the choice, never just that a choice
-        was made."""
+        was made, and which models were skipped because their last load
+        failed."""
         if not self.has_gap:
             return "no capability gap"
         parts = []
         for cap, state in sorted(self.gaps.items()):
             parts.append(f"{cap}=" + ("absent" if state is False else "unknown"))
         gap_text = ", ".join(parts)
+        skipped = f"; {_skipped_text(self.skipped)}" if self.skipped else ""
         if self.routed:
             if self.unmet:
                 return (f"routed {self.current} -> {self.resolved} ({gap_text}); "
-                        f"no installed model also provides {', '.join(self.unmet)}")
-            return f"routed {self.current} -> {self.resolved} ({gap_text})"
+                        f"no installed model also provides "
+                        f"{', '.join(self.unmet)}{skipped}")
+            return f"routed {self.current} -> {self.resolved} ({gap_text}){skipped}"
         if self.pinned:
             return f"kept pinned {self.current} ({gap_text})"
         if self.load_errors:
             return (f"kept {self.current} ({gap_text}); no capable model could "
-                    f"be loaded: {'; '.join(self.load_errors)}")
+                    f"answer: {'; '.join(self.load_errors)}{skipped}")
+        if self.skipped:
+            return f"kept {self.current} ({gap_text}){skipped}"
         if self.unmet:
             return (f"kept {self.current} ({gap_text}); "
                     f"no installed model provides {', '.join(self.unmet)}")
@@ -277,7 +327,10 @@ def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
 def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
                pinned: bool, resident: Sequence[str] = (),
                reg: Optional[dict] = None,
-               current_known: Optional[Dict[str, bool]] = None) -> RoutingDecision:
+               current_known: Optional[Dict[str, bool]] = None,
+               skip: Union[Mapping[str, SkippedCandidate],
+                           Callable[[], Mapping[str, SkippedCandidate]], None] = None
+               ) -> RoutingDecision:
     """Decide which model should answer a request needing *needs*.
 
     *current* is the model that would answer if nothing changed. *pinned* says
@@ -294,6 +347,12 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     not a gap.
 
     Only chat LLMs whose file is not recorded missing are candidates.
+
+    *skip* maps a model name to why it must not be tried: a model in it is
+    left out of the candidates, is never chosen, and is reported in the
+    decision's ``skipped`` when it would otherwise have qualified. It may be
+    a callable returning that mapping, called only once a request that is not
+    pinned has a gap.
 
     When no model meets every need, a model is still chosen when the current
     one cannot take the request at all (an image it cannot read, a confirmed
@@ -332,13 +391,20 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         ctx = caps.model_context_length(n, reg=reg) or 0
         return (0 if n in resident_set else 1, -ctx, n)
 
-    qualified = [n for n in reg
-                 if n != current and _model_satisfies(n, needs, reg, dir_cache)]
+    skip = (skip() if callable(skip) else skip) or {}
+
+    def split_skipped(names):
+        usable = [n for n in names if n not in skip]
+        return usable, tuple(skip[n] for n in sorted(names) if n in skip)
+
+    qualified, skipped = split_skipped(
+        [n for n in reg
+         if n != current and _model_satisfies(n, needs, reg, dir_cache)])
     if qualified:
         qualified.sort(key=rank)
         return RoutingDecision(current=current, resolved=qualified[0], pinned=False,
                                needs=needs, gaps=gaps,
-                               candidates=tuple(qualified))
+                               candidates=tuple(qualified), skipped=skipped)
 
     required = CapabilityNeeds(
         capabilities=tuple(c for c in needs.capabilities if c in _REQUIRED_TO_ANSWER),
@@ -350,15 +416,19 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         def has(n: str, cap: str) -> bool:
             return caps.model_capability(n, cap, reg=reg, dir_cache=dir_cache) is True
 
-        partial = [n for n in reg
-                   if n != current and _model_satisfies(n, required, reg, dir_cache)]
+        partial, partial_skipped = split_skipped(
+            [n for n in reg
+             if n != current and _model_satisfies(n, required, reg, dir_cache)])
+        skipped = partial_skipped
         if partial:
             partial.sort(key=lambda n: (-sum(has(n, c) for c in optional), *rank(n)))
             lacks = {n: tuple(sorted(c for c in optional if not has(n, c)))
                      for n in partial}
             return RoutingDecision(current=current, resolved=partial[0], pinned=False,
                                    needs=needs, gaps=gaps, unmet=lacks[partial[0]],
-                                   candidates=tuple(partial), candidate_unmet=lacks)
+                                   candidates=tuple(partial), candidate_unmet=lacks,
+                                   skipped=skipped)
 
     return RoutingDecision(current=current, resolved=current, pinned=False,
-                           needs=needs, gaps=gaps, unmet=tuple(sorted(gaps)))
+                           needs=needs, gaps=gaps, unmet=tuple(sorted(gaps)),
+                           skipped=skipped)

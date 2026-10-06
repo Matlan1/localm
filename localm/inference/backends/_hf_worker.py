@@ -161,9 +161,10 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     - 2+ valid ``gpu_split_indices`` -> ``"auto"`` sharded ONLY across those
       devices. Any GPU id absent from ``max_memory`` is excluded from
       accelerate's auto-shard.
-    - no split, but a valid ``main_gpu_index`` -> ``"auto"`` confined to that
-      ONE device by the same technique (its id is the only GPU in
-      ``max_memory``).
+    - a 1-entry ``gpu_split_indices`` naming a detected device
+      (``discover.single_gpu_index``), else a valid ``main_gpu_index`` ->
+      ``"auto"`` confined to that ONE device by the same technique (its id is
+      the only GPU in ``max_memory``).
     - neither configured -> ``"auto"`` across every visible device.
 
     Every ``max_memory`` built here also carries a ``"cpu"`` budget: passing a
@@ -175,7 +176,8 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     overflow spills to CPU exactly as plain "auto" does.
     """
     from localm.config import load_config
-    from localm.discover import resolve_gpu_split, resolve_main_gpu_index
+    from localm.discover import (resolve_gpu_split, resolve_main_gpu_index,
+                                 single_gpu_index)
     cfg = config if config is not None else load_config()
 
     headroom = int(0.5e9)   # leave a little free per device, like the GGUF backend
@@ -208,8 +210,11 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
             "for enough devices (only %s usable); falling back to the "
             "default device_map", sorted(max_memory))
 
-    if cfg.get("main_gpu_index") is not None:
-        idx = resolve_main_gpu_index(cfg.get("main_gpu_index"))
+    single = single_gpu_index(cfg.get("gpu_split_indices"))
+    if single is not None or cfg.get("main_gpu_index") is not None:
+        idx = (single if single is not None
+               else resolve_main_gpu_index(cfg.get("main_gpu_index")))
+        setting = "gpu_split_indices" if single is not None else "main_gpu_index"
         budget = _free_minus_headroom(idx)
         if budget is None:
             # No readable free VRAM means no budget to build, so there is no way
@@ -217,10 +222,10 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
             # is honoured by pinning, and reported: this is the one path with no
             # CPU fallback, so an oversized model here still OOMs.
             logger.warning(
-                "main_gpu_index=%s is configured but its free VRAM could not be "
-                "read; pinning the whole model to that device. A model larger "
-                "than its free VRAM will fail to load rather than offloading to "
-                "CPU.", idx)
+                "%s names device %s but its free VRAM could not be read; pinning "
+                "the whole model to that device. A model larger than its free "
+                "VRAM will fail to load rather than offloading to CPU.",
+                setting, idx)
             return {"device_map": {"": idx}}
         return {"device_map": "auto",
                 "max_memory": {idx: budget, "cpu": _cpu_budget()}}

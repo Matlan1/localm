@@ -220,18 +220,22 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     hide_on_close=False's plain close - or the window fails to load at all.
 
     *server_stopped*, when given, is set by the caller once the server the
-    window fronts has stopped, before it calls close_native_window(). When it
-    is already set before the window's loop starts, no window is shown and
-    True is returned at once, so the caller opens no browser tab for a stopped
-    server either.
+    window fronts has stopped or has begun to stop (the window's quit action),
+    before it calls close_native_window(). When it is already set before the
+    window's loop starts, no window is shown and True is returned at once, so
+    the caller opens no browser tab for a stopped server either.
 
     Returns True only once the window actually LOADED the page, via pywebview's
-    ``window.events.loaded`` (a plain threading.Event with .wait(timeout)),
-    watched from a short-lived helper thread since the calling thread is busy
-    inside the blocking webview.start() call by then. Returns False whenever a
-    real, loaded window cannot be confirmed (extra absent, WebView2/WebKitGTK
-    missing or broken, window never loaded) so the caller can fall back to
-    webbrowser.open. NEVER raises.
+    ``window.events.loaded`` (read through its .wait(timeout)). A helper thread
+    waits for it for as long as the window loop runs, while the calling thread
+    is busy inside the blocking webview.start() call; when the page loads, it
+    enables the copy and paste shortcuts and brings the window to the
+    foreground (not a window the user has closed to the tray). The event is
+    read once more when the window loop returns, so a page that loaded as the
+    loop ended still counts. Returns False whenever a real, loaded window
+    cannot be confirmed (extra absent, WebView2/WebKitGTK missing or broken,
+    window never loaded) so the caller can fall back to webbrowser.open. NEVER
+    raises.
     """
     global _native_window
     if "pytest" in sys.modules:
@@ -256,6 +260,7 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     if window is None:
         return False
 
+    hidden_by_user = threading.Event()
     if hide_on_close:
         _native_window_may_really_close.clear()
 
@@ -278,12 +283,14 @@ def run_native_window(url: str, name: str = "LocaLM", *,
                     # blocked.
                     threading.Thread(target=on_quit, daemon=True).start()
                 return True   # allow the real close - the app is stopping
+            hidden_by_user.set()
             window.hide()
             return False
 
         window.events.closing += _on_closing
 
     loaded = {"v": False}
+    loop_ended = threading.Event()
 
     def _watch_loaded():
         # window.show() also calls .Activate(); a plain WinForms .Show() on first
@@ -291,45 +298,54 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         # by a background-launched process. window.on_top is NOT toggled here: the
         # winforms backend sets TopMost with no thread marshaling, and calling it
         # from this background thread hangs the process.
-        if window.events.loaded.wait(timeout=8.0):
+        while not loop_ended.is_set():
+            if not window.events.loaded.wait(timeout=1.0):
+                continue
             loaded["v"] = True
             problem = _enable_clipboard_bindings(window)
             if problem:
                 logger.warning("appface: copy and paste shortcuts could not be "
                                "enabled in the app window (%s); use the GUI's "
                                "own copy buttons", problem)
-            try:
-                window.show()
-            except Exception:
-                logger.debug("appface: native window foreground-activate "
-                             "failed (non-fatal)", exc_info=True)
+            if not hidden_by_user.is_set():
+                try:
+                    window.show()
+                except Exception:
+                    logger.debug("appface: native window foreground-activate "
+                                 "failed (non-fatal)", exc_info=True)
+            return
 
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
-    # One step under the lock close_native_window() reads under: either the
-    # stop is seen here and no window is published, or the window is published
-    # and a later close_native_window() destroys it. See
-    # test_a_stop_racing_the_window_publish_neither_hangs_nor_stalls.
-    with _native_window_lock:
-        if server_stopped is not None and server_stopped.is_set():
-            return True
-        _native_window = window
     try:
-        # private_mode=False keeps the login cookie across restarts, like the
-        # browser tab this replaces. Blocks until the window is destroyed.
-        # gui="qt" on Linux: pywebview tries GTK first, and this project never
-        # installs the GTK extra, so qt is the backend the `desktop` extra
-        # actually provides there. Windows and macOS keep pywebview's default.
-        start_kwargs = {"icon": icon_path(), "private_mode": False}
-        if sys.platform.startswith("linux"):
-            start_kwargs["gui"] = "qt"
-        webview.start(**start_kwargs)
-    except Exception:
-        logger.debug("appface: native window loop failed", exc_info=True)
-        return False
+        # One step under the lock close_native_window() reads under: either the
+        # stop is seen here and no window is published, or the window is
+        # published and a later close_native_window() destroys it. See
+        # test_a_stop_racing_the_window_publish_neither_hangs_nor_stalls.
+        with _native_window_lock:
+            if server_stopped is not None and server_stopped.is_set():
+                return True
+            _native_window = window
+        try:
+            # private_mode=False keeps the login cookie across restarts, like
+            # the browser tab this replaces. Blocks until the window is
+            # destroyed. gui="qt" on Linux: pywebview tries GTK first, and this
+            # project never installs the GTK extra, so qt is the backend the
+            # `desktop` extra actually provides there. Windows and macOS keep
+            # pywebview's default.
+            start_kwargs = {"icon": icon_path(), "private_mode": False}
+            if sys.platform.startswith("linux"):
+                start_kwargs["gui"] = "qt"
+            webview.start(**start_kwargs)
+        except Exception:
+            logger.debug("appface: native window loop failed", exc_info=True)
+            return False
+        finally:
+            _native_window = None
+        # Re-reads the event for a page that loaded since the helper last looked.
+        return loaded["v"] or bool(window.events.loaded.wait(timeout=0))
     finally:
-        _native_window = None
-    return loaded["v"]
+        loop_ended.set()
 
 
 def show_native_window() -> bool:

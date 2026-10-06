@@ -299,6 +299,27 @@ def _wire_http(monkeypatch, head_total: int, response):
     monkeypatch.setattr("localm.netpolicy.pinned_request", fake_pinned_request)
 
 
+def _interrupt_pull(monkeypatch, models, head_total: int, delivered: bytes):
+    """Run a pull whose transfer drops after *delivered* bytes, leaving the
+    partial (and the record beside it) that the next pull of the same URL
+    resumes."""
+    import requests
+
+    def _dropped(chunk_size):
+        yield delivered
+        raise requests.ConnectionError("connection reset by peer")
+
+    resp = _resp(200, b"", content_length=head_total)
+    resp.iter_content = _dropped
+    _wire_http(monkeypatch, head_total, resp)
+    try:
+        mm._pull_url("http://example.com/model.gguf", "mymodel")
+    except requests.ConnectionError:
+        pass
+    assert (models / "model.gguf.part").read_bytes() == delivered, (
+        "the interrupted pull left no partial")
+
+
 class TestAResumeOffsetIsNotATotal:
     def test_a_resumed_chunked_download_never_claims_a_percentage(
             self, url_env, monkeypatch, capsys):
@@ -314,7 +335,8 @@ class TestAResumeOffsetIsNotATotal:
         either alone cannot reproduce it.
         """
         models = url_env
-        (models / "model.gguf.part").write_bytes(b"01234")   # 5 already on disk
+        _interrupt_pull(monkeypatch, models, 10, b"01234")   # 5 already on disk
+        capsys.readouterr()
         monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
         _wire_http(monkeypatch, 10, _resp(206, b"56789", content_length=0))
 
@@ -331,7 +353,8 @@ class TestAResumeOffsetIsNotATotal:
             self, url_env, monkeypatch, capsys):
         """The fix must not throw away a total we genuinely have."""
         models = url_env
-        (models / "model.gguf.part").write_bytes(b"01234")
+        _interrupt_pull(monkeypatch, models, 10, b"01234")
+        capsys.readouterr()
         monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
         _wire_http(monkeypatch, 10, _resp(206, b"56789", content_length=5))
 

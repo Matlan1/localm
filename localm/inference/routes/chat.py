@@ -101,22 +101,31 @@ def register(app: FastAPI, ctx) -> None:
         engine = None
         if route.routed:
             load_errors = []
+            skipped_now = []
             for _cand in route.candidates or (route.resolved,):
                 try:
                     # activate=False: answering one request with the routed
                     # model does not make it the model every later unnamed
-                    # request resolves to.
-                    engine = await _hs.get_engine(_cand, activate=False)
-                except HTTPException as e:
-                    load_errors.append(f"{_cand}: {e.detail}")
+                    # request resolves to. skip_if_latched: a load that failed
+                    # while this request waited for the model is not repeated.
+                    engine = await _hs.get_engine(_cand, activate=False,
+                                                  skip_if_latched=True)
+                except _hs.LoadSkipped as e:
+                    skipped_now.append(e.skipped)
+                    continue
+                except (HTTPException, OSError, ValueError) as e:
+                    detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+                    load_errors.append(f"{_cand}: {detail}")
                     from localm.debuglog import logger as _dbg
                     _dbg.warning("capability routing: could not load %s for a "
                                  "request %s lacks (%s): %s", _cand, route.current,
-                                 ", ".join(sorted(route.gaps)), e.detail)
+                                 ", ".join(sorted(route.gaps)), detail)
                     continue
                 if _cand != route.resolved:
                     route = route.answered_by(_cand)
                 break
+            if skipped_now:
+                route = route.with_skipped(skipped_now)
             if engine is None:
                 route = route.without_route(load_errors)
         if route.has_gap:

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import queue
 import re
 import subprocess
@@ -36,8 +37,16 @@ import types
 import pytest
 
 import localm.rag.collection_lock as cl
+from localm import instances
 from localm.rag import Collection, CollectionLockedError, collection_names
 from localm.rag.collection_lock import collection_write_lock, lock_path_for
+from tests._process_identity import (
+    a_forward_step_past_boot,
+    spawn_on_this_tree,
+    start_identity_of,
+    started_an_hour_earlier,
+    step_the_clock,
+)
 
 
 # heavy_slot (only ONE subprocess-heavy test at a time, box-wide) lives in
@@ -64,11 +73,63 @@ def docs(tmp_path):
 
 def _record(**over) -> dict:
     """A well-formed lock record for a plausible FOREIGN holder."""
-    rec = {"token": "feedface" * 4, "pid": 999_999, "pid_create_time": None,
+    rec = {"token": "feedface" * 4, "pid": 999_999, "start": None,
            "machine": "another-machine-hash", "collection": "kb",
            "op": "a re-sync", "started": time.time() - 120}
     rec.update(over)
     return rec
+
+
+def _this_machine(pid: int, start) -> dict:
+    """A lock record for *pid* in this process's pid space with start
+    identity *start*."""
+    return _record(pid=pid, start=start, machine=cl._machine_id())
+
+
+# A real holder: takes the lock with its heartbeat running every argv[2]
+# seconds, recording pid space argv[3] ("-" for its own), and keeps it until
+# its stdin closes.
+_HOLDER = '''
+    import os, sys
+    from pathlib import Path
+    import localm.rag.collection_lock as cl
+    cl.HEARTBEAT_INTERVAL = float(sys.argv[2])
+    if sys.argv[3] != "-":
+        cl._machine_id_cache = sys.argv[3]
+    with cl.collection_write_lock(Path(sys.argv[1]), collection="kb",
+                                  op="a long index", timeout=30):
+        print("HELD", os.getpid(), flush=True)
+        sys.stdin.read()
+'''
+
+
+def _live_holder(tmp_path, lockpath, *, beat: float = cl.HEARTBEAT_INTERVAL,
+                 space: str = "-"):
+    """A real process holding *lockpath* (see _HOLDER). Returns the process
+    and the pid its lock record names."""
+    home = tmp_path / "holder-home"
+    home.mkdir(exist_ok=True)
+    p = spawn_on_this_tree(_HOLDER, home, lockpath, beat, space,
+                           stdin=subprocess.PIPE)
+    first = p.stdout.readline().split()
+    if first[:1] != ["HELD"]:
+        _, err = p.communicate(timeout=60)
+        pytest.fail(f"the holder did not take the lock: {first} {err}")
+    return p, int(first[1])
+
+
+def _idle_process():
+    """A live process that exits when its stdin closes, and its own pid."""
+    p = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, sys; print(os.getpid(), flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    return p, int(p.stdout.readline())
+
+
+def _release(p) -> None:
+    """Close *p*'s stdin and wait for it to exit."""
+    p.communicate(timeout=60)
 
 
 def _hold(path, rec, *, silent_for: float = 0.0) -> None:
@@ -195,9 +256,10 @@ def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path,
 #  2. Staleness: heartbeat age, both directions                               #
 # --------------------------------------------------------------------------- #
 
-def test_a_dead_holders_stale_lock_is_reclaimed(base, capsys):
+def test_a_dead_holders_stale_lock_is_reclaimed(base, capsys, monkeypatch):
     """A lock left behind by a crashed holder must not wedge the collection
     forever: once its heartbeat goes stale it is reclaimed, and said out loud."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(), silent_for=3600)
 
@@ -208,17 +270,19 @@ def test_a_dead_holders_stale_lock_is_reclaimed(base, capsys):
     assert "reclaimed the write lock" in capsys.readouterr().err
 
 
-def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base):
+def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base, monkeypatch):
     """The other direction, and the whole reason for the heartbeat: a holder
     that has held the lock far LONGER than the staleness window but is still
-    reporting must be left alone. config._cross_process_lock's fixed 30 s rule
-    would have reaped this one - it is a normal indexing run."""
+    reporting must be left alone, even by a waiter that has watched it for
+    longer than its confirm window. config._cross_process_lock's fixed 30 s
+    rule would have reaped this one - it is a normal indexing run."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(started=time.time() - 7200))     # held 2h, reporting now
 
     with pytest.raises(CollectionLockedError) as e:
         with collection_write_lock(lp, collection="kb", op="a test",
-                                   timeout=0.3, stale_after=1.0):
+                                   timeout=1.0, stale_after=5.0):
             pass
     assert "pid 999999" in _flat(str(e.value)), "the refusal must name the holder"
     assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == 999_999, (
@@ -245,19 +309,24 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
     lp = lock_path_for(base / "kb")
     stale_after = 1.2
 
+    # The hold is recorded under another pid space, so the waiter below cannot
+    # check its liveness and only the heartbeat keeps it.
+    monkeypatch.setattr(cl, "_machine_id_cache", "another-pid-space")
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
+        monkeypatch.setattr(cl, "_machine_id_cache", None)
         # TWO windows, not four, to bound how long this test occupies heavy_slot,
         # which is box-wide across xdist workers. Crossing the staleness
         # threshold twice proves the same property: a REFRESHED record survives
         # past the threshold.
         time.sleep(stale_after * 2)          # two whole staleness windows
-        mine = json.loads(lp.read_text(encoding="utf-8"))["token"]
+        held = json.loads(lp.read_text(encoding="utf-8"))
+        assert cl._holder_liveness(held) == "unknown"
         with pytest.raises(CollectionLockedError):
             with collection_write_lock(lp, collection="kb", op="a waiter",
-                                       timeout=0.2, stale_after=stale_after):
+                                       timeout=1.0, stale_after=stale_after):
                 pass
-        assert json.loads(lp.read_text(encoding="utf-8"))["token"] == mine
+        assert json.loads(lp.read_text(encoding="utf-8"))["token"] == held["token"]
 
     # The control, same run and same stale_after: an identical record that is
     # NOT being refreshed is reclaimed.
@@ -267,35 +336,58 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
         assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == os.getpid()
 
 
-def test_a_recycled_pid_is_not_read_as_a_live_holder(base):
-    """pids are reused. A record pinning THIS pid but a start time from before
-    this process existed describes a process that is gone, whatever the number
-    says - so it is reclaimable early rather than holding the collection for the
+def test_a_record_whose_pid_now_names_another_process_is_taken_over(
+        base, monkeypatch):
+    """pids are reused. A record naming a live pid whose start identity is not
+    the one it recorded describes a holder that is gone, so its lock is taken
+    over once its heartbeat is DEAD_HOLDER_GRACE old rather than after the
     full staleness window."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    other, pid = _idle_process()
+    try:
+        lp = lock_path_for(base / "kb")
+        _hold(lp, _this_machine(pid, started_an_hour_earlier(start_identity_of(pid))),
+              silent_for=cl.DEAD_HOLDER_GRACE + 5)
+
+        with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0,
+                                   stale_after=3600):
+            assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    finally:
+        _release(other)
+
+
+def test_a_suspended_holder_keeps_its_lock_however_old_its_heartbeat(
+        heavy_slot, tmp_path, base, monkeypatch):
+    """A real holder that is suspended (its heartbeat thread still exists but
+    cannot run) keeps the lock when its heartbeat is far older than the
+    staleness window and the waiter has watched it stay silent past its
+    confirm window: it writes again when it is resumed."""
+    import psutil
     lp = lock_path_for(base / "kb")
-    _hold(lp, _record(pid=os.getpid(), pid_create_time=1.0,   # 1970: not us
-                      machine=cl._machine_id()),
-          silent_for=cl.DEAD_HOLDER_GRACE + 5)
+    holder, pid = _live_holder(tmp_path, lp)
+    proc = psutil.Process(pid)
+    try:
+        start_identity_of(pid)
+        proc.suspend()
+        when = time.time() - 3600
+        os.utime(lp, (when, when))
+        before = lp.read_text(encoding="utf-8")
+        monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
 
-    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0,
-                               stale_after=3600):
-        assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == os.getpid()
-
-
-def test_the_real_pid_of_a_live_process_is_read_as_alive(base):
-    """The control for the test above: the SAME pid with its REAL start time is
-    a living holder, so the identical record is not reclaimed early."""
-    lp = lock_path_for(base / "kb")
-    if cl._create_time(os.getpid()) is None:
-        pytest.skip("no psutil: the (pid, create_time) pin is inert by design")
-    _hold(lp, _record(pid=os.getpid(), pid_create_time=cl._create_time(os.getpid()),
-                      machine=cl._machine_id()),
-          silent_for=cl.DEAD_HOLDER_GRACE + 5)
-
-    with pytest.raises(CollectionLockedError):
-        with collection_write_lock(lp, collection="kb", op="a test",
-                                   timeout=0.3, stale_after=3600):
-            pass
+        refused = None
+        try:
+            with collection_write_lock(lp, collection="kb", op="a test",
+                                       timeout=1.5, stale_after=1.0):
+                pass
+        except CollectionLockedError as e:
+            refused = e
+        assert lp.exists() and lp.read_text(encoding="utf-8") == before, (
+            "a suspended holder's lock was taken over because its heartbeat "
+            "was old")
+        assert refused is not None and f"pid {pid}" in _flat(str(refused))
+    finally:
+        proc.resume()
+        _release(holder)
 
 
 def test_a_pid_from_another_pid_space_is_never_judged_dead(base):
@@ -304,7 +396,7 @@ def test_a_pid_from_another_pid_space_is_never_judged_dead(base):
     side of a WSL mount, where the Linux hostname defaults to the Windows
     machine name) would otherwise let each side look the other's pids up in its
     own process table, find nothing, and reclaim a perfectly live holder early."""
-    foreign = _record(pid=os.getpid(), pid_create_time=1.0,
+    foreign = _record(pid=os.getpid(), start={"created": 1.0},
                       machine="a-different-pid-space")
     assert cl._holder_liveness(foreign) == "unknown"
 
@@ -329,14 +421,473 @@ def test_the_machine_id_separates_two_pid_spaces_on_one_host(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  2b. Clock steps: liveness and staleness without trusting the wall clock   #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("step", ["between-grace-and-stale", "past-boot"])
+def test_a_live_collection_holder_keeps_its_lock_across_a_clock_step(
+        heavy_slot, tmp_path, base, monkeypatch, step):
+    """A system clock step while a real holder indexes (NTP after sleep, a VM
+    or WSL guest resyncing) leaves its lock file and record in place and
+    refuses the waiter, also when the holder's next heartbeat is further off
+    than the waiter's confirm window. The first step lands between
+    DEAD_HOLDER_GRACE and STALE_AFTER; the second is an hour larger than the
+    machine's uptime."""
+    lp = lock_path_for(base / "kb")
+    holder, pid = _live_holder(tmp_path, lp)
+    try:
+        start_identity_of(pid)
+        before = lp.read_text(encoding="utf-8")
+        assert json.loads(before)["pid"] == pid, "the real holder wrote this lock"
+        seconds = {"between-grace-and-stale":
+                   (cl.DEAD_HOLDER_GRACE + cl.STALE_AFTER) / 2,
+                   "past-boot": a_forward_step_past_boot()}[step]
+
+        refused = None
+        with monkeypatch.context() as m:
+            m.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+            step_the_clock(m, seconds)
+            try:
+                with collection_write_lock(lp, collection="kb", op="a waiter",
+                                           timeout=2.0):
+                    pass
+            except CollectionLockedError as e:
+                refused = e
+
+        assert lp.exists(), (
+            f"the live holder's lock file was removed after a {seconds:+.0f}s "
+            f"clock step")
+        assert lp.read_text(encoding="utf-8") == before, (
+            f"the live holder's lock record changed after a {seconds:+.0f}s "
+            f"clock step")
+        assert holder.poll() is None, "the holder died during the test"
+        assert refused is not None, (
+            f"the waiter took a live holder's lock after a {seconds:+.0f}s "
+            f"clock step")
+        assert f"pid {pid}" in _flat(str(refused))
+    finally:
+        _release(holder)
+
+
+def test_a_holder_this_machine_cannot_identify_keeps_its_lock_across_a_clock_step(
+        heavy_slot, tmp_path, base, monkeypatch):
+    """The same for a real holder whose liveness cannot be checked here (its
+    record names another pid space): while it keeps beating, a waiter whose
+    clock reads its heartbeat as far older than STALE_AFTER still refuses. Two
+    machines with skewed clocks sharing one LOCALM_HOME read the same way."""
+    lp = lock_path_for(base / "kb")
+    holder, pid = _live_holder(tmp_path, lp, beat=0.1, space="another-pid-space")
+    try:
+        before = lp.read_text(encoding="utf-8")
+        rec = json.loads(before)
+        assert rec["pid"] == pid and rec["machine"] == "another-pid-space"
+        assert cl._holder_liveness(rec) == "unknown", (
+            "the holder's liveness must be uncheckable from this process")
+        monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.5)
+
+        refused = None
+        with monkeypatch.context() as m:
+            step_the_clock(m, a_forward_step_past_boot())
+            try:
+                with collection_write_lock(lp, collection="kb", op="a waiter",
+                                           timeout=5.0):
+                    pass
+            except CollectionLockedError as e:
+                refused = e
+
+        assert lp.exists(), "a beating holder's lock file was removed"
+        assert lp.read_text(encoding="utf-8") == before, (
+            "a beating holder's lock record changed")
+        assert holder.poll() is None, "the holder died during the test"
+        assert refused is not None, "the waiter took a beating holder's lock"
+    finally:
+        _release(holder)
+
+
+def test_an_unidentifiable_holder_is_taken_over_only_after_the_waiter_sees_it_silent(
+        base, monkeypatch):
+    """A holder whose liveness cannot be checked, with a heartbeat far older
+    than STALE_AFTER, is taken over only once the waiter has itself watched
+    CONFIRM_BEATS heartbeats go missing."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.3)
+    window = cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+
+    started = time.monotonic()
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=10.0):
+        took = time.monotonic() - started
+        assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    assert took >= window, (
+        f"took over after {took:.2f}s, before watching the holder stay silent "
+        f"for {window:.2f}s")
+
+
+def _acquired_pid(lp, **kw):
+    """The pid in *lp*'s record while this process holds it, or None when
+    the acquisition is refused."""
+    try:
+        with collection_write_lock(lp, collection="kb", op="a test", **kw):
+            return json.loads(lp.read_text(encoding="utf-8"))["pid"]
+    except CollectionLockedError:
+        return None
+
+
+def test_a_dead_holders_lock_is_taken_over_after_the_clock_was_set_back(
+        base, monkeypatch):
+    """A holder proven gone whose last heartbeat reads as in the future (the
+    clock was set back after it stopped) is taken over once the waiter has
+    itself watched it stay silent longer than DEAD_HOLDER_GRACE."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    monkeypatch.setattr(cl, "DEAD_HOLDER_GRACE", 0.5)
+    other, pid = _idle_process()
+    ident = start_identity_of(pid)
+    _release(other)
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _this_machine(pid, ident), silent_for=-3600)
+    assert cl._holder_liveness(json.loads(lp.read_text(encoding="utf-8"))) == "dead"
+
+    assert _acquired_pid(lp, timeout=5.0, stale_after=3600) == os.getpid(), (
+        "a crashed holder's lock stayed wedged after the clock was set back")
+
+
+def test_an_unidentifiable_holders_lock_is_taken_over_after_the_clock_was_set_back(
+        base, monkeypatch, capsys):
+    """The same for a holder whose liveness cannot be checked: the waiter's own
+    watch of a silence longer than the staleness window is enough, and the
+    reclaim note reports that watched silence rather than the clock's."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=-3600)
+
+    assert _acquired_pid(lp, timeout=5.0, stale_after=1.0) == os.getpid(), (
+        "an abandoned lock stayed wedged after the clock was set back")
+    note = _flat(capsys.readouterr().err)
+    assert "reclaimed the write lock" in note, note
+    assert "had not reported for 0s" not in note, note
+    assert "last heartbeat 0s ago" not in note, note
+
+
+def test_short_waits_in_one_process_take_over_an_abandoned_lock_between_them(
+        base, monkeypatch):
+    """Waits each shorter than the confirm window (a stats backfill, a memory
+    reinforcement) keep watching the same lock across calls in one process, so
+    together they take over a lock no single one of them could."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    window = cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+
+    assert _acquired_pid(lp, timeout=0) is None, (
+        "a single zero-length wait took over before any watch")
+    taken, deadline = None, time.monotonic() + 10 * window
+    while taken is None and time.monotonic() < deadline:
+        time.sleep(window / 3)
+        taken = _acquired_pid(lp, timeout=0)
+    assert taken == os.getpid(), (
+        "repeated short waits never took over an abandoned lock")
+
+
+def test_a_heartbeat_between_short_waits_restarts_their_watch(base, monkeypatch):
+    """A heartbeat that lands between two short waits (its mtime changes, even
+    to a time that still reads as old) restarts the watch, so the next wait
+    does not take the lock over."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    window = cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    assert _acquired_pid(lp, timeout=0) is None
+
+    time.sleep(window * 2)
+    beat = lp.stat().st_mtime + 1
+    os.utime(lp, (beat, beat))
+    before = lp.read_text(encoding="utf-8")
+    taken = _acquired_pid(lp, timeout=0)
+    assert lp.read_text(encoding="utf-8") == before, (
+        "a lock whose heartbeat had just moved was taken over")
+    assert taken is None
+
+    time.sleep(window * 2)
+    assert _acquired_pid(lp, timeout=0) == os.getpid(), (
+        "the restarted watch never completed")
+
+
+_HINT = "only after watching it for"
+
+
+def _refusal_text(lp, **kw) -> str:
+    """The message of the refusal a wait on *lp* ends in."""
+    with pytest.raises(CollectionLockedError) as e:
+        with collection_write_lock(lp, collection="kb", op="a test", **kw):
+            pass
+    return _flat(str(e.value))
+
+
+def test_a_wait_shorter_than_the_confirm_window_says_so(base, monkeypatch):
+    """A refusal from a configured wait too short to take over a lock that has
+    stopped reporting names that as the reason."""
+    monkeypatch.setenv(cl.ENV_WAIT, "0.5")
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    msg = _refusal_text(lp)
+    assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == 999_999
+    assert _HINT + " 15s" in msg, msg
+
+
+@pytest.mark.parametrize("case", ["explicit-timeout", "fresh-heartbeat",
+                                  "holder-running", "watched-long-enough"])
+def test_a_refusal_names_the_short_wait_only_when_it_is_the_reason(
+        base, monkeypatch, case):
+    """No hint when the wait was set by the caller rather than
+    LOCALM_RAG_LOCK_WAIT, when the holder is still reporting, when it is proven
+    running, or when this process has already watched it for the whole window."""
+    monkeypatch.setenv(cl.ENV_WAIT, "0.5")
+    lp = lock_path_for(base / "kb")
+    if case == "explicit-timeout":
+        _hold(lp, _record(), silent_for=3600)
+        assert _HINT not in _refusal_text(lp, timeout=0.5)
+    elif case == "fresh-heartbeat":
+        _hold(lp, _record())
+        assert _HINT not in _refusal_text(lp)
+    elif case == "holder-running":
+        start_identity_of(os.getpid())
+        with collection_write_lock(lp, collection="kb", op="a hold", timeout=5.0):
+            when = time.time() - 3600
+            os.utime(lp, (when, when))
+            msg = _refusal_text(lp)
+        assert _HINT not in msg, msg
+    else:
+        monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.5)
+        monkeypatch.setenv(cl.ENV_STALE, "3600")
+        _hold(lp, _record(), silent_for=100)
+        assert _acquired_pid(lp, timeout=0) is None
+        time.sleep(cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL * 2)
+        msg = _refusal_text(lp)
+        assert _HINT not in msg, msg
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="time.monotonic counts system sleep on Windows only")
+def test_a_system_sleep_between_short_waits_is_not_counted_as_silence(
+        base, monkeypatch):
+    """A system sleep between two waits (time.monotonic, GetTickCount64 on
+    Windows, counts it; the holder could not beat during it) does not count as
+    the holder staying silent."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    before = lp.read_text(encoding="utf-8")
+    assert _acquired_pid(lp, timeout=0) is None
+
+    real = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real() + 7200.0)
+    taken = _acquired_pid(lp, timeout=0)
+    assert lp.read_text(encoding="utf-8") == before, (
+        "a system sleep was counted as the holder's silence")
+    assert taken is None
+
+
+def test_a_beating_holder_is_never_taken_over_even_when_judged_dead(
+        heavy_slot, tmp_path, base, monkeypatch):
+    """Whatever makes a liveness verdict wrong (two hosts sharing one pid-space
+    id), a holder whose heartbeat keeps moving is never taken over, even when
+    the waiter's clock reads that heartbeat as older than DEAD_HOLDER_GRACE."""
+    lp = lock_path_for(base / "kb")
+    holder, pid = _live_holder(tmp_path, lp, beat=0.1)
+    try:
+        before = lp.read_text(encoding="utf-8")
+        assert json.loads(before)["pid"] == pid
+        monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.5)
+        monkeypatch.setattr(cl, "_holder_liveness", lambda rec: "dead")
+        with monkeypatch.context() as m:
+            step_the_clock(m, cl.DEAD_HOLDER_GRACE + 20)
+            taken = _acquired_pid(lp, timeout=5.0)
+
+        assert lp.exists() and lp.read_text(encoding="utf-8") == before, (
+            "a beating holder judged dead lost its lock")
+        assert holder.poll() is None, "the holder died during the test"
+        assert taken is None
+    finally:
+        _release(holder)
+
+
+# A real holder that takes the lock, then on the first line of stdin re-execs
+# its process image from another thread, as the server's in-place restart does,
+# into a process that prints its pid and waits for stdin to close.
+_EXEC_HOLDER = '''
+    import os, sys, threading
+    from pathlib import Path
+    import localm.rag.collection_lock as cl
+    cm = cl.collection_write_lock(Path(sys.argv[1]), collection="kb",
+                                  op="a re-sync", timeout=30)
+    cm.__enter__()
+    print("HELD", os.getpid(), flush=True)
+    sys.stdin.readline()
+
+    def restart():
+        os.execv(sys.executable, [
+            sys.executable, "-c",
+            "import os, sys; print('EXECED', os.getpid(), flush=True); "
+            "sys.stdin.read()"])
+
+    threading.Thread(target=restart).start()
+    threading.Event().wait()
+'''
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="os.execv keeps the pid and start identity on Linux")
+def test_a_holder_that_re_execs_in_place_loses_its_lock(heavy_slot, tmp_path,
+                                                       base, monkeypatch):
+    """An in-place restart (os.execv) keeps the pid and its start identity but
+    ends the process image that held the lock, so its heartbeat stops for good
+    and the lock is taken over by the heartbeat rule."""
+    lp = lock_path_for(base / "kb")
+    home = tmp_path / "exec-home"
+    home.mkdir()
+    p = spawn_on_this_tree(_EXEC_HOLDER, home, lp, stdin=subprocess.PIPE)
+    try:
+        first = p.stdout.readline().split()
+        assert first[:1] == ["HELD"], (first, p.stderr.read())
+        pid = int(first[1])
+        start_identity_of(pid)
+        p.stdin.write("restart\n")
+        p.stdin.flush()
+        second = p.stdout.readline().split()
+        assert second == ["EXECED", str(pid)], (second, p.stderr.read())
+        monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+
+        taken = _acquired_pid(lp, timeout=5.0, stale_after=1.0)
+        assert taken == os.getpid(), (
+            "the lock of a process image replaced by an in-place restart was "
+            "never taken over")
+        assert p.poll() is None, "the re-executed process exited"
+    finally:
+        _release(p)
+
+
+# Prints _holder_liveness of the lock record at argv[1], as another process
+# sees it.
+_LIVENESS = '''
+    import json, sys
+    import localm.rag.collection_lock as cl
+    print(cl._holder_liveness(json.loads(open(sys.argv[1]).read())), flush=True)
+'''
+
+
+@pytest.mark.parametrize("fault", ["unlink-refused", "read-failed"])
+def test_a_lock_file_a_release_left_behind_is_not_read_as_held(
+        heavy_slot, tmp_path, base, monkeypatch, fault):
+    """A release that could not remove its own lock file (the unlink kept
+    failing, or the file could not be read to prove it was its own) leaves a
+    record that another process no longer reads as a running holder, so the
+    lock is taken over by the heartbeat rule while this process lives on."""
+    lp = lock_path_for(base / "kb")
+    real_read = cl._read_record
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
+        held = json.loads(lp.read_text(encoding="utf-8"))
+        start_identity_of(os.getpid())
+        if fault == "unlink-refused":
+            _refuse_unlink(monkeypatch, lp, 10_000)
+        else:
+            monkeypatch.setattr(cl, "_read_record",
+                                lambda path: (None, path.stat().st_mtime))
+    monkeypatch.setattr(cl, "_read_record", real_read)
+    assert json.loads(lp.read_text(encoding="utf-8")) == held, (
+        "fixture: the release was meant to leave its record in place")
+
+    home = tmp_path / "liveness-home"
+    home.mkdir()
+    out, err = spawn_on_this_tree(_LIVENESS, home, lp).communicate(timeout=120)
+    assert out.split() == ["unknown"], (out, err)
+
+
+def test_a_reclaim_leaves_a_lock_whose_heartbeat_moved_since_it_was_judged(base):
+    """A heartbeat that moved between the staleness judgement and the reclaim
+    means the holder beat, even when the new mtime still reads as old (a
+    holder whose clock runs behind this one), so the lock is left alone."""
+    lp = lock_path_for(base / "kb")
+    _hold(lp, _record(), silent_for=3600)
+    rec, judged = cl._read_record(lp)
+    later = judged + 100
+    os.utime(lp, (later, later))
+
+    reclaimed = cl._reclaim(lp, rec, judged, 60.0, quiet=3600.0)
+    assert lp.exists() and json.loads(lp.read_text(encoding="utf-8")) == rec
+    assert reclaimed is False
+
+
+def test_this_processs_own_lock_is_alive_only_while_it_is_held(base, monkeypatch):
+    """A record naming this process is alive while the acquisition that wrote
+    it holds the lock, and dead once it has been released."""
+    start_identity_of(os.getpid())
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
+    lp = lock_path_for(base / "kb")
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
+        held = json.loads(lp.read_text(encoding="utf-8"))
+        assert cl._holder_liveness(held) == "alive"
+    assert cl._holder_liveness(held) == "dead"
+
+    # A copy of that record left behind is taken over by this same process
+    # once its heartbeat is DEAD_HOLDER_GRACE old.
+    _hold(lp, held, silent_for=cl.DEAD_HOLDER_GRACE + 5)
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0,
+                               stale_after=3600):
+        assert json.loads(lp.read_text(encoding="utf-8"))["token"] != held["token"]
+
+
+def test_a_record_in_the_previous_format_is_not_evidence(base):
+    """A record written by an earlier localm pins ``pid_create_time`` instead
+    of a start identity. A matching value does not make its holder alive and a
+    mismatched one does not make it dead."""
+    import psutil
+    other, pid = _idle_process()
+    try:
+        created = psutil.Process(pid).create_time()
+        for pinned in (created, created - 3600.0):
+            rec = _this_machine(pid, None)
+            del rec["start"]
+            rec["pid_create_time"] = pinned
+            assert cl._holder_liveness(rec) == "unknown", pinned
+    finally:
+        _release(other)
+
+
+def test_the_lock_records_its_holders_start_identity(base):
+    """The record names the holder process's start identity and its heartbeat
+    thread's id and start identity."""
+    lp = lock_path_for(base / "kb")
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
+        rec = json.loads(lp.read_text(encoding="utf-8"))
+        beat = next(t for t in threading.enumerate() if t.name == "rag-lock-a test")
+        beat_ident = instances.thread_start_identity(os.getpid(), beat.native_id)
+    assert rec["start"] == instances.process_start_identity(os.getpid())
+    assert "pid_create_time" not in rec
+    if sys.platform.startswith("linux") or sys.platform == "win32":
+        assert beat_ident is not None
+    assert rec["beat"] == (None if beat_ident is None
+                           else {"tid": beat.native_id, **beat_ident})
+
+
+def test_the_confirm_window_fits_inside_the_wait_budget():
+    """A default wait can watch CONFIRM_BEATS heartbeats go missing and still
+    take the lock over, and the window spans more than one heartbeat."""
+    window = cl.CONFIRM_BEATS * cl.HEARTBEAT_INTERVAL
+    assert 2 * cl.HEARTBEAT_INTERVAL <= window
+    assert 2 * window <= cl.WAIT_TIMEOUT
+    assert cl.DEAD_HOLDER_GRACE < cl.STALE_AFTER
+
+
+# --------------------------------------------------------------------------- #
 #  3. Fail safe: never fall through to an unserialised write                  #
 # --------------------------------------------------------------------------- #
 
-def test_a_corrupt_lock_record_is_held_not_free(base):
+def test_a_corrupt_lock_record_is_held_not_free(base, monkeypatch):
     """A lock file we cannot parse means we do not know who holds it or whether
     they are alive. Treating that as "free" would let a second writer in exactly
     when the on-disk state is already suspect, so it counts as HELD - until the
     file itself goes stale, which is what stops a corrupt file wedging it."""
+    monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
     lp = lock_path_for(base / "kb")
     lp.parent.mkdir(parents=True, exist_ok=True)
     lp.write_text("{ this is not json", encoding="utf-8")
@@ -449,6 +1000,94 @@ def test_release_does_not_delete_a_lock_it_cannot_read(base, capsys):
         "live successor's, and deleting it lets a third writer in")
     assert "no longer readable" in capsys.readouterr().err
     lp.unlink()
+
+
+def _refuse_unlink(monkeypatch, path, times: int) -> dict:
+    """Make ``Path.unlink`` of *path* raise PermissionError *times* times.
+    Returns a dict counting every unlink of *path* under ``"tries"``."""
+    real = pathlib.Path.unlink
+    state = {"left": times, "tries": 0}
+
+    def fake(self, *a, **kw):
+        if os.path.normcase(str(self)) == os.path.normcase(str(path)):
+            state["tries"] += 1
+            if state["left"]:
+                state["left"] -= 1
+                raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", fake)
+    return state
+
+
+def test_a_release_retries_a_refused_unlink(base, monkeypatch, capsys):
+    """A lock file that cannot be removed for a moment (a scanner or a waiter
+    reading it) is removed on a retry, silently."""
+    lp = lock_path_for(base / "kb")
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
+        state = _refuse_unlink(monkeypatch, lp, 2)
+    assert not lp.exists(), "a briefly refused unlink left the lock file behind"
+    assert state["tries"] == 3
+    assert "could not remove" not in capsys.readouterr().err
+
+
+def test_a_release_that_cannot_unlink_says_so_and_leaves_its_record(
+        base, monkeypatch, capsys):
+    """When the lock file cannot be removed, release leaves the record as it
+    is and says the lock is reclaimed as stale."""
+    lp = lock_path_for(base / "kb")
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
+        held = json.loads(lp.read_text(encoding="utf-8"))
+        state = _refuse_unlink(monkeypatch, lp, 10_000)
+    assert json.loads(lp.read_text(encoding="utf-8")) == held
+    assert state["tries"] == cl._UNLINK_TRIES
+    assert "reclaimed as stale" in _flat(capsys.readouterr().err)
+
+
+def _replace_on_first_unlink(monkeypatch, path, content: str) -> dict:
+    """Make the first ``Path.unlink`` of *path* remove it, write *content* in
+    its place (another process creating the lock afresh) and raise
+    PermissionError. Returns a dict counting every unlink of *path*."""
+    real = pathlib.Path.unlink
+    state = {"tries": 0}
+
+    def fake(self, *a, **kw):
+        if os.path.normcase(str(self)) == os.path.normcase(str(path)):
+            state["tries"] += 1
+            if state["tries"] == 1:
+                real(self)
+                self.write_text(content, encoding="utf-8")
+                raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", fake)
+    return state
+
+
+def test_a_release_retry_leaves_a_lock_file_it_cannot_read(base, monkeypatch):
+    """A lock file that turned unreadable between two release attempts can be
+    a successor that has created it but not yet written its record, so the
+    retry leaves it."""
+    lp = lock_path_for(base / "kb")
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
+        state = _replace_on_first_unlink(monkeypatch, lp, "")
+    assert lp.exists() and lp.read_bytes() == b"", (
+        "a release retry deleted a lock file it could not read")
+    assert state["tries"] == 1
+
+
+def test_a_release_retry_leaves_a_lock_another_process_took_over(
+        base, monkeypatch, capsys):
+    """A lock file that names another holder by the time of a release retry is
+    that holder's, so the retry leaves it and says so."""
+    lp = lock_path_for(base / "kb")
+    successor = _record(token="succ" * 8)
+    with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
+        state = _replace_on_first_unlink(monkeypatch, lp, json.dumps(successor))
+    assert json.loads(lp.read_text(encoding="utf-8")) == successor, (
+        "a release retry deleted another holder's lock")
+    assert state["tries"] == 1
+    assert "taken over" in capsys.readouterr().err
 
 
 def test_the_lock_file_sits_beside_the_collection_not_inside_it(base):

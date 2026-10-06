@@ -7,6 +7,7 @@ from localm import instances
 
 import contextlib
 import errno
+import hashlib
 import json
 import os
 import re
@@ -384,6 +385,30 @@ def _hf_incomplete_path(base_dir: Path, rel: str, etag: str) -> "Path | None":
     except Exception as e:
         logger.debug("cannot compute the .incomplete path for %s: %s", rel, e)
         return None
+
+
+_REPO_PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
+
+
+# The folder under a destination that a download of a file inside a repo
+# folder is staged in before it is moved into the destination.
+_REPO_FOLDER_STAGING = Path(".cache") / "localm-staging"
+
+
+def _safe_repo_subdir(remote_dir: str, base_dir: Path) -> bool:
+    """True when *remote_dir* (the folder part of an ``owner/repo:dir/file``
+    spec) is a plain relative path whose every component matches
+    ``_REPO_PATH_PART_RE`` and is not ``.``/``..``, and which stays inside
+    *base_dir* when joined to it and resolved."""
+    comps = remote_dir.split("/")
+    if not comps or any(c in ("", ".", "..") or not _REPO_PATH_PART_RE.match(c)
+                        for c in comps):
+        return False
+    try:
+        base = Path(base_dir).resolve()
+        return (base / remote_dir).resolve().is_relative_to(base)
+    except (OSError, ValueError):
+        return False
 
 
 def _etag_from_head(resp: Any) -> "str | None":
@@ -1347,10 +1372,27 @@ def _pull_gguf_file(
     base_dir = dest_dir if dest_dir is not None else _mm.MODELS_DIR
 
     if ":" in spec:
-        repo_id, filename = spec.rsplit(":", 1)
+        repo_id, remote = spec.split(":", 1)
     else:
         parts = spec.rsplit("/", 1)
-        repo_id, filename = parts[0], parts[1]
+        repo_id, remote = parts[0], parts[1]
+    # "owner/repo:sub/dir/file" names a file inside a repo folder. huggingface_hub
+    # writes it to <stage_dir>/sub/dir/file, which is then moved to
+    # base_dir/file; stage_dir is under base_dir's hidden .cache so no folder of
+    # the repo's layout appears in base_dir. A root-level file stages in
+    # base_dir itself.
+    remote_dir, in_folder, filename = remote.rpartition("/")
+    stage_dir = base_dir / _REPO_FOLDER_STAGING if in_folder else base_dir
+    if in_folder and not _safe_repo_subdir(remote_dir, stage_dir):
+        console.print(
+            f"[red]Unsafe repository path:[/red] {escape(remote)}\n"
+            "A folder inside the repository may only use letters, digits and "
+            "'._+-', with no '.' or '..' parts."
+        )
+        return False
+
+    def _remote(part: str) -> str:
+        return f"{remote_dir}/{part}" if remote_dir else part
 
     # Split GGUF: normalise to the full ordered part list. llama.cpp loads
     # the model from the first part, so that's what gets registered. A
@@ -1376,7 +1418,7 @@ def _pull_gguf_file(
 
     # Expected digest from HF metadata - free, no download needed.
     # (Only identifies the first part of a split GGUF, which is enough.)
-    expected = _mm._hf_file_sha256(repo_id, filename)
+    expected = _mm._hf_file_sha256(repo_id, _remote(filename))
 
     # Honour a user-supplied --sha256: when HF's own metadata digest is known
     # and disagrees with it, the bytes can never match, so refuse up front
@@ -1460,7 +1502,7 @@ def _pull_gguf_file(
         import requests as _req
         total_size = 0
         for part in missing:
-            cdn_url = hf_hub_url(repo_id, part, endpoint=_HF_ENDPOINT)
+            cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT)
             head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
             size = int(head.headers.get("content-length", 0))
             part_sizes[part] = size
@@ -1493,7 +1535,7 @@ def _pull_gguf_file(
         etag = etags.get(part)
         if not etag:
             continue
-        inc = _hf_incomplete_path(base_dir, part, etag)
+        inc = _hf_incomplete_path(stage_dir, _remote(part), etag)
         if inc is None:
             continue
         already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
@@ -1522,14 +1564,15 @@ def _pull_gguf_file(
                       f"[bold]{escape(filename)}[/bold]")
 
     with _download_progress([base_dir / p for p in missing], total_size,
-                            base_dir=base_dir, rel_parts=list(missing),
-                            etags=etags) as _prog:
+                            base_dir=stage_dir,
+                            rel_parts=[_remote(p) for p in missing],
+                            etags={_remote(p): e for p, e in etags.items()}) as _prog:
         for part in missing:
             try:
                 local = hf_hub_download(
                     repo_id=repo_id,
-                    filename=part,
-                    local_dir=str(base_dir),
+                    filename=_remote(part),
+                    local_dir=str(stage_dir),
                     endpoint=_HF_ENDPOINT,
                 )
                 final = base_dir / part
@@ -2262,6 +2305,18 @@ def _pull_url(
         return False
 
 
+def _url_part_identity(url: str, expected_sha256: Optional[str],
+                       total: int) -> dict:
+    """The record a direct-URL ``.part`` is resumed against: a SHA256 of *url*
+    as the caller gave it (the record never holds the URL itself), the expected
+    SHA256 lower-cased, and the size the size HEAD reported (None when it
+    reported none)."""
+    return {"source": "url",
+            "url_sha256": hashlib.sha256(url.encode("utf-8")).hexdigest(),
+            "sha256": expected_sha256.lower() if expected_sha256 else None,
+            "size": total or None}
+
+
 def _pull_url_locked(
     url: str,
     name: str,
@@ -2274,6 +2329,13 @@ def _pull_url_locked(
 
     Split out so the lock can wrap every exit path through a single ``with``
     instead of a ``try/finally`` wrapped around the whole download.
+
+    The download goes to ``<filename>.part``; ``<filename>.part.json`` beside it
+    records which URL, digest and size that partial holds (see
+    :func:`_url_part_identity`). A partial is appended to only when its record
+    matches this pull, and is truncated otherwise. A transfer that stops early
+    keeps both for the next pull; the record is removed once the partial is
+    moved into place or discarded.
     """
     import requests
     from localm.netpolicy import NetworkPolicyError
@@ -2325,9 +2387,6 @@ def _pull_url_locked(
 
     _mm.ensure_dirs()
 
-    # Determine how much we already have (from a prior interrupted download)
-    already_have = part_file.stat().st_size if part_file.exists() else 0
-
     # Resolve the redirect chain with each hop validated, then use the final
     # CHECKED URL for both the size HEAD and the streaming GET with redirects
     # OFF, so no unchecked hop can bounce the download into an internal host.
@@ -2355,6 +2414,11 @@ def _pull_url_locked(
         logger.debug("size HEAD failed for %s (non-fatal, size unknown): %s", dl_url, e)
         total = 0
 
+    # Bytes already on disk from an earlier pull of this same URL.
+    identity = _url_part_identity(url, expected_sha256, total)
+    already_have = (part_file.stat().st_size
+                    if _part_is_resumable(part_file, identity) else 0)
+
     remaining = max(0, total - already_have)
     if not _mm._check_disk_space(_mm.MODELS_DIR, remaining):
         return False
@@ -2381,10 +2445,7 @@ def _pull_url_locked(
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
-            try:
-                part_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                          timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):
@@ -2417,9 +2478,13 @@ def _pull_url_locked(
     # already_have and report a stuck 100% for the whole transfer.
     total_display = (already_have + content_length) if content_length else None
 
+    # Opened, and truncated on a restart, before either progress reporter below
+    # reads the partial's size. See
+    # test_a_restart_over_another_urls_partial_reports_progress_from_zero.
+    f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
+
     def _write_chunks(on_chunk=None):
-        mode = "ab" if already_have else "wb"
-        with open(part_file, mode) as f:
+        with f:
             for chunk in r.iter_content(65536):
                 f.write(chunk)
                 if on_chunk is not None:
@@ -2452,6 +2517,7 @@ def _pull_url_locked(
 
     # Atomically rename on successful completion
     part_file.rename(dest)
+    _unlink_quiet(_part_record_path(part_file))
 
     # SHA256 verification. `actual` is a hashlib hexdigest; expected_sha256 is
     # the raw --sha256 value, with no charset validation upstream. Both are
@@ -2736,6 +2802,16 @@ def _civitai_owners(dest: Path) -> "list[tuple[str, str]]":
             for n in find_aliases_by_path(dest, reg)]
 
 
+def _civitai_registry_unreadable() -> bool:
+    """True when registry.json exists but neither it nor its backup can be read,
+    which ``load_registry`` reports as an empty registry."""
+    from .. import config
+    return not config._read_json_checked(config.REGISTRY_FILE, {})[1]
+
+
+_CIVITAI_REGISTRY_STEP = "Fix or remove registry.json, then pull again."
+
+
 def _civitai_registered_as(owners: "list[tuple[str, str]]") -> str:
     """*owners* as ``'name' (source)``, escaped for console markup."""
     from rich.markup import escape
@@ -2758,8 +2834,11 @@ def _civitai_unproven_reason(dest: Path, resolved: Any,
                              owners: "list[tuple[str, str]]") -> Optional[str]:
     """Why the file at *dest* cannot be taken as *resolved*'s when there is no
     SHA256 to check it against, or None when the registry records it as that
-    version and its size equals the size CivitAI lists."""
+    version and, if CivitAI lists a size, its size equals it."""
     from rich.markup import escape
+    if _civitai_registry_unreadable():
+        return ("localm's model registry (registry.json) could not be read, so "
+                "it cannot tell which model owns this file")
     if not any(source == resolved.source_tag for _, source in owners):
         if owners:
             return (f"it is registered as {_civitai_registered_as(owners)}, "
@@ -2784,6 +2863,13 @@ def _civitai_refuse_replacing(dest: Path, resolved: Any) -> bool:
     from rich.markup import escape
     if not dest.exists():
         return False
+    if _civitai_registry_unreadable():
+        console.print(
+            f"[red]Refusing to replace {escape(str(dest))}:[/red] localm's model "
+            "registry (registry.json) could not be read, so it cannot tell "
+            "which model owns this file. Nothing was changed.")
+        console.print(f"[dim]{_CIVITAI_REGISTRY_STEP}[/dim]")
+        return True
     others = [o for o in _civitai_owners(dest) if o[1] != resolved.source_tag]
     if not others:
         return False
@@ -2825,7 +2911,7 @@ def _pull_civitai_file(
     A file already at the destination is used as this version's only when its
     SHA256 matches (CivitAI's, else *expected_sha256*) or, with no SHA256 to
     compare, when the registry records it as this version and its size equals
-    the size CivitAI lists; any other file is left as it is and the pull is
+    the size CivitAI lists, when it lists one; any other file is left as it is and the pull is
     refused. *redownload* replaces the file, but is refused while a registry
     entry recorded from another source points at it. Both checks are repeated
     after the part lock on the file's name is taken; the transfer itself runs
@@ -2886,10 +2972,13 @@ def _pull_civitai_file(
                     f"{escape(str(dest))} as {escape(resolved.source_tag)}:"
                     f"[/red] {reason}. CivitAI lists no SHA256 to check it "
                     "against, so it was left as it is.")
-                step = _civitai_next_step(others)
-                if not others:
-                    step += (" Or pass --sha256 with the digest CivitAI shows "
-                             "for this file to check the one already here.")
+                if _civitai_registry_unreadable():
+                    step = _CIVITAI_REGISTRY_STEP
+                else:
+                    step = _civitai_next_step(others)
+                    if not others:
+                        step += (" Or pass --sha256 with this file's expected "
+                                 "digest to check the one already here.")
                 console.print(f"[dim]{step}[/dim]")
                 return False
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")

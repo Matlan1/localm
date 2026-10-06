@@ -31,7 +31,7 @@ real quantized matmul through the winning tier.
 
 NON-DESTRUCTIVE AND REVERSIBLE: rejected tiers are renamed in place (prefixed
 with ``_unused-``), never deleted and never moved to a subdirectory. A
-subdirectory would be invisible to ``setup_llama.py``'s ``_clear_target()``
+subdirectory would be invisible to ``setup_llama``'s ``_clear_target()``
 (which only recurses into a fixed allowlist of subdirectory names) and to
 ``install_manifest.py``'s ``_bin_files()`` (a non-recursive directory listing),
 so files placed there would survive a re-provision as stale leftovers and leak
@@ -194,7 +194,7 @@ def _marker_is_current(lib_dir: Path) -> bool:
 
 @contextlib.contextmanager
 def _lock(lib_dir: Path):
-    """Cross-process mkdir-based lock, mirroring setup_llama.py's
+    """Cross-process mkdir-based lock, mirroring setup_llama's
     _provisioning_lock idiom (atomic os.mkdir, PID-liveness staleness via
     localm.instances.pid_alive - never elapsed time). Waits, bounded, rather
     than failing fast: selection here is a handful of small subprocess probes,

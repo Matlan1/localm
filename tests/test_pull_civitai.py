@@ -879,6 +879,8 @@ class TestPullCivitaiFileSharedFilename:
         assert ok is False
         assert "SHA256 mismatch" in out and self.FILE in out, out
         assert hint in out, out
+        if registered_as:
+            assert "'char'" in out and registered_as in out, out
 
     def test_a_redownload_will_not_replace_a_file_registered_as_another_version(
             self, fake_registry, tmp_path, monkeypatch, capsys):
@@ -898,6 +900,63 @@ class TestPullCivitaiFileSharedFilename:
         assert ok is False
         assert "'char'" in out and "civitai:111" in out, out
         assert "localm rm char" in out and "--redownload" in out, out
+
+    @pytest.fixture
+    def _unreadable_registry(self, tmp_path, monkeypatch):
+        """registry.json present but holding no valid JSON, with no backup."""
+        from localm import config
+        bad = tmp_path / "home" / "registry.json"
+        bad.parent.mkdir()
+        bad.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(config, "REGISTRY_FILE", bad)
+        return bad
+
+    def test_a_redownload_will_not_replace_a_file_when_the_registry_is_unreadable(
+            self, _unreadable_registry, fake_registry, tmp_path, monkeypatch,
+            capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store)
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                self._resolved(sha256=_digest(_V2)),
+                                redownload=True)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V1, "the file was replaced"
+        assert server.gets == [], "the file was downloaded"
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert ok is False
+        assert "registry.json" in out and "could not be read" in out, out
+        assert "Fix or remove registry.json" in out, out
+
+    def test_a_file_is_not_taken_without_a_digest_when_the_registry_is_unreadable(
+            self, _unreadable_registry, fake_registry, tmp_path, monkeypatch,
+            capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, body=_V2)
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V2
+        assert store == {}, f"the file was registered: {store}"
+        assert server.gets == []
+        assert ok is False
+        assert "registry.json" in out and "could not be read" in out, out
+        assert "not in the model registry" not in out, out
+        assert "Fix or remove registry.json" in out, out
+        assert "--sha256" not in out, out
+
+    def test_the_sha256_hint_is_offered_only_when_no_model_owns_the_file(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store)
+
+        self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert "pass --sha256 with this file's expected digest" in out, out
+        assert "the digest CivitAI shows" not in out, out
 
     def test_a_redownload_replaces_a_file_registered_as_this_version(
             self, fake_registry, tmp_path, monkeypatch):

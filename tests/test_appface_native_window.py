@@ -146,6 +146,36 @@ class _ClosingEvent:
         return self
 
 
+class _FakeLoaded:
+    """window.events.loaded: wait(timeout) returns at once when the event is set
+    and otherwise blocks for at most min(timeout, 0.05) seconds, setting
+    *timed_out* when it gives up."""
+
+    def __init__(self, is_set):
+        self._event = threading.Event()
+        if is_set:
+            self._event.set()
+        self.timed_out = threading.Event()
+        self.wait = MagicMock(side_effect=self._wait)
+
+    def _wait(self, timeout=None):
+        if self._event.wait(None if timeout is None else min(timeout, 0.05)):
+            return True
+        self.timed_out.set()
+        return False
+
+    def set(self):
+        self._event.set()
+
+
+def _join_confirmation_helper():
+    """Wait for run_native_window's confirmation helper thread to finish."""
+    for t in threading.enumerate():
+        if t.name == "localm-webview-confirm":
+            t.join(5.0)
+            assert not t.is_alive(), "the confirmation helper outlived the window loop"
+
+
 def _fake_webview(*, loaded=True, create_raises=False, start_sleep=0.2):
     """A fake `webview` module. `start`'s side_effect sleeps briefly before
     returning - the REAL webview.start() blocks for the whole window
@@ -156,9 +186,7 @@ def _fake_webview(*, loaded=True, create_raises=False, start_sleep=0.2):
     case flaky for a reason that has nothing to do with the code under test."""
     fake = MagicMock()
     window = SimpleNamespace(
-        events=SimpleNamespace(
-            loaded=SimpleNamespace(wait=MagicMock(return_value=loaded)),
-            closing=_ClosingEvent()),
+        events=SimpleNamespace(loaded=_FakeLoaded(loaded), closing=_ClosingEvent()),
         hide=MagicMock(), destroy=MagicMock(), show=MagicMock())
     if create_raises:
         fake.create_window.side_effect = RuntimeError("boom")
@@ -248,6 +276,109 @@ def test_run_native_window_returns_false_when_the_window_never_reports_loaded(mo
     # the same shape as this file's other opt-in-mode tests must guard against.
     fake.create_window.assert_called_once()
     fake.start.assert_called_once()
+
+
+@pytest.mark.parametrize("hide_on_close", [True, False])
+def test_run_native_window_returns_true_for_a_page_that_loads_after_the_confirmation_wait(
+        monkeypatch, hide_on_close):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, window = _fake_webview(loaded=False)
+    seen = {}
+
+    def start(*a, **k):
+        seen["timed_out"] = window.events.loaded.timed_out.wait(5.0)
+        window.events.loaded.set()
+    fake.start.side_effect = start
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
+
+    result = appface.run_native_window("http://127.0.0.1:8642/",
+                                       hide_on_close=hide_on_close)
+
+    assert seen["timed_out"], "the confirmation wait never ran out before the page loaded"
+    assert result is True
+
+
+def test_a_page_that_loads_late_still_gets_its_setup_and_foreground(monkeypatch):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, window = _fake_webview(loaded=False)
+    shown = threading.Event()
+    window.show.side_effect = shown.set
+    bound = []
+    monkeypatch.setattr(appface, "_enable_clipboard_bindings",
+                        lambda w: bound.append(w) or "")
+    seen = {}
+
+    def start(*a, **k):
+        window.events.loaded.timed_out.wait(5.0)
+        window.events.loaded.set()
+        seen["shown"] = shown.wait(2.0)
+    fake.start.side_effect = start
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
+
+    appface.run_native_window("http://127.0.0.1:8642/")
+    _join_confirmation_helper()
+
+    assert seen["shown"], "the window was never brought to the foreground"
+    assert bound == [window]
+    window.show.assert_called_once()
+
+
+def test_a_window_closed_to_the_tray_is_not_shown_again_by_a_late_load(monkeypatch):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, window = _fake_webview(loaded=False)
+    bound = threading.Event()
+    monkeypatch.setattr(appface, "_enable_clipboard_bindings",
+                        lambda w: bound.set() or "")
+    seen = {}
+
+    def start(*a, **k):
+        window.events.loaded.timed_out.wait(5.0)
+        window.events.closing.handlers[0]()
+        window.events.loaded.set()
+        seen["bound"] = bound.wait(2.0)
+    fake.start.side_effect = start
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto",
+                                 "desktop_window_quit_on_close": False})
+
+    appface.run_native_window("http://127.0.0.1:8642/")
+    _join_confirmation_helper()
+
+    assert seen["bound"], "the copy and paste setup never ran"
+    window.hide.assert_called_once()
+    window.show.assert_not_called()
+
+
+def test_the_confirmation_helper_ends_with_the_window_loop(monkeypatch):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _ = _fake_webview(loaded=False)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is False
+    _join_confirmation_helper()
+
+
+def test_a_stop_seen_before_the_window_loop_ends_the_confirmation_helper(monkeypatch):
+    fake = _native_window_ready(monkeypatch)
+    window = MagicMock()
+    window.events.loaded = _FakeLoaded(False)
+    stopped = threading.Event()
+
+    def create_window(*a, **k):
+        stopped.set()
+        return window
+    fake.create_window.side_effect = create_window
+
+    assert appface.run_native_window("http://127.0.0.1:8642/",
+                                     server_stopped=stopped) is True
+    _join_confirmation_helper()
 
 
 def test_run_native_window_hides_and_vetoes_close_when_quit_setting_is_off(monkeypatch):

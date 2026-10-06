@@ -550,6 +550,28 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .coder-rail-project .coder-session-item { padding-left: 20px; }
+/* Delete controls on past-session rows, project groups and the "Past sessions
+   here" heading: hidden until the row is hovered or the button has keyboard
+   focus, always shown on a device without hover. */
+.coder-rail-del {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; border: none; border-radius: 5px;
+  background: none; color: var(--text-dim); cursor: pointer; opacity: 0;
+}
+.coder-rail-del .ic svg { width: 13px; height: 13px; }
+.coder-session-item:hover .coder-rail-del,
+.coder-rail-project > summary:hover .coder-rail-del,
+.coder-rail-head.with-action:hover .coder-rail-del,
+.coder-rail-del:focus-visible { opacity: 1; }
+.coder-rail-del:hover { color: var(--red); background: var(--bg-input); }
+.coder-rail-del:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (hover: none) { .coder-rail-del { opacity: 1; } }
+.coder-session-item.dormant { position: relative; padding-right: 32px; }
+.coder-session-item.dormant .coder-rail-del {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+}
+.coder-rail-head.with-action { display: flex; align-items: center; gap: 6px; }
+.coder-rail-head.with-action .title { flex: 1; }
 .coder-rail-note {
   color: var(--text-dim); font-size: 11px; line-height: 1.4;
   padding: 10px 10px 2px; margin: 0; border-top: 1px solid var(--border);

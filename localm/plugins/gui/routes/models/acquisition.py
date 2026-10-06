@@ -19,9 +19,16 @@ from localm.inference.http_server import (principal_id, require_fs_host,
                                           require_scope)
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
-from localm.plugins.gui.web import (ComfyPullRequest, MediaPreflightRequest,
-                                    PullRequest, PullTokenRedeemRequest,
-                                    consume_pull_grant)
+from localm.plugins.gui.web import (ComfyPullRequest, ComfySourceLookupRequest,
+                                    MediaPreflightRequest, PullRequest,
+                                    PullTokenRedeemRequest, consume_pull_grant)
+
+# Longest filename, class_type or input_name a model-source request accepts.
+_MAX_SLOT_FIELD = 255
+# Seconds a model-source lookup may take before the request gives up on it:
+# above comfy_resolve.MAX_HF_REQUESTS times discover._TIMEOUT. See
+# test_lookup_timeout_covers_every_request_timing_out.
+_LOOKUP_TIMEOUT = 150.0
 
 
 def _spec_names_a_host_path(spec: str) -> bool:
@@ -201,6 +208,22 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             return workflow
         raise ValueError(f"Unknown media kind: {kind}")
 
+    def _source_json(download) -> dict:
+        """The client-facing view of a comfy_resolve.ComfyDownload."""
+        return {"repo": download.repo, "file": download.path,
+                "size_bytes": download.size_bytes, "model_type": download.model_type,
+                "origin": download.origin}
+
+    def _download_dest(download, plugin):
+        """The ComfyUI folder *download* goes into for *plugin*
+        (``models/<comfy_subfolder>/<subdir>``), or None when no ComfyUI folder
+        is configured (managed_comfy.comfy_models_dest_dir)."""
+        from localm.media.managed_comfy import comfy_models_dest_dir
+        base = comfy_models_dest_dir(download.comfy_subfolder, plugin=plugin)
+        if base is None or not download.subdir:
+            return base
+        return base.joinpath(*download.subdir.split("/"))
+
     @app.post("/api/media/{kind}/preflight",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def media_preflight(kind: str, req: MediaPreflightRequest):
@@ -223,8 +246,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 raise HTTPException(400, "Invalid LoRA name")
             req.lora_name = stripped
         from localm.media.comfy_client import describe_missing_models
-        from localm.media.managed_comfy import comfy_models_dest_dir, resolve_comfy_target
-        from localm.model_manager.registry import resolve_comfy_model_source
+        from localm.media.managed_comfy import resolve_comfy_target
+        from localm.model_manager.comfy_resolve import (
+            cached_comfy_download, curated_comfy_download, search_refusal,
+        )
 
         def _check():
             try:
@@ -241,61 +266,117 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
             results = []
             for slot in missing:
-                source = resolve_comfy_model_source(slot.filename)
+                download = (curated_comfy_download(slot.filename)
+                            or cached_comfy_download(slot.filename, slot.class_type,
+                                                     slot.input_name))
                 entry = {
                     "class_type": slot.class_type,
                     "input_name": slot.input_name,
                     "filename": slot.filename,
                     "source": None,
                     "dest_dir": None,
+                    "searchable": False,
+                    "reason": "",
+                    "detail": "",
                 }
-                if source is not None:
-                    repo, file = source.spec.rsplit(":", 1)
+                if download is not None:
                     # Stays inside this offloaded call. See
                     # tests/test_comfy_media_routes_offloaded.py.
-                    dest_dir = comfy_models_dest_dir(source.comfy_subfolder, plugin=kind)
-                    entry["source"] = {
-                        "repo": repo, "file": file,
-                        "size_bytes": source.size_bytes, "model_type": source.model_type,
-                    }
+                    dest_dir = _download_dest(download, kind)
+                    entry["source"] = _source_json(download)
                     entry["dest_dir"] = str(dest_dir) if dest_dir is not None else None
+                else:
+                    refusal = search_refusal(slot.filename, slot.class_type,
+                                             slot.input_name)
+                    entry["searchable"] = refusal is None
+                    if refusal is not None:
+                        entry["reason"] = refusal.reason
+                        entry["detail"] = refusal.detail
                 results.append(entry)
             return {"status": "verified", "missing": results, "warning": ""}
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(get_plugin_executor(), _check)
 
+    @app.post("/api/models/comfy-source/lookup",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_comfy_source_lookup(req: ComfySourceLookupRequest):
+        """Find where to download one missing ComfyUI workflow model file: the
+        curated table, else a HuggingFace search by exact file name
+        (comfy_resolve.lookup_comfy_download), which makes network requests.
+
+        Returns {"status", "source", "dest_dir", "reason", "detail"}. status is
+        one of comfy_resolve's LOOKUP_* values; source and dest_dir are set only
+        when it is "found", and reason only when it is "unsupported"."""
+        from localm.model_manager.comfy_resolve import lookup_comfy_download
+        from localm.plugins.media_config import MEDIA_PLUGINS
+        for value in (req.filename, req.class_type, req.input_name):
+            if len(value) > _MAX_SLOT_FIELD:
+                raise HTTPException(400, "Field too long")
+        plugin = req.plugin if req.plugin in MEDIA_PLUGINS else None
+
+        def _lookup():
+            lookup = lookup_comfy_download(req.filename, req.class_type, req.input_name)
+            out = {"status": lookup.status, "source": None, "dest_dir": None,
+                   "reason": lookup.reason, "detail": lookup.detail}
+            if lookup.download is not None:
+                out["source"] = _source_json(lookup.download)
+                dest = _download_dest(lookup.download, plugin)
+                out["dest_dir"] = str(dest) if dest is not None else None
+            return out
+
+        try:
+            return await run_in_threadpool_bounded(_lookup, timeout=_LOOKUP_TIMEOUT)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Looking up the model source timed out: {e}")
+
     @app.post("/api/models/pull-comfy-source",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull_comfy_source(req: ComfyPullRequest, request: Request):
-        """Download one CURATED ComfyUI model into the ComfyUI models folder.
+        """Download one ComfyUI workflow model file into the ComfyUI models
+        folder. The source comes from the curated table, else, when
+        class_type and input_name are given, from
+        comfy_resolve.lookup_comfy_download for that slot; the client never
+        names a repository or path. 400 when neither has a source. When the
+        client sends the repo and file it showed the user, 409 when the source
+        resolved now differs from them, and nothing is downloaded.
 
         Requires host filesystem access, the same gate /api/models/scan uses on
-        the same folder. When the managed ComfyUI instance is not active - the
-        DEFAULT state of a fresh install - comfy_models_dest_dir() resolves to
-        `<comfy_workdir>/models/<subfolder>`. comfy_workdir is admin_only
-        (settings_schema.py, both the core field and its per-plugin twin), but
-        this route's own caller only needs MODELS_WRITE, so require_fs_host()
-        below is what requires the CALLER triggering the write to independently
-        hold host filesystem reach. The curated table fixes the filename and
-        subfolder, so this is not an arbitrary-path write, but choosing the
-        parent directory is still host filesystem reach and a UNC value draws
-        outbound SMB authentication from the server."""
-        from localm.media.managed_comfy import comfy_models_dest_dir
-        from localm.model_manager.registry import resolve_comfy_model_source
+        the same folder: the destination is `<comfy_workdir>/models/<subfolder>`
+        unless the managed ComfyUI instance is active, and comfy_workdir may be
+        a UNC path."""
+        from localm.model_manager.comfy_resolve import (
+            curated_comfy_download, lookup_comfy_download,
+        )
         from localm.plugins.media_config import MEDIA_PLUGINS
         require_fs_host(request)
-        source = resolve_comfy_model_source(req.filename.strip())
+        filename = req.filename.strip()
+        source = curated_comfy_download(filename)
+        if source is None and req.class_type and req.input_name:
+            if max(len(filename), len(req.class_type),
+                   len(req.input_name)) > _MAX_SLOT_FIELD:
+                raise HTTPException(400, "Field too long")
+            try:
+                lookup = await run_in_threadpool_bounded(
+                    lookup_comfy_download, filename, req.class_type, req.input_name,
+                    timeout=_LOOKUP_TIMEOUT)
+            except ThreadCallTimeout as e:
+                raise HTTPException(504, f"Looking up the model source timed out: {e}")
+            source = lookup.download
         if source is None:
-            raise HTTPException(400, f"Not a curated download source: {req.filename}")
+            raise HTTPException(400, f"No download source for: {req.filename}")
+        if ((req.repo is not None and req.repo != source.repo)
+                or (req.file is not None and req.file != source.path)):
+            raise HTTPException(
+                409, f"The download source for {req.filename} changed since it was "
+                     f"shown; it is now {source.repo} / {source.path}. Search again.")
         # req.plugin is a selector into the server's own per-plugin config, not a
         # path; an unrecognized value falls back to no plugin context (the global
         # comfy_workdir).
         plugin = req.plugin if req.plugin in MEDIA_PLUGINS else None
         try:
             dest_dir = await run_in_threadpool_bounded(
-                comfy_models_dest_dir, source.comfy_subfolder, plugin=plugin,
-                timeout=20.0)
+                _download_dest, source, plugin, timeout=20.0)
         except ThreadCallTimeout as e:
             raise HTTPException(
                 504, f"Resolving the ComfyUI download destination timed out: {e}")

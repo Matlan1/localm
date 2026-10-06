@@ -147,6 +147,45 @@ def _runtime_libs() -> tuple:
         return None, [], ""
 
 
+# Shown for an environment field whose probe ran but returned nothing.
+_NOT_DETECTED = "not detected"
+
+
+def _gpu_inventory() -> list:
+    """Every GPU in this process's last completed ``discover.list_gpus``
+    reading, one line each: index, name, and free / total memory, numbered as
+    torch numbers them (nvidia-smi's own order for a line marked "via
+    nvidia-smi"). That is not llama.cpp's device numbering on a Vulkan or
+    SYCL build, nor when an integrated GPU sits beside a discrete one. Never probes: a
+    process that has not read its GPUs yet gets one ``not measured`` line, and
+    an empty reading one ``not detected`` line. Never raises."""
+    try:
+        from localm.discover import last_gpu_reading
+        gpus = last_gpu_reading()
+    except Exception as e:
+        return [f"not measured ({type(e).__name__})"]
+    if gpus is None:
+        return ["not measured in this process"]
+    if not gpus:
+        return [_NOT_DETECTED]
+    gb = 1024 ** 3
+    lines = []
+    for g in gpus:
+        if not isinstance(g, dict):
+            continue
+        free, total = g.get("free"), g.get("total")
+        if isinstance(free, int) and isinstance(total, int):
+            mem = f"{free / gb:.1f} of {total / gb:.1f} GB free"
+        elif isinstance(total, int):
+            mem = f"{total / gb:.1f} GB total, free {_NOT_DETECTED}"
+        else:
+            mem = f"memory {_NOT_DETECTED}"
+        src = f" via {g['source']}" if g.get("source") else ""
+        lines.append(f"{g.get('index')}: {g.get('name') or _NOT_DETECTED} "
+                     f"({mem}{src})")
+    return lines
+
+
 def collect_diagnostics(context: Optional[dict] = None) -> dict:
     """Gather a safe, useful environment snapshot. Never raises."""
     context = dict(context or {})
@@ -179,14 +218,21 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         if "nvidia" in diag.get("gpu_vendors", []) or context.get("backend") == "cuda":
             nv = nvidia_preflight()
             if nv.present:
-                diag["nvidia_gpu"] = nv.gpu_name
-                diag["nvidia_driver"] = nv.driver_version
-                diag["nvidia_cuda_capability"] = nv.cuda_capability
-                diag["nvidia_compute_capability"] = nv.compute_capability
+                diag["nvidia_gpu"] = nv.gpu_name or _NOT_DETECTED
+                diag["nvidia_driver"] = nv.driver_version or _NOT_DETECTED
+                diag["nvidia_cuda_capability"] = nv.cuda_capability or _NOT_DETECTED
+                diag["nvidia_compute_capability"] = nv.compute_capability or _NOT_DETECTED
                 diag["nvidia_cuda_line"] = nv.cuda_line
+                diag["nvidia_gpus"] = [
+                    f"{g['index']}: {g['name'] or _NOT_DETECTED} "
+                    f"({g['free_mib'] / 1024:.1f} of {g['total_mib'] / 1024:.1f} GB free)"
+                    for g in (getattr(nv, "gpus", None) or [])
+                ] or [_NOT_DETECTED]
     except Exception:
         # Omit the NVIDIA fields on failure (no nvidia-smi, a driver hiccup).
         pass
+
+    diag["gpus"] = _gpu_inventory()
 
     try:
         res = _runtime_libs()
@@ -412,8 +458,9 @@ def _scrub_secrets(text: str) -> str:
 # credential-scrubbed before they are rendered. The API key lives in auth.key,
 # never config.json.
 _SAFE_CONFIG_KEYS = (
-    "binary_dir", "n_ctx", "n_ctx_max", "ctx_auto", "n_gpu_layers",
-    "n_gpu_layers_auto", "max_tokens",
+    "binary_dir", "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto", "n_gpu_layers",
+    "n_gpu_layers_auto", "n_cpu_moe", "mtp_enabled", "main_gpu_index",
+    "gpu_split_indices", "gpu_split_ratios", "max_tokens",
     "model_swap_policy", "idle_unload_seconds", "reload_llm_after_imagine",
     "port", "require_auth", "cors_origins", "mode", "chat_mode", "coder_mode",
     "net_mode", "comfy_launch_cmd", "comfy_workdir", "comfy_api_url",
@@ -846,6 +893,8 @@ def build_report(summary: str, reason: str = "",
         "nvidia_cuda_capability": "Driver CUDA capability",
         "nvidia_compute_capability": "GPU compute capability",
         "nvidia_cuda_line": "Selected CUDA line",
+        "nvidia_gpus": "NVIDIA GPUs (nvidia-smi order)",
+        "gpus": "GPUs",
         "native_runtime_provisioned": "Native runtime provisioned",
         "native_runtime_backend": "Native runtime backend",
         "native_runtime_build": "Native runtime build",

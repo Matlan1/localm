@@ -19,11 +19,11 @@ when nothing is installed.
 
 Nothing about provisioning is decided here. The route validates its inputs and
 hands them to the EXISTING command, so the backend-resolution, load-test,
-fallback and pin rules stay in setup_llama.py - notably
+fallback and pin rules stay in the setup_llama package - notably
 _provision_with_fallback, which keeps a backend that cannot load on this
 machine from being left installed.
 
-Safety: setup-llama's own _provisioning_lock (localm/setup_llama.py) is what
+Safety: setup-llama's own _provisioning_lock (localm/setup_llama/) is what
 serializes this against a concurrent `localm update` re-provision or a user's
 own terminal `setup-llama` run. jobs.has_running() below is a fast,
 same-process guard for the double-click case; the file lock is the

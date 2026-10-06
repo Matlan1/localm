@@ -172,8 +172,8 @@ Versions of one CivitAI model often share a filename. A file already in that
 folder is reused only when it is shown to be the requested version's: its
 SHA256 matches CivitAI's (or the one you pass with `--sha256`), or, when
 CivitAI lists no SHA256, localm's registry records it as that version and its
-size matches. Any other file is left untouched and the pull stops with the
-steps to replace it. `--redownload` replaces a file only once no model
+size matches the size CivitAI lists, when it lists one. Any other file is left
+untouched and the pull stops with the steps to replace it. `--redownload` replaces a file only once no model
 registered from another source points at it.
 
 An optional CivitAI API token, and a matching one for HuggingFace, raise rate
@@ -483,12 +483,13 @@ A model too large for any single card's VRAM can load using the combined VRAM of
 localm gpus                              # (split) marks any device in the split
 localm config gpu_split_indices 0,1      # split the model across devices 0 and 1
 localm config gpu_split_ratios 3,1       # optional: PIN device 0 to three times device 1's share
-localm config gpu_split_indices ""       # clear the split - back to a single GPU (main_gpu_index)
+localm config gpu_split_indices 1        # GGUF chat model: load on device 1 only
+localm config gpu_split_indices ""       # clear it - llama.cpp spreads a GGUF model over every GPU again
 ```
 
 How much of the model lands on each card is figured out automatically: at load time localm reads every split device's free VRAM and sizes each card's share proportionally, so a card that is half-occupied gets a half-sized share instead of an equal one that would not fit. Set `gpu_split_ratios` only to pin exact weights (that disables the automatic distribution); when free VRAM cannot be measured per device, the split falls back to even shares, and the decision is logged either way.
 
-GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. Fewer than 2 currently-detected devices in `gpu_split_indices` (a stale index, or only one still present) falls back to the single-GPU behavior above, with a logged warning - it never crashes a load. On the `vulkan` or `sycl` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices, so there is nothing to cross-check them against); there the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown, and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
+GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. A single entry loads a GGUF chat model on that device alone, when localm can match the device to llama.cpp's own device list (otherwise llama.cpp's default split is kept and the reason is logged), and loads an HF model on that device with any overflow on the CPU. A longer list with fewer than 2 currently-detected devices (a stale index, or only one still present) drops the split with a logged warning - it never crashes a load. On a CUDA or ROCm build with an integrated GPU beside a discrete one, the integrated GPU is listed, and llama.cpp usually does not use it: for a GGUF load localm checks llama.cpp's own device list and renumbers the split and `main_gpu_index` into it (when the runtime keeps the integrated GPU, the numbers already match and nothing changes; when localm cannot match the two lists, llama.cpp's default split is kept, device 0 is the primary, and the reason is logged). A split or single entry that names an integrated GPU llama.cpp leaves out refuses the GGUF load with a message saying so. On the `vulkan` or `sycl` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices, so there is nothing to cross-check them against); there the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown (one ticked GPU loads a GGUF model on that GPU only, none ticked keeps automatic placement), and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
 
 ### Keeping more than one model loaded
 
@@ -810,7 +811,7 @@ localm stop --all                        # stop every running localm instance
 
 `localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path. Switching to a different model than the one currently configured reports which existing Knowledge collections have embeddings and asks you to confirm before it happens (`-y`/`--yes` skips the confirmation) - see [docs/rag.md](../docs/rag.md#how-retrieval-works-and-why-its-lexical-first).
 
-`localm setup-browser` downloads the Chromium build that the automated browser tool drives (the coder's browser tool, and anything else built on `localm.browser`). The `browser` pip extra installs the playwright driver only; this fetches the separate, version-pinned Chromium binary it needs. Respects the network policy and is refused under `net_mode=off` unless `net_allow_model_downloads` exempts it, same as any other explicit download; does nothing on the network when Chromium is already installed. `--force` reinstalls even if present - note that playwright removes the existing build before redownloading, so a failed `--force` run can leave no Chromium installed at all.
+`localm setup-browser` downloads the Chromium build that the automated browser tool drives (the coder's browser tool, and anything else built on `localm.browser`). The `browser` pip extra installs the playwright driver only; this fetches the separate, version-pinned Chromium binary it needs. Respects the network policy and is refused under `net_mode=off` unless `net_allow_model_downloads` exempts it, same as any other explicit download; does nothing on the network when Chromium is already installed. The GUI offers the same download as a Download browser button on the Browser tab and under Settings > Server & network. `--force` reinstalls even if present - note that playwright removes the existing build before redownloading, so a failed `--force` run can leave no Chromium installed at all.
 
 See [docs/gpu-setup.md](../docs/gpu-setup.md) for the full GPU setup guide.
 

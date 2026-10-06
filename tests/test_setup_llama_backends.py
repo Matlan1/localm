@@ -133,7 +133,7 @@ def test_every_asset_fragment_resolves_against_the_real_latest_release():
 
     Scoped to _ASSET_MATCH's own generic upstream-repo resolution. TWO
     combinations are excluded, both documented at their own call sites in
-    setup_llama.py:
+    setup_llama:
       * linux/cuda - ggml-org publishes no bare Linux CUDA binary at all;
         _resolve_backend_asset special-cases this combination and resolves
         against hybridgroup/llama-cpp-builder BEFORE reaching _ASSET_MATCH, so
