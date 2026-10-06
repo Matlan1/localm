@@ -498,13 +498,29 @@ class TestPullUrlTagInjection:
         # still carries the full payload either way.
         payload = _tag_injection_payload("bold cyan")
         url = f"https://example.com/{payload}/plain.gguf"
-        # Pre-existing .part bytes so the resume branch (not the fresh one)
-        # fires the "Resuming" message instead of "Downloading".
-        (url_env / "plain.gguf.part").write_bytes(b"01")
+        # A real interrupted pull of the same URL leaves the partial and the
+        # record that make the next pull take the resume branch, which fires
+        # the "Resuming" message instead of "Downloading".
+        import requests
+        dropped = _resp(200, b"", content_length=4)
+
+        def _drop(chunk_size):
+            yield b"01"
+            raise requests.ConnectionError("connection reset by peer")
+
+        dropped.iter_content = _drop
+        _wire_http(monkeypatch, 4, dropped)
+        try:
+            mm._pull_url(url, "mymodel")
+        except requests.ConnectionError:
+            pass
+        assert (url_env / "plain.gguf.part").read_bytes() == b"01"
+        rich_capture.export_text(clear=True)
         _wire_http(monkeypatch, 4, _resp(206, b"UF", content_length=2))
 
         ok = mm._pull_url(url, "mymodel")
 
+        assert "Resuming" in _plain(rich_capture)
         assert ok is True
         _assert_injection_blocked(rich_capture, payload)
 
