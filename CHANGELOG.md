@@ -174,6 +174,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Small talk no longer ends up in the remembered facts, and one common word no
+  longer pulls old session summaries into every chat turn.** A session with
+  nothing lasting in it (a greeting, a passing remark, a one-off request) now
+  gets no session summary, and a stored session summary is recalled only when a
+  message shares at least two content words with it (or is a close paraphrase),
+  so unrelated turns carry no remembered-facts block.
 - **The microphone button works on a fresh install again.** A new install could
   pull in a PyAV release that faster-whisper cannot use, so every recording
   failed. The voice extra now keeps PyAV below version 19. A failure inside the

@@ -90,6 +90,9 @@ VEC_COVERAGE = 0.8         # blend cosine only when >= this fraction have vector
 # regardless.
 # Absolute cosine floor for the semantic gate, matching the coder episode gate.
 REL_COS_MIN = 0.55
+# Distinct content words an episodic synth summary must share with the query to
+# clear the LEXICAL gate.
+EPISODIC_LEX_MIN_OVERLAP = 2
 # Stopwords stripped from the LEXICAL gate: a query and a fact sharing only "the"
 # must NOT clear it. Mirrors the coder episode store's _STOPWORDS.
 _STOPWORDS = frozenset(
@@ -910,7 +913,16 @@ class MemoryStore:
             if qv and len(qv) == stored_dim:
                 cos = [(_cosine(qv, self._vectors[r.id]) if r.id in self._vectors
                         else 0.0) for r in self._records]
-        lex_hits = [bool(q_tokens & _content_tokens(r.text)) for r in self._records]
+        # An EPISODIC synth summary needs EPISODIC_LEX_MIN_OVERLAP shared content
+        # words (capped by the query's own size), so one generic word ("model",
+        # "local") does not pull the same summaries into every turn. Trusted facts
+        # and semantic records keep the single-word hit.
+        lex_hits = []
+        for r in self._records:
+            need = 1
+            if r.kind == "episodic" and r.source not in TRUSTED_SOURCES:
+                need = max(1, min(EPISODIC_LEX_MIN_OVERLAP, len(q_tokens)))
+            lex_hits.append(len(q_tokens & _content_tokens(r.text)) >= need)
         sem_hits = [cos is not None and cos[i] >= REL_COS_MIN
                     for i in range(len(self._records))]
         # A LEXICAL HIT RAISES THE BAR FOR EVERYTHING ELSE. When the query shares a

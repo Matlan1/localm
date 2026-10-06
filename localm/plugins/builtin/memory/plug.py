@@ -832,6 +832,29 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
 
 _UNSET = object()
 
+# A session whose user turns carry fewer distinct content words than this is
+# greeting/acknowledgement traffic and never gets an episode.
+EPISODIC_MIN_USER_CONTENT_WORDS = 3
+
+
+def _is_substantive_session(text: str) -> bool:
+    """True when the User turns of a `_session_text` transcript carry at least
+    EPISODIC_MIN_USER_CONTENT_WORDS distinct content (non-stopword) tokens."""
+    from localm.memory.store import _content_tokens
+    user_lines: list[str] = []
+    in_user = False
+    for line in text.splitlines():
+        if line.startswith("User: "):
+            in_user = True
+            line = line[len("User: "):]
+        elif line.startswith("Assistant: "):
+            in_user = False
+        if in_user:
+            user_lines.append(line)
+    user_text = "\n".join(user_lines)
+    return len(_content_tokens(user_text)) >= EPISODIC_MIN_USER_CONTENT_WORDS
+
+
 # Cap on real model generations per episodic pass. The backlog drains over several
 # runs; the watermark advances only past files actually processed.
 EPISODIC_MAX_PER_RUN = 5
@@ -925,8 +948,8 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
             if now - mt < EPISODIC_SETTLE_SECONDS:
                 break
             text = _session_text(f)
-            if not text.strip():
-                _advance(mt, f.stem)               # no usable turns: seen, skip forever
+            if not text.strip() or not _is_substantive_session(text):
+                _advance(mt, f.stem)               # no usable turns / chatter: seen, skip forever
                 continue
             # Bound real generations per run. At the cap, leave this file, the rest,
             # and the cursor for the next run.
