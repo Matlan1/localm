@@ -294,15 +294,26 @@ def _model_file_size(name: str) -> Optional[int]:
 
 
 def _current_gpu_index() -> int:
-    """The configured main GPU device index (0 when unset/unconfigured) - see
-    ``main_gpu_index`` / ``discover.resolve_main_gpu_index``, the same
-    resolution ``vram_info()`` and the GGUF backend's own VRAM check use."""
+    """The device the next GGUF load reads its VRAM from (0 when nothing
+    selects one) - ``discover.resolve_load_gpu_index``, the same resolution
+    ``vram_info()`` and the GGUF backend's own VRAM check use, validated
+    against ``discover.last_gpu_reading()`` so it never probes."""
     try:
         from localm.config import load_config
-        from localm.discover import resolve_main_gpu_index
-        return resolve_main_gpu_index(load_config().get("main_gpu_index"))
+        from localm.discover import last_gpu_reading, resolve_load_gpu_index
+        return resolve_load_gpu_index(load_config(), gpus=last_gpu_reading() or [],
+                                      quiet=True)
     except Exception:
         return 0
+
+
+def _loaded_gpu_index(name: Optional[str]) -> Optional[int]:
+    """The device loaded model *name* runs on alone (its backend's
+    ``load_gpu_index``), or None when it is not loaded on one device or that
+    is not recorded."""
+    engine = _engines.get(name) if name else None
+    idx = getattr(getattr(engine, "_backend", None), "load_gpu_index", None)
+    return idx if isinstance(idx, int) and not isinstance(idx, bool) else None
 
 
 def _loaded_model_identities() -> list:
@@ -345,6 +356,9 @@ def _gpu_registry_sync() -> None:
         sizes = [_model_file_size(n) for n in (loaded or ([model] if model else []))]
         if sizes and all(sz is not None for sz in sizes):
             vram_bytes = int(sum(sizes) * 1.2)
+        gpu_index = _loaded_gpu_index(model)
+        if gpu_index is None:
+            gpu_index = _current_gpu_index()
         gpu_registry.write_entry(
             gpu_registry.registry_dir(),
             instance_id=_gpu_coord["instance_id"],
@@ -354,7 +368,7 @@ def _gpu_registry_sync() -> None:
             scheme=_gpu_coord.get("scheme") or "http",
             model=model,
             vram_estimate_bytes=vram_bytes,
-            gpu_index=_current_gpu_index(),
+            gpu_index=gpu_index,
             coordination_token=_gpu_coord["token"],
             models=_loaded_model_identities(),
         )
@@ -365,8 +379,11 @@ def _gpu_registry_sync() -> None:
 
 def _load_gpu_indices() -> set:
     """Every device whose free VRAM this instance's next model load can actually
-    USE - the whole configured split when one is active, else just the main
-    device.
+    USE - the whole configured split when one resolves to 2+ devices, else the
+    GPUs llama.cpp's default split spreads a GGUF load over
+    (``discover.implicit_split_gpus`` on the last reading, the devices
+    ``_switch_probe_vram`` sums), else the one device ``_current_gpu_index``
+    names. Never probes beyond ``resolve_gpu_split``'s own reading.
 
     NOT ``{_current_gpu_index()}``: that is an IDENTITY answer ("which one device
     is primary"), and resolve_main_gpu_index(None) returns 0 for an unconfigured
@@ -392,6 +409,10 @@ def _load_gpu_indices() -> set:
                                   cfg.get("gpu_split_ratios"))
         if len(pairs) >= 2:
             return {idx for idx, _ratio in pairs}
+        from localm.discover import implicit_split_gpus
+        kept = implicit_split_gpus(cfg)
+        if kept is not None:
+            return {d.get("index") for d in kept}
     except Exception as e:
         from localm.debuglog import logger as _dbg
         _dbg.debug("could not resolve the configured GPU split for the "
@@ -729,9 +750,15 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
 
     ``vram_capacity`` is given the full CLI deadline on this first call and
     joins a probe already in flight (``wait_for_inflight``); joining is only
-    safe because the call runs in an executor thread."""
+    safe because the call runs in an executor thread.
+
+    For a GGUF load (``budget.check_split_fit``) with no configured split, a
+    fresh reading of the GPUs llama.cpp's default split spreads over (2+, or
+    the one discrete GPU beside integrated ones) is judged by their summed
+    free VRAM (``discover.implicit_split_free``, the budget the backend sizes
+    the load against), and the probe is marked ``implicit_split``."""
     from localm import discover
-    from localm.discover import gpu_split_shortfall, vram_capacity
+    from localm.discover import gpu_split_shortfall, implicit_split_free, vram_capacity
 
     v_info, probe_status = await loop.run_in_executor(
         None, functools.partial(
@@ -740,6 +767,12 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
             wait_for_inflight=True))
     free = v_info.get("free")
     process_scoped = v_info.get("free_scope") == discover.FREE_SCOPE_PROCESS
+    implicit = None
+    if budget.check_split_fit and probe_status == discover.GPU_PROBE_OK:
+        implicit = await loop.run_in_executor(None, implicit_split_free)
+    if implicit is not None:
+        free = implicit["free"]
+        process_scoped = implicit.get("free_scope") == discover.FREE_SCOPE_PROCESS
     shortfall, shares_adaptive = (
         await loop.run_in_executor(
             None, functools.partial(
@@ -749,7 +782,26 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
     return switch_admission.VramProbe(
         free=free, probe_ok=probe_status == discover.GPU_PROBE_OK,
         process_scoped=process_scoped, shortfall=shortfall,
-        shares_adaptive=shares_adaptive)
+        shares_adaptive=shares_adaptive, implicit_split=implicit is not None)
+
+
+def _probe_free_reader(probe: switch_admission.VramProbe):
+    """A callable re-reading free VRAM as the same quantity as ``probe.free``:
+    the summed free of llama.cpp's default-split GPUs for an
+    ``implicit_split`` probe (None when a fresh reading of them is not
+    available), else ``vram_capacity()``'s free."""
+    from localm import discover
+
+    if not probe.implicit_split:
+        return lambda: discover.vram_capacity().get("free")
+
+    def _read() -> Optional[int]:
+        gpus, status = discover._list_gpus_reading()
+        if status != discover.GPU_PROBE_OK:
+            return None
+        info = discover.implicit_split_free(gpus=gpus)
+        return info.get("free") if info is not None else None
+    return _read
 
 
 async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
@@ -818,7 +870,6 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     Sets ``attempt.embedder_attempted`` once a loaded embedder is found, so it
     is tried at most once per load attempt. ``reset_embedder(force=False)``
     checks for in-flight requests and clears in one locked step."""
-    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     embedder_dim = await loop.run_in_executor(None, embedder_mod.loaded_dim)
@@ -833,8 +884,7 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
         await loop.run_in_executor(
             None,
             lambda: wait_for_vram_release(
-                lambda: vram_capacity().get("free"),
-                before_bytes=probe.free))
+                _probe_free_reader(probe), before_bytes=probe.free))
     return True
 
 
@@ -941,7 +991,6 @@ async def _switch_free_victim(loop, victim: str, engine,
     for its VRAM to be released when *probe* was measurable, so the next
     reading is not stale. *victim* is in ``_evicting_names`` for the whole
     free, and is removed again even when ``unload()`` raises."""
-    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     _evicting_names.add(victim)
@@ -951,7 +1000,7 @@ async def _switch_free_victim(loop, victim: str, engine,
             await loop.run_in_executor(
                 None,
                 lambda: wait_for_vram_release(
-                    lambda: vram_capacity().get("free"), before_bytes=probe.free))
+                    _probe_free_reader(probe), before_bytes=probe.free))
     finally:
         _evicting_names.discard(victim)
 

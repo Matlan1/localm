@@ -341,16 +341,20 @@ test("a single detected GPU keeps the split checkbox row hidden", async () => {
     "checkbox list left unpopulated for a single GPU");
 });
 
-test("unchecking down to 1 checked PATCHes gpu_split_indices to null", async () => {
+test("unchecking down to 1 checked saves that one GPU and shows it as a single-GPU choice", async () => {
   const calls = [];
   const gpus = [
     { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
     { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
   ];
-  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: [0, 1] }) });
+  const { window } = loadApp({ fetchImpl: makeFetch(calls,
+    { gpus, gpuSplitIndices: [0, 1], gpuSplitRatios: [3, 1] }) });
   const list = window.document.getElementById("perf-gpu-split-list");
+  const hint = window.document.getElementById("perf-gpu-single-hint");
+  const ratioList = window.document.getElementById("perf-gpu-ratio-list");
   assert.ok(await waitFor(() => list.querySelectorAll("input[type=checkbox]").length === 2),
     "checkbox list populated");
+  assert.equal(hint.hidden, true, "no single-GPU note while two GPUs are checked");
   const boxes = [...list.querySelectorAll("input[type=checkbox]")];
   boxes[0].checked = false;
   boxes[0].dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -358,8 +362,39 @@ test("unchecking down to 1 checked PATCHes gpu_split_indices to null", async () 
     (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "unchecking issues a PATCH");
   const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
   const body = JSON.parse(patch.body);
-  assert.equal(body.gpu_split_indices, null,
-    "fewer than 2 checked clears the split rather than silently keeping it on");
+  assert.deepEqual(body.gpu_split_indices, [1],
+    "one checked GPU is saved as a 1-entry gpu_split_indices (load on that GPU only)");
+  assert.equal(body.gpu_split_ratios, null, "a single GPU carries no split ratios");
+  assert.equal(hint.hidden, false, "the single-GPU note is shown");
+  assert.match(hint.textContent, /GPU 1 \(GPU B\)/, "the note names the chosen GPU");
+  assert.equal(ratioList.querySelectorAll("input[type=number]").length, 0,
+    "no ratio inputs for a single GPU");
+});
+
+test("unchecking every GPU PATCHes gpu_split_indices to null (automatic placement)", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: [1] }) });
+  const list = window.document.getElementById("perf-gpu-split-list");
+  const hint = window.document.getElementById("perf-gpu-single-hint");
+  assert.ok(await waitFor(() => list.querySelectorAll("input[type=checkbox]").length === 2),
+    "checkbox list populated");
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  assert.deepEqual(boxes.map((cb) => cb.checked), [false, true],
+    "a stored 1-entry gpu_split_indices pre-checks that one box");
+  assert.equal(hint.hidden, false, "a stored single GPU shows the single-GPU note");
+  boxes[1].checked = false;
+  boxes[1].dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(() => calls.some(
+    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "unchecking issues a PATCH");
+  const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+  const body = JSON.parse(patch.body);
+  assert.equal(body.gpu_split_indices, null, "no GPU checked clears the setting");
+  assert.equal(body.gpu_split_ratios, null);
+  assert.equal(hint.hidden, true, "the single-GPU note is hidden again");
 });
 
 test("2 checked boxes PATCH gpu_split_indices with both selected indices", async () => {

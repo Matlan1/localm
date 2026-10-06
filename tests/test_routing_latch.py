@@ -450,6 +450,8 @@ def _build_world(monkeypatch, tmp_path, registry):
     # Every load fits beside the resident models, whatever the host's GPUs.
     monkeypatch.setattr("localm.discover.vram_capacity",
                         probe_double({"total": AMPLE_VRAM, "free": AMPLE_VRAM}))
+    # The default-split sum admission reads instead on a multi-GPU reading.
+    monkeypatch.setattr("localm.discover.implicit_split_free", lambda *a, **k: None)
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._inference_sems.clear()

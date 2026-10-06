@@ -252,7 +252,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no longer counted when sizing a model, since llama.cpp does not use it
   then. Setting `gpu_split_indices` to a single GPU now loads a GGUF chat
   model on that GPU only, instead of still spreading it over every GPU, when
-  localm can match that GPU to llama.cpp's own device list. A crash while
+  localm can match that GPU to llama.cpp's own device list, and an HF model
+  now loads on that GPU too; in Settings, ticking one GPU under Split across
+  GPUs now does exactly that, and leaving every box unticked keeps automatic
+  placement. On such a computer a configured split of several GPUs and the
+  main GPU now land on the GPUs you picked instead of being shifted by the
+  integrated GPU llama.cpp leaves out, warnings about the main GPU name the
+  GPU numbers Settings shows, and a split or single GPU that names the
+  integrated GPU is refused with a message saying so, instead of loading
+  somewhere else. A llama.cpp build that does use the integrated GPU keeps
+  the split as configured. The VRAM shown in the GUI, the memory check before
+  a load and the GPU this instance reports to other localm instances now
+  describe the GPU a single-GPU load actually runs on, and the automatic
+  context limit only counts the GPUs a load uses when GPUs are left out. With
+  no split configured, the memory check before loading a GGUF model on
+  several GPUs now counts the free memory of every GPU llama.cpp spreads it
+  over, instead of GPU 0's alone, so it no longer unloads other models or
+  asks for confirmation when the model fits across them, and another localm
+  instance using any of those GPUs can be asked to free memory. A crash while
   creating the context is reported as that, with advice
   about the context size and the split, instead of telling you to repair the
   runtime. Bug reports list every GPU with its memory, write "not detected"
