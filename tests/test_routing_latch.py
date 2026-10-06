@@ -26,9 +26,11 @@ import localm.inference.http_server as hs
 from localm.inference import capability_routing as cr
 from localm.inference import routing_latch as rl
 from localm.inference.backends.base import ModelLoadCancelled
+from tests.conftest import probe_double
 
 CRASH_TEXT = ("The native model-loading process crashed (exit code -11 "
               "(killed by signal SIGSEGV)) while loading the model file.")
+AMPLE_VRAM = 64 << 30
 
 
 class _Clock:
@@ -445,6 +447,9 @@ def _build_world(monkeypatch, tmp_path, registry):
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
     monkeypatch.setattr(hs, "_engine_factory", factory)
     monkeypatch.setattr(hs._routing_latch, "_clock", world.clock)
+    # Every load fits beside the resident models, whatever the host's GPUs.
+    monkeypatch.setattr("localm.discover.vram_capacity",
+                        probe_double({"total": AMPLE_VRAM, "free": AMPLE_VRAM}))
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._inference_sems.clear()
