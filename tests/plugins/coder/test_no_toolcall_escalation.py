@@ -16,7 +16,7 @@ import pytest
 
 from localm.inference.gbnf import TOOL_CALLS_AFTER_THINK, check_grammar_structure
 from localm.plugins.coder.agent.constants import _MAX_NOCALL_ESCALATIONS
-from localm.plugins.coder.agent.loop import implies_action, response_similarity
+from localm.plugins.coder.agent.loop import demands_action, implies_action, response_similarity
 from tests.conftest import final_answer as _final_answer
 
 
@@ -64,9 +64,34 @@ def test_action_requests_are_recognised(text):
     "explain the difference between a thread and a process",
     "why is recursion sometimes slower than iteration?",
     "",
+    "why does web search sometimes fail?",
+    "the issue is that web search is behaving odd since we updated it ... what?",
+    "the check is flaky, any clue why?",
+    "explain how search works",
+    "we use github.com for the search, is that a problem?",
+    "since python 3.12 the list view looks odd, why?",
 ])
 def test_pure_questions_are_not_action_requests(text):
     assert implies_action(text) is False
+    assert demands_action(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "search the repo for X",
+    "can you check the logs?",
+    "please run the tests",
+    "I need you to find the bug",
+    "the build is red. fix it",
+    "python 3.12 is installed. check the version",
+])
+def test_imperative_requests_demand_action(text):
+    assert implies_action(text) is True
+    assert demands_action(text) is True
+
+
+def test_a_file_name_alone_implies_action_without_demanding_it():
+    assert implies_action("what does main.py do?") is True
+    assert demands_action("what does main.py do?") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +158,76 @@ def test_a_question_is_still_answered_without_escalation(tmp_path):
     assert _final_answer(result) == "A closure captures its enclosing scope."
     assert _nocall_prompts(agent) == []
     assert "tool use not achieved" not in result
+
+
+@pytest.mark.parametrize("request_text", [
+    "why does web search sometimes fail?",
+    "the issue is that web search is behaving odd since we updated it ... what?",
+])
+def test_a_diagnostic_question_gets_its_prose_answer_with_no_nudge(tmp_path, request_text):
+    """An action word inside a question must not start the ladder: no nudge, no
+    forced grammar, and the prose reply is the final answer."""
+    agent = _make_agent(tmp_path, max_turns=6)
+    forced = []
+
+    def _reply(*a, **k):
+        forced.append(bool(getattr(agent, "_force_tool_grammar", False)))
+        return "It fails when the provider rate-limits the request."
+
+    with patch.object(agent, "_call_llm", side_effect=_reply), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        result = agent.run_task(request_text)
+    assert _final_answer(result) == "It fails when the provider rate-limits the request."
+    assert _nocall_prompts(agent) == []
+    assert forced == [False]
+    assert "tool use not achieved" not in result
+
+
+def test_a_clarifying_question_on_a_file_question_stands_as_the_answer(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=6)
+    reply = "Which main.py do you mean, the one in src or the one in tools?"
+    with patch.object(agent, "_call_llm", return_value=reply), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        result = agent.run_task("what does main.py do?")
+    assert _final_answer(result) == reply
+    assert _nocall_prompts(agent) == []
+
+
+def test_a_prose_answer_to_a_file_question_is_accepted_after_rung_one(tmp_path):
+    """Rung 1 tells the model a one-sentence prose answer is acceptable; a
+    request that only names a file must not then be grammar-forced or reported
+    as failed enforcement."""
+    agent = _make_agent(tmp_path, max_turns=8)
+    forced = []
+    n = [0]
+
+    def _reply(*a, **k):
+        forced.append(bool(getattr(agent, "_force_tool_grammar", False)))
+        n[0] += 1
+        return f"It is the program entry point, variation {n[0]}."
+
+    with patch.object(agent, "_call_llm", side_effect=_reply), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        result = agent.run_task("what does main.py do?")
+    assert len(_nocall_prompts(agent)) == 1
+    assert forced == [False, False]
+    assert "tool use not achieved" not in result
+
+
+def test_an_imperative_request_still_climbs_to_the_forced_rung(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=8)
+    forced = []
+
+    def _reply(*a, **k):
+        forced.append(bool(getattr(agent, "_force_tool_grammar", False)))
+        return f"I would look for it, variation {len(forced)}."
+
+    with patch.object(agent, "_call_llm", side_effect=_reply), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        result = agent.run_task("search the repo for the retry helper")
+    assert len(_nocall_prompts(agent)) == _MAX_NOCALL_ESCALATIONS
+    assert forced[:3] == [False, False, True]
+    assert "tool use not achieved" in result
 
 
 def test_no_escalation_once_the_model_has_called_a_tool(tmp_path):

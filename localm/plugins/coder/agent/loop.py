@@ -21,13 +21,70 @@ from ..parser import looks_like_tool_attempt, split_response
 from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
-    _ACTION_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
+    _ACTION_VERBS, _IMPERATIVE_LEADS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
+    _NON_FILE_SUFFIXES,
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
-    _SKILL_STATE_TOOLS, _WORKSPACE_HINT,
+    _SKILL_STATE_TOOLS,
 )
 from localm.textguard import compose, compose_join
 
-_RE_WORKSPACE = None      # compiled on first use
+_RE_CLAUSE_SPLIT = re.compile(r"[!?:;\n]+|\.+(?=\s|$)")
+_RE_WORD = re.compile(r"[a-z']+")
+_RE_POLITE_VERB = re.compile(
+    r"\b(?:(?:can|could|would|will)\s+you(?:\s+please)?|please|pls|kindly"
+    r"|let'?s|go\s+ahead\s+and|(?:i\s+)?(?:need|want)\s+you\s+to"
+    r"|you\s+(?:need|have|should|must)\s+to|(?:i\s+)?(?:need|want)\s+to)"
+    r"\s+([a-z]+)\b", re.IGNORECASE)
+_RE_PATH_TOKEN_SPLIT = re.compile(r"[\s`'\"()\[\]{}<>,;*|]+")
+_RE_FILE_NAME = re.compile(r"[\w.-]*[\w-]\.([A-Za-z0-9]{1,8})")
+_RE_SEPARATED_PATH = re.compile(r"(?:~|\.{1,2})?[/\\][\w.-]+|[\w.-]+[/\\][\w.-]+")
+
+
+def _names_a_path(text: str) -> bool:
+    """True when *text* contains a token that is a file name with an extension
+    or a path with a separator. A domain name (``github.com``), a version number
+    (``3.12``), an abbreviation (``e.g``) and a bare ellipsis are not paths."""
+    for token in _RE_PATH_TOKEN_SPLIT.split(text):
+        token = token.rstrip(".,:;!?")
+        if not token or "://" in token:
+            continue
+        m = _RE_FILE_NAME.fullmatch(token)
+        if m is not None:
+            ext = m.group(1)
+            if (any(c.isalpha() for c in ext)
+                    and ext.lower() not in _NON_FILE_SUFFIXES
+                    and token.lower() not in ("e.g", "i.e")):
+                return True
+        if _RE_SEPARATED_PATH.fullmatch(token):
+            return True
+    return False
+
+
+def demands_action(text: str) -> bool:
+    """True when *text* tells the agent to DO something: an action verb used as
+    an imperative - the first word of a sentence, or right after a request
+    prefix such as "please", "can you", "let's", "I need you to". An action verb
+    inside a question or a statement ("why does web search fail?", "the check
+    is flaky") does not count.
+
+    Pure and module-level, so it can be tested directly on request strings."""
+    lowered = (text or "").lower()
+    if not lowered.strip():
+        return False
+    for clause in _RE_CLAUSE_SPLIT.split(lowered):
+        for word in _RE_WORD.findall(clause):
+            if word in _IMPERATIVE_LEADS:
+                continue
+            if word in _ACTION_VERBS:
+                return True
+            break
+    return any(m.group(1) in _ACTION_VERBS for m in _RE_POLITE_VERB.finditer(lowered))
+
+
+def _asks_a_question(response: str) -> bool:
+    """True when the last non-empty line of *response* ends with a question mark."""
+    lines = [ln.strip() for ln in (response or "").strip().splitlines() if ln.strip()]
+    return bool(lines) and lines[-1].endswith("?")
 
 
 def implies_action(text: str) -> bool:
@@ -35,30 +92,18 @@ def implies_action(text: str) -> bool:
     explanation - the precondition for escalating a turn that produced no tool
     call.
 
-    Two independent signals, either of which is enough: an imperative action
-    verb (``_ACTION_VERBS``), or a reference to this workspace - a path, a
-    filename with an extension, or a project noun (``_WORKSPACE_HINT``). Read
-    verbs count: "show me what is in config.py" needs read_file exactly as much
-    as "write config.py" needs write_file.
-
-    THE BAR IS LOW, and leans toward firing. A false POSITIVE costs one extra
-    turn whose re-prompt states that a plain answer is acceptable if no tool is
-    needed, so the model can decline and the loop finishes normally. A false
-    NEGATIVE silently answers the request with prose and does nothing.
+    Two signals, either of which is enough: an imperative action verb
+    (:func:`demands_action`), or a named file or path (``main.py``,
+    ``src/app``). Read verbs count: "show me what is in config.py" needs
+    read_file exactly as much as "write config.py" needs write_file. A question
+    or statement that uses an action word without naming a file ("why does web
+    search sometimes fail?") is not an action request.
 
     Pure and module-level, so it can be tested directly on request strings
     without constructing an Agent."""
-    global _RE_WORKSPACE
     if not text:
         return False
-    lowered = text.lower()
-    import re
-    if _RE_WORKSPACE is None:
-        _RE_WORKSPACE = re.compile(_WORKSPACE_HINT, re.IGNORECASE)
-    for word in re.findall(r"[a-z]+", lowered):
-        if word in _ACTION_VERBS:
-            return True
-    return bool(_RE_WORKSPACE.search(text))
+    return demands_action(text) or _names_a_path(text)
 
 
 # A fenced code block's body.
@@ -735,7 +780,8 @@ class _LoopMixin:
         # a call. Reached when the rungs are exhausted, when forcing is
         # unavailable, or when turns ran out mid-ladder.
         enforcement = ""
-        if st.nocall_escalation and not self._used_tools_this_task(st):
+        if (st.nocall_escalation and not self._used_tools_this_task(st)
+                and demands_action(getattr(self, "_last_user_request", "") or "")):
             why = ("" if self.can_force_tool_calls() else
                    " Constrained sampling, which would have forced one, is not "
                    "available here (this backend cannot enforce a grammar, or "
@@ -812,6 +858,11 @@ class _LoopMixin:
              pick a different model: which model to run is the user's choice
              and this code's job is to make their choice work.
 
+        Only an imperative request (:func:`demands_action`) climbs past rung 1
+        or is reported as failed enforcement. A request that merely names a
+        file gets rung 1, whose one-sentence prose answer is accepted. A reply
+        that ends in a question stands as the answer to such a request.
+
         Deliberately NOT gated on the response's wording. Every phrasing-based
         check inherits the unreliability of the self-report it is reading (see
         _grounding_footer); "did the harness parse a call" is an observable
@@ -819,12 +870,18 @@ class _LoopMixin:
         the user's own text, so neither can be talked past."""
         if self._used_tools_this_task(st):
             return None                      # this model calls tools fine
-        if not implies_action(getattr(self, "_last_user_request", "") or ""):
+        request = getattr(self, "_last_user_request", "") or ""
+        if not implies_action(request):
             return None                      # a question, not an action
+        demanded = demands_action(request)
+        if not demanded and _asks_a_question(response):
+            return None                      # a clarifying question is the answer
         if self._turns >= self.max_turns:
             return None                      # no turns left to escalate into
         if st.nocall_escalation >= _MAX_NOCALL_ESCALATIONS:
             return None                      # ladder exhausted; caller reports below
+        if st.nocall_escalation >= 1 and not demanded:
+            return None                      # rung 1 allowed a prose answer; accept it
 
         st.nocall_escalation += 1
         rung = st.nocall_escalation
