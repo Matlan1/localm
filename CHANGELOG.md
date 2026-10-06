@@ -168,6 +168,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A browser that starts too slowly is no longer left running.** When the
+  automated browser did not come up within its start timeout, the Browser tab
+  and the coder's browser tools reported "the browser did not start in time",
+  but the launch carried on and, once it finished, left a Chromium and its
+  driver running until the server was stopped. That browser is now closed as
+  soon as the late launch finishes.
 - **A change of the system clock no longer lets a second writer into a knowledge
   collection that is being indexed.** After the clock jumped (a laptop waking, a VM
   or WSL resyncing its clock), a `localm rag add`, a scheduled re-sync or a memory

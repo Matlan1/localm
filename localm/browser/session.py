@@ -134,6 +134,11 @@ class BrowserSession:
         self._thread: Optional[threading.Thread] = None
         self._ready = threading.Event()
         self._start_error: Optional[BaseException] = None
+        #: Held while start() gives up on a launch and while the launch reports
+        #: that it has finished, so exactly one of the two happens first.
+        self._start_lock = threading.Lock()
+        #: True once start() has given up on a launch that was still running.
+        self._abandoned = False
         self._pw = None
         self._browser = None
         self._ctx = None
@@ -153,13 +158,23 @@ class BrowserSession:
     # -- lifecycle ---------------------------------------------------------- #
 
     def start(self, timeout: float = 90.0) -> None:
-        """Launch the browser and block until it is ready to drive."""
+        """Launch the browser and block until it is ready to drive.
+
+        Raises the launch's own error when it fails, and BrowserUnavailableError
+        when it is not ready within *timeout* seconds. A launch still running
+        after that closes the browser it started as soon as it finishes, and the
+        session is closed."""
         _require_playwright()
         self._thread = threading.Thread(
             target=self._run_loop, name="browser-" + self.session_id, daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout):
-            raise BrowserUnavailableError("the browser did not start in time")
+            with self._start_lock:
+                if not self._ready.is_set():
+                    self._abandoned = True
+                    self._closed = True
+                    raise BrowserUnavailableError(
+                        "the browser did not start in time")
         if self._start_error is not None:
             raise self._start_error
 
@@ -168,27 +183,45 @@ class BrowserSession:
         self._loop = loop
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._launch())
-        except BaseException as exc:                 # noqa: BLE001
-            self._start_error = exc
-            # A launch that got as far as starting Chromium and then failed
-            # still owns a browser and a driver, and this session is in no
-            # registry, so nothing else can ever close them.
             try:
-                loop.run_until_complete(self._teardown())
-            except BaseException:                    # noqa: BLE001
-                pass
-            self._ready.set()
-            return
-        self._ready.set()
-        try:
-            loop.run_forever()
+                loop.run_until_complete(self._launch())
+            except BaseException as exc:             # noqa: BLE001
+                self._start_error = exc
+                self._closed = True
+                self._close_started(loop)
+                if not self._finish_start():
+                    logger.warning(
+                        "browser %s: the launch failed after start() gave up: %s",
+                        self.session_id, exc)
+                return
+            if not self._finish_start():
+                logger.info("browser %s: closing a browser that finished "
+                            "starting after start() gave up", self.session_id)
+                self._close_started(loop)
+                return
+            try:
+                loop.run_forever()
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    pass
         finally:
-            try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            except Exception:
-                pass
             loop.close()
+
+    def _finish_start(self) -> bool:
+        """Report that the launch is over. False when start() had already given
+        up waiting for it."""
+        with self._start_lock:
+            self._ready.set()
+            return not self._abandoned
+
+    def _close_started(self, loop) -> None:
+        """Close on *loop* whatever the launch has started. Never raises."""
+        try:
+            loop.run_until_complete(self._teardown())
+        except BaseException as exc:                 # noqa: BLE001
+            logger.debug("browser %s teardown: %s", self.session_id, exc)
 
     async def _launch(self) -> None:
         async_playwright = _require_playwright()
@@ -465,7 +498,10 @@ class BrowserSession:
             pass
 
     def stop(self, timeout: float = 30.0) -> None:
-        """Close the browser and stop the loop. Safe to call more than once."""
+        """Close the browser and stop the loop. Safe to call more than once.
+
+        A session whose start() failed or gave up is already closed, so this
+        returns at once for it."""
         if self._closed or self._loop is None:
             self._closed = True
             return
