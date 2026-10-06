@@ -168,6 +168,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **The microphone button works on a fresh install again.** A new install could
+  pull in a PyAV release that faster-whisper cannot use, so every recording
+  failed. The voice extra now keeps PyAV below version 19. A failure inside the
+  audio decoder itself is now reported as a server error naming the library
+  problem instead of "corrupt or unsupported audio".
 - **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
   projector files record a width that is not the one the model uses, so localm
   decided the projector did not fit and left it off: the model was not shown as
