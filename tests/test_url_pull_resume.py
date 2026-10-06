@@ -477,6 +477,51 @@ class TestUrlPartIdentity:
         assert ok is False
 
 
+class TestUrlPullDroppedConnection:
+    """A connection that drops mid-transfer is an ordinary failed download:
+    the pull reports it and returns False, and the partial stays for the next
+    pull."""
+
+    def test_a_dropped_connection_fails_the_pull_and_keeps_the_partial(
+            self, url_env, monkeypatch, capsys):
+        models, _ = url_env
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _RangeServer(_A, drop_after=5))
+
+        exc = None
+        try:
+            ok = mm._pull_url(URL_A, "mymodel")
+        except Exception as e:
+            ok, exc = None, e
+
+        out = capsys.readouterr().out
+        assert exc is None, f"the pull raised {exc!r}"
+        assert sorted(p.name for p in models.iterdir()) == [
+            "model.gguf.part", "model.gguf.part.json"]
+        assert (models / "model.gguf.part").read_bytes() == b"AAAAA"
+        assert "Download interrupted" in out
+        assert "pull the same URL again" in out
+        assert ok is False
+
+    def test_a_dropped_connection_does_not_report_a_finished_download(
+            self, url_env, monkeypatch, capsys):
+        import json
+        monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _RangeServer(_A, drop_after=5))
+
+        ok = mm._pull_url(URL_A, "mymodel")
+
+        out = capsys.readouterr().out
+        events = [json.loads(line.split(mm.PROGRESS_SENTINEL, 1)[1])
+                  for line in out.splitlines() if mm.PROGRESS_SENTINEL in line]
+        downloads = [e for e in events if e.get("phase") == "download"]
+        assert downloads, f"no download progress was reported: {out!r}"
+        assert downloads[-1]["downloaded"] == 5, downloads
+        assert downloads[-1]["pct"] == 50.0, downloads
+        assert ok is False
+
+
 class TestUrlPullResult:
     """The bool return drives the CLI exit code and the GUI job status."""
 
