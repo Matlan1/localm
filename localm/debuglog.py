@@ -162,6 +162,14 @@ def uvicorn_log_level() -> str:
 # --------------------------------------------------------------------------- #
 
 _RING_CAPACITY = 400
+_RING_MAX_RECORD_CHARS = 2000
+
+
+def _clip_record(text: str) -> str:
+    """Return text cut to _RING_MAX_RECORD_CHARS with a visible truncation suffix."""
+    if len(text) <= _RING_MAX_RECORD_CHARS:
+        return text
+    return f"{text[:_RING_MAX_RECORD_CHARS]}...(truncated, {len(text)} chars)"
 
 
 class _RingBufferHandler(logging.Handler):
@@ -176,7 +184,7 @@ class _RingBufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             render = self.format          # bound logging.Handler renderer
-            self._buf.append(render(record))
+            self._buf.append(_clip_record(render(record)))
         except Exception:
             # A logging handler must never raise into the code that logged.
             self.handleError(record)
@@ -596,7 +604,8 @@ def record_native_line(text: str) -> None:
     if _ring_handler is None:
         return
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    _ring_handler._buf.append(f"{stamp} INFO    localm.native: {text}")
+    _ring_handler._buf.append(
+        _clip_record(f"{stamp} INFO    localm.native: {text}"))
 
 
 class _LineGrouper:
