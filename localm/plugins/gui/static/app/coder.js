@@ -1250,7 +1250,12 @@ export function renderCoderAttachChips() {
   });
 }
 
+const CODER_IMAGE_SUFFIX = /\.(png|jpe?g|gif|webp)$/i;
+
 export async function attachCoderDocument(file) {
+  if ((file.type || "").startsWith("image/") || CODER_IMAGE_SUFFIX.test(file.name)) {
+    throw new Error(t("coder.attach.noImages"));
+  }
   const b64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");

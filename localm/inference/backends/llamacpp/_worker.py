@@ -114,6 +114,13 @@ class GgufWorker(VramSizingMixin):
         image, so this is per-call where mtp_status is per-model."""
         return bool(getattr(self._llm, "mtp_active_this_call", False)) if self._llm is not None else False
 
+    @property
+    def mtp_call_status(self) -> str:
+        """Why the call that just finished stopped speculating partway, or "" when
+        it did not. Per-call: the model itself can still speculate on its next
+        request."""
+        return str(getattr(self._llm, "mtp_call_status", "") or "") if self._llm is not None else ""
+
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",

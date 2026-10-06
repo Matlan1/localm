@@ -281,7 +281,7 @@ def test_collapse_only_touches_the_processed_stem(memhome):
         store.add(MemoryRecord(text=f"Partial {i} about rust ownership rules",
                                kind="episodic", source="synth", importance=0.4,
                                meta={"session": "dupe", "session_mtime": 1000.0 + i}))
-    _write_session(memhome, "dupe", _SETTLED, content="rust the lot")
+    _write_session(memhome, "dupe", _SETTLED, content="rust the whole toolchain")
     c, _ = _summaries("Covered the whole Rust toolchain end to end")
     plug._store_episodes(store, c, embed_fn=None)
 

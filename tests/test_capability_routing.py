@@ -98,17 +98,54 @@ class TestPlanRoute:
         assert d.resolved == "current"
         assert d.unmet == ("tool_use",)
 
-    def test_a_gap_records_unknown_and_absent_distinctly(self):
-        """An unmeasured current model gaps (routing prefers certainty) but is
-        recorded as None, never False - it is not a model known to lack tools."""
+    def test_an_unknown_capability_never_moves_an_unpinned_request(self):
+        """An unmeasured current model is not a gap: only a confirmed absence
+        routes. A confirmed-capable model is installed and resident, so every
+        incentive to swap is present."""
         reg = _reg(unmeasured={}, tooly={"tool_use": True})
         d = cr.plan_route("unmeasured",
                           cr.CapabilityNeeds(capabilities=("tool_use",)),
-                          pinned=False, reg=reg)
-        assert d.resolved == "tooly"
+                          pinned=False, resident=["tooly"], reg=reg)
+        assert d.resolved == "unmeasured"
+        assert d.routed is False
+        assert d.has_gap is False
+        assert d.describe() == "no capability gap"
+
+    def test_a_pinned_request_still_reports_an_unknown_as_none(self):
+        """A pinned model keeps the suggestion surface: the unknown is recorded
+        as None, never False - it is not a model known to lack tools."""
+        reg = _reg(unmeasured={}, tooly={"tool_use": True})
+        d = cr.plan_route("unmeasured",
+                          cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=True, reg=reg)
+        assert d.resolved == "unmeasured"
+        assert d.routed is False
         assert d.gaps == {"tool_use": None}
         assert d.gaps["tool_use"] is not False
         assert "unknown" in d.describe()
+
+    def test_an_unknown_vision_capability_still_routes(self, monkeypatch):
+        """Vision is needed to answer at all, so an unconfirmed model does not
+        keep an image request. "unmeasured" sits on an unreachable path (vision
+        unknown); "seer" resolves a projector (vision confirmed)."""
+        monkeypatch.setattr("localm.model_manager.registry.get_model_mmproj",
+                            lambda name, **kw: "Z:/models/proj.gguf"
+                            if name == "seer" else None)
+        reg = _reg(unmeasured={}, seer={"mmproj": "Z:/models/proj.gguf"})
+        d = cr.plan_route("unmeasured", cr.CapabilityNeeds(capabilities=("vision",)),
+                          pinned=False, reg=reg)
+        assert d.resolved == "seer"
+        assert d.gaps == {"vision": None}
+
+    def test_an_unknown_tool_use_does_not_hide_a_confirmed_context_shortfall(self):
+        reg = _reg(unmeasured={"context_length": 4096},
+                   tooly={"tool_use": True, "context_length": 131072})
+        d = cr.plan_route(
+            "unmeasured", cr.CapabilityNeeds(capabilities=("tool_use",),
+                                             min_context=100000),
+            pinned=False, reg=reg)
+        assert d.resolved == "tooly"
+        assert d.gaps == {"context_length": False}
 
     def test_unknown_context_is_not_a_shortfall(self):
         """Context gaps only on a CONFIRMED shortfall. Treating an unmeasured
@@ -241,14 +278,9 @@ class FakeEngine:
         return 8192
 
 
-@pytest.fixture
-def server(monkeypatch):
-    """A running server with two REGISTERED models: the loaded one has no
-    tool-call template, a second one does."""
-    registry = _reg(
-        plain={"tool_use": False, "context_length": 8192},
-        tooly={"tool_use": True, "context_length": 32768},
-    )
+def _serve(monkeypatch, registry):
+    """A running server over *registry*, with "plain" loaded as the startup
+    model. Yields ``(client, engines)``."""
     engines: dict[str, FakeEngine] = {}
 
     def factory(name):
@@ -275,6 +307,26 @@ def server(monkeypatch):
         yield client, engines
 
 
+@pytest.fixture
+def server(monkeypatch):
+    """Two REGISTERED models: the loaded one has no tool-call template, a
+    second one does."""
+    yield from _serve(monkeypatch, _reg(
+        plain={"tool_use": False, "context_length": 8192},
+        tooly={"tool_use": True, "context_length": 32768},
+    ))
+
+
+@pytest.fixture
+def server_unmeasured(monkeypatch):
+    """Two REGISTERED models: the loaded one has never been inspected for tool
+    use, a second one is confirmed to have it."""
+    yield from _serve(monkeypatch, _reg(
+        plain={"context_length": 8192},
+        tooly={"tool_use": True, "context_length": 32768},
+    ))
+
+
 def _ask(client, **body):
     body.setdefault("messages", [{"role": "user", "content": "hi"}])
     body.setdefault("stream", False)
@@ -295,6 +347,30 @@ class TestRoutingOverHTTP:
         assert r.status_code == 200
         assert _answering_model(engines) == ["tooly"]
         assert engines["plain"].answered == 0
+
+    def test_unpinned_request_on_an_unmeasured_model_is_not_rerouted(
+            self, server_unmeasured):
+        """The GUI sends tool_use on every turn with web tools on. A model
+        nobody has inspected keeps a plain text turn: the reply comes from the
+        engine that was loaded, the other model is never even constructed, and
+        no routing header is written."""
+        client, engines = server_unmeasured
+        r = _ask(client, required_capabilities=["tool_use"])
+        assert _answering_model(engines) == ["plain"]
+        assert "answered-by-plain" in r.text
+        assert "tooly" not in engines
+        assert "X-Localm-Model-Routing" not in r.headers
+        assert r.status_code == 200
+
+    def test_a_pinned_unmeasured_model_still_reports_the_unknown(
+            self, server_unmeasured):
+        client, engines = server_unmeasured
+        r = _ask(client, model="plain", required_capabilities=["tool_use"])
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert _answering_model(engines) == ["plain"]
+        assert blob["pinned"] is True
+        assert blob["routed"] is False
+        assert blob["gaps"] == {"tool_use": "unknown"}
 
     def test_explicit_pin_is_NEVER_overridden(self, server):
         """THE binding constraint, end to end.

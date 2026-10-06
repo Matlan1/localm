@@ -174,6 +174,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A chat no longer switches models for an ordinary reply just because the model's tool
+  support has never been checked.** With web tools on, an unpinned chat could move
+  from the model you had loaded to a different one for a plain text turn, which
+  unloaded and reloaded large models. A model whose tool support is unknown now
+  keeps the turn; only a model known to lack a needed capability is swapped out.
+  Image and context-length routing are unchanged.
+- **Small talk no longer ends up in the remembered facts, and one common word no
+  longer pulls old session summaries into every chat turn.** A session with
+  nothing lasting in it (a greeting, a passing remark, a one-off request) now
+  gets no session summary, and a stored session summary is recalled only when a
+  message shares at least two content words with it (or is a close paraphrase),
+  so unrelated turns carry no remembered-facts block.
+- **The microphone button works on a fresh install again.** A new install could
+  pull in a PyAV release that faster-whisper cannot use, so every recording
+  failed. The voice extra now keeps PyAV below version 19. A failure inside the
+  audio decoder itself is now reported as a server error naming the library
+  problem instead of "corrupt or unsupported audio".
+- **Attaching an image in the Coder now says plainly that the Coder cannot take
+  images.** It used to ask you to load a vision model, which could not help.
+  Attach the image in Chat with a vision model, or paste the text instead.
+- **Multi-Token Prediction no longer switches itself off after one long prompt, and no longer stops silently partway through a reply.** The speculative-decoding helper used to be capped at 2048 tokens, so a single longer prompt turned it off for as long as the model stayed loaded, and a reply that crossed 2048 tokens stopped speculating while still being reported as active. It now grows with the conversation's context, keeps working on the next request, and a reply on which it has to stop reports that it did. A permanent stop that comes with a detail suffix, such as a failed helper prefill, is now recognised as a stop.
 - **Long chats keep their thread when older messages are compacted.** With a
   reasoning ("thinking") model the summary of older messages was never written,
   so the earlier conversation was replaced by a one-line note and the model lost

@@ -292,13 +292,18 @@ def _model_satisfies(name: str, needs: CapabilityNeeds, reg: dict,
 
 def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
                   dir_cache: dict,
-                  known: Optional[Dict[str, bool]] = None) -> Dict[str, Optional[bool]]:
+                  known: Optional[Dict[str, bool]] = None,
+                  ignore_unknown: bool = False) -> Dict[str, Optional[bool]]:
     """The needs *name* does not confirm, each with the tri-state as measured.
 
-    A capability is a gap when it is not confirmed True, so an UNKNOWN counts.
-    That is a preference for certainty, not a claim of absence, and the recorded
-    ``None`` is what keeps the two distinguishable everywhere downstream: a
-    caller must never render "this model cannot do X" from a None."""
+    A capability is a gap when it is not confirmed True, so an UNKNOWN counts,
+    and the recorded ``None`` keeps unknown distinguishable from a confirmed
+    ``False`` everywhere downstream: a caller must never render "this model
+    cannot do X" from a None.
+
+    With *ignore_unknown*, an unknown capability is not a gap unless the
+    request cannot be answered without it (``_REQUIRED_TO_ANSWER``); only a
+    confirmed ``False`` is. Passing *name* as None still gaps every need."""
     gaps: Dict[str, Optional[bool]] = {}
     known = known or {}
     if name is None:
@@ -307,8 +312,11 @@ def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
         if known.get(cap) is True:
             continue
         state = caps.model_capability(name, cap, reg=reg, dir_cache=dir_cache)
-        if state is not True:
-            gaps[cap] = state
+        if state is True:
+            continue
+        if state is None and ignore_unknown and cap not in _REQUIRED_TO_ANSWER:
+            continue
+        gaps[cap] = state
     if needs.min_context is not None:
         # Context is the one need that gaps ONLY on a confirmed shortfall, never
         # on an unknown, and the asymmetry with the capabilities above is
@@ -340,6 +348,10 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     *resident* is the models already loaded, preferred among equally qualified
     candidates so routing does not evict a perfectly good model to load an
     equivalent one.
+
+    For an unpinned request an unknown capability on *current* (other than
+    vision) is not a gap, so it never moves the request; only a confirmed
+    absence does. A pinned request still reports the unknown.
 
     *current_known* maps a capability to True when the live engine behind
     *current* is confirmed to have it (for example a loaded model accepting
@@ -374,7 +386,8 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         reg = {}
     dir_cache: dict = {}
 
-    gaps = _current_gaps(current, needs, reg, dir_cache, current_known)
+    gaps = _current_gaps(current, needs, reg, dir_cache, current_known,
+                         ignore_unknown=not pinned)
     if not gaps:
         return RoutingDecision(current=current, resolved=current, pinned=pinned,
                                needs=needs)
