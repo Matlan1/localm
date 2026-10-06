@@ -102,6 +102,19 @@ def mode_at_least_as_private(candidate: SessionMode, floor: SessionMode) -> bool
 
 _active_coder_privacy_lock = threading.Lock()
 _active_coder_privacy_count = 0
+_shared_coder_privacy = None
+_inherited_coder_privacy = None
+
+
+def _publish_shared_count_locked() -> None:
+    """Mirror the count into the cross-process value. Caller holds the lock."""
+    if _shared_coder_privacy is not None:
+        _shared_coder_privacy.value = _active_coder_privacy_count
+
+
+def _publish_shared_count() -> None:
+    with _active_coder_privacy_lock:
+        _publish_shared_count_locked()
 
 
 def register_coder_session_mode(mode: SessionMode) -> None:
@@ -110,6 +123,7 @@ def register_coder_session_mode(mode: SessionMode) -> None:
     if mode == SessionMode.PRIVACY:
         with _active_coder_privacy_lock:
             _active_coder_privacy_count += 1
+            _publish_shared_count_locked()
 
 
 def unregister_coder_session_mode(mode: SessionMode) -> None:
@@ -118,12 +132,47 @@ def unregister_coder_session_mode(mode: SessionMode) -> None:
     if mode == SessionMode.PRIVACY:
         with _active_coder_privacy_lock:
             _active_coder_privacy_count = max(0, _active_coder_privacy_count - 1)
+            _publish_shared_count_locked()
+
+
+def shared_coder_privacy_value():
+    """The cross-process mirror of the privacy count, created on first use, to be
+    passed as an argument when spawning a worker child (spawn-context shared
+    memory can only be handed over that way). The parent's count stays
+    authoritative; register/unregister keep this value current for the life of
+    the process. Lock-free on purpose: a child killed mid-read cannot leave it
+    held."""
+    global _shared_coder_privacy
+    with _active_coder_privacy_lock:
+        if _shared_coder_privacy is None:
+            from multiprocessing.context import SpawnContext
+            _shared_coder_privacy = SpawnContext().Value(
+                "i", _active_coder_privacy_count, lock=False)
+        return _shared_coder_privacy
+
+
+def adopt_shared_coder_privacy(value) -> None:
+    """Child side of :func:`shared_coder_privacy_value`: make
+    :func:`any_coder_session_is_privacy` follow the parent's count. *value* is
+    the object the parent passed at spawn."""
+    global _inherited_coder_privacy
+    _inherited_coder_privacy = value
 
 
 def any_coder_session_is_privacy() -> bool:
     """True while at least one coder session is running in PRIVACY mode,
-    including one pinned there only by its project's .localcoder/config.toml."""
-    return _active_coder_privacy_count > 0
+    including one pinned there only by its project's .localcoder/config.toml.
+    In a worker child this follows the parent's count; an unreadable shared
+    value counts as privacy."""
+    if _active_coder_privacy_count > 0:
+        return True
+    inherited = _inherited_coder_privacy
+    if inherited is None:
+        return False
+    try:
+        return inherited.value > 0
+    except Exception:   # noqa: BLE001 - an unreadable count must fail closed
+        return True
 
 
 def effective_mode(surface: str, cwd=None) -> SessionMode:

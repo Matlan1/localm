@@ -781,6 +781,7 @@ def _reset_coder_privacy_registry():
     before = audit._active_coder_privacy_count
     yield
     audit._active_coder_privacy_count = before
+    audit._publish_shared_count()
 
 
 @pytest.fixture(autouse=True)
