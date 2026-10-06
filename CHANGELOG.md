@@ -1023,6 +1023,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the debug log token by token through llama.cpp's grammar trace, even in privacy
   mode. The log now keeps only the token ids there unless the session mode allows
   chat content in the debug log.
+- **A coder session set to privacy by its project's `.localcoder/config.toml` no
+  longer leaves model output in the debug log.** With debug logging on, the model
+  worker process still wrote the model's raw output (and the grammar trace) to the
+  debug log for such a session, because it could not see that the session was
+  private. The worker now follows the coder sessions' privacy state.
 - **Windows network-share paths written with the `\??\` prefix are refused like
   any other network path.** A path such as `\??\UNC\host\share` got past the
   checks that stop localm from reaching network shares and device paths

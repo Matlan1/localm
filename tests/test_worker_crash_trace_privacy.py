@@ -92,21 +92,21 @@ class TestGgufRunnerCrashTracePrivacy:
         _set_mode(monkeypatch, "privacy")
         r, ctx = self._spawn(monkeypatch)
         assert r._crash_trace_path is None
-        assert ctx.processes[0].args[-1] is None
+        assert ctx.processes[0].args[3] is None
         assert _no_crash_trace_files_on_disk()
 
     def test_privacy_mode_with_keep_diagnostics_still_mints(self, monkeypatch):
         _set_mode(monkeypatch, "privacy", keep_diagnostics=True)
         r, ctx = self._spawn(monkeypatch)
         assert r._crash_trace_path is not None
-        assert ctx.processes[0].args[-1] == r._crash_trace_path
+        assert ctx.processes[0].args[3] == r._crash_trace_path
 
     def test_log_mode_mints_a_trace_path(self, monkeypatch):
         _set_mode(monkeypatch, "log")
         r, ctx = self._spawn(monkeypatch)
         assert r._crash_trace_path is not None
         assert r._crash_trace_path.name.startswith("crash_gguf-worker_")
-        assert ctx.processes[0].args[-1] == r._crash_trace_path
+        assert ctx.processes[0].args[3] == r._crash_trace_path
 
 
 # --------------------------------------------------------------------------- #
