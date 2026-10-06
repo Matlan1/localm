@@ -1156,6 +1156,20 @@ CRASH_BEFORE_RECORD = '''
         print("HELD", flush=True)
 '''
 
+CRASH_IN_RECORD_WRITE = '''
+    import os, sys
+    import localm.model_manager.pull as pull
+
+    def die_after_creating_the_record(staging, payload):
+        open(staging / "owner.json", "x", encoding="utf-8").close()
+        print("RECORD-CREATED", staging.name, flush=True)
+        os._exit(0)
+
+    pull._write_lock_record = die_after_creating_the_record
+    with pull._part_lock(sys.argv[1]):
+        print("HELD", flush=True)
+'''
+
 CRASH_IN_RELEASE = '''
     import os, shutil, sys
     from pathlib import Path
@@ -1232,9 +1246,9 @@ def _await_file(path, timeout=30.0):
 
 
 def test_a_holder_killed_before_writing_its_record_does_not_wedge_the_lock(home):
-    """A real process dies after it starts taking the lock and before its
-    owner record exists. The next pull takes the lock and nothing is left
-    behind."""
+    """A real process dies while taking the lock, when it reads its own start
+    identity for the owner record. The next pull takes the lock and nothing is
+    left behind."""
     p = spawn_on_this_tree(CRASH_BEFORE_RECORD, home, "m.gguf")
     out, err = p.communicate(timeout=60)
     # The injection took: the process exited inside the acquisition, at the
@@ -1247,6 +1261,28 @@ def test_a_holder_killed_before_writing_its_record_does_not_wedge_the_lock(home)
         rec = json.loads(_record(d))
     assert rec["pid"] == os.getpid(), "the lock was not taken by this process"
     assert _litter(d.parent) == [], _litter(d.parent)
+
+
+def test_a_holder_killed_while_writing_its_record_does_not_wedge_the_lock(home):
+    """A real process dies after creating its owner record file and before
+    writing it. The next pull takes the lock; the dead process's unfinished
+    acquisition stays behind outside the lock path."""
+    p = spawn_on_this_tree(CRASH_IN_RECORD_WRITE, home, "m.gguf")
+    out, err = p.communicate(timeout=60)
+    words = out.split()
+    # The injection took: the process created an empty record file in its
+    # staging directory and exited before taking the lock.
+    assert words[:1] == ["RECORD-CREATED"] and "HELD" not in words, (out, err)
+    assert p.returncode == 0, err
+    d = _part_lock_dir("m.gguf")
+    staging = d.parent / words[1]
+    assert (staging / "owner.json").stat().st_size == 0
+    assert not d.exists()
+
+    with _part_lock("m.gguf"):
+        rec = json.loads(_record(d))
+    assert rec["pid"] == os.getpid(), "the lock was not taken by this process"
+    assert _litter(d.parent) == [staging.name], _litter(d.parent)
 
 
 def test_a_holder_killed_while_releasing_does_not_wedge_the_lock(home):
