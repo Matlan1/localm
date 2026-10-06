@@ -182,6 +182,7 @@ def test_config_route_names_the_model_the_context_ceiling_belongs_to(tmp_path, m
         body = c.get("/v1/config", headers=auth).json()
         assert body["effective_ctx_max"] == 8192
         assert body["effective_ctx_model"] == "model-b"
+        assert c.patch("/v1/config", json=body, headers=auth).status_code == 200
         monkeypatch.setattr(hs, "_engine", None)
         body = c.get("/v1/config", headers=auth).json()
         assert body["effective_ctx_max"] is None
