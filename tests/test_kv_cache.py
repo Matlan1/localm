@@ -14,6 +14,7 @@ from localm.inference.backends.llamacpp.llama import (
     _build_sampler,
     _common_prefix_len,
 )
+from localm.inference.backends.llamacpp._structs import LLAMA_CONTEXT_TYPE_MTP
 from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init
 
@@ -511,6 +512,11 @@ class TestMtpDraftingRespectsGrammar:
         mock_api.llama_sampler_sample.return_value = 42
         mock_api.llama_decode.return_value = 0
         mock_api.llama_batch_init.side_effect = fake_batch_init
+        # The first prompt grows the context, which recreates the draft context.
+        mock_api.llama_model_mtp_support.return_value = (True, "ok:qwen35")
+        mock_api.llama_model_n_embd.return_value = 4
+        mock_api.llama_init_from_model.side_effect = lambda model, cp: (
+            self._MTP_CTX if cp.ctx_type == LLAMA_CONTEXT_TYPE_MTP else 333)
         return mock_api
 
     def _drive(self, grammar):

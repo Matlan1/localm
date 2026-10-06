@@ -174,6 +174,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A chat no longer switches models for an ordinary reply just because the model's tool
+  support has never been checked.** With web tools on, an unpinned chat could move
+  from the model you had loaded to a different one for a plain text turn, which
+  unloaded and reloaded large models. A model whose tool support is unknown now
+  keeps the turn; only a model known to lack a needed capability is swapped out.
+  Image and context-length routing are unchanged.
 - **Small talk no longer ends up in the remembered facts, and one common word no
   longer pulls old session summaries into every chat turn.** A session with
   nothing lasting in it (a greeting, a passing remark, a one-off request) now
@@ -196,6 +202,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Attaching an image in the Coder now says plainly that the Coder cannot take
   images.** It used to ask you to load a vision model, which could not help.
   Attach the image in Chat with a vision model, or paste the text instead.
+- **Multi-Token Prediction no longer switches itself off after one long prompt, and no longer stops silently partway through a reply.** The speculative-decoding helper used to be capped at 2048 tokens, so a single longer prompt turned it off for as long as the model stayed loaded, and a reply that crossed 2048 tokens stopped speculating while still being reported as active. It now grows with the conversation's context, keeps working on the next request, and a reply on which it has to stop reports that it did. A permanent stop that comes with a detail suffix, such as a failed helper prefill, is now recognised as a stop.
 - **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
   projector files record a width that is not the one the model uses, so localm
   decided the projector did not fit and left it off: the model was not shown as
