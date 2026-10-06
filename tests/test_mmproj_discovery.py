@@ -11,6 +11,7 @@ import pytest
 
 import localm.model_manager as mm
 from localm.model_manager import find_sibling_mmproj, get_model_mmproj
+from localm.model_manager.gguf import gguf_n_embd
 
 
 def _gguf(p):
@@ -27,15 +28,66 @@ def _s(text: str) -> bytes:
     return struct.pack("<Q", len(raw)) + raw
 
 
-def _write_gguf(path, kv):
-    """Write a GGUF v3 header carrying the metadata *kv* and no tensors."""
-    out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, len(kv))]
+_GGML_TYPE_F16 = 1
+
+
+def _write_gguf(path, kv, tensors=(), version=3):
+    """Write a GGUF header carrying the metadata *kv* and the tensor infos
+    *tensors* (``(name, dims)`` pairs, ``dims`` ne[0] first), with no tensor
+    data."""
+    out = [b"GGUF", struct.pack("<I", version),
+           struct.pack("<QQ", len(tensors), len(kv))]
     for key, vtype, val in kv:
         out.append(_s(key))
         out.append(struct.pack("<I", vtype))
         out.append(_s(val) if vtype == _T_STRING else struct.pack("<I", val))
+    data_offset = 0
+    for name, dims in tensors:
+        out.append(_s(name))
+        out.append(struct.pack("<I", len(dims)))
+        out.append(struct.pack(f"<{len(dims)}Q", *dims))
+        out.append(struct.pack("<I", _GGML_TYPE_F16))
+        out.append(struct.pack("<Q", data_offset))
+        n = 1
+        for d in dims:
+            n *= d
+        data_offset += 2 * n
     path.write_bytes(b"".join(out))
     return path
+
+
+# The llava projector tensors of cjpais/llava-1.6-mistral-7b-gguf
+# mmproj-model-f16.gguf, in file order.
+_LLAVA_MLP_TENSORS = [
+    ("mm.0.bias", (4096,)), ("mm.0.weight", (1024, 4096)),
+    ("mm.2.bias", (4096,)), ("mm.2.weight", (4096, 4096))]
+
+
+def _real_llava16_mmproj_gguf(path, tensors=_LLAVA_MLP_TENSORS, projector_type="mlp"):
+    """The header of cjpais/llava-1.6-mistral-7b-gguf mmproj-model-f16.gguf:
+    clip.projector_type='mlp' and clip.vision.projection_dim=768 (the CLIP
+    vision config's own value), with mm.2.weight (4096, 4096) as the
+    projector's output layer. Its text model reports
+    llama.embedding_length=4096."""
+    kv = [("general.architecture", _T_STRING, "clip")]
+    if projector_type is not None:
+        kv.append(("clip.projector_type", _T_STRING, projector_type))
+    kv += [("clip.vision.embedding_length", _T_UINT32, 1024),
+           ("clip.vision.projection_dim", _T_UINT32, 768)]
+    return _write_gguf(path, kv, tensors)
+
+
+def _real_llava15_mmproj_gguf(path):
+    """The header of mys/ggml_llava-v1.5-7b mmproj-model-f16.gguf: a GGUF v2
+    file with no projector-type key, clip.vision.projection_dim=768 and
+    mm.2.weight (4096, 4096). Its text model reports
+    llama.embedding_length=4096."""
+    return _write_gguf(path, [
+        ("general.architecture", _T_STRING, "clip"),
+        ("clip.vision.embedding_length", _T_UINT32, 1024),
+        ("clip.vision.projection_dim", _T_UINT32, 768)],
+        [("mm.0.weight", (1024, 4096)), ("mm.0.bias", (4096,)),
+         ("mm.2.weight", (4096, 4096)), ("mm.2.bias", (4096,))], version=2)
 
 
 def _real_text_model_gguf(path, architecture: str, embedding_length: int):
@@ -48,15 +100,17 @@ def _real_text_model_gguf(path, architecture: str, embedding_length: int):
         (f"{architecture}.embedding_length", _T_UINT32, embedding_length)])
 
 
-def _real_mmproj_gguf(path, projection_dim: int):
-    """A minimal but REAL GGUF header for a clip mmproj: general.architecture
-    plus clip.vision.projection_dim, the exact two keys gguf_n_embd reads for
-    a clip file. Ground-truthed against a real mmproj-*-F16.gguf, which
-    reports general.architecture='clip' and clip.vision.projection_dim=5120.
+def _real_mmproj_gguf(path, projection_dim: int, projector_type: str = "qwen25vl"):
+    """A minimal but REAL GGUF header for a clip mmproj written by the current
+    converter: general.architecture, clip.projector_type and
+    clip.vision.projection_dim, the keys gguf_n_embd reads for such a file.
+    Ground-truthed against a real mmproj-*-F16.gguf, which reports
+    general.architecture='clip' and clip.vision.projection_dim=5120.
     openbmb's MiniCPM-V-2_6 mmproj-model-f16.gguf reports projection_dim=0,
     which gguf_n_embd reads as unknown."""
     return _write_gguf(path, [
         ("general.architecture", _T_STRING, "clip"),
+        ("clip.projector_type", _T_STRING, projector_type),
         ("clip.vision.projection_dim", _T_UINT32, projection_dim)])
 
 
@@ -218,6 +272,80 @@ class TestFindSiblingMmproj:
         proj = _real_mmproj_gguf(tmp_path / "LLaMA3-8B_mmproj-Q4_1.gguf", 4096)
         assert find_sibling_mmproj(model) == proj
         assert find_sibling_mmproj(mistral) is None
+
+
+class TestLegacyLlavaProjectorWidth:
+    """A llava-1.5/1.6-era projector stores the CLIP vision model's own
+    projection_dim (768); its real output width is its output tensor's."""
+
+    def test_legacy_llava_projector_width_comes_from_its_output_tensor(self, tmp_path):
+        model = _real_text_model_gguf(
+            tmp_path / "llava-v1.6-mistral-7b.Q4_K_M.gguf", "llama", 4096)
+        proj = _real_llava16_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf")
+        assert gguf_n_embd(proj) == 4096
+        assert find_sibling_mmproj(model) == proj
+
+    def test_projector_without_a_projector_type_key_reads_as_mlp(self, tmp_path):
+        model = _real_text_model_gguf(tmp_path / "ggml-model-q4_k.gguf", "llama", 4096)
+        proj = _real_llava15_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf")
+        assert gguf_n_embd(proj) == 4096
+        assert find_sibling_mmproj(model) == proj
+
+    def test_legacy_llava_projector_for_another_width_is_not_attached(self, tmp_path):
+        model = _real_text_model_gguf(
+            tmp_path / "Mistral-Small-24B-Instruct-Q4_K_M.gguf", "llama", 5120)
+        _real_llava16_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf")
+        assert find_sibling_mmproj(model) is None
+
+    def test_yi_type_projector_reads_its_norm_layer_width(self, tmp_path):
+        proj = _real_llava16_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf", [
+            ("mm.0.weight", (1024, 7168)), ("mm.0.bias", (7168,)),
+            ("mm.1.weight", (7168,)), ("mm.1.bias", (7168,)),
+            ("mm.3.weight", (7168, 7168)), ("mm.3.bias", (7168,)),
+            ("mm.4.weight", (7168,)), ("mm.4.bias", (7168,))])
+        assert gguf_n_embd(proj) == 7168
+
+    @pytest.mark.parametrize("projector_type, tensor, width", [
+        ("ldp", ("mm.model.mb_block.1.block.2.1.bias", (2048,)), 2048),
+        ("ldpv2", ("mm.model.peg.0.bias", (2560,)), 2560)])
+    def test_mobilevlm_projector_reads_its_output_bias(
+            self, tmp_path, projector_type, tensor, width):
+        proj = _real_llava16_mmproj_gguf(
+            tmp_path / "mmproj-model-f16.gguf", [tensor], projector_type)
+        assert gguf_n_embd(proj) == width
+
+    def test_mlp_projector_without_its_output_tensor_is_unknown(self, tmp_path):
+        proj = _real_llava16_mmproj_gguf(
+            tmp_path / "mmproj-model-f16.gguf", [("mm.0.weight", (1024, 4096))])
+        assert gguf_n_embd(proj) is None
+
+    def test_truncated_tensor_list_is_unknown(self, tmp_path):
+        proj = _real_llava16_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf")
+        proj.write_bytes(proj.read_bytes()[:-30])
+        assert gguf_n_embd(proj) is None
+
+    def test_new_style_projector_keeps_reading_projection_dim(self, tmp_path):
+        """lmstudio-community gemma-3-4b-it mmproj-model-f16.gguf:
+        projector_type='gemma3', projection_dim=2560 and
+        mm.input_projection.weight (2560, 1152)."""
+        model = _real_text_model_gguf(tmp_path / "gemma-3-4b-it-Q4_K_M.gguf", "gemma3", 2560)
+        proj = _write_gguf(tmp_path / "mmproj-model-f16.gguf", [
+            ("general.architecture", _T_STRING, "clip"),
+            ("clip.projector_type", _T_STRING, "gemma3"),
+            ("clip.vision.projection_dim", _T_UINT32, 2560)],
+            [("mm.input_projection.weight", (2560, 1152)),
+             ("mm.2.weight", (1152, 1152))])
+        assert gguf_n_embd(proj) == 2560
+        assert find_sibling_mmproj(model) == proj
+
+    def test_vision_projector_type_key_is_read_when_the_default_key_is_absent(
+            self, tmp_path):
+        proj = _write_gguf(tmp_path / "mmproj-model-f16.gguf", [
+            ("general.architecture", _T_STRING, "clip"),
+            ("clip.vision.projector_type", _T_STRING, "qwen25vl"),
+            ("clip.vision.projection_dim", _T_UINT32, 3584)],
+            [("mm.2.weight", (5120, 5120))])
+        assert gguf_n_embd(proj) == 3584
 
 
 class TestGenericallyNamedProjector:

@@ -1565,29 +1565,97 @@ def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
 
 
+# Projector types whose output width llama.cpp's clip_n_mmproj_embd reads from
+# a tensor dimension rather than from clip.vision.projection_dim. These are the
+# types the legacy llava image-encoder converter writes, and that converter
+# stores the CLIP vision model's own projection_dim (e.g. 768) under that key,
+# not the text model's width. A missing projector-type key is read as "mlp".
+# See test_legacy_llava_projector_width_comes_from_its_output_tensor.
+_CLIP_TENSOR_WIDTH_PROJECTOR_TYPES = frozenset({"mlp", "ldp", "ldpv2"})
+_CLIP_MLP_OUT_WEIGHT = "mm.2.weight"
+_CLIP_MLP_NORM_WEIGHT = "mm.3.weight"
+_CLIP_MLP_NORM_BIAS = "mm.3.bias"
+_CLIP_LDP_OUT_BIAS = "mm.model.mb_block.1.block.2.1.bias"
+_CLIP_LDPV2_OUT_BIAS = "mm.model.peg.0.bias"
+_CLIP_WIDTH_TENSORS = frozenset({
+    _CLIP_MLP_OUT_WEIGHT, _CLIP_MLP_NORM_WEIGHT, _CLIP_MLP_NORM_BIAS,
+    _CLIP_LDP_OUT_BIAS, _CLIP_LDPV2_OUT_BIAS})
+
+
+def _gguf_tensor_dims(buf: bytes, off: int, tensor_count: int,
+                      names: frozenset) -> dict:
+    """Map each tensor in *names* to its dims tuple (``ne[0]`` first), parsing
+    every entry of the tensor-info section of *buf* that starts at *off*. A
+    tensor absent from the file is left out of the result. Raises
+    struct.error/UnicodeDecodeError/IndexError on malformed input or when the
+    section runs past the end of *buf*."""
+    found = {}
+    if tensor_count > _GGUF_MAX_TENSOR_COUNT:
+        raise struct.error(f"implausible tensor count {tensor_count}")
+    for _ in range(tensor_count):
+        name, off = _gguf_read_string(buf, off)
+        (n_dims,) = struct.unpack_from("<I", buf, off)
+        off += 4
+        if n_dims > _GGUF_MAX_TENSOR_DIMS:
+            raise struct.error(f"implausible tensor n_dims {n_dims}")
+        dims = struct.unpack_from(f"<{n_dims}Q", buf, off)
+        off += 8 * n_dims + 4          # dims, ggml_type
+        struct.unpack_from("<Q", buf, off)
+        off += 8                       # data offset
+        if name in names:
+            found[name] = dims
+    return found
+
+
+def _clip_tensor_output_width(projector_type: Optional[str], dims: dict) -> Optional[int]:
+    """The projector output width ``clip_n_mmproj_embd`` reports for a
+    projector type in ``_CLIP_TENSOR_WIDTH_PROJECTOR_TYPES`` (or a missing
+    type), from the tensor *dims* collected by ``_gguf_tensor_dims``. None
+    when the tensor that type reads is absent."""
+    def dim(name: str, index: int) -> Optional[int]:
+        d = dims.get(name)
+        return int(d[index]) if d and len(d) > index and d[index] > 0 else None
+
+    if projector_type == "ldp":
+        return dim(_CLIP_LDP_OUT_BIAS, 0)
+    if projector_type == "ldpv2":
+        return dim(_CLIP_LDPV2_OUT_BIAS, 0)
+    if _CLIP_MLP_NORM_WEIGHT in dims:
+        return dim(_CLIP_MLP_NORM_BIAS, 0)
+    return dim(_CLIP_MLP_OUT_WEIGHT, 1)
+
+
 def gguf_n_embd(path: Path) -> Optional[int]:
     """The embedding width a llama.cpp load would compare for compatibility:
     a text model's own ``"<architecture>.embedding_length"``, or - for a clip
-    mmproj (``general.architecture == "clip"``) - its
-    ``"clip.vision.projection_dim"``, the value the projector's OUTPUT must
-    match the paired text model's ``embedding_length`` for
-    ``mtmd_init_from_file`` to accept the pair (its own error names both
-    "n_embd"; confirmed against a real mismatching pair: a text model
-    reporting ``qwen2.embedding_length = 3584`` and a mmproj reporting
-    ``clip.vision.projection_dim = 5120`` is exactly the failure
-    ``mtmd_init_from_file: error: mismatch between text model (n_embd = 3584)
-    and mmproj (n_embd = 5120)`` reports).
+    mmproj (``general.architecture == "clip"``) - the projector's OUTPUT
+    width, which must equal the paired text model's ``embedding_length`` for
+    ``mtmd_init_from_file`` to accept the pair (its error reads
+    ``mismatch between text model (n_embd = 3584) and mmproj (n_embd =
+    5120)``).
 
-    Returns ``None`` on any parse failure, truncation, or missing key -
-    never a guessed number - so a caller comparing two of these must treat
-    ``None`` as "unknown" and never as a mismatch."""
+    The projector width follows llama.cpp's ``clip_n_mmproj_embd``:
+
+    - projector type ``mlp`` (or no ``clip.projector_type`` /
+      ``clip.vision.projector_type`` key at all): ``mm.2.weight``'s second
+      dimension, or ``mm.3.bias``'s length when an ``mm.3.weight`` tensor is
+      present;
+    - ``ldp``: ``mm.model.mb_block.1.block.2.1.bias``'s length;
+    - ``ldpv2``: ``mm.model.peg.0.bias``'s length;
+    - every other projector type: ``clip.vision.projection_dim``.
+
+    Returns ``None`` on any parse failure, truncation, missing key or missing
+    tensor - never a guessed number - so a caller comparing two of these must
+    treat ``None`` as "unknown" and never as a mismatch."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_META_PROBE_BYTES)
     except OSError:
         return None
     architecture = None
-    result = None
+    projection_dim = None
+    projector_type = None
+    vision_projector_type = None
     try:
         if buf[:4] != b"GGUF":
             return None
@@ -1603,20 +1671,37 @@ def gguf_n_embd(path: Path) -> Optional[int]:
             if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
                 architecture, off = _gguf_read_string(buf, off)
                 continue
-            wanted = (key == "clip.vision.projection_dim"
-                     if architecture == _GGUF_MMPROJ_ARCHITECTURE
-                     else architecture and key == f"{architecture}.embedding_length")
-            if wanted:
+            if architecture == _GGUF_MMPROJ_ARCHITECTURE:
+                if key in ("clip.projector_type", "clip.vision.projector_type")                         and vtype == _GGUF_TYPE_STRING:
+                    value, off = _gguf_read_string(buf, off)
+                    if key == "clip.projector_type":
+                        projector_type = value
+                    else:
+                        vision_projector_type = value
+                    continue
+                if key == "clip.vision.projection_dim":
+                    try:
+                        v, off = _gguf_read_scalar(buf, off, vtype)
+                        projection_dim = int(v) if v and v > 0 else None
+                        continue
+                    except struct.error:
+                        pass
+            elif architecture and key == f"{architecture}.embedding_length":
                 try:
-                    v, off = _gguf_read_scalar(buf, off, vtype)
-                    result = int(v) if v and v > 0 else None
-                    break
+                    v, _ = _gguf_read_scalar(buf, off, vtype)
+                    return int(v) if v and v > 0 else None
                 except struct.error:
                     pass
             off = _gguf_skip_value(buf, off, vtype)
+        if architecture != _GGUF_MMPROJ_ARCHITECTURE:
+            return None
+        ptype = projector_type or vision_projector_type
+        if ptype is not None and ptype not in _CLIP_TENSOR_WIDTH_PROJECTOR_TYPES:
+            return projection_dim
+        dims = _gguf_tensor_dims(buf, off, tensor_count, _CLIP_WIDTH_TENSORS)
+        return _clip_tensor_output_width(ptype, dims)
     except (struct.error, IndexError, UnicodeDecodeError):
-        pass
-    return result
+        return None
 
 
 def gguf_registry_metadata(path: Path, meta: Optional[dict] = None) -> dict:

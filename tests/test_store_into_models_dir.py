@@ -251,6 +251,7 @@ def _projector(path: Path, width: int, tag: str = "") -> Path:
     """A clip mmproj whose ``clip.vision.projection_dim`` is *width*. *tag*
     (default: the filename) goes into the metadata and decides the bytes."""
     return _real_gguf(path, [("general.architecture", _T_STRING, "clip"),
+                             ("clip.projector_type", _T_STRING, "qwen25vl"),
                              ("clip.vision.projection_dim", _T_UINT32, width),
                              ("general.name", _T_STRING, tag or path.name)])
 
