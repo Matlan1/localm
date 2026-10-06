@@ -174,6 +174,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **The microphone button works on a fresh install again.** A new install could
+  pull in a PyAV release that faster-whisper cannot use, so every recording
+  failed. The voice extra now keeps PyAV below version 19. A failure inside the
+  audio decoder itself is now reported as a server error naming the library
+  problem instead of "corrupt or unsupported audio".
 - **Attaching an image in the Coder now says plainly that the Coder cannot take
   images.** It used to ask you to load a vision model, which could not help.
   Attach the image in Chat with a vision model, or paste the text instead.
