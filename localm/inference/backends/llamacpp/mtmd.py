@@ -88,6 +88,112 @@ _lib: Optional[ctypes.CDLL] = None
 # by _detect_input_text_class (a property of the library, not of the model).
 _input_text_class: Optional[type] = None
 
+_COMPAT_DIR_NAME = "mmproj-compat"
+# Room left on the cache drive after writing a compatible copy.
+_COMPAT_FREE_MARGIN_BYTES = 1024 * 1024 * 1024
+
+
+def _prune_orphaned_compat_copies(out_dir) -> None:
+    """Delete each compatible copy in *out_dir* whose recorded source file no
+    longer exists, with its record. A failure is logged and the entry kept."""
+    import json
+
+    from localm.debuglog import logger
+
+    for meta_path in out_dir.glob("*.json"):
+        try:
+            source = json.loads(meta_path.read_text(encoding="utf-8")).get("source")
+            if not isinstance(source, str) or os.path.exists(source):
+                continue
+            meta_path.with_suffix(".gguf").unlink(missing_ok=True)
+            meta_path.unlink()
+            logger.info("mmproj compat: removed the copy of %s, which no longer "
+                        "exists", source)
+        except (OSError, ValueError, AttributeError) as exc:
+            logger.warning("mmproj compat: could not check or remove %s (%s)",
+                           meta_path, exc)
+
+
+def compatible_mmproj_path(mmproj_path: str) -> str:
+    """The path to hand ``mtmd_init_from_file`` for the projector *mmproj_path*.
+
+    A clip projector that records no projector type is refused by the bundled
+    runtime ("unknown projector type"). When its tensors show which type it is
+    (``gguf_mmproj_inferred_projector_type``), this returns a copy under
+    ``<data dir>/cache/mmproj-compat/`` that records that type, writing it on
+    first use and rewriting it when the source file's size or modification time
+    changes. The source file is never modified. Each time a copy is written,
+    copies whose source file no longer exists are deleted. Every other
+    projector is returned unchanged.
+
+    Never raises: when the copy cannot be written (no space, an I/O error) it
+    logs a warning and returns *mmproj_path*."""
+    from pathlib import Path
+
+    from localm.model_manager.gguf import gguf_mmproj_inferred_projector_type
+
+    src = Path(mmproj_path)
+    projector_type = gguf_mmproj_inferred_projector_type(src)
+    if projector_type is None:
+        return mmproj_path
+
+    import hashlib
+    import json
+    import shutil
+
+    from localm.config import cache_dir
+    from localm.debuglog import logger
+    from localm.model_manager.gguf import write_gguf_with_string_kv
+
+    tmp = None
+    try:
+        st = src.stat()
+        resolved = os.path.normcase(str(src.resolve()))
+        name = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+        out_dir = cache_dir() / _COMPAT_DIR_NAME
+        dst = out_dir / f"{name}.gguf"
+        meta_path = out_dir / f"{name}.json"
+        meta = {"source": resolved, "size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                "projector_type": projector_type}
+        try:
+            if dst.is_file() and json.loads(meta_path.read_text(encoding="utf-8")) == meta:
+                return str(dst)
+        except (OSError, ValueError):
+            pass
+        out_dir.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(out_dir).free
+        if free < st.st_size + _COMPAT_FREE_MARGIN_BYTES:
+            logger.warning(
+                "mmproj %s records no projector type and the runtime refuses it; "
+                "a compatible copy needs %d MiB in %s but only %d MiB is free, so "
+                "it is loaded as-is", src.name, st.st_size >> 20, out_dir, free >> 20)
+            return mmproj_path
+        tmp = out_dir / f"{name}.{os.getpid()}.tmp"
+        write_gguf_with_string_kv(src, tmp, "clip.projector_type", projector_type)
+        os.replace(tmp, dst)
+        tmp = None
+        meta_tmp = out_dir / f"{name}.{os.getpid()}.json.tmp"
+        meta_tmp.write_text(json.dumps(meta), encoding="utf-8")
+        os.replace(meta_tmp, meta_path)
+        logger.info(
+            "mmproj %s records no projector type; its tensors are a %r projector, "
+            "so it is loaded from a copy that records that type: %s",
+            src.name, projector_type, dst)
+        _prune_orphaned_compat_copies(out_dir)
+        return str(dst)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "mmproj %s records no projector type and the runtime refuses it; "
+            "writing a compatible copy failed (%s), so it is loaded as-is",
+            src.name, exc)
+        return mmproj_path
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.debug("mmproj compat: could not remove %s (%s)", tmp, exc)
+
 
 class MtmdUnavailable(RuntimeError):
     """Raised when mtmd.dll or the mmproj cannot be loaded - the GGUF backend then
