@@ -303,7 +303,8 @@ class EngineCache:
                     if n not in peers}
 
         return cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                             current_known=known, skip=skip_set)
+                             current_known=known, skip=skip_set,
+                             mode=cr.configured_mode())
 
     def get_chat(self, name: str):
         """The engine to answer a chat with model *name*: this server's own

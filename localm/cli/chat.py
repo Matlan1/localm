@@ -95,7 +95,7 @@ class _TurnRouter:
             known[caps.VISION] = True
         decision = cr.plan_route(self.model_name, needs, pinned=self.pinned,
                                  resident=[self.current], reg=reg,
-                                 current_known=known)
+                                 current_known=known, mode=cr.configured_mode())
         self.last_decision = decision
         self.min_context = (comp if decision.routed
                             and caps.CONTEXT_LENGTH in decision.gaps else None)

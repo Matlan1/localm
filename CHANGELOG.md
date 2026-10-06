@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A "Model autoswitch" setting controls when a chat may be answered by a different
+  model.** `off` never switches; `ask` keeps your model and offers the better one on
+  the reply, where one click selects it; `loaded` switches only to a model that is
+  already loaded, so nothing is loaded or unloaded; `auto` (the default) switches to
+  an installed model when yours is known to lack what the chat needs; `eager` also
+  switches when your model has never been checked. A chat pinned to a model is never
+  switched.
 - **Older vision models whose projector file does not say what kind of projector
   it is now read images.** LLaVA 1.5 projectors (`mmproj-model-f16.gguf` from
   the original LLaVA 1.5 GGUF releases) predate that field, and the bundled

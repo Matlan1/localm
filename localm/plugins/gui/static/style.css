@@ -2241,6 +2241,13 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
 
+/* model-autoswitch "ask": offers the better model (chat.js buildRoutedChip). */
+.msg-meta button.routed-suggest {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+.msg-meta button.routed-suggest:hover { color: var(--accent); border-color: var(--accent); }
+
 /* file/folder picker modal (app/picker.js) - replaces the old .dir-picker-*
    modal list. The .dir-picker-row/-btn rules below are a separate thing (the
    settings FOLDER/PATH field row) and stay. */

@@ -122,6 +122,38 @@ test("a reply that was not routed records the selected model and no chip", async
   assert.equal(doc.querySelector(".routed-chip"), null);
 });
 
+test("an ask-mode reply records the suggested model, shows a chip, and the chip selects it", async () => {
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "plain", requested: "plain", routed: false, pinned: false,
+    gaps: { tool_use: "absent" }, unmet: [], suggested: "seer" } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const reply = conv.messages[conv.messages.length - 1];
+  assert.equal(reply.model, "plain", "the selected model answered");
+  assert.deepEqual(JSON.parse(JSON.stringify(reply.routed)),
+                   { from: "plain", suggest: "seer", gaps: ["tool_use"] });
+  const chip = doc.querySelector(".routed-suggest");
+  assert.ok(chip, "the reply offers the better model");
+  assert.equal(chip.tagName, "BUTTON");
+  assert.match(chip.textContent, /seer/);
+  assert.match(chip.title, /tool calls/);
+  const select = doc.getElementById("model-select");
+  assert.equal(select.value, "plain");
+  chip.click();
+  assert.equal(select.value, "seer", "clicking the chip selects the suggested model");
+});
+
+test("a pinned chat never shows a suggestion chip", async () => {
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "plain", requested: "plain", routed: false, pinned: true,
+    gaps: { tool_use: "absent" }, unmet: [], suggested: "seer" } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(doc.querySelector(".routed-suggest"), null);
+});
+
 test("a reply answered by the selected model because a capable model was skipped says why", async () => {
   const note = "kept plain (tool_use=absent); big was skipped because its last load "
     + "failed at 14:08 (the native model-loading process crashed); it is tried "
@@ -169,6 +201,12 @@ test("parseRoutingHeader reads the header and survives junk", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(partial.gaps)), ["vision"],
                    "the chip names only what the answering model provides");
   assert.deepEqual(JSON.parse(JSON.stringify(partial.unmet)), ["tool_use"]);
+  const asked = window.parseRoutingHeader(resp(JSON.stringify({
+    resolved: "a", requested: "a", routed: false, pinned: false,
+    gaps: { tool_use: "absent" }, suggested: "b" })));
+  assert.equal(asked.suggested, "b");
+  assert.equal(window.parseRoutingHeader(resp(JSON.stringify({
+    resolved: "a", requested: "a", gaps: {}, suggested: 5 }))).suggested, undefined);
   assert.equal(window.parseRoutingHeader(resp(null)), null);
   assert.equal(window.parseRoutingHeader(resp("not json")), null);
   assert.equal(window.parseRoutingHeader(null), null);

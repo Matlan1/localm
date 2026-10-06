@@ -54,6 +54,47 @@ _CONTEXT_ROUTING_FLOOR_TOKENS = 2048
 # Every other capability only changes how the request is answered.
 _REQUIRED_TO_ANSWER = (caps.VISION,)
 
+# The ``model_autoswitch`` setting: when an unpinned request may be answered by
+# a model other than the one it names.
+#   off    never; the named or loaded model always answers
+#   ask    never on its own; the decision carries the model it would switch to
+#   loaded only to a model that is already loaded, so nothing is loaded or evicted
+#   auto   to an installed model when the current one is confirmed to lack a need
+#   eager  as auto, and also when the current model's capability is unknown
+AUTOSWITCH_OFF = "off"
+AUTOSWITCH_ASK = "ask"
+AUTOSWITCH_LOADED = "loaded"
+AUTOSWITCH_AUTO = "auto"
+AUTOSWITCH_EAGER = "eager"
+AUTOSWITCH_MODES = (AUTOSWITCH_OFF, AUTOSWITCH_ASK, AUTOSWITCH_LOADED,
+                    AUTOSWITCH_AUTO, AUTOSWITCH_EAGER)
+AUTOSWITCH_KEY = "model_autoswitch"
+
+_warned_bad_mode: set = set()
+
+
+def coerce_autoswitch_mode(val) -> Optional[str]:
+    """*val* as one of ``AUTOSWITCH_MODES``, or None when it is not one."""
+    if isinstance(val, str) and val.strip().lower() in AUTOSWITCH_MODES:
+        return val.strip().lower()
+    return None
+
+
+def configured_mode() -> str:
+    """The ``model_autoswitch`` setting, always one of ``AUTOSWITCH_MODES``.
+    An unreadable value reads as ``auto`` and is reported once per value."""
+    from localm import config
+    raw = config.load_config().get(AUTOSWITCH_KEY)
+    mode = coerce_autoswitch_mode(raw)
+    if mode is not None:
+        return mode
+    if repr(raw) not in _warned_bad_mode:
+        _warned_bad_mode.add(repr(raw))
+        from localm.debuglog import logger
+        logger.warning("config %s=%r is not one of %s; using %r",
+                       AUTOSWITCH_KEY, raw, list(AUTOSWITCH_MODES), AUTOSWITCH_AUTO)
+    return AUTOSWITCH_AUTO
+
 
 @dataclass(frozen=True)
 class CapabilityNeeds:
@@ -121,7 +162,11 @@ class RoutingDecision:
     window), the other needs it lacks because no installed model has them all.
 
     ``skipped`` lists the models that meet the request's needs but were left
-    out of ``candidates`` because their last load failed."""
+    out of ``candidates`` because their last load failed.
+
+    ``policy`` is the autoswitch mode the decision was made under. Under
+    ``ask``, ``suggested`` names the model that would have answered; ``resolved``
+    stays ``current``."""
 
     current: Optional[str]
     resolved: Optional[str]
@@ -133,6 +178,8 @@ class RoutingDecision:
     load_errors: Tuple[str, ...] = ()
     candidate_unmet: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     skipped: Tuple[SkippedCandidate, ...] = ()
+    policy: str = AUTOSWITCH_AUTO
+    suggested: Optional[str] = None
 
     def answered_by(self, name: str) -> "RoutingDecision":
         """This decision with candidate *name* answering: ``resolved`` names it and
@@ -188,14 +235,20 @@ class RoutingDecision:
             return f"routed {self.current} -> {self.resolved} ({gap_text}){skipped}"
         if self.pinned:
             return f"kept pinned {self.current} ({gap_text})"
+        if self.suggested:
+            return (f"kept {self.current} ({gap_text}); {self.suggested} would "
+                    f"answer if you switch")
+        if self.policy == AUTOSWITCH_OFF:
+            return f"kept {self.current} ({gap_text}); model autoswitch is off"
         if self.load_errors:
             return (f"kept {self.current} ({gap_text}); no capable model could "
                     f"answer: {'; '.join(self.load_errors)}{skipped}")
         if self.skipped:
             return f"kept {self.current} ({gap_text}){skipped}"
         if self.unmet:
+            scope = "loaded" if self.policy == AUTOSWITCH_LOADED else "installed"
             return (f"kept {self.current} ({gap_text}); "
-                    f"no installed model provides {', '.join(self.unmet)}")
+                    f"no {scope} model provides {', '.join(self.unmet)}")
         return f"kept {self.current} ({gap_text})"
 
 
@@ -337,8 +390,8 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
                reg: Optional[dict] = None,
                current_known: Optional[Dict[str, bool]] = None,
                skip: Union[Mapping[str, SkippedCandidate],
-                           Callable[[], Mapping[str, SkippedCandidate]], None] = None
-               ) -> RoutingDecision:
+                           Callable[[], Mapping[str, SkippedCandidate]], None] = None,
+               mode: str = AUTOSWITCH_AUTO) -> RoutingDecision:
     """Decide which model should answer a request needing *needs*.
 
     *current* is the model that would answer if nothing changed. *pinned* says
@@ -349,9 +402,14 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     candidates so routing does not evict a perfectly good model to load an
     equivalent one.
 
-    For an unpinned request an unknown capability on *current* (other than
-    vision) is not a gap, so it never moves the request; only a confirmed
-    absence does. A pinned request still reports the unknown.
+    *mode* is the autoswitch mode (``AUTOSWITCH_MODES``; an unrecognised value
+    reads as ``auto``) and applies to an unpinned request only. For ``off``,
+    ``ask``, ``loaded`` and ``auto`` an unknown capability on *current* (other
+    than vision) is not a gap, so only a confirmed absence moves the request;
+    ``eager`` also moves it on an unknown. ``off`` never moves it. ``ask``
+    plans as ``auto`` but leaves ``resolved`` as *current* and names the model
+    it would have used in ``suggested``. ``loaded`` considers only *resident*
+    models. A pinned request still reports the unknown.
 
     *current_known* maps a capability to True when the live engine behind
     *current* is confirmed to have it (for example a loaded model accepting
@@ -386,18 +444,37 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         reg = {}
     dir_cache: dict = {}
 
+    mode = coerce_autoswitch_mode(mode) or AUTOSWITCH_AUTO
     gaps = _current_gaps(current, needs, reg, dir_cache, current_known,
-                         ignore_unknown=not pinned)
+                         ignore_unknown=not pinned and mode != AUTOSWITCH_EAGER)
     if not gaps:
         return RoutingDecision(current=current, resolved=current, pinned=pinned,
-                               needs=needs)
+                               needs=needs, policy=mode)
 
     if pinned:
         # The gap is reported so the caller can surface it. Nothing here may act
         # on it: resolved stays the model the user asked for.
         return RoutingDecision(current=current, resolved=current, pinned=True,
-                               needs=needs, gaps=gaps)
+                               needs=needs, gaps=gaps, policy=mode)
 
+    if mode == AUTOSWITCH_OFF:
+        return RoutingDecision(current=current, resolved=current, pinned=False,
+                               needs=needs, gaps=gaps, policy=mode)
+
+    decision = _plan_unpinned(current, needs, gaps, reg, dir_cache, resident,
+                              skip, only_resident=mode == AUTOSWITCH_LOADED)
+    decision = replace(decision, policy=mode)
+    if mode == AUTOSWITCH_ASK and decision.routed:
+        return replace(decision, resolved=current, suggested=decision.resolved,
+                       candidates=(), candidate_unmet={})
+    return decision
+
+
+def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip,
+                   only_resident: bool) -> RoutingDecision:
+    """The decision for an unpinned request whose current model has *gaps*:
+    the best other model, or *current* kept with every gap unmet. With
+    *only_resident*, only a model in *resident* is a candidate."""
     resident_set = set(resident)
 
     def rank(n: str):
@@ -410,9 +487,12 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
         usable = [n for n in names if n not in skip]
         return usable, tuple(skip[n] for n in sorted(names) if n in skip)
 
+    def eligible(n: str) -> bool:
+        return n != current and (not only_resident or n in resident_set)
+
     qualified, skipped = split_skipped(
         [n for n in reg
-         if n != current and _model_satisfies(n, needs, reg, dir_cache)])
+         if eligible(n) and _model_satisfies(n, needs, reg, dir_cache)])
     if qualified:
         qualified.sort(key=rank)
         return RoutingDecision(current=current, resolved=qualified[0], pinned=False,
@@ -431,7 +511,7 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
 
         partial, partial_skipped = split_skipped(
             [n for n in reg
-             if n != current and _model_satisfies(n, required, reg, dir_cache)])
+             if eligible(n) and _model_satisfies(n, required, reg, dir_cache)])
         skipped = partial_skipped
         if partial:
             partial.sort(key=lambda n: (-sum(has(n, c) for c in optional), *rank(n)))
