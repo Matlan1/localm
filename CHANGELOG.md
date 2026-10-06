@@ -196,6 +196,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   size CivitAI lists, when it lists one; otherwise the pull stops, leaves the
   file as it is and says how to replace it. A SHA256 mismatch says which registered model owns the file, and `--redownload` no
   longer overwrites a file that a model registered from another source points at.
+- **A download interrupted at the wrong moment no longer blocks every later pull
+  of that file.** A crash or power loss while a pull was taking or giving up its
+  download lock could leave the lock behind without saying which process held it,
+  and every later pull of that file then refused with "already being downloaded
+  by process unknown" until the lock folder was deleted by hand. Such a lock is
+  now taken over by the next pull, including one left by an earlier version, and
+  a pull that starts while another is finishing no longer refuses.
 - **Two browser calls in one coder turn no longer open two browsers.** With no
   browser open yet, a turn that called `browser_navigate` twice at once started
   a browser for each call. The second replaced the first in the session's
