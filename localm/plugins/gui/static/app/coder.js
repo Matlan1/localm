@@ -869,6 +869,7 @@ export function handleCoderEvent(s, ev) {
     case "final": {
       flushAssistantBlock(s);
       s.busy = false;
+      _applyPendingModel(s);
       s.info.turns = ev.turns;
       s.info.total_tokens = ev.total_tokens;
       if (s.info.id === coder.activeId) setCoderState("idle");
@@ -889,6 +890,7 @@ export function handleCoderEvent(s, ev) {
     case "error": {
       flushAssistantBlock(s);
       s.busy = false;
+      _applyPendingModel(s);
       if (s.info.id === coder.activeId) setCoderState("error");
       toast(t("coder.event.agentError") + ev.text, true);
       break;
@@ -1027,9 +1029,8 @@ export async function startCoderSession(opts = {}) {
       if (_sameCheckpoint(already, opts.checkpointId)) {
         const wantedModel = opts.model || $("setup-model").value.trim() || null;
         if (wantedModel && already.info.model && already.info.model !== wantedModel) {
-          postSessionModel(already.info.id, wantedModel).then((updated) => {
+          _applySessionModel(already, wantedModel, true).then((updated) => {
             if (!updated) return;
-            already.info = updated;
             const mb = $("coder-model");
             if (mb) { mb.textContent = updated.model || wantedModel; mb.style.display = ""; }
           }).catch((e) => {
@@ -2011,6 +2012,44 @@ export async function postSessionModel(sessionId, model, pin = true) {
   return data;
 }
 
+/** True when the session runs on the shared localm engine (no backend_info, or
+ *  backend "local"); any other backend keeps its own model namespace. */
+export function isLocalEngineSession(info) {
+  return !info || !info.backend_info || info.backend_info.backend === "local";
+}
+
+/** POST a model switch for *s* and store the effective info. Refreshes the
+ *  model sidebar when the session is on the shared engine. Returns the updated
+ *  info, or null when the user declined a load confirmation. */
+async function _applySessionModel(s, model, pin) {
+  const updated = await postSessionModel(s.info.id, model, pin);
+  if (!updated) return null;
+  s.info = updated;
+  if (isLocalEngineSession(updated)) refreshModels();
+  return updated;
+}
+
+function _renderModelBar(updated, model) {
+  const modelBtn = $("coder-model");
+  if (modelBtn) {
+    modelBtn.textContent = updated.model || model;
+    modelBtn.style.display = updated.model ? "" : "none";
+  }
+  const bi = updated.backend_info;
+  const remote = $("coder-remote");
+  if (remote) {
+    if (bi && bi.leaves_machine) {
+      let where = bi.target;
+      try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
+      remote.textContent = t("coder.remote.badge", { host: where });
+      remote.title = t("coder.remote.tooltip", { target: bi.target });
+      remote.style.display = "";
+    } else {
+      remote.style.display = "none";
+    }
+  }
+}
+
 /** Switch the active session's model, updating bar and indicators. *pin*
  *  false makes it the session's preferred model rather than its pin. */
 export async function switchActiveSessionModel(model, pin = true) {
@@ -2021,31 +2060,48 @@ export async function switchActiveSessionModel(model, pin = true) {
     return;
   }
   try {
-    const updated = await postSessionModel(s.info.id, model, pin);
+    const updated = await _applySessionModel(s, model, pin);
     if (!updated) return;
-    s.info = updated;
-    const modelBtn = $("coder-model");
-    if (modelBtn) {
-      modelBtn.textContent = updated.model || model;
-      modelBtn.style.display = updated.model ? "" : "none";
-    }
-    const bi = updated.backend_info;
-    const remote = $("coder-remote");
-    if (remote) {
-      if (bi && bi.leaves_machine) {
-        let where = bi.target;
-        try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
-        remote.textContent = t("coder.remote.badge", { host: where });
-        remote.title = t("coder.remote.tooltip", { target: bi.target });
-        remote.style.display = "";
-      } else {
-        remote.style.display = "none";
-      }
-    }
+    if (pin) s.pendingModel = null;
+    _renderModelBar(updated, model);
     toast(t("coder.controls.modelSwitched", { model: updated.model || model }));
   } catch (e) {
     toast(t("coder.controls.modelSwitchFailed") + e.message, true);
   }
+}
+
+const _PENDING_MODEL_RETRIES = 5;
+const _PENDING_MODEL_RETRY_MS = 300;
+
+/** Follow the sidebar model on a local, unpinned session: now when idle, or
+ *  once its running task ends. */
+function _followSidebarModel(s, model, attempt = 0) {
+  if (s.closed || !isLocalEngineSession(s.info) || s.info.model_pinned) {
+    s.pendingModel = null;
+    return Promise.resolve();
+  }
+  if (s.info.model === model) {
+    s.pendingModel = null;
+    return Promise.resolve();
+  }
+  if (s.busy) {
+    s.pendingModel = model;
+    return Promise.resolve();
+  }
+  s.pendingModel = null;
+  return _applySessionModel(s, model, false).then((updated) => {
+    if (updated && s.info.id === coder.activeId) _renderModelBar(updated, model);
+  }).catch((e) => {
+    if (/busy/i.test(e.message) && attempt < _PENDING_MODEL_RETRIES) {
+      return new Promise((r) => setTimeout(r, _PENDING_MODEL_RETRY_MS))
+        .then(() => _followSidebarModel(s, model, attempt + 1));
+    }
+    toast(t("coder.controls.modelSwitchFailed") + e.message, true);
+  });
+}
+
+function _applyPendingModel(s) {
+  if (s.pendingModel) _followSidebarModel(s, s.pendingModel);
 }
 
 /** The running session's behaviour knobs. Reads back what the server actually
@@ -2063,7 +2119,7 @@ export function openSessionControls() {
     const modelCard = el("div", "card");
     modelCard.appendChild(el("label", "", t("coder.controls.modelLabel")));
     const modelRow = el("div", "row");
-    const isRemote = info.backend_info && info.backend_info.leaves_machine;
+    const isRemote = !isLocalEngineSession(info);
     let modelInput;
     if (isRemote) {
       modelInput = document.createElement("input");
@@ -2432,13 +2488,12 @@ if (coderModelBtn) coderModelBtn.onclick = openSessionControls;
 window.addEventListener("localm:model-switched", (e) => {
   const model = e.detail && e.detail.model;
   if (!model) return;
-  const s = activeSession();
-  if (s && !s.info.model_pinned &&
-      (!s.info.backend_info || !s.info.backend_info.leaves_machine)) {
-    if (s.info.model !== model) {
-      switchActiveSessionModel(model, false);
-    }
-  }
+  const active = activeSession();
+  const sessions = [...coder.sessions.values()].sort(
+    (a, b) => (b === active) - (a === active));
+  (async () => {
+    for (const s of sessions) await _followSidebarModel(s, model);
+  })();
 });
 
 
