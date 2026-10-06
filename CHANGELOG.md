@@ -990,6 +990,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
+- **Privacy mode no longer leaves the start of tool-enabled replies in the debug
+  log.** With `--debug`, `LOCALM_DEBUG` or `keep_diagnostics` on, the text a model
+  wrote before a tool call (coder turns, web-enabled chat, jobs) was copied into
+  the debug log token by token through llama.cpp's grammar trace, even in privacy
+  mode. The log now keeps only the token ids there unless the session mode allows
+  chat content in the debug log.
 - **Windows network-share paths written with the `\??\` prefix are refused like
   any other network path.** A path such as `\??\UNC\host\share` got past the
   checks that stop localm from reaching network shares and device paths
