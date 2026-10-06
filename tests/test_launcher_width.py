@@ -6,7 +6,7 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 
-import pytest
+from tests._tk_root import build_tk_root
 
 _LAUNCHER = Path(__file__).resolve().parents[1] / "launcher.pyw"
 
@@ -43,11 +43,7 @@ def test_window_width_is_fixed_against_long_content():
     """Build the real launcher and confirm a huge status message + a huge model
     name leave the window width unchanged. Skips when no display is available."""
     mod = _load_launcher()
-    tk = mod.tk
-    try:
-        app = mod.Launcher()
-    except tk.TclError as e:
-        pytest.skip(f"no display for tkinter: {e}")
+    app = build_tk_root(mod.Launcher)
     try:
         app.withdraw()
         app.update_idletasks()
