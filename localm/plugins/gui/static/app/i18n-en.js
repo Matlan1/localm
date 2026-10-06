@@ -262,6 +262,7 @@ export const I18N_EN = {
     "Lets the model search the web and read pages mid-conversation (uses the server's network policy; under net_mode=ask every request the model makes must be approved first). Off = fully offline chat.",
 
   // ---- Coder panel ----
+  "coder.attach.noImages": "the coder cannot take images. Paste the text instead, or attach the image in Chat with a vision model",
   "coder.attach.readError": "could not read file",
   "coder.attach.sizeSuffix": " ({kb}k chars{trimmed})",
   "coder.attach.trimmedSuffix": ", trimmed",
