@@ -168,6 +168,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Image, music and video requests with a NaN or infinite number in a
+  tuning field are now refused.** Guidance, cfg, denoise, the LoRA strengths,
+  lyrics strength and shift each return a 422 instead of starting a
+  generation job with garbage sampler values.
 - **Two browser calls in one coder turn no longer open two browsers.** With no
   browser open yet, a turn that called `browser_navigate` twice at once started
   a browser for each call. The second replaced the first in the session's
