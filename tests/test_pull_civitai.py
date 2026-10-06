@@ -1038,3 +1038,107 @@ class TestPullModelCivitaiDispatch:
         monkeypatch.setenv("LOCALM_NET_MODE", "ask")
         monkeypatch.setattr(mm, "_pull_civitai_file", lambda *a, **kw: True)
         assert mm.pull_model("civitai:135867", mmproj_spec="org/repo:mmproj.gguf") is True
+
+
+class TestPullRefreshesTheEntryItRecreates:
+    """A pull that has just written verified bytes to a path an entry of the
+    same name already holds records that download's source and digest on the
+    entry, so neither describes the bytes the file held before."""
+
+    def _registered(self, tmp_path, store, on_disk, source):
+        dest_dir = tmp_path / "comfy" / "loras"
+        dest_dir.mkdir(parents=True)
+        dest = dest_dir / "char.safetensors"
+        if on_disk is not None:
+            dest.write_bytes(on_disk)
+        store["char"] = {"path": str(dest.resolve()), "source": source,
+                         "model_type": "lora", "sha256": _digest(_V1)}
+        return dest_dir, dest
+
+    def _v222(self):
+        return _resolved(filename="char.safetensors", source_tag="civitai:222",
+                         sha256=_digest(_V2), size_bytes=len(_V2), file_id="2")
+
+    def test_same_version_redownload_of_changed_bytes_updates_the_digest(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir, dest = self._registered(tmp_path, store, _V1, "civitai:222")
+        ok = _civitai_pull(monkeypatch, self._v222(), dest_dir, _RangeServer(_V2),
+                           version_id="222", redownload=True)
+        assert ok is True and dest.read_bytes() == _V2
+        assert store["char"]["sha256"] == _digest(_V2), store["char"]
+
+    def test_a_dangling_entry_of_another_version_is_refreshed_by_a_new_pull(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir, dest = self._registered(tmp_path, store, None, "civitai:111")
+        ok = _civitai_pull(monkeypatch, self._v222(), dest_dir, _RangeServer(_V2),
+                           version_id="222")
+        assert ok is True and dest.read_bytes() == _V2
+        assert store["char"]["source"] == "civitai:222", store["char"]
+        assert store["char"]["sha256"] == _digest(_V2), store["char"]
+
+    def test_the_refresh_keeps_the_entry_keys_the_download_does_not_describe(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir, dest = self._registered(tmp_path, store, None, "civitai:111")
+        store["char"]["architecture"] = "sdxl"
+        ok = _civitai_pull(monkeypatch, self._v222(), dest_dir, _RangeServer(_V2),
+                           version_id="222")
+        assert ok is True
+        assert store["char"]["architecture"] == "sdxl", store["char"]
+        assert store["char"]["model_type"] == "lora", store["char"]
+        assert store["char"]["path"] == str(dest.resolve()), store["char"]
+
+    def test_a_pull_the_registry_declines_is_not_reported_as_done(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        other = tmp_path / "elsewhere" / "char.safetensors"
+        other.parent.mkdir()
+        other.write_bytes(_V1)
+        store["char"] = {"path": str(other.resolve()), "source": "local",
+                         "model_type": "lora"}
+        dest_dir = tmp_path / "comfy" / "loras"
+        dest_dir.mkdir(parents=True)
+        ok = _civitai_pull(monkeypatch, self._v222(), dest_dir, _RangeServer(_V2),
+                           version_id="222")
+        assert (dest_dir / "char.safetensors").read_bytes() == _V2
+        assert store["char"]["path"] == str(other.resolve()), store["char"]
+        assert ok is False
+
+
+class TestRegisterWithDedupRefresh:
+    """``refresh=True`` is opt-in: a plain call on an entry already registered
+    for the same file only backfills what is missing."""
+
+    def _entry(self, tmp_path, store):
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"x")
+        store["m"] = {"path": str(f.resolve()), "source": "hf:old/repo",
+                      "model_type": "llm", "sha256": "a" * 64}
+        return f
+
+    def test_a_plain_call_leaves_source_and_digest_alone(
+            self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        f = self._entry(tmp_path, store)
+        assert mm._register_with_dedup("m", f, "hf:new/repo", digest="b" * 64)
+        assert store["m"]["source"] == "hf:old/repo"
+        assert store["m"]["sha256"] == "a" * 64
+
+    def test_refresh_replaces_source_and_digest(self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        f = self._entry(tmp_path, store)
+        assert mm._register_with_dedup("m", f, "hf:new/repo", digest="B" * 64,
+                                       refresh=True)
+        assert store["m"]["source"] == "hf:new/repo"
+        assert store["m"]["sha256"] == "b" * 64
+        assert store["m"]["model_type"] == "llm"
+
+    def test_refresh_without_a_digest_drops_the_stale_one(
+            self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        f = self._entry(tmp_path, store)
+        assert mm._register_with_dedup("m", f, "hf:new/repo", refresh=True)
+        assert store["m"]["source"] == "hf:new/repo"
+        assert "sha256" not in store["m"], store["m"]

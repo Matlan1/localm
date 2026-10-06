@@ -168,6 +168,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Pulling a model again over a file it already names now updates that entry's
+  source and checksum.** After `localm pull civitai:... --redownload` replaced a
+  file with different bytes, or a pull recreated a file that had been deleted by
+  hand, the model's entry still named the old version and its checksum, which
+  peer routing and duplicate detection trust. A CivitAI pull whose entry cannot
+  be saved under the requested name now reports that instead of saying it
+  finished.
 - **Closing a coder session while its browser is still starting no longer
   leaves the browser running.** A browser that finishes starting after its coder
   session has closed is now stopped instead of staying open, with its cookies and
