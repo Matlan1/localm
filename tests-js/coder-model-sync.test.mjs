@@ -47,11 +47,11 @@ async function flush() {
 const posts = (calls) => calls.filter((c) => MODEL_URL.test(c.url));
 const refreshes = (calls) => calls.filter((c) => c.url.startsWith("/api/models"));
 const local = (id, extra = {}) => ({
-  info: { id, model: "X", model_pinned: false, backend_info: { backend: "local" } },
+  info: { id, cwd: "/p/" + id, model: "X", model_pinned: false, backend_info: { backend: "local" } },
   busy: false, ...extra,
 });
 const url = (id) => ({
-  info: { id, model: "qwen2.5-coder:7b", model_pinned: false,
+  info: { id, cwd: "/p/" + id, model: "qwen2.5-coder:7b", model_pinned: false,
           backend_info: { backend: "url", leaves_machine: false,
                           target: "http://localhost:11434/v1" } },
   busy: false,
@@ -124,14 +124,20 @@ test("a pinned session never follows, even after its task ends", async () => {
 
 test("switching a local session's model from the coder refreshes the model sidebar", async () => {
   const { window, calls } = setup([local("a")]);
+  await flush();
+  const before = refreshes(calls).length;
   await window.switchActiveSessionModel("Z");
+  await flush();
   assert.equal(posts(calls).length, 1);
-  assert.ok(refreshes(calls).length >= 1, "the sidebar model list was re-read");
+  assert.equal(refreshes(calls).length, before + 1, "the sidebar model list was re-read");
 });
 
 test("switching a url-backend session's model does not refresh the model sidebar", async () => {
   const { window, calls } = setup([url("u1")]);
+  await flush();
+  const before = refreshes(calls).length;
   await window.switchActiveSessionModel("llama3");
+  await flush();
   assert.equal(posts(calls).length, 1);
-  assert.equal(refreshes(calls).length, 0);
+  assert.equal(refreshes(calls).length, before, "no sidebar refresh");
 });
