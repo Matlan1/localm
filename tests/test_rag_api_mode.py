@@ -248,17 +248,50 @@ class TestApiModeIndexesHeadless:
             assert r.status_code == 400, r.text
             assert "too many paths" in r.text.lower()
 
-    def test_embedding_set_starts_a_job_headless(self, api_mode_app):
+    def test_embedding_set_starts_a_job_headless(self, api_mode_app, monkeypatch):
         """Embedding-model setup needs a job for its download-progress stream,
         and headless now has one, so it starts the job instead of 503-ing with
         "run localm gui". confirm=True: the unconfirmed dry-run (see
         TestEmbeddingSetConfirmGate below) never reaches the job registry at
-        all, so this must actually confirm to exercise that path."""
+        all, so this must actually confirm to exercise that path.
+
+        The job resolves the model through ``huggingface_hub.hf_hub_download``;
+        that is replaced with a recorder that raises, and a socket tripwire
+        records any non-loopback connection, so the job's download attempt is
+        counted instead of performed. The job is awaited before the test ends."""
+        import socket
+        import huggingface_hub
+
+        downloads = []
+
+        def _recording_download(repo, filename, **kwargs):
+            downloads.append((repo, filename))
+            raise RuntimeError("download blocked by test")
+
+        outbound = []
+        real_connect = socket.socket.connect
+
+        def _recording_connect(sock, address, *args, **kwargs):
+            if not (isinstance(address, tuple)
+                    and address[0] in ("127.0.0.1", "::1", "localhost")):
+                outbound.append(address)
+                raise OSError("outbound connection blocked by test")
+            return real_connect(sock, address, *args, **kwargs)
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _recording_download)
+        monkeypatch.setattr(socket.socket, "connect", _recording_connect)
         with TestClient(api_mode_app) as c:
             r = c.post("/api/rag/embedding",
                        json={"model": "bge-small-en-v1.5", "confirm": True})
             assert r.status_code == 200, r.text
-            assert "job_id" in r.json(), r.text
+            body = r.json()
+            assert "job_id" in body, r.text
+            job = _await_job(api_mode_app, body["job_id"])
+            assert job.status != "running"
+        assert downloads == [("CompendiumLabs/bge-small-en-v1.5-gguf",
+                              "bge-small-en-v1.5-q4_k_m.gguf")], (
+            f"the job must resolve the model through exactly one download: {downloads}")
+        assert outbound == [], f"unexpected outbound connections: {outbound}"
 
     def test_embedding_set_without_a_job_registry_is_a_clean_503(
             self, api_mode_app_no_jobs):

@@ -174,6 +174,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   able to read images, and a `--store` copy or move left the projector behind.
   localm now reads the projector's real width from its weights, the same way
   llama.cpp does.
+- **Pulling a model again over a file it already names now updates that entry's
+  source and checksum.** After `localm pull civitai:... --redownload` replaced a
+  file with different bytes, or a pull recreated a file that had been deleted by
+  hand, the model's entry still named the old version and its checksum, which
+  peer routing and duplicate detection trust. A CivitAI pull whose entry cannot
+  be saved under the requested name now reports that instead of saying it
+  finished.
+- **Closing a coder session while its browser is still starting no longer
+  leaves the browser running.** A browser that finishes starting after its coder
+  session has closed is now stopped instead of staying open, with its cookies and
+  storage, until localm exits.
 - **`localm setup-llama --help` no longer says the newest upstream build is the
   default.** The default installs the llama.cpp build this localm release
   confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
@@ -1008,6 +1019,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
+- **Privacy mode no longer leaves the start of tool-enabled replies in the debug
+  log.** With `--debug`, `LOCALM_DEBUG` or `keep_diagnostics` on, the text a model
+  wrote before a tool call (coder turns, web-enabled chat, jobs) was copied into
+  the debug log token by token through llama.cpp's grammar trace, even in privacy
+  mode. The log now keeps only the token ids there unless the session mode allows
+  chat content in the debug log.
 - **Windows network-share paths written with the `\??\` prefix are refused like
   any other network path.** A path such as `\??\UNC\host\share` got past the
   checks that stop localm from reaching network shares and device paths

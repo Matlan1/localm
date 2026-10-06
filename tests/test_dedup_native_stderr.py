@@ -520,3 +520,79 @@ def test_folder_bounds_an_unterminated_record():
     passed, recorded = _fold(lines)
     assert passed == ["after the bound"], passed
     assert recorded == ["Grammar still awaiting trigger after 1 token(s)"]
+
+
+def test_folder_hands_redacted_first_lines_over_in_order_with_forwarded_lines():
+    events = []
+    trace = debuglog._GrammarTraceFolder(
+        lambda text: None, lambda line: events.append(("forward", line)),
+        lambda text: events.append(("redacted", text)))
+    for line in (_record_lines(11, "ZQXa\nZQXb`)") + ["plain native line"]
+                 + _record_lines(12, "ZQXc") + ["held until flush"]
+                 + ["Grammar triggered on regex: '<tool_call>\r", "ZQXpayload'\r"]):
+        trace.feed(line)
+    trace.flush()
+    assert events == [
+        ("redacted", "Grammar still awaiting trigger after token 11"),
+        ("forward", "plain native line"),
+        ("redacted", "Grammar still awaiting trigger after token 12"),
+        ("forward", "held until flush"),
+        ("redacted", "Grammar triggered on regex\r"),
+    ], events
+
+
+def _run_with_debug_file(monkeypatch, tmp_path, content_allowed, chunks):
+    log = tmp_path / "debug.log"
+    calls = []
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: _Console())
+    monkeypatch.setattr(
+        debuglog, "native_stderr_target",
+        lambda: os.open(str(log), os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                          | getattr(os, "O_BINARY", 0)))
+    monkeypatch.setattr(
+        debuglog, "debug_content_enabled",
+        lambda: calls.append(1) or content_allowed)
+    with debuglog.dedup_native_stderr():
+        for chunk in chunks:
+            os.write(2, chunk)
+    return log.read_bytes(), calls
+
+
+_TRACE_STREAM = [
+    b"native \xff line\n",
+    _awaiting(11, "ZQXa"),
+    _awaiting(12, "ZQXb\nZQXc"),
+    _awaiting(13, "`)\n"),
+    _awaiting(14, "ZQXd", "\r\n"),
+    b"Grammar triggered on regex: '<tool_call>\nZQXpayload'\n",
+    b"after \xfe line\n",
+    b"unterminated \xfd tail",
+]
+
+
+def test_debug_file_copy_of_a_trace_record_drops_the_generated_text(monkeypatch, tmp_path):
+    data, calls = _run_with_debug_file(monkeypatch, tmp_path, False, _TRACE_STREAM)
+    assert data == (
+        b"native \xff line\n"
+        b"Grammar still awaiting trigger after token 11\n"
+        b"Grammar still awaiting trigger after token 12\n"
+        b"Grammar still awaiting trigger after token 13\n"
+        b"Grammar still awaiting trigger after token 14\r\n"
+        b"Grammar triggered on regex\n"
+        b"after \xfe line\n"
+        b"unterminated \xfd tail"), data
+    assert b"ZQX" not in data
+    assert len(calls) == 1
+
+
+def test_debug_file_keeps_the_raw_trace_when_chat_content_is_allowed(monkeypatch, tmp_path):
+    data, calls = _run_with_debug_file(monkeypatch, tmp_path, True, _TRACE_STREAM)
+    assert data == b"".join(_TRACE_STREAM), data
+    assert len(calls) == 1
+
+
+def test_debug_file_keeps_a_line_held_after_a_record_when_the_stream_ends(monkeypatch, tmp_path):
+    data, _ = _run_with_debug_file(
+        monkeypatch, tmp_path, False, [_awaiting(5, "ZQXa"), b"last native line\n"])
+    assert data == (b"Grammar still awaiting trigger after token 5\n"
+                    b"last native line\n"), data
