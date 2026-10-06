@@ -847,3 +847,19 @@ def test_a_data_folder_on_a_network_drive_runs_the_window_private_and_says_so(
     assert not (home_dir() / "app-window").exists()
     assert any("app-window" in r.getMessage() and r.levelname == "WARNING"
                for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_the_profile_is_set_up_before_the_window_is_published(monkeypatch):
+    """A stop signalled while the profile is being set up (importing the Qt
+    backend takes seconds) must find no published window to destroy."""
+    seen = []
+    real = appface._window_start_kwargs
+
+    def spy():
+        seen.append(appface._native_window)
+        return real()
+
+    monkeypatch.setattr(appface, "_window_start_kwargs", spy)
+    _start_kwargs(monkeypatch, "win32")
+
+    assert seen == [None]
