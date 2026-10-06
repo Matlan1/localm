@@ -56,6 +56,16 @@ Platform status:
   verified on this project's own hardware - the same caveat this project applies
   to its other macOS-only paths.
 
+Where the app window keeps its data: its login cookie, page storage and web
+cache live in an `app-window` folder inside the data folder, so deleting the data
+folder (or choosing "delete saved data" on uninstall) removes them with the rest.
+Windows and Linux both do this. pywebview's macOS backend has no way to be
+pointed at a folder, so on macOS, and on any system where `app-window` cannot be
+created (a warning is logged), the window runs private and keeps nothing between
+launches. Earlier versions kept this data in a folder shared with other pywebview
+apps (`%APPDATA%\pywebview` on Windows, `~/.pywebview` on Linux); that folder is
+left alone, and the uninstaller names it when it exists.
+
 This is a separate control surface from the tray/status window described below:
 with the `desktop` extra installed, both can be visible at once - a tray icon or
 status window for Open/Copy address/View logs/Restart/Stop, and the app window

@@ -168,6 +168,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+
+- **The app window keeps its saved login and page data inside your data folder.**
+  It used to keep them in a folder shared with other apps, outside your LocaLM
+  folder (`%APPDATA%\pywebview` on Windows, `~/.pywebview` on Linux), so deleting
+  the data folder, or choosing "delete saved data" when uninstalling, left a
+  copy of your recent chats and your sign-in behind. They now live in
+  `app-window` inside the data folder and go with it, and on Linux the window's
+  web cache moves there too. On macOS the window keeps nothing between launches,
+  and it does the same on any system where that folder cannot be created (a
+  warning is logged). The shared folder from earlier installs is left alone and
+  not migrated; the uninstaller still names it.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",
