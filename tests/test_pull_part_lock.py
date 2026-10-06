@@ -796,10 +796,24 @@ GUARD = '''
 '''
 
 
+def _stale_owner_fields() -> dict:
+    """Record fields for a holder that exited, in this pid space.
+
+    The record carries the start identity of a process that began an hour
+    before this test process, so a later process that is handed the exited
+    holder's pid reads as a different process and the lock stays stale. Where
+    the platform has no start identity the record carries none.
+    """
+    from localm.instances import process_start_identity
+    ident = process_start_identity(os.getpid())
+    return {"start": started_an_hour_earlier(ident) if ident else None,
+            "started": 0.0}
+
+
 def _write_stale_lock():
     """A lock left by a holder that has exited, in this pid space."""
     d = _part_lock_dir("m.gguf")
-    _write_owner(d, _exited_pid(), started=0.0)
+    _write_owner(d, _exited_pid(), **_stale_owner_fields())
     return d
 
 
@@ -964,7 +978,7 @@ def test_two_spellings_of_one_file_name_share_one_reclaim_guard(home):
 def test_a_stale_lock_with_the_longest_lockable_name_is_taken_over(home):
     longest = "m" * 240 + ".gguf"
     d = _part_lock_dir(longest)
-    _write_owner(d, _exited_pid(), started=0.0)
+    _write_owner(d, _exited_pid(), **_stale_owner_fields())
     with _part_lock(longest):
         assert json.loads(_record(d))["pid"] == os.getpid()
 

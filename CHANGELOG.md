@@ -176,6 +176,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   own identifier, as the model download lock already did. A lock written by an
   earlier version reads as another machine's and is released by its heartbeat
   going quiet rather than by its process exiting.
+
+- **A coder session's log file can be deleted after the session ends, even when
+  saving the session's lessons failed.** A failure while storing a finished
+  session's episode used to skip closing its audit log, which on Windows left the
+  file locked until the server stopped.
 - **Pulling a model again over a file it already names now updates that entry's
   source and checksum.** After `localm pull civitai:... --redownload` replaced a
   file with different bytes, or a pull recreated a file that had been deleted by
