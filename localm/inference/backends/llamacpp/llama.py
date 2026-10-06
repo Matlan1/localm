@@ -997,6 +997,7 @@ class LlamaCpp:
         # around each native step; close()/_free_native take it too, after
         # setting _stop so an in-flight generation bails at its next step.
         # Lock order: _gen_lock before the module-level _stderr_lock.
+        # _gen_lock is held around native calls, never across a yield.
         self._gen_lock    = threading.RLock()
         self._stop        = threading.Event()
         self._inference_lock = threading.Lock()
@@ -1745,6 +1746,7 @@ class LlamaCpp:
 
                         # --- Speculative MTP drafting (if draft context is active) ---
                         draft_token = None
+                        accepted_draft = None
                         if (self._mtp_ctx_ptr is not None and draft_sampler is not None
                                 and self._mtp_usable):
                             with self._gen_lock:
@@ -1801,11 +1803,7 @@ class LlamaCpp:
 
                                             self._cached_tokens.extend([token, draft_token])
                                             pos += 2
-                                            yield draft_token
-                                            tokens_generated += 1
-                                            if self._tokenizer.is_eog(draft_token):
-                                                break
-                                            continue
+                                            accepted_draft = draft_token
                                         else:
                                             # Draft REJECTED: remove the speculative token slot at pos + 1
                                             removed = api.llama_kv_cache_seq_rm(self._ctx_ptr, 0, pos + 1, -1)
@@ -1857,6 +1855,12 @@ class LlamaCpp:
                                 finally:
                                     if batch is not None:
                                         api.llama_batch_free(batch)
+                            if accepted_draft is not None:
+                                yield accepted_draft
+                                tokens_generated += 1
+                                if self._tokenizer.is_eog(accepted_draft):
+                                    break
+                                continue
                         else:
                             # --- locked native region 2: feed single token back ---
                             with self._gen_lock:
