@@ -42,7 +42,7 @@ _count_messages_tokens_rpc_warned = False
 _MTP_STOPPED = frozenset({
     "rewind-unsupported", "draft-context-full", "hidden-state-refused",
     "context-refused", "no-ctx-type-field", "draft-prefill-failed",
-    "draft-prefill-error", "draft-trim-error",
+    "draft-prefill-error", "draft-trim-error", "no-mtp-graph",
 })
 
 

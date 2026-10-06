@@ -2281,8 +2281,11 @@ class LlamaCpp:
         The draft context is sized like the main one, so a position the main
         context can hold is one the draft context can hold. Returns "" on
         success, otherwise the status naming why no draft context exists:
-        "no-ctx-type-field", "context-refused" or "hidden-state-refused".
+        "no-mtp-graph", "no-ctx-type-field", "context-refused" or
+        "hidden-state-refused".
         """
+        if not api.llama_model_mtp_support(self._model_ptr)[0]:
+            return "no-mtp-graph"
         cp_mtp = api.llama_context_default_params()
         if not hasattr(cp_mtp, "ctx_type"):
             # Without ctx_type this build cannot be ASKED for an MTP context, so

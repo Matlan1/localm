@@ -1408,6 +1408,7 @@ def _context_factory(mock_api, refuse_draft=False):
     mock_api.llama_init_from_model.side_effect = init
     mock_api.llama_set_embeddings_nextn.return_value = True
     mock_api.llama_model_n_embd.return_value = 4
+    mock_api.llama_model_mtp_support.return_value = (True, "ok:qwen35")
     mock_api.llama_decode.return_value = 0
     return made
 
@@ -1704,3 +1705,13 @@ def test_the_draft_kv_per_token_is_the_probed_value_when_eligible_and_zero_other
                return_value=1234):
         assert b._mtp_draft_kv_per_token() == 1234
     assert _mtp_sizing_backend(mtp_enabled=False)._mtp_draft_kv_per_token() == 0
+
+
+def test_a_draft_context_is_never_created_for_a_model_without_an_mtp_graph():
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        made = _context_factory(mock_api)
+        mock_api.llama_model_mtp_support.return_value = (False, "no-mtp-graph")
+        assert llm._create_mtp_context(4096) == "no-mtp-graph"
+
+    assert made == []
