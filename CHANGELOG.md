@@ -168,6 +168,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Attaching an image in the Coder now says plainly that the Coder cannot take
+  images.** It used to ask you to load a vision model, which could not help.
+  Attach the image in Chat with a vision model, or paste the text instead.
 - **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
   projector files record a width that is not the one the model uses, so localm
   decided the projector did not fit and left it off: the model was not shown as
