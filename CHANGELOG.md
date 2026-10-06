@@ -168,7 +168,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
-
+- **`localm setup-llama --help` no longer says the newest upstream build is the
+  default.** The default installs the llama.cpp build this localm release
+  confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
+  `--tag default` and `--rollback` accurately.
 - **The app window keeps its saved login and page data inside your data folder.**
   It used to keep them in a folder shared with other apps, outside your LocaLM
   folder (`%APPDATA%\pywebview` on Windows, `~/.pywebview` on Linux), so deleting
