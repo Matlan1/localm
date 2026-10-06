@@ -701,6 +701,303 @@ class TestPullCivitaiFileUnderThePartLock:
         assert ok is True
 
 
+class TestPullCivitaiFileSharedFilename:
+    """Versions of one CivitAI model often share a filename. A file already at
+    the destination is taken as the requested version's only when a SHA256
+    (CivitAI's or the user's) matches it, or when the registry records it as
+    that version and CivitAI's listed size agrees. A file that is not proven is
+    never deleted, replaced or registered."""
+
+    FILE = "char.safetensors"
+
+    @pytest.fixture(autouse=True)
+    def _plain_wide_console(self, monkeypatch):
+        from tests.conftest import make_console_wide_and_plain
+        make_console_wide_and_plain(monkeypatch, width="300")
+
+    def _dest(self, tmp_path, store, body=_V1, registered_as=None):
+        """A model file holding *body* at the destination, registered as
+        *registered_as* when given."""
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest_dir.mkdir(parents=True)
+        dest = dest_dir / self.FILE
+        dest.write_bytes(body)
+        if registered_as:
+            store["char"] = {"path": str(dest.resolve()), "source": registered_as,
+                             "model_type": "lora", "sha256": _digest(body)}
+        return dest_dir, dest
+
+    def _resolved(self, **over) -> ResolvedDownload:
+        base = dict(filename=self.FILE, source_tag="civitai:222", file_id="2",
+                    sha256=None, size_bytes=len(_V2))
+        base.update(over)
+        return _resolved(**base)
+
+    def _pull(self, monkeypatch, dest_dir, resolved=None, **kw):
+        """Pull version 222 into *dest_dir*; returns the result and the server."""
+        server = _RangeServer(_V2)
+        ok = _civitai_pull(monkeypatch, resolved or self._resolved(), dest_dir,
+                           server, version_id="222", **kw)
+        return ok, server
+
+    def test_a_file_that_is_not_in_the_registry_is_not_taken_as_this_version(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store)
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V1, "the file already there was changed"
+        assert store == {}, f"the file was registered: {store}"
+        assert server.gets == [], "the file already there was downloaded over"
+        assert ok is False
+        assert self.FILE in out and "--redownload" in out, out
+
+    def test_a_file_registered_as_another_version_is_not_taken_as_this_one(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, registered_as="civitai:111")
+        entry = dict(store["char"])
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V1, "the file already there was changed"
+        assert store == {"char": entry}, f"the registry changed: {store}"
+        assert server.gets == [], "the file already there was downloaded over"
+        assert ok is False
+        assert "'char'" in out and "civitai:111" in out, out
+        assert "localm rm char" in out and "--redownload" in out, out
+
+    def test_a_file_registered_as_this_version_is_taken_without_a_digest(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, body=_V2,
+                                    registered_as="civitai:222")
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        assert server.gets == [], "a file already in place was downloaded again"
+        assert dest.read_bytes() == _V2
+        assert store["char"]["source"] == "civitai:222"
+        assert ok is True
+
+    def test_a_registered_file_of_another_size_is_not_taken(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        store, _ = fake_registry
+        body = _V2 + b"+"
+        dest_dir, dest = self._dest(tmp_path, store, body=body,
+                                    registered_as="civitai:222")
+        entry = dict(store["char"])
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == body, "the file already there was changed"
+        assert store == {"char": entry}, f"the registry changed: {store}"
+        assert server.gets == [], "the file already there was downloaded over"
+        assert ok is False
+        assert f"{len(body)} bytes" in out and f"lists {len(_V2)}" in out, out
+
+    def test_a_registered_file_whose_size_cannot_be_read_is_not_taken(self, tmp_path):
+        gone = tmp_path / self.FILE
+
+        reason = pull._civitai_unproven_reason(
+            gone, self._resolved(), [("char", "civitai:222")])
+
+        assert reason is not None and "size could not be read" in reason
+
+    def test_a_registry_name_is_shown_as_written_in_the_refusal(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store)
+        store["a[b]"] = {"path": str(dest.resolve()), "source": "civitai:111",
+                         "model_type": "lora"}
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert ok is False
+        assert "'a[b]'" in out and "localm rm a[b]" in out, out
+
+    def test_a_registered_file_is_taken_when_civitai_lists_no_size(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        body = _V2 + b"+"
+        dest_dir, dest = self._dest(tmp_path, store, body=body,
+                                    registered_as="civitai:222")
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                self._resolved(size_bytes=None))
+
+        assert server.gets == [], "a file already in place was downloaded again"
+        assert dest.read_bytes() == body
+        assert ok is True
+
+    def test_a_matching_sha256_from_the_user_proves_the_file_already_there(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, body=_V2)
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                expected_sha256=_digest(_V2))
+
+        assert server.gets == [], "a file already in place was downloaded again"
+        assert store["char"]["source"] == "civitai:222"
+        assert ok is True
+
+    def test_a_different_sha256_from_the_user_refuses_the_file_already_there(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store)
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                expected_sha256=_digest(_V2))
+
+        assert dest.read_bytes() == _V1, "the file already there was changed"
+        assert store == {}, f"the file was registered: {store}"
+        assert server.gets == [], "the file already there was downloaded over"
+        assert ok is False
+
+    @pytest.mark.parametrize("registered_as, hint", [
+        pytest.param(None, "--redownload", id="unregistered"),
+        pytest.param("civitai:111", "localm rm char", id="registered-as-another-version"),
+    ])
+    def test_a_file_that_fails_the_published_digest_says_how_to_proceed(
+            self, registered_as, hint, fake_registry, tmp_path, monkeypatch,
+            capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, registered_as=registered_as)
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                self._resolved(sha256=_digest(_V2)))
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V1, "the file already there was changed"
+        assert server.gets == [], "the file already there was downloaded over"
+        assert ok is False
+        assert "SHA256 mismatch" in out and self.FILE in out, out
+        assert hint in out, out
+        if registered_as:
+            assert "'char'" in out and registered_as in out, out
+
+    def test_a_redownload_will_not_replace_a_file_registered_as_another_version(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, registered_as="civitai:111")
+        entry = dict(store["char"])
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                self._resolved(sha256=_digest(_V2)),
+                                redownload=True)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V1, "another version's file was replaced"
+        assert store == {"char": entry}, f"the registry changed: {store}"
+        assert server.gets == [], "the file was downloaded"
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert ok is False
+        assert "'char'" in out and "civitai:111" in out, out
+        assert "localm rm char" in out and "--redownload" in out, out
+
+    @pytest.fixture
+    def _unreadable_registry(self, tmp_path, monkeypatch):
+        """registry.json present but holding no valid JSON, with no backup."""
+        from localm import config
+        bad = tmp_path / "home" / "registry.json"
+        bad.parent.mkdir()
+        bad.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(config, "REGISTRY_FILE", bad)
+        return bad
+
+    def test_a_redownload_will_not_replace_a_file_when_the_registry_is_unreadable(
+            self, _unreadable_registry, fake_registry, tmp_path, monkeypatch,
+            capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store)
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                self._resolved(sha256=_digest(_V2)),
+                                redownload=True)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V1, "the file was replaced"
+        assert server.gets == [], "the file was downloaded"
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert ok is False
+        assert "registry.json" in out and "could not be read" in out, out
+        assert "Fix or remove registry.json" in out, out
+
+    def test_a_file_is_not_taken_without_a_digest_when_the_registry_is_unreadable(
+            self, _unreadable_registry, fake_registry, tmp_path, monkeypatch,
+            capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, body=_V2)
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert dest.read_bytes() == _V2
+        assert store == {}, f"the file was registered: {store}"
+        assert server.gets == []
+        assert ok is False
+        assert "registry.json" in out and "could not be read" in out, out
+        assert "not in the model registry" not in out, out
+        assert "Fix or remove registry.json" in out, out
+        assert "--sha256" not in out, out
+
+    def test_the_sha256_hint_is_offered_only_when_no_model_owns_the_file(
+            self, fake_registry, tmp_path, monkeypatch, capsys):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store)
+
+        self._pull(monkeypatch, dest_dir)
+
+        out = capsys.readouterr().out
+        assert "pass --sha256 with this file's expected digest" in out, out
+        assert "the digest CivitAI shows" not in out, out
+
+    def test_a_redownload_replaces_a_file_registered_as_this_version(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir, dest = self._dest(tmp_path, store, body=b"a-damaged-copy-of-it",
+                                    registered_as="civitai:222")
+
+        ok, server = self._pull(monkeypatch, dest_dir,
+                                self._resolved(sha256=_digest(_V2)),
+                                redownload=True)
+
+        assert dest.read_bytes() == _V2
+        assert sorted(p.name for p in dest_dir.iterdir()) == [self.FILE]
+        assert ok is True
+
+    def test_a_file_that_appears_before_the_lock_is_checked_the_same_way(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        dest = dest_dir / self.FILE
+        real = pull._part_lock
+        fired = []
+
+        @contextlib.contextmanager
+        def _another_version_finishes_first(filename):
+            fired.append(filename)
+            dest.write_bytes(_V1)
+            with real(filename):
+                yield
+
+        monkeypatch.setattr(pull, "_part_lock", _another_version_finishes_first)
+
+        ok, server = self._pull(monkeypatch, dest_dir)
+
+        assert fired == [self.FILE], "the other pull was never simulated"
+        assert dest.read_bytes() == _V1, "the file already there was changed"
+        assert store == {}, f"the file was registered: {store}"
+        assert server.gets == [], "the file already there was downloaded over"
+        assert ok is False
+
+
 class TestPullModelCivitaiDispatch:
     def test_parses_version_and_file_id(self, monkeypatch):
         monkeypatch.setenv("LOCALM_NET_MODE", "ask")

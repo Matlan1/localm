@@ -168,6 +168,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **`localm pull civitai:<version>` no longer takes another version's file as
+  already downloaded.** Versions of one CivitAI model often share a filename, and
+  when CivitAI lists no SHA256 for the file, a file left by a different version was
+  accepted and registered as the one you asked for. Such a file is now reused only
+  when localm's own registry records it as that version and its size matches the
+  size CivitAI lists, when it lists one; otherwise the pull stops, leaves the
+  file as it is and says how to replace it. A SHA256 mismatch says which registered model owns the file, and `--redownload` no
+  longer overwrites a file that a model registered from another source points at.
 - **Two browser calls in one coder turn no longer open two browsers.** With no
   browser open yet, a turn that called `browser_navigate` twice at once started
   a browser for each call. The second replaced the first in the session's
