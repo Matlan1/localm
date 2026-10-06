@@ -270,9 +270,12 @@ class TestGenerateImageAcrossTurns:
                 repeat_penalty=1.0))
 
     def test_the_reply_is_reevaluated_and_the_image_is_not(self):
+        """The reply the decode loop wrote is decoded again as part of the next
+        prompt, even when its tokens match that prompt exactly."""
         rig = _Rig()
         rig.api.llama_sampler_free = lambda s: None
-        assert self._turn(rig, TURN1, [IMG_A], [7, 8, -1]) == [7, 8]
+        reply = [word_token("a"), word_token("red")]
+        assert self._turn(rig, TURN1, [IMG_A], reply + [-1]) == reply
         n_prompt1 = len(_fresh_cells(TURN1, [IMG_A]))
         assert len(rig.kv.cells) == n_prompt1 + 2, "the reply was not decoded into the cache"
         rig.api.decoded.clear()
