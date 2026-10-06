@@ -180,6 +180,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   saving the session's lessons failed.** A failure while storing a finished
   session's episode used to skip closing its audit log, which on Windows left the
   file locked until the server stopped.
+- **Chatting with a HuggingFace model that has no chat template now says so
+  instead of crashing the model process.** Such a model (typically a base,
+  non-chat checkpoint) used to load fine, then kill its worker on the first chat
+  turn with a generic "exited unexpectedly" message and unload. Chat now returns
+  a clear error (HTTP 400, or a message in the CLI) telling you to use an
+  instruct or chat variant, and the model stays loaded. When a model process does
+  stop on an unexpected error, the message now includes that error instead of
+  "no native fault trace was captured".
 - **Pulling a model again over a file it already names now updates that entry's
   source and checksum.** After `localm pull civitai:... --redownload` replaced a
   file with different bytes, or a pull recreated a file that had been deleted by

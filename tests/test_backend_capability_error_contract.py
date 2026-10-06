@@ -27,6 +27,7 @@ import localm.inference.http_server as hs
 from localm.inference.backends.base import (
     GRAMMAR_UNSUPPORTED_MESSAGE,
     BaseBackend,
+    ChatTemplateMissingError,
     ContextCapacityExceededError,
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
@@ -269,6 +270,7 @@ class TestBackendErrorStatusTable:
         (ImageDecodeUnavailable("no decoder"), 501),
         (VisionInputError("bad image"), 400),
         (UnsupportedInputError("no images"), 400),
+        (ChatTemplateMissingError("no template"), 400),
         (GrammarUnsupportedError("no grammar"), 400),
         (InvalidGrammarError("bad grammar"), 400),
         (TriggerValidatorUnavailableError("probe pool busy"), 503),
@@ -325,6 +327,8 @@ class TestNonStreamingReportsTheReason:
          "cannot accept image input"),
         (InvalidGrammarError("grammar failed to parse at 'root'"), 400,
          "failed to parse"),
+        (ChatTemplateMissingError("This model defines no chat template"), 400,
+         "no chat template"),
         (PretokenizerUnsafeInputError(
             "This model's pre-tokenizer (llama4) crashes on an unbroken run of "
             "more than 64 letters"), 400, "unbroken run"),

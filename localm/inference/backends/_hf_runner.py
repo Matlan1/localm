@@ -76,7 +76,11 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
                                   type by the parent. Recognised tags:
                                   "UnsupportedInputError",
                                   "GrammarUnsupportedError",
-                                  "InvalidGrammarError". An UNTAGGED error becomes
+                                  "InvalidGrammarError",
+                                  "ContextCapacityExceededError",
+                                  "ChatTemplateMissingError". "WorkerFault"
+                                  carries the text of an exception the child
+                                  is dying on. An UNTAGGED error becomes
                                   a RuntimeError, which callers read as "the
                                   isolated worker faulted" (503), so anything the
                                   CALLER can fix needs a tag
@@ -306,6 +310,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
 
     from localm.inference.backends._hf_worker import HFWorker
     from localm.inference.backends.base import (
+        ChatTemplateMissingError,
         ContextCapacityExceededError,
         GrammarUnsupportedError,
         InvalidGrammarError,
@@ -419,10 +424,19 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # problem, not this worker, so keep serving and let the parent
                 # re-raise the typed error the routes already map to a 400.
                 resp_q.put(("error", str(e), "InvalidGrammarError"))
-            # Any OTHER uncaught fault (a torch/CUDA crash inside
-            # model.generate(), a tokenizer failure mid-stream) propagates
-            # OUT of this whole function, uncaught: the model is left in an
-            # unknown state, so this process does not keep serving from it.
+            except ChatTemplateMissingError as e:
+                # Raised before any native call, so the model is unharmed and
+                # the worker keeps serving.
+                resp_q.put(("error", str(e), "ChatTemplateMissingError"))
+            except Exception as e:
+                # Any OTHER uncaught fault (a torch/CUDA crash inside
+                # model.generate(), a tokenizer failure mid-stream) leaves the
+                # model in an unknown state, so this process does not keep
+                # serving from it. The exception text is sent first so the
+                # parent can report the real cause, then it is re-raised so the
+                # process still dies and logs its traceback.
+                resp_q.put(("error", f"{type(e).__name__}: {e}", "WorkerFault"))
+                raise
             continue
 
         if name == "count_tokens":
@@ -489,6 +503,10 @@ _STREAM_CHUNK_TIMEOUT = 120.0
 # exists to contain) never confirms, so this is the fallback-to-kill bound,
 # not an expected steady-state wait.
 _CANCEL_DRAIN_TIMEOUT = 5.0
+
+# How long the parent waits for a child that reported a fatal exception to log
+# its traceback and exit on its own before it is reaped.
+_FAULT_EXIT_GRACE = 5.0
 
 # Bounded wait for a simple request/response command (count_tokens,
 # count_messages_tokens). Mirrors llamacpp/_runner.py's _SIMPLE_CMD_TIMEOUT,
@@ -834,6 +852,21 @@ class HFRunner:
                         if tag == "ContextCapacityExceededError":
                             from localm.inference.backends.base import ContextCapacityExceededError
                             raise ContextCapacityExceededError(msg)
+                        if tag == "ChatTemplateMissingError":
+                            from localm.inference.backends.base import ChatTemplateMissingError
+                            raise ChatTemplateMissingError(msg)
+                        if tag == "WorkerFault":
+                            # The child is exiting on this exception. It is
+                            # given time to log its traceback and exit, then
+                            # reaped so the model reads as unloaded at once and
+                            # reloads on the next request.
+                            if self._proc is not None:
+                                self._proc.join(timeout=_FAULT_EXIT_GRACE)
+                            self.shutdown(grace=0)
+                            raise RuntimeError(
+                                f"The model process stopped on an error: {msg}. "
+                                "The model has been unloaded and will reload on "
+                                "the next request.")
                         raise RuntimeError(msg)
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")
