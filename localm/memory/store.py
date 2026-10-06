@@ -41,6 +41,7 @@ from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_ato
 
 from .corrections import PendingCorrection
 from .record import MemoryRecord
+from .relevance import generic_tokens, lexical_match
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
 
@@ -90,9 +91,6 @@ VEC_COVERAGE = 0.8         # blend cosine only when >= this fraction have vector
 # regardless.
 # Absolute cosine floor for the semantic gate, matching the coder episode gate.
 REL_COS_MIN = 0.55
-# Distinct content words an episodic synth summary must share with the query to
-# clear the LEXICAL gate.
-EPISODIC_LEX_MIN_OVERLAP = 2
 # Stopwords stripped from the LEXICAL gate: a query and a fact sharing only "the"
 # must NOT clear it. Mirrors the coder episode store's _STOPWORDS.
 _STOPWORDS = frozenset(
@@ -913,16 +911,17 @@ class MemoryStore:
             if qv and len(qv) == stored_dim:
                 cos = [(_cosine(qv, self._vectors[r.id]) if r.id in self._vectors
                         else 0.0) for r in self._records]
-        # An EPISODIC synth summary needs EPISODIC_LEX_MIN_OVERLAP shared content
-        # words (capped by the query's own size), so one generic word ("model",
-        # "local") does not pull the same summaries into every turn. Trusted facts
-        # and semantic records keep the single-word hit.
-        lex_hits = []
-        for r in self._records:
-            need = 1
-            if r.kind == "episodic" and r.source not in TRUSTED_SOURCES:
-                need = max(1, min(EPISODIC_LEX_MIN_OVERLAP, len(q_tokens)))
-            lex_hits.append(len(q_tokens & _content_tokens(r.text)) >= need)
+        # An EPISODIC synth summary must share distinctive content words with the
+        # query (see relevance.lexical_match), so a generic word ("model", "local")
+        # does not pull the same summaries into every turn. Trusted facts and
+        # semantic records keep the single-word hit.
+        rec_tokens = [_content_tokens(r.text) for r in self._records]
+        is_episode = [r.kind == "episodic" and r.source not in TRUSTED_SOURCES
+                      for r in self._records]
+        generic = generic_tokens([t for t, e in zip(rec_tokens, is_episode) if e])
+        lex_hits = [lexical_match(q_tokens, rec_tokens[i], generic) if is_episode[i]
+                    else bool(q_tokens & rec_tokens[i])
+                    for i in range(len(self._records))]
         sem_hits = [cos is not None and cos[i] >= REL_COS_MIN
                     for i in range(len(self._records))]
         # A LEXICAL HIT RAISES THE BAR FOR EVERYTHING ELSE. When the query shares a
@@ -1085,6 +1084,17 @@ class MemoryStore:
 
     def _forgotten_file(self) -> Path:
         return self._file.with_suffix(".forgotten.jsonl")
+
+    def forget(self, mem_id: str) -> bool:
+        """Delete record *mem_id* after archiving it to the recoverable sidecar.
+        Returns False, leaving the record in place, when it is absent or the
+        archive could not be written."""
+        with self._wlock('a forget'):
+            self._load()
+            rec = self.get(mem_id)
+            if rec is None or not self._archive_forgotten([rec]):
+                return False
+            return self.delete(mem_id)
 
     def _archive_forgotten(self, records: list[MemoryRecord]) -> bool:
         """Append evicted records to a ``.forgotten.jsonl`` sidecar so forgetting

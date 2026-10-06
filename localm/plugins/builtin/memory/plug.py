@@ -729,6 +729,7 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # Episodic capture is per-session and watermarked: one episode per NEW session,
     # not one blob summary over all of them.
     episodic = _store_episodes(store, complete, embed_fn=embed_fn)
+    pruned = _prune_trivial_episodes(store, complete)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
     # over several passes. No-op when no embedder.
@@ -746,7 +747,7 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
             # TOTAL pending corrections awaiting review, not just this run's new ones,
             # so outstanding earlier suggestions are still reported.
             "pending": len(store.corrections()),
-            "episodic": episodic, "facts": new_facts}
+            "episodic": episodic, "pruned": pruned, "facts": new_facts}
 
 
 def _episodic_watermark_path(store) -> Path:
@@ -835,6 +836,10 @@ _UNSET = object()
 # A session whose user turns carry fewer distinct content words than this is
 # greeting/acknowledgement traffic and never gets an episode.
 EPISODIC_MIN_USER_CONTENT_WORDS = 3
+# Greeting and acknowledgement words that carry no topic; not counted toward it.
+_FILLER_WORDS = frozenset(
+    "hi hello hey thanks thank please ok okay yes yeah yep nope sure bye goodbye "
+    "cool great good nice lot thx ty welcome sorry".split())
 
 
 def _is_substantive_session(text: str) -> bool:
@@ -852,7 +857,8 @@ def _is_substantive_session(text: str) -> bool:
         if in_user:
             user_lines.append(line)
     user_text = "\n".join(user_lines)
-    return len(_content_tokens(user_text)) >= EPISODIC_MIN_USER_CONTENT_WORDS
+    words = _content_tokens(user_text) - _FILLER_WORDS
+    return len(words) >= EPISODIC_MIN_USER_CONTENT_WORDS
 
 
 # Cap on real model generations per episodic pass. The backlog drains over several
@@ -861,6 +867,38 @@ EPISODIC_MAX_PER_RUN = 5
 # Only a SETTLED session (untouched for at least this long) is summarised. Matches
 # the auto-consolidate debounce cadence (MEMORY_AUTO_MIN_INTERVAL).
 EPISODIC_SETTLE_SECONDS = 900.0
+
+
+# Cap on model judgements per pass over already-stored episodes.
+EPISODIC_JUDGE_MAX_PER_RUN = 5
+
+
+def _prune_trivial_episodes(store, complete) -> int:
+    """Ask the model once about each stored synth episode that was never judged,
+    at most EPISODIC_JUDGE_MAX_PER_RUN per call. An episode judged DROP is archived
+    to the recoverable sidecar and removed; every other one is stamped judged.
+    Returns the number removed. Best-effort; the caller confirmed writes are
+    allowed."""
+    from localm.debuglog import logger
+    from localm.memory.consolidate import judge_episode
+    try:
+        pending = [r for r in store.all()
+                   if r.kind == "episodic" and r.source == "synth"
+                   and not (r.meta or {}).get("judged")][:EPISODIC_JUDGE_MAX_PER_RUN]
+        removed = 0
+        for r in pending:
+            if not judge_episode(complete, r.text):
+                if store.forget(r.id):
+                    removed += 1
+                    continue
+                continue                           # archive failed: leave it, retry next run
+            store.update(r.id, meta={**(r.meta or {}), "judged": True})
+        if removed:
+            logger.info("memory consolidation: removed %d trivial episodic record(s)", removed)
+        return removed
+    except Exception as e:
+        logger.debug("episodic prune skipped: %s", e)
+        return 0
 
 
 def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
@@ -979,13 +1017,14 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
                 if SequenceMatcher(None, lo, keep.text.lower()).ratio() > 0.85:
                     # Substantively the same story: keep the text, re-stamp which state
                     # of the session it reflects (no re-embed needed).
-                    store.update(keep.id,
-                                 meta={"session": f.stem, "session_mtime": mt})
+                    store.update(keep.id, meta={
+                        **(keep.meta or {}), "session": f.stem, "session_mtime": mt})
                     continue
                 # update() re-embeds on a text change, so the vector cannot go stale
                 # against the superseded text.
                 store.update(keep.id, text=summ, embed_fn=ef,
-                             meta={"session": f.stem, "session_mtime": mt})
+                             meta={"session": f.stem, "session_mtime": mt,
+                                   "judged": True})
                 continue
             # Cross-stem dedup: a DIFFERENT session whose summary near-duplicates an
             # existing episode adds nothing.
@@ -995,7 +1034,8 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
                 continue                           # already have this episode
             store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
                                    importance=0.4,
-                                   meta={"session": f.stem, "session_mtime": mt}),
+                                   meta={"session": f.stem, "session_mtime": mt,
+                                         "judged": True}),
                       embed_fn=ef)
             stored += 1
         _write_episodic_watermark(store, newest, newest_stems)
