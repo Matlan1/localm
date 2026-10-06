@@ -174,9 +174,19 @@ class TestResolveDownload:
         assert resolved.source_tag == "civitai:135867"
         assert resolved.url == "https://civitai.com/api/download/models/135867?fileId=99264"
         assert resolved.filename == "add-detail-xl.safetensors"
-        assert resolved.size_bytes == int(223097.99 * 1024)
+        assert resolved.size_bytes == round(223097.99 * 1024)
         assert resolved.sha256 == "0d9bd1b873a7863e128b4672e3e245838858f71469a3cec58123c16c06f83bd7"
         assert resolved.file_id == "99264"
+
+    def test_a_size_that_lost_its_last_digit_still_gives_the_exact_byte_count(
+            self, monkeypatch):
+        version = _version_detail()
+        version["files"][0]["sizeKB"] = 20041576.86132812
+        self._wire(monkeypatch, version=version)
+
+        resolved = sources.CivitAISource().resolve_download(135867, None)
+
+        assert resolved.size_bytes == 20522574706
 
     def test_refuses_an_unmapped_type(self, monkeypatch):
         version = _version_detail()
