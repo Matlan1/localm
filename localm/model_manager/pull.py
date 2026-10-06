@@ -56,53 +56,10 @@ def _partial_owner_path(partial: Path) -> Path:
     return partial.with_name(partial.name + _PARTIAL_OWNER_SUFFIX)
 
 
-_PID_SPACE: "str | None" = None
-
-
-def _machine_guid() -> str:
-    """This Windows installation's MachineGuid, or "" on other platforms and
-    when it cannot be read."""
-    if sys.platform != "win32":
-        return ""
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                            r"SOFTWARE\Microsoft\Cryptography", 0,
-                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
-            value, _ = winreg.QueryValueEx(k, "MachineGuid")
-    except (OSError, ImportError):
-        return ""
-    return str(value).strip()
-
-
 def _pid_space_id() -> str:
-    """An opaque id for the pid table this process's pids belong to: the
-    platform, the Windows MachineGuid (see :func:`_machine_guid`), the host
-    name and, on Linux, the pid namespace, hashed.
-
-    A process that can read none of the MachineGuid, the host name and the pid
-    namespace gets an id unique to itself, so no other process's record
-    matches it.
-    """
-    global _PID_SPACE
-    if _PID_SPACE is None:
-        import hashlib
-        import platform
-        import uuid
-        parts = [sys.platform, _machine_guid()]
-        try:
-            parts.append(platform.node() or "")
-        except Exception:
-            parts.append("")
-        try:
-            parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
-        except OSError:
-            pass
-        if not any(parts[1:]):
-            parts.append(uuid.uuid4().hex)
-        _PID_SPACE = hashlib.sha256(
-            "\x1f".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
-    return _PID_SPACE
+    """An opaque id for the pid table this process's pids belong to; see
+    :func:`localm.instances.pid_space_id`."""
+    return instances.pid_space_id()
 
 
 def _write_partial_owner(partial: Path) -> None:

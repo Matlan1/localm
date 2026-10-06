@@ -168,6 +168,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Two machines sharing one data folder no longer take over each other's
+  knowledge-base write lock.** Two machines with the same host name (on Windows,
+  or on Linux hosts) read each other's lock records as their own process table,
+  found the holder's process absent and handed the lock over while the other
+  machine was still writing. The lock now tells machines apart by the machine's
+  own identifier, as the model download lock already did. A lock written by an
+  earlier version reads as another machine's and is released by its heartbeat
+  going quiet rather than by its process exiting.
 - **Pulling a model again over a file it already names now updates that entry's
   source and checksum.** After `localm pull civitai:... --redownload` replaced a
   file with different bytes, or a pull recreated a file that had been deleted by
