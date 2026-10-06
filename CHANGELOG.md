@@ -174,6 +174,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A chat no longer switches models for an ordinary reply just because the model's tool
+  support has never been checked.** With web tools on, an unpinned chat could move
+  from the model you had loaded to a different one for a plain text turn, which
+  unloaded and reloaded large models. A model whose tool support is unknown now
+  keeps the turn; only a model known to lack a needed capability is swapped out.
+  Image and context-length routing are unchanged.
 - **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
   projector files record a width that is not the one the model uses, so localm
   decided the projector did not fit and left it off: the model was not shown as
