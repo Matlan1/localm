@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -70,19 +71,29 @@ def _trust_remote_code_enabled() -> bool:
 
 
 def _silence_upstream_docstring_leak(tr) -> None:
-    # Wrap transformers.utils.auto_docstring to intercept stdout print() leaks. See test_silence_upstream_docstring_leak_intercepts_print.
+    # Wrap transformers.utils.auto_docstring to intercept stdout print() leaks, including those from the decorator the parameterized form returns. See test_silence_upstream_docstring_leak_intercepts_print.
     try:
         orig = getattr(getattr(tr, "utils", None), "auto_docstring", None)
         if orig is None or getattr(orig, "_silent_wrapped", False):
             return
 
-        def _silent_auto_docstring(*args, **kwargs):
+        def _call_silenced(fn, *args, **kwargs):
             old_stdout = sys.stdout
             sys.stdout = io.StringIO()
             try:
-                return orig(*args, **kwargs)
+                return fn(*args, **kwargs)
             finally:
                 sys.stdout = old_stdout
+
+        def _silent_auto_docstring(*args, **kwargs):
+            result = _call_silenced(orig, *args, **kwargs)
+            if args or not callable(result):
+                return result
+
+            def _silent_decorator(*dargs, **dkwargs):
+                return _call_silenced(result, *dargs, **dkwargs)
+
+            return _silent_decorator
 
         _silent_auto_docstring._silent_wrapped = True
         tr.utils.auto_docstring = _silent_auto_docstring
@@ -119,8 +130,28 @@ def _filter_docstring_leak():
         sys.stdout = old
 
 
+class _OffloadBufferAdvisoryFilter(logging.Filter):
+    # Drops the accelerate advisory that asks for offload_buffers=True.
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "offload_buffers=True" not in record.getMessage()
+
+
+@contextlib.contextmanager
+def _suppress_offload_buffer_advisory():
+    # Drops the transformers advisory that recommends offload_buffers=True for the duration of the block. See test_infer_auto_device_map_advisory_is_suppressed_during_load.
+    lg = logging.getLogger("transformers.integrations.accelerate")
+    flt = _OffloadBufferAdvisoryFilter()
+    lg.addFilter(flt)
+    try:
+        yield
+    finally:
+        lg.removeFilter(flt)
+
+
 def _build_load_kwargs(tr, device_map_kwargs: dict, dtype, trust_remote_code: bool) -> dict:
-    """Build kwargs for from_pretrained with version-appropriate dtype and offload_buffers."""
+    """Build kwargs for from_pretrained: ``dtype`` on transformers >= 4.56.0,
+    ``torch_dtype`` below it, plus ``offload_buffers=True``."""
     kwargs = {
         **device_map_kwargs,
         "trust_remote_code": trust_remote_code,
@@ -128,7 +159,7 @@ def _build_load_kwargs(tr, device_map_kwargs: dict, dtype, trust_remote_code: bo
     }
     try:
         from packaging.version import Version
-        use_dtype = Version(tr.__version__) >= Version("4.49.0")
+        use_dtype = Version(tr.__version__) >= Version("4.56.0")
     except Exception:
         use_dtype = hasattr(tr, "__version__") and int(tr.__version__.split(".")[0]) >= 5
     if use_dtype:
@@ -818,7 +849,8 @@ class HFWorker:
             if cls is None:
                 continue
             try:
-                self._model = cls.from_pretrained(self.model_path, **load_kwargs)
+                with _filter_docstring_leak(), _suppress_offload_buffer_advisory():
+                    self._model = cls.from_pretrained(self.model_path, **load_kwargs)
                 logger.debug("hf load: class=%s", cls_name)
                 break
             except (ValueError, OSError, RuntimeError, KeyError) as e:
