@@ -8,14 +8,19 @@ telling the reader to run ``playwright install``. These pin that the message a
 user sees states the reason and localm's remedy and carries none of that, that
 the raw text goes to the debug log, and that the system engine launches the
 browser it found.
+
+A launch that fails, or that outlives the timeout start() waits for, must also
+leave no browser running and no stop() that blocks.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import subprocess
 import sys
+import threading
 import types
 
 import pytest
@@ -658,3 +663,181 @@ def test_a_single_system_failure_is_the_message_the_user_sees(monkeypatch):
     assert ei.value.kind == launch_errors.SYSTEM_MISSING
     assert str(ei.value).startswith("Google Chrome could not be found")
     _assert_reads_as_localm(str(ei.value))
+
+
+class _LaunchFailed(Exception):
+    pass
+
+
+class _LateEvent(threading.Event):
+    """An event whose wait() reports a timeout although it is set by the time
+    wait() returns."""
+
+    def wait(self, timeout=None):
+        super().wait(10)
+        return False
+
+
+class _Launch:
+    """A launch that finishes when the test opens its gate, and a teardown that
+    is recorded instead of run."""
+
+    def __init__(self, monkeypatch, fail=None):
+        self.gate = threading.Event()
+        self.teardowns = []
+        self.sessions = []
+        gate, teardowns = self.gate, self.teardowns
+
+        async def launch(session):
+            while not gate.is_set():
+                await asyncio.sleep(0.005)
+            if fail is not None:
+                raise fail
+
+        async def teardown(session):
+            teardowns.append(session.session_id)
+
+        monkeypatch.setattr(bsession, "_require_playwright", lambda: None)
+        monkeypatch.setattr(bsession.BrowserSession, "_launch", launch)
+        monkeypatch.setattr(bsession.BrowserSession, "_teardown", teardown)
+
+    def session(self, session_id):
+        sess = bsession.BrowserSession(session_id)
+        self.sessions.append(sess)
+        return sess
+
+    def close(self):
+        self.gate.set()
+        for sess in self.sessions:
+            thread, loop = sess._thread, sess._loop
+            if thread is not None and thread.is_alive() and loop is not None:
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=5)
+
+
+@pytest.fixture
+def make_launch(monkeypatch):
+    made = []
+
+    def make(fail=None):
+        made.append(_Launch(monkeypatch, fail))
+        return made[-1]
+
+    yield make
+    for launch in made:
+        launch.close()
+
+
+def _run_within(seconds, fn):
+    """Run fn() on a worker thread and wait *seconds* for it. Returns whether it
+    finished in time, and what it raised."""
+    raised = []
+
+    def call():
+        try:
+            fn()
+        except BaseException as exc:                 # noqa: BLE001
+            raised.append(exc)
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return not worker.is_alive(), (raised[0] if raised else None)
+
+
+def test_a_launch_that_outlives_start_closes_its_browser(make_launch):
+    launch = make_launch()
+    sess = launch.session("t-outlives")
+    raised = None
+    try:
+        sess.start(timeout=0.2)
+    except bsession.BrowserUnavailableError as exc:
+        raised = exc
+
+    launch.gate.set()
+    sess._thread.join(timeout=10)
+
+    assert launch.teardowns == ["t-outlives"], (
+        "a browser that finished launching after start() gave up was left running")
+    assert not sess._thread.is_alive(), (
+        "the loop thread of a session start() gave up on is still running")
+    assert sess._loop.is_closed(), (
+        "the event loop of a session start() gave up on was left open")
+    assert raised is not None and "did not start in time" in str(raised)
+
+
+def test_start_proceeds_when_the_launch_finishes_as_the_timeout_fires(make_launch):
+    launch = make_launch()
+    launch.gate.set()
+    sess = launch.session("t-race")
+    sess._ready = _LateEvent()
+    raised = None
+    try:
+        sess.start(timeout=0.2)
+    except bsession.BrowserUnavailableError as exc:
+        raised = exc
+    running = sess._thread.is_alive()
+    closed_by_start = list(launch.teardowns)
+    sess.stop(timeout=10)
+
+    assert raised is None, (
+        f"start() gave up on a launch that had already finished: {raised}")
+    assert running and closed_by_start == []
+    assert launch.teardowns == ["t-race"]
+    assert not sess._thread.is_alive()
+
+
+def test_stop_after_a_failed_start_returns_at_once(make_launch):
+    launch = make_launch(fail=_LaunchFailed("no chromium"))
+    launch.gate.set()
+    sess = launch.session("t-failed")
+    raised = None
+    try:
+        sess.start(timeout=10)
+    except _LaunchFailed as exc:
+        raised = exc
+
+    finished, error = _run_within(5, lambda: sess.stop(timeout=30.0))
+    sess._thread.join(timeout=10)
+
+    assert finished, "stop() blocked on the loop of a session whose launch failed"
+    assert error is None, f"stop() raised on a session whose launch failed: {error!r}"
+    assert launch.teardowns == ["t-failed"], (
+        "stop() tore down again what the failed launch had already closed")
+    assert sess._loop.is_closed(), "the event loop of a failed launch was left open"
+    assert raised is not None
+
+
+def test_stop_after_start_gave_up_leaves_the_close_to_the_launch(make_launch):
+    launch = make_launch()
+    sess = launch.session("t-gave-up")
+    with pytest.raises(bsession.BrowserUnavailableError):
+        sess.start(timeout=0.2)
+
+    finished, error = _run_within(5, lambda: sess.stop(timeout=30.0))
+    closed_by_stop = list(launch.teardowns)
+    launch.gate.set()
+    sess._thread.join(timeout=10)
+
+    assert closed_by_stop == [], (
+        "stop() ran a teardown while the launch was still in flight")
+    assert launch.teardowns == ["t-gave-up"]
+    assert finished, "stop() blocked on a session start() had given up on"
+    assert error is None, f"stop() raised on a session start() gave up on: {error!r}"
+
+
+def test_a_launch_that_fails_after_start_gave_up_is_logged(make_launch, caplog):
+    launch = make_launch(fail=_LaunchFailed("no chromium here"))
+    sess = launch.session("t-late-failure")
+    with caplog.at_level(logging.WARNING, logger=bsession.logger.name):
+        with pytest.raises(bsession.BrowserUnavailableError):
+            sess.start(timeout=0.2)
+        launch.gate.set()
+        sess._thread.join(timeout=10)
+
+    logged = [r.getMessage() for r in caplog.records
+              if r.levelno >= logging.WARNING]
+    assert launch.teardowns == ["t-late-failure"]
+    assert any("no chromium here" in m for m in logged), (
+        f"the launch's own failure was lost once start() had given up: {logged}")
