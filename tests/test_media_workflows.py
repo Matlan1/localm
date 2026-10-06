@@ -30,6 +30,14 @@ def home(tmp_path, monkeypatch):
     return h
 
 
+@pytest.fixture(autouse=True)
+def fresh_media_locks(monkeypatch):
+    """Each test starts with its own per-media lock registry, so a worker a
+    timed-out request abandoned in an earlier test, still holding the old lock,
+    cannot make this test's requests queue behind it."""
+    monkeypatch.setattr(mw, "_media_locks", {})
+
+
 _WF = json.dumps({"3": {"class_type": "KSampler", "inputs": {}},
                   "4": {"class_type": "SaveImage", "inputs": {}}}).encode()
 
@@ -161,6 +169,20 @@ def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
     assert elapsed < 1.5, (
         f"the route waited {elapsed:.2f}s despite a 0.2s budget - the "
         "timeout did not actually bound the request")
+
+
+def test_an_abandoned_worker_keeps_holding_the_media_lock_it_took():
+    """Leaves the "image" lock held, as a worker abandoned by a timed-out request
+    does. The next test asserts it starts with that lock free."""
+    assert mw._lock_for("image").acquire(blocking=False)
+
+
+def test_the_next_test_does_not_inherit_an_abandoned_workers_media_lock():
+    lock = mw._lock_for("image")
+    assert lock.acquire(blocking=False), (
+        "the per-media lock was still held from an earlier test, so this "
+        "test's requests would queue behind it")
+    lock.release()
 
 
 def test_rmw_timeout_has_headroom_over_a_single_holders_own_work_ceiling():
