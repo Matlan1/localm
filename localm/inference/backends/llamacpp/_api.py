@@ -214,6 +214,14 @@ def llama_model_n_embd(model: ctypes.c_void_p) -> int:
     return _bind("llama_model_n_embd", ctypes.c_int32, LlamaModel)(model)
 
 
+def llama_model_n_embd_inp(model: ctypes.c_void_p) -> int:
+    """Floats per input embedding row (the width of an encoded image chunk), or
+    ``llama_model_n_embd`` on a build that does not export this accessor."""
+    if hasattr(load_lib(), "llama_model_n_embd_inp"):
+        return _bind("llama_model_n_embd_inp", ctypes.c_int32, LlamaModel)(model)
+    return llama_model_n_embd(model)
+
+
 def llama_model_n_layer(model: ctypes.c_void_p) -> int:
     return _bind("llama_model_n_layer", ctypes.c_int32, LlamaModel)(model)
 

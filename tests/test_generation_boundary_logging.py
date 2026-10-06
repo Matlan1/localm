@@ -28,6 +28,7 @@ from localm.inference.backends.llamacpp.llama import LlamaCpp
 from localm.inference.backends.llamacpp._runner import ModelRunner
 from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init
+from tests._fake_mtmd import fake_vision_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ def _mock_native_api() -> MagicMock:
     mock_api.llama_get_memory.return_value = 333
     mock_api.llama_memory_seq_rm.return_value = True
     mock_api.llama_decode.return_value = 0
+    mock_api.llama_n_ctx.return_value = 4096
     mock_api.llama_batch_init.side_effect = fake_batch_init
     mock_api.llama_sampler_sample.return_value = 42
     mock_api.llama_sampler_free = MagicMock()
@@ -71,8 +73,8 @@ def _bare_llama_vision() -> LlamaCpp:
     llm = _bare_llama()
     llm._mtmd = MagicMock()
     llm._mtmd.marker = "<image>"
-    llm._mtmd.count_tokens.return_value = 10   # well under _ctx_capacity (4096)
-    llm._mtmd.eval_into.return_value = 3   # pos after prefill
+    llm._mtmd.encode_count = 0
+    llm._mtmd.tokenize.return_value = fake_vision_prompt()   # 3 prompt tokens
     return llm
 
 
@@ -254,7 +256,8 @@ class TestLlamaCppGenerateImageBoundaryLogging:
 
     def test_prefill_failure_logs_start_but_not_complete_then_aborts(self, caplog):
         llm = _bare_llama_vision()
-        llm._mtmd.eval_into.side_effect = RuntimeError("mtmd eval failed")
+        llm._mtmd.tokenize.return_value = fake_vision_prompt(image_tokens=4)
+        llm._mtmd.eval_media_chunk.side_effect = RuntimeError("mtmd eval failed")
         mock_api = _mock_native_api()
 
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \

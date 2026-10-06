@@ -27,8 +27,8 @@ class VisionInputError(UnsupportedInputError):
     It must not be a bare ``RuntimeError``: the GGUF worker's dispatch loop lets
     an escaping exception KILL the process, because an escaping exception there
     means a native fault that left the model in an unknown state (see
-    ``_runner.py``'s chat_stream branch). Every failure ``mtmd.eval_into``
-    reports is the opposite of that - a native call that RETURNED NORMALLY with a
+    ``_runner.py``'s chat_stream branch). Every failure the mtmd vision prefill
+    (``MtmdContext.tokenize`` / ``eval_media_chunk``) reports is the opposite of that - a native call that RETURNED NORMALLY with a
     status code localm itself checked - so the model is unharmed and the request
     should fail, not the worker.
     """

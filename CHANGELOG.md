@@ -144,6 +144,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with an open session, has to be ended first.
 
 ### Changed
+- **Follow-up messages in a chat with an image answer much faster on GGUF
+  models.** Once an image has been sent, each later turn used to encode every
+  image in the conversation again and reprocess the whole chat, which could take
+  minutes per turn when images are encoded on the CPU. Now an image is encoded
+  only once, and on most models only the previous reply and the new message are
+  processed (Qwen-VL models still reprocess the conversation text, as they do in
+  text-only chats); the status line reads "Processing prompt..." instead of
+  "Encoding image..." when no image needs encoding. Encoded images are kept in memory only for the most recent image
+  conversation and are released when the model unloads.
 - **Settings' "Library" section is now called "Model Library & Sources".**
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
 - **Web activity in the chat is its own collapsed card, not a user turn.** A

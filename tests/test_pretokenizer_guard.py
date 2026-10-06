@@ -576,7 +576,7 @@ class TestVisionPathIsGuardedToo:
         obj._stop = threading.Event()
         obj._ctx_ptr = object()
         obj._reset_kv_for_image = MagicMock()
-        obj._mtmd.eval_into.return_value = 0
+        obj._mtmd.tokenize.side_effect = RuntimeError("the stub stops at mtmd")
         return obj
 
     def _drive(self, obj, prompt):
@@ -592,7 +592,7 @@ class TestVisionPathIsGuardedToo:
         obj = self._vision_llama("llama4", prompt)
         with pytest.raises(PretokenizerUnsafeInputError):
             self._drive(obj, prompt)
-        obj._mtmd.eval_into.assert_not_called()
+        obj._mtmd.tokenize.assert_not_called()
 
     def test_an_unaffected_vision_model_is_not_blocked_by_the_guard(self):
         # The guard must not be what stops an ordinary vision request; this one
@@ -602,6 +602,7 @@ class TestVisionPathIsGuardedToo:
         with pytest.raises(Exception) as exc:
             self._drive(obj, prompt)
         assert not isinstance(exc.value, PretokenizerUnsafeInputError)
+        obj._mtmd.tokenize.assert_called_once()
 
 
 class TestAFailedPreTypeReadIsVisible:
