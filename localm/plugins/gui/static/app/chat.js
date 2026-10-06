@@ -1204,8 +1204,22 @@ const MEMORY_DEGRADE_LABELS = {
  *  the selected model answered because a model that could have answered was
  *  skipped or failed to load: `fallback` is the server's explanation. */
 export function buildRoutedChip(routed) {
-  const chip = el("span", "routed-chip");
+  const chip = routed.suggest ? el("button", "routed-chip routed-suggest")
+    : el("span", "routed-chip");
   chip.appendChild(iconEl("models", "btn-ic"));
+  if (routed.suggest) {
+    const needs = (routed.gaps || []).map((g) => t("chat.routed.cap." + g)).join(", ") || "?";
+    chip.appendChild(document.createTextNode(t("chat.routed.suggestChip", { model: routed.suggest })));
+    chip.title = t("chat.routed.suggestTitle", {
+      from: routed.from || "?", needs, model: routed.suggest });
+    chip.onclick = () => {
+      if ([...modelSelect.options].some((o) => o.value === routed.suggest)) {
+        modelSelect.value = routed.suggest;
+        modelSelect.dispatchEvent(new Event("change"));
+      }
+    };
+    return chip;
+  }
   if (routed.fallback) {
     chip.appendChild(document.createTextNode(t("chat.routed.fallbackChip")));
     chip.title = routed.fallback;

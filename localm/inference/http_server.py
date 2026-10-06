@@ -1161,7 +1161,8 @@ def plan_capability_route(model_name: str | None, messages: list,
                 if n not in peer_routes}
 
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                          current_known=known, skip=skip_set)
+                          current_known=known, skip=skip_set,
+                          mode=_cr.configured_mode())
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
@@ -4994,7 +4995,8 @@ def _capability_route_header(route) -> dict:
     must be able to tell them apart, so they are not flattened into one flag.
     Compact ASCII JSON, header-safe:
     ``{"resolved","requested","routed","pinned","gaps":{cap:"absent"|"unknown"},
-    "unmet":[...]}``, plus ``"load_errors":[...]`` (each cut to 200
+    "unmet":[...]}``, plus ``"suggested":<model>`` when model autoswitch is
+    ``ask`` and another model would have answered, plus ``"load_errors":[...]`` (each cut to 200
     characters) when every capable model failed to load, and, when a model was
     left out because its last load failed, ``"skipped":[{"model","failed_at",
     "retry_at","reason"}]`` (the times in epoch seconds). ``"note"`` carries
@@ -5011,6 +5013,9 @@ def _capability_route_header(route) -> dict:
                  for c, s in route.gaps.items()},
         "unmet": list(route.unmet),
     }
+    suggested = getattr(route, "suggested", None)
+    if suggested:
+        payload["suggested"] = suggested
     load_errors = getattr(route, "load_errors", ())
     if load_errors:
         payload["load_errors"] = [str(e)[:200] for e in load_errors]

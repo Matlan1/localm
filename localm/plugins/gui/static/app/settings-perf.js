@@ -2171,6 +2171,7 @@ export function parseRoutingHeader(resp) {
       gaps: data.gaps && typeof data.gaps === "object"
         ? Object.keys(data.gaps).filter((g) => !unmet.includes(g)) : [],
       unmet,
+      ...(typeof data.suggested === "string" && data.suggested ? { suggested: data.suggested } : {}),
       ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
     };
   } catch { return null; }
@@ -2473,8 +2474,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const answeredBy = (routing && routing.routed && routing.resolved) || modelName;
   const routedNote = routing && routing.routed
     ? { from: routing.requested || modelName, gaps: routing.gaps }
-    : (routing && !routing.pinned && routing.note
-      ? { fallback: routing.note, gaps: [] } : null);
+    : (routing && !routing.pinned && routing.suggested
+      ? { from: routing.requested || modelName, suggest: routing.suggested,
+          gaps: [...routing.gaps, ...routing.unmet] }
+      : (routing && !routing.pinned && routing.note
+        ? { fallback: routing.note, gaps: [] } : null));
   if (aborted) {
     renderMarkdown(liveBody,
       (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +
