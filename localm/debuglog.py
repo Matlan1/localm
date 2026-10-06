@@ -742,20 +742,26 @@ class _GrammarTraceFolder:
     or _MAX_CONTINUATION_LINES held lines release the held lines to *forward*.
     A triggered record ends at the first of its lines that ends in "'". A
     record whose closing delimiter has not arrived after
-    _MAX_CONTINUATION_LINES further lines is treated as ended."""
+    _MAX_CONTINUATION_LINES further lines is treated as ended.
+
+    *redacted*, when given, receives the first line of every record with its
+    payload removed (``Grammar still awaiting trigger after token <id>`` or
+    ``Grammar triggered on regex``, followed by the line's own trailing "\\r"),
+    at the moment the record is recognised and in order with *forward*."""
 
     _TRACE_PREFIX = "Grammar "
     _AWAITING = "Grammar still awaiting trigger after token "
-    _AWAITING_ID = re.compile(r"-?\d+ \(`")
+    _AWAITING_ID = re.compile(r"(-?\d+) \(`")
     _AWAITING_CLOSER = "`)"
     _TRIGGERED = "Grammar triggered on regex: '"
     _TRIGGERED_CLOSER = "'"
     _MAX_CONTINUATION_LINES = 64
     _MAX_TAIL = 256
 
-    def __init__(self, record, forward) -> None:
+    def __init__(self, record, forward, redacted=None) -> None:
         self._record = record
         self._forward = forward
+        self._redacted = redacted
         self._awaiting = 0
         self._closer: Optional[str] = None
         self._continuations = 0
@@ -783,20 +789,24 @@ class _GrammarTraceFolder:
                 if len(self._held) >= self._MAX_CONTINUATION_LINES:
                     self._release()
                 return
-        if not self._start(text):
+        if not self._start(text, line):
             self._forward(line)
 
-    def _start(self, text: str) -> bool:
+    def _start(self, text: str, line: str) -> bool:
         if text.startswith(self._AWAITING):
             opening = self._AWAITING_ID.match(text, len(self._AWAITING))
             if opening is None:
                 return False
             self._awaiting += 1
+            if self._redacted is not None:
+                self._redacted(self._AWAITING + opening.group(1) + line[len(text):])
             self._open(text[opening.end():], self._AWAITING_CLOSER)
             return True
         if text.startswith(self._TRIGGERED):
             self._record_awaiting()
             self._record("Grammar triggered on regex")
+            if self._redacted is not None:
+                self._redacted("Grammar triggered on regex" + line[len(text):])
             self._open(text[len(self._TRIGGERED):], self._TRIGGERED_CLOSER)
             return True
         return False
@@ -858,6 +868,9 @@ def dedup_native_stderr(swap_lock=None):
     RAW (ungrouped) line is ALSO appended to the debug log file
     (native_stderr_target()), exactly as _quiet_stderr already does for the
     windows it covers - only the two LIVE views are grouped, never the file.
+    When debug_content_enabled() is False, the file copy of a grammar trace
+    record keeps only its first line without the generated text, and every
+    other line stays byte-identical and in order.
     If a persisted-log write itself fails (disk full, a closed fd), the line
     still reaches the console and the ring buffer and a single warning is
     emitted (see the _write_debug latch below) - degraded, never a silent drop.
@@ -918,9 +931,25 @@ def dedup_native_stderr(swap_lock=None):
                 console.flush()
         record_native_line(text)
 
+    redact_debug = debug_fd is not None and not debug_content_enabled()
+
+    class _Unterminated(str):
+        """The last native line when the stream ended without a newline."""
+
+    def _debug_line(line: str) -> None:
+        data = line.encode("utf-8", errors="surrogateescape")
+        _write_debug(data if isinstance(line, _Unterminated) else data + b"\n")
+
+    def _forward(line: str) -> None:
+        if redact_debug:
+            _debug_line(line)
+        grouper.feed(
+            line.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace"))
+
     grouper = _LineGrouper(_emit)
-    grammar_trace = _GrammarTraceFolder(lambda text: record_native_line(text),
-                                        lambda line: grouper.feed(line))
+    grammar_trace = _GrammarTraceFolder(
+        lambda text: record_native_line(text), _forward,
+        _debug_line if redact_debug else None)
 
     def _reader() -> None:
         buf = b""
@@ -935,14 +964,17 @@ def dedup_native_stderr(swap_lock=None):
                 buf += chunk
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
-                    _write_debug(raw + b"\n")
-                    grammar_trace.feed(raw.decode("utf-8", errors="replace"))
+                    if not redact_debug:
+                        _write_debug(raw + b"\n")
+                    grammar_trace.feed(raw.decode("utf-8", errors="surrogateescape"))
         finally:
             with contextlib.suppress(OSError):
                 os.close(read_fd)
         if buf:
-            _write_debug(buf)
-            grammar_trace.feed(buf.decode("utf-8", errors="replace"))
+            if not redact_debug:
+                _write_debug(buf)
+            tail = buf.decode("utf-8", errors="surrogateescape")
+            grammar_trace.feed(_Unterminated(tail))
         grammar_trace.flush()
         grouper.flush()
 
