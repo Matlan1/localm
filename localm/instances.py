@@ -473,6 +473,75 @@ def start_identity_matches(recorded, current) -> bool:
     return False
 
 
+_PID_SPACE: "str | None" = None
+_LINUX_MACHINE_ID_FILES = (Path("/etc/machine-id"),
+                           Path("/var/lib/dbus/machine-id"))
+
+
+def machine_guid() -> str:
+    """This Windows installation's MachineGuid, or "" on other platforms and
+    when it cannot be read."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Cryptography", 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+            value, _ = winreg.QueryValueEx(k, "MachineGuid")
+    except (OSError, ImportError):
+        return ""
+    return str(value).strip()
+
+
+def linux_machine_id() -> str:
+    """This Linux installation's machine-id (/etc/machine-id, else
+    /var/lib/dbus/machine-id), or "" on other platforms and when neither can
+    be read. Cloned images can share one, so it narrows the host a pid table
+    belongs to without identifying it."""
+    if not sys.platform.startswith("linux"):
+        return ""
+    for path in _LINUX_MACHINE_ID_FILES:
+        try:
+            value = path.read_text(encoding="ascii").strip()
+        except (OSError, ValueError):
+            continue
+        if value:
+            return value
+    return ""
+
+
+def pid_space_id() -> str:
+    """An opaque id for the pid table this process's pids belong to: the
+    platform, the Windows MachineGuid (see :func:`machine_guid`), the Linux
+    machine-id (see :func:`linux_machine_id`), the host name and, on Linux, the
+    pid namespace, hashed.
+
+    A process that can read none of the machine identifiers, the host name and
+    the pid namespace gets an id unique to itself, so no other process's record
+    matches it.
+    """
+    global _PID_SPACE
+    if _PID_SPACE is None:
+        import hashlib
+        import platform
+        import uuid
+        parts = [sys.platform, machine_guid(), linux_machine_id()]
+        try:
+            parts.append(platform.node() or "")
+        except Exception:
+            parts.append("")
+        try:
+            parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
+        except OSError:
+            pass
+        if not any(parts[1:]):
+            parts.append(uuid.uuid4().hex)
+        _PID_SPACE = hashlib.sha256(
+            "".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+    return _PID_SPACE
+
+
 def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
     """Direct-process fallback for ``localm stop`` when a graceful HTTP shutdown
     (POST /v1/server/shutdown) could not be confirmed - the server did not

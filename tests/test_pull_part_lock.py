@@ -538,11 +538,12 @@ def test_a_holder_in_another_pid_namespace_keeps_its_lock(home):
 
 
 def test_the_pid_space_id_differs_between_platforms_on_one_host(monkeypatch):
+    from localm import instances
     from localm.model_manager import pull
-    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "win32")
     windows = pull._pid_space_id()
-    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "linux")
     linux = pull._pid_space_id()
     assert windows != linux
@@ -574,6 +575,7 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
     Windows its MachineGuid gives it another pid space; on Linux the pid space
     matches but its start identity carries another boot id. Either way the
     lock stays."""
+    from localm import instances
     from localm.model_manager import pull
     other = _idle_child()
     try:
@@ -584,8 +586,9 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
                             "boot": "00000000-0000-0000-0000-000000000000"}
         else:
             with monkeypatch.context() as m:
-                m.setattr(pull, "_PID_SPACE", None)
-                m.setattr(pull, "_machine_guid", lambda: "another-machine-guid")
+                m.setattr(instances, "_PID_SPACE", None)
+                m.setattr(instances, "machine_guid",
+                          lambda: "another-machine-guid")
                 remote_space = pull._pid_space_id()
             # The injection took: the same host name, another MachineGuid.
             assert remote_space != this_pid_space()
@@ -612,8 +615,8 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
 @pytest.mark.skipif(sys.platform != "win32",
                     reason="MachineGuid is a Windows registry value")
 def test_the_windows_machine_guid_is_read():
-    from localm.model_manager.pull import _machine_guid
-    assert _machine_guid(), "no MachineGuid was read"
+    from localm.instances import machine_guid
+    assert machine_guid(), "no MachineGuid was read"
 
 
 def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
