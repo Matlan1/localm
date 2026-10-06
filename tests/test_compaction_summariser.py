@@ -224,7 +224,8 @@ def test_the_summariser_runs_with_thinking_off():
 
 
 class _EndlessEngine:
-    """A summariser that never finishes and holds a lock while generating."""
+    """A summariser that runs for up to ~6 s unless closed, holding a lock
+    while generating."""
     display_name = "endless-model"
 
     def __init__(self):
@@ -237,7 +238,7 @@ class _EndlessEngine:
             with self.lock:
                 self.entered.set()
                 try:
-                    while True:
+                    for _ in range(600):
                         time.sleep(0.01)
                         yield "t"
                 finally:
@@ -269,11 +270,13 @@ def test_a_disconnect_stops_the_summariser():
         assert eng.entered.is_set(), "the summariser never started"
         assert eng.lock.locked()
         gone.set()
-        out, changed, disconnected = await asyncio.wait_for(task, timeout=5.0)
-        return eng, out, changed, disconnected
+        started = time.monotonic()
+        out, changed, disconnected = await task
+        return eng, out, changed, disconnected, time.monotonic() - started
 
-    eng, out, changed, disconnected = asyncio.run(scenario())
+    eng, out, changed, disconnected, elapsed = asyncio.run(scenario())
     assert disconnected is True
+    assert elapsed < 2.0, f"the summariser ran on for {elapsed:.1f}s after the disconnect"
     assert eng.closed.is_set(), "the summariser generation was not closed"
     assert not eng.lock.locked(), "the summariser still holds its lock"
 
