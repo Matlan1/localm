@@ -738,15 +738,15 @@ def test_the_app_window_keeps_its_profile_inside_the_data_folder(monkeypatch, pl
     assert kwargs["private_mode"] is False
 
 
-def test_the_app_window_keeps_nothing_where_the_platform_cannot_be_pointed_at_a_folder(
+def test_the_macos_window_keeps_pywebviews_own_store_and_creates_no_profile_folder(
         monkeypatch):
-    """pywebview's macOS backend has no storage path option, so the window runs
-    in private mode there instead of writing a profile outside the data folder."""
+    """pywebview's macOS backend has no storage path option and its private mode
+    only wipes at the next window creation, so the window is left as it was."""
     from localm.config import home_dir
     kwargs = _start_kwargs(monkeypatch, "darwin")
 
     assert "storage_path" not in kwargs
-    assert kwargs["private_mode"] is True
+    assert kwargs["private_mode"] is False
     assert not (home_dir() / "app-window").exists()
 
 
@@ -804,5 +804,46 @@ def test_a_qt_backend_that_cannot_be_confined_runs_the_window_private_and_says_s
 
     assert "storage_path" not in kwargs
     assert kwargs["private_mode"] is True
+    assert any("app-window" in r.getMessage() and r.levelname == "WARNING"
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.parametrize("path, expected", [
+    (r"\\server\share\localm\app-window", True),
+    (r"D:\localm\app-window", False),
+])
+def test_a_unc_path_is_a_network_path_and_a_local_drive_is_not(monkeypatch, path, expected):
+    monkeypatch.setattr(appface.sys, "platform", "win32")
+    monkeypatch.setattr("ctypes.windll",
+                        SimpleNamespace(kernel32=SimpleNamespace(
+                            GetDriveTypeW=lambda root: 3)), raising=False)
+
+    assert appface._is_network_path(path) is expected
+
+
+def test_a_mapped_network_drive_is_a_network_path(monkeypatch):
+    monkeypatch.setattr(appface.sys, "platform", "win32")
+    seen = []
+    monkeypatch.setattr("ctypes.windll",
+                        SimpleNamespace(kernel32=SimpleNamespace(
+                            GetDriveTypeW=lambda root: seen.append(root) or 4)),
+                        raising=False)
+
+    assert appface._is_network_path(r"Z:\localm\app-window") is True
+    assert seen == ["Z:\\"]
+
+
+def test_a_data_folder_on_a_network_drive_runs_the_window_private_and_says_so(
+        monkeypatch, caplog):
+    """WebView2 does not support a profile on a network drive, and a window that
+    fails to initialise there stays blank with no browser fallback."""
+    monkeypatch.setattr(appface, "_is_network_path", lambda path: True)
+    from localm.config import home_dir
+    with caplog.at_level("WARNING", logger="localm"):
+        kwargs = _start_kwargs(monkeypatch, "win32")
+
+    assert "storage_path" not in kwargs
+    assert kwargs["private_mode"] is True
+    assert not (home_dir() / "app-window").exists()
     assert any("app-window" in r.getMessage() and r.levelname == "WARNING"
                for r in caplog.records), [r.getMessage() for r in caplog.records]

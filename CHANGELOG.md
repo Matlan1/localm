@@ -175,10 +175,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the data folder, or choosing "delete saved data" when uninstalling, left a
   copy of your recent chats and your sign-in behind. They now live in
   `app-window` inside the data folder and go with it, and on Linux the window's
-  web cache moves there too. On macOS the window keeps nothing between launches,
-  and it does the same on any system where that folder cannot be created (a
-  warning is logged). The shared folder from earlier installs is left alone and
-  not migrated; the uninstaller still names it.
+  web cache moves there too. If `app-window` cannot be used (a read-only data
+  folder, or one on a network drive, which the Windows web view does not
+  support), the window keeps nothing after it closes and a warning is logged.
+  macOS cannot be pointed at a folder, so there the window still keeps its data
+  in macOS's own storage outside the data folder. The shared folder from earlier
+  installs is left alone and not migrated; the uninstaller still names it.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",

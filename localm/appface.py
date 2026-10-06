@@ -13,6 +13,7 @@ server from running.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import sys
 import threading
@@ -210,18 +211,35 @@ def _confine_qt_profile(path: str) -> None:
     qt.QWebEngineProfile = _ConfinedProfile
 
 
+def _is_network_path(path: str) -> bool:
+    """Whether *path* is on a network location (a UNC path or a mapped network
+    drive). Windows only; False elsewhere or when the drive type is unknown."""
+    if sys.platform != "win32":
+        return False
+    if path.startswith("\\\\"):
+        return True
+    drive = ntpath.splitdrive(path)[0]
+    if not drive:
+        return False
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4
+    except (AttributeError, OSError):
+        return False
+
+
 def _window_profile_dir() -> Optional[str]:
     """The folder inside the data folder where the app window keeps its login
-    cookie, page storage and web cache, created when missing. None when the
-    window cannot keep a profile there: pywebview's macOS backend has no storage
-    path option, and a data folder that cannot hold the folder, or a Qt backend
-    whose cache cannot be moved into it, logs a warning. The caller then runs the
-    window private, keeping nothing. Never raises."""
-    if sys.platform == "darwin":
-        return None
+    cookie, page storage and web cache, created when missing. None, with a
+    logged warning, when the window cannot keep a profile there: the data folder
+    cannot hold the folder, it is on a network drive (WebView2 does not support
+    a profile there), or the Qt backend's cache cannot be moved into it. The
+    caller then runs the window private. Never raises."""
     try:
         from localm.config import home_dir
         path = home_dir() / "app-window"
+        if _is_network_path(str(path)):
+            raise OSError(f"{path} is on a network drive")
         path.mkdir(parents=True, exist_ok=True)
         if not os.access(path, os.W_OK):
             raise PermissionError(f"{path} is not writable")
@@ -231,8 +249,25 @@ def _window_profile_dir() -> Optional[str]:
     except Exception:
         logger.warning("appface: could not set up the app window profile folder "
                        "app-window in the data folder; the window keeps no login "
-                       "or page data between launches", exc_info=True)
+                       "or page data after it closes", exc_info=True)
         return None
+
+
+def _window_start_kwargs() -> dict:
+    """The webview.start() arguments that decide where the app window keeps its
+    profile: a folder in the data folder on Windows and Linux, private mode when
+    that folder cannot be used. pywebview's macOS backend has no storage path
+    option, so there the window keeps pywebview's own default store."""
+    kwargs = {"icon": icon_path(), "private_mode": False}
+    if sys.platform != "darwin":
+        profile = _window_profile_dir()
+        if profile is None:
+            kwargs["private_mode"] = True
+        else:
+            kwargs["storage_path"] = profile
+    if sys.platform.startswith("linux"):
+        kwargs["gui"] = "qt"
+    return kwargs
 
 
 def run_native_window(url: str, name: str = "LocaLM", *,
@@ -366,6 +401,7 @@ def run_native_window(url: str, name: str = "LocaLM", *,
 
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
+    start_kwargs = _window_start_kwargs()
     try:
         # One step under the lock close_native_window() reads under: either the
         # stop is seen here and no window is published, or the window is
@@ -376,22 +412,10 @@ def run_native_window(url: str, name: str = "LocaLM", *,
                 return True
             _native_window = window
         try:
-            # With a profile folder in the data folder the window keeps its login
-            # cookie across restarts, like the browser tab this replaces; without
-            # one it runs private and keeps nothing. Blocks until the window is
-            # destroyed. gui="qt" on Linux: pywebview tries GTK first, and this
-            # project never installs the GTK extra, so qt is the backend the
-            # `desktop` extra actually provides there. Windows and macOS keep
-            # pywebview's default.
-            start_kwargs = {"icon": icon_path()}
-            profile = _window_profile_dir()
-            if profile is None:
-                start_kwargs["private_mode"] = True
-            else:
-                start_kwargs["private_mode"] = False
-                start_kwargs["storage_path"] = profile
-            if sys.platform.startswith("linux"):
-                start_kwargs["gui"] = "qt"
+            # Blocks until the window is destroyed. gui="qt" on Linux: pywebview
+            # tries GTK first, and this project never installs the GTK extra, so
+            # qt is the backend the `desktop` extra actually provides there.
+            # Windows and macOS keep pywebview's default.
             webview.start(**start_kwargs)
         except Exception:
             logger.debug("appface: native window loop failed", exc_info=True)
