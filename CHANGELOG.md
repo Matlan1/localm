@@ -174,6 +174,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Long chats keep their thread when older messages are compacted.** With a
+  reasoning ("thinking") model the summary of older messages was never written,
+  so the earlier conversation was replaced by a one-line note and the model lost
+  track of what you were talking about. The summary is now written with
+  reasoning turned off, and if it still cannot be written the earlier messages
+  are kept as short excerpts instead of being dropped. The messages kept as they
+  are always start with one of your own messages, so your latest request is never
+  lost and the conversation no longer shows two assistant replies in a row. The
+  same applies to the coder, which also keeps your current request when it
+  compacts a long session. Closing the request while a server-side compaction is
+  running now stops the summary instead of letting it run to the end.
 - **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
   projector files record a width that is not the one the model uses, so localm
   decided the projector did not fit and left it off: the model was not shown as

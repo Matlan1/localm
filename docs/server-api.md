@@ -39,6 +39,7 @@ request extras:
 | `top_k`, `repeat_penalty` | extra sampling controls |
 | `seed` | reproducible generation |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
+| `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks to answer without reasoning. Only `enable_thinking` (a boolean) is accepted; any other key is refused with 422. A model without a `<think>` convention is unaffected. |
 
 A message may also carry `untrusted_spans`: `[[start, end], ...]` character
 ranges of its own `content` that came from an untrusted source, such as a

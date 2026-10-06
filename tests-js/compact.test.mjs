@@ -116,12 +116,12 @@ test("F-02: an HTTP-200 inference error is not accepted as a summary", async () 
   const conv = makeConv(20);
   const original = conv.messages.map((m) => m.content);
   const ok = await window.compactConversation(conv);
-  assert.equal(ok, true, "compaction still ran (hard-trim fallback)");
+  assert.equal(ok, true, "compaction still ran (digest fallback)");
   const all = JSON.stringify(conv.messages.map((m) => m.content));
   assert.doesNotMatch(all, /inference error/, "the error text is not in the transcript");
   assert.doesNotMatch(all, /\[Conversation summary\]/, "no summary bridge was claimed");
-  assert.match(conv.messages[0].content, /trimmed to fit the context window/,
-    "the documented hard-trim bridge was used instead");
+  assert.match(conv.messages[0].content, /condensed to fit the context window/,
+    "the digest bridge was used instead");
   assert.ok(toasts.some((t) => /trimmed/.test(t)), "the user is told it was trimmed");
   assert.ok(!toasts.some((t) => /summarised/.test(t)), "no summarised-success message");
   const archived = window.compactedTurns(conv.messages).map((m) => m.content);
@@ -130,14 +130,74 @@ test("F-02: an HTTP-200 inference error is not accepted as a summary", async () 
     "every removed original turn is archived, in order");
 });
 
-test("F-02: a finish_reason other than stop (length) is not accepted as a summary", async () => {
+test("a length-cut reply with visible text is accepted as the summary", async () => {
   const { impl } = summFetch("A summary that was cut off mid", "length");
   const { window } = loadApp({ fetchImpl: impl });
   runScript(window, "chat.ctxMax = 160;");
   const conv = makeConv(20);
   await window.compactConversation(conv);
-  assert.doesNotMatch(conv.messages[0].content, /\[Conversation summary\]/);
-  assert.match(conv.messages[0].content, /trimmed to fit/);
+  assert.match(conv.messages[0].content, /\[Conversation summary\]\nA summary that was cut off mid/);
+});
+
+test("a reasoning-only reply keeps a digest of the removed turns, not a bare note", async () => {
+  const { impl } = summFetch("<think>Thinking Process: drafting the", "length");
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 160;");
+  const conv = makeConv(20);
+  const original = conv.messages.map((m) => m.content);
+  await window.compactConversation(conv);
+  const bridge = conv.messages[0].content;
+  assert.doesNotMatch(bridge, /\[Conversation summary\]/);
+  assert.doesNotMatch(bridge, /Thinking Process/);
+  assert.match(bridge, /condensed to fit the context window/);
+  const kept = conv.messages.length - 2;
+  for (const c of original.slice(0, 20 - kept)) {
+    assert.ok(bridge.includes(c.trim()), `removed turn ${c} is in the digest`);
+  }
+});
+
+test("the summarise request asks for no reasoning and a 1024-token budget", async () => {
+  const { impl, calls } = summFetch("ok");
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 160;");
+  await window.compactConversation(makeConv(20));
+  const summReq = calls.find((c) => c.url === "/v1/chat/completions");
+  assert.equal(summReq.body.max_tokens, 1024);
+  assert.equal(JSON.stringify(summReq.body.chat_template_kwargs),
+    JSON.stringify({ enable_thinking: false }));
+});
+
+test("the kept tail starts at a user turn and the pending request survives", async () => {
+  for (const n of [9, 10, 11, 20, 21]) {
+    for (const ctx of [40, 80, 160, 400]) {
+      const { impl } = summFetch("Summary.");
+      const { window } = loadApp({ fetchImpl: impl });
+      runScript(window, `chat.ctxMax = ${ctx};`);
+      const conv = makeConv(n);
+      const last = conv.messages[n - 1].content;
+      await window.compactConversation(conv);
+      const roles = conv.messages.map((m) => m.role);
+      for (let i = 1; i < roles.length; i++) {
+        assert.notEqual(roles[i], roles[i - 1], `n=${n} ctx=${ctx}: ${roles.join(",")}`);
+      }
+      assert.equal(conv.messages[conv.messages.length - 1].content, last);
+    }
+  }
+});
+
+test("compactionCut skips tool events and assistant turns", () => {
+  const { window: w } = loadApp();
+  const msgs = [
+    { role: "user", content: "a" },
+    { role: "assistant", content: "b" },
+    { role: "user", content: "c" },
+    { kind: "tool", role: "user", content: "web" },
+    { role: "assistant", content: "d" },
+  ];
+  assert.equal(w.isToolEvent(msgs[3]), true);
+  assert.equal(w.compactionCut(msgs, 4), 2);
+  assert.equal(w.compactionCut(msgs, 1), 2);
+  assert.equal(w.compactionCut([{ role: "user", content: "a" }, { role: "assistant", content: "b" }], 1), 0);
 });
 
 test("F-02: a successful summary still takes the normal path and archives the originals", async () => {

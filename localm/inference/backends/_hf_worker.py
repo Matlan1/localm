@@ -319,8 +319,10 @@ def _require_chat_template(*templated) -> None:
     raise ChatTemplateMissingError(CHAT_TEMPLATE_MISSING_MESSAGE)
 
 
-def _untrusted_prompt_ranges(tokenizer, template_messages, text):
-    """Untrusted character ranges of the rendered prompt *text*.
+def _untrusted_prompt_ranges(tokenizer, template_messages, text,
+                             template_kwargs=None):
+    """Untrusted character ranges of the rendered prompt *text*, which was
+    rendered with *template_kwargs* passed to ``apply_chat_template``.
 
     Empty when no message carries an annotation (the common case, which costs no
     extra render) and also when the ranges cannot be located exactly, in which
@@ -347,7 +349,8 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text):
     def render(sentinels):
         probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels)]
         return tokenizer.apply_chat_template(
-            probe, tokenize=False, add_generation_prompt=True)
+            probe, tokenize=False, add_generation_prompt=True,
+            **(template_kwargs or {}))
 
     spans = content_spans_via_sentinels([str(c) for c in contents], render, text)
     if spans is None:
@@ -360,8 +363,11 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text):
     return map_untrusted_ranges(spans, per_message)
 
 
-def _tokenize_prompt(tokenizer, template_messages, text, device):
-    """Tokenise *text*, splitting special tokens inside untrusted spans only.
+def _tokenize_prompt(tokenizer, template_messages, text, device, *,
+                     template_kwargs=None, suffix=""):
+    """Tokenise *text* + *suffix*, splitting special tokens inside untrusted
+    spans only. The spans are located in *text* (rendered with
+    *template_kwargs*); *suffix* is trusted.
 
     ``split_special_tokens=True`` makes a control token spelled inside untrusted
     content tokenise as ordinary text instead of the real special id. Trusted
@@ -378,11 +384,13 @@ def _tokenize_prompt(tokenizer, template_messages, text, device):
     model's BOS, exactly as on the single-call path.
     """
     plain = lambda: tokenizer(                                    # noqa: E731
-        text, return_tensors="pt", add_special_tokens=False).to(device)
+        text + suffix, return_tensors="pt", add_special_tokens=False).to(device)
 
-    ranges = _untrusted_prompt_ranges(tokenizer, template_messages, text)
+    ranges = _untrusted_prompt_ranges(
+        tokenizer, template_messages, text, template_kwargs)
     if not ranges:
         return plain()
+    text = text + suffix
 
     from localm.textguard import split_by_trust
 
@@ -1110,6 +1118,7 @@ class HFWorker:
         seed: Optional[int] = None,
         cancel_event: Optional[threading.Event] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        thinking: Optional[bool] = None,
     ) -> Iterator[str]:
         # xgrammar has no trigger/lazy mode, and a lazy request must not silently
         # become a STRICT constraint either (a strict grammar stalls thinking
@@ -1215,9 +1224,17 @@ class HFWorker:
         else:
             # Text-only path (even if processor exists, no media was provided)
             _require_chat_template(tokenizer)
+            template_kwargs = {"enable_thinking": False} if thinking is False else {}
             text = tokenizer.apply_chat_template(
-                template_messages, tokenize=False, add_generation_prompt=True
+                template_messages, tokenize=False, add_generation_prompt=True,
+                **template_kwargs,
             )
+            suffix = ""
+            if thinking is False:
+                from .base import no_think_prompt
+                tmpl = getattr(tokenizer, "chat_template", None)
+                suffix = no_think_prompt(
+                    text, tmpl if isinstance(tmpl, str) else None)[len(text):]
             # add_special_tokens=False: the chat template already emits the
             # model's BOS (Gemma <bos>, Llama-3 <|begin_of_text|>, Mistral <s>),
             # so re-tokenizing with the tokenizer default would prepend a SECOND
@@ -1226,7 +1243,8 @@ class HFWorker:
             # (ChatML/Qwen) are for models that take no standalone BOS, so
             # suppressing it here is correct for them too.
             inputs = _tokenize_prompt(
-                tokenizer, template_messages, text, model.device)
+                tokenizer, template_messages, text, model.device,
+                template_kwargs=template_kwargs, suffix=suffix)
 
         # Check prompt token length against context capacity before generate
         input_ids = inputs.get("input_ids")

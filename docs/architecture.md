@@ -288,10 +288,17 @@ models, after verifying the forward target resolves to loopback.
 
 `inference/compact.py` summarises older chat turns through the model when a
 conversation reaches 70% of the context ceiling, keeping the system prompt
-and the last two exchanges verbatim, with a hard-trim fallback that never
-raises. Used by `localm run` interactive chat; the GUI (itself a plugin
-surface now) implements the same protocol client-side. The coder agent has
-its own GBNF-structured compaction in the `localm/plugins/coder/agent/` package.
+and at least the last four messages verbatim. The kept tail always starts at
+a user message, so the latest request survives and roles keep alternating.
+The summary is written with the model's reasoning channel off; when it still
+comes back empty, the bridge carries a bounded digest of excerpts from the
+removed turns instead, and compaction never raises. Used by `localm run`
+interactive chat and by the server before a chat request that nearly fills
+the context; a client disconnect stops the server's summary generation. The
+GUI (itself a plugin surface now) implements the same protocol client-side.
+The coder agent has its own GBNF-structured compaction in the
+`localm/plugins/coder/agent/` package, which also carries the current request
+verbatim into its summary.
 
 ## Plugin engine
 

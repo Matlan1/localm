@@ -2582,6 +2582,7 @@ class LlamaCpp:
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        thinking: Optional[bool] = None,
         **_ignored,
     ):
         """
@@ -2592,6 +2593,9 @@ class LlamaCpp:
             {"choices": [{"delta": {"content": "<token>"}}]}
 
         With ``stream=False`` returns a single completion dict.
+
+        ``thinking=False`` starts a text-only reply with an empty reasoning
+        block (``no_think_prompt``); an image request is unaffected.
         """
         # Use the model's embedded chat template when available (Gemma, Llama3,
         # Mistral, etc.) so we don't force ChatML on every model.
@@ -2620,6 +2624,10 @@ class LlamaCpp:
         else:
             untrusted_ranges = _untrusted_prompt_ranges(
                 self._model_ptr, messages, prompt, fallback_reason)
+        if thinking is False and not going_to_vision:
+            from localm.inference.backends.base import no_think_prompt
+            prompt = no_think_prompt(
+                prompt, api.llama_model_chat_template(self._model_ptr))
         tokens = self._tokenizer.encode(
             prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
 

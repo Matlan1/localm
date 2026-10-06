@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -188,6 +188,25 @@ class ChatRequest(BaseModel):
     # Tokens the answering model's trained context window must hold. Combined
     # with the window the prompt's own size implies; the larger one applies.
     min_context: Optional[int] = Field(None, ge=1)
+    # Chat-template switches. Only ``enable_thinking`` is accepted: false asks a
+    # reasoning model to answer without its reasoning channel.
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+
+    @field_validator("chat_template_kwargs")
+    @classmethod
+    def _known_template_kwargs(cls, v):
+        """Reject a key other than ``enable_thinking``, or a non-boolean value
+        for it, instead of ignoring it."""
+        if v is None:
+            return v
+        unknown = [k for k in v if k != "enable_thinking"]
+        if unknown:
+            raise ValueError(
+                f"unsupported chat_template_kwargs {unknown}; "
+                f"only 'enable_thinking' is accepted")
+        if "enable_thinking" in v and not isinstance(v["enable_thinking"], bool):
+            raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
+        return v
 
     @field_validator("required_capabilities")
     @classmethod

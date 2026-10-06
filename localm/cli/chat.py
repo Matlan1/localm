@@ -806,8 +806,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             continue
 
         # Seamless compaction: summarise older turns before the history
-        # collides with the context ceiling. Never fails - falls back to a
-        # visible hard trim when summarisation is unavailable.
+        # collides with the context ceiling. Never fails - keeps a digest of the
+        # removed turns when summarisation is unavailable.
         from ..inference.compact import maybe_compact
         # Budget against the LOADED model's RESOLVED ceiling (VRAM-derived under
         # ctx_auto), not the static config n_ctx_max, which both over-compacts a
@@ -824,7 +824,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 limit_tokens=limit,
                 count_tokens=engine.count_tokens,
                 generate=lambda m, max_tok: "".join(
-                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3)),
+                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
+                                       thinking=False)),
             )
         if did_compact:
             messages[:] = compacted_msgs
@@ -1074,7 +1075,8 @@ def _handle_command(
             new_messages, changed = compact_messages(
                 messages,
                 generate=lambda m, max_tok: "".join(
-                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3)),
+                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
+                                       thinking=False)),
             )
             if changed:
                 messages[:] = new_messages

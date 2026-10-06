@@ -205,6 +205,7 @@ def register(app: FastAPI, ctx) -> None:
                 repeat_penalty=req.repeat_penalty,
                 grammar=req.grammar,
                 seed=req.seed,
+                thinking=(req.chat_template_kwargs or {}).get("enable_thinking"),
             )
             # Strip None so Engine uses its config defaults
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
@@ -284,11 +285,10 @@ def register(app: FastAPI, ctx) -> None:
                     and isinstance(prompt_tokens, int) and len(messages) > 3):
                 buffer = max(2048, int(capacity * 0.10))
                 if capacity - prompt_tokens < buffer:
-                    from localm.inference.compact import compact_messages
-                    def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                        return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-                    new_messages, changed = await loop.run_in_executor(
-                        None, compact_messages, messages, _gen_for_compact)
+                    new_messages, changed, gone = await _hs._compact_for_capacity(
+                        engine, messages, request)
+                    if gone:
+                        raise HTTPException(499, _hs.COMPACTION_DISCONNECT_DETAIL)
                     if changed:
                         messages = list(new_messages)
                         compacted_here = True

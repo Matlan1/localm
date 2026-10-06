@@ -240,8 +240,48 @@ export function archiveCopy(m) {
   return out;
 }
 
-/** Summarises or trims the older part of *conv*. An aborted *signal* cancels
- *  the summary request and leaves the conversation unchanged. */
+/** Index where the kept tail of *messages* starts, at or before *from*: the
+ *  nearest user turn that is not a tool event, else the next one after it.
+ *  0 when there is none, meaning nothing can be compacted. */
+export function compactionCut(messages, from) {
+  const isTurn = (m) => m && m.role === "user" && !isToolEvent(m);
+  for (let i = Math.min(from, messages.length - 1); i > 0; i--) {
+    if (isTurn(messages[i])) return i;
+  }
+  for (let i = Math.max(from, 1); i < messages.length; i++) {
+    if (isTurn(messages[i])) return i;
+  }
+  return 0;
+}
+
+export const DIGEST_MAX_CHARS = 4096;
+const DIGEST_MIN_EXCERPT = 160;
+
+/** The fallback bridge text when no summary is available: a note plus one
+ *  word-boundary excerpt per removed message (reasoning stripped), newest kept
+ *  first within DIGEST_MAX_CHARS, in conversation order. */
+export function compactionDigest(older) {
+  const per = Math.max(DIGEST_MIN_EXCERPT, Math.floor(DIGEST_MAX_CHARS / Math.max(1, older.length)));
+  const lines = [];
+  let used = 0;
+  for (let i = older.length - 1; i >= 0; i--) {
+    const m = older[i];
+    const line = `${isToolEvent(m) ? "WEB" : String(m.role || "user").toUpperCase()}: ` +
+      truncateAtWord(stripThink(msgText(m)), per);
+    if (lines.length && used + line.length > DIGEST_MAX_CHARS) break;
+    lines.unshift(line);
+    used += line.length;
+  }
+  const parts = ["[Earlier conversation was condensed to fit the context window. " +
+    "Summarisation was unavailable, so these are excerpts of the earlier turns:]"];
+  const omitted = older.length - lines.length;
+  if (omitted) parts.push(`(${omitted} earlier message(s) omitted)`);
+  return [...parts, ...lines].join("\n\n");
+}
+
+/** Summarises or condenses the older part of *conv*. The kept tail starts at
+ *  a user turn (see compactionCut). An aborted *signal* cancels the summary
+ *  request and leaves the conversation unchanged. */
 export async function compactConversation(conv, signal = null) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
   // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
@@ -258,9 +298,10 @@ export async function compactConversation(conv, signal = null) {
     keepCount++;
   }
   keepCount = Math.max(COMPACT_KEEP, Math.min(keepCount, conv.messages.length - 1));
-  const older = conv.messages.slice(0, -keepCount);
-  const recent = conv.messages.slice(-keepCount);
-  if (!older.length) return false;
+  const cut = compactionCut(conv.messages, conv.messages.length - keepCount);
+  if (cut <= 0) return false;
+  const older = conv.messages.slice(0, cut);
+  const recent = conv.messages.slice(cut);
 
   // R44: feed whole messages truncated at a word boundary, with reasoning blocks
   // stripped, so the summariser never sees half-words or display-only <think>.
@@ -288,20 +329,20 @@ export async function compactConversation(conv, signal = null) {
             "Keep facts, names, decisions, and anything the user asked to " +
             "remember. Reply with the summary only.\n\n" + excerpt,
         }],
-        max_tokens: 400,
+        max_tokens: 1024,
         temperature: 0.3,
         stream: false,
+        chat_template_kwargs: { enable_thinking: false },
       }),
       ...(signal ? { signal } : {}),
     });
     if (r.ok) {
       const data = await r.json();
       const choice = data.choices?.[0];
-      // A summary is accepted only from a generation that finished normally
-      // (finish_reason "stop"); an "error" or "length" choice, whose content
-      // is the server's error text or a cut-off summary, is treated as
-      // summarisation unavailable.
-      if (choice && choice.finish_reason === "stop") {
+      // A summary is accepted from a generation that finished with "stop" or
+      // "length"; an "error" choice, whose content is the server's error
+      // text, is treated as summarisation unavailable.
+      if (choice && (choice.finish_reason === "stop" || choice.finish_reason === "length")) {
         summary = (choice.message?.content || "").trim();
       }
     }
@@ -319,10 +360,8 @@ export async function compactConversation(conv, signal = null) {
     ? [{ role: "user", content: "[Conversation summary]\n" + summary,
          compacted: archived, bridge: true },
        { role: "assistant", content: "Understood. Continuing from this summary.", bridge: true }]
-    : [{ role: "user", content:
-         "[Earlier conversation was trimmed to fit the context window; " +
-         "the recent messages below are intact.]", compacted: archived, bridge: true },
-       { role: "assistant", content: "Understood.", bridge: true }];
+    : [{ role: "user", content: compactionDigest(older), compacted: archived, bridge: true },
+       { role: "assistant", content: "Understood. Continuing from these excerpts.", bridge: true }];
 
   conv.messages = [...bridge, ...recent];
   // Forks anchored in the summarised-away region can no longer be reached by
