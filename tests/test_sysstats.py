@@ -64,7 +64,7 @@ def _reset_vram_cache(monkeypatch):
     # aggregate-only tests. See TestPerDeviceVramAnyBackend below for the tests
     # that exercise that fallback deliberately, with their own fake data.
     from localm.inference.backends.llamacpp import _loader
-    monkeypatch.setattr(_loader, "native_device_inventory", lambda: [])
+    monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: [])
 
 
 # Seconds to wait for the background VRAM probe to land. Overridden by
@@ -825,7 +825,7 @@ class TestPerDeviceVramAnyBackend:
             discover, "vram_capacity",
             lambda *a, **k: ({"total": 32 * self._GIB, "free": 8 * self._GIB}, None))
         monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
-        monkeypatch.setattr(_loader, "native_device_inventory", lambda: [
+        monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: [
             {"index": 0, "name": "Vulkan0", "total": 16 * self._GIB, "free": 2 * self._GIB},
             {"index": 1, "name": "Vulkan1", "total": 16 * self._GIB, "free": 6 * self._GIB},
         ])
@@ -841,9 +841,9 @@ class TestPerDeviceVramAnyBackend:
         assert v["devices"][1]["used"] == 10 * self._GIB
 
     def test_the_torch_source_still_wins_when_it_has_devices(self, monkeypatch):
-        # last_known_gpus costs nothing (vram_capacity just probed) while the
-        # native registry needs the lib resident, so the registry stays the
-        # fallback and does not displace a working reading.
+        # last_known_gpus costs nothing (vram_capacity just probed), so the
+        # isolated registry read stays the fallback and does not displace a
+        # working reading.
         from localm import discover, sysstats
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [
@@ -857,10 +857,47 @@ class TestPerDeviceVramAnyBackend:
             lambda *a, **k: ({"total": 48 * self._GIB, "free": 26 * self._GIB}, None))
         monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
         def boom():
-            raise AssertionError("native inventory must not be consulted here")
-        monkeypatch.setattr(_loader, "native_device_inventory", boom)
+            raise AssertionError("device inventory must not be consulted here")
+        monkeypatch.setattr(_loader, "gpu_devices_isolated", boom)
         v = sysstats._compute_vram()["vram"]
         assert [d["name"] for d in v["devices"]] == ["RTX 4090", "RTX 3090"]
+
+    def test_the_fallback_never_loads_the_native_runtime_in_process(
+            self, monkeypatch):
+        from unittest import mock
+        from localm import discover, sysstats
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [])
+        monkeypatch.setattr(
+            discover, "vram_capacity",
+            lambda *a, **k: ({"total": 32 * self._GIB, "free": 8 * self._GIB}, None))
+        monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
+        isolated = mock.MagicMock(return_value=[
+            {"index": 0, "name": "Vulkan0", "total": 16 * self._GIB, "free": 2 * self._GIB},
+            {"index": 1, "name": "Vulkan1", "total": 16 * self._GIB, "free": 6 * self._GIB},
+        ])
+        in_process = mock.MagicMock(return_value=[])
+        monkeypatch.setattr(_loader, "gpu_devices_isolated", isolated)
+        monkeypatch.setattr(_loader, "native_device_inventory", in_process)
+        monkeypatch.setattr(discover, "_apply_device_global_free", lambda gpus: None)
+        v = sysstats._compute_vram()["vram"]
+        in_process.assert_not_called()
+        isolated.assert_called_once_with()
+        assert [d["index"] for d in v["devices"]] == [0, 1]
+
+    def test_an_unreadable_isolated_registry_leaves_the_aggregate_alone(
+            self, monkeypatch):
+        from localm import discover, sysstats
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [])
+        monkeypatch.setattr(
+            discover, "vram_capacity",
+            lambda *a, **k: ({"total": 32 * self._GIB, "free": 8 * self._GIB}, None))
+        monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
+        monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: None)
+        v = sysstats._compute_vram()["vram"]
+        assert v["total"] == 32 * self._GIB and v["used"] == 24 * self._GIB
+        assert "devices" not in v
 
 
 def test_a_process_scoped_card_reports_total_only(monkeypatch):
