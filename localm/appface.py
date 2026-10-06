@@ -13,6 +13,7 @@ server from running.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import webbrowser
@@ -186,6 +187,28 @@ def _enable_clipboard_bindings(win) -> str:
     return outcome.get("err", "the settings were not applied")
 
 
+def _window_profile_dir() -> Optional[str]:
+    """The folder inside the data folder where the app window keeps its login
+    cookie and page storage, created when missing. None when the window cannot
+    keep a profile there: pywebview's macOS backend has no storage path option,
+    and a data folder that cannot hold the folder logs a warning. The caller
+    then runs the window private, keeping nothing. Never raises."""
+    if sys.platform == "darwin":
+        return None
+    try:
+        from localm.config import home_dir
+        path = home_dir() / "app-window"
+        path.mkdir(parents=True, exist_ok=True)
+        if not os.access(path, os.W_OK):
+            raise PermissionError(f"{path} is not writable")
+        return str(path)
+    except Exception:
+        logger.warning("appface: could not create the app window profile folder "
+                       "app-window in the data folder; the window keeps no login "
+                       "or page data between launches", exc_info=True)
+        return None
+
+
 def run_native_window(url: str, name: str = "LocaLM", *,
                       hide_on_close: bool = True,
                       on_quit: Optional[Callable] = None,
@@ -327,13 +350,20 @@ def run_native_window(url: str, name: str = "LocaLM", *,
                 return True
             _native_window = window
         try:
-            # private_mode=False keeps the login cookie across restarts, like
-            # the browser tab this replaces. Blocks until the window is
+            # With a profile folder in the data folder the window keeps its login
+            # cookie across restarts, like the browser tab this replaces; without
+            # one it runs private and keeps nothing. Blocks until the window is
             # destroyed. gui="qt" on Linux: pywebview tries GTK first, and this
             # project never installs the GTK extra, so qt is the backend the
             # `desktop` extra actually provides there. Windows and macOS keep
             # pywebview's default.
-            start_kwargs = {"icon": icon_path(), "private_mode": False}
+            start_kwargs = {"icon": icon_path()}
+            profile = _window_profile_dir()
+            if profile is None:
+                start_kwargs["private_mode"] = True
+            else:
+                start_kwargs["private_mode"] = False
+                start_kwargs["storage_path"] = profile
             if sys.platform.startswith("linux"):
                 start_kwargs["gui"] = "qt"
             webview.start(**start_kwargs)

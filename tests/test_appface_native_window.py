@@ -687,3 +687,56 @@ def test_start_app_face_creates_no_status_window_when_told_not_to(monkeypatch):
     assert appface.start_app_face(url="http://127.0.0.1:1/",
                                   show_window=False) is None
     window.start.assert_not_called()
+
+
+def _start_kwargs(monkeypatch, platform):
+    """The keyword arguments run_native_window hands webview.start on *platform*."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _ = _fake_webview(loaded=True)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(appface.sys, "platform", platform)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    fake.start.assert_called_once()
+    return fake.start.call_args.kwargs
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_the_app_window_keeps_its_profile_inside_the_data_folder(monkeypatch, platform):
+    from localm.config import home_dir
+    kwargs = _start_kwargs(monkeypatch, platform)
+
+    assert kwargs.get("storage_path") == str(home_dir() / "app-window")
+    assert (home_dir() / "app-window").is_dir()
+    assert kwargs["private_mode"] is False
+
+
+def test_the_app_window_keeps_nothing_where_the_platform_cannot_be_pointed_at_a_folder(
+        monkeypatch):
+    """pywebview's macOS backend has no storage path option, so the window runs
+    in private mode there instead of writing a profile outside the data folder."""
+    from localm.config import home_dir
+    kwargs = _start_kwargs(monkeypatch, "darwin")
+
+    assert "storage_path" not in kwargs
+    assert kwargs["private_mode"] is True
+    assert not (home_dir() / "app-window").exists()
+
+
+def test_an_uncreatable_profile_folder_runs_the_window_private_and_says_so(
+        monkeypatch, caplog):
+    """A file where the profile folder belongs makes the real mkdir fail. The
+    window must still open, keep nothing, and must not fall back to pywebview's
+    shared profile outside the data folder."""
+    from localm.config import home_dir
+    home_dir().mkdir(parents=True, exist_ok=True)
+    (home_dir() / "app-window").write_text("not a folder", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="localm"):
+        kwargs = _start_kwargs(monkeypatch, "win32")
+
+    assert "storage_path" not in kwargs
+    assert kwargs["private_mode"] is True
+    assert any("app-window" in r.getMessage() and r.levelname == "WARNING"
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
