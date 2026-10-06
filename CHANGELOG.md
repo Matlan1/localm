@@ -187,6 +187,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A very large request no longer stays in memory through the activity log.** The 
+  recent-activity log (shown in the control window and attached to bug reports) now 
+  keeps at most 2000 characters of each entry, marked as truncated, so a multi-megabyte 
+  query or prompt cannot pin its full text in memory or slow the window and bug-report 
+  saving.
 - **Switching the embedding model back to the one a knowledge-base collection was
   built with no longer warns that it needs re-embedding.** The warning is shown
   only for collections the new model would actually invalidate, and the
