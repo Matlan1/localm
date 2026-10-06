@@ -461,6 +461,7 @@ class HFBackend(BaseBackend):
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        thinking: Optional[bool] = None,
     ) -> Iterator[str]:
         # Checked before the loaded-state gate below and before touching
         # self._runner, so any caller gets a clean UnsupportedInputError for an
@@ -483,9 +484,11 @@ class HFBackend(BaseBackend):
         # done envelope, which HFRunner.chat_stream caches as
         # self._runner.last_done.
         self.last_finish_reason = "stop"
+        extra = {"thinking": thinking} if thinking is not None else {}
         yield from self._runner.chat_stream(
             first_chunk_timeout=self._first_token_timeout_seconds(),
             on_status=on_status,
+            **extra,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,

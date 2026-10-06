@@ -434,7 +434,11 @@ class Engine:
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        thinking: Optional[bool] = None,
     ) -> Iterator[str]:
+        """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
+        model to answer without its reasoning channel; ``None`` leaves the
+        model's default. The other parameters default to the config values."""
         # Auto-reload if the model was unloaded. Holds the process-global load
         # lock so a reload cannot race another load onto the GPU, and
         # double-checks inside the lock so a model another thread just brought
@@ -448,6 +452,7 @@ class Engine:
                     self._backend.load()
 
         cfg = load_config()
+        extra = {"thinking": thinking} if thinking is not None else {}
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF
@@ -464,6 +469,7 @@ class Engine:
             grammar_triggers=grammar_triggers,
             seed=seed,
             on_status=on_status,
+            **extra,
         ))
 
     def __enter__(self) -> "Engine":

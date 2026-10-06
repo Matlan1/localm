@@ -499,8 +499,13 @@ class HTTPBackend(BaseLLMBackend):
         return out
 
     def _body(self, messages: list[dict], stream: bool, **kwargs) -> dict:
+        # ``thinking`` is sent only to a localm server, as
+        # chat_template_kwargs.enable_thinking; other servers do not receive it.
+        thinking = kwargs.pop("thinking", None)
         if self.anthropic:
             return self._anthropic_body(messages, stream, **kwargs)
+        if thinking is not None and self._is_local_server:
+            kwargs["chat_template_kwargs"] = {"enable_thinking": bool(thinking)}
         body = {
             "model":    self._model,
             "messages": self._with_untrusted_spans(messages),

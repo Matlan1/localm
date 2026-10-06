@@ -27,7 +27,7 @@ from .base import BaseLLMBackend
 # raise a TypeError.
 _ENGINE_GEN_KWARGS = frozenset({
     "max_tokens", "temperature", "top_p", "top_k", "repeat_penalty", "grammar",
-    "grammar_lazy", "grammar_triggers", "seed",
+    "grammar_lazy", "grammar_triggers", "seed", "thinking",
 })
 
 

@@ -271,6 +271,7 @@ class GgufWorker(VramSizingMixin):
         grammar_triggers: Optional[list] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        thinking: Optional[bool] = None,
     ):
         """Yield text tokens one at a time. The caller (the runner's dispatch
         loop) already filtered out an image the model cannot see and already
@@ -306,6 +307,8 @@ class GgufWorker(VramSizingMixin):
             )
             if seed is not None:
                 kw["seed"] = seed
+            if thinking is not None:
+                kw["thinking"] = thinking
             return kw
 
         def _stream(g: Optional[str]):

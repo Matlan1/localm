@@ -823,6 +823,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         grammar_triggers: Optional[list] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        thinking: Optional[bool] = None,
     ) -> Iterator[str]:
         # Image input: with an mmproj loaded it flows through to
         # create_chat_completion's image path. A text-only model refuses the image
@@ -853,6 +854,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         )
         if seed is not None:
             kwargs["seed"] = seed
+        if thinking is not None:
+            kwargs["thinking"] = thinking
 
         # The grammar-fault retry-without-grammar logic runs inside the isolated
         # worker (GgufWorker.chat_stream). This method relays the resulting stream

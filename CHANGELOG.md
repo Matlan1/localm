@@ -223,6 +223,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   images.** It used to ask you to load a vision model, which could not help.
   Attach the image in Chat with a vision model, or paste the text instead.
 - **Multi-Token Prediction no longer switches itself off after one long prompt, and no longer stops silently partway through a reply.** The speculative-decoding helper used to be capped at 2048 tokens, so a single longer prompt turned it off for as long as the model stayed loaded, and a reply that crossed 2048 tokens stopped speculating while still being reported as active. It now grows with the conversation's context, keeps working on the next request, and a reply on which it has to stop reports that it did. A permanent stop that comes with a detail suffix, such as a failed helper prefill, is now recognised as a stop.
+- **Long chats keep their thread when older messages are compacted.** With a
+  reasoning ("thinking") model the summary of older messages was never written,
+  so the earlier conversation was replaced by a one-line note and the model lost
+  track of what you were talking about. The summary is now written with
+  reasoning turned off, and if it still cannot be written the earlier messages
+  are kept as short excerpts instead of being dropped. Your latest request is
+  always kept word for word, and the conversation no longer shows two assistant
+  replies in a row. The
+  same applies to the coder, which also keeps your current request when it
+  compacts a long session. Closing the request while a server-side compaction is
+  running now stops the summary instead of letting it run to the end.
 - **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
   projector files record a width that is not the one the model uses, so localm
   decided the projector did not fit and left it off: the model was not shown as

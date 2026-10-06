@@ -268,6 +268,32 @@ def messages_contain_image(messages: List[dict]) -> bool:
     return False
 
 
+_EMPTY_THINK_BLOCK = "<think>\n\n</think>\n\n"
+
+
+def no_think_prompt(prompt: str, template: Optional[str]) -> str:
+    """Return *prompt* (a rendered chat prompt ending in the assistant
+    generation prefix) with an empty ``<think></think>`` block as the start of
+    the reply, so a ``<think>``-style reasoning model answers directly.
+
+    - A prompt that already ends in an empty think block is returned unchanged.
+    - A prompt whose generation prefix opens ``<think>`` has that block closed
+      empty.
+    - Otherwise the empty block is appended only when *template* (the chat
+      template source) mentions ``<think>``; any other prompt is returned
+      unchanged, so a model with no ``<think>`` convention is never fed one.
+    """
+    import re
+    if re.search(r"<think>\s*</think>\s*$", prompt):
+        return prompt
+    m = re.search(r"<think>\s*$", prompt)
+    if m:
+        return prompt[:m.start()] + _EMPTY_THINK_BLOCK
+    if template and "<think>" in template:
+        return prompt + _EMPTY_THINK_BLOCK
+    return prompt
+
+
 class BaseBackend(ABC):
     """Loaded model that can stream chat completions."""
 
@@ -382,6 +408,7 @@ class BaseBackend(ABC):
         grammar: Optional[str] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        thinking: Optional[bool] = None,
     ) -> Iterator[str]:
         """
         Yield text tokens one at a time.
@@ -408,6 +435,11 @@ class BaseBackend(ABC):
             these strings, or on ``STATUS_CODE_BY_TEXT``'s stable id for the
             ones present there.  Backends and transports must not let an
             exception raised by this callback interrupt generation.
+        thinking:
+            ``False`` asks a reasoning model to answer without its reasoning
+            channel (see :func:`no_think_prompt`); ``None`` and ``True`` leave
+            the model's default.  A model with no ``<think>`` convention is
+            unaffected.
         """
 
     @property

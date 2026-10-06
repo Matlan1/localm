@@ -304,13 +304,69 @@ char   ::= [^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
 ws     ::= [ \t\n\r]*
 """
 
-    def _compact_history(self) -> bool:
-        keep_n = 4   # last 4 messages kept verbatim (~2 turns)
-        if len(self._messages) <= keep_n:
-            return False   # not enough history to compact
+    @staticmethod
+    def _is_tool_result(message: dict) -> bool:
+        """True for a user-role message that carries tool results."""
+        content = message.get("content", "")
+        return isinstance(content, str) and content.lstrip().startswith("<tool_result")
 
-        older  = self._messages[:-keep_n]
-        recent = self._messages[-keep_n:]
+    def _compaction_cut(self, keep_n: int) -> int:
+        """Index where the kept tail starts, or 0 when nothing can be compacted.
+
+        The tail holds at least the last *keep_n* messages and starts at a user
+        message that is not a tool result: the cut moves back to the nearest
+        one, else forward to the next one. With neither, it starts at the
+        nearest user message of any kind at or before the default cut."""
+        msgs = self._messages
+        default = len(msgs) - keep_n
+        if default <= 0:
+            return 0
+
+        def _real_user(i: int) -> bool:
+            return msgs[i].get("role") == "user" and not self._is_tool_result(msgs[i])
+
+        for i in range(default, 0, -1):
+            if _real_user(i):
+                return i
+        for i in range(default + 1, len(msgs)):
+            if _real_user(i):
+                return i
+        for i in range(default, 0, -1):
+            if msgs[i].get("role") == "user":
+                return i
+        return 0
+
+    def _latest_request(self):
+        """The most recent user request: ``_last_user_request`` when set, else
+        the last user message that is not a tool result, else ``""``."""
+        request = getattr(self, "_last_user_request", "") or ""
+        if request:
+            return request
+        for m in reversed(self._messages):
+            if m.get("role") == "user" and not self._is_tool_result(m):
+                content = m.get("content", "")
+                return content if isinstance(content, str) else ""
+        return ""
+
+    def _compact_history(self) -> bool:
+        """Replace everything before the kept tail (see ``_compaction_cut``)
+        with a summary exchange. The latest user request is carried verbatim
+        into the summary message when it is not in the tail. When the
+        summariser fails or returns nothing, the summary message carries a
+        digest of the removed messages instead. Returns False only when there
+        is nothing to compact."""
+        keep_n = 4
+        cut = self._compaction_cut(keep_n)
+        if cut <= 0:
+            return False
+
+        older  = self._messages[:cut]
+        recent = self._messages[cut:]
+        request = self._latest_request()
+        request_in_tail = bool(request) and any(
+            str(m.get("content", "")) == str(request) or
+            str(m.get("content", "")).endswith(str(request))
+            for m in recent if m.get("role") == "user")
 
         # Build a concise conversation excerpt for the summariser. The role label
         # is inside the untrusted range with its content: resume_checkpoint
@@ -335,6 +391,10 @@ ws     ::= [ \t\n\r]*
         # When the backend supports GBNF grammar sampling, request a structured
         # JSON summary so the compacted message is always machine-parseable.
         use_json = getattr(self.backend, "supports_grammar", False)
+        request_part = (
+            compose("The user's current request, verbatim:\n",
+                    untrusted_span(request), "\n\n")
+            if request else "")
 
         if use_json:
             summary_prompt = compose(
@@ -342,8 +402,9 @@ ws     ::= [ \t\n\r]*
                 "Summarise the following coding session as JSON with exactly three fields:\n"
                 '  "summary": a concise narrative (≤200 words) of decisions, edits, and fixes\n'
                 '  "changed_files": list of file paths that were created or modified\n'
-                '  "open_tasks": list of tasks or problems still unresolved\n\n'
+                '  "open_tasks": list of what remains to do for the current request\n\n'
                 "Respond with valid JSON only - no prose outside the JSON object.\n\n",
+                request_part,
                 excerpt,
             )
         else:
@@ -351,20 +412,23 @@ ws     ::= [ \t\n\r]*
                 _COMPACT_GUARD,
                 "Produce a concise summary (≤300 words) of the following coding session. "
                 "Focus on: decisions made, files created or edited, errors and fixes, "
-                "and any open problems or next steps.\n\n",
+                "and what remains to do for the current request.\n\n",
+                request_part,
                 excerpt,
             )
 
+        raw = ""
+        failure = ""
         try:
-            call_kwargs: dict = {"max_tokens": 400}
+            call_kwargs: dict = {"max_tokens": 1024, "thinking": False}
             if use_json:
                 call_kwargs["grammar"] = self._COMPACT_GRAMMAR.strip()
             raw = self.backend.chat(
                 [{"role": "user", "content": summary_prompt}],
                 **call_kwargs,
-            )
-        except Exception:
-            return False   # best-effort; don't crash on summary failure
+            ) or ""
+        except Exception as e:
+            failure = f"{type(e).__name__}: {e}"
 
         # Parse structured output if we requested JSON
         if use_json:
@@ -384,16 +448,32 @@ ws     ::= [ \t\n\r]*
         else:
             summary = raw
 
+        from localm.textnorm import strip_think
+        summary = strip_think(str(summary)).strip()
+        if summary:
+            body = compose("[Session summary]\n", summary)
+        else:
+            from localm.debuglog import logger
+            from localm.inference.compact import digest_messages
+            logger.warning(
+                "coder compaction: summarisation unavailable (%s); keeping a "
+                "digest of %d removed message(s)",
+                failure or "empty reply", len(older))
+            body = compose("[Session summary]\n", digest_messages(older))
+
         # The task list lives on the Agent, so compaction never destroys it, but
         # the model only sees what is in the messages: carry the surviving list
         # into the summary verbatim.
         todos = self.get_todos()
         if todos:
             from ..tools.tasks import render_todos
-            summary += "\n\nTask list (set_todos):\n" + render_todos(todos)
+            body = compose(body, "\n\nTask list (set_todos):\n" + render_todos(todos))
+
+        if request and not request_in_tail:
+            body = compose(body, "\n\nCurrent request (verbatim):\n", request)
 
         self._messages = [
-            {"role": "user",      "content": f"[Session summary]\n{summary}"},
+            {"role": "user",      "content": body},
             {"role": "assistant", "content": "Understood. Continuing from this context."},
             *recent,
         ]
