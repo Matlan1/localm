@@ -193,6 +193,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   gets no session summary, and a stored session summary is recalled only when a
   message shares at least two content words with it (or is a close paraphrase),
   so unrelated turns carry no remembered-facts block.
+- **Common words no longer drag old chat summaries or Coder lessons into
+  unrelated turns, and small talk already stored is cleaned up.** A word that
+  appears in many of your stored session summaries (or Coder lessons) no longer
+  counts as a match, and the Coder's lesson recall needs two shared words, as the
+  chat memory now does. Session summaries saved earlier are checked once by the
+  model; those that are only small talk are removed, and a removed one can still
+  be restored from the memory archive. Greetings and thank-yous no longer count
+  as something worth summarising.
 - **The microphone button works on a fresh install again.** A new install could
   pull in a PyAV release that faster-whisper cannot use, so every recording
   failed. The voice extra now keeps PyAV below version 19. A failure inside the
