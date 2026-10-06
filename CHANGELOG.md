@@ -202,6 +202,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   record, so the first kept running with nothing able to close it. The calls
   now share a single start and drive the same browser; if that start fails,
   every waiting call gets the same error.
+- **Model downloads no longer leave Hugging Face files in your user profile.**
+  Pulling a model, installing the embedding model and downloading the speech model
+  wrote Hugging Face transfer logs, staging folders and cache stamps to
+  `~/.cache/huggingface` (or `$XDG_CACHE_HOME/huggingface`), outside the data
+  folder, so "delete saved data" never removed them. They now go to
+  `cache/huggingface` inside the data folder. A Hugging Face login you saved with
+  `huggingface-cli login` keeps working, and a location you set yourself with
+  `HF_HOME`, `HF_HUB_CACHE`, `HF_XET_CACHE` or `HF_TOKEN_PATH` is used as you set it.
+  Files already in the old location are left where they are.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",

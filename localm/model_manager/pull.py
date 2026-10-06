@@ -359,12 +359,32 @@ def _resumable_download_to_tmp_and_move(
             _INFLIGHT_PARTIALS.discard(str(tmp_path))
 
 
+_HF_PLACEMENT_NOTED = False
+
+
+def _note_user_hf_placement() -> None:
+    """Log once per process, at INFO, which Hugging Face cache locations come
+    from the user's environment (and so sit outside the data folder)."""
+    global _HF_PLACEMENT_NOTED
+    if _HF_PLACEMENT_NOTED:
+        return
+    _HF_PLACEMENT_NOTED = True
+    from ..config import hf_cache_user_placement
+    placed = hf_cache_user_placement()
+    if placed:
+        logger.info(
+            "Hugging Face caches use the location set in the environment, "
+            "outside the data folder: %s",
+            ", ".join(f"{k}={v}" for k, v in sorted(placed.items())))
+
+
 def _ensure_hf_resumable_download() -> None:
     """Wire _resumable_download_to_tmp_and_move into huggingface_hub.file_download.
 
     Called from the pull entry points, never at import, so a process that
     never pulls keeps huggingface_hub's own download behaviour.
     """
+    _note_user_hf_placement()
     try:
         import huggingface_hub.file_download as fd
         if getattr(fd, "_localm_resumable_patched", False):

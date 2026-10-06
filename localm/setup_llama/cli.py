@@ -83,10 +83,11 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     instead names the missing piece and offers a retry, then reports the
     cause and stops rather than silently degrading.
 
-    By default the newest upstream llama.cpp release is used, which means an
-    upstream build that is broken on your hardware arrives on your next install.
-    --tag pins one exact build and --rollback returns to the previous one; both
-    stick, including across 'localm update'.
+    By default the llama.cpp build this localm release confirmed is installed.
+    --tag <tag> pins another exact release, --tag latest tracks upstream's
+    newest (untested here), --tag default returns to the confirmed build, and
+    --rollback returns to the previous one. The choice sticks across
+    'localm update'.
 
     \b
       localm setup-llama                        # auto-detect GPU, fetch the right prebuilt
