@@ -93,6 +93,27 @@ _COMPAT_DIR_NAME = "mmproj-compat"
 _COMPAT_FREE_MARGIN_BYTES = 1024 * 1024 * 1024
 
 
+def _prune_orphaned_compat_copies(out_dir) -> None:
+    """Delete each compatible copy in *out_dir* whose recorded source file no
+    longer exists, with its record. A failure is logged and the entry kept."""
+    import json
+
+    from localm.debuglog import logger
+
+    for meta_path in out_dir.glob("*.json"):
+        try:
+            source = json.loads(meta_path.read_text(encoding="utf-8")).get("source")
+            if not isinstance(source, str) or os.path.exists(source):
+                continue
+            meta_path.with_suffix(".gguf").unlink(missing_ok=True)
+            meta_path.unlink()
+            logger.info("mmproj compat: removed the copy of %s, which no longer "
+                        "exists", source)
+        except (OSError, ValueError, AttributeError) as exc:
+            logger.warning("mmproj compat: could not check or remove %s (%s)",
+                           meta_path, exc)
+
+
 def compatible_mmproj_path(mmproj_path: str) -> str:
     """The path to hand ``mtmd_init_from_file`` for the projector *mmproj_path*.
 
@@ -101,8 +122,9 @@ def compatible_mmproj_path(mmproj_path: str) -> str:
     (``gguf_mmproj_inferred_projector_type``), this returns a copy under
     ``<data dir>/cache/mmproj-compat/`` that records that type, writing it on
     first use and rewriting it when the source file's size or modification time
-    changes. The source file is never modified. Every other projector is
-    returned unchanged.
+    changes. The source file is never modified. Each time a copy is written,
+    copies whose source file no longer exists are deleted. Every other
+    projector is returned unchanged.
 
     Never raises: when the copy cannot be written (no space, an I/O error) it
     logs a warning and returns *mmproj_path*."""
@@ -157,6 +179,7 @@ def compatible_mmproj_path(mmproj_path: str) -> str:
             "mmproj %s records no projector type; its tensors are a %r projector, "
             "so it is loaded from a copy that records that type: %s",
             src.name, projector_type, dst)
+        _prune_orphaned_compat_copies(out_dir)
         return str(dst)
     except (OSError, ValueError) as exc:
         logger.warning(

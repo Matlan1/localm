@@ -200,6 +200,27 @@ class TestCompatibleMmprojPath:
         assert mtmd_mod.compatible_mmproj_path(str(src)) == first
         assert len(writes) == 1, "a changed source did not refresh its copy"
 
+    def test_copy_of_a_deleted_projector_is_removed_on_the_next_write(
+            self, tmp_path, compat_cache):
+        gone = tmp_path / "a" / "mmproj-model-f16.gguf"
+        kept = tmp_path / "b" / "mmproj-model-f16.gguf"
+        gone.parent.mkdir()
+        kept.parent.mkdir()
+        _small_llava15(gone)
+        _small_llava15(kept)
+        gone_copy = mtmd_mod.compatible_mmproj_path(str(gone))
+        kept_copy = mtmd_mod.compatible_mmproj_path(str(kept))
+        assert gone_copy != kept_copy
+
+        gone.unlink()
+        st = kept.stat()
+        os.utime(kept, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000_000))
+        assert mtmd_mod.compatible_mmproj_path(str(kept)) == kept_copy
+
+        assert not os.path.exists(gone_copy), "the deleted projector's copy was kept"
+        assert not os.path.exists(gone_copy[:-len(".gguf")] + ".json")
+        assert os.path.exists(kept_copy)
+
     def test_projector_that_records_its_type_is_used_as_is(self, tmp_path, compat_cache):
         src = _real_llava16_mmproj_gguf(tmp_path / "mmproj-model-f16.gguf")
         assert mtmd_mod.compatible_mmproj_path(str(src)) == str(src)
@@ -219,7 +240,7 @@ class TestCompatibleMmprojPath:
             out = mtmd_mod.compatible_mmproj_path(str(src))
 
         assert out == str(src)
-        assert list(compat_cache.iterdir()) == [], "a partial copy was left behind"
+        assert not list(compat_cache.glob("*")), "a partial copy was left behind"
         assert any("disk full" in r.getMessage() for r in caplog.records)
 
     def test_too_little_space_falls_back_to_the_original_and_says_so(
