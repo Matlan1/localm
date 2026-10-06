@@ -676,6 +676,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     from rich.markup import escape
 
     from localm.inference.backends.base import (
+        ChatTemplateMissingError,
         ImageDecodeUnavailable,
         UnsupportedInputError,
         VISION_CPU_FALLBACK_STATUS,
@@ -706,6 +707,9 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         # message, which names the missing library and the fix.
         console.print(f"\n[red]{escape(str(e))}[/red]")
         return ""
+    except ChatTemplateMissingError as e:
+        console.print(f"\n[red]{escape(str(e))}[/red]")
+        sys.exit(1)
     except UnsupportedInputError:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # vision model this install has, or how to get one.

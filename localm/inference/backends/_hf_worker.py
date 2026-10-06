@@ -300,6 +300,25 @@ def _eos_token_ids(model, tokenizer) -> set:
     return {int(raw)}
 
 
+CHAT_TEMPLATE_MISSING_MESSAGE = (
+    "This model defines no chat template, so localm cannot turn a conversation "
+    "into a prompt for it. It is most likely a base (non-chat) checkpoint: use "
+    "an instruct or chat variant of it instead.")
+
+
+def _require_chat_template(*templated) -> None:
+    """Raise :class:`ChatTemplateMissingError` unless one of *templated* (a
+    tokenizer or processor) carries a ``chat_template``.
+
+    Raised before ``apply_chat_template``, which would otherwise raise a bare
+    ``ValueError`` that the worker loop treats as a native fault and dies on.
+    """
+    if any(getattr(obj, "chat_template", None) for obj in templated):
+        return
+    from .base import ChatTemplateMissingError
+    raise ChatTemplateMissingError(CHAT_TEMPLATE_MISSING_MESSAGE)
+
+
 def _untrusted_prompt_ranges(tokenizer, template_messages, text):
     """Untrusted character ranges of the rendered prompt *text*.
 
@@ -1161,6 +1180,7 @@ class HFWorker:
         # --- Tokenize / process ---
         if self._processor and (images or audios):
             # Full multimodal path
+            _require_chat_template(self._processor, tokenizer)
             text = self._processor.apply_chat_template(
                 template_messages, tokenize=False, add_generation_prompt=True
             )
@@ -1194,6 +1214,7 @@ class HFWorker:
                 raise
         else:
             # Text-only path (even if processor exists, no media was provided)
+            _require_chat_template(tokenizer)
             text = tokenizer.apply_chat_template(
                 template_messages, tokenize=False, add_generation_prompt=True
             )
