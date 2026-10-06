@@ -122,6 +122,17 @@ def function_of(mutant: str) -> str:
     raise ValueError(f"not a mutmut mutant id: {mutant!r}")
 
 
+def _is_mutant_id(key) -> bool:
+    """Whether ``key`` is a string ``function_of`` can read."""
+    if not isinstance(key, str):
+        return False
+    try:
+        function_of(key)
+    except ValueError:
+        return False
+    return True
+
+
 def only_mutate_modules(pyproject_text: str) -> list[str]:
     """The ``[tool.mutmut] only_mutate`` list, forward-slash paths."""
     import tomllib
@@ -147,14 +158,17 @@ def load_results(mutants_dir: Path, modules: list[str]) -> tuple[dict, list[str]
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             exit_codes = meta["exit_code_by_key"]
-            hashes = meta.get("hash_by_function_name", {})
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError, KeyError, TypeError) as e:
-            problems.append(f"{module}: could not read {meta_path.name}: {e}")
+            hashes = meta["hash_by_function_name"]
+            if not isinstance(exit_codes, dict) or not isinstance(hashes, dict):
+                raise TypeError(
+                    "exit_code_by_key and hash_by_function_name must be objects")
+            mutants = {k: status_of(v) for k, v in exit_codes.items()}
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError, KeyError,
+                TypeError, AttributeError, ValueError) as e:
+            problems.append(
+                f"{module}: could not read {meta_path.name}: {type(e).__name__}: {e}")
             continue
-        results[module] = {
-            "mutants": {k: status_of(v) for k, v in exit_codes.items()},
-            "function_hashes": dict(hashes),
-        }
+        results[module] = {"mutants": mutants, "function_hashes": dict(hashes)}
     return results, problems
 
 
@@ -230,6 +244,25 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
         base_hashes = base.get("function_hashes") or {}
         statuses: dict[str, str] = res["mutants"]
         hashes: dict[str, str] = res["function_hashes"]
+
+        foreign = sorted(m for m in {*statuses, *base_mutants} if not _is_mutant_id(m))
+        if foreign:
+            problems.append(
+                f"{module}: {len(foreign)} key(s) are not mutmut mutant ids "
+                f"(e.g. {foreign[0]!r}) - the results or the baseline are malformed")
+            continue
+        if base_mutants and not statuses:
+            problems.append(
+                f"{module}: the results hold no mutants but the baseline has "
+                f"{len(base_mutants)} - mutmut produced nothing for this module; "
+                "an empty result is not a passing one")
+            continue
+        if base_hashes and not hashes:
+            problems.append(
+                f"{module}: the results carry no function hashes but the baseline "
+                f"has {len(base_hashes)} - without them a vanished mutant cannot be "
+                "told from a removed function")
+            continue
 
         incomplete = sorted(m for m, s in statuses.items() if s in INCOMPLETE)
         if incomplete:
@@ -350,6 +383,9 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
             problems.append(f"control {name!r}: needs 'module' and 'mutant'")
             continue
         module, mutant = ctl["module"], ctl["mutant"]
+        if not _is_mutant_id(mutant):
+            problems.append(f"control {name!r}: {mutant!r} is not a mutmut mutant id")
+            continue
         res = results.get(module)
         if res is None:
             if module in modules:

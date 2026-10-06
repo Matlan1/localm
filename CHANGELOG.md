@@ -49,8 +49,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   You can now change the model powering an active coder session in place without
   starting a new session or losing history. In the GUI, click the session model
   badge in the session bar or use the Model section in session controls; switching
-  the active model in the sidebar also updates local coder sessions that were not
-  started with a chosen model.
+  the active model in the sidebar also updates every local coder session that was not
+  started with a chosen model (a busy one once its task ends), and never a session on
+  another backend such as Ollama on localhost. A model switch made from a coder session
+  now refreshes the sidebar model list straight away.
   When loading the chosen model would evict a model that is in use, or would only
   partly fit in VRAM, the coder asks first, as the sidebar model picker does. If
   the load does not complete, starting a session reports why instead of starting
@@ -92,8 +94,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   browser. Esc releases the keyboard from the frame and Shift+Tab moves focus
   back to the controls above it, as a hint under the focused frame says.
 - **Accelerated RAG vector queries, BM25 inverted index, and chat message queueing.**
-  Vector search uses a normalized NumPy matrix dot product for fast vectorized
-  cosine similarity, BM25 uses an inverted postings index for term lookups, and
+  When NumPy is installed, vector search uses a normalized matrix dot product for
+  fast cosine similarity (without it, search is unchanged), BM25 uses an inverted postings index for term lookups, and
   recently queried collections stay in memory (at most 256 MiB in total, least
   recently used dropped first) and are re-read whenever their files change.
   Chat now displays an immediate search status indicator with elapsed timer and
@@ -128,6 +130,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   colours to match Windows, macOS or GNOME, including a dark title bar on
   Windows. Set `LOCALM_THEME=dark` or `LOCALM_THEME=light` to choose one
   yourself.
+- **Secret fields in Settings show their state and can be cleared.** Each API key
+  or token field is tagged "(configured)", "(from environment)", "(not set)" or
+  "(new value)", its placeholder says what saving will do, and a saved value gets a
+  Clear button that removes it when you save, with Undo until then. The stored
+  secret itself is never sent to the page.
 - **Delete past coder sessions and remove projects from the coder's session
   list.** Each past session in the list has a delete button, and each project
   has a remove button that forgets the project and deletes its saved sessions.
@@ -137,6 +144,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with an open session, has to be ended first.
 
 ### Changed
+- **Settings' "Library" section is now called "Model Library & Sources".**
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
 - **Web activity in the chat is its own collapsed card, not a user turn.** A
   web search, a page read, a declined or repeated request and the chat's own
@@ -181,6 +189,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A very large request no longer stays in memory through the activity log.** The 
+  recent-activity log (shown in the control window and attached to bug reports) now 
+  keeps at most 2000 characters of each entry, marked as truncated, so a multi-megabyte 
+  query or prompt cannot pin its full text in memory or slow the window and bug-report 
+  saving.
+- **Switching the embedding model back to the one a knowledge-base collection was
+  built with no longer warns that it needs re-embedding.** The warning is shown
+  only for collections the new model would actually invalidate, and the
+  collections table drops a stale "re-embed needed" badge as soon as the switch
+  or the model download finishes. Opening or deleting a large collection no
+  longer stalls the rest of the server while it loads.
 - **Compacting a long conversation now shows that it is happening.** While older
   messages are being summarised to fit the context window, the chat shows
   "Compacting conversation…" instead of sitting silent, in the browser, in
@@ -645,16 +664,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **On Linux, killing a coder background job (a shell command or the server/build it started) no longer loses track of its own process after the system clock jumps (sleep, NTP, a VM or WSL resync).** A clock step could make the kill wrongly conclude the job's pid had been recycled by an unrelated program, warn that "the process no longer matches", and kill only the direct child instead of its whole tree - leaving a descendant process (such as a dev server) still running.
 - **Two pulls of the same file started together after a crashed download no longer both take over its leftover lock and write into one `.part` file.** Only one continues; the other refuses, as it does for any download already in progress.
 - **Curated model download shortcuts for Phi-4-mini and Gemma-3 now resolve to their correct HuggingFace repositories.** The curated shortcuts dropdown in the GUI and `localm pull <alias>` now use the `microsoft_` and `google_` upstream repo prefixes for `phi4-mini`, `gemma3-4b`, and `gemma3-12b`, resolving previous 401 download failures.
-- **HuggingFace backend loading no longer emits docstring lint errors, `torch_dtype` deprecation warnings, or offloaded buffer warnings.** `_hf_worker` dynamically passes `dtype` on modern Transformers, sets `offload_buffers=True` to offload layer buffers to CPU alongside parameters during partial offloading (preventing GPU VRAM contention on AWQ models), and filters upstream `@auto_docstring` stdout leaks.
+- **HuggingFace backend loading no longer emits docstring lint errors, `torch_dtype` deprecation warnings, or offloaded buffer warnings.** The model's data type is now passed under the name modern Transformers expects, layer buffers are offloaded to the CPU alongside parameters during partial offloading (preventing GPU VRAM contention on AWQ models), and stray output from the library's documentation decorator is filtered out.
 - **Ctrl+C and closing the console window no longer trigger automatic watchdog restarts on Windows.** The crash-recovery watchdog recognizes a console interrupt exit (`STATUS_CONTROL_C_EXIT`, `0xC000013A`) as an intentional stop, and no longer waits out its grace period after a clean stop.
 - **Closing the terminal (Linux, macOS), `kill`, or Ctrl+Break now stop the server cleanly instead of making the crash watchdog relaunch it.** Ctrl+C in app-window mode, which leaves the server running, no longer turns off crash recovery for the rest of that run, a crash while the console window is closing is still captured and reported on the next start, and app-window mode no longer hangs when the server stops before its window has opened.
 - **A native crash while the server is shutting down after Ctrl+C or Stop is now captured and reported on the next start.** The crash guard used to be fully released as soon as the serving loop ended, before the shutdown sequence that unloads models and the embedder had run, so a fault during that unload went unrecorded. It now stays armed through that unload and is only fully released once it has finished.
-- **Restarting the server from Settings while running in standalone app-window mode
-  (`localm[desktop]`) no longer opens a browser tab.** The native window is now
-  correctly reopened after the restart; previously the restart flag that suppresses
-  duplicate browser tabs was inadvertently also suppressing the native window, and
-  then a second read of the same flag (which had already been consumed) opened a
-  browser tab regardless.
+- **Restarting the server from Settings no longer opens an extra browser tab, in the
+  browser or in the standalone app window (`localm[desktop]`).** In the browser, the
+  tab you already have reconnects. In app-window mode the native window is reopened
+  after the restart; before, the restart opened a second browser tab in either mode
+  and could leave the app window closed.
 - **A lone vision projector in a folder is no longer attached to a model it was not made for.** A projector beside a model is attached when its name matches the model, or when its name names no model (`mmproj-F16.gguf`, `mmproj-model-f16.gguf`) and no other model in the folder could use it: other quantizations of the same model and its multi-token-prediction head do not count, and a model with a different embedding width is ruled out. A projector named after another model in the folder is left for that model unless that model's embedding width rules it out. `localm pull` applies the same naming rules to the repo's file list, which carries no model headers.
 - **Pulling a vision model no longer attaches a different model's vision projector just because the two repos happen to name it the same.** Several HuggingFace vendors ship a vision-language release with an identically named projector file (`mmproj-model-f16.gguf` and similar); a same-named file already in the models folder from an earlier pull is now confirmed to be the repo currently being pulled (its published sha256, or, when that is not published, a matching GGUF embedding width) before it is reused, matching the check the local `--store` import already applies to a filename collision. A confirmed mismatch downloads the new projector under a numbered name instead of attaching the wrong one or touching the earlier model's own file. Covers both the automatic same-repo projector detection and an explicit `--mmproj`.
 - **Adding a model with `--store move` or `--store copy` no longer leaves its vision projector behind.** Every projector next to the model that may belong to it now comes along, including generically named ones such as `mmproj-F16.gguf`, instead of only one localm recognises by name. A projector another model in the same folder may also use is copied rather than moved, so that model keeps its vision, and the projector the model is paired with is recorded on its entry, so vision still works in a models folder that holds several projectors. When projectors came along but none is attached, a note names them with the `--mmproj` path to use one. When a single file is added, a same-named projector already in the models folder is reused if identical and otherwise stored under a numbered name, instead of failing the import. A projector path recorded on another model's entry now follows the file when it moves. The same applies when a single file is added with `--on-duplicate copy` / `move`, and importing a folder with `--on-duplicate move` no longer registers a projector at the location it was just moved out of.
