@@ -78,6 +78,32 @@ export const I18N_EN = {
   "common.imageProxy.unreachable": "This localm could not reach it.",
   "common.modal.cancel": "Cancel",
   "common.modal.ok": "OK",
+  "common.modelDownload.bodyNoSize":
+    "This workflow needs '{filename}', which isn't installed.",
+  "common.modelDownload.foundOnHf":
+    "Found on Hugging Face by its file name. It is not from localm's own catalog, so check the repository before you download it.",
+  "common.modelDownload.genericName":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). Its name is too generic for localm to find the right model automatically. Add it to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.notFoundOnHf":
+    "'{filename}' is missing (needed by {class_type}.{input_name}) and no public Hugging Face repository has a file with exactly that name. Add it to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.search":
+    "Search Hugging Face",
+  "common.modelDownload.searchBody":
+    "This workflow needs '{filename}' (for {class_type}.{input_name}), which isn't installed and isn't in localm's catalog. localm can search Hugging Face for a file with exactly this name.",
+  "common.modelDownload.searchError":
+    "Could not search for the model: {message}",
+  "common.modelDownload.searchFailed":
+    "Could not search Hugging Face for '{filename}'. Check your connection and try again, or add the file to your ComfyUI installation's matching models folder.",
+  "common.modelDownload.searchOffline":
+    "Could not search for '{filename}': network access is off. Turn it on, or allow downloads only, in Settings → Network.",
+  "common.modelDownload.searching":
+    "Searching…",
+  "common.modelDownload.unknownFolder":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). localm does not know which ComfyUI models folder this node reads from. Add the file to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.unusableName":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). Its name has characters localm cannot save a file under, so it cannot be downloaded automatically. Add it to your ComfyUI installation's matching models folder, then try again.",
+  "common.modelDownload.unsupportedFormat":
+    "'{filename}' is missing (needed by {class_type}.{input_name}). localm downloads only .safetensors and .gguf model files automatically. Add this file to your ComfyUI installation's matching models folder, then try again.",
   "common.modelDownload.body": "This workflow needs '{filename}' ({size}), which isn't installed.",
   "common.modelDownload.download": "Download",
   "common.modelDownload.failed": "Download failed: {message}",
@@ -170,6 +196,7 @@ export const I18N_EN = {
   "chat.routed.cap.tool_use": "tool calls",
   "chat.routed.cap.vision": "reading images",
   "chat.routed.chip": "instead of {from}",
+  "chat.routed.fallbackChip": "a capable model was not used",
   "chat.routed.title": "{from} lacks what this request needed ({needs}), so an installed model that has it answered. Pin the chat in its parameters to always use one model.",
   "chat.seed": "Seed",
   "chat.send": "Send",
@@ -497,6 +524,13 @@ export const I18N_EN = {
   "coder.rail.open": "Open",
   "coder.rail.otherProjects": "Other projects",
   "coder.rail.pastHere": "Past sessions here",
+  "coder.rail.projectRemoved": "Project removed",
+  "coder.rail.removeProjectConfirmBody":
+    "Remove \"{name}\" from the list and delete its saved sessions? This cannot be undone. Your project files in {path} are left alone.",
+  "coder.rail.removeProjectConfirmLabel": "Remove project",
+  "coder.rail.removeProjectConfirmTitle": "Remove project?",
+  "coder.rail.removeProjectFailed": "Could not remove the project: ",
+  "coder.rail.removeProjectTitle": "Remove this project and its saved sessions",
   "coder.rail.saveSideFailed": "Could not save which side the session list sits on",
   "coder.rail.sessionsHeading": "Sessions",
   "coder.remote.badge": "remote: {host}",
@@ -513,6 +547,13 @@ export const I18N_EN = {
   "coder.session.continueLastDetail": "Continue last session ({turns} turns, {when})",
   "coder.session.continueTitle": "Continue this session",
   "coder.session.daysAgo": "{days}d ago",
+  "coder.session.deleteConfirmBody":
+    "Delete the saved session \"{title}\"? It cannot be continued afterwards. Your files in the project are left alone.",
+  "coder.session.deleteConfirmLabel": "Delete",
+  "coder.session.deleteConfirmTitle": "Delete this session?",
+  "coder.session.deleteFailed": "Could not delete the session: ",
+  "coder.session.deleteTitle": "Delete this saved session",
+  "coder.session.deleted": "Session deleted",
   "coder.session.earlier": "earlier",
   "coder.session.endAndContinue": "End it and continue",
   "coder.session.foundButUnreadable":
@@ -1238,6 +1279,8 @@ export const I18N_EN = {
     "Badges compare each file against your {gib} GB VRAM combined across {count} GPUs (weights + ~1.5 GB overhead).",
   "models.vramBasis.mainGpu":
     "Badges compare each file against your main GPU's {gib} GB (set a split in Settings to use all {count}) (weights + ~1.5 GB overhead).",
+  "models.vramBasis.oneGpu":
+    "Badges compare each file against the {gib} GB of GPU {index}, the one GPU chosen in Settings (weights + ~1.5 GB overhead).",
   "models.vramBasis.single":
     "Badges compare each file against your {gib} GB VRAM (weights + ~1.5 GB overhead).",
 
@@ -1525,7 +1568,7 @@ export const I18N_EN = {
   "settings.field.browserEnabled.label": "Let the model drive a web browser",
   "settings.field.browserEnabled.help": "Off by default. A key must also hold the browser capability. The browser reaches only what the network policy already allows.",
   "settings.field.browserEngine.label": "Browser to drive",
-  "settings.field.browserEngine.help": "'bundled' runs the sandboxed browser localm downloads. 'system' drives your own installed browser, including its logged-in sessions, which is why it is not the default.",
+  "settings.field.browserEngine.help": "'bundled' runs the browser localm downloads. 'system' runs a Chrome, Chromium, Edge or Brave already installed here. Either way it starts with a fresh, empty profile: none of your logins carry over.",
   "settings.field.browserHeadless.label": "Run the browser hidden",
   "settings.field.browserHeadless.help": "On by default. Off opens a visible window; the live view works either way.",
   "settings.field.browserCustomDomainRules.label": "Use browser-specific domain rules",
@@ -1705,7 +1748,9 @@ export const I18N_EN = {
   "settings.perf.mainGpuHelp": "Which device the model loads onto. Saves immediately; applies on the next model load.",
   "settings.perf.splitLabel": "Split across GPUs",
   "settings.perf.splitHelp":
-    "Spread a model too large for one card over several (check 2 or more, which overrides Main GPU). Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
+    "Check one GPU to load a model on that GPU only, or 2 or more to spread a model too large for one card over them (overrides Main GPU); leave all unchecked for automatic placement. Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
+  "settings.perf.singleGpuHint": "One GPU chosen: a model loads on GPU {index} ({name}) only.",
+  "settings.perf.singleGpuToast": "Saved - a model loads on GPU {index} only, from the next model load",
   "settings.perf.ratioHint":
     "Optional relative weight per checked device (e.g. 3 and 1 gives the first card three times the second's share). Leave every weight blank to keep the automatic free-VRAM sizing above.",
   "settings.perf.indexSpaceHint":
@@ -2243,6 +2288,31 @@ export const I18N_EN = {
   "browser.liveView.inputRestored": "Input is reaching the browser again.",
   "browser.liveView.keysHint":
     "Keys go to the page · Esc releases the keyboard · Shift+Tab moves back",
+  "browser.setup.alreadyDownloading": "A download is already running.",
+  "browser.setup.bundledMissing":
+    "The bundled browser has not been downloaded yet. It is a one-time " +
+    "download, separate from the localm install.",
+  "browser.setup.checkFailed": "Could not check the browser.",
+  "browser.setup.checking": "Checking the browser...",
+  "browser.setup.download": "Download browser",
+  "browser.setup.downloadBlockedNetwork":
+    "Network access is off, which blocks the download. Turn network access on, " +
+    "or allow model downloads while it is off, in Settings > Server & network.",
+  "browser.setup.downloadBlockedPermission":
+    "Downloading the browser needs permission to change settings.",
+  "browser.setup.downloadDone": "The browser is downloaded and ready.",
+  "browser.setup.downloadFailed": "The download did not finish: {detail}",
+  "browser.setup.downloading": "Downloading the browser...",
+  "browser.setup.heading": "Browser setup",
+  "browser.setup.playwrightMissing":
+    "The browser automation extra is not installed. Install it with:  " +
+    "pip install \"localm[browser]\"",
+  "browser.setup.readyBundled": "The bundled browser is downloaded and ready.",
+  "browser.setup.readySystem": "localm will use {browser}, found on this computer.",
+  "browser.setup.switchedToBundled": "Switched to the bundled browser.",
+  "browser.setup.systemMissing":
+    "No supported browser was found on this computer. localm looked for {names}.",
+  "browser.setup.useBundled": "Use the bundled browser instead",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
 };

@@ -47,11 +47,27 @@ from localm.inference.backends.base import (
 )
 from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
+from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
     ChatChunk, ChatResponse,
     FullChoice, Message, STATUS_CODE_BY_TEXT, UsageInfo,
     WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
+
+# Models whose last load failed; capability routing leaves them out of its
+# candidates (see localm.inference.routing_latch).
+_routing_latch = RoutingLatch()
+
+
+class LoadSkipped(HTTPException):
+    """503 raised instead of a load that was refused because the model's last
+    load failed and that failure still applies. ``skipped`` is the latch's
+    record for the model."""
+
+    def __init__(self, skipped) -> None:
+        super().__init__(503, skipped.describe())
+        self.skipped = skipped
+
 
 # Map of display name -> Engine instance
 _engines: dict[str, Engine] = {}
@@ -278,15 +294,26 @@ def _model_file_size(name: str) -> Optional[int]:
 
 
 def _current_gpu_index() -> int:
-    """The configured main GPU device index (0 when unset/unconfigured) - see
-    ``main_gpu_index`` / ``discover.resolve_main_gpu_index``, the same
-    resolution ``vram_info()`` and the GGUF backend's own VRAM check use."""
+    """The device the next GGUF load reads its VRAM from (0 when nothing
+    selects one) - ``discover.resolve_load_gpu_index``, the same resolution
+    ``vram_info()`` and the GGUF backend's own VRAM check use, validated
+    against ``discover.last_gpu_reading()`` so it never probes."""
     try:
         from localm.config import load_config
-        from localm.discover import resolve_main_gpu_index
-        return resolve_main_gpu_index(load_config().get("main_gpu_index"))
+        from localm.discover import last_gpu_reading, resolve_load_gpu_index
+        return resolve_load_gpu_index(load_config(), gpus=last_gpu_reading() or [],
+                                      quiet=True)
     except Exception:
         return 0
+
+
+def _loaded_gpu_index(name: Optional[str]) -> Optional[int]:
+    """The device loaded model *name* runs on alone (its backend's
+    ``load_gpu_index``), or None when it is not loaded on one device or that
+    is not recorded."""
+    engine = _engines.get(name) if name else None
+    idx = getattr(getattr(engine, "_backend", None), "load_gpu_index", None)
+    return idx if isinstance(idx, int) and not isinstance(idx, bool) else None
 
 
 def _loaded_model_identities() -> list:
@@ -329,6 +356,9 @@ def _gpu_registry_sync() -> None:
         sizes = [_model_file_size(n) for n in (loaded or ([model] if model else []))]
         if sizes and all(sz is not None for sz in sizes):
             vram_bytes = int(sum(sizes) * 1.2)
+        gpu_index = _loaded_gpu_index(model)
+        if gpu_index is None:
+            gpu_index = _current_gpu_index()
         gpu_registry.write_entry(
             gpu_registry.registry_dir(),
             instance_id=_gpu_coord["instance_id"],
@@ -338,7 +368,7 @@ def _gpu_registry_sync() -> None:
             scheme=_gpu_coord.get("scheme") or "http",
             model=model,
             vram_estimate_bytes=vram_bytes,
-            gpu_index=_current_gpu_index(),
+            gpu_index=gpu_index,
             coordination_token=_gpu_coord["token"],
             models=_loaded_model_identities(),
         )
@@ -349,8 +379,11 @@ def _gpu_registry_sync() -> None:
 
 def _load_gpu_indices() -> set:
     """Every device whose free VRAM this instance's next model load can actually
-    USE - the whole configured split when one is active, else just the main
-    device.
+    USE - the whole configured split when one resolves to 2+ devices, else the
+    GPUs llama.cpp's default split spreads a GGUF load over
+    (``discover.implicit_split_gpus`` on the last reading, the devices
+    ``_switch_probe_vram`` sums), else the one device ``_current_gpu_index``
+    names. Never probes beyond ``resolve_gpu_split``'s own reading.
 
     NOT ``{_current_gpu_index()}``: that is an IDENTITY answer ("which one device
     is primary"), and resolve_main_gpu_index(None) returns 0 for an unconfigured
@@ -376,6 +409,10 @@ def _load_gpu_indices() -> set:
                                   cfg.get("gpu_split_ratios"))
         if len(pairs) >= 2:
             return {idx for idx, _ratio in pairs}
+        from localm.discover import implicit_split_gpus
+        kept = implicit_split_gpus(cfg)
+        if kept is not None:
+            return {d.get("index") for d in kept}
     except Exception as e:
         from localm.debuglog import logger as _dbg
         _dbg.debug("could not resolve the configured GPU split for the "
@@ -500,7 +537,8 @@ _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 
 
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
-                        force: bool = False, activate: bool = True) -> dict:
+                        force: bool = False, activate: bool = True,
+                        skip_if_latched: bool = False) -> dict:
     """Make model *name* resident and, with *activate*, the active model.
 
     *make_engine*, when not None, becomes the engine factory used to build an
@@ -510,6 +548,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     loading, and may cancel a busy resident model or ask before a degraded
     load. *force* skips those confirmations. With *activate* False the model
     becomes active only when nothing else would answer an unnamed request.
+    With *skip_if_latched* (a load that capability routing chose, not one the
+    user asked for) a model that is not resident is not loaded when its last
+    load failed and that failure still applies once the model's semaphore is
+    held; ``LoadSkipped`` is raised instead.
 
     Returns a dict whose ``status`` is one of:
 
@@ -526,7 +568,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     Raises HTTPException 404 when *name* is registered but its files are not
     found, and 503 when a static split device is short of VRAM, the VRAM probe
     stays inconclusive, *name* is still being freed by another request, or the
-    backend fails to load it.
+    backend fails to load it. ``LoadSkipped`` (a 503) is raised for
+    *skip_if_latched*.
 
     Loads of one model are serialized by its ``_inference_sems`` semaphore.
     The admission decisions come from ``localm.inference.switch_admission``;
@@ -553,6 +596,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             _switch_reuse_resident(name, sem, activate=activate, on_active=on_active)
             return {"status": "already_active", "model": name,
                     **_gpu_placement_fields(_engines[name])}
+
+        if skip_if_latched and _routing_latch.failure(name) is not None:
+            latched = await loop.run_in_executor(None, _routing_latch.skipped, [name])
+            if name in latched:
+                raise LoadSkipped(latched[name])
 
         budget = _switch_load_budget(name)
         if budget is not None:
@@ -702,9 +750,15 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
 
     ``vram_capacity`` is given the full CLI deadline on this first call and
     joins a probe already in flight (``wait_for_inflight``); joining is only
-    safe because the call runs in an executor thread."""
+    safe because the call runs in an executor thread.
+
+    For a GGUF load (``budget.check_split_fit``) with no configured split, a
+    fresh reading of the GPUs llama.cpp's default split spreads over (2+, or
+    the one discrete GPU beside integrated ones) is judged by their summed
+    free VRAM (``discover.implicit_split_free``, the budget the backend sizes
+    the load against), and the probe is marked ``implicit_split``."""
     from localm import discover
-    from localm.discover import gpu_split_shortfall, vram_capacity
+    from localm.discover import gpu_split_shortfall, implicit_split_free, vram_capacity
 
     v_info, probe_status = await loop.run_in_executor(
         None, functools.partial(
@@ -713,6 +767,12 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
             wait_for_inflight=True))
     free = v_info.get("free")
     process_scoped = v_info.get("free_scope") == discover.FREE_SCOPE_PROCESS
+    implicit = None
+    if budget.check_split_fit and probe_status == discover.GPU_PROBE_OK:
+        implicit = await loop.run_in_executor(None, implicit_split_free)
+    if implicit is not None:
+        free = implicit["free"]
+        process_scoped = implicit.get("free_scope") == discover.FREE_SCOPE_PROCESS
     shortfall, shares_adaptive = (
         await loop.run_in_executor(
             None, functools.partial(
@@ -722,7 +782,26 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
     return switch_admission.VramProbe(
         free=free, probe_ok=probe_status == discover.GPU_PROBE_OK,
         process_scoped=process_scoped, shortfall=shortfall,
-        shares_adaptive=shares_adaptive)
+        shares_adaptive=shares_adaptive, implicit_split=implicit is not None)
+
+
+def _probe_free_reader(probe: switch_admission.VramProbe):
+    """A callable re-reading free VRAM as the same quantity as ``probe.free``:
+    the summed free of llama.cpp's default-split GPUs for an
+    ``implicit_split`` probe (None when a fresh reading of them is not
+    available), else ``vram_capacity()``'s free."""
+    from localm import discover
+
+    if not probe.implicit_split:
+        return lambda: discover.vram_capacity().get("free")
+
+    def _read() -> Optional[int]:
+        gpus, status = discover._list_gpus_reading()
+        if status != discover.GPU_PROBE_OK:
+            return None
+        info = discover.implicit_split_free(gpus=gpus)
+        return info.get("free") if info is not None else None
+    return _read
 
 
 async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
@@ -791,7 +870,6 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     Sets ``attempt.embedder_attempted`` once a loaded embedder is found, so it
     is tried at most once per load attempt. ``reset_embedder(force=False)``
     checks for in-flight requests and clears in one locked step."""
-    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     embedder_dim = await loop.run_in_executor(None, embedder_mod.loaded_dim)
@@ -806,8 +884,7 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
         await loop.run_in_executor(
             None,
             lambda: wait_for_vram_release(
-                lambda: vram_capacity().get("free"),
-                before_bytes=probe.free))
+                _probe_free_reader(probe), before_bytes=probe.free))
     return True
 
 
@@ -914,7 +991,6 @@ async def _switch_free_victim(loop, victim: str, engine,
     for its VRAM to be released when *probe* was measurable, so the next
     reading is not stale. *victim* is in ``_evicting_names`` for the whole
     free, and is removed again even when ``unload()`` raises."""
-    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     _evicting_names.add(victim)
@@ -924,7 +1000,7 @@ async def _switch_free_victim(loop, victim: str, engine,
             await loop.run_in_executor(
                 None,
                 lambda: wait_for_vram_release(
-                    lambda: vram_capacity().get("free"), before_bytes=probe.free))
+                    _probe_free_reader(probe), before_bytes=probe.free))
     finally:
         _evicting_names.discard(victim)
 
@@ -941,8 +1017,14 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
     set event of an earlier superseded switch. See
     test_api_load_of_reused_engine_after_preempted_switch_succeeds. Only an
     explicit switch (*preempt*) publishes it as ``_switch_cancel`` for the
-    duration of the load, so only a newer explicit switch can abort it."""
+    duration of the load, so only a newer explicit switch can abort it.
+
+    A load that raises is recorded in ``_routing_latch`` (a cancelled or
+    superseded one is not) and a load that succeeds clears the model's record.
+    The load fingerprint the record is made under is computed off the event
+    loop, before ``engine.load`` starts."""
     global _switch_cancel, _switch_loading
+    fingerprint = None
     cancel = threading.Event()
     if hasattr(engine, "set_load_cancel"):
         engine.set_load_cancel(cancel)
@@ -950,17 +1032,25 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
         _switch_cancel = cancel
         _switch_loading = name
     try:
+        fingerprint = await loop.run_in_executor(
+            None, _routing_latch.fingerprint, name)
         await loop.run_in_executor(None, engine.load)
     except ModelLoadCancelled as e:
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
         return {"status": "cancelled", "model": name, "reason": str(e)}
     except RuntimeError as exc:
+        _routing_latch.record_failure(name, exc, fingerprint=fingerprint)
         raise HTTPException(503, f"Failed to load '{name}': {exc}") from exc
+    except Exception as exc:
+        _routing_latch.record_failure(name, f"{type(exc).__name__}: {exc}",
+                                      fingerprint=fingerprint)
+        raise
     finally:
         if preempt and _switch_cancel is cancel:
             _switch_cancel = None
             _switch_loading = None
+    _routing_latch.record_success(name)
     return None
 
 
@@ -1035,7 +1125,13 @@ def plan_capability_route(model_name: str | None, messages: list,
     images does not count vision as a gap, whatever the registry records.
 
     Models with an accepted peer route count as resident, since answering with
-    one loads nothing here."""
+    one loads nothing here.
+
+    A model whose last load failed is left out of the candidates while
+    ``_routing_latch`` holds it, and the decision's ``skipped`` names it. The
+    model the request names, the active one and a model with an accepted peer
+    route are never affected. The latch is read only once the request has a
+    gap and is not pinned."""
     from localm import peer_routing
     from localm.inference import capability_routing as _cr
     from localm.model_manager import capabilities as _caps
@@ -1051,18 +1147,24 @@ def plan_capability_route(model_name: str | None, messages: list,
     # be adding or evicting engines, and iterating the live dict would raise.
     live = list(_engines.items())
     resident = [n for n, e in live if getattr(e, "loaded", False)]
-    resident += [n for n in peer_routing.list_routes() if n not in resident]
+    peer_routes = peer_routing.list_routes()
+    resident += [n for n in peer_routes if n not in resident]
     known = {}
     cur_engine = dict(live).get(current) if current else None
     if (cur_engine is not None and getattr(cur_engine, "loaded", False)
             and getattr(cur_engine, "supports_images", False) is True):
         known[_caps.VISION] = True
+
+    def skip_set():
+        return {n: s for n, s in _routing_latch.skipped().items()
+                if n not in peer_routes}
+
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                          current_known=known)
+                          current_known=known, skip=skip_set)
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
-                     activate: bool = True) -> Engine:
+                     activate: bool = True, skip_if_latched: bool = False) -> Engine:
     """Resolve the engine for *model_name*, loading it if necessary.
 
     With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
@@ -1074,6 +1176,10 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     With ``activate=False`` the engine serves this one request without becoming
     the model an unnamed request resolves to: the active/default model is left
     as it was (see ``switch_engine``). Capability routing uses this.
+
+    With ``skip_if_latched`` a model that is not resident is not loaded when its
+    last load failed and that failure still applies: ``LoadSkipped`` is raised.
+    Capability routing sets it for the models it chose.
     """
     global _engines, _engines_lru, _active_model_name, _default_model_name, _last_active_model_name, _inference_sems, _engine, _inference_sem
 
@@ -1144,7 +1250,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         return _engines.get(name) or _engine_factory(name)
 
     res = await switch_engine(name, _engine_factory, preempt=False,
-                              activate=activate)
+                              activate=activate, skip_if_latched=skip_if_latched)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
     if res.get("status") == "cancelled":
@@ -3122,7 +3228,8 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     """The stop sequence, WITHOUT the process exit.
 
     Stops in-flight job children (both the GUI's and the coder plugin's own
-    background shell/agent jobs) and any localm-launched ComfyUI instance,
+    background shell/agent jobs), closes every live GUI coder session
+    (waiting a few seconds at most), stops any localm-launched ComfyUI instance,
     unloads the model so the native context is freed cleanly (a hard exit
     while it is loaded segfaults during teardown), releases the shared
     embedder, and clears the crash marker so this intentional stop is not
@@ -3174,6 +3281,18 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("terminating coder background jobs during shutdown failed "
                      "(non-fatal); a job may be left running")
+    # Live GUI coder sessions are closed the way a graceful stop closes
+    # them. See test_a_failure_closing_sessions_does_not_block_the_stop.
+    try:
+        from localm.plugins.coder.sessions import close_all_for_exit
+        _sessions_closed = close_all_for_exit()
+        if _sessions_closed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("closed %d coder session(s) on shutdown", _sessions_closed)
+    except Exception:
+        _dbg_swallow("closing coder sessions during shutdown failed "
+                     "(non-fatal); a session may not record its end",
+                     level="warning")
     # Any ComfyUI instance localm itself launched (image/music/video, each
     # possibly its own api_url) runs in a detached process group so
     # stop_comfy() can kill its whole tree on demand - which also means it
@@ -3449,6 +3568,18 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     except Exception:
         _dbg_swallow("terminating coder background jobs during restart failed "
                      "(non-fatal); a job may be left running")
+    # Live GUI coder sessions are closed the way a graceful stop closes
+    # them. See test_a_failure_closing_sessions_does_not_block_the_stop.
+    try:
+        from localm.plugins.coder.sessions import close_all_for_exit
+        _sessions_closed = close_all_for_exit()
+        if _sessions_closed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("closed %d coder session(s) on restart", _sessions_closed)
+    except Exception:
+        _dbg_swallow("closing coder sessions during restart failed "
+                     "(non-fatal); a session may not record its end",
+                     level="warning")
     # Any ComfyUI instance localm itself launched runs in a detached process
     # group so stop_comfy() can kill its whole tree on demand - which also
     # means it does NOT die on its own when this process re-execs. Left
@@ -3648,6 +3779,7 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
     _inference_sems.clear()
     _embedder_sem = None
     _last_activity_per_model.clear()
+    _routing_latch.clear()
     # A fresh app boot must never carry over a name remembered from a
     # previous create_app() call in the same process (test reuse, a restart) -
     # see _last_active_model_name's own docstring for why it exists at all.
@@ -4862,7 +4994,11 @@ def _capability_route_header(route) -> dict:
     Compact ASCII JSON, header-safe:
     ``{"resolved","requested","routed","pinned","gaps":{cap:"absent"|"unknown"},
     "unmet":[...]}``, plus ``"load_errors":[...]`` (each cut to 200
-    characters) when every capable model failed to load."""
+    characters) when every capable model failed to load, and, when a model was
+    left out because its last load failed, ``"skipped":[{"model","failed_at",
+    "retry_at","reason"}]`` (the times in epoch seconds). ``"note"`` carries
+    the decision's one-line description (cut to 600 characters) whenever either
+    is present."""
     if route is None or not getattr(route, "has_gap", False):
         return {}
     payload = {
@@ -4877,6 +5013,14 @@ def _capability_route_header(route) -> dict:
     load_errors = getattr(route, "load_errors", ())
     if load_errors:
         payload["load_errors"] = [str(e)[:200] for e in load_errors]
+    skipped = getattr(route, "skipped", ())
+    if skipped:
+        payload["skipped"] = [
+            {"model": s.model, "failed_at": int(s.failed_at),
+             "retry_at": int(s.retry_at), "reason": s.reason}
+            for s in skipped]
+    if load_errors or skipped:
+        payload["note"] = route.describe()[:600]
     try:
         blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):

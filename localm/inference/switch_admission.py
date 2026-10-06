@@ -82,7 +82,9 @@ class VramProbe:
     (``discover.FREE_SCOPE_PROCESS``), ``shortfall`` the configured split's
     short devices (``discover.gpu_split_shortfall``, empty when not checked)
     and ``shares_adaptive`` whether those shares were the live
-    free-VRAM-proportional ones rather than static ratios.
+    free-VRAM-proportional ones rather than static ratios. ``implicit_split``
+    is True when ``free`` is summed over the GPUs llama.cpp's default split
+    uses (``discover.implicit_split_free``) rather than one device's reading.
     """
 
     free: Optional[int]
@@ -90,6 +92,7 @@ class VramProbe:
     process_scoped: bool
     shortfall: Any
     shares_adaptive: bool
+    implicit_split: bool = False
 
     @property
     def measurable(self) -> bool:

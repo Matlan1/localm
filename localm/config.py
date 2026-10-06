@@ -209,7 +209,7 @@ def pip_cache_dir() -> Path:
     """localm's OWN pip cache, inside the data dir.
 
     Shared by every pip subprocess localm drives itself - plugin-extra installs
-    (plugins/deps.py), the native runtime wheel (setup_llama.py), and managed-ComfyUI
+    (plugins/deps.py), the native runtime wheel (setup_llama/), and managed-ComfyUI
     provisioning (media/managed_comfy_provision.py delegates here) - so wheels are
     cached once, contained, and removed with the data dir. Left unset, pip caches to a
     per-user location OUTSIDE the data dir (``%LOCALAPPDATA%\\pip\\cache`` on Windows,
@@ -234,7 +234,7 @@ def contained_pip_env(base: Optional[dict] = None) -> dict:
     """A subprocess environment with pip's AND uv's caches pinned inside the data dir.
 
     *base* defaults to a copy of the current process environment. localm's package
-    installers (plugins/deps.py, setup_llama.py) shell out to ``uv pip install`` first
+    installers (plugins/deps.py, setup_llama/) shell out to ``uv pip install`` first
     and ``python -m pip install`` second; BOTH tools cache to a per-user location
     outside the data dir when left to their defaults, so BOTH ``PIP_CACHE_DIR`` and
     ``UV_CACHE_DIR`` are set here - pinning only one still leaks via the other. Both
@@ -360,16 +360,25 @@ DEFAULT_CONFIG: dict = {
     # the dedicated on-device embedder (a separate, purpose-built path).
     "hf_embed_max_texts": 256,
     "hf_embed_max_chars": 200_000,
-    # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
-    # explicit selection (device 0). A stale index falls back to device 0 with
-    # a logged warning, not a wrong/out-of-range GPU (see
+    # Primary GPU device on a multi-GPU box, and the device VRAM is read from
+    # unless a 1-entry gpu_split_indices names one, or the only discrete GPU
+    # beside integrated ones is used (discover.resolve_load_gpu_index).
+    # None = no explicit selection (device 0). For a GGUF model it does not
+    # confine the load to that device: without gpu_split_indices llama.cpp
+    # still spreads the layers over every GPU. A stale index falls back to
+    # device 0 with a logged warning, not a wrong/out-of-range GPU (see
     # discover.resolve_main_gpu_index).
     "main_gpu_index": None,
-    # Split a model too big for one card across 2+ GPUs (GGUF: llama.cpp
-    # layer-split; HF: accelerate device_map restricted to these devices).
-    # None/empty/1 entry = off (today's single-GPU behavior via
-    # main_gpu_index, unchanged). A device no longer detected at load time is
-    # dropped with a logged warning, not trusted blindly (see
+    # Which GPUs a model may use (GGUF: llama.cpp layer split; HF: accelerate
+    # device_map restricted to these devices). 2+ entries split the model
+    # across them. GGUF chat model: 1 entry loads it on that one GPU only, when
+    # the device can be matched to llama.cpp's own device list
+    # (discover.single_gpu_load_slot); None/empty leaves llama.cpp's default,
+    # a layer split over every GPU by free memory. A GGUF split that names an
+    # integrated GPU llama.cpp leaves out is refused. HF: 1 entry loads the
+    # model on that GPU, overflowing to CPU; with no entries main_gpu_index
+    # applies when set. A device no longer detected
+    # at load time is dropped with a logged warning, not trusted blindly (see
     # discover.resolve_gpu_split).
     "gpu_split_indices": None,
     # Optional relative weight per entry in gpu_split_indices (same length,

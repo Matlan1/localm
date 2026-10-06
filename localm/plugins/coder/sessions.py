@@ -17,6 +17,7 @@ import queue
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -55,6 +56,13 @@ _QUEUE_MAX = 10_000
 # an abandoned session (a closed tab, a killed browser), not a working-session
 # timeout: any event resets the clock.
 _IDLE_REAP_SECONDS = 24 * 3600
+
+# The longest close_all_for_exit() waits for live sessions to close.
+_EXIT_CLOSE_BUDGET_S = 5.0
+
+# Every SessionManager created in this process, for close_all_for_exit().
+_live_managers: "weakref.WeakSet[SessionManager]" = weakref.WeakSet()
+_live_managers_lock = threading.Lock()
 
 
 class SessionUnavailable(RuntimeError):
@@ -190,6 +198,11 @@ class CoderSession:
         # preferred model, which the server may replace when a request needs
         # something it lacks.
         self.model_pinned = bool(getattr(backend, "model_pinned", True))
+        # A backend that reports why the server did not use a model that could
+        # have answered has each report shown in this session's feed.
+        if hasattr(backend, "on_routing_note"):
+            backend.on_routing_note = (
+                lambda text: self._push({"type": "info", "text": text}))
         self.auto_approve = auto_approve
         self.mode = mode
         self.dry_run = dry_run
@@ -890,6 +903,9 @@ class CoderSession:
             # can; "answered_by" names the model that answered last.
             "model_pinned": self.model_pinned,
             "answered_by": getattr(self.agent.backend, "answered_model", None),
+            # Why the last request was not answered by a model that could have
+            # answered it (skipped, or failed to load); None otherwise.
+            "routing_note": getattr(self.agent.backend, "routing_note", None),
             "mode": self.mode,
             "auto_approve": self.auto_approve,
             # The LIVE glob, not the one passed at creation: it is settable
@@ -993,6 +1009,8 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, CoderSession] = {}
         self._lock = threading.Lock()
+        with _live_managers_lock:
+            _live_managers.add(self)
 
     def create(self, session: CoderSession) -> CoderSession:
         with self._lock:
@@ -1029,6 +1047,12 @@ class SessionManager:
             sessions = [s for s in sessions if s.principal == principal]
         return [s.info() for s in sorted(sessions, key=lambda s: s.created_at)]
 
+    def snapshot(self) -> list:
+        """Every live session, for every principal. Unlike :meth:`list`, this
+        never reaps an idle session."""
+        with self._lock:
+            return list(self._sessions.values())
+
     def remove(self, session_id: str) -> Optional[CoderSession]:
         with self._lock:
             session = self._sessions.pop(session_id, None)
@@ -1062,9 +1086,56 @@ class SessionManager:
                 reaped.append(session_id)
         return reaped
 
-    def close_all(self) -> None:
+    def close_all(self) -> int:
+        """Remove and close every session. Returns how many closed. A session
+        whose close() raises is logged at WARNING and the rest still close."""
         with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
+        closed = 0
         for s in sessions:
-            s.close()
+            try:
+                s.close()
+                closed += 1
+            except Exception:
+                from localm.debuglog import logger
+                logger.warning("coder: closing session %s failed",
+                               getattr(s, "id", "?"), exc_info=True)
+        return closed
+
+
+def close_all_for_exit(timeout_s: Optional[float] = None) -> int:
+    """Close the sessions of every SessionManager in this process, from the
+    server's ``os._exit``/``os.execv`` exit paths.
+
+    The closes run on a daemon thread; this waits at most *timeout_s* seconds
+    (default ``_EXIT_CLOSE_BUDGET_S``) for them and logs at WARNING when they
+    have not finished by then. Returns how many sessions had closed when it
+    returned. Never raises."""
+    budget = _EXIT_CLOSE_BUDGET_S if timeout_s is None else timeout_s
+    closed = [0]
+    try:
+        with _live_managers_lock:
+            managers = list(_live_managers)
+
+        def _close_managers() -> None:
+            for manager in managers:
+                try:
+                    closed[0] += manager.close_all()
+                except Exception:
+                    from localm.debuglog import logger
+                    logger.warning("coder: closing sessions at exit failed",
+                                   exc_info=True)
+
+        worker = threading.Thread(target=_close_managers,
+                                  name="coder-sessions-exit-close", daemon=True)
+        worker.start()
+        worker.join(budget)
+        if worker.is_alive():
+            from localm.debuglog import logger
+            logger.warning("coder: live sessions were still closing after %.1fs "
+                           "at exit; the exit goes ahead without them", budget)
+    except Exception:
+        from localm.debuglog import logger
+        logger.warning("coder: closing sessions at exit failed", exc_info=True)
+    return closed[0]

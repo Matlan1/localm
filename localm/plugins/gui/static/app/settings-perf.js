@@ -335,12 +335,27 @@ function renderGpuSplitRatioRow(gpus, checkedIndices, presetRatios) {
   });
 }
 
+/** Show the one-GPU note under the checkboxes when exactly one device is
+ *  checked (a 1-entry gpu_split_indices: a model loads on that GPU only),
+ *  naming that device; hidden otherwise. */
+function renderGpuSingleHint(gpus, checkedIndices) {
+  const hint = $("perf-gpu-single-hint");
+  if (!hint) return;
+  if (checkedIndices.length !== 1) { hint.hidden = true; return; }
+  const idx = checkedIndices[0];
+  const gpu = gpus.find((g) => g.index === idx);
+  hint.textContent = t("settings.perf.singleGpuHint",
+    { index: idx, name: gpu ? (gpu.name || "GPU " + idx) : "GPU " + idx });
+  hint.hidden = false;
+}
+
 /** Populate the "Split across GPUs" checkbox list from GET /api/gpus: one
  *  checkbox per detected device, pre-checked for whatever gpu_split_indices
  *  currently holds. Hidden entirely on a single-GPU box, or when the
  *  endpoint is unreachable/empty - same gate (including the inconclusive-probe
  *  exception) as the Main GPU selector above. Also renders the ratio-weight
- *  row beside it, pre-filled from gpu_split_ratios (see renderGpuSplitRatioRow). */
+ *  row beside it, pre-filled from gpu_split_ratios (see renderGpuSplitRatioRow),
+ *  and the one-GPU note when one device is checked (renderGpuSingleHint). */
 export async function refreshGpuSplitCheckboxes() {
   const row = $("perf-gpu-split-row"), list = $("perf-gpu-split-list");
   if (!row || !list) return;
@@ -372,6 +387,7 @@ export async function refreshGpuSplitCheckboxes() {
     // indices (not `current`, a Set) preserves the stored ORDER, which is what
     // gpu_split_ratios is position-paired against.
     renderGpuSplitRatioRow(gpus, indices, data.gpu_split_ratios);
+    renderGpuSingleHint(gpus, indices.filter((i) => gpus.some((g) => g.index === i)));
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
   } catch {
@@ -380,26 +396,27 @@ export async function refreshGpuSplitCheckboxes() {
 }
 
 /** PATCH /v1/config with the currently-checked GPU indices and their ratio
- *  weights, read straight from the DOM as it stands right now. Fewer than 2
- *  checked CLEARS both the split and its ratios (single-GPU behavior, Main
- *  GPU selector applies instead) - the saved value always matches exactly
- *  what is checked/typed, never silently turning the split on or guessing a
- *  weight. A partially-filled ratio row (some devices weighted, others left
- *  blank) is ambiguous - rather than guess a neutral weight for the blank
- *  ones, gpu_split_ratios is left OUT of that PATCH (the previously-saved
- *  value, if any, is untouched) and the user is told to fill every field or
- *  clear them all. Shared by both the checkbox and the ratio-input handlers
- *  below, which differ only in whether the ratio row needs rebuilding first. */
+ *  weights, read straight from the DOM as it stands right now. None checked
+ *  CLEARS both the split and its ratios (automatic placement); exactly one
+ *  checked saves that one index (a model loads on that GPU only) with no
+ *  ratios - the saved value always matches exactly what is checked/typed,
+ *  never silently turning the split on or guessing a weight. A
+ *  partially-filled ratio row (some devices weighted, others left blank) is
+ *  ambiguous - rather than guess a neutral weight for the blank ones,
+ *  gpu_split_ratios is left OUT of that PATCH (the previously-saved value, if
+ *  any, is untouched) and the user is told to fill every field or clear them
+ *  all. Shared by both the checkbox and the ratio-input handlers below, which
+ *  differ only in whether the ratio row needs rebuilding first. */
 async function _saveGpuSplit() {
   const list = $("perf-gpu-split-list");
   if (!list) return;
   const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
     .map((cb) => Number(cb.value));
-  const value = checked.length >= 2 ? checked : null;
+  const value = checked.length >= 1 ? checked : null;
   const body = { gpu_split_indices: value };
   let ratioWarning = "";
-  if (!value) {
-    body.gpu_split_ratios = null;   // no split -> ratios are meaningless without it
+  if (!value || value.length === 1) {
+    body.gpu_split_ratios = null;   // ratios only weight a split of 2+ GPUs
   } else {
     const ratioList = $("perf-gpu-ratio-list");
     const raw = ratioList
@@ -423,8 +440,9 @@ async function _saveGpuSplit() {
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
     toast(ratioWarning ? ratioWarning
-        : value ? t("settings.perf.savedNextLoad")
-                : t("settings.perf.splitDisabledToast"),
+        : !value ? t("settings.perf.splitDisabledToast")
+        : value.length === 1 ? t("settings.perf.singleGpuToast", { index: value[0] })
+                : t("settings.perf.savedNextLoad"),
           !!ratioWarning);
   } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
 }
@@ -437,6 +455,7 @@ async function onGpuSplitCheckboxChange() {
   const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
     .map((cb) => Number(cb.value));
   renderGpuSplitRatioRow(_lastSplitGpus, checked.length >= 2 ? checked : [], null);
+  renderGpuSingleHint(_lastSplitGpus, checked);
   await _saveGpuSplit();
 }
 
@@ -2133,7 +2152,9 @@ $("persona-delete").onclick = () => {
  *  `X-Localm-Model-Routing` response header): which model answered, which
  *  model the request asked for, which capabilities drove the choice (`gaps`,
  *  the ones the answering model provides) and which it still lacks (`unmet`).
- *  Returns null when the header is absent or unparseable. */
+ *  `note` is present when the server says why a model that could have
+ *  answered was skipped or failed to load. Returns null when the header is
+ *  absent or unparseable. */
 export function parseRoutingHeader(resp) {
   try {
     const raw = resp && resp.headers && resp.headers.get
@@ -2150,6 +2171,7 @@ export function parseRoutingHeader(resp) {
       gaps: data.gaps && typeof data.gaps === "object"
         ? Object.keys(data.gaps).filter((g) => !unmet.includes(g)) : [],
       unmet,
+      ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
     };
   } catch { return null; }
 }
@@ -2450,7 +2472,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // that literal marker in its own prior turn on the next request).
   const answeredBy = (routing && routing.routed && routing.resolved) || modelName;
   const routedNote = routing && routing.routed
-    ? { from: routing.requested || modelName, gaps: routing.gaps } : null;
+    ? { from: routing.requested || modelName, gaps: routing.gaps }
+    : (routing && !routing.pinned && routing.note
+      ? { fallback: routing.note, gaps: [] } : null);
   if (aborted) {
     renderMarkdown(liveBody,
       (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +

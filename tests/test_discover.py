@@ -1116,10 +1116,11 @@ class TestListGpus:
         assert len(gpus) == 2
         # free_scope "device" is part of this path's contract: nvidia-smi's
         # memory.free is the whole board's across every process, so it needs no
-        # correction on any platform.
+        # correction on any platform. source "nvidia-smi" marks an index in
+        # nvidia-smi's own order rather than a CUDA device ordinal.
         assert gpus[0] == {"index": 0, "name": "NVIDIA RTX 4090",
                             "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2,
-                            "free_scope": "device"}
+                            "free_scope": "device", "source": "nvidia-smi"}
         assert gpus[1]["index"] == 1
         assert gpus[1]["name"] == "NVIDIA RTX 3060"
 
@@ -1342,6 +1343,9 @@ class TestListGpusTimeoutStatus:
         (status OK) - the real no-torch/no-nvidia-smi box - and must NOT be
         conflated with a timeout."""
         monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: [])
+        # An earlier test in the process may have loaded a HIP llama.cpp runtime.
+        monkeypatch.setattr("localm.discover._torch_gpu_probe_known_doomed",
+                            lambda: False)
         gpus, status = list_gpus(deadline=3.0, return_status=True)
         assert gpus == []
         assert status == GPU_PROBE_OK

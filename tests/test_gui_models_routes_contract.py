@@ -44,6 +44,7 @@ EXPECTED_ROUTES = {
     ("POST", "/api/models/pull"): S.MODELS_WRITE,
     ("POST", "/api/media/{kind}/preflight"): S.MODELS_WRITE,
     ("POST", "/api/models/pull-comfy-source"): S.MODELS_WRITE,
+    ("POST", "/api/models/comfy-source/lookup"): S.MODELS_WRITE,
     ("POST", "/api/models/remove"): S.MODELS_WRITE,
     ("POST", "/api/models/alias"): S.MODELS_WRITE,
     ("POST", "/api/models/rename"): S.MODELS_WRITE,
@@ -235,6 +236,8 @@ def _requests_for(app):
         ("POST", "/api/models/pull", {"spec": "owner/repo"}),
         ("POST", "/api/media/image/preflight", {}),
         ("POST", "/api/models/pull-comfy-source", {"filename": "not-curated.gguf"}),
+        ("POST", "/api/models/comfy-source/lookup",
+         {"filename": "x.pth", "class_type": "VAELoader", "input_name": "vae_name"}),
         ("POST", "/api/models/remove", {"model": "nope"}),
         ("POST", "/api/models/alias", {"model": "nope", "alias": "x"}),
         ("POST", "/api/models/rename", {"model": "nope", "new_name": "x"}),
@@ -673,12 +676,15 @@ class TestMediaPreflight:
         assert data["status"] == "verified" and data["warning"] == ""
         curated, homemade = data["missing"]
         for entry in (curated, homemade):
-            assert set(entry) == {"class_type", "input_name", "filename", "source", "dest_dir"}
+            assert set(entry) == {"class_type", "input_name", "filename", "source", "dest_dir",
+                                  "searchable", "reason", "detail"}
         assert curated["filename"] == "flux1-dev-Q8_0.gguf"
-        assert set(curated["source"]) == {"repo", "file", "size_bytes", "model_type"}
+        assert set(curated["source"]) == {"repo", "file", "size_bytes", "model_type", "origin"}
+        assert curated["source"]["origin"] == "curated"
         assert curated["source"]["repo"] == "city96/FLUX.1-dev-gguf"
         assert curated["source"]["file"] == "flux1-dev-Q8_0.gguf"
         assert homemade["source"] is None and homemade["dest_dir"] is None
+        assert homemade["searchable"] is True and homemade["reason"] == ""
 
 
 class TestPullComfySource:

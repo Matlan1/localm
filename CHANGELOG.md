@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Missing ComfyUI models can be downloaded even when localm has no built-in
+  source for them.** When an image, video or music workflow needs a model file
+  that is not installed, localm now offers to search Hugging Face for a file with
+  exactly that name, shows the repository, path and size it found, and downloads
+  it into the right ComfyUI models folder when you confirm. Files published by
+  ComfyUI's own Hugging Face organisation are preferred. Only `.safetensors`,
+  `.sft` and `.gguf` files are downloaded this way, and a model the workflow
+  keeps in a subfolder of its models folder is saved in that subfolder. The
+  models used by the built-in music (ACE-Step) and video (Wan 2.2) workflows are
+  now offered directly, without a search.
 - **Text-to-speech and speech-to-text offer a one-time download prompt instead of a
   hard refusal when network access is off.** Settings also gained direct "download
   the voice/speech model now" controls for both, so first-time setup no longer
@@ -105,6 +115,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   colours to match Windows, macOS or GNOME, including a dark title bar on
   Windows. Set `LOCALM_THEME=dark` or `LOCALM_THEME=light` to choose one
   yourself.
+- **Delete past coder sessions and remove projects from the coder's session
+  list.** Each past session in the list has a delete button, and each project
+  has a remove button that forgets the project and deletes its saved sessions.
+  Both ask first. Removing a project deletes only the coder's saved sessions
+  for it, including an older one kept in the project's `.localcoder` folder;
+  your project files are left alone. A session that is open, or a project
+  with an open session, has to be ended first.
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
@@ -157,6 +174,114 @@ permanent public record of what shipped and are never rewritten; the in-progress
   record, so the first kept running with nothing able to close it. The calls
   now share a single start and drive the same browser; if that start fails,
   every waiting call gets the same error.
+- **A browser that starts too slowly is no longer left running.** When the
+  automated browser did not come up within its start timeout, the Browser tab
+  and the coder's browser tools reported "the browser did not start in time",
+  but the launch carried on and, once it finished, left a Chromium and its
+  driver running until the server was stopped. That browser is now closed as
+  soon as the late launch finishes.
+- **Stopping or restarting localm now closes open coder sessions properly.**
+  Stopping or restarting from Settings or the tray, or stopping a `localm serve`
+  the GUI was attached to, left open coder sessions unclosed. Each one now saves
+  its conversation, records its end in its session log, writes its full-mode
+  transcript, and closes the automated browser it opened. A session that cannot
+  finish closing within a few seconds does not hold up the stop.
+- **A change of the system clock no longer lets a second writer into a knowledge
+  collection that is being indexed.** After the clock jumped (a laptop waking, a VM
+  or WSL resyncing its clock), a `localm rag add`, a scheduled re-sync or a memory
+  write could decide that a run still writing the same collection had crashed and
+  write alongside it. A run that is still writing now keeps the collection whatever
+  the clock does: the waiting command takes a collection over only after it has
+  itself watched the other run stay silent. When localm can see that run has
+  exited, a clock set back after it stopped no longer keeps its collection locked.
+- **An app window that loads slowly now gets its copy and paste shortcuts.** On
+  Windows, when the window's first page took longer than about 8 seconds to
+  load, its keyboard shortcuts for copy, paste and select all, and its
+  right-click menu, were never turned on and did not work in that window. They
+  now turn on as soon as the page has loaded, however long that takes, and the
+  window comes to the front then (unless you already closed it to the tray).
+- **Quitting from an app window that never finished loading no longer opens a
+  browser tab.** With "Quit when the app window is closed" on, closing a window
+  whose page never loaded opened a browser tab onto the localm that was shutting
+  down.
+- **A slow-to-load app window no longer makes a stopped localm open a browser
+  tab.** When the app window took longer than about 8 seconds to load its first
+  page, stopping localm with a termination signal, or closing the window with
+  "Quit when the app window is closed" on, opened a browser tab onto the server
+  that had just stopped, and closing the window of a `localm gui` attached to an
+  already-running instance opened a tab as well. A slow first load now counts as
+  loaded, and no tab opens once the server has stopped.
+- **A model whose load just failed is no longer loaded again on every request.**
+  When a request needed something the selected model lacks (for example tool
+  calls in the coder) and the model chosen to answer it crashed or failed while
+  loading, localm retried that load on every later request, each time costing
+  the load time and a crashed worker before falling back. Routing now leaves
+  that model out until its load settings, its model file or the llama.cpp
+  runtime change, it loads successfully, or a growing delay (10 minutes, doubling
+  to 6 hours) passes. Loading it yourself still tries it. A reply answered by
+  the selected model for that reason says so: the chat shows "a capable model was
+  not used", the coder session feed and `localm coder` print why, the MCP tools
+  add a note, and the `X-Localm-Model-Routing` header and the debug log name the
+  skipped model, when its load failed and the reason.
+  Requests that were already waiting for the model when its load failed no
+  longer repeat the load, and the overlapping failures count as one, so the
+  delay no longer grows with the number of requests. A model another localm
+  instance already serves still answers through that instance after a failed
+  local load, and replacing the runtime with `setup-llama --from` or `--url`
+  lets a failed model be tried again.
+- **The automated browser can be set up from the GUI, and it starts on Linux.**
+  When the bundled browser had not been downloaded, opening it failed with
+  a message telling you to run `playwright install`, which localm does not
+  give you. The Browser tab and Settings > Server & network now show a
+  Download browser button (a one-time download that respects the network
+  policy) and errors name localm's own remedy instead. The system engine
+  looks for Google Chrome, Chromium, Microsoft Edge and Brave in their
+  usual places on Linux, macOS and Windows, not only Chrome at its default
+  path; if none is found it lists what it looked for and offers the bundled
+  browser. A browser that cannot start for missing system libraries now says
+  so and names them. A download that did not finish, or a build missing its
+  headless part, is offered for download again instead of reading as
+  installed, in the GUI and in `localm setup-browser`. The setting's help
+  no longer claims the system engine uses your logged-in sessions: both
+  engines start with a fresh, empty profile.
+- **A multi-GPU load no longer puts the output layer on a GPU too small for
+  it.** Without a configured split, llama.cpp spreads layers over every GPU by
+  free memory and puts the output layer, plus a logits buffer that can reach
+  several GB for a large vocabulary, on the last GPU in its list, even when
+  that card has little free memory. localm now checks what each GPU would
+  hold and leaves out a GPU that cannot hold its share, or loads the model on
+  one GPU when only that one can hold it, saying which one and why. A GPU
+  that would receive nothing is no longer reported as short of memory. The
+  check only changes the split when localm can match its GPU numbering to
+  llama.cpp's; otherwise llama.cpp's own split is kept. On a computer with
+  integrated graphics beside a discrete GPU, the integrated GPU's memory is
+  no longer counted when sizing a model, since llama.cpp does not use it
+  then. Setting `gpu_split_indices` to a single GPU now loads a GGUF chat
+  model on that GPU only, instead of still spreading it over every GPU, when
+  localm can match that GPU to llama.cpp's own device list, and an HF model
+  now loads on that GPU too; in Settings, ticking one GPU under Split across
+  GPUs now does exactly that, and leaving every box unticked keeps automatic
+  placement. On such a computer a configured split of several GPUs and the
+  main GPU now land on the GPUs you picked instead of being shifted by the
+  integrated GPU llama.cpp leaves out, warnings about the main GPU name the
+  GPU numbers Settings shows, and a split or single GPU that names the
+  integrated GPU is refused with a message saying so, instead of loading
+  somewhere else. A llama.cpp build that does use the integrated GPU keeps
+  the split as configured. The VRAM shown in the GUI, the memory check before
+  a load and the GPU this instance reports to other localm instances now
+  describe the GPU a single-GPU load actually runs on, and the automatic
+  context limit only counts the GPUs a load uses when GPUs are left out. With
+  no split configured, the memory check before loading a GGUF model on
+  several GPUs now counts the free memory of every GPU llama.cpp spreads it
+  over, instead of GPU 0's alone, so it no longer unloads other models or
+  asks for confirmation when the model fits across them, and another localm
+  instance using any of those GPUs can be asked to free memory. A crash while
+  creating the context is reported as that, with advice
+  about the context size and the split, instead of telling you to repair the
+  runtime. Bug reports list every GPU with its memory, write "not detected"
+  instead of leaving the NVIDIA driver and CUDA version blank, include the
+  multi-GPU settings, and keep llama.cpp's out-of-memory lines. The load
+  error names this platform's library file instead of always `llama.dll`.
 - **The desktop launcher's API server mode starts without a model selected.**
   Choosing "(no model - choose later)" used to stop with "Pick or import a
   model first" even though the server runs fine with nothing loaded. `localm
@@ -839,6 +964,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   moments earlier now uses that finished file instead of failing or replacing it.
 
 ### Security
+- **Windows network-share paths written with the `\??\` prefix are refused like
+  any other network path.** A path such as `\??\UNC\host\share` got past the
+  checks that stop localm from reaching network shares and device paths
+  (folder settings, coder and job working folders, model file paths), and
+  Windows would then open the share. It is now refused before any file access.
 - **A malicious search result or fetched web page could still attempt to forge a model role
   marker.** Web content was already stripped of literal control-token text before reaching the
   model; the chat now also marks exactly which characters of a search result or page came from

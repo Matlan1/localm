@@ -5,7 +5,7 @@ An exception, a log line, a CLI print, a pytest skip reason, or an assert
 message that reads "(see dev-notes/foo.md)" or "(issues/bar.txt)" points a
 reader at a file that exists only on the maintainer's machine - this repo
 is public. Five such sites shipped: a
-click.ClickException in setup_llama.py, a logger.debug call in
+click.ClickException in setup_llama, a logger.debug call in
 gpu_usage.py, a print() in check_llama_abi.py, a pytest skip reason in
 conftest.py, and an assert message in test_gpu_split_native_vulkan.py.
 
@@ -87,7 +87,7 @@ def test_scan_flags_a_planted_runtime_string():
 
 
 def test_scan_flags_a_planted_fstring_segment():
-    """The real setup_llama.py site is an f-string, not a plain str literal -
+    """The real setup_llama site is an f-string, not a plain str literal -
     the scan must see literal text INSIDE a JoinedStr, not only bare
     Constant strings, or it proves nothing about that site."""
     hits = find_leaks('raise Exception(f"boom {x!r} (dev-notes/ADR-0010)")\n')

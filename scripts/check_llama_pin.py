@@ -3,7 +3,7 @@
 """Report how far localm's pinned llama.cpp build has fallen behind upstream, and
 with ``--gate`` fail once it is further behind than the project tolerates.
 
-``localm/setup_llama.py`` installs ``_PINNED_TAG``, one release confirmed to load
+``localm/setup_llama/pins.py`` holds ``_PINNED_TAG``, one release confirmed to load
 AND generate, rather than whatever upstream published most recently. This script
 compares that constant against upstream's newest release with uploaded assets.
 
@@ -60,7 +60,8 @@ if str(SCRIPTS) not in sys.path:
 import ci_runner_files  # noqa: E402
 
 _REPO = "ggml-org/llama.cpp"
-_SETUP_PATH = Path(__file__).resolve().parent.parent / "localm" / "setup_llama.py"
+_SETUP_PATH = (Path(__file__).resolve().parent.parent / "localm" / "setup_llama"
+               / "pins.py")
 _PIN_RE = re.compile(r'^_PINNED_TAG\s*=\s*"([^"]+)"', re.M)
 # Upstream build tags are "b" plus a monotonically increasing build number.
 _TAG_RE = re.compile(r"^b(\d+)$")
@@ -78,7 +79,7 @@ CURRENT, BEHIND, STALE, UNKNOWN = "current", "behind", "stale", "unknown"
 
 
 def pinned_tag(path: Path = _SETUP_PATH) -> str:
-    """_PINNED_TAG out of setup_llama.py, BY TEXT rather than by importing it.
+    """_PINNED_TAG out of localm/setup_llama/pins.py, BY TEXT rather than by importing it.
 
     Importing would drag in click, rich and the rest of localm, which this script
     is independent of so the CI job can run it with nothing installed. Reading by
@@ -258,7 +259,7 @@ def _report_unknown(pin: str, reason: str, gate: bool) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--pinned", default=None,
-                    help="check this tag instead of the one in setup_llama.py")
+                    help="check this tag instead of the one in localm/setup_llama/pins.py")
     ap.add_argument("--gate", action="store_true",
                     help="exit 1 when the pin is older than --max-age-days, 2 when "
                          "nothing could be compared (default: always exit 0)")

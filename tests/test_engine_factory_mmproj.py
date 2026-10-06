@@ -18,6 +18,8 @@ import asyncio
 import pytest
 from click.testing import CliRunner
 
+from tests.conftest import probe_double
+
 
 class _FakeEngine:
     """A stand-in for inference.engine.Engine that only records the kwargs it
@@ -94,6 +96,9 @@ class TestHttpServerFactoriesAlreadyCorrect:
             self, registry_with_mmproj, tmp_path, monkeypatch):
         _model_path, mmproj_path = registry_with_mmproj
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.setattr("localm.discover.vram_info",
+                            probe_double({"free": 10 * 1024 ** 3,
+                                          "total": 16 * 1024 ** 3}))
         from localm.inference.http_server import create_app, mount_gui_surface
 
         app = create_app(None)

@@ -323,6 +323,126 @@ class TestCoderRouting:
         assert engines.resident == []
 
 
+class TestAFailedLoadIsNotRetriedByRouting:
+    """A routing candidate whose load failed is left out of later routes,
+    whichever tool routes; a model asked for by name is still loaded."""
+
+    @staticmethod
+    def _crashing(reg, fails_to_load):
+        TestCoderRouting._add_tooly2(reg)
+        loads = []
+
+        class Counted(_LazyEngine):
+            def load(self):
+                loads.append(self.display_name)
+                super().load()
+
+        made = {}
+
+        def factory(name):
+            return made.setdefault(name, Counted(
+                name, fails_to_load=name in fails_to_load))
+        cache = EngineCache("plain", engine_factory=factory)
+        cache.made = made
+        cache.loads = loads
+        return cache
+
+    @staticmethod
+    def _coder(engines):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            return coder_engine(engines, decision)
+
+    def test_the_next_route_leaves_out_the_model_that_failed_to_load(self, reg):
+        engines = self._crashing(reg, {"tooly"})
+        first = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert first.candidates == ("tooly", "tooly2")
+        self._coder(engines)
+        again = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert again.candidates == ("tooly2",)
+        assert [s.model for s in again.skipped] == ["tooly"]
+        assert "tooly was skipped because its last load failed" in again.describe()
+
+    def test_a_task_after_a_failed_load_does_not_attempt_it_again(self, reg):
+        engines = self._crashing(reg, {"tooly"})
+        self._coder(engines)
+        self._coder(engines)
+        assert engines.loads.count("tooly") == 1, engines.loads
+
+    def test_when_every_capable_model_failed_the_note_says_why_none_answered(self, reg):
+        from localm.plugins.mcpserver.tools.chat import routing_note
+        engines = self._crashing(reg, {"tooly", "tooly2"})
+        self._coder(engines)
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert decision.candidates == () and decision.routed is False
+        note = routing_note(decision)
+        assert note is not None
+        assert "tooly was skipped because its last load failed" in note
+        assert "tooly2 was skipped because its last load failed" in note
+
+    def test_a_model_asked_for_by_name_is_still_loaded(self, reg):
+        engines = self._crashing(reg, {"tooly"})
+        self._coder(engines)
+        assert engines.loads.count("tooly") == 1
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None), \
+                pytest.raises(RuntimeError, match="tooly could not be loaded"):
+            engines.get_loaded("tooly")
+        assert engines.loads.count("tooly") == 2
+
+    def test_a_successful_load_of_that_model_puts_it_back_in_the_routes(self, reg):
+        engines = self._crashing(reg, {"tooly"})
+        self._coder(engines)
+        engines.made["tooly"].fails_to_load = False
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            engines.get_loaded("tooly")
+        again = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert "tooly" in again.candidates and again.skipped == ()
+
+    def test_a_pinned_route_ignores_the_latch(self, reg):
+        engines = self._crashing(reg, {"tooly"})
+        self._coder(engines)
+        pinned = engines.route("tooly", [], required=("tool_use",), pinned=True)
+        assert pinned.resolved == "tooly" and pinned.skipped == ()
+
+    def test_a_copy_another_instance_serves_is_not_left_out(self, reg):
+        from localm.plugins.mcpserver.tools.chat import answer_with
+        engines = self._crashing(reg, {"tooly"})
+        self._coder(engines)
+        assert engines.routing_latch().failure("tooly") is not None
+        peer_copy = _Engine("tooly")
+        engines.share_loaded = True
+        engines._peers["tooly"] = peer_copy
+        with patch.object(EngineCache, "_peer_still_answers", lambda self, name: True), \
+                patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            decision = engines.route(None, [], required=("tool_use",), pinned=False)
+            assert decision.resolved == "tooly" and decision.skipped == ()
+            result, answered = answer_with(
+                engines, decision, lambda engine, name: (name, engine))
+        assert result == ("tooly", peer_copy), "the peer's copy did not answer"
+        assert answered.resolved == "tooly"
+        assert engines.loads.count("tooly") == 1, "the model was loaded here again"
+
+    def test_a_candidate_that_fails_to_answer_is_not_said_to_have_failed_to_load(
+            self, reg):
+        from localm.plugins.mcpserver.tools.chat import answer_with, routing_note
+        engines = self._crashing(reg, set())
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert decision.routed and decision.candidates
+
+        def run(engine, name):
+            if name != decision.current:
+                raise RuntimeError("generation exploded")
+            return "plain answered"
+
+        with patch.object(EngineCache, "_make_room_for", lambda self, name: None):
+            result, answered = answer_with(engines, decision, run)
+        assert result == "plain answered"
+        note = routing_note(answered)
+        assert note is not None and "generation exploded" in note
+        assert "could be loaded" not in note
+
+
 class TestPullModel:
     def test_a_pulled_model_that_fails_to_load_is_not_kept_as_resident(self, reg):
         made = {}

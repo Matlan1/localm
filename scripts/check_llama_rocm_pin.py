@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Report how far localm's pinned lemonade-sdk llama.cpp ROCm build has fallen behind upstream.
 
-``localm/setup_llama.py`` installs ``_ROCM_TAG``, one lemonade-sdk/llamacpp-rocm
+``localm/setup_llama/pins.py`` holds ``_ROCM_TAG``, one lemonade-sdk/llamacpp-rocm
 release confirmed to work on gfx103X hardware, rather than whatever that repo
 published most recently. This is a SEPARATE tag series from ``_PINNED_TAG``
 (ggml-org/llama.cpp, checked by scripts/check_llama_pin.py) - see the comments
-on ``_ROCM_TAG`` and ``_tag_for`` in setup_llama.py.
+on ``_ROCM_TAG`` (setup_llama/pins.py) and ``_tag_for`` (setup_llama/versions.py).
 
 TWO MODES, the same shape as scripts/check_llama_pin.py:
 
@@ -34,7 +34,7 @@ never resolves from an upstream ggml-org tag at all. Advancing _ROCM_TAG means
 a maintainer running the newer lemonade-sdk build through localm's real loader
 on AMD ROCm hardware, confirming it loads and generates, and then updating
 _ROCM_TAG, DEFAULT_URL, DEFAULT_URL_SHA256 and the affected
-_PINNED_FALLBACK_SHA256 entries in setup_llama.py together - a person's
+_PINNED_FALLBACK_SHA256 entries in setup_llama/pins.py together - a person's
 decision, not something this script does.
 
 Fails soft on the API: unreachable, rate-limited, or a malformed response all
@@ -69,7 +69,8 @@ if str(SCRIPTS) not in sys.path:
 import ci_runner_files  # noqa: E402
 
 _REPO = "lemonade-sdk/llamacpp-rocm"
-_SETUP_PATH = Path(__file__).resolve().parent.parent / "localm" / "setup_llama.py"
+_SETUP_PATH = (Path(__file__).resolve().parent.parent / "localm" / "setup_llama"
+               / "pins.py")
 _PIN_RE = re.compile(r'^_ROCM_TAG\s*=\s*"([^"]+)"', re.M)
 # lemonade-sdk build tags are "b" plus a monotonically increasing build number,
 # the same shape as ggml-org's own but a different, unrelated numbering.
@@ -88,7 +89,7 @@ CURRENT, BEHIND, STALE, UNKNOWN = "current", "behind", "stale", "unknown"
 
 
 def pinned_tag(path: Path = _SETUP_PATH) -> str:
-    """_ROCM_TAG out of setup_llama.py, BY TEXT rather than by importing it.
+    """_ROCM_TAG out of localm/setup_llama/pins.py, BY TEXT rather than by importing it.
 
     Importing would drag in click, rich and the rest of localm, which this script
     is independent of so the CI job can run it with nothing installed. Reading by
@@ -263,7 +264,7 @@ def _report_unknown_gate(pin: str, reason: str) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--pinned", default=None,
-                    help="check this tag instead of the one in setup_llama.py")
+                    help="check this tag instead of the one in localm/setup_llama/pins.py")
     ap.add_argument("--gate", action="store_true",
                     help="exit 1 when the pin is older than --max-age-days, 2 when "
                          "nothing could be compared (default: always exit 0)")
@@ -306,7 +307,7 @@ def main(argv=None) -> int:
               "generates. There is no confirm_llama_runtime.py-style automated "
               "check for this pin - that script's backend list excludes amd-rocm, "
               "since this build never resolves from an upstream ggml-org tag. Once "
-              "confirmed, update in setup_llama.py together:")
+              "confirmed, update in localm/setup_llama/pins.py together:")
         print(f"    _ROCM_TAG = {newest!r}")
         print("    DEFAULT_URL, DEFAULT_URL_SHA256, and the affected "
               "_PINNED_FALLBACK_SHA256 entries")
@@ -357,7 +358,7 @@ def main(argv=None) -> int:
     print("\nTo advance the pin: run the newer lemonade-sdk build through "
           "localm's real loader on AMD ROCm hardware and confirm it loads AND "
           "generates. Update _ROCM_TAG, DEFAULT_URL, DEFAULT_URL_SHA256 and the "
-          "affected _PINNED_FALLBACK_SHA256 entries in setup_llama.py together.")
+          "affected _PINNED_FALLBACK_SHA256 entries in localm/setup_llama/pins.py together.")
     summary = [f"## llama.cpp ROCm pin currency: {result['status'].upper()}",
                "", "| | |", "|---|---|",
                f"| pinned | `{pin}` ({_date_str(pin_date)}) |",

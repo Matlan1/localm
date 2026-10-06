@@ -430,14 +430,33 @@ class MediaPreflightRequest(BaseModel):
 
 
 class ComfyPullRequest(BaseModel):
-    # Only a filename the client saw in a preceding preflight response, never a
-    # client-supplied repo or path. The server re-resolves everything else from
-    # COMFY_MODEL_SOURCES itself.
+    # Only a filename the client saw in a preceding preflight or lookup response,
+    # never a client-supplied repo or path. The server re-resolves the source
+    # itself (comfy_resolve.lookup_comfy_download).
     filename: str
     # Which plugin's per-plugin comfy.workdir to prefer when resolving the download
     # destination. A selector into the server's own per-plugin config, never a path.
     # Validated against the known plugin set server-side; an unrecognized value is
     # treated as None and falls back to the global key.
+    plugin: str | None = None
+    # The workflow input the file is for, as the preflight response named it.
+    # Selects the ComfyUI models folder from comfy_resolve's own table and lets
+    # the server search HuggingFace for a file with no curated source.
+    class_type: str | None = None
+    input_name: str | None = None
+    # The repository and path the user was shown and confirmed. Compared with
+    # the source the server resolves; never used as the source.
+    repo: str | None = None
+    file: str | None = None
+
+
+class ComfySourceLookupRequest(BaseModel):
+    # A missing workflow model file and the workflow input that needs it, as a
+    # preflight response named them.
+    filename: str
+    class_type: str
+    input_name: str
+    # Same selector as ComfyPullRequest.plugin.
     plugin: str | None = None
 
 
@@ -730,7 +749,7 @@ def attach_gui(
     app.state.active_model = active_model
     # The builtin "coder" plugin reads these to drive live sessions and
     # per-session model switches; its routes 503 when they're absent
-    # (headless / no GUI). The manager is also returned for close_all().
+    # (headless / no GUI). The manager is also returned to the caller.
     app.state.switch_model = switch_model
     app.state.coder_sessions = manager
     # One-time launcher -> browser handoff grants (see mint_launch_grant): an

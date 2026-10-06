@@ -298,6 +298,10 @@ def main(
     if hasattr(backend, "model_pinned"):
         backend.model_pinned = bool(pin_model)
         backend.required_capabilities = ("tool_use",)
+    # A server that kept this session's model because a model that could have
+    # answered was skipped or failed to load says so in the terminal.
+    if hasattr(backend, "on_routing_note"):
+        backend.on_routing_note = print_warning
 
     # --native-tools asked for a protocol the chosen server does not implement.
     # localm's own /v1/chat/completions declares no tools/tool_choice fields, so a

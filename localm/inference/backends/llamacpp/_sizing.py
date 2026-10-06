@@ -108,8 +108,9 @@ class VramSizingMixin:
 
     @staticmethod
     def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
-        """(free, total) bytes on the configured main GPU device (device 0 when
-        unset - see main_gpu_index / discover.resolve_main_gpu_index), or
+        """(free, total) bytes on the device a load's single-device readings
+        come from (``discover.resolve_load_gpu_index``: the one device a 1-entry
+        gpu_split_indices names, else main_gpu_index, device 0 when unset), or
         (None, None) when not measurable. Shared by _free_vram_bytes() and
         _total_vram_bytes() so both read the same device in one call.
 
@@ -217,9 +218,8 @@ class VramSizingMixin:
             return None, None
         try:
             if torch.cuda.is_available():
-                from localm.config import load_config
-                from localm.discover import resolve_main_gpu_index
-                idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+                from localm.discover import resolve_load_gpu_index
+                idx = resolve_load_gpu_index()
                 free, total = torch.cuda.mem_get_info(idx)
                 return int(free), int(total)
         except Exception as e:
@@ -293,9 +293,8 @@ class VramSizingMixin:
                                           raw_reading_is_process_scoped)
             if not raw_reading_is_process_scoped():
                 return None
-            from localm.config import load_config
-            from localm.discover import resolve_main_gpu_index
-            idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+            from localm.discover import resolve_load_gpu_index
+            idx = resolve_load_gpu_index()
             used = device_global_used_bytes([{"index": idx, "total": total}])
             u = used.get(idx)
             if u is None:
@@ -344,7 +343,9 @@ class VramSizingMixin:
         """``(free, total, devices)`` summed across the 2+ devices this load
         will actually spread over, or ``(None, None, 0)`` when no combined
         budget applies and the caller must fall back to the single-device
-        readings above.
+        readings above. With no ``gpu_split_indices``, ``devices`` is 1 when
+        ``discover.implicit_split_capacity`` answers for the one discrete GPU
+        left beside integrated ones.
 
         BOTH SPLITS COUNT. A CONFIGURED ``gpu_split_indices`` writes an
         explicit ``tensor_split`` (``discover.apply_gpu_split``). An UNSET one
@@ -398,7 +399,7 @@ class VramSizingMixin:
                 info = implicit_split_capacity(cfg, wait_for_inflight=True)
                 free, total = info.get("free"), info.get("total")
                 devices = info.get("devices") or 0
-                if devices < 2 or free is None or total is None:
+                if devices < 1 or free is None or total is None:
                     return None, None, 0
                 return int(free), int(total), int(devices)
             from localm.discover import GPU_PROBE_OK, vram_capacity
@@ -442,6 +443,107 @@ class VramSizingMixin:
         more than its exact share, and the free reading is a snapshot another
         process can invalidate between the probe and the load."""
         return self._VRAM_OVERHEAD_BYTES * max(1, int(devices or 1))
+
+    # Largest n_batch/n_ubatch llama.py gives a context: n_batch = min(n_ctx,
+    # this), n_ubatch = n_batch.
+    _MAX_BATCH = 2048
+
+    def _implicit_split_fit(self, gpu_layers: int):
+        """Per-device fit of llama.cpp's IMPLICIT layer split for this load, as
+        a :class:`~localm.inference.backends.llamacpp._split_fit.SplitFitPlan`,
+        or ``None`` when it does not apply or cannot be measured.
+
+        Applies only to a GPU load (``gpu_layers != 0``) with no configured
+        ``gpu_split_indices`` and no ``n_cpu_moe``, on 2+ devices whose
+        readings :func:`localm.discover.implicit_split_devices` returns, for a
+        model whose GGUF header :func:`localm.model_manager.gguf.gguf_split_layout`
+        reads. Each device that receives a layer or the output layer is charged
+        its layers' weights and KV cache and ``_VRAM_OVERHEAD_BYTES``; the device
+        that receives the output layer is
+        also charged the output weights and the logits buffer (twice when an
+        MTP draft context will be created). The weights of MTP / nextn layers
+        are charged only when MTP is enabled, since llama.cpp skips loading
+        them otherwise. A plan that writes a split or reports a shortfall is
+        returned only when :func:`localm.discover.runtime_split_devices_match`
+        confirms the device numbering; when the runtime instead keeps the
+        integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`),
+        the plan is made over every GPU in torch's numbering. ``_fit_source_index`` maps each
+        planned device to its torch index. Must run off the event loop (it
+        probes). Never raises."""
+        if gpu_layers == 0 or (getattr(self, "n_cpu_moe", 0) or 0) > 0:
+            return None
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            return None
+        try:
+            from localm.config import load_config
+            from localm.discover import (implicit_split_devices,
+                                         runtime_identity_split_devices,
+                                         runtime_split_devices_match)
+            from localm.inference.backends.llamacpp._split_fit import (
+                logits_buffer_bytes, plan_split)
+            from localm.model_manager.gguf import (
+                gguf_nextn_predict_layers, gguf_split_layout)
+            cfg = load_config()
+            if cfg.get("gpu_split_indices"):
+                return None
+            path = Path(self.model_path)
+            layout = gguf_split_layout(path)
+            if layout is None:
+                return None
+            devices = implicit_split_devices(cfg, wait_for_inflight=True,
+                                             check_runtime=False,
+                                             with_source_index=True)
+            if not devices:
+                return None
+            n_layer_all = int(layout["block_count"])
+            sizes = layout["tensor_bytes"]
+            arch, nextn = gguf_nextn_predict_layers(path)
+            nextn = max(0, min(int(nextn), n_layer_all))
+            mtp_on = bool(getattr(self, "mtp_enabled", False)) and nextn > 0
+            if mtp_on:
+                from localm.inference.backends.llamacpp._api import (
+                    MTP_GRAPH_ARCHITECTURES)
+                mtp_on = arch in MTP_GRAPH_ARCHITECTURES
+            layer_bytes = [0] * n_layer_all
+            for name, size in sizes.items():
+                if not name.startswith("blk."):
+                    continue
+                head, _, _rest = name[4:].partition(".")
+                if head.isdigit() and int(head) < n_layer_all:
+                    layer_bytes[int(head)] += int(size)
+            if not mtp_on:
+                for il in range(n_layer_all - nextn, n_layer_all):
+                    layer_bytes[il] = 0
+            output_bytes = (sizes.get("output.weight")
+                            or sizes.get("token_embd.weight") or 0)
+            output_bytes += sizes.get("output_norm.weight", 0)
+            repeating = max(1, n_layer_all - nextn)
+            kv_per_layer = (self.n_ctx * self._kv_bytes_per_token()) // repeating
+            layer_kv = [kv_per_layer if il < n_layer_all - nextn else 0
+                        for il in range(n_layer_all)]
+            logits = logits_buffer_bytes(layout["n_vocab"], self.n_ctx,
+                                         max_batch=self._MAX_BATCH,
+                                         contexts=2 if mtp_on else 1)
+            fit_kw = dict(layer_bytes=layer_bytes, output_bytes=int(output_bytes),
+                          layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
+                          logits_bytes=logits,
+                          reserve_bytes=int(self._VRAM_OVERHEAD_BYTES))
+            plan = plan_split(devices, **fit_kw)
+            if (plan.tensor_split or not plan.default_fits) and \
+                    not runtime_split_devices_match(devices):
+                devices = runtime_identity_split_devices()
+                if not devices:
+                    return None
+                plan = plan_split(devices, **fit_kw)
+            self._fit_source_index = {d["index"]: d.get("source_index", d["index"])
+                                      for d in devices}
+            return plan
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("implicit split fit unavailable (%s: %s); keeping "
+                       "llama.cpp's default split", type(e).__name__, e)
+            return None
 
     # The MTP draft context is never created larger than this many tokens
     # regardless of the main n_ctx - matches llama.py's own
@@ -648,9 +750,10 @@ class VramSizingMixin:
         resident while loading a second one)."""
         try:
             from localm.config import load_config
-            from localm.discover import resolve_main_gpu_index
+            from localm.discover import last_gpu_reading, resolve_load_gpu_index
             from localm import gpu_registry
-            idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+            idx = resolve_load_gpu_index(load_config(), gpus=last_gpu_reading() or [],
+                                         quiet=True)
             peers = gpu_registry.list_gpu_peers()
             holder = next(
                 (p for p in peers
@@ -897,7 +1000,8 @@ class VramSizingMixin:
     _AUTO_CTX_MAX = 65536
     _AUTO_CTX_FALLBACK = 16384   # no GPU visibility - match common practice
 
-    def _auto_ctx_max(self, capped: bool = True) -> int:
+    def _auto_ctx_max(self, capped: bool = True,
+                      split_budget: "Optional[tuple[int, int]]" = None) -> int:
         """
         Derive a context ceiling from available resources.
 
@@ -922,8 +1026,15 @@ class VramSizingMixin:
         reservation is deducted from that combined budget - a GPU-placed
         embedder is itself tensor-split across the same devices, so its
         footprint draws on the combined pool.
+
+        ``split_budget`` = ``(free, devices)``, when given, replaces that
+        reading: the free VRAM summed over the devices the load uses and how
+        many there are (the implicit split fit's kept devices).
         """
-        free, _split_total, split_devices = self._split_free_total_bytes()
+        if split_budget is not None:
+            free, split_devices = split_budget
+        else:
+            free, _split_total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
             split_devices = 1   # single-device reading - the flat overhead
@@ -941,17 +1052,19 @@ class VramSizingMixin:
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
         return int(max(self._AUTO_CTX_MIN, hi))
 
-    def _effective_ctx_max(self) -> Optional[int]:
+    def _effective_ctx_max(self, split_budget: "Optional[tuple[int, int]]" = None
+                           ) -> Optional[int]:
         """The context ceiling to use for this load (auto or configured).
 
         ctx_auto sizes the ceiling from free VRAM. n_ctx_max==0 means the user
         asked for NO fixed ceiling ("grow until VRAM"); combined with ctx_auto
         that lifts the conservative _AUTO_CTX_MAX safety clamp so the window can
         use the full VRAM-derived budget. When ctx_auto is off, n_ctx_max is used
-        verbatim (0/None already mean unlimited downstream)."""
+        verbatim (0/None already mean unlimited downstream). ``split_budget`` is
+        passed to :meth:`_auto_ctx_max`."""
         if self.ctx_auto:
             unlimited = (self.n_ctx_max == 0)
-            auto = self._auto_ctx_max(capped=not unlimited)
+            auto = self._auto_ctx_max(capped=not unlimited, split_budget=split_budget)
             extra = "; no max (n_ctx_max=0)" if unlimited else ""
             console.print(
                 f"[dim]  ctx auto : window may grow to {auto:,} tokens "

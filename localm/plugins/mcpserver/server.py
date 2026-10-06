@@ -148,6 +148,17 @@ class EngineCache:
         # thread alike. Never acquired while holding a generation lock
         # (generation_lock), Engine's load lock or the residency pin lock.
         self._lock = threading.RLock()
+        # Created on first use by routing_latch().
+        self._latch = None
+
+    def routing_latch(self):
+        """The ``RoutingLatch`` recording which of this server's models failed
+        to load; ``route()`` leaves the ones it holds out of its candidates."""
+        with self._lock:
+            if self._latch is None:
+                from localm.inference.routing_latch import RoutingLatch
+                self._latch = RoutingLatch()
+            return self._latch
 
     # ---- back-compat views over the multi-resident state -------------------
     # _engine and _loaded_name read the most-recently-used resident.
@@ -268,7 +279,11 @@ class EngineCache:
         the server's default model is not. A request that needs something the
         model it would use lacks (an image, structured tool calls, a longer
         conversation than it was trained for) resolves to an installed model
-        that has it. Raises ValueError for a name that is not registered."""
+        that has it. A model whose last load failed is left out of the
+        candidates while ``routing_latch()`` holds it, unless another
+        instance's copy of it is in use. The latch is read only once the
+        request has a gap and is not pinned. Raises ValueError for a name that
+        is not registered."""
         from localm.inference import capability_routing as cr
         from localm.model_manager import capabilities as caps
         current = self.resolve_model(requested)
@@ -277,12 +292,18 @@ class EngineCache:
         known = {}
         with self._lock:
             eng = self._engines.get(current)
-            resident = list(self._lru) + list(self._peers)
+            peers = set(self._peers)
+            resident = list(self._lru) + list(peers)
         if (eng is not None and getattr(eng, "loaded", False)
                 and getattr(eng, "supports_images", False) is True):
             known[caps.VISION] = True
+
+        def skip_set():
+            return {n: s for n, s in self.routing_latch().skipped().items()
+                    if n not in peers}
+
         return cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                             current_known=known)
+                             current_known=known, skip=skip_set)
 
     def get_chat(self, name: str):
         """The engine to answer a chat with model *name*: this server's own
@@ -345,15 +366,26 @@ class EngineCache:
     def _loaded(self, name: str, engine):
         """*engine*, the cache's engine for *name*, ready to answer: another
         instance's copy as it is, this server's own after ``load()``. An
-        engine that fails to load is removed from the cache and the load error
+        engine that fails to load is removed from the cache, recorded in
+        ``routing_latch()`` (a cancelled load is not) and the load error
         raised."""
         if self.is_peer(engine) or getattr(engine, "loaded", False) is True:
             return engine
+        from localm.inference.backends.base import ModelLoadCancelled
+        latch = self.routing_latch()
+        fingerprint = latch.fingerprint(name)
         try:
             engine.load()
-        except Exception:
+        except ModelLoadCancelled:
             self._discard(name, engine)
             raise
+        except Exception as e:
+            latch.record_failure(
+                name, e if isinstance(e, RuntimeError) else f"{type(e).__name__}: {e}",
+                fingerprint=fingerprint)
+            self._discard(name, engine)
+            raise
+        latch.record_success(name)
         return engine
 
     def _peer_still_answers(self, name: str) -> bool:

@@ -265,6 +265,73 @@ def test_pid_alive_is_false_for_an_unreaped_child():
         proc.wait(timeout=10)
 
 
+_BOOT = "5f0c3a4e-1111-4222-8333-944455556666"
+
+
+@pytest.mark.parametrize("recorded, current, matches", [
+    ({"boot": _BOOT, "ticks": 5}, {"boot": _BOOT, "ticks": 5}, True),
+    ({"boot": _BOOT, "ticks": 5}, {"boot": _BOOT, "ticks": 6}, False),
+    ({"boot": _BOOT, "ticks": 5}, {"boot": "another-boot", "ticks": 5}, False),
+    ({"boot": None, "ticks": 5}, {"boot": None, "ticks": 5}, False),
+    ({"boot": _BOOT, "ticks": True}, {"boot": _BOOT, "ticks": True}, False),
+    ({"boot": _BOOT, "ticks": "5"}, {"boot": _BOOT, "ticks": "5"}, False),
+    ({"created": 10.0}, {"created": 10.5}, True),
+    ({"created": 10}, {"created": 11.0}, True),
+    ({"created": 10.0}, {"created": 11.5}, False),
+    ({"created": float("nan")}, {"created": float("nan")}, False),
+    ({"created": float("inf")}, {"created": float("inf")}, False),
+    ({"created": 10.0}, {"boot": _BOOT, "ticks": 5}, False),
+    (None, {"created": 10.0}, False),
+    ({"created": 10.0}, None, False),
+    ({}, {}, False),
+], ids=["same-ticks", "other-ticks", "other-boot", "no-boot", "bool-ticks",
+        "text-ticks", "created-close", "created-int", "created-apart",
+        "nan-created", "inf-created", "other-shapes", "no-record",
+        "no-current", "empty"])
+def test_start_identity_matches_only_one_comparable_start(recorded, current,
+                                                          matches):
+    """``start_identity_matches`` is True only for two comparable identities
+    naming one process start, and never together with
+    ``start_identity_differs``."""
+    assert instances.start_identity_matches(recorded, current) is matches
+    assert not (instances.start_identity_matches(recorded, current)
+                and instances.start_identity_differs(recorded, current))
+
+
+def test_thread_start_identity_names_a_running_thread_of_that_process_only():
+    """A running thread of the given process has a start identity that reads
+    the same every time; the same thread id under another process, or the
+    thread once it has finished, has none."""
+    import threading
+    release = threading.Event()
+    t = threading.Thread(target=release.wait)
+    t.start()
+    other = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                             stdin=subprocess.PIPE)
+    try:
+        ident = instances.thread_start_identity(os.getpid(), t.native_id)
+        if not (sys.platform.startswith("linux") or sys.platform == "win32"):
+            assert ident is None
+            pytest.skip(f"no thread start identity on {sys.platform}")
+        assert isinstance(ident, dict) and ident
+        assert instances.thread_start_identity(os.getpid(), t.native_id) == ident
+        assert instances.thread_start_identity(other.pid, t.native_id) is None
+    finally:
+        release.set()
+        t.join(timeout=10)
+        other.communicate(timeout=30)
+    assert instances.thread_start_identity(os.getpid(), t.native_id) is None
+
+
+def test_a_live_process_matches_its_own_start_identity():
+    ident = instances.process_start_identity(os.getpid())
+    if ident is None:
+        assert not (sys.platform.startswith("linux") or sys.platform == "win32")
+        pytest.skip(f"no process start identity on {sys.platform}")
+    assert instances.start_identity_matches(
+        ident, instances.process_start_identity(os.getpid()))
+
+
 # ------------------------------------------------------------------ #
 #  kill_pid (the `localm stop` direct-kill fallback)                 #
 # ------------------------------------------------------------------ #

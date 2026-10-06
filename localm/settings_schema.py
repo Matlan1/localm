@@ -264,9 +264,9 @@ CORE_FIELDS: list = [
     # included. Each card's share follows its free VRAM at load time unless GPU
     # split ratios pins exact weights.
     SettingField("gpu_split_indices", Widget.HIDDEN, "Split across GPUs",
-                 "Device indices to split a model across when it is too large for "
-                 "one card (2+ needed to take effect). Blank still spreads a model "
-                 "over every GPU by free VRAM; set this to choose which cards.",
+                 "Device indices a model may use: 2+ split it across them, 1 keeps "
+                 "a GGUF chat model on that card only. Blank still spreads a model "
+                 "over every GPU by free VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # HIDDEN: rendered by a ratio-weight input beside each checked device in
     # the "Split across GPUs" row (settings-perf.js renderGpuSplitRatioRow),
@@ -1140,9 +1140,10 @@ CORE_FIELDS: list = [
                  "allows.",
                  group="Network", owner="browser", admin_only=True),
     SettingField("browser_engine", Widget.SELECT, "Browser to drive",
-                 "'bundled' runs the sandboxed browser localm downloads. "
-                 "'system' drives your own installed browser, including its "
-                 "logged-in sessions, which is why it is not the default.",
+                 "'bundled' runs the browser localm downloads. 'system' runs a "
+                 "Chrome, Chromium, Edge or Brave already installed here. "
+                 "Either way it starts with a fresh, empty profile: none of "
+                 "your logins carry over.",
                  group="Network", owner="browser", admin_only=True,
                  options=["bundled", "system"]),
     SettingField("browser_headless", Widget.TOGGLE, "Run the browser hidden",
