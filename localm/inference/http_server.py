@@ -3179,7 +3179,8 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     """The stop sequence, WITHOUT the process exit.
 
     Stops in-flight job children (both the GUI's and the coder plugin's own
-    background shell/agent jobs) and any localm-launched ComfyUI instance,
+    background shell/agent jobs), closes every live GUI coder session
+    (waiting a few seconds at most), stops any localm-launched ComfyUI instance,
     unloads the model so the native context is freed cleanly (a hard exit
     while it is loaded segfaults during teardown), releases the shared
     embedder, and clears the crash marker so this intentional stop is not
