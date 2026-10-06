@@ -753,10 +753,10 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
     safe because the call runs in an executor thread.
 
     For a GGUF load (``budget.check_split_fit``) with no configured split, a
-    fresh reading of 2+ GPUs llama.cpp's default split spreads over is judged
-    by their summed free VRAM (``discover.implicit_split_free``, the budget
-    the backend sizes the load against), and the probe is marked
-    ``implicit_split``."""
+    fresh reading of the GPUs llama.cpp's default split spreads over (2+, or
+    the one discrete GPU beside integrated ones) is judged by their summed
+    free VRAM (``discover.implicit_split_free``, the budget the backend sizes
+    the load against), and the probe is marked ``implicit_split``."""
     from localm import discover
     from localm.discover import gpu_split_shortfall, implicit_split_free, vram_capacity
 

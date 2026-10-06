@@ -466,9 +466,8 @@ class VramSizingMixin:
         them otherwise. A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
-        integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`,
-        also tried when no discrete-only device list applies), the plan is made
-        over every GPU in torch's numbering. ``_fit_source_index`` maps each
+        integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`),
+        the plan is made over every GPU in torch's numbering. ``_fit_source_index`` maps each
         planned device to its torch index. Must run off the event loop (it
         probes). Never raises."""
         if gpu_layers == 0 or (getattr(self, "n_cpu_moe", 0) or 0) > 0:
@@ -495,10 +494,6 @@ class VramSizingMixin:
             devices = implicit_split_devices(cfg, wait_for_inflight=True,
                                              check_runtime=False,
                                              with_source_index=True)
-            identity = False
-            if not devices:
-                devices = runtime_identity_split_devices()
-                identity = True
             if not devices:
                 return None
             n_layer_all = int(layout["block_count"])
@@ -535,7 +530,7 @@ class VramSizingMixin:
                           logits_bytes=logits,
                           reserve_bytes=int(self._VRAM_OVERHEAD_BYTES))
             plan = plan_split(devices, **fit_kw)
-            if (plan.tensor_split or not plan.default_fits) and not identity and \
+            if (plan.tensor_split or not plan.default_fits) and \
                     not runtime_split_devices_match(devices):
                 devices = runtime_identity_split_devices()
                 if not devices:

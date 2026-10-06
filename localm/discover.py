@@ -2534,9 +2534,9 @@ def resolve_load_gpu_index(config: Optional[dict] = None, *,
 
     1. the one device a 1-entry ``gpu_split_indices`` names
        (:func:`single_gpu_index`, warnings at debug with *quiet*);
-    2. with no ``gpu_split_indices`` configured, the only discrete GPU of a
-       reading whose other GPUs are integrated ones llama.cpp leaves out, the
-       device llama.cpp loads on whatever ``main_gpu_index`` says
+    2. with neither ``gpu_split_indices`` nor ``main_gpu_index`` configured,
+       the only discrete GPU of a reading whose other GPUs are integrated
+       ones llama.cpp leaves out
        (:func:`_lone_discrete_gpu_index`; the reading is *gpus*, else
        :func:`last_gpu_reading`, so this step never probes);
     3. :func:`resolve_main_gpu_index` of the configured ``main_gpu_index``.
@@ -2548,7 +2548,7 @@ def resolve_load_gpu_index(config: Optional[dict] = None, *,
     single = single_gpu_index(configured, gpus=gpus, quiet=quiet)
     if single is not None:
         return single
-    if not configured:
+    if not configured and cfg.get("main_gpu_index") is None:
         lone = _lone_discrete_gpu_index(gpus if gpus is not None else last_gpu_reading())
         if lone is not None and not _native_gpu_index_space_is_opaque():
             return lone
@@ -2619,9 +2619,11 @@ def _torch_llama_numbering(readings: list) -> "tuple[Optional[dict], str]":
     return None, reason
 
 
-def _is_identity(slot_of: dict) -> bool:
-    """Whether every torch index in *slot_of* is its own llama.cpp device."""
-    return all(t == s for t, s in slot_of.items())
+def _is_identity(slot_of: dict, readings: list) -> bool:
+    """Whether *slot_of* holds every GPU of *readings* and each torch index is
+    its own llama.cpp device (llama.cpp keeps every GPU torch reports). See
+    test_a_trailing_integrated_gpu_is_still_left_out."""
+    return len(slot_of) == len(readings) and all(t == s for t, s in slot_of.items())
 
 
 def _primary_slot(cfg: dict, readings: list, slot_of: dict,
@@ -2810,7 +2812,7 @@ def configured_split_placement(config: Optional[dict] = None, *,
                        "llama.cpp's device list (%s); keeping llama.cpp's default "
                        "split", list(indices), reason)
         return SplitPlacement({}, 0)
-    if _is_identity(slot_of):
+    if _is_identity(slot_of, readings):
         return None
     by_index = {g.get("index"): g for g in readings}
     integrated = next((i for i in raw if i in by_index and i not in slot_of), None)
@@ -2861,7 +2863,7 @@ def default_split_main_gpu(config: Optional[dict] = None, *,
                        "list (%s); llama.cpp's device 0 is the primary",
                        cfg.get("main_gpu_index"), reason)
         return 0
-    if _is_identity(slot_of):
+    if _is_identity(slot_of, readings):
         return None
     return _primary_slot(cfg, readings, slot_of, sorted(set(slot_of.values())))
 
@@ -3576,7 +3578,8 @@ def implicit_split_gpus(config: Optional[dict] = None, *,
     :func:`_llama_visible_torch_devices`), or ``None`` when a
     ``gpu_split_indices`` is configured, fewer than 2 such GPUs are read, any
     of them lacks an integer ``free``, or the index space is opaque (vulkan or
-    sycl). The reading is *gpus*, else :func:`last_gpu_reading`, so this
+    sycl). A single discrete GPU left beside integrated ones is answered
+    alone. The reading is *gpus*, else :func:`last_gpu_reading`, so this
     never probes."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
@@ -3586,7 +3589,7 @@ def implicit_split_gpus(config: Optional[dict] = None, *,
     if not isinstance(readings, list) or len(readings) < 2:
         return None
     kept = _llama_visible_torch_devices(readings)
-    if len(kept) < 2:
+    if len(kept) < 2 and not (len(kept) == 1 and len(readings) > 1):
         return None
     if not all(isinstance(d, dict) and isinstance(d.get("free"), int)
                and not isinstance(d.get("free"), bool) for d in kept):
@@ -3815,7 +3818,7 @@ def runtime_identity_split_devices() -> Optional[list]:
                    for d in readings):
             return None
         slot_of, _reason = _torch_llama_numbering(readings)
-        if slot_of is None or not _is_identity(slot_of):
+        if slot_of is None or not _is_identity(slot_of, readings):
             return None
         return [{"index": d["index"], "free": d["free"], "total": d["total"],
                  "source_index": d["index"]}

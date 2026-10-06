@@ -185,6 +185,37 @@ class TestARuntimeThatKeepsTheIntegratedGpu:
         assert b._fit_source_index == {0: 0, 1: 1, 2: 2}
 
 
+class TestATrailingIntegratedGpu:
+    """An integrated GPU torch numbers after the discrete ones is still left
+    out of llama.cpp's device list; the numbering is not mistaken for one in
+    which llama.cpp keeps every GPU."""
+
+    def test_a_trailing_integrated_gpu_is_still_left_out(self, tmp_path):
+        gpus = _mb_readings((2_000, False), (60_000_000, True))
+        params = _load(_fit_backend(tmp_path), gpus, _registry(gpus),
+                       _config(gpu_split_indices=None, main_gpu_index=None))
+        assert params["gpu_split_ratios"] is None
+        assert _worker_writes(params, _config(gpu_split_indices=None), gpus) == (
+            discover._LLAMA_SPLIT_MODE_LAYER, 0, None)
+
+    def test_a_split_naming_a_trailing_integrated_gpu_is_refused(self, tmp_path):
+        gpus = _torch_readings((20.0, False), (20.0, False), (2.0, True))
+        cfg = _config(gpu_split_indices=[1, 2], gpu_split_ratios=None)
+        with pytest.raises(discover.GpuSplitConfigError, match="GPU 2"):
+            _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
+
+    def test_a_main_gpu_naming_a_trailing_integrated_gpu_is_warned(
+            self, tmp_path, caplog):
+        gpus = _torch_readings((20.0, False), (20.0, False), (2.0, True))
+        cfg = _config(gpu_split_indices=None, main_gpu_index=2)
+        with caplog.at_level("WARNING", logger="localm"):
+            params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
+        assert params["main_gpu"] == 0
+        assert _warnings(caplog) == ["main_gpu_index=2 is an integrated GPU, which "
+                                     "llama.cpp does not use beside a discrete GPU; "
+                                     "GPU 0 is the primary instead"]
+
+
 class TestAProbeThatDidNotFinish:
     """A timed-out or busy probe never sends the configured split to the
     worker in torch's numbering."""
@@ -270,7 +301,7 @@ class TestNoExtraProbes:
 
     @pytest.mark.parametrize("split,main,last,expected", [
         ([1], None, True, 1), ([1], None, False, 1), ([5], 1, True, 1),
-        ([0], None, False, 0)])
+        ([0], 1, False, 0)])
     def test_the_registry_heartbeat_never_probes(self, monkeypatch, split, main,
                                                  last, expected):
         gpus = _torch_readings((8.0, False), (20.0, False))
@@ -335,6 +366,39 @@ class TestHfLoadsHonourOneChosenGpu:
         assert set(device_map["max_memory"]) == {1, "cpu"}
         assert probe.free == 20 * GiB
         assert written["gpu_index"] == 1
+
+
+class TestAnExplicitMainGpuBesideTheOnlyDiscreteGpu:
+    """main_gpu_index naming an integrated GPU beside one discrete GPU: an HF
+    load runs on that GPU and is judged by it, while a GGUF load (which
+    llama.cpp places on the discrete GPU) is judged by the discrete GPU."""
+
+    @staticmethod
+    def _gpus():
+        return [{"index": 0, "name": "igpu", "free": 6 * GiB, "total": 8 * GiB,
+                 "free_scope": discover.FREE_SCOPE_DEVICE, "integrated": True},
+                {"index": 1, "name": "dgpu", "free": 20 * GiB, "total": 24 * GiB,
+                 "free_scope": discover.FREE_SCOPE_DEVICE, "integrated": False}]
+
+    @pytest.mark.parametrize("gguf,free", [(False, 6 * GiB), (True, 20 * GiB)])
+    def test_each_load_is_judged_by_the_gpu_it_uses(self, monkeypatch, gguf, free):
+        from localm.inference import http_server, switch_admission
+        gpus = self._gpus()
+        budget = switch_admission.LoadBudget(
+            name="m", vram_required=4 * GiB, headroom=GiB, resident_cap=None,
+            pinned=frozenset(), check_split_fit=gguf)
+
+        async def _probe():
+            return await http_server._switch_probe_vram(
+                asyncio.get_running_loop(), budget)
+
+        with _box(gpus, _registry(gpus)), \
+                mock.patch("localm.config.load_config", return_value=_config(
+                    gpu_split_indices=None, main_gpu_index=0)):
+            probe = asyncio.run(_probe())
+            index = http_server._current_gpu_index()
+        assert probe.free == free
+        assert index == 0
 
 
 class TestMainGpuReachesTheNativeParams:

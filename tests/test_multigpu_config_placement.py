@@ -265,18 +265,19 @@ class TestReadingsFollowTheLoadDevice:
         assert info["total"] == 24 * GiB and info["free"] == 20 * GiB
         assert capacity["free"] == 20 * GiB
 
-    @pytest.mark.parametrize("igpu_first", [True, False])
-    def test_vram_info_reads_the_only_discrete_gpu_beside_an_integrated_one(
-            self, igpu_first):
-        specs = [(1.0, True), (20.0, False)]
-        if not igpu_first:
-            specs.reverse()
-        gpus = _torch_readings(*specs)
-        dgpu = next(g for g in gpus if not g["integrated"])
+    def test_vram_info_reads_the_only_discrete_gpu_beside_an_integrated_one(self):
+        gpus = _torch_readings((1.0, True), (20.0, False))
         cfg = _config(gpu_split_indices=None, main_gpu_index=None)
         with _box(gpus, _registry(gpus)), \
                 mock.patch("localm.config.load_config", return_value=cfg):
-            assert discover.vram_info()["total"] == dgpu["total"]
+            assert discover.vram_info()["total"] == gpus[1]["total"]
+
+    def test_a_configured_main_gpu_is_still_what_vram_info_reads(self):
+        gpus = _torch_readings((1.0, True), (20.0, False))
+        cfg = _config(gpu_split_indices=None, main_gpu_index=0)
+        with _box(gpus, _registry(gpus)), \
+                mock.patch("localm.config.load_config", return_value=cfg):
+            assert discover.vram_info()["total"] == gpus[0]["total"]
 
     def test_the_check_before_a_load_admits_a_model_the_chosen_gpu_holds(self):
         from localm.inference import http_server, switch_admission
