@@ -140,6 +140,7 @@ def fleet(monkeypatch):
         bt.close_for_owner(owner)
         bsession.close("coder-" + owner)
     bt._STARTING.clear()
+    bt._ABORTED.clear()
 
 
 def _navigate_from_threads(cwd, owner, urls):
@@ -266,3 +267,54 @@ class TestCallsMadeTogetherShareOneBrowser:
         assert all(getattr(r, "ok", False)
                    for r in slow_results + quick_results), [
             getattr(r, "output", r) for r in slow_results + quick_results]
+
+
+class TestSessionClosedWhileItsBrowserStarts:
+    def test_the_browser_that_finishes_starting_is_stopped_and_not_registered(
+            self, tmp_path, fleet):
+        from localm.browser import session as bsession
+        from localm.plugins.coder.tools import browser as bt
+        sid = "coder-" + OWNER
+        before = set(bsession.active_ids())
+        threads, results = _navigate_from_threads(tmp_path, OWNER, [URL_A])
+        assert fleet.entered(sid).wait(WAIT), "the start never began"
+        bt.close_for_owner(OWNER)
+        fleet.gate(sid).set()
+        _join(threads)
+        assert set(bsession.active_ids()) == before, "the closed session's browser was registered"
+        assert len(fleet.built) == 1
+        assert fleet.built[0].stopped is True, "the browser was left running"
+        assert bt.owned_session_id(OWNER) is None
+        assert getattr(results[0], "ok", True) is False, getattr(
+            results[0], "output", results[0])
+
+    def test_a_call_waiting_on_that_start_gets_the_same_error(self, tmp_path, fleet):
+        from localm.browser import session as bsession
+        from localm.plugins.coder.tools import browser as bt
+        sid = "coder-" + OWNER
+        before = set(bsession.active_ids())
+        threads, results = _navigate_from_threads(tmp_path, OWNER, [URL_A, URL_B])
+        fleet.both_checked.wait(GRACE)
+        assert fleet.entered(sid).wait(WAIT), "the start never began"
+        bt.close_for_owner(OWNER)
+        fleet.gate(sid).set()
+        _join(threads)
+        assert set(bsession.active_ids()) == before
+        assert all(b.stopped for b in fleet.built), "a browser was left running"
+        assert all(getattr(r, "ok", True) is False for r in results), [
+            getattr(r, "output", r) for r in results]
+
+    def test_a_browser_opened_after_the_close_is_kept(self, tmp_path, fleet):
+        from localm.browser import session as bsession
+        from localm.plugins.coder.tools import browser as bt
+        sid = "coder-" + OWNER
+        threads, _ = _navigate_from_threads(tmp_path, OWNER, [URL_A])
+        assert fleet.entered(sid).wait(WAIT), "the start never began"
+        bt.close_for_owner(OWNER)
+        fleet.gate(sid).set()
+        _join(threads)
+        again = bt.tool_browser_navigate(tmp_path, url=URL_B, _session=_Session(OWNER))
+        assert again.ok is True, again.output
+        assert bsession.get(sid) is fleet.built[1]
+        assert fleet.built[1].stopped is False
+        assert bt.owned_session_id(OWNER) == sid

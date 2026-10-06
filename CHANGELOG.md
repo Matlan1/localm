@@ -175,10 +175,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   peer routing and duplicate detection trust. A CivitAI pull whose entry cannot
   be saved under the requested name now reports that instead of saying it
   finished.
+- **Closing a coder session while its browser is still starting no longer
+  leaves the browser running.** A browser that finishes starting after its coder
+  session has closed is now stopped instead of staying open, with its cookies and
+  storage, until localm exits.
 - **`localm setup-llama --help` no longer says the newest upstream build is the
   default.** The default installs the llama.cpp build this localm release
   confirmed; the help now says so and describes `--tag <tag>`, `--tag latest`,
   `--tag default` and `--rollback` accurately.
+- **The app window keeps its saved login and page data inside your data folder.**
+  It used to keep them in a folder shared with other apps, outside your LocaLM
+  folder (`%APPDATA%\pywebview` on Windows, `~/.pywebview` on Linux), so deleting
+  the data folder, or choosing "delete saved data" when uninstalling, left a
+  copy of your recent chats and your sign-in behind. They now live in
+  `app-window` inside the data folder and go with it, and on Linux the window's
+  web cache moves there too. If `app-window` cannot be used (a read-only data
+  folder, or one on a network drive, which the Windows web view does not
+  support), the window keeps nothing after it closes and a warning is logged.
+  macOS cannot be pointed at a folder, so there the window still keeps its data
+  in macOS's own storage outside the data folder. The shared folder from earlier
+  installs is left alone and not migrated; the uninstaller still names it.
 - **Image, music and video requests with a NaN or infinite number in a
   tuning field are now refused.** Guidance, cfg, denoise, the LoRA strengths,
   lyrics strength and shift each return a 422 instead of starting a

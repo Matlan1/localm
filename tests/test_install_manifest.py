@@ -251,6 +251,19 @@ def test_uninstall_purge_removes_a_folder_setup_created(tmp_path):
     assert str(target) in rep["removed"]
 
 
+def test_purge_deletes_the_app_window_profile_and_keeps_the_users_own_files(tmp_path):
+    shared = tmp_path / "AI"
+    shared.mkdir()
+    (shared / "notes.txt").write_text("mine", encoding="utf-8")
+    im.prepare_data(tmp_path, data_dir=str(shared))
+    store = shared / "app-window" / "EBWebView" / "Default" / "Local Storage" / "leveldb"
+    store.mkdir(parents=True)
+    (store / "000003.log").write_text("localm.conversations", encoding="utf-8")
+    im.uninstall(tmp_path, purge_data=True, force=True)
+    assert not (shared / "app-window").exists()
+    assert (shared / "notes.txt").exists()
+
+
 def test_created_claim_without_the_marker_is_not_trusted(tmp_path):
     p = _fake_install(tmp_path, data_created=True)    # recorded created, no marker
     (p["data"] / "config.json").write_text("{}", encoding="utf-8")
