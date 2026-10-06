@@ -184,6 +184,15 @@ class TestWhenTheCacheCannotBeReused:
         assert rig.lib.encode_calls == 1, "growing the context re-encoded the image"
         assert rig.kv.cells == _fresh_cells(TURN2, [IMG_A])
 
+    def test_without_the_memory_api_the_rebuilt_context_keeps_its_size(self):
+        rig = _Rig(n_ctx=256)
+        rig.llm._kv_supported = False
+        rig.prefill(TURN1, [IMG_A], needed=600)
+        rig.prefill(TURN2, [IMG_A])
+        assert rig.api.inits == [768, 768], "the emptied context shrank"
+        assert rig.lib.encode_calls == 1
+        assert rig.kv.cells == _fresh_cells(TURN2, [IMG_A])
+
     def test_an_mrope_model_reevaluates_but_does_not_reencode(self):
         rig = _Rig(mrope=True, image_pos=2)
         rig.prefill(TURN1, [IMG_A])

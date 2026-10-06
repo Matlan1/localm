@@ -2753,7 +2753,7 @@ class LlamaCpp:
                 return
             except Exception:
                 pass
-        self._prefill_fresh_context([], self._n_ctx)   # empty fresh context
+        self._prefill_fresh_context([], self._ctx_capacity)   # empty, same size
 
     # Public API compatible with llama-cpp-python
 
