@@ -168,6 +168,14 @@ the managed ComfyUI's folder if one is active, otherwise your configured
 `comfy_workdir`. With neither configured, the pull fails outright rather than
 falling back to localm's own models folder.
 
+Versions of one CivitAI model often share a filename. A file already in that
+folder is reused only when it is shown to be the requested version's: its
+SHA256 matches CivitAI's (or the one you pass with `--sha256`), or, when
+CivitAI lists no SHA256, localm's registry records it as that version and its
+size matches the size CivitAI lists, when it lists one. Any other file is left
+untouched and the pull stops with the steps to replace it. `--redownload` replaces a file only once no model
+registered from another source points at it.
+
 An optional CivitAI API token, and a matching one for HuggingFace, raise rate
 limits and reach gated or login-required models on search and download.
 Neither is required - both sources keep working anonymously with nothing
@@ -481,7 +489,7 @@ localm config gpu_split_indices ""       # clear it - llama.cpp spreads a GGUF m
 
 How much of the model lands on each card is figured out automatically: at load time localm reads every split device's free VRAM and sizes each card's share proportionally, so a card that is half-occupied gets a half-sized share instead of an equal one that would not fit. Set `gpu_split_ratios` only to pin exact weights (that disables the automatic distribution); when free VRAM cannot be measured per device, the split falls back to even shares, and the decision is logged either way.
 
-GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. A single entry loads a GGUF chat model on that device alone, when localm can match the device to llama.cpp's own device list (otherwise llama.cpp's default split is kept and the reason is logged); HF models ignore a single entry. A longer list with fewer than 2 currently-detected devices (a stale index, or only one still present) drops the split with a logged warning - it never crashes a load. On the `vulkan` or `sycl` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices, so there is nothing to cross-check them against); there the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown, and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
+GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. A single entry loads a GGUF chat model on that device alone, when localm can match the device to llama.cpp's own device list (otherwise llama.cpp's default split is kept and the reason is logged), and loads an HF model on that device with any overflow on the CPU. A longer list with fewer than 2 currently-detected devices (a stale index, or only one still present) drops the split with a logged warning - it never crashes a load. On a CUDA or ROCm build with an integrated GPU beside a discrete one, the integrated GPU is listed, and llama.cpp usually does not use it: for a GGUF load localm checks llama.cpp's own device list and renumbers the split and `main_gpu_index` into it (when the runtime keeps the integrated GPU, the numbers already match and nothing changes; when localm cannot match the two lists, llama.cpp's default split is kept, device 0 is the primary, and the reason is logged). A split or single entry that names an integrated GPU llama.cpp leaves out refuses the GGUF load with a message saying so. On the `vulkan` or `sycl` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices, so there is nothing to cross-check them against); there the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown (one ticked GPU loads a GGUF model on that GPU only, none ticked keeps automatic placement), and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
 
 ### Keeping more than one model loaded
 

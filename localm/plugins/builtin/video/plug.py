@@ -28,7 +28,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.inference.http_server import principal_id
 from localm.media import gallery
@@ -48,7 +48,7 @@ class VideoRequest(BaseModel):
     width: int | None = None
     height: int | None = None
     steps: int | None = None
-    cfg: float | None = None
+    cfg: float | None = Field(None, allow_inf_nan=False)
     seed: int | None = None
     input_image: str | None = None    # path on this machine (image-to-video)
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /

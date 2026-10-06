@@ -181,6 +181,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   macOS cannot be pointed at a folder, so there the window still keeps its data
   in macOS's own storage outside the data folder. The shared folder from earlier
   installs is left alone and not migrated; the uninstaller still names it.
+- **Image, music and video requests with a NaN or infinite number in a
+  tuning field are now refused.** Guidance, cfg, denoise, the LoRA strengths,
+  lyrics strength and shift each return a 422 instead of starting a
+  generation job with garbage sampler values.
+- **`localm pull civitai:<version>` no longer takes another version's file as
+  already downloaded.** Versions of one CivitAI model often share a filename, and
+  when CivitAI lists no SHA256 for the file, a file left by a different version was
+  accepted and registered as the one you asked for. Such a file is now reused only
+  when localm's own registry records it as that version and its size matches the
+  size CivitAI lists, when it lists one; otherwise the pull stops, leaves the
+  file as it is and says how to replace it. A SHA256 mismatch says which registered model owns the file, and `--redownload` no
+  longer overwrites a file that a model registered from another source points at.
+- **Two browser calls in one coder turn no longer open two browsers.** With no
+  browser open yet, a turn that called `browser_navigate` twice at once started
+  a browser for each call. The second replaced the first in the session's
+  record, so the first kept running with nothing able to close it. The calls
+  now share a single start and drive the same browser; if that start fails,
+  every waiting call gets the same error.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",
@@ -265,7 +283,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no longer counted when sizing a model, since llama.cpp does not use it
   then. Setting `gpu_split_indices` to a single GPU now loads a GGUF chat
   model on that GPU only, instead of still spreading it over every GPU, when
-  localm can match that GPU to llama.cpp's own device list. A crash while
+  localm can match that GPU to llama.cpp's own device list, and an HF model
+  now loads on that GPU too; in Settings, ticking one GPU under Split across
+  GPUs now does exactly that, and leaving every box unticked keeps automatic
+  placement. On such a computer a configured split of several GPUs and the
+  main GPU now land on the GPUs you picked instead of being shifted by the
+  integrated GPU llama.cpp leaves out, warnings about the main GPU name the
+  GPU numbers Settings shows, and a split or single GPU that names the
+  integrated GPU is refused with a message saying so, instead of loading
+  somewhere else. A llama.cpp build that does use the integrated GPU keeps
+  the split as configured. The VRAM shown in the GUI, the memory check before
+  a load and the GPU this instance reports to other localm instances now
+  describe the GPU a single-GPU load actually runs on, and the automatic
+  context limit only counts the GPUs a load uses when GPUs are left out. With
+  no split configured, the memory check before loading a GGUF model on
+  several GPUs now counts the free memory of every GPU llama.cpp spreads it
+  over, instead of GPU 0's alone, so it no longer unloads other models or
+  asks for confirmation when the model fits across them, and another localm
+  instance using any of those GPUs can be asked to free memory. A crash while
   creating the context is reported as that, with advice
   about the context size and the split, instead of telling you to repair the
   runtime. Bug reports list every GPU with its memory, write "not detected"
@@ -466,7 +501,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A plugin's secret setting (an API key it registers via `add_settings()`) now correctly shows its configured status and a Clear button in Settings.** It previously always displayed as not set, and could never be cleared from the GUI, because the Settings page dropped the saved/environment status when rendering plugin, TTS, and per-plugin media secret fields.
 - **A settings save that fails no longer deletes or replaces your stored Hugging Face or CivitAI token.** Clearing or changing the token in the same save as a setting the server rejected (such as an out-of-range number), an embedding model change still waiting for your confirmation, or a save that timed out used to change the stored token anyway, although the save reported an error. The token now changes only when the whole save succeeds, and if the token alone could not be saved, the error says so and that your other changes were kept.
 - **Settings shows "(status unknown)" for the Hugging Face and CivitAI tokens when the file that stores them cannot be read, instead of "(not set)".** Saving settings while that file, or `config.json`, cannot be read now reports which file it is and how to fix it, instead of "Internal Server Error"; `localm config` reports the same as an ordinary error instead of treating it as a crash and offering a bug report.
-- **Resumed HuggingFace downloads are safe to run alongside another download, resume on Xet-backed repos, and are verified before they are registered.** A pull now writes its own temp file and only continues from a partial whose owning process is confirmed gone, so two pulls of the same file (or another program using the HuggingFace cache) can no longer be stitched into one corrupt file. A partial left by an earlier upload of the same file is no longer counted as "already downloaded" and is cleaned up. "Resuming ... (skipping first N MB)" is now only printed when those bytes are really reused, including on Xet-backed repos where the retry previously started over from zero. Every pull whose sha256 HuggingFace publishes is now hashed against it after download; a mismatch deletes the file and fails instead of registering it.
+- **Resumed HuggingFace downloads are safe to run alongside another download, resume on Xet-backed repos, and are verified before they are registered.** A pull now writes its own temp file and only continues from a partial whose owning process is confirmed gone, so two pulls of the same file (or another program using the HuggingFace cache) can no longer be stitched into one corrupt file. A partial left by an earlier upload of the same file is no longer counted as "already downloaded" and is cleaned up. "Resuming ... (skipping first N MB)" is now only printed when those bytes are really reused, including on Xet-backed repos where the retry previously started over from zero. Every pull whose sha256 HuggingFace publishes is now hashed against it after download; a mismatch deletes the file and fails instead of registering it. Interrupted direct-URL and CivitAI downloads also continue where they stopped on the next pull of the same URL or file; a partial left by a different URL or file is started over rather than joined onto the new download.
+- **A direct-URL download whose connection drops partway now reports a failed download instead of "localm hit an unexpected error".** `localm pull <url>` no longer offers to send a bug report for an ordinary network drop; it says the download was interrupted, keeps the partial file, and the next pull of the same URL continues from it.
 - **On Linux and Windows, a download cut off by a crash no longer blocks the next pull of the same file once its process id belongs to another program; on Windows this also holds after a reboot.** A pull still refuses while the original download is running, including after the system clock jumps (sleep, NTP, a VM or WSL resync) and when that download runs in another container or pid namespace that shares the data folder.
 - **On Linux, killing a coder background job (a shell command or the server/build it started) no longer loses track of its own process after the system clock jumps (sleep, NTP, a VM or WSL resync).** A clock step could make the kill wrongly conclude the job's pid had been recycled by an unrelated program, warn that "the process no longer matches", and kill only the direct child instead of its whole tree - leaving a descendant process (such as a dev server) still running.
 - **Two pulls of the same file started together after a crashed download no longer both take over its leftover lock and write into one `.part` file.** Only one continues; the other refuses, as it does for any download already in progress.

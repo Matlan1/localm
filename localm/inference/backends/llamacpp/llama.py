@@ -955,6 +955,7 @@ class LlamaCpp:
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
+        main_gpu: Optional[int] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -1030,10 +1031,14 @@ class LlamaCpp:
             # land in check_tensors on those builds - same size, no error.
             set_use_mmap(mp, False)
         # Multi-GPU: honour the configured main_gpu_index (validated against
-        # the devices actually visible right now); leaves the native default
+        # the devices actually visible right now), or the parent's main_gpu in
+        # llama.cpp's device numbering when given; leaves the native default
         # (device 0) untouched when unset. See discover.apply_main_gpu.
         from localm.discover import apply_gpu_split, apply_main_gpu
-        apply_main_gpu(mp)
+        if main_gpu is not None:
+            apply_main_gpu(mp, slot=main_gpu)
+        else:
+            apply_main_gpu(mp)
         # Multi-GPU tensor-split: spreads the model across 2+ configured
         # devices when gpu_split_indices is set, or loads it on the one device
         # a 1-entry ratios mapping from the parent names (see

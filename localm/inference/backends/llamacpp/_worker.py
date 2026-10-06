@@ -46,6 +46,7 @@ class GgufWorker(VramSizingMixin):
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
+        main_gpu: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -71,6 +72,9 @@ class GgufWorker(VramSizingMixin):
         # LlamaCpp, never recomputed here: this process must not probe
         # (see discover.resolve_auto_split_ratios).
         self.gpu_split_ratios = gpu_split_ratios
+        # The parent's main_gpu_index in llama.cpp's device numbering, or None
+        # (LlamaCpp then reads main_gpu_index from the config).
+        self.main_gpu = main_gpu
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
@@ -174,6 +178,7 @@ class GgufWorker(VramSizingMixin):
             cancel_event=self.cancel_event,       # abort mid-load if superseded
             vram_check=self._check_context_fit,   # guard context GROWTH too
             gpu_split_ratios=self.gpu_split_ratios,
+            main_gpu=self.main_gpu,
             n_cpu_moe=self.n_cpu_moe,
             mtp_enabled=self.mtp_enabled,
             verbose=False,

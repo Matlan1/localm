@@ -29,7 +29,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.inference.http_server import principal_id
 from localm.media import gallery
@@ -47,11 +47,11 @@ class MusicRequest(BaseModel):
     duration_seconds: float = 120.0   # arbitrary track length
     seed: int | None = None
     steps: int | None = None
-    cfg: float | None = None
-    lyrics_strength: float | None = None
+    cfg: float | None = Field(None, allow_inf_nan=False)
+    lyrics_strength: float | None = Field(None, allow_inf_nan=False)
     sampler_name: str | None = None   # KSampler override, e.g. "euler_ancestral"
     scheduler: str | None = None      # KSampler override, e.g. "karras"
-    shift: float | None = None        # ModelSamplingSD3 override
+    shift: float | None = Field(None, allow_inf_nan=False)        # ModelSamplingSD3 override
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None

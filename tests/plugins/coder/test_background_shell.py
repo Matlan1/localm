@@ -1414,17 +1414,59 @@ def test_a_clock_step_does_not_orphan_the_kill_path(tmp_path, monkeypatch):
     from tests._process_identity import a_forward_step_past_boot, step_the_clock
     pytest.importorskip("psutil")
     job = ShellJob(_argv("import time; time.sleep(120)"), tmp_path, label="clockstep")
-    handle_calls = []
-    monkeypatch.setattr(job, "_kill_via_handle", lambda **kw: handle_calls.append(kw))
+    tree_name = ("_terminate_tree_windows" if sys.platform == "win32"
+                 else "_terminate_tree_posix")
+    tree_kills = []
+    real_tree_kill = getattr(job, tree_name)
+
+    def _recording_tree_kill(*a, **kw):
+        tree_kills.append(kw)
+        return real_tree_kill(*a, **kw)
+
     try:
         with job._lock, monkeypatch.context() as m:
+            m.setattr(job, tree_name, _recording_tree_kill)
             step_the_clock(m, a_forward_step_past_boot())
             assert bg._still_the_same_process(job.pid, job._create_time), (
                 "a live job's own pid read as a different process after a "
                 "clock step")
             job._terminate(force=False)
-        assert handle_calls == [], (
-            f"fell back to _kill_via_handle after a clock step: {handle_calls}")
+        assert len(tree_kills) == 1, (
+            f"the tree kill was not taken after a clock step: {tree_kills}")
+        assert not any("no longer matches" in w for w in job.warnings), job.warnings
+    finally:
+        job.kill()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="taskkill is the Windows tree kill")
+def test_a_failed_taskkill_after_a_clock_step_is_not_an_identity_mismatch(
+        tmp_path, monkeypatch):
+    """taskkill reports exit 255 when the direct child exits during its /T
+    sweep, and _terminate then kills through the process handle. That fallback
+    is the failed tree kill's, not the identity check's: it must not append the
+    "no longer matches" warning.
+    """
+    import subprocess
+    from tests._process_identity import a_forward_step_past_boot, step_the_clock
+    pytest.importorskip("psutil")
+    job = ShellJob(_argv("import time; time.sleep(120)"), tmp_path, label="clockstep255")
+    real_run = subprocess.run
+    handle_calls = []
+
+    def _taskkill_exits_255(args, *a, **kw):
+        if args and args[0] == "taskkill":
+            return subprocess.CompletedProcess(
+                args, 255, b"", b"ERROR: There is no running instance of the task.")
+        return real_run(args, *a, **kw)
+
+    try:
+        with job._lock, monkeypatch.context() as m:
+            step_the_clock(m, a_forward_step_past_boot())
+            m.setattr(bg.subprocess, "run", _taskkill_exits_255)
+            m.setattr(job, "_kill_via_handle", lambda **kw: handle_calls.append(kw))
+            job._terminate(force=False)
+        assert handle_calls == [{"force": True}], handle_calls
+        assert any("taskkill exited 255" in w for w in job.warnings), job.warnings
         assert not any("no longer matches" in w for w in job.warnings), job.warnings
     finally:
         job.kill()
