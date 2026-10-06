@@ -181,6 +181,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Compacting a long conversation now shows that it is happening.** While older
+  messages are being summarised to fit the context window, the chat shows
+  "Compacting conversation…" instead of sitting silent, in the browser, in
+  `localm run`, and in the coder. Streaming API clients receive a `compacting`
+  status before the reply starts.
 - **The coder answers a question in plain text instead of forcing a tool call.** A
   message such as "why does web search sometimes fail?" used to count as a request
   to act because it contained a word like "search" or "check", and the coder then
