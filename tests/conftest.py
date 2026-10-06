@@ -312,6 +312,8 @@ _SYSPATH_CERT_STORE_ALLOW = frozenset({
     "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
 })
 
+_SYSPATH_MACHINE_ID_ALLOW = frozenset({"/etc/machine-id"})
+
 
 def _is_cert_store_probe(raw) -> bool:
     try:
@@ -322,7 +324,8 @@ def _is_cert_store_probe(raw) -> bool:
         s = s.decode("utf-8", "replace")
     elif not isinstance(s, str):
         return False
-    return s.replace("\\", "/").rstrip("/").lower() in _SYSPATH_CERT_STORE_ALLOW
+    norm = s.replace("\\", "/").rstrip("/").lower()
+    return norm in _SYSPATH_CERT_STORE_ALLOW or norm in _SYSPATH_MACHINE_ID_ALLOW
 
 
 def _syspath_matches(rx, raw) -> bool:
@@ -781,6 +784,7 @@ def _reset_coder_privacy_registry():
     before = audit._active_coder_privacy_count
     yield
     audit._active_coder_privacy_count = before
+    audit._publish_shared_count()
 
 
 @pytest.fixture(autouse=True)

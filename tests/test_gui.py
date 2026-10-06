@@ -743,10 +743,10 @@ class TestStatsEndpoint:
 
     def test_system_stats_never_raises_and_is_a_dict(self, monkeypatch):
         from localm.sysstats import system_stats
-        # The per-device native fallback reports no devices; wait_first_vram=True
+        # The per-device isolated fallback reports no devices; wait_first_vram=True
         # blocks until the real VRAM probe has landed.
         monkeypatch.setattr(
-            "localm.inference.backends.llamacpp._loader.native_device_inventory",
+            "localm.inference.backends.llamacpp._loader.gpu_devices_isolated",
             lambda: [])
         stats = system_stats(wait_first_vram=True)  # must not raise on any box
         assert isinstance(stats, dict)
@@ -1170,7 +1170,7 @@ class TestStatsVramTrust:
     (bounded by VRAM_POLL_DEADLINE, imported from test_sysstats.py so the two
     never drift apart), then polls again to read the now-cached reading.
 
-    Every case runs hardware-free: list_gpus, the native device inventory and
+    Every case runs hardware-free: list_gpus, the isolated device inventory and
     sysstats._gpu_util are doubled, and the native-runtime entry points
     (_arm_native_tripwires) record and refuse any reach. _stats_vram fails the
     case, naming the boundary, when one is recorded."""
@@ -1183,9 +1183,9 @@ class TestStatsVramTrust:
         monkeypatch.setattr(sysstats, "_vram_inflight", False)
         monkeypatch.setattr(sysstats, "_vram_ready", ready)
         hits = _arm_native_tripwires(monkeypatch)
-        # The per-device native fallback in _compute_vram() returns no devices.
+        # The per-device isolated fallback in _compute_vram() returns no devices.
         inventory = (patch("localm.inference.backends.llamacpp._loader."
-                           "native_device_inventory", return_value=[])
+                           "gpu_devices_isolated", return_value=[])
                      if stub_inventory else contextlib.nullcontext())
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double([reading], status)), \
@@ -1232,15 +1232,16 @@ class TestStatsVramTrust:
         assert vram.get("total") == 24 * _GB
         assert "used" not in vram
 
-    def test_an_unstubbed_native_inventory_is_recorded_not_loaded(
+    def test_an_unstubbed_device_inventory_is_recorded_not_spawned(
             self, gui_app, monkeypatch):
-        """With the native device inventory left real, the per-device fallback in
-        _compute_vram() reaches the in-process loader from the probe thread. The
-        tripwire records that reach and the native runtime is never loaded."""
+        """With the isolated device inventory left real, the per-device fallback in
+        _compute_vram() reaches the probe daemon from the probe thread. The
+        tripwire records that reach, no daemon starts, and the native runtime is
+        never loaded in this process."""
         app, _ = gui_app
         _, hits, landed, _ = self._drive(
             app, _DEVICE_GPU, GPU_PROBE_OK, monkeypatch, stub_inventory=False)
-        assert hits == [("_loader.load_lib", "localm-vram-probe")]
+        assert hits == [("_loader._probe_roundtrip", "localm-vram-probe")]
         assert landed
 
     def test_the_isolated_probe_daemon_is_recorded_not_spawned(self, monkeypatch):

@@ -78,10 +78,8 @@ Failure is never silent and never optimistic:
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
-import platform
 import sys
 import threading
 import time
@@ -222,45 +220,16 @@ def _env_float(name: str, default: float) -> float:
     return value
 
 
-_machine_id_cache: Optional[str] = None
-
-
 def _machine_id() -> str:
-    """An opaque, stable id for THIS PID SPACE.
+    """An opaque, stable id for THIS PID SPACE: :func:`localm.instances.pid_space_id`.
 
     Not just the host: a pid only means something within one pid table, and a
     hostname does not identify one. WSL2 defaults its hostname to the Windows
-    machine name, and a LOCALM_HOME shared across that boundary (a /mnt/c path)
-    would otherwise let each side look the other's pids up in its own process
-    table, find nothing, and declare a perfectly live holder dead. So the
-    platform and, where the kernel exposes it, the pid namespace go into the id
-    as well.
-
-    Hashed rather than stored plainly: the node name is a personal identifier
-    and this record is written into the user's data directory. Only ever
-    compared for equality, so the hash is as good as the name."""
-    global _machine_id_cache
-    if _machine_id_cache is None:
-        parts = [sys.platform]
-        try:
-            parts.append(platform.node() or "")
-        except Exception:
-            parts.append("")
-        try:
-            # Linux/containers: distinguishes two pid namespaces on one host.
-            parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
-        except OSError:
-            pass                  # not Linux, or not exposed: the rest still holds
-        if not any(p for p in parts[1:]):
-            # We learned nothing machine-specific. A SHARED constant here would
-            # make two unrelated boxes compare equal and start trusting each
-            # other's pids, so fail toward "no two processes match": a value
-            # unique to this process makes every foreign record read as
-            # another pid space, which only ever costs a slower crash recovery.
-            parts.append(uuid.uuid4().hex)
-        _machine_id_cache = hashlib.sha256(
-            "\x1f".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
-    return _machine_id_cache
+    machine name, and two machines can share a host name and a LOCALM_HOME on a
+    network share, so the platform, the machine's own identifier and, where
+    the kernel exposes it, the pid namespace go into the id as well."""
+    from localm import instances
+    return instances.pid_space_id()
 
 
 # Tokens of the acquisitions in this process that currently hold, or are

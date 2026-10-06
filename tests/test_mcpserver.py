@@ -1894,10 +1894,11 @@ def _tool_call(name: str, **args) -> str:
     return "<tool_call>" + json.dumps({"name": name, "args": args}) + "</tool_call>"
 
 
-def _scripted_engine_factory(script, *, gate=None, seen=None):
+def _scripted_engine_factory(script, *, gate=None, seen=None, entered=None):
     """A stub engine whose chat_stream answers one canned reply per call,
     repeating the last. ``gate`` blocks every reply until set; ``seen``
-    collects the engine's own active_requests at each call."""
+    collects the engine's own active_requests at each call; ``entered`` is
+    set when a generation begins."""
     loads = []
 
     def factory(model_name):
@@ -1915,6 +1916,8 @@ def _scripted_engine_factory(script, *, gate=None, seen=None):
         calls = []
 
         def chat_stream(messages, **kw):
+            if entered is not None:
+                entered.set()
             if gate is not None:
                 gate.wait()
             if seen is not None:
@@ -2223,10 +2226,38 @@ class TestRunCoderTaskInProcess:
         from localm.plugins.coder import runner as coder_runner
         monkeypatch.setattr(coder_runner, "STOP_GRACE_SECONDS", 0.2)
         gate = threading.Event()
-        factory = _scripted_engine_factory(["done"], gate=gate)
+        entered = threading.Event()
+        factory = _scripted_engine_factory(["done"], gate=gate, entered=entered)
         server, engines = _coder_server(factory)
+
+        real_thread = threading.Thread
+
+        class _StartsClockAtGeneration(real_thread):
+            """The run's first join waits for the generation to begin, so the
+            run's deadline starts counting only once the pins are held."""
+            _first_join = True
+
+            def join(self, timeout=None):
+                if self._first_join and self.name == "coder-task":
+                    self._first_join = False
+                    assert entered.wait(10), "the run never began generating"
+                return super().join(timeout)
+
+        class _Threading:
+            Thread = _StartsClockAtGeneration
+
+            def __getattr__(self, name):
+                return getattr(threading, name)
+
+        monkeypatch.setattr(coder_runner, "threading", _Threading())
+        real_run = coder_runner.run_task_with_timeout
+
+        def short_deadline(agent, task, timeout, **kw):
+            return real_run(agent, task, 0.3, **kw)
+
+        monkeypatch.setattr(coder_runner, "run_task_with_timeout", short_deadline)
         try:
-            resp = _run_task(server, _project(tmp_path), timeout_seconds=0.3)
+            resp = _run_task(server, _project(tmp_path), timeout_seconds=60)
             result = resp["result"]
             assert result["isError"] is True
             assert "timed out" in result["content"][0]["text"]

@@ -337,11 +337,63 @@ def contain_hf_cache() -> None:
                   file=sys.stderr)
 
 
+# GPU driver caches that default to the user profile, as (env var, subfolder of
+# cache_dir()). Each is pinned only when the user has not set the variable.
+_GPU_CACHE_PINS = (
+    ("AMD_COMGR_CACHE_DIR", "comgr"),
+    ("MIOPEN_USER_DB_PATH", "miopen/db"),
+    ("MIOPEN_CUSTOM_CACHE_DIR", "miopen/cache"),
+)
+
+
+def _gpu_pin_marker(var: str) -> str:
+    return "LOCALM_PINNED_" + var
+
+
+def gpu_cache_dirs() -> dict:
+    """localm's OWN AMD GPU compiler caches, ``{env var: path}``, inside the data dir.
+
+    comgr (the HIP runtime's kernel compiler) keeps its LLVM object cache under
+    ``%LOCALAPPDATA%\\comgr`` and MIOpen (torch convolutions) keeps its kernel cache and
+    tuning database under ``~/.miopen`` when these variables are unset. Those are
+    per-user locations OUTSIDE the data dir that "delete saved data" never reaches.
+    Siblings of the pip / uv / whisper / Hugging Face caches under ``cache_dir()``."""
+    return {var: cache_dir().joinpath(*sub.split("/")) for var, sub in _GPU_CACHE_PINS}
+
+
+def contained_gpu_cache_env(base: Optional[dict] = None) -> dict:
+    """An environment with the AMD GPU cache variables pinned inside the data dir.
+
+    *base* defaults to a copy of the current process environment. A variable the user
+    set (other than localm's own earlier pin of it) is left exactly as set;
+    ``AMD_COMGR_CACHE`` (the on/off switch) is never touched."""
+    env = dict(os.environ if base is None else base)
+    for var, path in gpu_cache_dirs().items():
+        marker = _gpu_pin_marker(var)
+        if env.get(var) not in (None, env.get(marker)):
+            continue
+        value = os.path.abspath(str(path))
+        env[var] = value
+        env[marker] = value
+    return env
+
+
+def contain_gpu_caches() -> None:
+    """Apply ``contained_gpu_cache_env`` to THIS process, so in-process HIP use (the
+    llama.cpp ROCm runtime) and every child process (the torch ROCm worker) inherit it."""
+    env = contained_gpu_cache_env()
+    for var, _ in _GPU_CACHE_PINS:
+        for key in (var, _gpu_pin_marker(var)):
+            if key in env and os.environ.get(key) != env[key]:
+                os.environ[key] = env[key]
+
+
 HOME_DIR = _detect_home()
 MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
 CONFIG_FILE = HOME_DIR / "config.json"
 contain_hf_cache()
+contain_gpu_caches()
 
 
 # Only the keys the user actually changed are persisted to config.json; a key

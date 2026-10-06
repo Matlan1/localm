@@ -232,16 +232,17 @@ def _compute_vram() -> dict:
         # Source order matters. last_known_gpus() comes from list_gpus(), which
         # enumerates only via torch.cuda or nvidia-smi and never calls the Vulkan
         # loader, so it cannot see a device visible only through Vulkan.
-        # native_device_inventory() is the ggml runtime's own registry and sees
-        # whatever backend is loaded, Vulkan included; it is the fallback because it
-        # needs the native lib resident.
+        # The ggml runtime's own registry sees whatever backend is loaded, Vulkan
+        # included; it is the fallback, read through the crash-isolated probe
+        # daemon so the native runtime is never loaded into this process. None
+        # means the registry could not be read this call: no breakdown.
         raw = last_known_gpus()
         if not raw:
             try:
                 from localm.discover import _apply_device_global_free
                 from localm.inference.backends.llamacpp._loader import (
-                    native_device_inventory)
-                raw = list(native_device_inventory() or [])
+                    gpu_devices_isolated)
+                raw = list(gpu_devices_isolated() or [])
                 # The registry returns a raw driver `free` with no free_scope tag,
                 # and on Windows with AMD that counts only this process's
                 # allocations. _apply_device_global_free corrects it and tags the

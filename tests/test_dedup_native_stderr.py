@@ -15,11 +15,33 @@ so the call order is asserted directly instead of the hang.
 import logging
 import os
 import string
+import threading
 import time
 
 import pytest
 
 from localm import debuglog
+
+_READER_THREAD_NAME = "native-stderr-dedup"
+_ABANDONED_READER_DRAIN_SECONDS = 30.0
+
+
+@pytest.fixture(autouse=True)
+def _drain_abandoned_readers():
+    """Joins every dedup reader thread still running when a test ends.
+
+    A reader that outlives its join timeout keeps recording into the shared
+    ring buffer after its test returns, so its lines would land inside the
+    next test's recording window.
+    """
+    yield
+    deadline = time.monotonic() + _ABANDONED_READER_DRAIN_SECONDS
+    for thread in threading.enumerate():
+        if thread.name == _READER_THREAD_NAME:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    still_running = [t.name for t in threading.enumerate()
+                     if t.name == _READER_THREAD_NAME]
+    assert not still_running, "a dedup reader thread outlived its test"
 
 
 def setup_function():
