@@ -205,6 +205,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "Compacting conversation…" instead of sitting silent, in the browser, in
   `localm run`, and in the coder. Streaming API clients receive a `compacting`
   status before the reply starts.
+- **`localm run` attached to a server, and the coder talking to a localm server,
+  report a failed reply as an error.** A reply the server ended as failed (for
+  example a conversation that still does not fit after compacting) used to be
+  shown and kept as if the model had written it; it is now reported as an error
+  and your message is not kept in the conversation.
 - **The coder answers a question in plain text instead of forcing a tool call.** A
   message such as "why does web search sometimes fail?" used to count as a request
   to act because it contained a word like "search" or "check", and the coder then
