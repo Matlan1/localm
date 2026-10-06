@@ -188,23 +188,18 @@ class ChatRequest(BaseModel):
     # Tokens the answering model's trained context window must hold. Combined
     # with the window the prompt's own size implies; the larger one applies.
     min_context: Optional[int] = Field(None, ge=1)
-    # Chat-template switches. Only ``enable_thinking`` is accepted: false asks a
-    # reasoning model to answer without its reasoning channel.
+    # Chat-template switches. Only ``enable_thinking`` is applied: false asks a
+    # reasoning model to answer without its reasoning channel. Other keys are
+    # accepted and ignored.
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     @field_validator("chat_template_kwargs")
     @classmethod
-    def _known_template_kwargs(cls, v):
-        """Reject a key other than ``enable_thinking``, or a non-boolean value
-        for it, instead of ignoring it."""
-        if v is None:
-            return v
-        unknown = [k for k in v if k != "enable_thinking"]
-        if unknown:
-            raise ValueError(
-                f"unsupported chat_template_kwargs {unknown}; "
-                f"only 'enable_thinking' is accepted")
-        if "enable_thinking" in v and not isinstance(v["enable_thinking"], bool):
+    def _enable_thinking_is_boolean(cls, v):
+        """Reject an ``enable_thinking`` value that is neither a boolean nor
+        null."""
+        flag = None if v is None else v.get("enable_thinking")
+        if flag is not None and not isinstance(flag, bool):
             raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
         return v
 

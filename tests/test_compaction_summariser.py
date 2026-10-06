@@ -182,19 +182,38 @@ class TestHfPrompt:
         text = tok.apply_chat_template(msgs, enable_thinking=False)
         _hf_worker._tokenize_prompt(tok, msgs, text, "cpu",
                                     template_kwargs={"enable_thinking": False},
-                                    suffix="SUFFIX")
+                                    prompt=text + "SUFFIX")
         assert all(r.get("enable_thinking") is False for r in tok.renders)
         segments = [(t, kw.get("split_special_tokens")) for t, kw in tok.calls]
         assert ("web", True) in segments, segments
         assert "".join(t for t, _ in segments) == text + "SUFFIX"
         assert segments[-1][1] is False
 
-    def test_plain_prompt_tokenises_text_and_suffix(self):
+    def test_plain_prompt_tokenises_the_final_prompt(self):
         from localm.inference.backends import _hf_worker
         tok = self._Tok()
         _hf_worker._tokenize_prompt(tok, [{"role": "user", "content": "p"}],
-                                    "PROMPT", "cpu", suffix="SUFFIX")
+                                    "PROMPT", "cpu", prompt="PROMPTSUFFIX")
         assert tok.calls[-1][0] == "PROMPTSUFFIX"
+
+    def test_fallback_after_a_span_tokenisation_failure_adds_the_suffix_once(self):
+        pytest.importorskip("torch")
+        from localm.inference.backends import _hf_worker
+        from localm.textguard import compose, untrusted_span
+
+        class _Failing(self._Tok):
+            def __call__(self, text, **kw):
+                if "split_special_tokens" in kw:
+                    raise ValueError("knob unsupported")
+                return super().__call__(text, **kw)
+
+        tok = _Failing()
+        msgs = [{"role": "user", "content": compose("x ", untrusted_span("web"))}]
+        text = tok.apply_chat_template(msgs, enable_thinking=False)
+        _hf_worker._tokenize_prompt(tok, msgs, text, "cpu",
+                                    template_kwargs={"enable_thinking": False},
+                                    prompt=text + "SUFFIX")
+        assert tok.calls[-1][0] == text + "SUFFIX"
 
 
 # --------------------------------------------------------------------------- #
@@ -372,11 +391,23 @@ def test_route_passes_enable_thinking_false_to_the_generation():
     assert r.status_code == 200
 
 
-@pytest.mark.parametrize("kwargs", [{"foo": 1}, {"enable_thinking": "no"}])
-def test_route_rejects_an_unsupported_template_kwarg(kwargs):
+@pytest.mark.parametrize("value", ["no", 1, [False]])
+def test_route_rejects_a_non_boolean_enable_thinking(value):
     engine = _engine("unused")
     r = _post(engine, {"model": "test-model", "stream": False,
                        "messages": [{"role": "user", "content": "hi"}],
-                       "chat_template_kwargs": kwargs})
+                       "chat_template_kwargs": {"enable_thinking": value}})
     assert engine.calls == []
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize("kwargs", [{"reasoning_effort": "low"},
+                                    {"enable_thinking": None, "foo": 1}])
+def test_route_ignores_other_template_kwargs(kwargs):
+    engine = _engine("unused")
+    engine.context_capacity.return_value = None
+    r = _post(engine, {"model": "test-model", "stream": False,
+                       "messages": [{"role": "user", "content": "hi"}],
+                       "chat_template_kwargs": kwargs})
+    assert "thinking" not in engine.calls[-1][1]
+    assert r.status_code == 200

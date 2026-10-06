@@ -372,10 +372,10 @@ def test_compaction_marks_the_body_on_the_grammar_path_too():
 
 
 # ---------------------------------------------------------------------------
-#  I17: the tail is well formed and the pending request survives
+#  The tail is well formed and the pending request survives
 # ---------------------------------------------------------------------------
 
-_I17 = [
+_TOOL_SESSION = [
     {"role": "user", "content": "old question"},
     {"role": "assistant", "content": "old answer"},
     {"role": "user", "content": "im asking you to diagnose the web search issue"},
@@ -392,11 +392,11 @@ def _roles_alternate(messages):
 
 
 class TestTailAndPendingRequest:
-    def test_i17_scenario_alternates_and_keeps_the_request(self):
+    def test_tool_session_alternates_and_keeps_the_request(self):
         agent = _make_agent()
         agent.backend.supports_grammar = False
         agent.backend.chat.return_value = "Generic summary."
-        agent._messages = [dict(m) for m in _I17]
+        agent._messages = [dict(m) for m in _TOOL_SESSION]
         agent._last_user_request = "im asking you to diagnose the web search issue"
 
         assert agent._compact_history() is True

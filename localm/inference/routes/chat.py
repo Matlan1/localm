@@ -209,6 +209,11 @@ def register(app: FastAPI, ctx) -> None:
             )
             # Strip None so Engine uses its config defaults
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+            ignored = sorted(k for k in (req.chat_template_kwargs or {})
+                             if k != "enable_thinking")
+            if ignored:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("chat_template_kwargs keys ignored: %s", ignored)
             if req.grammar_lazy:
                 # A lazy grammar without its trigger patterns can never engage.
                 if not req.grammar or not req.grammar_triggers:

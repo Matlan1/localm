@@ -113,9 +113,8 @@ class TestMaybeCompact:
         assert compacted is False
 
 
-# The I16 repro: a pending user turn at the end makes a flat 4-message tail
-# start at an assistant turn, and the summariser is a thinking model whose
-# reply is one unterminated reasoning block.
+# A history ending in a pending user turn, and a summariser reply that is one
+# unterminated reasoning block.
 _THREAD = [
     {"role": "system", "content": "s"},
     {"role": "user", "content": "tell me about tidal locking"},
@@ -176,12 +175,42 @@ class TestTailShape:
                 last_user = [m for m in msgs if m["role"] == "user"][-1]
                 assert last_user in out
 
-    def test_no_user_turn_to_cut_at_leaves_history_unchanged(self):
-        msgs = [{"role": "user", "content": "q"}] + [
-            {"role": "assistant", "content": f"a{i}"} for i in range(8)]
+    def test_a_single_request_followed_by_tool_calls_still_compacts(self):
+        msgs = [{"role": "system", "content": "s"},
+                {"role": "user", "content": "do the task"}]
+        for i in range(4):
+            msgs += [{"role": "assistant", "content": f"call {i}"},
+                     {"role": "tool", "content": f"result {i}"}]
         out, changed = compact_messages(msgs, _summariser)
-        assert changed is False
-        assert out == msgs
+        assert changed is True
+        assert [m["role"] for m in out[:3]] == ["system", "user", "assistant"]
+        assert "Current request (verbatim):\ndo the task" in str(out[1]["content"])
+        assert out[-1] == msgs[-1]
+
+    def test_tool_events_are_not_cut_points(self):
+        msgs = [{"role": "system", "content": "s"},
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "search the web for X"},
+                {"role": "user", "content": "result 1", "origin": "tool"},
+                {"role": "assistant", "content": "reading"},
+                {"role": "user", "content": "result 2", "origin": "tool"},
+                {"role": "assistant", "content": "reading more"},
+                {"role": "user", "content": "result 3", "origin": "tool"}]
+        out, changed = compact_messages(msgs, _summariser)
+        assert changed is True
+        assert {"role": "user", "content": "search the web for X"} in out
+        assert out[1]["role"] == "user" and out[2]["role"] == "assistant"
+
+    def test_tool_results_are_not_cut_points(self):
+        msgs = [{"role": "user", "content": "fix the parser"}]
+        for i in range(5):
+            msgs += [{"role": "assistant", "content": f"call {i}"},
+                     {"role": "user", "content": f"<tool_result>{i}</tool_result>"}]
+        out, changed = compact_messages(msgs, _summariser)
+        assert changed is True
+        assert "Current request (verbatim):\nfix the parser" in str(out[0]["content"])
+        _assert_alternates(out)
 
 
 class TestDigest:

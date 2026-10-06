@@ -340,8 +340,7 @@ export async function compactConversation(conv, signal = null) {
       const data = await r.json();
       const choice = data.choices?.[0];
       // A summary is accepted from a generation that finished with "stop" or
-      // "length"; an "error" choice, whose content is the server's error
-      // text, is treated as summarisation unavailable.
+      // "length"; an "error" choice is treated as summarisation unavailable.
       if (choice && (choice.finish_reason === "stop" || choice.finish_reason === "length")) {
         summary = (choice.message?.content || "").trim();
       }

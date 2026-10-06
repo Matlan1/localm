@@ -364,10 +364,11 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text,
 
 
 def _tokenize_prompt(tokenizer, template_messages, text, device, *,
-                     template_kwargs=None, suffix=""):
-    """Tokenise *text* + *suffix*, splitting special tokens inside untrusted
-    spans only. The spans are located in *text* (rendered with
-    *template_kwargs*); *suffix* is trusted.
+                     template_kwargs=None, prompt=None):
+    """Tokenise *prompt* (default *text*), splitting special tokens inside
+    untrusted spans only. The spans are located in *text*, the template's
+    rendering with *template_kwargs*; *prompt* must equal *text* up to the
+    end of the last message content.
 
     ``split_special_tokens=True`` makes a control token spelled inside untrusted
     content tokenise as ordinary text instead of the real special id. Trusted
@@ -383,21 +384,21 @@ def _tokenize_prompt(tokenizer, template_messages, text, device, *,
     ``add_special_tokens=False`` throughout: the template already emitted the
     model's BOS, exactly as on the single-call path.
     """
+    final = text if prompt is None else prompt
     plain = lambda: tokenizer(                                    # noqa: E731
-        text + suffix, return_tensors="pt", add_special_tokens=False).to(device)
+        final, return_tensors="pt", add_special_tokens=False).to(device)
 
     ranges = _untrusted_prompt_ranges(
         tokenizer, template_messages, text, template_kwargs)
     if not ranges:
         return plain()
-    text = text + suffix
 
     from localm.textguard import split_by_trust
 
     try:
         import torch
         ids = []
-        for segment, is_untrusted in split_by_trust(text, ranges):
+        for segment, is_untrusted in split_by_trust(final, ranges):
             if not segment:
                 continue
             ids.extend(tokenizer(
@@ -1229,12 +1230,12 @@ class HFWorker:
                 template_messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
-            suffix = ""
+            prompt = text
             if thinking is False:
                 from .base import no_think_prompt
                 tmpl = getattr(tokenizer, "chat_template", None)
-                suffix = no_think_prompt(
-                    text, tmpl if isinstance(tmpl, str) else None)[len(text):]
+                prompt = no_think_prompt(
+                    text, tmpl if isinstance(tmpl, str) else None)
             # add_special_tokens=False: the chat template already emits the
             # model's BOS (Gemma <bos>, Llama-3 <|begin_of_text|>, Mistral <s>),
             # so re-tokenizing with the tokenizer default would prepend a SECOND
@@ -1244,7 +1245,7 @@ class HFWorker:
             # suppressing it here is correct for them too.
             inputs = _tokenize_prompt(
                 tokenizer, template_messages, text, model.device,
-                template_kwargs=template_kwargs, suffix=suffix)
+                template_kwargs=template_kwargs, prompt=prompt)
 
         # Check prompt token length against context capacity before generate
         input_ids = inputs.get("input_ids")

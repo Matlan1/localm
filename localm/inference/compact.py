@@ -4,13 +4,14 @@ Conversation compaction for chat sessions.
 
 When a chat history approaches the context ceiling, older turns are
 summarised by the model itself and replaced with a compact summary
-exchange, keeping the most recent turns verbatim. The kept tail always
-starts at a user turn, so the latest user request survives verbatim and the
-bridge exchange keeps user/assistant alternation. If summarisation fails
-for any reason (model error, empty or all-reasoning output), the bridge
-carries a bounded digest of excerpts from the removed turns instead. Either
-way the function never raises and always returns a usable history: chat
-keeps working instead of dying at the ceiling.
+exchange, keeping the most recent turns verbatim. The kept tail starts at a
+message the user wrote where one is available (see ``_split``), and the
+latest user-written message is carried verbatim into the bridge when it falls
+outside the tail; the bridge keeps user/assistant alternation. If
+summarisation fails for any reason (model error, empty or all-reasoning
+output), the bridge carries a bounded digest of excerpts from the removed
+turns instead. Either way the function never raises and always returns a
+usable history: chat keeps working instead of dying at the ceiling.
 
 Used by the CLI interactive chat; the GUI implements the same protocol
 client-side against /v1/chat/completions.
@@ -85,31 +86,58 @@ def estimate_tokens(
     return total
 
 
+def _is_users_own(message: dict) -> bool:
+    """True for a user message the user wrote: role ``user``, no ``origin``
+    marker, and not a ``<tool_result`` block."""
+    if message.get("role") != "user" or message.get("origin"):
+        return False
+    content = message.get("content", "")
+    return not (isinstance(content, str) and content.lstrip().startswith("<tool_result"))
+
+
 def _split(messages: List[dict]) -> Tuple[List[dict], List[dict], List[dict]]:
     """(leading system messages, older middle, recent tail).
 
-    The tail holds at least the last KEEP_RECENT messages and always starts at
-    a user message: the cut moves back to the nearest user message, or, when
-    there is none before it, forward to the next one. With no user message to
-    cut at, older is empty."""
+    The tail holds at least the last KEEP_RECENT messages. Its first message
+    is, in order of preference: the nearest user-written message at or before
+    the default cut, else the next one after it; else the nearest user
+    message of any kind at or before the default cut; else the nearest
+    assistant message at or before it, else the next one after it. With none
+    of these, older is empty."""
     head = []
     rest = list(messages)
     while rest and rest[0].get("role") == "system":
         head.append(rest.pop(0))
     if len(rest) <= KEEP_RECENT:
         return head, [], rest
-    cut = len(rest) - KEEP_RECENT
-    back = cut
-    while back > 0 and rest[back].get("role") != "user":
-        back -= 1
-    if back > 0:
-        cut = back
-    else:
-        while cut < len(rest) and rest[cut].get("role") != "user":
-            cut += 1
-        if cut >= len(rest):
-            return head, [], rest
-    return head, rest[:cut], rest[cut:]
+    default = len(rest) - KEEP_RECENT
+    backward = range(default, 0, -1)
+    forward = range(default + 1, len(rest))
+    for test, scan in (
+        (_is_users_own, backward),
+        (_is_users_own, forward),
+        (lambda m: m.get("role") == "user", backward),
+        (lambda m: m.get("role") == "assistant", backward),
+        (lambda m: m.get("role") == "assistant", forward),
+    ):
+        for i in scan:
+            if test(rest[i]):
+                return head, rest[:i], rest[i:]
+    return head, [], rest
+
+
+def _request_part(older: List[dict], recent: List[dict]):
+    """A "Current request (verbatim):" section holding the last user-written
+    message when it is in *older* and *recent* has none, else ``""``."""
+    if any(_is_users_own(m) for m in recent):
+        return ""
+    for m in reversed(older):
+        if _is_users_own(m):
+            content = m.get("content", "")
+            text = content if isinstance(content, str) else _text_of(m)
+            return compose("\n\nCurrent request (verbatim):\n",
+                           slice_guarded(text, 0, len(text)))
+    return ""
 
 
 def _excerpt_of(message: dict, limit: int):
@@ -194,19 +222,15 @@ def compact_messages(
             "%d removed message(s)", failure or "empty or reasoning-only reply",
             len(older))
 
-    if summary:
-        bridge = [
-            {"role": "user",
-             "content": f"[Conversation summary]\n{summary}"},
-            {"role": "assistant",
-             "content": "Understood. Continuing from this summary."},
-        ]
-    else:
-        bridge = [
-            {"role": "user", "content": digest_messages(older)},
-            {"role": "assistant",
-             "content": "Understood. Continuing from these excerpts."},
-        ]
+    body = (compose("[Conversation summary]\n", summary) if summary
+            else digest_messages(older))
+    body = compose(body, _request_part(older, recent))
+    bridge = [{"role": "user", "content": body}]
+    if recent and recent[0].get("role") == "user":
+        bridge.append({
+            "role": "assistant",
+            "content": ("Understood. Continuing from this summary." if summary
+                        else "Understood. Continuing from these excerpts.")})
 
     return [*head, *bridge, *recent], True
 

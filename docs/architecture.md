@@ -288,8 +288,10 @@ models, after verifying the forward target resolves to loopback.
 
 `inference/compact.py` summarises older chat turns through the model when a
 conversation reaches 70% of the context ceiling, keeping the system prompt
-and at least the last four messages verbatim. The kept tail always starts at
-a user message, so the latest request survives and roles keep alternating.
+and at least the last four messages verbatim. The kept tail starts at a
+message the user wrote where one is available (not a tool event or tool
+result), the latest request is carried verbatim into the summary when it falls
+outside the tail, and roles keep alternating.
 The summary is written with the model's reasoning channel off; when it still
 comes back empty, the bridge carries a bounded digest of excerpts from the
 removed turns instead, and compaction never raises. Used by `localm run`

@@ -4843,8 +4843,7 @@ def _resolve_disconnect_poll(request):
     """The async "has the client gone?" poll for *request*, or ``None``.
 
     Prefers the poll ``_DisconnectSignalMiddleware`` publishes under
-    ``scope[_DISCONNECT_POLL_KEY]`` (``request.is_disconnected()`` is always
-    False behind the BaseHTTPMiddleware stack) and falls back to
+    ``scope[_DISCONNECT_POLL_KEY]`` and falls back to
     ``request.is_disconnected`` for a request without that middleware. ``None``
     when *request* is ``None``."""
     if request is None:
@@ -4870,8 +4869,7 @@ async def _compact_for_capacity(engine, messages: list, request=None
     re-raised).
 
     Returns ``(messages, changed, disconnected)``; *disconnected* is True when
-    a client disconnect was observed while compacting. Never raises except
-    for its own cancellation."""
+    a client disconnect was observed while compacting."""
     from localm.inference.compact import compact_messages
     loop = asyncio.get_running_loop()
     cancel = threading.Event()
