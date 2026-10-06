@@ -680,9 +680,9 @@ def _quant_of(name: str) -> str:
 # the overrun is surfaced at debug level, never silently eaten.
 #
 # WHAT THE DEADLINE BOUNDS. No production caller probes ON THE EVENT LOOP: the
-# GUI routes all run_in_executor, and the GPU-registry heartbeat's probe (via
-# resolve_main_gpu_index -> list_gpus every ~20s when main_gpu_index >= 1) is
-# likewise executor-offloaded. So the deadline does NOT protect the loop; it
+# GUI routes all run_in_executor, and the GPU-registry heartbeat resolves its
+# device against last_gpu_reading() without probing. So the deadline does NOT
+# protect the loop; it
 # only bounds how long one worker thread (or a blocking CLI call) waits on a
 # wedged driver before degrading.
 #
@@ -2758,12 +2758,15 @@ def configured_split_placement(config: Optional[dict] = None, *,
     device list may leave out. ``None`` when the configured split applies in
     the worker unchanged: fewer than 2 entries, entries that are not
     integers, an opaque index space (vulkan or sycl), no reading holding a
-    GPU, a reading in which no integrated GPU is left out, or a runtime proven
-    to keep every GPU (torch's numbering is then llama.cpp's).
+    GPU after a probe that completed or was inconclusive, a reading in which
+    no integrated GPU is left out, or a runtime proven to keep every GPU
+    (torch's numbering is then llama.cpp's). No reading after a timed-out or
+    busy probe: a WARNING and an empty mapping, ``main_gpu`` 0.
 
-    The reading is *gpus*, else the last completed one, else a probe's
-    (:func:`_placement_reading`), so a caller holding a reading adds no probe.
-    It is numbered by :func:`_torch_llama_numbering`. Unproven: a WARNING and
+    The reading is *gpus*, else :func:`last_gpu_reading`, else a probe's
+    (fresh, or the last-known-good a timed-out or busy probe serves), so a
+    caller holding a reading adds no probe. It is numbered by
+    :func:`_torch_llama_numbering`. Unproven: a WARNING and
     an empty mapping (llama.cpp's default split), ``main_gpu`` 0. Proven: the
     split validated by :func:`resolve_gpu_split` against the reading, with
     *ratios* (else ``gpu_split_ratios``) paired by position, renumbered into
@@ -2783,8 +2786,18 @@ def configured_split_placement(config: Optional[dict] = None, *,
         return None
     if _native_gpu_index_space_is_opaque():
         return None
-    readings = _placement_reading(gpus, wait_for_inflight)
+    readings = list(gpus) if gpus else (last_gpu_reading() or [])
+    status = GPU_PROBE_OK
     if not readings:
+        readings, status = _list_gpus_reading(wait_for_inflight=wait_for_inflight)
+        readings = list(readings or [])
+    if not readings:
+        if status in (GPU_PROBE_TIMEOUT, GPU_PROBE_BUSY):
+            logger.warning("gpu_split_indices=%r: no GPU reading (probe status %s), "
+                           "so the GPUs cannot be matched to llama.cpp's device "
+                           "list; keeping llama.cpp's default split",
+                           list(indices), status)
+            return SplitPlacement({}, 0)
         return None
     if len(_llama_visible_torch_devices(readings)) == len(readings):
         return None
@@ -3556,20 +3569,15 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
     return out
 
 
-def implicit_split_free(config: Optional[dict] = None, *,
-                        gpus: Optional[list] = None) -> Optional[dict]:
-    """``{"free", "devices", "free_scope"?}`` summed over the 2+ GPUs of a
-    torch reading that llama.cpp's default layer split spreads a GGUF load
-    over (integrated GPUs beside a discrete one left out,
+def implicit_split_gpus(config: Optional[dict] = None, *,
+                        gpus: Optional[list] = None) -> Optional[list]:
+    """The entries of a torch reading that llama.cpp's default layer split
+    spreads a GGUF load over (integrated GPUs beside a discrete one left out,
     :func:`_llama_visible_torch_devices`), or ``None`` when a
     ``gpu_split_indices`` is configured, fewer than 2 such GPUs are read, any
     of them lacks an integer ``free``, or the index space is opaque (vulkan or
-    sycl).
-
-    The reading is *gpus*, else :func:`last_gpu_reading`, so this never
-    probes. ``free_scope`` is :data:`FREE_SCOPE_DEVICE` when every summed GPU
-    reports it, :data:`FREE_SCOPE_PROCESS` when any reports another scope, and
-    absent when none reports one."""
+    sycl). The reading is *gpus*, else :func:`last_gpu_reading`, so this
+    never probes."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     if cfg.get("gpu_split_indices"):
@@ -3580,12 +3588,25 @@ def implicit_split_free(config: Optional[dict] = None, *,
     kept = _llama_visible_torch_devices(readings)
     if len(kept) < 2:
         return None
-    frees = [d.get("free") if isinstance(d, dict) else None for d in kept]
-    if not all(isinstance(f, int) and not isinstance(f, bool) for f in frees):
+    if not all(isinstance(d, dict) and isinstance(d.get("free"), int)
+               and not isinstance(d.get("free"), bool) for d in kept):
         return None
     if _native_gpu_index_space_is_opaque():
         return None
-    out = {"free": sum(frees), "devices": len(kept)}
+    return kept
+
+
+def implicit_split_free(config: Optional[dict] = None, *,
+                        gpus: Optional[list] = None) -> Optional[dict]:
+    """``{"free", "devices", "free_scope"?}`` summed over
+    :func:`implicit_split_gpus`, or ``None`` when that answers ``None``.
+    ``free_scope`` is :data:`FREE_SCOPE_DEVICE` when every summed GPU reports
+    it, :data:`FREE_SCOPE_PROCESS` when any reports another scope, and absent
+    when none reports one."""
+    kept = implicit_split_gpus(config, gpus=gpus)
+    if kept is None:
+        return None
+    out = {"free": sum(d["free"] for d in kept), "devices": len(kept)}
     scopes = [d.get("free_scope") for d in kept if d.get("free_scope")]
     if scopes:
         out["free_scope"] = (FREE_SCOPE_DEVICE

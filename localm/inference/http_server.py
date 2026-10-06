@@ -296,11 +296,13 @@ def _model_file_size(name: str) -> Optional[int]:
 def _current_gpu_index() -> int:
     """The device the next GGUF load reads its VRAM from (0 when nothing
     selects one) - ``discover.resolve_load_gpu_index``, the same resolution
-    ``vram_info()`` and the GGUF backend's own VRAM check use."""
+    ``vram_info()`` and the GGUF backend's own VRAM check use, validated
+    against ``discover.last_gpu_reading()`` so it never probes."""
     try:
         from localm.config import load_config
-        from localm.discover import resolve_load_gpu_index
-        return resolve_load_gpu_index(load_config(), quiet=True)
+        from localm.discover import last_gpu_reading, resolve_load_gpu_index
+        return resolve_load_gpu_index(load_config(), gpus=last_gpu_reading() or [],
+                                      quiet=True)
     except Exception:
         return 0
 
@@ -377,8 +379,11 @@ def _gpu_registry_sync() -> None:
 
 def _load_gpu_indices() -> set:
     """Every device whose free VRAM this instance's next model load can actually
-    USE - the whole configured split when one is active, else just the main
-    device.
+    USE - the whole configured split when one resolves to 2+ devices, else the
+    GPUs llama.cpp's default split spreads a GGUF load over
+    (``discover.implicit_split_gpus`` on the last reading, the devices
+    ``_switch_probe_vram`` sums), else the one device ``_current_gpu_index``
+    names. Never probes beyond ``resolve_gpu_split``'s own reading.
 
     NOT ``{_current_gpu_index()}``: that is an IDENTITY answer ("which one device
     is primary"), and resolve_main_gpu_index(None) returns 0 for an unconfigured
@@ -404,6 +409,10 @@ def _load_gpu_indices() -> set:
                                   cfg.get("gpu_split_ratios"))
         if len(pairs) >= 2:
             return {idx for idx, _ratio in pairs}
+        from localm.discover import implicit_split_gpus
+        kept = implicit_split_gpus(cfg)
+        if kept is not None:
+            return {d.get("index") for d in kept}
     except Exception as e:
         from localm.debuglog import logger as _dbg
         _dbg.debug("could not resolve the configured GPU split for the "

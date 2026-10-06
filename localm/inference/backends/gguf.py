@@ -163,10 +163,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         """Tell the user what the implicit split's per-device fit decided:
         which devices were left out (and, for a single kept device, that the
         load runs on it alone), or which device is short of memory when no
-        plan fits. Sets ``_split_fit_note`` for the unresolved case."""
+        plan fits. Devices are named by their torch index
+        (``_fit_source_index``), the number ``localm gpus`` and the GUI show.
+        Sets ``_split_fit_note`` for the unresolved case."""
         from localm.debuglog import logger as _dbg
         gb = 1024 ** 3
         short = [c for c in plan.default if not c.fits]
+        source = getattr(self, "_fit_source_index", None) or {}
+
+        def gpu(i) -> int:
+            return source.get(i, i)
 
         def _what(c) -> str:
             parts = []
@@ -179,19 +185,19 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         _dbg.info(
             "implicit GPU split fit: %s",
-            "; ".join(f"device {c.index}: {c.free / gb:.1f} GB free, needs "
+            "; ".join(f"device {gpu(c.index)}: {c.free / gb:.1f} GB free, needs "
                       f"{c.need / gb:.1f} GB ({c.layers} layers "
                       f"{c.weights / gb:.1f}, output {c.output / gb:.2f}, kv "
                       f"{c.kv / gb:.2f}, logits {c.logits / gb:.2f}, reserve "
                       f"{c.reserve / gb:.1f})" for c in plan.default))
         if plan.tensor_split:
-            left_out = ", ".join(str(i) for i in plan.excluded)
-            kept = ", ".join(str(i) for i in plan.tensor_split)
+            left_out = ", ".join(str(gpu(i)) for i in plan.excluded)
+            kept = ", ".join(str(gpu(i)) for i in plan.tensor_split)
             short_ids = {c.index for c in short}
-            parts = [f"device {c.index} has {c.free / gb:.1f} GB free but would "
+            parts = [f"device {gpu(c.index)} has {c.free / gb:.1f} GB free but would "
                      f"hold about {c.need / gb:.1f} GB ({_what(c)})"
                      for c in short if c.index in plan.excluded]
-            parts += [f"device {i} would then be short of memory as well"
+            parts += [f"device {gpu(i)} would then be short of memory as well"
                       for i in plan.excluded if i not in short_ids]
             detail = "; ".join(parts)
             if len(plan.tensor_split) == 1:
@@ -210,7 +216,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 f"instead. Set gpu_split_indices to choose the devices yourself.")
             return
         detail = "; ".join(
-            f"device {c.index} has {c.free / gb:.1f} GB free but the split "
+            f"device {gpu(c.index)} has {c.free / gb:.1f} GB free but the split "
             f"would place about {c.need / gb:.1f} GB on it ({_what(c)})"
             for c in short)
         self._split_fit_note = (
@@ -377,22 +383,27 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # a box whose integrated GPUs llama.cpp leaves out is renumbered into
         # llama.cpp's devices (configured_split_placement); a 1-entry
         # gpu_split_indices becomes a {llama.cpp device: 1.0} mapping; otherwise
-        # the implicit split fit's plan applies. By-symbol, function-scoped
-        # imports so the resolvers stay patchable.
+        # the implicit split fit's plan applies. main_gpu_index travels as a
+        # llama.cpp device whenever the parent renumbered the placement, and is
+        # left to the worker's config read otherwise. By-symbol,
+        # function-scoped imports so the resolvers stay patchable.
         # wait_for_inflight=True requires running off the event loop.
         from localm.config import load_config
         from localm.discover import (configured_split_placement,
+                                     default_split_main_gpu, fit_main_gpu,
                                      resolve_auto_split_ratios, resolve_gpu_split,
                                      single_gpu_placement)
         auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
         worker_split = auto_ratios
         main_gpu = None
         self._split_fit_note = ""
+        self._fit_source_index = {}
         self.load_gpu_index = None
         placement = None
         plan = None
         if gpu_layers != 0:
             placement = configured_split_placement(ratios=auto_ratios,
+                                                   gpus=vram_before,
                                                    wait_for_inflight=True)
             if placement is None and not auto_ratios:
                 placement = single_gpu_placement(wait_for_inflight=True)
@@ -407,12 +418,15 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             if plan is not None and plan.tensor_split:
                 worker_split = plan.tensor_split
                 self._report_split_fit(plan)
+                main_gpu = fit_main_gpu(source_index=self._fit_source_index,
+                                        used=list(plan.tensor_split))
                 if len(plan.tensor_split) == 1:
                     (slot,) = plan.tensor_split
-                    self.load_gpu_index = getattr(
-                        self, "_fit_source_index", {}).get(slot, slot)
+                    self.load_gpu_index = self._fit_source_index.get(slot, slot)
             elif plan is not None and not plan.default_fits:
                 self._report_split_fit(plan)
+        if gpu_layers != 0 and placement is None and not isinstance(worker_split, dict):
+            main_gpu = default_split_main_gpu(gpus=vram_before, wait_for_inflight=True)
 
         # The context ceiling is sized from the devices this load uses: a fit
         # that leaves devices out bounds it by the devices it keeps.

@@ -955,24 +955,30 @@ class IsolatedEmbedder(VramSizingMixin):
         # child, which must not probe for it. Skipped when this embedder is
         # CPU-bound anyway (cpu_only, or zero GPU layers).
         from localm.discover import (configured_split_placement,
+                                     default_split_main_gpu, last_gpu_reading,
                                      resolve_auto_split_ratios)
         cpu_only = self.gpu_fallback_reason is not None
         auto_ratios = None
         placement = None
+        main_gpu = None
         if not cpu_only and self.n_gpu_layers != 0:
             # wait_for_inflight: loads run off the event loop, so a
             # heartbeat-probe collision joins instead of declining auto into
             # the equal fallback.
             auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
-            placement = configured_split_placement(ratios=auto_ratios,
+            reading = last_gpu_reading()
+            placement = configured_split_placement(ratios=auto_ratios, gpus=reading,
                                                    wait_for_inflight=True)
+            main_gpu = (placement.main_gpu if placement is not None
+                        else default_split_main_gpu(gpus=reading,
+                                                    wait_for_inflight=True))
         params = dict(model_path=self.model_path, n_gpu_layers=self.n_gpu_layers,
                       n_ctx=self._requested_n_ctx, pooling_type=self._pooling_type,
                       cpu_only=cpu_only, gpu_split_ratios=auto_ratios)
         if placement is not None:
             params["gpu_split_ratios"] = placement.mapping
-            if placement.main_gpu is not None:
-                params["main_gpu"] = placement.main_gpu
+        if main_gpu is not None:
+            params["main_gpu"] = main_gpu
         self._runner = EmbedderRunner()
         meta = self._runner.spawn_and_load(params)
         self.dim = meta["dim"]

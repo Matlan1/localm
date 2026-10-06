@@ -25,17 +25,21 @@ GiB = 1024 ** 3
 
 
 @contextlib.contextmanager
-def _box(gpus, registry):
-    """A CUDA/HIP build whose torch probe reports *gpus* (through every probe
-    entry point, and as the last completed reading) and whose native registry
-    reports *registry*."""
-    def _list(*_a, **kw):
-        return (list(gpus), discover.GPU_PROBE_OK) if kw.get("return_status") else list(gpus)
+def _box(gpus, registry, *, status=discover.GPU_PROBE_OK, last=True, calls=None):
+    """A CUDA/HIP build whose torch probe reports *gpus* with *status* (through
+    every probe entry point) and whose native registry reports *registry*.
+    With *last*, *gpus* is also the last completed reading. Each probe call
+    appends to *calls* when given."""
+    def _list(*, return_status=False, deadline=None, wait_for_inflight=False):
+        if calls is not None:
+            calls.append(1)
+        return (list(gpus), status) if return_status else list(gpus)
 
     with mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
                            return_value=False), \
             mock.patch.object(discover, "list_gpus", _list), \
-            mock.patch.object(discover, "last_gpu_reading", lambda: list(gpus)), \
+            mock.patch.object(discover, "last_gpu_reading",
+                              lambda: list(gpus) if last else None), \
             mock.patch.object(_loader, "gpu_devices_isolated",
                               return_value=registry) as reg, \
             mock.patch.object(_loader, "probe_daemon_running", return_value=True), \
@@ -43,9 +47,10 @@ def _box(gpus, registry):
         yield reg
 
 
-def _load(b, gpus, registry, cfg, *, ctx_max=4096, registry_reads=None):
+def _load(b, gpus, registry, cfg, *, ctx_max=4096, registry_reads=None, **box):
     """Run the backend's real ``_load_native`` on a torch box with *cfg* as the
-    config and return the params handed to the worker."""
+    config and return the params handed to the worker. *box* goes to
+    :func:`_box`."""
     captured = {}
 
     def _fake_spawn(self_runner, params, cancel_event=None, timeout=None,
@@ -56,7 +61,7 @@ def _load(b, gpus, registry, cfg, *, ctx_max=4096, registry_reads=None):
     ctx_patch = (mock.patch.object(GgufBackend, "_effective_ctx_max",
                                    return_value=ctx_max)
                  if ctx_max is not None else contextlib.nullcontext())
-    with _box(gpus, registry) as reg, ctx_patch, \
+    with _box(gpus, registry, **box) as reg, ctx_patch, \
             mock.patch("localm.config.load_config", return_value=cfg), \
             mock.patch.object(_loader, "native_lib_loaded", return_value=False), \
             mock.patch("localm.inference.backends.llamacpp._sizing."

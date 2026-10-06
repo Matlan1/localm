@@ -232,16 +232,18 @@ free VRAM; set it explicitly to choose which cards, and `gpu_split_ratios` to pi
 exact relative weights instead of following free VRAM at load time (blank
 distributes evenly when free VRAM cannot be measured). On a CUDA or ROCm build the
 indices are the ones `localm gpus` and the GUI list. A computer with an integrated
-GPU alongside a discrete one lists the integrated GPU too, but llama.cpp does not
-use it then: localm renumbers a configured split and main GPU into llama.cpp's own
-device list, and refuses a split (or single GPU) that names the integrated GPU with
-a message saying so. On the `vulkan` or `sycl` build the indices are llama.cpp's own
-device order.
+GPU alongside a discrete one lists the integrated GPU too, and llama.cpp usually does
+not use it then: for a GGUF load localm checks llama.cpp's own device list and
+renumbers a configured split and main GPU into it, and refuses a split (or single
+GPU) that names an integrated GPU llama.cpp leaves out, with a message saying so.
+When the runtime keeps the integrated GPU the numbers already match; when localm
+cannot match the two lists, llama.cpp's default split is kept and the reason is
+logged. On the `vulkan` or `sycl` build the indices are llama.cpp's own device order.
 
 In the GUI, the same controls live in Settings' Live Tuning card as a **Main
 GPU** selector and a "Split across GPUs" checkbox row (populated from the
 detected device list), with a ratio-weight input beside each checked device for
-`gpu_split_ratios`. Ticking one GPU loads a GGUF model on that GPU only; leaving
+`gpu_split_ratios`. Ticking one GPU loads a model on that GPU only; leaving
 every box unticked keeps automatic placement.
 
 ## Mixture-of-Experts: reducing VRAM footprint

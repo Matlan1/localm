@@ -336,7 +336,7 @@ function renderGpuSplitRatioRow(gpus, checkedIndices, presetRatios) {
 }
 
 /** Show the one-GPU note under the checkboxes when exactly one device is
- *  checked (a 1-entry gpu_split_indices: a GGUF model loads on that GPU only),
+ *  checked (a 1-entry gpu_split_indices: a model loads on that GPU only),
  *  naming that device; hidden otherwise. */
 function renderGpuSingleHint(gpus, checkedIndices) {
   const hint = $("perf-gpu-single-hint");
@@ -398,7 +398,7 @@ export async function refreshGpuSplitCheckboxes() {
 /** PATCH /v1/config with the currently-checked GPU indices and their ratio
  *  weights, read straight from the DOM as it stands right now. None checked
  *  CLEARS both the split and its ratios (automatic placement); exactly one
- *  checked saves that one index (a GGUF model loads on that GPU only) with no
+ *  checked saves that one index (a model loads on that GPU only) with no
  *  ratios - the saved value always matches exactly what is checked/typed,
  *  never silently turning the split on or guessing a weight. A
  *  partially-filled ratio row (some devices weighted, others left blank) is
