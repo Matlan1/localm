@@ -132,6 +132,7 @@ def test_a_question_that_opens_with_an_action_word_demands_nothing(text):
     "Describe the project structure",
     "Go through the repo and tell me what it does",
     "the tests are red again",
+    "we always check things twice around here",
 ])
 def test_a_statement_about_the_workspace_still_gets_the_first_nudge(text):
     assert implies_action(text) is True
