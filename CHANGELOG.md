@@ -168,6 +168,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **LLaVA 1.5 and 1.6 models get their vision projector again.** These older
+  projector files record a width that is not the one the model uses, so localm
+  decided the projector did not fit and left it off: the model was not shown as
+  able to read images, and a `--store` copy or move left the projector behind.
+  localm now reads the projector's real width from its weights, the same way
+  llama.cpp does.
 - **Two machines sharing one data folder no longer take over each other's
   knowledge-base write lock.** Two machines with the same host name (on Windows,
   or on Linux hosts) read each other's lock records as their own process table,
