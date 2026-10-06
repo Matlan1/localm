@@ -83,10 +83,58 @@ def test_pure_questions_are_not_action_requests(text):
     "I need you to find the bug",
     "the build is red. fix it",
     "python 3.12 is installed. check the version",
+    "I would like you to run the tests",
+    "can you also fix the bug",
+    "could you just run the tests",
+    "Pls can you run the tests",
+    "go and run the tests",
+    "try to run the tests",
+    "Be sure to run the tests",
+    "Don't forget to run the tests",
+    "Great, now fix it",
+    "Yes fix it",
+    "Hello, run the tests",
+    "Quickly run the tests",
+    "Again, run the tests",
+    "Using the shell tool, run ls",
+    "Cd into src and run make",
+    "Use grep to find foo",
+    "I'd like you to run the tests",
+    "I want you to please run the tests",
+    "In src/app.py, change X to Y",
+    "main.py is broken, fix it",
+    "would you mind fixing main.py",
+    "Take a look at main.py",
+    "Review main.py",
+    "Carefully fix main.py",
 ])
 def test_imperative_requests_demand_action(text):
     assert implies_action(text) is True
     assert demands_action(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "Search fails with a 500, why?",
+    "Build fails on CI, any idea why?",
+    "Test coverage dropped, why is that?",
+    "Update broke login. Why?",
+    "Check engine light is on, what does it mean?",
+    "Print jobs hang; why?",
+    "explain how search works",
+])
+def test_a_question_that_opens_with_an_action_word_demands_nothing(text):
+    assert demands_action(text) is False
+    assert implies_action(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Analyze the repo",
+    "Describe the project structure",
+    "Go through the repo and tell me what it does",
+    "the tests are red again",
+])
+def test_a_statement_about_the_workspace_still_gets_the_first_nudge(text):
+    assert implies_action(text) is True
 
 
 def test_a_file_name_alone_implies_action_without_demanding_it():
@@ -191,6 +239,54 @@ def test_a_clarifying_question_on_a_file_question_stands_as_the_answer(tmp_path)
         result = agent.run_task("what does main.py do?")
     assert _final_answer(result) == reply
     assert _nocall_prompts(agent) == []
+
+
+def test_a_short_clarifying_question_stands_for_an_imperative_request_too(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=6)
+    with patch.object(agent, "_call_llm", return_value="Which bug do you mean?"), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        result = agent.run_task("fix the bug")
+    assert _final_answer(result) == "Which bug do you mean?"
+    assert _nocall_prompts(agent) == []
+
+
+def test_a_long_reply_ending_in_a_question_does_not_stand(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=6)
+    reply = "I would write the script for you like this. " * 20 + "Shall I proceed?"
+    with patch.object(agent, "_call_llm", return_value=reply), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        agent.run_task("create a.txt")
+    assert len(_nocall_prompts(agent)) >= 1
+
+
+def test_the_first_nudge_offers_the_no_tool_needed_escape(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=6)
+    with patch.object(agent, "_call_llm", return_value="Nope."), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        agent.run_task("run the tests")
+    assert "[no tool needed]" in str(_nocall_prompts(agent)[0]["content"])
+
+
+def test_the_no_tool_needed_escape_is_accepted_and_never_forced(tmp_path):
+    """The escape rung 1 offers must hold: a reply that takes it is the final
+    answer, with the marker removed, no grammar-forced turn and no failed-
+    enforcement report."""
+    agent = _make_agent(tmp_path, max_turns=8)
+    forced = []
+    replies = iter(["I cannot do that.", "[no tool needed] The tests already pass."])
+
+    def _reply(*a, **k):
+        forced.append(bool(getattr(agent, "_force_tool_grammar", False)))
+        return next(replies)
+
+    with patch.object(agent, "_call_llm", side_effect=_reply), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        result = agent.run_task("run the tests")
+    assert _final_answer(result) == "The tests already pass."
+    assert forced == [False, False]
+    assert len(_nocall_prompts(agent)) == 1
+    assert "tool use not achieved" not in result
+    assert "[no tool needed]" not in result
 
 
 def test_a_prose_answer_to_a_file_question_is_accepted_after_rung_one(tmp_path):

@@ -645,7 +645,34 @@ class TestMistralToolCallsToken:
         text = '[TOOL_CALLS] [{"a": ' * 3000
         assert parse_tool_calls(text, tool_names=self.NAMES) == []
 
-    def test_orphan_closers_are_stripped_but_a_broken_opener_is_not(self):
-        assert strip_orphan_closers("a </tool_call> b [/tool_call] c") == "a  b  c"
+    def test_a_scrubbed_native_list_is_still_a_trusted_call(self):
+        """The engine removes the [TOOL_CALLS] token before the coder sees the
+        reply, which leaves a bare list of exact call objects."""
+        text = ('[{"name": "web_search", "arguments": {"query": "q"}}, '
+                '{"name": "grep", "arguments": {"pattern": "x"}}]')
+        calls = parse_tool_calls(text, tool_names=self.NAMES)
+        assert [c.name for c in calls] == ["web_search", "grep"]
+        assert [c.lenient for c in calls] == [False, False]
+        assert not looks_like_tool_attempt(
+            strip_orphan_closers(self._leftover(text, calls)), self.NAMES)
+
+    def test_a_list_amid_prose_stays_lenient(self):
+        text = 'Maybe use [{"name": "web_search", "arguments": {"query": "q"}}] here.'
+        calls = parse_tool_calls(text, tool_names=self.NAMES)
+        assert [c.lenient for c in calls] == [True]
+
+    def test_a_list_with_a_broken_element_leaves_that_element_visible(self):
+        text = ('[TOOL_CALLS][{"name": "grep", "arguments": {"pattern": "a"}}, '
+                '{"name": "grep", "arguments": {"pattern": }}]')
+        calls = parse_tool_calls(text, tool_names=self.NAMES)
+        assert [c.args for c in calls] == [{"pattern": "a"}]
+        leftover = strip_orphan_closers(self._leftover(text, calls))
+        assert looks_like_tool_attempt(leftover, self.NAMES)
+
+    def test_only_a_closing_tag_alone_on_its_line_is_stripped(self):
+        assert strip_orphan_closers("a\n</tool_call>\nb\n[/tool_call]") == "a\nb\n"
         broken = '<tool_call>{"name": 1}</tool_call>'
         assert looks_like_tool_attempt(strip_orphan_closers(broken), self.NAMES)
+        inline = 'call:write_file{path:"b",content:"c"}</tool_call>'
+        assert strip_orphan_closers(inline) == inline
+        assert looks_like_tool_attempt(strip_orphan_closers(inline), self.NAMES)

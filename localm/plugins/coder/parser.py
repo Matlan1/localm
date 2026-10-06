@@ -88,6 +88,10 @@ _RE_MISTRAL_OPEN = re.compile(r"\[TOOL_CALLS\][ \t\r\n]*")
 _RE_MISTRAL_ATTEMPT = re.compile(r"\[TOOL_CALLS\]\s*(?:\[\s*)?\{")
 # A closing wrapper tag with no opener of its own.
 _RE_CLOSER = re.compile(r"<\|?/tool_call\|?>|<tool_call\|>|\[/tool_call\]", re.IGNORECASE)
+# A closing tag alone on its line.
+_RE_CLOSER_LINE = re.compile(
+    r"^[ \t]*(?:<\|?/tool_call\|?>|<tool_call\|>|\[/tool_call\])[ \t]*(?:\r?\n|$)",
+    re.IGNORECASE | re.MULTILINE)
 
 # Marker-variant wrapper. Finetunes mangle the canonical <tool_call> tags in the
 # wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or <|/tool_call>, an
@@ -148,10 +152,11 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
 
 
 def strip_orphan_closers(text: str) -> str:
-    """*text* with every closing tool-call tag removed (``</tool_call>``,
-    ``<|/tool_call>``, ``[/tool_call]``). The leftover of a response whose
-    calls were consumed can hold such a tag; it is not an attempt at a call."""
-    return _RE_CLOSER.sub("", text)
+    """*text* with every closing tool-call tag that stands alone on its line
+    removed (``</tool_call>``, ``<|/tool_call>``, ``[/tool_call]``). The leftover
+    of a response whose calls were consumed can hold such a tag; it is not an
+    attempt at a call. A closing tag that ends other text on its line stays."""
+    return _RE_CLOSER_LINE.sub("", text)
 
 
 def _detriple_quoted(s: str) -> str:
@@ -531,7 +536,8 @@ def _iter_mistral_calls(text: str):
     """Yield ``(start, end, [(name, args), ...])`` for each ``[TOOL_CALLS]``
     token followed by a JSON list of call objects, or by one call object. A
     closing ``</tool_call>`` / ``[/tool_call]`` after the body is part of the
-    span."""
+    span. A list with an element that does not parse yields nothing, so the
+    caller's leftover check still sees the broken element."""
     pos = 0
     scans_left = _MAX_MISTRAL_SCANS
     last_close = text.rfind("}")
@@ -556,10 +562,14 @@ def _iter_mistral_calls(text: str):
             pos = opener.end()
             continue
         items = []
-        for _s, _e, chunk in _iter_top_level_json_objects(text[inner_from:inner_to]):
+        chunks = list(_iter_top_level_json_objects(text[inner_from:inner_to]))
+        for _s, _e, chunk in chunks:
             parsed = _try_parse_body(chunk, None)
             if parsed is not None:
                 items.append(parsed)
+        if len(items) != len(chunks):
+            pos = opener.end()
+            continue
         end = body_end
         j = end
         while j < len(text) and text[j].isspace():
@@ -681,7 +691,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
         leftover = text
         for c_start, c_end in sorted(seen_spans, reverse=True):
             leftover = leftover[:c_start] + leftover[c_end:]
-        if not leftover.strip():
+        if not leftover.strip(" " + chr(9) + chr(13) + chr(10) + "[],"):
             for call, _exact in gated:
                 call.lenient = False
 

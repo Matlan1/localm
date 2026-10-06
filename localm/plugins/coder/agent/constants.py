@@ -324,11 +324,20 @@ _ACTION_VERBS: frozenset[str] = frozenset({
     "update", "upgrade", "verify", "write",
 })
 
+# Verbs that make a request an action only when used as an imperative: too common
+# in ordinary prose to count anywhere in a text.
+_IMPERATIVE_ONLY_VERBS: frozenset[str] = frozenset({
+    "analyse", "analyze", "audit", "cd", "count", "describe", "explore", "go",
+    "locate", "review", "scan", "summarise", "summarize", "take", "try", "use",
+})
+
 # Words that may precede an imperative verb without changing what it is
 # ("please run the tests", "then fix it").
 _IMPERATIVE_LEADS: frozenset[str] = frozenset({
     "please", "pls", "kindly", "now", "then", "also", "and", "just", "ok",
-    "okay", "so", "first", "next", "finally", "hey", "hi",
+    "okay", "so", "first", "next", "finally", "hey", "hi", "yes", "yeah",
+    "sure", "great", "thanks", "thank", "you", "quickly", "again", "carefully",
+    "simply", "actually", "well", "alright", "cool", "good", "perfect", "right",
 })
 
 # Suffixes that make a dotted token a domain name, not a file name.
