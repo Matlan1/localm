@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._tk_root import build_tk_root
+
 _GUI_PATH = Path(__file__).resolve().parents[1] / "installer" / "gui.py"
 _REPO_ROOT = _GUI_PATH.parents[1]
 _MOD_NAME = "localm_installer_gui"
@@ -860,10 +862,7 @@ def wizard(gui):
     """A real Tk wizard, skipped where there is no display to build one on."""
     tk = pytest.importorskip("tkinter")
     from tkinter import filedialog, ttk
-    try:
-        root = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"no display: {e}")
+    root = build_tk_root(tk.Tk)
     root.withdraw()
     try:
         yield gui.Wizard(root, tk, ttk, filedialog)
@@ -1014,10 +1013,7 @@ def installed(gui, tmp_path, monkeypatch):
 def uninstall_wizard(gui, installed):
     tk = pytest.importorskip("tkinter")
     from tkinter import filedialog, ttk
-    try:
-        root = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"no display: {e}")
+    root = build_tk_root(tk.Tk)
     root.withdraw()
     answer = _Answer()
     try:
@@ -1042,10 +1038,7 @@ def test_a_repair_offers_the_data_folder_in_use(gui, installed, tmp_path):
     from localm import install_manifest as im
     custom = tmp_path / "my data"
     im.prepare_data(tmp_path, data_dir=str(custom))
-    try:
-        root = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"no display: {e}")
+    root = build_tk_root(tk.Tk)
     root.withdraw()
     try:
         wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=_Answer())
@@ -1166,10 +1159,7 @@ class TestUninstallFromTheWindow:
             link.symlink_to(real, target_is_directory=True)
         im.prepare_data(tmp_path, data_dir=str(link))
         (link / "chats").mkdir()
-        try:
-            root = tk.Tk()
-        except tk.TclError as e:
-            pytest.skip(f"no display: {e}")
+        root = build_tk_root(tk.Tk)
         root.withdraw()
         try:
             wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=_Answer())
@@ -1196,10 +1186,7 @@ class TestUninstallFromTheWindow:
     def test_the_window_closes_when_no_uninstall_is_running(self, gui, installed):
         tk = pytest.importorskip("tkinter")
         from tkinter import filedialog, ttk
-        try:
-            root = tk.Tk()
-        except tk.TclError as e:
-            pytest.skip(f"no display: {e}")
+        root = build_tk_root(tk.Tk)
         root.withdraw()
         answer = _Answer()
         wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=answer)
@@ -1219,10 +1206,7 @@ def test_a_repair_says_when_the_data_folder_in_use_is_unavailable(gui, installed
     custom = tmp_path / "offline drive" / "data"
     im.prepare_data(tmp_path, data_dir=str(custom))
     shutil.rmtree(custom.parent)
-    try:
-        root = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"no display: {e}")
+    root = build_tk_root(tk.Tk)
     root.withdraw()
     try:
         wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=_Answer())
@@ -1443,10 +1427,7 @@ class TestPalettes:
 
 def _tk_root():
     tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"no display: {e}")
+    root = build_tk_root(tk.Tk)
     root.withdraw()
     return root
 

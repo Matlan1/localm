@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
+from tests._tk_root import build_tk_root
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -182,21 +182,8 @@ class TestNoThreadEscapesTheSuite:
 
 
 def _make_launcher(mod):
-    """Construct the real launcher window.
-
-    Skips only when Tk reports no display. Any other TclError is retried, then
-    raised, so an intermittent Tk initialisation failure cannot turn into a
-    silent skip."""
-    last = None
-    for _ in range(3):
-        try:
-            return mod.Launcher()
-        except mod.tk.TclError as e:
-            if "display" in str(e).lower():
-                pytest.skip(f"no display for tkinter: {e}")
-            last = e
-            time.sleep(0.2)
-    raise last
+    """Construct the real launcher window."""
+    return build_tk_root(mod.Launcher)
 
 
 def _real_launcher(mod, monkeypatch, *, sync=None, models=("probe-model",)):
