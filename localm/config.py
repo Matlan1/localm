@@ -200,8 +200,10 @@ def cache_dir() -> Path:
     to their defaults (under ``%LOCALAPPDATA%`` on Windows, ``~/.cache`` on POSIX).
 
     Derived from ``home_dir()``, never a hardcoded path, so the cache follows
-    LOCALM_HOME. NOT conditional on an ambient ``PIP_CACHE_DIR`` / ``HF_HUB_CACHE``:
-    LOCALM_HOME is the only knob that moves it."""
+    LOCALM_HOME. NOT conditional on an ambient ``PIP_CACHE_DIR``: LOCALM_HOME is
+    the only knob that moves it. The Hugging Face caches under it are the one
+    exception: ``HF_HOME`` / ``HF_HUB_CACHE`` / ``HF_XET_CACHE`` set by the user
+    are honoured (see ``contained_hf_env``)."""
     return home_dir() / "cache"
 
 
@@ -247,10 +249,99 @@ def contained_pip_env(base: Optional[dict] = None) -> dict:
     return env
 
 
+# Env var recording the HF_HOME value localm itself pinned.
+_HF_PIN_MARKER = "LOCALM_PINNED_HF_HOME"
+_HF_USER_PLACEMENT_VARS = ("HF_HOME", "HF_HUB_CACHE", "HF_XET_CACHE", "HF_ASSETS_CACHE",
+                           "HUGGINGFACE_HUB_CACHE", "HUGGINGFACE_ASSETS_CACHE")
+
+
+def hf_home_dir() -> Path:
+    """localm's OWN Hugging Face home, inside the data dir.
+
+    huggingface_hub and its xet transfer layer write under ``HF_HOME`` (default
+    ``~/.cache/huggingface``, or ``$XDG_CACHE_HOME/huggingface``): xet logs and
+    staging, the chunk cache, hub cache refs, update-check stamps. Left unset
+    that is a per-user location OUTSIDE the data dir that "delete saved data"
+    never reaches. Sibling of the pip / uv / whisper caches under ``cache_dir()``."""
+    return cache_dir() / "huggingface"
+
+
+def _default_hf_token_path(env: dict) -> str:
+    """Where huggingface_hub looks for a saved login when ``HF_HOME`` is not set,
+    for the ``XDG_CACHE_HOME`` in *env* and this process's home directory."""
+    default_home = os.path.join(os.path.expanduser("~"), ".cache")
+    hf_home = os.path.expandvars(os.path.expanduser(
+        os.path.join(env.get("XDG_CACHE_HOME", default_home), "huggingface")))
+    return os.path.join(hf_home, "token")
+
+
+def hf_cache_user_placement(base: Optional[dict] = None) -> dict:
+    """The Hugging Face cache locations the USER chose, ``{var: value}``.
+
+    ``HF_HUB_CACHE``, ``HF_XET_CACHE`` and the asset / legacy cache variables always
+    count when set; ``HF_HOME``
+    counts unless it is the value localm itself pinned. Empty when localm's
+    own contained home is in effect."""
+    env = os.environ if base is None else base
+    out = {}
+    for var in _HF_USER_PLACEMENT_VARS:
+        val = env.get(var)
+        if val is not None and not (var == "HF_HOME" and val == env.get(_HF_PIN_MARKER)):
+            out[var] = val
+    return out
+
+
+def contained_hf_env(base: Optional[dict] = None) -> dict:
+    """An environment with ``HF_HOME`` pinned inside the data dir.
+
+    *base* defaults to a copy of the current process environment. ``HF_HOME``
+    moves the xet cache and logs, the hub cache and every other Hugging Face
+    cache that localm's downloads write; ``HF_HUB_CACHE`` / ``HF_XET_CACHE``
+    follow it unless set separately. A location the user set (``HF_HOME`` other
+    than localm's own earlier pin) is left exactly as set, as are an explicit
+    ``HF_HUB_CACHE`` / ``HF_XET_CACHE``.
+
+    When localm pins ``HF_HOME``, ``HF_TOKEN_PATH`` is pinned to where the saved
+    Hugging Face login lives by default (unless the user set it), so a
+    ``huggingface-cli login`` made outside localm keeps authenticating
+    downloads. The login is read from there and never moved or copied."""
+    env = dict(os.environ if base is None else base)
+    pinned = env.get(_HF_PIN_MARKER)
+    if env.get("HF_HOME") not in (None, pinned):
+        return env
+    if "HF_TOKEN_PATH" not in env:
+        env["HF_TOKEN_PATH"] = _default_hf_token_path(env)
+    home = os.path.abspath(str(hf_home_dir()))
+    env["HF_HOME"] = home
+    env[_HF_PIN_MARKER] = home
+    return env
+
+
+def contain_hf_cache() -> None:
+    """Apply ``contained_hf_env`` to THIS process, so in-process Hugging Face use
+    and every child process inherit it.
+
+    huggingface_hub reads ``HF_HOME`` once, when it is first imported, so this
+    runs when ``localm.config`` is imported, ahead of any localm import of it."""
+    env = contained_hf_env()
+    for key in ("HF_HOME", "HF_TOKEN_PATH", _HF_PIN_MARKER):
+        if key in env and os.environ.get(key) != env[key]:
+            os.environ[key] = env[key]
+    pinned = os.environ.get(_HF_PIN_MARKER)
+    if pinned and os.environ.get("HF_HOME") == pinned:
+        loaded = getattr(sys.modules.get("huggingface_hub.constants"), "HF_HOME", None)
+        if loaded is not None and (os.path.normcase(os.path.normpath(loaded))
+                                   != os.path.normcase(os.path.normpath(pinned))):
+            print(f"[localm] WARNING: huggingface_hub was imported before localm, so "
+                  f"its caches stay at {loaded} instead of the data folder ({pinned}).",
+                  file=sys.stderr)
+
+
 HOME_DIR = _detect_home()
 MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
 CONFIG_FILE = HOME_DIR / "config.json"
+contain_hf_cache()
 
 
 # Only the keys the user actually changed are persisted to config.json; a key
