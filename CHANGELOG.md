@@ -174,6 +174,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   but the launch carried on and, once it finished, left a Chromium and its
   driver running until the server was stopped. That browser is now closed as
   soon as the late launch finishes.
+- **Stopping or restarting localm now closes open coder sessions properly.**
+  Stopping or restarting from Settings or the tray, or stopping a `localm serve`
+  the GUI was attached to, left open coder sessions unclosed. Each one now saves
+  its conversation, records its end in its session log, writes its full-mode
+  transcript, and closes the automated browser it opened. A session that cannot
+  finish closing within a few seconds does not hold up the stop.
 - **A change of the system clock no longer lets a second writer into a knowledge
   collection that is being indexed.** After the clock jumped (a laptop waking, a VM
   or WSL resyncing its clock), a `localm rag add`, a scheduled re-sync or a memory

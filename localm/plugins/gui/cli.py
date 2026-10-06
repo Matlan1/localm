@@ -895,8 +895,7 @@ def _build_app(engine, make_engine, plan: _BindPlan, *, api_mode: bool):
     """Create the server app around *engine* (None: model-less) and, unless
     api_mode, mount the web GUI on it, pointed at this server's own /v1.
 
-    Returns ``(app, manager)``: manager is attach_gui's SessionManager, or None
-    in api_mode."""
+    Returns the app."""
     from localm.inference import http_server as hs
     from .web import attach_gui
     app = hs.create_app(engine)
@@ -908,9 +907,8 @@ def _build_app(engine, make_engine, plan: _BindPlan, *, api_mode: bool):
         semaphore so no generation is mid-flight."""
         return await hs.switch_engine(name, make_engine, force=force)
 
-    manager = None
     if not api_mode:
-        manager = attach_gui(
+        attach_gui(
             app,
             self_url=f"{plan.scheme}://{plan.self_authority}/v1",
             switch_model=switch_model,
@@ -918,7 +916,7 @@ def _build_app(engine, make_engine, plan: _BindPlan, *, api_mode: bool):
             # and by unload_all_models/unload_one_model on unload.
             active_model=lambda: hs._active_model_name or "",
         )
-    return app, manager
+    return app
 
 
 def _launch_url(app, base_url: str, *, pull_spec, model_less: bool) -> str:
@@ -1138,19 +1136,18 @@ def _start_app_face(plan: _BindPlan, *, on_restart, on_stop, no_browser: bool):
     return app_face
 
 
-def _release_after_serving(app_face, mdns_advertiser, manager,
+def _release_after_serving(app_face, mdns_advertiser,
                            server_stopped: threading.Event) -> None:
     """Release what startup opened, once the server has stopped: close the tray /
-    status window, the mDNS advertiser and the GUI session manager (each when
-    present), set *server_stopped*, then close the native app window
-    (appface.close_native_window; a no-op when none is open)."""
+    status window and the mDNS advertiser (each when present), set
+    *server_stopped*, then close the native app window
+    (appface.close_native_window; a no-op when none is open). The GUI's coder
+    sessions are closed before this, by http_server._shutdown_teardown."""
     from localm import appface
     if app_face is not None:
         app_face.close()
     if mdns_advertiser is not None:
         mdns_advertiser.close()
-    if manager is not None:
-        manager.close_all()
     server_stopped.set()
     appface.close_native_window()
 
@@ -1319,7 +1316,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if not model_less:
         engine, model_less = _build_startup_engine(
             console, engine_for, model, info, mmproj=mmproj, api_mode=api_mode)
-    app, manager = _build_app(engine, make_engine, plan, api_mode=api_mode)
+    app = _build_app(engine, make_engine, plan, api_mode=api_mode)
     open_url = _launch_url(app, plan.base_url, pull_spec=pull_spec, model_less=model_less)
 
     _announce_server(console, plan, api_mode=api_mode, model_less=model_less,
@@ -1345,7 +1342,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Server start; everything above is released once serving ends.
     server_stopped = threading.Event()
     release = functools.partial(_release_after_serving, app_face, mdns_advertiser,
-                                manager, server_stopped)
+                                server_stopped)
     serve = functools.partial(_serve_then_release, app, plan, api_mode=api_mode,
                               project=project, isolated=isolated, release=release)
     if want_native:

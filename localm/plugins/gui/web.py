@@ -749,7 +749,7 @@ def attach_gui(
     app.state.active_model = active_model
     # The builtin "coder" plugin reads these to drive live sessions and
     # per-session model switches; its routes 503 when they're absent
-    # (headless / no GUI). The manager is also returned for close_all().
+    # (headless / no GUI). The manager is also returned to the caller.
     app.state.switch_model = switch_model
     app.state.coder_sessions = manager
     # One-time launcher -> browser handoff grants (see mint_launch_grant): an

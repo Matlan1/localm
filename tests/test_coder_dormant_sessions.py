@@ -15,6 +15,25 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _close_coder_sessions_left_open(monkeypatch):
+    """Records every CoderSession the test creates and closes the ones still
+    open when it ends, before monkeypatch restores the test's paths."""
+    from localm.plugins.coder.sessions import CoderSession
+    opened = []
+    real_init = CoderSession.__init__
+
+    def _recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        opened.append(self)
+
+    monkeypatch.setattr(CoderSession, "__init__", _recording_init)
+    yield
+    for session in opened:
+        if not session.closed:
+            session.close()
+
+
 def _coder_app(tmp_path, monkeypatch, *, api_key):
     """A real app, real routes, real Agent, real checkpoint files on disk."""
     home = tmp_path / ".localm"
