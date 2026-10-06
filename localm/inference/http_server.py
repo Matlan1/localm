@@ -34,6 +34,7 @@ from fastapi.security import HTTPBearer
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import (
+    ChatTemplateMissingError,
     ContextCapacityExceededError,
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
@@ -5079,6 +5080,7 @@ _BACKEND_ERROR_STATUS: tuple = (
     (ImageDecodeUnavailable, 501),
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
+    (ChatTemplateMissingError, 400),
     (GrammarUnsupportedError, 400),
     (TriggerValidatorUnavailableError, 503),
     (InvalidGrammarError, 400),

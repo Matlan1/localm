@@ -200,7 +200,8 @@ def _arm_native_crash_trace(path) -> None:
             type(e).__name__, e)
 
 
-def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
+def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None,
+                  coder_privacy=None) -> None:
     """Process target. Wraps the whole worker body so ANY exception escaping it
     - a bug anywhere in ``_runner_main``'s own dispatch code, or the
     let-a-native-fault-kill-the-process design in the "chat_stream" branch (see
@@ -229,6 +230,9 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
     parent's crash detection covers that, plus the faulthandler trace
     :func:`_arm_native_crash_trace` leaves behind."""
     _arm_native_crash_trace(crash_trace_path)
+    if coder_privacy is not None:
+        from localm.audit import adopt_shared_coder_privacy
+        adopt_shared_coder_privacy(coder_privacy)
     try:
         _runner_main(req_q, resp_q, ctrl_q)
     except BaseException:
@@ -728,7 +732,8 @@ class ModelRunner:
         # trace nothing consumed); drop it before the new child claims the name,
         # so a stale trace can never be reported against the new process.
         self._discard_native_crash_trace()
-        from localm.audit import diagnostics_allowed
+        from localm.audit import diagnostics_allowed, shared_coder_privacy_value
+        coder_privacy = shared_coder_privacy_value()
         if diagnostics_allowed():
             from localm.debuglog import child_crash_trace_path, logger
             try:
@@ -743,7 +748,7 @@ class ModelRunner:
         self._proc = ctx.Process(
             target=_runner_entry,
             args=(self._req_q, self._resp_q, self._ctrl_q,
-                  self._crash_trace_path),
+                  self._crash_trace_path, coder_privacy),
             name="localm-gguf-worker", daemon=True)
         self._proc.start()
 

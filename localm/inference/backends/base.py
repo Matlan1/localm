@@ -104,6 +104,23 @@ class GrammarUnsupportedError(ValueError):
     """
 
 
+class ChatTemplateMissingError(ValueError):
+    """Raised when a chat request reaches a model whose tokenizer defines no chat
+    template, so the conversation cannot be turned into a prompt for it.
+
+    Typically a base (non-chat) checkpoint. localm refuses rather than invent a
+    template, since a wrong one silently degrades every answer.
+
+    A ValueError subclass carried across IPC as a typed error, for the reason
+    given on :class:`ContextCapacityExceededError`: the check runs before any
+    native call, so the loaded model is unharmed and the worker keeps serving
+    (embeddings and token counts still work).
+
+    NOT an :class:`UnsupportedInputError`: ``cli/chat.py`` replaces that arm's
+    message with vision guidance, which would be wrong here.
+    """
+
+
 class EmbedBatchTooLargeError(ValueError):
     """Raised when an ``/v1/embeddings`` request against an HF-backed model
     exceeds the configured per-request text-count or character-count cap

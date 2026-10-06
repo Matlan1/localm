@@ -56,53 +56,10 @@ def _partial_owner_path(partial: Path) -> Path:
     return partial.with_name(partial.name + _PARTIAL_OWNER_SUFFIX)
 
 
-_PID_SPACE: "str | None" = None
-
-
-def _machine_guid() -> str:
-    """This Windows installation's MachineGuid, or "" on other platforms and
-    when it cannot be read."""
-    if sys.platform != "win32":
-        return ""
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                            r"SOFTWARE\Microsoft\Cryptography", 0,
-                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
-            value, _ = winreg.QueryValueEx(k, "MachineGuid")
-    except (OSError, ImportError):
-        return ""
-    return str(value).strip()
-
-
 def _pid_space_id() -> str:
-    """An opaque id for the pid table this process's pids belong to: the
-    platform, the Windows MachineGuid (see :func:`_machine_guid`), the host
-    name and, on Linux, the pid namespace, hashed.
-
-    A process that can read none of the MachineGuid, the host name and the pid
-    namespace gets an id unique to itself, so no other process's record
-    matches it.
-    """
-    global _PID_SPACE
-    if _PID_SPACE is None:
-        import hashlib
-        import platform
-        import uuid
-        parts = [sys.platform, _machine_guid()]
-        try:
-            parts.append(platform.node() or "")
-        except Exception:
-            parts.append("")
-        try:
-            parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
-        except OSError:
-            pass
-        if not any(parts[1:]):
-            parts.append(uuid.uuid4().hex)
-        _PID_SPACE = hashlib.sha256(
-            "\x1f".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
-    return _PID_SPACE
+    """An opaque id for the pid table this process's pids belong to; see
+    :func:`localm.instances.pid_space_id`."""
+    return instances.pid_space_id()
 
 
 def _write_partial_owner(partial: Path) -> None:
@@ -2038,13 +1995,45 @@ def _part_lock_dir(filename: str) -> Path:
     return _mm.MODELS_DIR.parent / "locks" / ("pull-" + filename + ".lock")
 
 
-def _part_lock_owner(d: Path):
-    """The recorded holder of lock *d*, or None when that cannot be read."""
+_LOCK_STAGING_PREFIX = ".pull-acq-"
+_LOCK_TOMBSTONE_PREFIX = ".pull-tomb-"
+_LOCK_ATTEMPTS = 50
+_RENAME_RETRIES = 50
+_RENAME_RETRY_DELAY = 0.02
+
+
+def _read_lock_record(d: Path):
+    """The owner record in directory *d*, or None when it cannot be read."""
     try:
         rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return rec if isinstance(rec, dict) else None
+
+
+def _part_lock_owner(d: Path):
+    """The recorded holder of lock *d*, or None when that cannot be read."""
+    return _read_lock_record(d)
+
+
+def _record_holder_is_gone(rec) -> bool:
+    """:func:`_part_lock_holder_is_gone` for the owner record *rec*, which
+    may be None."""
+    if rec is None:
+        return False
+    try:
+        pid = int(rec.get("pid", -1))
+    except (TypeError, ValueError):
+        return False
+    space = rec.get("space")
+    if space is not None and space != _pid_space_id():
+        return False
+    if pid == os.getpid():
+        return False
+    if not instances.pid_alive(pid):
+        return True
+    return space is not None and instances.start_identity_differs(
+        rec.get("start"), instances.process_start_identity(pid))
 
 
 def _part_lock_holder_is_gone(d: Path) -> bool:
@@ -2068,22 +2057,99 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
     True when it genuinely cannot tell - so this composes rather than
     re-deciding.
     """
-    rec = _part_lock_owner(d)
-    if rec is None:
-        return False
+    return _record_holder_is_gone(_part_lock_owner(d))
+
+
+def _is_empty_dir(d: Path) -> bool:
+    """True when *d* is a directory with no entries."""
     try:
-        pid = int(rec.get("pid", -1))
-    except (TypeError, ValueError):
+        with os.scandir(d) as entries:
+            return next(entries, None) is None
+    except OSError:
         return False
-    space = rec.get("space")
-    if space is not None and space != _pid_space_id():
-        return False
-    if pid == os.getpid():
-        return False
-    if not instances.pid_alive(pid):
-        return True
-    return space is not None and instances.start_identity_differs(
-        rec.get("start"), instances.process_start_identity(pid))
+
+
+def _lock_is_reclaimable(d: Path) -> bool:
+    """True when lock *d* may be taken over: its recorded holder is proven
+    gone (see :func:`_part_lock_holder_is_gone`), or it is an empty directory
+    with no record."""
+    if _part_lock_owner(d) is None:
+        return _is_empty_dir(d)
+    return _part_lock_holder_is_gone(d)
+
+
+def _rename_dir(src: Path, dst: Path) -> None:
+    """``os.rename(src, dst)``. On Windows a PermissionError, which a file
+    open inside *src* causes, is retried up to ``_RENAME_RETRIES`` times,
+    ``_RENAME_RETRY_DELAY`` seconds apart."""
+    for attempt in range(_RENAME_RETRIES):
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or attempt == _RENAME_RETRIES - 1:
+                raise
+            time.sleep(_RENAME_RETRY_DELAY)
+
+
+def _rename_noreplace(src: Path, dst: Path) -> None:
+    """Rename directory *src* to *dst*, raising FileExistsError when *dst*
+    exists.
+
+    On Windows the rename itself refuses an existing *dst*. Elsewhere *dst* is
+    checked first and the rename refuses a non-empty *dst*; an empty directory
+    created at *dst* between the check and the rename is replaced.
+    """
+    if sys.platform == "win32":
+        _rename_dir(src, dst)
+        return
+    if os.path.lexists(dst):
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(dst))
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        if e.errno in (errno.EEXIST, errno.ENOTEMPTY):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST),
+                                  str(dst)) from e
+        raise
+
+
+def _tombstone_path(locks: Path) -> Path:
+    """A new, unused name in *locks* for a lock being removed."""
+    return locks / (_LOCK_TOMBSTONE_PREFIX + uuid.uuid4().hex)
+
+
+def _remove_tombstone(tomb: Path) -> None:
+    """Remove *tomb*; what cannot be removed now is left for
+    :func:`_sweep_lock_leftovers`."""
+    shutil.rmtree(tomb, ignore_errors=True)
+    if os.path.lexists(tomb):
+        logger.debug("left %s in place; the next pull removes it", tomb)
+
+
+def _sweep_lock_leftovers(locks: Path) -> None:
+    """Remove from *locks* every tombstone, and every staging directory that
+    is empty or whose record names a holder proven gone (see
+    :func:`_part_lock_holder_is_gone`)."""
+    try:
+        with os.scandir(locks) as entries:
+            paths = [Path(e.path) for e in entries]
+    except OSError as e:
+        logger.debug("could not list %s for download lock leftovers: %s",
+                     locks, e)
+        return
+    for p in paths:
+        if p.name.startswith(_LOCK_TOMBSTONE_PREFIX):
+            _remove_tombstone(p)
+        elif p.name.startswith(_LOCK_STAGING_PREFIX):
+            rec = _read_lock_record(p)
+            if rec is None:
+                try:
+                    os.rmdir(p)
+                except OSError as e:
+                    logger.debug("left %s in place: %s", p, e)
+            elif _record_holder_is_gone(rec):
+                shutil.rmtree(p, ignore_errors=True)
 
 
 _GUARD_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK,
@@ -2171,31 +2237,112 @@ def _reclaim_guard(d: Path, filename: str):
                              "releases it", guard, e)
 
 
-def _take_over_stale_lock(d: Path, filename: str) -> None:
-    """Take lock *d* while holding its reclaim guard: create it when it is
-    already gone, or remove and re-create it when the holder recorded in it
-    now is proven gone. Raises :class:`PullInFlight` otherwise."""
-    try:
-        d.mkdir()
+def _write_lock_record(staging: Path, payload: str) -> None:
+    """Write *payload* to ``owner.json`` in *staging* and flush it to disk."""
+    with open(staging / "owner.json", "x", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _stage_lock_record(locks: Path, filename: str, token: str) -> Path:
+    """A new staging directory in *locks* holding this process's owner record
+    for *filename*'s lock, carrying *token*. A staging directory removed
+    before its record is written is replaced by a new one. Raises
+    :class:`PullInFlight` when the record cannot be written."""
+    # `space` and `start` are what _part_lock_holder_is_gone compares and
+    # `token` is what the release checks; `started` is only read by a human
+    # inspecting the lock.
+    payload = json.dumps({"pid": os.getpid(), "filename": filename,
+                          "space": _pid_space_id(),
+                          "start": instances.process_start_identity(os.getpid()),
+                          "token": token, "started": time.time()})
+    for _ in range(_LOCK_ATTEMPTS):
+        staging = locks / (_LOCK_STAGING_PREFIX + uuid.uuid4().hex)
+        try:
+            staging.mkdir()
+            _write_lock_record(staging, payload)
+            return staging
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise PullInFlight(
+                f"could not record ownership of the download lock for "
+                f"{filename}: {e}")
+    raise PullInFlight(
+        f"could not record ownership of the download lock for {filename}")
+
+
+def _take_over_stale_lock(d: Path, filename: str, staging: Path) -> None:
+    """Take lock *d* while holding its reclaim guard, by renaming *staging*
+    onto it: directly when it is already gone, or after moving it to a
+    tombstone when :func:`_lock_is_reclaimable` holds for it now. Raises
+    :class:`PullInFlight` otherwise."""
+    for _ in range(_LOCK_ATTEMPTS):
+        try:
+            _rename_noreplace(staging, d)
+            return
+        except FileExistsError:
+            pass
+        except OSError as e:
+            raise PullInFlight(
+                f"could not take the download lock for {filename}: {e}")
+        if not _lock_is_reclaimable(d):
+            if os.path.lexists(d):
+                raise _lock_held_error(d, filename)
+            continue
+        tomb = _tombstone_path(d.parent)
+        try:
+            _rename_dir(d, tomb)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            raise PullInFlight(
+                f"could not take over the stale download lock for {filename}: "
+                f"{e}. If you are certain no download is running, remove {d}.")
+        try:
+            _rename_noreplace(staging, d)
+        except FileExistsError:
+            raise PullInFlight(
+                f"{filename} is already being downloaded by another process.")
+        except OSError as e:
+            raise PullInFlight(
+                f"could not take the download lock for {filename}: {e}")
+        finally:
+            _remove_tombstone(tomb)
         return
-    except FileExistsError:
-        pass
-    except OSError as e:
-        raise PullInFlight(
-            f"could not take the download lock for {filename}: {e}")
-    if not _part_lock_holder_is_gone(d):
-        raise _lock_held_error(d, filename)
-    shutil.rmtree(d, ignore_errors=True)
-    try:
-        d.mkdir()
-    except OSError:
-        raise PullInFlight(
-            f"{filename} is already being downloaded by another process.")
+    raise PullInFlight(
+        f"{filename} is already being downloaded by another process.")
+
+
+def _acquire_part_lock(d: Path, filename: str, staging: Path) -> None:
+    """Take lock *d* by renaming *staging* onto it. A lock that is released
+    while this looks at it is retried; a reclaimable one (see
+    :func:`_lock_is_reclaimable`) is taken over under its reclaim guard.
+    Raises :class:`PullInFlight` when someone else holds it."""
+    for _ in range(_LOCK_ATTEMPTS):
+        try:
+            _rename_noreplace(staging, d)
+            return
+        except FileExistsError:
+            pass
+        except OSError as e:
+            raise PullInFlight(
+                f"could not take the download lock for {filename}: {e}")
+        if _lock_is_reclaimable(d):
+            with _reclaim_guard(d, filename):
+                _take_over_stale_lock(d, filename, staging)
+            return
+        if os.path.lexists(d):
+            raise _lock_held_error(d, filename)
+    raise PullInFlight(
+        f"{filename} is already being downloaded by another process.")
 
 
 def _release_part_lock(d: Path, filename: str, token: str) -> None:
-    """Remove lock *d* when its record still carries *token*; otherwise leave
-    it in place and log a warning."""
+    """Move lock *d* to a tombstone and remove the tombstone, when its record
+    still carries *token*; otherwise leave it in place and log a warning."""
     if not d.exists():
         logger.warning("the download lock at %s for %s disappeared while it "
                        "was held", d, filename)
@@ -2206,11 +2353,15 @@ def _release_part_lock(d: Path, filename: str, token: str) -> None:
             "left the download lock at %s in place: its record is no longer "
             "this download of %s", d, filename)
         return
-    shutil.rmtree(d, ignore_errors=True)
-    if d.exists():
+    tomb = _tombstone_path(d.parent)
+    try:
+        _rename_dir(d, tomb)
+    except OSError as e:
         logger.warning(
-            "could not release the download lock at %s - a later pull of "
-            "%s will refuse until this directory is removed", d, filename)
+            "could not release the download lock at %s (%s) - a later pull "
+            "of %s will refuse while this process runs", d, e, filename)
+        return
+    _remove_tombstone(tomb)
 
 
 @contextlib.contextmanager
@@ -2222,51 +2373,34 @@ def _part_lock(filename: str):
     in a terminal at the same time, so a ``threading.Lock`` would serialise
     nothing.
 
-    ``mkdir`` is the primitive because it is ATOMIC: the OS either creates the
-    directory or refuses, with nothing in between. A "does the lock exist"
-    check followed by a create is two steps, and two callers can both pass the
-    first one.
+    The lock is taken by renaming a staging directory that already holds the
+    owner record onto the lock path (see :func:`_rename_noreplace`), so the
+    lock path never exists without its record, and the rename refuses when
+    the lock path exists.
 
     Unserialised, two pulls of the same URL open one ``.part`` concurrently and
     the second one's ``already_have`` read decides append-or-truncate from a
     size the first is still changing, interleaving writes into a single file.
 
-    A stale lock is taken over only while holding its reclaim guard (see
-    :func:`_reclaim_guard`), after re-checking the holder recorded in it at
-    that moment. Release removes the lock only while its record still carries
-    this acquisition's token.
+    A stale lock, or an empty directory at the lock path, is taken over only
+    while holding its reclaim guard (see :func:`_reclaim_guard`), after
+    re-checking it at that moment. Release renames the lock to a tombstone,
+    and only while its record still carries this acquisition's token, then
+    removes the tombstone. Tombstones and staging directories a crash leaves
+    behind are removed by the next pull (see :func:`_sweep_lock_leftovers`).
 
     Raises :class:`PullInFlight` when someone else holds it.
     """
     d = _part_lock_dir(filename)
     d.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        d.mkdir()
-    except FileExistsError:
-        if not _part_lock_holder_is_gone(d):
-            raise _lock_held_error(d, filename)
-        with _reclaim_guard(d, filename):
-            _take_over_stale_lock(d, filename)
-    except OSError as e:
-        raise PullInFlight(f"could not take the download lock for {filename}: {e}")
-
+    _sweep_lock_leftovers(d.parent)
     token = uuid.uuid4().hex
-    # `space` and `start` are what _part_lock_holder_is_gone compares and
-    # `token` is what the release checks; `started` is only read by a human
-    # inspecting the lock.
+    staging = _stage_lock_record(d.parent, filename, token)
     try:
-        (d / "owner.json").write_text(
-            json.dumps({"pid": os.getpid(), "filename": filename,
-                        "space": _pid_space_id(),
-                        "start": instances.process_start_identity(os.getpid()),
-                        "token": token, "started": time.time()}),
-            encoding="utf-8")
-    except OSError:
-        # A lock nobody can identify would be un-reclaimable after a crash, so
-        # it is released and the acquisition refused rather than held.
-        shutil.rmtree(d, ignore_errors=True)
-        raise PullInFlight(
-            f"could not record ownership of the download lock for {filename}")
+        _acquire_part_lock(d, filename, staging)
+    finally:
+        if os.path.lexists(staging):
+            shutil.rmtree(staging, ignore_errors=True)
     try:
         yield
     finally:

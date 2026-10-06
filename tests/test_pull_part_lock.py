@@ -538,11 +538,12 @@ def test_a_holder_in_another_pid_namespace_keeps_its_lock(home):
 
 
 def test_the_pid_space_id_differs_between_platforms_on_one_host(monkeypatch):
+    from localm import instances
     from localm.model_manager import pull
-    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "win32")
     windows = pull._pid_space_id()
-    monkeypatch.setattr(pull, "_PID_SPACE", None)
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "linux")
     linux = pull._pid_space_id()
     assert windows != linux
@@ -574,6 +575,7 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
     Windows its MachineGuid gives it another pid space; on Linux the pid space
     matches but its start identity carries another boot id. Either way the
     lock stays."""
+    from localm import instances
     from localm.model_manager import pull
     other = _idle_child()
     try:
@@ -584,8 +586,9 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
                             "boot": "00000000-0000-0000-0000-000000000000"}
         else:
             with monkeypatch.context() as m:
-                m.setattr(pull, "_PID_SPACE", None)
-                m.setattr(pull, "_machine_guid", lambda: "another-machine-guid")
+                m.setattr(instances, "_PID_SPACE", None)
+                m.setattr(instances, "machine_guid",
+                          lambda: "another-machine-guid")
                 remote_space = pull._pid_space_id()
             # The injection took: the same host name, another MachineGuid.
             assert remote_space != this_pid_space()
@@ -612,8 +615,8 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
 @pytest.mark.skipif(sys.platform != "win32",
                     reason="MachineGuid is a Windows registry value")
 def test_the_windows_machine_guid_is_read():
-    from localm.model_manager.pull import _machine_guid
-    assert _machine_guid(), "no MachineGuid was read"
+    from localm.instances import machine_guid
+    assert machine_guid(), "no MachineGuid was read"
 
 
 def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
@@ -627,7 +630,6 @@ def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
 
 
 @pytest.mark.parametrize("body", [
-    None,                     # no owner record at all
     "{not json",              # unreadable
     '{"pid": "banana"}',      # a pid that is not a pid
 ])
@@ -639,8 +641,7 @@ def test_an_unidentifiable_holder_keeps_the_lock(home, body):
     """
     d = _part_lock_dir("m.gguf")
     d.mkdir(parents=True)
-    if body is not None:
-        (d / "owner.json").write_text(body, encoding="utf-8")
+    (d / "owner.json").write_text(body, encoding="utf-8")
 
     with pytest.raises(PullInFlight) as e:
         with _part_lock("m.gguf"):
@@ -739,13 +740,13 @@ RECHECK_RACE = '''
             (signals / "b-done").touch()
 '''
 
-RMTREE_RACE = '''
-    import os, shutil, sys, time
+TOMBSTONE_RACE = '''
+    import os, sys, time
     from pathlib import Path
     import localm.model_manager.pull as pull
     role, signals = sys.argv[1], Path(sys.argv[2])
-    real_gone, real_rmtree = pull._part_lock_holder_is_gone, shutil.rmtree
-    calls = {"gone": 0, "rmtree": 0}
+    real_gone, real_rename = pull._part_lock_holder_is_gone, pull._rename_dir
+    calls = {"gone": 0, "tombstone": 0}
 
     def await_signal(name):
         deadline = time.monotonic() + 30
@@ -759,18 +760,24 @@ RMTREE_RACE = '''
         verdict = real_gone(d)
         calls["gone"] += 1
         if role == "B" and calls["gone"] == 1:
-            await_signal("a-at-rmtree")
+            (signals / "b-checked").touch()
+            await_signal("a-at-tombstone")
         return verdict
 
-    def gated_rmtree(path, *args, **kwargs):
-        calls["rmtree"] += 1
-        if role == "A" and calls["rmtree"] == 1:
-            (signals / "a-at-rmtree").touch()
+    def gated_rename(src, dst):
+        to_tombstone = Path(dst).name.startswith(pull._LOCK_TOMBSTONE_PREFIX)
+        if to_tombstone:
+            calls["tombstone"] += 1
+        first = role == "A" and to_tombstone and calls["tombstone"] == 1
+        if first:
+            await_signal("b-checked")
+        real_rename(src, dst)
+        if first:
+            (signals / "a-at-tombstone").touch()
             await_signal("b-done")
-        return real_rmtree(path, *args, **kwargs)
 
     pull._part_lock_holder_is_gone = gated_gone
-    shutil.rmtree = gated_rmtree
+    pull._rename_dir = gated_rename
     try:
         with pull._part_lock("m.gguf"):
             print("WON", os.getpid(), flush=True)
@@ -793,10 +800,24 @@ GUARD = '''
 '''
 
 
+def _stale_owner_fields() -> dict:
+    """Record fields for a holder that exited, in this pid space.
+
+    The record carries the start identity of a process that began an hour
+    before this test process, so a later process that is handed the exited
+    holder's pid reads as a different process and the lock stays stale. Where
+    the platform has no start identity the record carries none.
+    """
+    from localm.instances import process_start_identity
+    ident = process_start_identity(os.getpid())
+    return {"start": started_an_hour_earlier(ident) if ident else None,
+            "started": 0.0}
+
+
 def _write_stale_lock():
     """A lock left by a holder that has exited, in this pid space."""
     d = _part_lock_dir("m.gguf")
-    _write_owner(d, _exited_pid(), started=0.0)
+    _write_owner(d, _exited_pid(), **_stale_owner_fields())
     return d
 
 
@@ -865,22 +886,25 @@ def test_two_takeovers_of_one_stale_lock_are_serialised(home, tmp_path):
 
 
 def test_a_takeover_keeps_its_guard_until_the_lock_is_re_created(home, tmp_path):
-    """One process is removing the stale lock it took over when a second
-    process, which also found it stale, arrives. The second refuses instead of
-    taking the lock over between the first one's removal and re-creation."""
+    """One process has moved the stale lock it took over to a tombstone when a
+    second process, which also found it stale, arrives. The second refuses
+    instead of taking the lock over before the first one renames its own
+    record in."""
     d = _write_stale_lock()
     signals = tmp_path / "signals"
     signals.mkdir()
-    a = spawn_on_this_tree(RMTREE_RACE, home, "A", signals,
+    a = spawn_on_this_tree(TOMBSTONE_RACE, home, "A", signals,
                            stdin=subprocess.PIPE)
-    b = spawn_on_this_tree(RMTREE_RACE, home, "B", signals,
+    b = spawn_on_this_tree(TOMBSTONE_RACE, home, "B", signals,
                            stdin=subprocess.PIPE)
     try:
         won_b = _first_line(b)
         won_a = _first_line(a)
         rec = json.loads(_record(d) or "null")
-        # The injection took: B found the lock stale while A was removing it.
-        assert (signals / "a-at-rmtree").exists()
+        # The injection took: B judged the lock before A moved it to a
+        # tombstone, and waited until it had.
+        assert (signals / "b-checked").exists()
+        assert (signals / "a-at-tombstone").exists()
         assert won_a[0] == "WON", f"the first process did not take the lock: {won_a}"
         assert rec is not None and rec["pid"] == int(won_a[1]), (
             "the lock record is not the first process's")
@@ -889,6 +913,34 @@ def test_a_takeover_keeps_its_guard_until_the_lock_is_re_created(home, tmp_path)
     finally:
         _release(a)
         _release(b)
+
+
+def test_a_pull_arriving_while_a_takeover_has_moved_the_lock_aside_takes_it(
+        home, tmp_path):
+    """A pull that arrives after a takeover has moved the stale lock to a
+    tombstone, and before it renames its own record in, takes the lock; the
+    takeover then refuses. Exactly one of them holds it."""
+    d = _write_stale_lock()
+    signals = tmp_path / "signals"
+    signals.mkdir()
+    (signals / "b-checked").touch()
+    a = spawn_on_this_tree(TOMBSTONE_RACE, home, "A", signals,
+                           stdin=subprocess.PIPE)
+    try:
+        # The injection took: the takeover has moved the stale lock aside.
+        _await_file(signals / "a-at-tombstone")
+        assert not d.exists()
+        try:
+            with _part_lock("m.gguf"):
+                rec = json.loads(_record(d))
+                (signals / "b-done").touch()
+                won_a = _first_line(a)
+        finally:
+            (signals / "b-done").touch()
+        assert rec["pid"] == os.getpid()
+        assert won_a[0] == "LOST", f"both processes held the lock: A={won_a}"
+    finally:
+        _release(a)
 
 
 def test_the_reclaim_guard_name_is_shorter_than_the_lock_name_and_never_one():
@@ -961,7 +1013,7 @@ def test_two_spellings_of_one_file_name_share_one_reclaim_guard(home):
 def test_a_stale_lock_with_the_longest_lockable_name_is_taken_over(home):
     longest = "m" * 240 + ".gguf"
     d = _part_lock_dir(longest)
-    _write_owner(d, _exited_pid(), started=0.0)
+    _write_owner(d, _exited_pid(), **_stale_owner_fields())
     with _part_lock(longest):
         assert json.loads(_record(d))["pid"] == os.getpid()
 
@@ -1085,6 +1137,308 @@ def test_each_acquisition_records_its_own_token(home):
             tokens.append(json.loads(_record(d))["token"])
     assert all(isinstance(t, str) and len(t) >= 32 for t in tokens), tokens
     assert len(set(tokens)) == 3, f"acquisitions reused a token: {tokens}"
+
+
+# --------------------------------------------------------------------------
+#  A crash never leaves a lock without its record
+# --------------------------------------------------------------------------
+
+CRASH_BEFORE_RECORD = '''
+    import os, sys
+    import localm.model_manager.pull as pull
+    real = pull.instances.process_start_identity
+
+    def die_on_own_identity(pid):
+        if pid == os.getpid():
+            os._exit(0)
+        return real(pid)
+
+    pull.instances.process_start_identity = die_on_own_identity
+    with pull._part_lock(sys.argv[1]):
+        print("HELD", flush=True)
+'''
+
+CRASH_IN_RECORD_WRITE = '''
+    import os, sys
+    import localm.model_manager.pull as pull
+
+    def die_after_creating_the_record(staging, payload):
+        open(staging / "owner.json", "x", encoding="utf-8").close()
+        print("RECORD-CREATED", staging.name, flush=True)
+        os._exit(0)
+
+    pull._write_lock_record = die_after_creating_the_record
+    with pull._part_lock(sys.argv[1]):
+        print("HELD", flush=True)
+'''
+
+CRASH_IN_RELEASE = '''
+    import os, shutil, sys
+    from pathlib import Path
+    import localm.model_manager.pull as pull
+
+    def die_after_removing_the_record(path, *args, **kwargs):
+        os.unlink(Path(path) / "owner.json")
+        print("RECORD-REMOVED", flush=True)
+        os._exit(0)
+
+    with pull._part_lock(sys.argv[1]):
+        print("HELD", flush=True)
+        shutil.rmtree = die_after_removing_the_record
+'''
+
+RELEASE_GATED = '''
+    import os, shutil, sys, time
+    from pathlib import Path
+    import localm.model_manager.pull as pull
+    signals = Path(sys.argv[2])
+    real = shutil.rmtree
+
+    def await_signal(name):
+        deadline = time.monotonic() + 30
+        while not (signals / name).exists():
+            if time.monotonic() > deadline:
+                print("TIMEOUT", name, flush=True)
+                os._exit(3)
+            time.sleep(0.01)
+
+    def gated(path, *args, **kwargs):
+        owner = Path(path) / "owner.json"
+        if owner.exists():
+            os.unlink(owner)
+        (signals / "a-releasing").touch()
+        await_signal("b-done")
+        return real(path, *args, **kwargs)
+
+    with pull._part_lock(sys.argv[1]):
+        print("HELD", os.getpid(), flush=True)
+        sys.stdin.readline()
+        shutil.rmtree = gated
+    print("RELEASED", flush=True)
+'''
+
+RELEASE_ON_SIGNAL = '''
+    import os, sys, time
+    from pathlib import Path
+    import localm.model_manager.pull as pull
+    signals = Path(sys.argv[2])
+    with pull._part_lock(sys.argv[1]):
+        print("HELD", os.getpid(), flush=True)
+        deadline = time.monotonic() + 30
+        while not (signals / "b-looked").exists():
+            if time.monotonic() > deadline:
+                print("TIMEOUT", flush=True)
+                os._exit(3)
+            time.sleep(0.01)
+    print("RELEASED", flush=True)
+'''
+
+
+def _litter(locks):
+    """Entries in *locks* other than reclaim guard files."""
+    return sorted(p.name for p in locks.iterdir() if not p.name.endswith(".grd"))
+
+
+def _await_file(path, timeout=30.0):
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            pytest.fail(f"{path.name} never appeared")
+        time.sleep(0.01)
+
+
+def test_a_holder_killed_before_writing_its_record_does_not_wedge_the_lock(home):
+    """A real process dies while taking the lock, when it reads its own start
+    identity for the owner record. The next pull takes the lock and nothing is
+    left behind."""
+    p = spawn_on_this_tree(CRASH_BEFORE_RECORD, home, "m.gguf")
+    out, err = p.communicate(timeout=60)
+    # The injection took: the process exited inside the acquisition, at the
+    # point that reads its own start identity for the record.
+    assert p.returncode == 0 and "HELD" not in out, (out, err)
+    assert "Traceback" not in err, err
+    d = _part_lock_dir("m.gguf")
+
+    with _part_lock("m.gguf"):
+        rec = json.loads(_record(d))
+    assert rec["pid"] == os.getpid(), "the lock was not taken by this process"
+    assert _litter(d.parent) == [], _litter(d.parent)
+
+
+def test_a_holder_killed_while_writing_its_record_does_not_wedge_the_lock(home):
+    """A real process dies after creating its owner record file and before
+    writing it. The next pull takes the lock; the dead process's unfinished
+    acquisition stays behind outside the lock path."""
+    p = spawn_on_this_tree(CRASH_IN_RECORD_WRITE, home, "m.gguf")
+    out, err = p.communicate(timeout=60)
+    words = out.split()
+    # The injection took: the process created an empty record file in its
+    # staging directory and exited before taking the lock.
+    assert words[:1] == ["RECORD-CREATED"] and "HELD" not in words, (out, err)
+    assert p.returncode == 0, err
+    d = _part_lock_dir("m.gguf")
+    staging = d.parent / words[1]
+    assert (staging / "owner.json").stat().st_size == 0
+    assert not d.exists()
+
+    with _part_lock("m.gguf"):
+        rec = json.loads(_record(d))
+    assert rec["pid"] == os.getpid(), "the lock was not taken by this process"
+    assert _litter(d.parent) == [staging.name], _litter(d.parent)
+
+
+def test_a_holder_killed_while_releasing_does_not_wedge_the_lock(home):
+    """A real process dies during its release, after its owner record is
+    removed and before the rest of the lock is. The next pull takes the lock
+    and nothing is left behind."""
+    p = spawn_on_this_tree(CRASH_IN_RELEASE, home, "m.gguf")
+    out, err = p.communicate(timeout=60)
+    # The injection took: the holder took the lock, then died in its release
+    # right after removing the record.
+    assert out.split() == ["HELD", "RECORD-REMOVED"], (out, err)
+    assert p.returncode == 0, err
+    d = _part_lock_dir("m.gguf")
+
+    with _part_lock("m.gguf"):
+        rec = json.loads(_record(d))
+    assert rec["pid"] == os.getpid(), "the lock was not taken by this process"
+    assert _litter(d.parent) == [], _litter(d.parent)
+
+
+def test_a_pull_arriving_during_a_release_takes_the_lock(home, tmp_path):
+    """A pull that arrives while a real holder is in the middle of releasing
+    the lock takes it instead of refusing."""
+    signals = tmp_path / "signals"
+    signals.mkdir()
+    a = spawn_on_this_tree(RELEASE_GATED, home, "m.gguf", signals,
+                           stdin=subprocess.PIPE)
+    try:
+        first = a.stdout.readline().split()
+        assert first[:1] == ["HELD"], (first, a.stderr.read())
+        a.stdin.write("\n")
+        a.stdin.flush()
+        # The injection took: the holder is inside its release, with its
+        # record already removed.
+        _await_file(signals / "a-releasing")
+        d = _part_lock_dir("m.gguf")
+        try:
+            with _part_lock("m.gguf"):
+                rec = json.loads(_record(d))
+        finally:
+            (signals / "b-done").touch()
+        assert rec["pid"] == os.getpid()
+        assert a.stdout.readline().split() == ["RELEASED"]
+    finally:
+        _release(a)
+
+
+def test_a_pull_that_finds_the_lock_released_before_reading_it_takes_it(
+        home, tmp_path, monkeypatch):
+    """The lock exists when a pull tries to take it and is released before
+    the pull reads its record. The pull takes it instead of refusing."""
+    from localm.model_manager import pull
+    signals = tmp_path / "signals"
+    signals.mkdir()
+    a = spawn_on_this_tree(RELEASE_ON_SIGNAL, home, "m.gguf", signals,
+                           stdin=subprocess.PIPE)
+    try:
+        first = a.stdout.readline().split()
+        assert first[:1] == ["HELD"], (first, a.stderr.read())
+        real = pull._part_lock_owner
+        calls = []
+
+        def after_the_release(d):
+            calls.append(d)
+            if len(calls) == 1:
+                (signals / "b-looked").touch()
+                assert a.stdout.readline().split() == ["RELEASED"]
+            return real(d)
+
+        monkeypatch.setattr(pull, "_part_lock_owner", after_the_release)
+        d = _part_lock_dir("m.gguf")
+        with _part_lock("m.gguf"):
+            monkeypatch.undo()
+            rec = json.loads(_record(d))
+        # The injection took: the pull read the lock while it was held.
+        assert calls, "the pull never read the lock record"
+        assert rec["pid"] == os.getpid()
+    finally:
+        _release(a)
+
+
+def test_an_empty_lock_directory_is_taken_over(home):
+    """An empty lock directory, as a crash in an earlier version of the lock
+    leaves, is taken over and nothing is left behind."""
+    d = _part_lock_dir("m.gguf")
+    d.mkdir(parents=True)
+    with _part_lock("m.gguf"):
+        rec = json.loads(_record(d))
+    assert rec["pid"] == os.getpid()
+    assert _litter(d.parent) == [], _litter(d.parent)
+
+
+def test_an_empty_lock_directory_is_not_taken_over_while_its_guard_is_held(home):
+    """Only a pull holding the reclaim guard replaces an empty lock
+    directory."""
+    d = _part_lock_dir("m.gguf")
+    d.mkdir(parents=True)
+    guard = spawn_on_this_tree(GUARD, home, d, "m.gguf", stdin=subprocess.PIPE)
+    try:
+        _first_line(guard)
+        with pytest.raises(PullInFlight) as e:
+            with _part_lock("m.gguf"):
+                pass
+        assert d.is_dir() and not any(d.iterdir()), (
+            "an empty lock directory was replaced while another process held "
+            "its reclaim guard")
+        assert "taken over" in str(e.value)
+    finally:
+        _release(guard)
+
+
+def test_leftovers_of_earlier_crashes_are_removed(home):
+    """Released locks and unfinished acquisitions left by dead processes are
+    removed by the next pull; an acquisition in progress in a live process is
+    left alone."""
+    locks = _part_lock_dir("m.gguf").parent
+    locks.mkdir(parents=True)
+    tomb = locks / ".pull-tomb-0123"
+    tomb.mkdir()
+    (tomb / "junk").write_text("x", encoding="utf-8")
+    (locks / ".pull-acq-empty").mkdir()
+    _write_owner(locks / ".pull-acq-dead", _exited_pid(),
+                 **_stale_owner_fields())
+    live = _idle_child()
+    try:
+        _write_owner(locks / ".pull-acq-live", live.pid)
+        with _part_lock("m.gguf"):
+            pass
+        assert _litter(locks) == [".pull-acq-live"], _litter(locks)
+    finally:
+        _release(live)
+
+
+def test_a_staging_directory_removed_before_its_record_is_written_is_restaged(
+        home, monkeypatch):
+    """A pull whose unfinished acquisition is removed by another pull's
+    leftover sweep before its record is written starts that acquisition
+    again."""
+    from localm.model_manager import pull
+    real = pull._write_lock_record
+    calls = []
+
+    def swept_first(staging, payload):
+        calls.append(staging)
+        if len(calls) == 1:
+            os.rmdir(staging)
+        return real(staging, payload)
+
+    monkeypatch.setattr(pull, "_write_lock_record", swept_first)
+    with _part_lock("m.gguf"):
+        rec = json.loads(_record(_part_lock_dir("m.gguf")))
+    assert len(calls) == 2, calls
+    assert rec["pid"] == os.getpid()
+    assert _litter(_part_lock_dir("m.gguf").parent) == []
 
 
 # --------------------------------------------------------------------------

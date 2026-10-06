@@ -174,6 +174,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   able to read images, and a `--store` copy or move left the projector behind.
   localm now reads the projector's real width from its weights, the same way
   llama.cpp does.
+- **Two machines sharing one data folder no longer take over each other's
+  knowledge-base write lock.** Two machines with the same host name (on Windows,
+  or on Linux hosts) read each other's lock records as their own process table,
+  found the holder's process absent and handed the lock over while the other
+  machine was still writing. The lock now tells machines apart by the machine's
+  own identifier, as the model download lock already did. A lock written by an
+  earlier version reads as another machine's and is released by its heartbeat
+  going quiet rather than by its process exiting.
+- **A coder session's log file can be deleted after the session ends, even when
+  saving the session's lessons failed.** A failure while storing a finished
+  session's episode used to skip closing its audit log, which on Windows left the
+  file locked until the server stopped.
+- **Chatting with a HuggingFace model that has no chat template now says so
+  instead of crashing the model process.** Such a model (typically a base,
+  non-chat checkpoint) used to load fine, then kill its worker on the first chat
+  turn with a generic "exited unexpectedly" message and unload. Chat now returns
+  a clear error (HTTP 400, or a message in the CLI) telling you to use an
+  instruct or chat variant, and the model stays loaded. When a model process does
+  stop on an unexpected error, the message now includes that error instead of
+  "no native fault trace was captured".
 - **Pulling a model again over a file it already names now updates that entry's
   source and checksum.** After `localm pull civitai:... --redownload` replaced a
   file with different bytes, or a pull recreated a file that had been deleted by
@@ -213,6 +233,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   size CivitAI lists, when it lists one; otherwise the pull stops, leaves the
   file as it is and says how to replace it. A SHA256 mismatch says which registered model owns the file, and `--redownload` no
   longer overwrites a file that a model registered from another source points at.
+- **A download interrupted at the wrong moment no longer blocks every later pull
+  of that file.** A crash while a pull was taking or giving up its download lock
+  could leave an empty lock folder behind, and every later pull of that file then
+  refused with "already being downloaded by process unknown" until the folder was
+  deleted by hand. The lock is now never left without a record of its holder, an
+  empty lock folder left by an earlier version is taken over by the next pull,
+  and a pull that starts while another is finishing no longer refuses.
 - **Two browser calls in one coder turn no longer open two browsers.** With no
   browser open yet, a turn that called `browser_navigate` twice at once started
   a browser for each call. The second replaced the first in the session's
@@ -228,6 +255,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `huggingface-cli login` keeps working, and a location you set yourself with
   `HF_HOME`, `HF_HUB_CACHE`, `HF_XET_CACHE` or `HF_TOKEN_PATH` is used as you set it.
   Files already in the old location are left where they are.
+- **Loading a model on an AMD GPU no longer leaves compiler caches in your user
+  profile.** The AMD GPU runtime wrote its compiled-kernel cache to
+  `%LOCALAPPDATA%\comgr` and, for convolution models, `~/.miopen`, outside the data
+  folder, so "delete saved data" never removed them. They now go to `cache/comgr`
+  and `cache/miopen` inside the data folder. A location you set yourself with
+  `AMD_COMGR_CACHE_DIR`, `MIOPEN_USER_DB_PATH` or `MIOPEN_CUSTOM_CACHE_DIR` is used
+  as you set it. Files already in the old location are left where they are.
 - **A browser that starts too slowly is no longer left running.** When the
   automated browser did not come up within its start timeout, the Browser tab
   and the coder's browser tools reported "the browser did not start in time",
@@ -1025,6 +1059,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the debug log token by token through llama.cpp's grammar trace, even in privacy
   mode. The log now keeps only the token ids there unless the session mode allows
   chat content in the debug log.
+- **A coder session set to privacy by its project's `.localcoder/config.toml` no
+  longer leaves model output in the debug log.** With debug logging on, the model
+  worker process still wrote the model's raw output (and the grammar trace) to the
+  debug log for such a session, because it could not see that the session was
+  private. The worker now follows the coder sessions' privacy state.
 - **Windows network-share paths written with the `\??\` prefix are refused like
   any other network path.** A path such as `\??\UNC\host\share` got past the
   checks that stop localm from reaching network shares and device paths
