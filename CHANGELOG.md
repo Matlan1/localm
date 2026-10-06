@@ -173,7 +173,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   decided the projector did not fit and left it off: the model was not shown as
   able to read images, and a `--store` copy or move left the projector behind.
   localm now reads the projector's real width from its weights, the same way
-  llama.cpp does.
+  llama.cpp does. LLaVA 1.5 projectors, which do not record their projector
+  type and were refused by the bundled runtime, now load too: localm uses a copy
+  in its cache folder that records the type, and your own file is left
+  untouched.
 - **Two machines sharing one data folder no longer take over each other's
   knowledge-base write lock.** Two machines with the same host name (on Windows,
   or on Linux hosts) read each other's lock records as their own process table,
