@@ -1672,7 +1672,8 @@ def gguf_n_embd(path: Path) -> Optional[int]:
                 architecture, off = _gguf_read_string(buf, off)
                 continue
             if architecture == _GGUF_MMPROJ_ARCHITECTURE:
-                if key in ("clip.projector_type", "clip.vision.projector_type")                         and vtype == _GGUF_TYPE_STRING:
+                if (key in ("clip.projector_type", "clip.vision.projector_type")
+                        and vtype == _GGUF_TYPE_STRING):
                     value, off = _gguf_read_string(buf, off)
                     if key == "clip.projector_type":
                         projector_type = value
