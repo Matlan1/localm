@@ -333,10 +333,12 @@ def _ask(client, **body):
     return client.post("/v1/chat/completions", json=body)
 
 
-def _stream_headers(r) -> dict:
+def _stream_headers(r):
     """A streamed reply's response headers, merged with the ``localm_headers``
-    chunk a stream that opened before its preparation finished carries."""
-    merged = dict(r.headers)
+    chunk a stream that opened before its preparation finished carries. Looked
+    up case-insensitively, like HTTP headers."""
+    import httpx
+    merged = httpx.Headers(r.headers)
     for line in r.text.splitlines():
         if line.startswith("data: {"):
             meta = json.loads(line[len("data: "):]).get("localm_headers")
@@ -443,7 +445,9 @@ class TestRoutingOverHTTP:
         r = _ask(client, required_capabilities=["tool-use"])
         assert r.status_code == 422
 
-    def test_streaming_carries_the_same_audit_header(self, server):
+    @pytest.mark.parametrize("grace_s", [0.0, 30.0], ids=["early-stream", "fast-path"])
+    def test_streaming_carries_the_same_audit_header(self, server, monkeypatch, grace_s):
+        monkeypatch.setattr(hs, "PREP_STATUS_GRACE_S", grace_s)
         client, engines = server
         r = _ask(client, required_capabilities=["tool_use"], stream=True)
         assert r.status_code == 200
