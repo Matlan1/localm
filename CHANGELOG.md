@@ -218,6 +218,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "Compacting conversation…" instead of sitting silent, in the browser, in
   `localm run`, and in the coder. Streaming API clients receive a `compacting`
   status before the reply starts.
+- **Chats say what localm is doing before the reply starts.** Loading or reloading
+  the model, recalling memories, running chat plugins and waiting for another
+  request now show as a live status instead of a generic "Processing prompt…",
+  in the browser chat, the browser coder, `localm run`, the coder in the
+  terminal (including one-shot `localm coder "task"` runs, which now print each
+  status and tool call), and the MCP `chat` tool for clients that ask for
+  progress. A streaming request that is still preparing after a moment opens
+  its stream at once and reports each step; a request refused at that point
+  ends the stream with the error, and the stream carries the routing and memory
+  information otherwise sent as response headers.
 - **`localm run` attached to a server, and the coder talking to a localm server,
   report a failed reply as an error.** A reply the server ended as failed (for
   example a conversation that still does not fit after compacting) used to be
