@@ -684,10 +684,9 @@ def _build_audio_process_kwargs(processor, audios: List[tuple]) -> Tuple[dict, b
     return {"audio": audio_value, "sampling_rate": clip_rate}, expected_rate is not None
 
 
-# Inner multimodal model classes whose forward() reads only
-# ``get_image_features(...).pooler_output`` and whose per-image features do not
-# depend on the other images in the request. Only these get a vision feature
-# cache. See test_hf_vision_feature_cache.py.
+# Inner multimodal model classes whose forward() takes image features only from
+# ``get_image_features(...)``: ``pooler_output``, plus ``deepstack_features`` on
+# Qwen3-VL. Only these get a vision feature cache.
 _VISION_CACHE_MODEL_CLASSES = frozenset({
     "Gemma3Model",
     "Gemma4Model",
