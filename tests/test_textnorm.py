@@ -384,7 +384,8 @@ class TestStreamRelease:
         rng = random.Random(3)
         frags = _TURN_MARKERS + _OTHER_MARKERS + [
             "<|", "<", "[", " ", "  ", "\n", "x", "|", ">", "1234", "model",
-            "<| channel |>", "< reasoning>", "</thinking >", "<unused"]
+            "<| channel |>", "< reasoning>", "</thinking >", "<Thinking>", "</ THOUGHT>",
+            "<unused"]
         found = 0
         for _ in range(3000):
             text = "".join(rng.choice(frags) for _ in range(rng.randint(1, 6)))

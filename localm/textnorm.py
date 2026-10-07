@@ -19,6 +19,7 @@ no-op, so a backend that also scrubs internally is safe.
 
 from __future__ import annotations
 
+import functools
 import re
 from re import _constants as _sre_constants
 from re import _parser as _sre_parser
@@ -168,6 +169,12 @@ def _prefix_fits(items: list, s: str, k: int) -> bool:
         again = (op, (max(lo - 1, 0), hi - 1, sub), ignorecase)
         return _prefix_fits(_tagged(sub, ignorecase) + [again] + rest, s, k)
     raise ValueError(f"unsupported regex construct {op}")
+
+
+@functools.lru_cache(maxsize=4096)
+def _could_become_marker(text: str) -> bool:
+    """True when *text* is a prefix of some string scrub_text would rewrite."""
+    return _prefix_fits(_SCRUB_TREE, text, 0)
 
 
 _THINK_OPEN = "<think>"
@@ -365,7 +372,7 @@ def _commit_point(buf: str) -> int:
     n = len(buf)
     cut = n
     for i in range(max(0, n - _MARKER_HOLD), n):
-        if buf[i] in _MARKER_START and _prefix_fits(_SCRUB_TREE, buf, i):
+        if buf[i] in _MARKER_START and _could_become_marker(buf[i:]):
             cut = i
             break
     moved = True
