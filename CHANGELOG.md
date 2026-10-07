@@ -144,6 +144,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with an open session, has to be ended first.
 
 ### Changed
+- **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
+  layers auto-sized (the default), such a model now keeps the experts of as few
+  layers as needed in system RAM and every layer on the GPU, instead of moving
+  whole layers to the CPU. On a 16 GB card Qwen3-30B-A3B generates 26 tokens/s
+  where moving whole layers gave 19. The load output, the model
+  load response (`moe_cpu_layers`) and the GUI's load message say how many
+  layers' experts are in RAM, and the load output says how much each token reads
+  from RAM, which limits the speed. A `n_cpu_moe` or `n_gpu_layers` you set is
+  used as given.
 - **Qwen-VL models answer follow-up messages faster.** Qwen2-VL, Qwen2.5-VL and
   Qwen3-VL GGUF models reprocessed the whole conversation on every turn, text-only
   chats included. They now keep the part of the conversation that did not change
@@ -239,6 +248,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   will actually need and frees the idle model first, in the server and in the MCP
   server. When even an empty card is too small, a model you pick still asks before
   loading partly on the CPU.
+- **On AMD (the `amd-rocm` build), work on the CPU runs about twice as fast.**
+  That build's CPU backend used no SIMD instructions, so Mixture-of-Experts
+  weights in system RAM, layers left on the CPU and CPU-only loads ran far below
+  the hardware's speed. Setup now installs the AVX2/AVX-512 CPU backend from the
+  same llama.cpp version over it; existing installs are offered it as a runtime
+  update. With the Mixture-of-Experts change above, Qwen3-30B-A3B on a 16 GB card
+  went from 7 to 26 tokens/s.
+- **The "context too large for VRAM" message suggests a context that fits.** It
+  suggested `-c 32768` whatever the current context, including when it already
+  was 32768; it now names the largest context that fits, leaves the suggestion
+  out when no context would help, and for a Mixture-of-Experts model names the
+  `n_cpu_moe` value that fits.
 - **A chat with web access on now ends on an answer, not on a bare "read page" or
   "web search" line.** Once the lookups stop, the last reply is requested without
   the web tools; if the model still writes a lookup, it is not run and the reply

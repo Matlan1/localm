@@ -159,7 +159,8 @@ def test_the_regions_match_exactly_once_on_the_real_tree(bump):
     m = bump._SHA_BLOCK_RE.search(setup)
     assert m.group("tag") == sl._PINNED_TAG, "the upstream block is labelled with the pin"
     entries = m.group("entries").count("\n")
-    upstream = [k for k in sl._PINNED_FALLBACK_SHA256 if sl._ROCM_TAG not in k]
+    upstream = [k for k in sl._PINNED_FALLBACK_SHA256
+                if sl._ROCM_TAG not in k and sl._ROCM_CPU_TAG not in k]
     assert entries == len(upstream), "the block spans every non-ROCm entry"
     assert bump.measured_backends(setup) == {
         b for b, note in sl._PIN_CONFIRMATION.items() if "load + generate, measured" in note}

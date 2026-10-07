@@ -22,6 +22,7 @@ from typing import Optional
 
 from localm.debuglog import logger
 from localm.setup_llama._common import console
+from localm.setup_llama.download import _extract_archive, _validate_archive
 from localm.setup_llama.pins import (_PINNED_FALLBACK_SHA256, _ROCM_BUILD,
                                      _ROCM_CPU_ASSET, _ROCM_CPU_TAG, _ROCM_TAG,
                                      _UPSTREAM_REPO)
@@ -96,10 +97,10 @@ def install_rocm_simd_cpu(target: Path) -> Optional[str]:
         with tempfile.TemporaryDirectory() as tmp:
             arc = Path(tmp) / _ROCM_CPU_ASSET
             dl = _sl._download(rocm_cpu_overlay_url(), arc)
-            _sl._validate_archive(arc, expected_sha256=_PINNED_FALLBACK_SHA256[_ROCM_CPU_ASSET],
-                                  dl=dl)
+            _validate_archive(arc, expected_sha256=_PINNED_FALLBACK_SHA256[_ROCM_CPU_ASSET],
+                              dl=dl)
             ex = Path(tmp) / "x"
-            _sl._extract_archive(arc, ex)
+            _extract_archive(arc, ex)
             variants = sorted(p for p in ex.rglob("ggml-cpu-*.dll") if p.is_file())
             if not variants:
                 _warn(f"{_ROCM_CPU_ASSET} contains no ggml-cpu variants")
