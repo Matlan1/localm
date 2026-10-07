@@ -312,6 +312,7 @@ def test_an_unpinned_shortfall_still_asks_a_peer(monkeypatch):
     """Guard on the test above: with nothing pinned and the only peer BUSY,
     local eviction is exhausted for a real reason, and the cooperative path
     must still run - the pin guard must not disable it wholesale."""
+    monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 0.2)
     _install_fakes(monkeypatch, free=2 * 1024 ** 3)
     _knobs(monkeypatch)
     asked = []
@@ -338,6 +339,7 @@ def test_busy_chat_peer_not_evicted_but_new_load_still_succeeds(monkeypatch):
     exhausted. The incoming load must still succeed via the backend's own
     partial offload rather than refuse, and the busy peer must survive
     untouched."""
+    monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 0.2)
     _install_fakes(monkeypatch, free=3 * 1024 ** 3)
     app = hs.create_app(None)
     client = TestClient(app)

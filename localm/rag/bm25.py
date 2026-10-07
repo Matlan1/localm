@@ -59,6 +59,30 @@ ENGLISH_STOP_WORDS = frozenset(
 )
 
 
+#: Question and conversation words that ``BM25.coverage`` does not count as
+#: query terms (they say how something is asked, not what it is about).
+QUERY_FILLER = frozenset(
+    "about again anything describe explain hello hey hi how just know mean meant "
+    "ok okay please something tell thank thanks thing things want why work works"
+    .split()
+)
+
+_STEM_SUFFIXES = ("ing", "ed", "es", "s")
+
+
+def stem(term: str) -> str:
+    """*term* with one plural/tense suffix (ing, ed, es, s) and then a final
+    "e" removed, keeping at least three characters; so "change", "changes",
+    "changed" and "changing" share the stem "chang"."""
+    for suffix in _STEM_SUFFIXES:
+        if term.endswith(suffix) and len(term) - len(suffix) >= 3:
+            term = term[:-len(suffix)]
+            break
+    if term.endswith("e") and len(term) > 3:
+        term = term[:-1]
+    return term
+
+
 def tokenize(text: str, stop_words: "frozenset[str] | None" = None) -> list[str]:
     """Lowercase unicode word tokens.
 
@@ -135,3 +159,29 @@ class BM25:
                 denom = f + _K1 * (1 - _B + _B * self._lengths[i] / self._avg_len)
                 out[i] += idf * (f * (_K1 + 1)) / denom
         return out
+
+    def coverage(self, query: str, docs: list[int]) -> list[float]:
+        """IDF-weighted fraction of *query*'s distinct terms that occur in each
+        of *docs* (indexes into the indexed texts), in the order given.
+
+        Words in ``QUERY_FILLER`` are not counted. A query term matches any indexed term with the same ``stem`` and weighs as the
+        rarest of them; a term with no indexed match weighs as much as the
+        rarest possible term. Every value is 0.0 when the query has no counted
+        terms or the index is empty; otherwise each lies in [0, 1]."""
+        terms = set(tokenize(query, self._stop_words)) - QUERY_FILLER
+        if not terms or not self._n:
+            return [0.0] * len(docs)
+        unseen = math.log(1 + (self._n + 0.5) / 0.5)
+        total = 0.0
+        matched = dict.fromkeys(docs, 0.0)
+        for term in terms:
+            root = stem(term)
+            variants = [v for v in {term} | {b + s for b in (root, root + "e")
+                                             for s in ("", "s", "es", "d", "ed", "ing")}
+                        if v in self._postings and stem(v) == root]
+            weight = max((self._idf[v] for v in variants), default=unseen)
+            total += weight
+            hit = {i for v in variants for i, _ in self._postings[v] if i in matched}
+            for i in hit:
+                matched[i] += weight
+        return [matched[d] / total for d in docs]

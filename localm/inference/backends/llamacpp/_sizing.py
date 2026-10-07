@@ -1209,18 +1209,40 @@ class VramSizingMixin:
             return False
         return bool(pinned and pinned > 0)
 
+    def _record_gpu_sizing(self, mode: str, layers: int,
+                           budget: Optional[_AutoLayerBudget] = None, *,
+                           cause: Optional[str] = None) -> None:
+        """Store how ``_effective_gpu_layers()`` chose *layers* as
+        ``self.last_gpu_sizing``, a dict with ``mode`` ("configured": auto off
+        or an explicit n_gpu_layers; "unmeasurable": auto on, no VRAM reading;
+        "auto": sized from free VRAM), ``layers`` and ``n_ctx``. An "auto"
+        record also carries ``free_bytes``, ``total_bytes``, ``model_bytes``,
+        ``kv_bytes`` and ``overhead_bytes`` from *budget*, and ``cause`` for a
+        partial offload."""
+        record = {"mode": mode, "layers": layers, "n_ctx": self.n_ctx}
+        if budget is not None:
+            record.update(free_bytes=budget.free, total_bytes=budget.total,
+                          model_bytes=budget.model, kv_bytes=budget.kv,
+                          overhead_bytes=budget.overhead)
+        if cause is not None:
+            record["cause"] = cause
+        self.last_gpu_sizing = record
+
     def _effective_gpu_layers(self) -> int:
         """The n_gpu_layers this load will actually use.
 
         Auto only acts when it is ON and the user left n_gpu_layers at the
         "everything" default (99): an explicit value (e.g. -g 24) is honoured
         verbatim. When auto sizes a partial offload it prints a one-line
-        notice naming the actual cause. When VRAM is unmeasurable it says so
-        and attempts the configured value."""
-        if not self.n_gpu_layers_auto:
+        notice naming the actual cause and logs it at WARNING. When VRAM is
+        unmeasurable it says so and attempts the configured value.
+
+        Records the decision in ``last_gpu_sizing`` (see
+        :meth:`_record_gpu_sizing`)."""
+        if not self.n_gpu_layers_auto or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS:
+            # Auto off, or an explicit choice: respected as-is.
+            self._record_gpu_sizing("configured", self.n_gpu_layers)
             return self.n_gpu_layers
-        if self.n_gpu_layers != self._DEFAULT_GPU_LAYERS:
-            return self.n_gpu_layers          # explicit choice - respect it as-is
         budget = self._auto_gpu_layers_budget()
         if budget is None:
             # Unmeasurable VRAM still needs a working default: attempt the
@@ -1230,21 +1252,29 @@ class VramSizingMixin:
             from localm.debuglog import logger as _dbg
             _dbg.debug("gpu layers auto: VRAM not measurable; using configured "
                        "n_gpu_layers=%s", self.n_gpu_layers)
+            self._record_gpu_sizing("unmeasurable", self.n_gpu_layers)
             return self.n_gpu_layers
         auto = budget.layers
         if auto >= self._DEFAULT_GPU_LAYERS:
+            self._record_gpu_sizing("auto", auto, budget)
             return auto                        # full offload fits - no scary notice
         count = self._cached_layer_count()
         of = f"{count}" if count else f"~{self._ASSUMED_LAYERS} (estimated)"
         cause, maybe_blind = self._auto_gpu_layers_cause(budget)
+        self._record_gpu_sizing("auto", auto, budget, cause=cause)
+        blind = maybe_blind and self._free_reading_may_be_blind()
         blind_note = ("  [yellow](this reading may not see other processes' "
-                      "VRAM use)[/yellow]" if maybe_blind and self._free_reading_may_be_blind()
-                      else "")
+                      "VRAM use)[/yellow]" if blind else "")
         console.print(
             f"[yellow]  gpu layers auto:[/yellow] offloading {auto}/{of} layers to "
             f"the GPU, the rest on CPU (slower) - {cause}.{blind_note} Set "
             f"n_gpu_layers to override, or n_gpu_layers_auto false."
         )
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("gpu layers auto: %s: offloading %s/%s layers to the GPU, the "
+                     "rest on CPU (slower) - %s%s", Path(self.model_path).name, auto,
+                     of, cause, " (the free reading may not see other processes' "
+                     "VRAM use)" if blind else "")
         if self._moe_hint_applicable():
             console.print(
                 "[dim]  hint: this is a Mixture-of-Experts model - n_cpu_moe "

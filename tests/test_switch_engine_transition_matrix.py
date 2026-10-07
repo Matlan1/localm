@@ -73,7 +73,9 @@ def _fresh_switch_state(monkeypatch):
                         ("_hang_alarm_instance", None),
                         ("_gpu_coord", None),
                         ("_engine_factory", hs._engine_factory),
-                        ("_INCONCLUSIVE_LOAD_RETRY_DELAY", 0)):
+                        ("_INCONCLUSIVE_LOAD_RETRY_DELAY", 0),
+                        ("_BUSY_VICTIM_IDLE_WAIT_S", 0.2),
+                        ("_VICTIM_RELEASE_EXTRA_WAIT_S", 0)):
         monkeypatch.setattr(hs, name, value)
     yield
     _clear()
@@ -972,3 +974,606 @@ class TestSplitShortfall:
 
         assert res == {"status": "loaded", "model": "model-a"}
         assert env.shortfall_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+#  Load placement log                                                         #
+# --------------------------------------------------------------------------- #
+
+def _switch_lines(caplog):
+    return [(r.levelname, r.getMessage()) for r in caplog.records
+            if r.getMessage().startswith("switch_engine: loaded ")]
+
+
+class TestLoadPlacementLog:
+    def test_a_routed_load_logs_its_placement_and_the_eviction_that_made_room(
+            self, monkeypatch, caplog):
+        a = GatedEngine("model-a")
+        b = PlacementEngine("model-b", gpu_placement={
+            "gpu_layers_offloaded": 32, "gpu_layers_total": 32, "degraded": False})
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True)
+
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                               activate=False))
+
+        assert res["status"] == "loaded" and a.unload_calls == 1
+        [(level, line)] = _switch_lines(caplog)
+        assert level == "INFO"
+        free_before = (10 * GB - NEED) // MB
+        assert line.startswith("switch_engine: loaded 'model-b': 32/32 layers on the GPU; ")
+        assert (f"evicting 'model-a': VRAM release confirmed ({free_before} -> "
+                f"{10 * GB // MB} MB free in ") in line
+
+    def test_a_load_left_partly_on_the_cpu_is_logged_as_a_warning(
+            self, monkeypatch, caplog):
+        b = PlacementEngine("model-b", gpu_placement={
+            "gpu_layers_offloaded": 12, "gpu_layers_total": 32, "degraded": True})
+        b.gpu_sizing = {"mode": "auto", "layers": 12, "n_ctx": 4096,
+                        "free_bytes": 6 * GB, "total_bytes": 16 * GB,
+                        "model_bytes": 8 * GB, "kv_bytes": GB // 2,
+                        "overhead_bytes": GB // 2,
+                        "cause": "only 6.0 of 16.0 GB free - another app holds VRAM"}
+        env = _install(monkeypatch, {"model-b": b})
+
+        with caplog.at_level("INFO", logger="localm"):
+            asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        [(level, line)] = _switch_lines(caplog)
+        assert level == "WARNING"
+        assert line == (
+            "switch_engine: loaded 'model-b': 12/32 layers on the GPU, the rest on the "
+            "CPU (slower); n_ctx 4096, sized against 6144 MB free VRAM (full offload "
+            "needs ~9216 MB: weights 8192 + KV 512 + overhead 512) - only 6.0 of 16.0 "
+            "GB free - another app holds VRAM")
+
+    def test_an_already_resident_model_logs_no_load_line(self, monkeypatch, caplog):
+        a = PlacementEngine("model-a")
+        env = _install(monkeypatch, {"model-a": a})
+        _seat("model-a", a, active=True)
+
+        with caplog.at_level("INFO", logger="localm"):
+            asyncio.run(hs.switch_engine("model-a", env.factory))
+
+        assert _switch_lines(caplog) == []
+
+
+# --------------------------------------------------------------------------- #
+#  Busy resident model and placement heal                                     #
+# --------------------------------------------------------------------------- #
+
+_REAL_BUSY_WAIT_S = hs._BUSY_VICTIM_IDLE_WAIT_S
+_REAL_EXTRA_RELEASE_WAIT_S = hs._VICTIM_RELEASE_EXTRA_WAIT_S
+_FULL = {"gpu_layers_offloaded": 32, "gpu_layers_total": 32, "degraded": False}
+_PARTIAL = {"gpu_layers_offloaded": 12, "gpu_layers_total": 32, "degraded": True}
+
+
+class _SizedEngine:
+    """Fake engine whose load N gets ``placements[N]`` (the last one repeats)
+    and an auto-sized ``gpu_sizing``, counting loads and unloads."""
+
+    def __init__(self, name, placements=(_FULL,)):
+        self.display_name = name
+        self._loaded = False
+        self.active_requests = 0
+        self.unloading = False
+        self.placement_heal = None
+        self._placements = list(placements)
+        self.gpu_placement = None
+        self.gpu_sizing = None
+        self.load_calls = 0
+        self.unload_calls = 0
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def set_load_cancel(self, event):
+        pass
+
+    def load(self):
+        placement = self._placements[min(self.load_calls, len(self._placements) - 1)]
+        self.load_calls += 1
+        self.gpu_placement = dict(placement)
+        self.gpu_sizing = {"mode": "auto", "layers": placement["gpu_layers_offloaded"],
+                           "n_ctx": 4096}
+        self._loaded = True
+
+    def unload(self):
+        self.unload_calls += 1
+        self._loaded = False
+
+
+def _degraded_beside(monkeypatch, *, a_busy=1, placements=(_PARTIAL, _FULL)):
+    """model-a resident, active and serving *a_busy* requests; model-b loaded
+    by a non-explicit switch that has to load beside it, partly on the CPU."""
+    a = GatedEngine("model-a")
+    b = _SizedEngine("model-b", placements)
+    env = _install(monkeypatch, {"model-a": a, "model-b": b})
+    monkeypatch.setattr(hs, "_engine_factory", env.factory)
+    _seat("model-a", a, active=True, busy=a_busy)
+    asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False, activate=False))
+    return a, b, env
+
+
+class TestBusyResidentModel:
+    def test_a_non_explicit_load_waits_for_the_busy_model_then_evicts_it(
+            self, monkeypatch, caplog):
+        from localm.inference.protocol import (LOADING_MODEL_STATUS,
+                                               WAITING_FOR_MODEL_STATUS)
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True, busy=1)
+        statuses = []
+
+        async def scenario():
+            asyncio.get_running_loop().call_later(
+                0.1, lambda: setattr(a, "active_requests", 0))
+            return await hs.switch_engine("model-b", env.factory, preempt=False,
+                                          activate=False, on_status=statuses.append)
+
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(scenario())
+
+        assert a.unload_calls == 1 and _registered_anywhere("model-a") == set()
+        assert hs._engines == {"model-b": b} and b.gpu_placement == _FULL
+        assert env.cancelled == [], "the busy model's generation is never cancelled"
+        assert statuses == [WAITING_FOR_MODEL_STATUS, LOADING_MODEL_STATUS]
+        assert any("waiting up to 5s for 'model-a' to finish" in r.getMessage()
+                   for r in caplog.records)
+        assert res == {"status": "loaded", "model": "model-b", **_FULL}
+
+    def test_a_model_still_busy_after_the_wait_is_kept_and_recorded_as_a_blocker(
+            self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+
+        assert a.loaded and a.unload_calls == 0 and env.cancelled == []
+        assert hs._engines == {"model-a": a, "model-b": b}
+        assert b.placement_heal == hs.PlacementHeal(frozenset({"model-a"}), False)
+
+    def test_an_explicit_switch_still_cancels_instead_of_waiting(self, monkeypatch):
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 60.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True, busy=1)
+        statuses = []
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory,
+                                           on_status=statuses.append))
+
+        assert res["status"] == "confirm_required"
+        assert env.cancelled == ["model-a"] and statuses == []
+
+    def test_two_loads_waiting_for_one_busy_model_both_finish(self, monkeypatch, caplog):
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+        c = _SizedEngine("model-c")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b, "model-c": c})
+        _seat("model-a", a, active=True, busy=1)
+
+        async def scenario():
+            asyncio.get_running_loop().call_later(
+                0.1, lambda: setattr(a, "active_requests", 0))
+            return await asyncio.gather(
+                hs.switch_engine("model-b", env.factory, preempt=False, activate=False),
+                hs.switch_engine("model-c", env.factory, preempt=False, activate=False),
+                return_exceptions=True)
+
+        with caplog.at_level("INFO", logger="localm"):
+            results = asyncio.run(scenario())
+
+        assert [r for r in results if isinstance(r, BaseException)] == []
+        assert [r["status"] for r in results] == ["loaded", "loaded"]
+        assert a.unload_calls == 1 and _registered_anywhere("model-a") == set()
+        assert sum("'model-a' was freed by another request while" in r.getMessage()
+                   for r in caplog.records) == 1
+
+    def test_a_busy_model_another_request_starts_unloading_is_not_unloaded_twice(
+            self, monkeypatch, caplog):
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b", (_PARTIAL,))
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True, busy=1)
+
+        def _unload_begins():
+            a.unloading = True
+            a.active_requests = 0
+
+        async def scenario():
+            asyncio.get_running_loop().call_later(0.1, _unload_begins)
+            return await hs.switch_engine("model-b", env.factory, preempt=False,
+                                          activate=False)
+
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(scenario())
+
+        assert a.unload_calls == 0, "only the unload already under way frees it"
+        assert res["status"] == "loaded" and b.loaded
+        assert any("'model-a' was freed by another request while 'model-b' waited"
+                   in r.getMessage() for r in caplog.records)
+
+    def test_an_explicit_switch_skips_a_claimed_model_another_request_removed(
+            self, monkeypatch):
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+
+        def _removed_elsewhere(name):
+            hs._engines.pop("model-a", None)
+            hs._engines_lru.remove("model-a")
+            a.active_requests = 0
+            a._loaded = False
+
+        env = _install(monkeypatch, {"model-a": a, "model-b": b},
+                       on_cancel=_removed_elsewhere)
+        _seat("model-a", a, active=True, busy=1)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "loaded", "model": "model-b", **_FULL}
+        assert a.unload_calls == 0
+
+    def test_an_explicit_switch_does_not_unload_a_claimed_model_twice(self, monkeypatch):
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+
+        def _unload_begins(name):
+            a.unloading = True
+            a.active_requests = 0
+
+        env = _install(monkeypatch, {"model-a": a, "model-b": b},
+                       on_cancel=_unload_begins)
+        _seat("model-a", a, active=True, busy=1)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert a.unload_calls == 0, "only the unload already under way frees it"
+        assert res["status"] == "confirm_required"
+
+    def test_get_engine_passes_the_wait_status_to_the_load(self, monkeypatch):
+        from localm.inference.protocol import (LOADING_MODEL_STATUS,
+                                               WAITING_FOR_MODEL_STATUS)
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        _seat("model-a", a, active=True, busy=1)
+        statuses = []
+
+        async def scenario():
+            asyncio.get_running_loop().call_later(
+                0.1, lambda: setattr(a, "active_requests", 0))
+            return await hs.get_engine("model-b", activate=False,
+                                       on_status=statuses.append)
+
+        got = asyncio.run(scenario())
+
+        assert got is b and b.gpu_placement == _FULL
+        assert statuses == [WAITING_FOR_MODEL_STATUS, LOADING_MODEL_STATUS]
+
+    @staticmethod
+    def _worst_wait():
+        """The longest a load can wait before it starts: a heal's own unload, one
+        busy model's wait, one eviction, and the one longer release wait a load
+        may take."""
+        import inspect
+        from localm.vram import wait_for_vram_release
+        first_release_wait = inspect.signature(
+            wait_for_vram_release).parameters["timeout_s"].default
+        return _REAL_BUSY_WAIT_S + 2 * first_release_wait + _REAL_EXTRA_RELEASE_WAIT_S
+
+    def test_the_waits_fit_inside_the_coder_http_request_timeout(self):
+        import inspect
+        from localm.plugins.coder.backends.http import HTTPBackend
+        coder_timeout = inspect.signature(HTTPBackend.__init__).parameters["timeout"].default
+        assert self._worst_wait() <= coder_timeout / 4, (
+            "the waits must leave the coder's request most of its timeout for the load")
+
+    def test_the_waits_leave_an_image_description_a_minute_for_load_and_reply(self):
+        from localm.plugins.builtin.rag import plug as rag_plug
+        assert rag_plug._DESCRIBE_TIMEOUT_S - self._worst_wait() >= 60
+
+
+class TestPlacementHeal:
+    def test_a_degraded_model_is_reloaded_once_its_blocker_is_idle(
+            self, monkeypatch, caplog):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+
+        with caplog.at_level("INFO", logger="localm"):
+            got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b
+        assert b.unload_calls == 1 and b.load_calls == 2 and b.gpu_placement == _FULL
+        assert a.unload_calls == 1 and _registered_anywhere("model-a") == set()
+        assert hs._engines == {"model-b": b} and hs._engines_lru == ["model-b"]
+        assert b.placement_heal is None and b.unloading is False
+        assert "model-b" in hs._inference_sems
+        lines = [r.getMessage() for r in caplog.records]
+        assert ("switch_engine: reloading 'model-b' (12/32 layers on the GPU) for a "
+                "full GPU placement: a model that held the VRAM it lacked is idle or "
+                "gone") in lines
+        assert any(line.startswith("switch_engine: loaded 'model-b': 32/32 layers")
+                   for line in lines)
+
+    def test_a_degraded_model_is_reloaded_when_its_blocker_is_gone(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+        hs._engines.pop("model-a")
+        hs._engines_lru.remove("model-a")
+
+        asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert b.load_calls == 2 and b.gpu_placement == _FULL
+
+    def test_no_reload_while_the_blocker_is_still_busy(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        assert b.placement_heal is not None
+
+    def test_no_reload_while_a_request_holds_the_degraded_model(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+        b.active_requests = 1
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+
+    def test_the_reload_happens_once_even_when_it_stays_degraded(self, monkeypatch):
+        a1 = GatedEngine("model-a1")
+        a2 = GatedEngine("model-a2")
+        b = _SizedEngine("model-b", (_PARTIAL,))
+        env = _install(monkeypatch, {"model-a1": a1, "model-a2": a2, "model-b": b},
+                       total=10 * GB + NEED)
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        _seat("model-a1", a1, active=True, busy=1)
+        _seat("model-a2", a2, busy=1)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False, activate=False))
+        assert b.placement_heal.blockers == frozenset({"model-a1", "model-a2"})
+
+        a1.active_requests = 0
+        asyncio.run(hs.get_engine("model-b", activate=False))
+        assert b.load_calls == 2 and a1.unload_calls == 1 and a2.loaded
+        assert b.gpu_placement == _PARTIAL and b.placement_heal is None
+
+        a2.active_requests = 0
+        asyncio.run(hs.get_engine("model-b", activate=False))
+        assert b.load_calls == 2, "a reload that stayed degraded is not repeated"
+
+    def test_an_explicit_switch_reuses_the_degraded_model_as_it_is(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "already_active", "model": "model-b", **_PARTIAL}
+        assert b.load_calls == 1
+
+    def test_a_load_without_a_blocker_records_nothing_to_heal(self, monkeypatch):
+        b = _SizedEngine("model-b", (_PARTIAL,))
+        env = _install(monkeypatch, {"model-b": b})
+
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        assert b.gpu_placement == _PARTIAL and b.placement_heal is None
+
+    def test_a_pinned_models_entry_is_never_a_blocker(self, monkeypatch):
+        _knobs(monkeypatch, pinned_models=["model-a"])
+        a, b, env = _degraded_beside(monkeypatch, a_busy=0)
+
+        assert a.loaded and a.unload_calls == 0
+        assert b.gpu_placement == _PARTIAL and b.placement_heal is None
+
+    def test_an_active_degraded_model_stays_active_after_its_reload(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        hs._active_model_name, hs._engine = "model-b", b
+        a.active_requests = 0
+
+        asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert hs._active_model_name == "model-b" and hs._engine is b
+
+    def test_an_unnamed_request_still_resolves_to_the_model_while_it_reloads(
+            self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        monkeypatch.setattr(hs, "_default_model_name", "model-a")
+        hs._active_model_name, hs._engine = "model-b", b
+        hs._inference_sem = hs._inference_sems["model-b"]
+        a.active_requests = 0
+        resolved_during_reload = []
+        unload = b.unload
+
+        def _unload():
+            resolved_during_reload.append(hs._resolve_unnamed_model_name())
+            unload()
+
+        b.unload = _unload
+
+        asyncio.run(hs.get_engine("model-b"))
+
+        assert b.load_calls == 2 and b.gpu_placement == _FULL
+        assert resolved_during_reload == ["model-b"]
+        assert hs._active_model_name == "model-b" and hs._last_active_model_name is None
+
+    def test_no_reload_when_the_load_was_admitted_beside_an_idle_model(self, monkeypatch):
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b", (_PARTIAL, _FULL))
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=20 * GB)
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        _seat("model-a", a, active=True)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False, activate=False))
+        assert a.loaded and b.gpu_placement == _PARTIAL
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        assert b.placement_heal is None
+
+    def test_no_reload_while_the_vram_probe_is_inconclusive(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+        stalled = probe_double(lambda: {"total": 10 * GB}, status=GPU_PROBE_TIMEOUT)
+        monkeypatch.setattr("localm.discover.vram_capacity", stalled)
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        assert a.loaded and a.unload_calls == 0
+        assert hs._engines == {"model-a": a, "model-b": b}
+        assert b.placement_heal is not None
+
+    def test_a_model_whose_files_are_gone_is_used_as_loaded(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+        monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: None)
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        assert a.loaded and hs._engines == {"model-a": a, "model-b": b}
+
+
+class TestVictimReleaseWait:
+    def _wait_answers(self, monkeypatch, answers, *, estimate=8 * GB, after=None):
+        """Each wait_for_vram_release call returns the next of *answers* (the
+        last repeats), with free VRAM *after* (default: unchanged when the
+        answer is False, 4 GB more when True). The evicted model is estimated to
+        hold *estimate* bytes of VRAM."""
+        calls = []
+
+        def _wait(read_free, *, before_bytes, **kwargs):
+            calls.append(kwargs.get("timeout_s"))
+            released = answers[min(len(calls), len(answers)) - 1]
+            if after is not None:
+                return released, after
+            return released, (before_bytes + 4 * GB if released else before_bytes)
+
+        monkeypatch.setattr("localm.vram.wait_for_vram_release", _wait)
+        monkeypatch.setattr(hs, "_victim_vram_estimate", lambda engine: estimate)
+        return calls
+
+    def _switch(self, monkeypatch, answers, *, estimate=8 * GB, reading=None,
+                placements=(_FULL,), after=None):
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b", placements)
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, reading=reading)
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        monkeypatch.setattr(hs, "_VICTIM_RELEASE_EXTRA_WAIT_S", 7.0)
+        calls = self._wait_answers(monkeypatch, answers, estimate=estimate, after=after)
+        _seat("model-a", a)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+        return a, b, env, calls
+
+    def test_an_unconfirmed_release_gets_one_longer_wait(self, monkeypatch, caplog):
+        with caplog.at_level("INFO", logger="localm"):
+            a, b, env, calls = self._switch(monkeypatch, [False, True])
+
+        assert calls == [None, 7.0]
+        assert any("evicting 'model-a': VRAM release confirmed" in r.getMessage()
+                   and "after an extended wait" in r.getMessage()
+                   and r.levelname == "INFO" for r in caplog.records)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_a_release_still_unconfirmed_is_a_warning_and_a_heal_reason(
+            self, monkeypatch, caplog):
+        with caplog.at_level("INFO", logger="localm"):
+            a, b, env, calls = self._switch(monkeypatch, [False],
+                                            placements=(_PARTIAL, _FULL))
+
+        assert calls == [None, 7.0]
+        assert any(r.levelname == "WARNING" and "VRAM release NOT confirmed"
+                   in r.getMessage() for r in caplog.records)
+        assert b.placement_heal == hs.PlacementHeal(frozenset(), True)
+        asyncio.run(hs.get_engine("model-b"))
+        assert b.load_calls == 2 and b.gpu_placement == _FULL
+
+    def test_no_longer_wait_when_free_vram_already_covers_the_load(self, monkeypatch):
+        a, b, env, calls = self._switch(monkeypatch, [False], after=10 * GB)
+
+        assert a.unload_calls == 1
+        assert calls == [None]
+
+    def test_no_longer_wait_on_a_process_scoped_reading(self, monkeypatch):
+        a, b, env, calls = self._switch(
+            monkeypatch, [False],
+            reading=lambda: {"total": 10 * GB, "free": 1 * GB, "free_scope": "process"})
+
+        assert calls == [None]
+
+    def test_a_process_scoped_reading_reports_the_release_as_not_verifiable(
+            self, monkeypatch, caplog):
+        with caplog.at_level("INFO", logger="localm"):
+            a, b, env, calls = self._switch(
+                monkeypatch, [False], placements=(_PARTIAL, _FULL),
+                reading=lambda: {"total": 10 * GB, "free": 1 * GB,
+                                 "free_scope": "process"})
+
+        assert a.unload_calls == 1
+        assert any(r.levelname == "INFO" and r.getMessage().startswith(
+            "switch_engine: evicting 'model-a': VRAM release could not be verified")
+            for r in caplog.records)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"
+                    and r.getMessage().startswith("switch_engine: evicting")]
+        assert b.placement_heal is None
+
+    def test_only_one_longer_wait_per_load(self, monkeypatch):
+        a1 = GatedEngine("model-a1")
+        a2 = GatedEngine("model-a2")
+        b = _SizedEngine("model-b")
+        env = _install(monkeypatch, {"model-a1": a1, "model-a2": a2, "model-b": b})
+        monkeypatch.setattr(hs, "_VICTIM_RELEASE_EXTRA_WAIT_S", 7.0)
+        calls = self._wait_answers(monkeypatch, [False])
+        _seat("model-a1", a1)
+        _seat("model-a2", a2)
+
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        assert a1.unload_calls == 1 and a2.unload_calls == 1
+        assert calls == [None, 7.0, None]
+
+    def test_a_victim_too_small_to_show_a_release_is_neither_waited_for_nor_warned(
+            self, monkeypatch, caplog):
+        with caplog.at_level("DEBUG", logger="localm"):
+            a, b, env, calls = self._switch(monkeypatch, [False], estimate=0,
+                                            placements=(_PARTIAL,))
+
+        assert calls == [None]
+        assert not [r for r in caplog.records if r.levelname == "WARNING"
+                    and r.getMessage().startswith("switch_engine: evicting")]
+        assert any("evicting 'model-a': no VRAM release seen, none expected"
+                   in r.getMessage() for r in caplog.records)
+        assert b.placement_heal is None
+
+
+class TestVictimVramEstimate:
+    def test_a_missing_model_path_is_zero(self):
+        assert hs._victim_vram_estimate(GatedEngine("model-a")) == 0
+
+    def test_a_real_file_is_its_required_vram_scaled_by_gpu_layers(self, tmp_path):
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"\0" * 1000)
+        e = _SizedEngine("m", ({"gpu_layers_offloaded": 8, "gpu_layers_total": 32,
+                                "degraded": True},))
+        e.model_path = str(f)
+        assert hs._victim_vram_estimate(e) == residency.required_vram_bytes(1000)
+        e.load()
+        assert hs._victim_vram_estimate(e) == residency.required_vram_bytes(250)
+
+    def test_no_layers_on_the_gpu_is_zero(self, tmp_path):
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"\0" * 1000)
+        e = _SizedEngine("m", ({"gpu_layers_offloaded": 0, "gpu_layers_total": 32,
+                                "degraded": True},))
+        e.model_path = str(f)
+        e.load()
+        assert hs._victim_vram_estimate(e) == 0

@@ -54,7 +54,7 @@ from .contracts import (
 )
 from .errors import describe_failure, failure_kind
 from .extract import extract_page
-from .providers import REMEDY, provider_from_config
+from .providers import observe_requests, provider_from_config
 from .sites import read_url
 
 #: ``fetch(url, timeout=...) -> (final_url, content_type, text)``.
@@ -85,24 +85,23 @@ def _default_fetch(url: str, *, timeout: float,
 def search_failure_text(exc: BaseException,
                         provider: Optional[SearchProvider] = None) -> str:
     """The ``search_error`` sentence for a failed search by *provider*
-    (default: ``provider_from_config()``): what failed, then what the user
-    can do about it. A ``SearchProviderError`` keeps its own message."""
+    (default: ``provider_from_config()``): the specific cause, and for a
+    configured SearXNG instance which backend it was. A
+    ``SearchProviderError`` keeps its own message."""
     from .contracts import SearchProviderError
     if isinstance(exc, SearchProviderError):
-        return str(exc).strip()[:_ERROR_TEXT_CAP * 2] or "the search failed"
+        return str(exc).strip()[:_ERROR_TEXT_CAP * 3] or "the search failed"
     if provider is None:
         provider = provider_from_config()
     url = (getattr(provider, "endpoint", "")
            or getattr(provider, "base_url", "") or "")
     reason = describe_failure(exc, url)
+    if getattr(provider, "name", "") == "searxng":
+        return f"The search backend set in Settings > Network failed: {reason}."
     host = urllib.parse.urlparse(url).hostname or ""
     if not (host and reason.startswith(host)):
         reason = reason[:1].upper() + reason[1:]
-    if getattr(provider, "name", "") == "searxng":
-        return (f"{reason}. Check that the Search backend URL in Settings > "
-                "Network points at a running SearXNG instance with the JSON "
-                "format enabled.")
-    return f"{reason}. {REMEDY}"
+    return f"{reason}."
 
 
 def _looks_like_html(content_type: str, body: str) -> bool:
@@ -241,8 +240,9 @@ def retrieve(
     ``PAGE_READ_TIMEOUT``; *deadline_seconds* (the wait for all
     page reads together) to ``PAGE_READ_DEADLINE``, or twice *fetch_timeout*
     when only *fetch_timeout* is given. *on_endpoint*, when given, is
-    called with every site content-endpoint URL (``sites.read_url``)
-    before it is requested, from the page-read worker threads.
+    called with every search request URL (``providers.observe_requests``)
+    and every site content-endpoint URL (``sites.read_url``) before it is
+    requested, the latter from the page-read worker threads.
 
     Raises ``ValueError`` for an empty query and ``NetworkPolicyError`` when
     the policy refuses the search request. Every other search failure is
@@ -272,7 +272,8 @@ def retrieve(
                             per_source_cap_chars=per_source_cap_chars)
     requested = min(2 * search_candidates, _MAX_SEARCH_CANDIDATES)
     try:
-        results = provider.search(query, requested)
+        with observe_requests(on_endpoint):
+            results = provider.search(query, requested)
     except netpolicy.NetworkPolicyError:
         raise
     except Exception as exc:
@@ -287,6 +288,7 @@ def retrieve(
         bundle.search_error = "the search backend returned no usable results"
         return bundle
     bundle.search_status = SEARCH_OK
+    bundle.provider = results[0].provider or bundle.provider
 
     sources = [
         Source(id=f"S{i}", url=r.url, canonical_url=canonicalize_url(r.url),

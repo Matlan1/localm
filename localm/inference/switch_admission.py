@@ -133,16 +133,22 @@ class EvictionAttempt:
 
     ``switch_engine`` updates it as it performs effects; the decisions here only
     read it. Each bounded step (embedder eviction, each peer instance, the busy
-    victim) runs at most once per attempt, and inconclusive probes are retried
-    ``_INCONCLUSIVE_LOAD_RETRIES`` times, so the loop always terminates.
-    ``started`` is the ``time.monotonic()`` reading the attempt began at.
+    victim, the wait for a busy model to go idle, the longer wait for an evicted
+    model's VRAM release) runs at most once per attempt, and inconclusive probes
+    are retried ``_INCONCLUSIVE_LOAD_RETRIES`` times, so the loop always
+    terminates. ``started`` is the ``time.monotonic()`` reading the attempt began
+    at. ``deferred_to_backend`` is set when the load goes ahead below the
+    whole-model estimate because nothing more could be evicted.
     """
 
     started: float
     asked_peers: set = field(default_factory=set)
     embedder_attempted: bool = False
     busy_attempted: bool = False
+    busy_waited: bool = False
+    release_wait_extended: bool = False
     inconclusive_retries: int = 0
+    deferred_to_backend: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,6 +228,23 @@ def busy_victim_candidate(budget: LoadBudget, lru: Iterable[str],
     ``residency.pick_busy_eviction_victim``: never the requested model, a
     pinned one or one already mid-unload."""
     if not preempt or already_attempted:
+        return None
+    return residency.pick_busy_eviction_victim(
+        lru, engines, requested=budget.name, pinned=budget.pinned)
+
+
+def idle_wait_candidate(budget: LoadBudget, lru: Iterable[str],
+                        engines: Mapping[str, Any], *, preempt: bool,
+                        already_waited: bool) -> Optional[str]:
+    """The serving model a non-explicit load waits for, so it can be evicted
+    once idle instead of loading beside it, or None.
+
+    Only a load that is not an explicit switch (*preempt* False) waits: an
+    explicit switch cancels the busy model instead (``busy_victim_candidate``).
+    Once per load attempt. The candidate is
+    ``residency.pick_busy_eviction_victim``: never the requested model, a
+    pinned one or one already mid-unload."""
+    if preempt or already_waited:
         return None
     return residency.pick_busy_eviction_victim(
         lru, engines, requested=budget.name, pinned=budget.pinned)
