@@ -76,7 +76,7 @@ def test_pyproject_transformers_spec_excludes_the_fsdp_breaking_line(extra):
 
 def test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins():
     """[hf] and [gpu] must never drift apart on the pins they share
-    (transformers, tokenizers, accelerate, psutil) - [hf] exists so a
+    (transformers, tokenizers, accelerate, psutil, num2words) - [hf] exists so a
     non-ROCm install gets the identical HF stack [gpu] gives a ROCm/Windows
     one."""
     packaging_requirements = pytest.importorskip("packaging.requirements")
@@ -87,12 +87,22 @@ def test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins():
 
     gpu_specs = _specifiers("gpu")
     hf_specs = _specifiers("hf")
-    for name in ("transformers", "tokenizers", "accelerate", "psutil"):
+    for name in ("transformers", "tokenizers", "accelerate", "psutil", "num2words"):
         assert name in hf_specs, f"[hf] is missing {name}"
         assert hf_specs[name] == gpu_specs[name], (
             f"[hf] pins {name} as '{hf_specs[name]}' but [gpu] pins it as "
             f"'{gpu_specs[name]}' - keep the two in sync"
         )
+
+
+def test_num2words_is_declared_and_locked_for_the_smolvlm_processor():
+    """transformers' SmolVLM processor imports num2words at construction; without
+    it AutoProcessor fails and a vision checkpoint loads text-only."""
+    packaging_requirements = pytest.importorskip("packaging.requirements")
+    for extra in ("gpu", "hf"):
+        names = {packaging_requirements.Requirement(r).name for r in _extra_requirements(extra)}
+        assert "num2words" in names, f"[{extra}] must declare num2words"
+    assert _locked_version("num2words"), "num2words must be present in uv.lock"
 
 
 def test_locked_transformers_cannot_break_the_hf_backend():

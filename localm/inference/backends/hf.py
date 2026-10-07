@@ -34,10 +34,10 @@ from ._hf_runner import (
     RunnerBusy,
 )
 from .base import (
-    IMAGE_UNSUPPORTED_MESSAGE,
     BaseBackend,
     EmbedBatchTooLargeError,
     UnsupportedInputError,
+    image_unsupported_message,
     messages_contain_image,
 )
 
@@ -143,6 +143,7 @@ class HFBackend(BaseBackend):
         # Cached from the child's load response; the real HFWorker lives in the
         # child and cannot be read live.
         self._supports_images = False
+        self._processor_error: Optional[str] = None
         self.effective_ctx_max: Optional[int] = None
         self.n_ctx_max: Optional[int] = None
         # Unloaded means True (unknown, load to find out). Unlike supports_images,
@@ -275,6 +276,7 @@ class HFBackend(BaseBackend):
         params = {"model_path": self.model_path, "device": self._device}
         meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
         self._supports_images = bool(meta.get("supports_images"))
+        self._processor_error = meta.get("processor_error")
         self._can_embed = bool(meta.get("can_embed", True))
         self.effective_ctx_max = meta.get("context_capacity")
         self.n_ctx_max = self.effective_ctx_max
@@ -469,7 +471,8 @@ class HFBackend(BaseBackend):
         # supports_images is False whenever not self.loaded, so this fires pre-load
         # too.
         if messages_contain_image(messages) and not self.supports_images:
-            raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+            raise UnsupportedInputError(
+                image_unsupported_message(self._processor_error))
         # The same check for a LAZY grammar this backend cannot apply: xgrammar has
         # no trigger mode, so the worker would otherwise generate UNCONSTRAINED
         # text. Placed before the loaded-state gate and the runner, so any caller is
