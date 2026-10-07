@@ -348,6 +348,39 @@ def test_grammar_constrains_real_generation():
 
 @pytest.mark.integration
 @pytest.mark.real_gguf
+def test_single_tool_call_grammar_ends_generation_after_one_block():
+    """TOOL_CALL_SINGLE lets a real model write exactly one <tool_call> block and
+    then end, where TOOL_CALLS_ONLY lets the same model, prompt and sampling go
+    on to further blocks (the control)."""
+    require_native_runtime()
+    path = fetch_gguf(_REPO, _FILE)
+
+    from localm.inference.backends.gguf import GgufBackend
+    from localm.inference.gbnf import TOOL_CALL_SINGLE, TOOL_CALLS_ONLY
+    backend = GgufBackend(path, n_ctx=2048, n_gpu_layers=0)
+    backend.load()
+    try:
+        msgs = [{"role": "user", "content":
+                 "Emit tool calls in the form <tool_call>{\"name\": \"web_search\", "
+                 "\"args\": {\"query\": \"...\"}}</tool_call>. Search the web three "
+                 "separate times: for cats, for dogs, and for birds."}]
+
+        def run(grammar):
+            return "".join(backend.chat_stream(msgs, max_tokens=400, temperature=0.0,
+                                               grammar=grammar))
+
+        many = run(TOOL_CALLS_ONLY)
+        one = run(TOOL_CALL_SINGLE)
+        assert not getattr(backend, "_grammar_unsupported", False)
+        assert many.count("<tool_call>") > 1, f"control did not repeat: {many!r}"
+        assert one.count("<tool_call>") == 1, one
+        assert one.rstrip().endswith("</tool_call>"), one
+    finally:
+        backend.unload()
+
+
+@pytest.mark.integration
+@pytest.mark.real_gguf
 def test_invalid_grammar_does_not_poison_later_valid_grammars():
     """A single MALFORMED grammar must not disable grammar for later VALID requests.
 
