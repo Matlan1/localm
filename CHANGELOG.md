@@ -207,6 +207,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   pairing flow), Sign in on this device, Companion app, Diagnostics, Your
   data and Live tuning (including the live VRAM estimate) are now translated
   too, completing the page.
+- **Multi-Token Prediction is faster and shows how well it is working.** Each
+  speculation step does less extra work, can draft several tokens at once (the
+  new "MTP draft tokens" setting, `mtp_draft_tokens`, default 1), and gives the
+  draft head the right context for every token. It also measures, while a reply
+  is being written, whether drafting is actually faster than generating one
+  token at a time, and pauses itself when it is not (common on small models and
+  when sampling with a temperature). The chat shows the share of drafted tokens
+  the model accepted next to the reply's speed, or that MTP paused or stopped,
+  the chat API reports it as `usage.mtp`, and `localm bench-mtp` prints the
+  acceptance rate and whether the replies matched MTP off.
 
 ### Fixed
 - **A chat with web access on now ends on an answer, not on a bare "read page" or

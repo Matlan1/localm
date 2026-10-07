@@ -209,6 +209,27 @@ class TestUsageMetricsInResponses:
         assert usage["ttft_ms"] is not None
         assert usage["tokens_per_sec"] is not None
 
+    def test_chat_reports_the_mtp_figures_streaming_and_not(self):
+        eng = _make_engine()
+        eng.context_capacity.return_value = 4096
+        figures = {"state": "on", "drafted": 12, "accepted": 9, "paused_steps": 0,
+                   "reason": None}
+        eng.mtp_usage.return_value = figures
+        with TestClient(create_app(eng)) as client:
+            ns = client.post("/v1/chat/completions", json=CHAT_PAYLOAD).json()["usage"]
+            st = _final_usage(client.post(
+                "/v1/chat/completions", json={**CHAT_PAYLOAD, "stream": True}))
+        assert ns["mtp"] == figures
+        assert st["mtp"] == figures
+
+    def test_chat_has_no_mtp_figures_when_the_engine_reports_none(self):
+        eng = _make_engine()
+        eng.context_capacity.return_value = 4096
+        eng.mtp_usage.return_value = None
+        with TestClient(create_app(eng)) as client:
+            ns = client.post("/v1/chat/completions", json=CHAT_PAYLOAD).json()["usage"]
+        assert ns["mtp"] is None
+
     # --- load must NOT be folded into the rate ------------------------------- #
 
     def _assert_rate_excludes_load(self, usage):

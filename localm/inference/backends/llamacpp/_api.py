@@ -599,6 +599,34 @@ def llama_sampler_accept(sampler: ctypes.c_void_p, token: int) -> None:
     _bind("llama_sampler_accept", None, LlamaSampler, llama_token)(sampler, token)
 
 
+def has_backend_sampling() -> bool:
+    """True when this runtime can run a sampler chain inside llama_decode."""
+    lib = load_lib()
+    return all(hasattr(lib, fn)
+               for fn in ("llama_set_sampler", "llama_get_sampled_token_ith"))
+
+
+def llama_set_sampler(ctx: ctypes.c_void_p, seq_id: int, sampler) -> bool:
+    """Attach the sampler chain *sampler* to *seq_id* of *ctx*, or detach with None.
+
+    While attached, llama_decode samples every output row of that sequence on
+    the backend, and llama_sampler_sample returns that token without reading
+    the logits. Returns False when the runtime lacks the call or refuses to
+    offload the chain; the context then keeps sampling on the CPU. The chain
+    must stay alive until it is detached or the context is freed.
+    """
+    if not has_backend_sampling():
+        return False
+    return bool(_bind("llama_set_sampler", ctypes.c_bool,
+                      LlamaContext, ctypes.c_int32, LlamaSampler)(ctx, seq_id, sampler))
+
+
+def llama_get_sampled_token_ith(ctx: ctypes.c_void_p, i: int) -> int:
+    """The token the backend sampler chose for output row *i*, or -1 (LLAMA_TOKEN_NULL)."""
+    return _bind("llama_get_sampled_token_ith", llama_token,
+                 LlamaContext, ctypes.c_int32)(ctx, i)
+
+
 # --- individual sampler constructors ---
 
 def llama_sampler_init_greedy() -> ctypes.c_void_p:
@@ -964,6 +992,23 @@ def llama_get_embeddings_nextn_ith(ctx: ctypes.c_void_p, i: int):
         return None
     ptr = fn(ctx, i)
     return ptr if ptr else None
+
+
+def llama_get_embeddings_nextn_rows(ctx: ctypes.c_void_p, first: int, count: int) -> list:
+    """Addresses of the hidden-state rows first..first+count-1 of the last batch.
+
+    Each entry is an int address, or None where the runtime has no such row
+    (or no hidden-state API at all).
+    """
+    fn = _resolve_staging("llama_get_embeddings_nextn_ith",
+                          ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_int32)
+    if fn is None:
+        return [None] * count
+    rows = []
+    for i in range(first, first + count):
+        ptr = fn(ctx, i)
+        rows.append(ctypes.cast(ptr, ctypes.c_void_p).value if ptr else None)
+    return rows
 
 
 def llama_set_nextn_layer_offset(ctx: ctypes.c_void_p, offset: int) -> bool:

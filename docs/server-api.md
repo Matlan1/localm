@@ -116,6 +116,22 @@ non-streaming chat completions.
 `context_capacity` (the model's total context window in tokens) is reported
 on both streaming and non-streaming chat completions.
 
+Chat completions on a GGUF model with Multi-Token Prediction enabled
+(`mtp_enabled`) also carry `usage.mtp`:
+
+```json
+{"mtp": {"state": "on", "drafted": 180, "accepted": 151, "paused_steps": 0, "reason": null}}
+```
+
+`state` is `on` (the reply speculated), `paused` (drafting was measured slower
+than generating one token at a time and was paused for most of the reply),
+`stopped` (it stopped partway; `reason` says why), `idle` (it did not
+speculate, as on an image or grammar-constrained turn) or `unavailable` (this
+model cannot speculate; `reason` says why). `drafted` and `accepted` count the
+draft tokens sent to verification and kept; `paused_steps` counts the steps
+generated without drafting because drafting was slower. The field is `null`
+when MTP is off.
+
 #### How a generation failure is reported
 
 Both generation endpoints answer failures the same way on both routes and in

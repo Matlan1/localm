@@ -239,6 +239,11 @@ CORE_FIELDS: list = [
                  "model and machine. Run `localm bench-mtp <model>` to check "
                  "yours.",
                  group="Engine", applies=Applies.NEXT_LOAD),
+    SettingField("mtp_draft_tokens", Widget.NUMBER, "MTP draft tokens",
+                 "Tokens MTP proposes per step when it is on. More pays off "
+                 "when most drafts are accepted; `localm bench-mtp <model> "
+                 "--draft-tokens N` measures it.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.

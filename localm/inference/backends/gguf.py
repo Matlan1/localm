@@ -50,6 +50,14 @@ def _mtp_status_kind(status) -> str:
     """The part of an MTP status before its ``:`` detail suffix."""
     return str(status or "").split(":", 1)[0]
 
+
+def _count(value) -> int:
+    """A non-negative int from an envelope field, 0 when absent or not a number."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
 # The worker's message when llama_init_from_model returned NULL: the runtime
 # loaded the weights, then could not create the context.
 _CONTEXT_FAILED_MSG = "Failed to create llama context"
@@ -106,6 +114,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         vram_overhead_bytes: Optional[int] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
+        mtp_draft_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -115,6 +124,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
         self.mtp_enabled = mtp_enabled
+        self.mtp_draft_tokens = mtp_draft_tokens   # None = the native default
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
@@ -150,6 +160,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_status = None    # why speculation is or is not running
         self.last_mtp_active = False   # whether the last call actually speculated
         self.last_mtp_call_status = ""  # why the last call stopped speculating partway
+        self.last_mtp_drafted = 0      # draft tokens the last call sent to verification
+        self.last_mtp_accepted = 0     # how many of those the target accepted
+        self.last_mtp_steps = 0        # verification batches the last call decoded
+        self.last_mtp_paused_steps = 0  # steps it ran plain because drafting was slower
         # Always None in production; the real LlamaCpp instance lives in the
         # child process.
         self._llm = None
@@ -274,8 +288,43 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_status = done.get("mtp_status")
         self.last_mtp_active = bool(done.get("mtp_active"))
         self.last_mtp_call_status = str(done.get("mtp_call_status") or "")
+        self.last_mtp_drafted = _count(done.get("mtp_drafted"))
+        self.last_mtp_accepted = _count(done.get("mtp_accepted"))
+        self.last_mtp_steps = _count(done.get("mtp_steps"))
+        self.last_mtp_paused_steps = _count(done.get("mtp_paused_steps"))
         if _mtp_status_kind(self.last_mtp_status) in _MTP_STOPPED:
             self._supports_mtp = False
+
+    @property
+    def last_mtp_usage(self) -> Optional[dict]:
+        """MTP figures for the reply that just finished, or None when MTP is
+        not enabled for this model.
+
+        ``state`` is "stopped" when the reply stopped speculating partway (the
+        reason is the per-call status), "paused" when drafting was measured
+        slower than one-token decoding for at least as many steps as it ran,
+        "on" when it speculated, "unavailable" when the model cannot speculate
+        (the reason is the model status), and "idle" otherwise. ``drafted`` and
+        ``accepted`` count draft tokens sent to verification and kept;
+        ``paused_steps`` counts the steps run without drafting because it was
+        slower.
+        """
+        if not self.mtp_enabled or not self.loaded:
+            return None
+        paused = self.last_mtp_paused_steps
+        if self.last_mtp_call_status:
+            state, reason = "stopped", self.last_mtp_call_status
+        elif paused and paused >= self.last_mtp_steps:
+            state, reason = "paused", "slower-than-plain"
+        elif self.last_mtp_active:
+            state, reason = "on", None
+        elif not self._supports_mtp:
+            state, reason = "unavailable", self.last_mtp_status or None
+        else:
+            state, reason = "idle", None
+        return {"state": state, "drafted": self.last_mtp_drafted,
+                "accepted": self.last_mtp_accepted, "paused_steps": paused,
+                "reason": reason}
 
     @property
     def supports_mtp(self) -> bool:
@@ -487,6 +536,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             n_cpu_moe=self.n_cpu_moe,
             mtp_enabled=self.mtp_enabled,
         )
+        if self.mtp_draft_tokens is not None:
+            params["mtp_draft_tokens"] = int(self.mtp_draft_tokens)
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
         timeout = self._load_timeout_seconds()
