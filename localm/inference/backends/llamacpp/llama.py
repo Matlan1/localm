@@ -1067,7 +1067,7 @@ class LlamaCpp:
     mtp_accepted = 0             # how many of those the target model accepted
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
-    mtp_skipped = ""             # why THIS generation could not draft at all: "grammar", "image" or ""
+    mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _clock = time.perf_counter
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
@@ -1767,23 +1767,19 @@ class LlamaCpp:
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
                 )
-                # Drafting proposes tokens greedily off the MTP context; the
-                # request's own sampler below decides what is emitted. Constrained
-                # requests take the single-token path instead: draft_sampler stays
-                # None whenever a grammar is active, so no speculation ever runs
-                # with a grammar sampler in the chain, where a mis-sequenced accept
-                # throws across the C ABI.
-                # See test_mtp_drafting_is_disabled_while_a_grammar_is_active.
+                # Drafting proposes tokens greedily off the MTP context and never
+                # hands them to the request's sampler: every emitted token, with
+                # or without a grammar in that sampler, is one the sampler itself
+                # sampled from a verification or decode row, in emission order.
+                # See test_a_grammar_reply_drafts_and_its_sampler_sees_only_emitted_tokens.
                 draft_sampler = (
                     _greedy_chain()
-                    if self._mtp_ctx_ptr is not None and grammar is None
-                    and self._mtp_usable
+                    if self._mtp_ctx_ptr is not None and self._mtp_usable
                     else None
                 )
 
                 self._mtp_drafting = draft_sampler is not None
-                self.mtp_skipped = ("grammar" if grammar is not None and self._mtp_ctx_ptr is not None
-                                    and self._mtp_usable else "")
+                self.mtp_skipped = ""
                 self.mtp_active_this_call = False
                 self.mtp_call_status = ""
                 self.mtp_drafted = 0

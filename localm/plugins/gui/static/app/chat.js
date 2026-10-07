@@ -1731,8 +1731,8 @@ export function buildEmptyHint() {
 // on screen or reload wiping them entirely.
 // The MTP part of the usage line for a reply's usage.mtp, as {text, title}:
 // the acceptance rate when the reply speculated, that MTP paused itself for
-// being slower, that it was off for this reply (grammar-constrained output or
-// an image), or that it stopped or is unavailable, with the reason as the
+// being slower, that it was off for this reply (a turn with an image), or that
+// it stopped or is unavailable, with the reason as the
 // tooltip. Empty for no MTP figures or an idle turn.
 export function mtpUsageText(mtp) {
   if (!mtp || typeof mtp !== "object") return { text: "", title: "" };
@@ -1746,7 +1746,7 @@ export function mtpUsageText(mtp) {
              title: t("chat.usage.mtpPaused.title", { steps: mtp.paused_steps || 0 }) };
   }
   if (mtp.state === "off") {
-    const why = { grammar: "chat.usage.mtpOff.grammar", image: "chat.usage.mtpOff.image" }[mtp.reason];
+    const why = { image: "chat.usage.mtpOff.image" }[mtp.reason];
     return { text: t("chat.usage.mtpOff"),
              title: why ? t(why) : t("chat.usage.mtpReason", { reason: mtp.reason || "" }) };
   }

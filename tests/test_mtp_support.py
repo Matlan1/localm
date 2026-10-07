@@ -586,18 +586,17 @@ def test_mtp_end_of_generation_verification_ends_the_turn_without_emitting():
     assert rec.shapes()[-1] == "VERIFY"
 
 
-def test_mtp_drafting_is_disabled_while_a_grammar_is_active():
-    """No speculation runs with a grammar sampler in the chain: the speculative
-    path decodes and rolls back a token the grammar never saw, and a
-    mis-sequenced accept on a grammar sampler throws across the C ABI."""
-    rec = _SpecRecorder(head=[400, _SpecRecorder.EOG])
+def test_a_grammar_request_drafts_and_never_accepts_a_draft_into_its_sampler():
+    """A grammar in the request's sampler does not stop drafting, and no token
+    is ever accepted into that sampler except by sampling it."""
+    rec = _SpecRecorder(head=[400, _SpecRecorder.EOG], draft=[401], verify=[401])
 
     tokens, mock_api = _run_generate(rec, max_new_tokens=4, grammar='root ::= "a"')
 
-    assert tokens == [400]
-    assert "DRAFT" not in rec.shapes(), rec.shapes()
-    mock_api.llama_sampler_init_greedy.assert_not_called()
-    mock_api.llama_sampler_chain_init.assert_not_called()
+    assert tokens == [400, 401]
+    assert ["DRAFT", "VERIFY"] == [s for s in rec.shapes() if s in ("DRAFT", "VERIFY")]
+    assert rec.told_main == [400, 401, _SpecRecorder.EOG]
+    mock_api.llama_sampler_accept.assert_not_called()
 
 
 def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
@@ -1760,8 +1759,8 @@ def test_the_draft_count_reaches_the_native_instance(tmp_path):
 
     from localm.inference.backends.llamacpp import _worker
     w = _worker.GgufWorker.__new__(_worker.GgufWorker)
-    w._llm = SimpleNamespace(mtp_drafted=7, mtp_accepted=5, mtp_skipped="grammar")
-    assert (w.mtp_drafted, w.mtp_accepted, w.mtp_skipped) == (7, 5, "grammar")
+    w._llm = SimpleNamespace(mtp_drafted=7, mtp_accepted=5, mtp_skipped="image")
+    assert (w.mtp_drafted, w.mtp_accepted, w.mtp_skipped) == (7, 5, "image")
     w._llm = None
     assert (w.mtp_drafted, w.mtp_accepted, w.mtp_skipped) == (0, 0, "")
 
@@ -1798,8 +1797,6 @@ def test_the_done_envelope_carries_the_draft_counts():
     ({"mtp_status": "no-mtp-graph:llama", "mtp_active": False}, False,
      {"state": "unavailable", "drafted": 0, "accepted": 0, "paused_steps": 0,
       "reason": "no-mtp-graph:llama"}),
-    ({"mtp_status": "ok:qwen35", "mtp_active": False, "mtp_skipped": "grammar"}, True,
-     {"state": "off", "drafted": 0, "accepted": 0, "paused_steps": 0, "reason": "grammar"}),
     ({"mtp_status": "ok:qwen35", "mtp_active": False, "mtp_skipped": "image"}, True,
      {"state": "off", "drafted": 0, "accepted": 0, "paused_steps": 0, "reason": "image"}),
 ])

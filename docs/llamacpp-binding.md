@@ -475,12 +475,12 @@ are nearly tied (measured: a top-2 logit gap around 0.1) the reply can take the
 other one. Up to three draft tokens no such divergence was seen on the test
 models, which is why the setting stops at three. If the removal fails,
 MTP is disabled for the rest of the loaded model's life (not just the current
-generation) - speculation needs that rewind. **Drafting never runs while a
-grammar is active** - a mis-sequenced `llama_sampler_accept` on a grammar
-sampler throws across the C ABI, so a constrained request always takes the
-plain, one-token-at-a-time path (the draft cache is still kept in step, also
-while drafting is paused, and the reply reports MTP as `off` with reason
-`grammar`).
+generation) - speculation needs that rewind. **A grammar does not stop
+drafting**: drafts are never accepted into the request's sampler, which only
+ever samples (and so accepts) the tokens that are emitted, in order, so a
+grammar or lazy grammar in that sampler sees exactly the sequence it would see
+without MTP, and a draft the grammar forbids is simply rejected at
+verification.
 
 Prefill mirrors each main chunk into the draft cache with the hidden states
 shifted by one position, and the first draft of a reply reads the hidden state

@@ -149,11 +149,6 @@ test("the usage line shows MTP acceptance, a pause, a stop, an off reply or unav
   assert.match(usage("chat-usage").textContent, /MTP unavailable/);
 
   window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "off", drafted: 0, accepted: 0,
-                                                       reason: "grammar" } });
-  assert.match(usage("chat-usage").textContent, /MTP off/);
-  assert.match(usage("chat-usage").title, /constrained output/);
-
-  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "off", drafted: 0, accepted: 0,
                                                        reason: "image" } });
   assert.match(usage("chat-usage").textContent, /MTP off/);
   assert.match(usage("chat-usage").title, /with an image/);
