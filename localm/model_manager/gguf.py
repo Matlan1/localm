@@ -1267,23 +1267,23 @@ def gguf_moe_pinned_expert_bytes(
     return total
 
 
-def gguf_moe_expert_bytes_by_layer(
-        path: Path, *, _parsed: object = _UNSET) -> "Optional[dict[int, int]]":
-    """Routed-expert weight bytes per transformer layer, ``{layer index:
-    bytes}``, summed over every part of a split GGUF: the tensors an
-    ``n_cpu_moe`` load pins to system RAM for that layer (see
-    ``_MOE_EXPERT_TENSOR_RE``). Sizes are offset deltas, as in
-    ``_gguf_tensor_offset_entries``.
+def gguf_block_bytes(
+        path: Path, *, _parsed: object = _UNSET) -> "Optional[dict[int, tuple[int, int]]]":
+    """``{block index: (all tensor bytes, routed-expert tensor bytes)}`` for
+    every ``blk.<i>.`` tensor, summed over every part of a split GGUF. The
+    routed-expert tensors are the ones an ``n_cpu_moe`` load pins to system
+    RAM for that block (see ``_MOE_EXPERT_TENSOR_RE``). Sizes are offset
+    deltas, as in ``_gguf_tensor_offset_entries``.
 
     *_parsed*, if given, is used for a single-file model instead of reading
     *path* again (an already-computed ``_gguf_tensor_offset_entries(path)``
     result, or its ``None`` failure); a split model reads every part.
 
-    ``{}`` for a model with no expert tensors. ``None`` - never raises - when
-    any part does not parse or a part of a split model is missing."""
+    ``None`` - never raises - when any part does not parse or a part of a
+    split model is missing."""
     parts = split_gguf_parts(path.name)
     paths = [path.parent / p for p in parts] if parts else [path]
-    by_layer: dict = {}
+    blocks: dict = {}
     for part in paths:
         if not parts and _parsed is not _UNSET:
             parsed = _parsed
@@ -1295,15 +1295,32 @@ def gguf_moe_expert_bytes_by_layer(
             return None
         entries, file_size, data_start = parsed
         for idx, (name, offset) in enumerate(entries):
-            m = _MOE_EXPERT_TENSOR_RE.search(name)
-            if not m:
+            if not name.startswith("blk."):
+                continue
+            head, _, _rest = name[4:].partition(".")
+            if not head.isdigit():
                 continue
             nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
             size = nxt - offset
-            if size > 0:
-                layer = int(m.group(1))
-                by_layer[layer] = by_layer.get(layer, 0) + size
-    return by_layer
+            if size <= 0:
+                continue
+            total, experts = blocks.get(int(head), (0, 0))
+            if _MOE_EXPERT_TENSOR_RE.search(name):
+                experts += size
+            blocks[int(head)] = (total + size, experts)
+    return blocks
+
+
+def gguf_moe_expert_bytes_by_layer(
+        path: Path, *, _parsed: object = _UNSET) -> "Optional[dict[int, int]]":
+    """Routed-expert weight bytes per transformer layer, ``{layer index:
+    bytes}``, for the layers that have any (``gguf_block_bytes``). ``{}`` for
+    a model with no expert tensors. ``None`` - never raises - when any part
+    does not parse or a part of a split model is missing."""
+    blocks = gguf_block_bytes(path, _parsed=_parsed)
+    if blocks is None:
+        return None
+    return {layer: experts for layer, (_total, experts) in blocks.items() if experts > 0}
 
 
 def gguf_input_layer_bytes(

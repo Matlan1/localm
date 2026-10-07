@@ -29,7 +29,7 @@ import pytest
 from localm.inference.backends.gguf import GgufBackend
 from localm.model_manager.gguf import (_gguf_tensor_offset_entries,
                                        gguf_input_layer_bytes,
-                                       gguf_moe_expert_bytes_by_layer,
+                                       gguf_block_bytes,
                                        gguf_moe_pinned_expert_bytes)
 
 
@@ -378,8 +378,8 @@ class TestEffectiveModelBytesForVram:
     def test_memoised_across_repeated_calls(self, tmp_path):
         tensors = [("blk.0.ffn_gate_exps.weight", [4], 0, 500)]
         b, f = self._backend(tmp_path, n_cpu_moe=1, tensors=tensors)
-        with patch("localm.model_manager.gguf.gguf_moe_expert_bytes_by_layer",
-                   wraps=gguf_moe_expert_bytes_by_layer) as spy:
+        with patch("localm.model_manager.gguf.gguf_block_bytes",
+                   wraps=gguf_block_bytes) as spy:
             first = b._effective_model_bytes_for_vram()
             second = b._effective_model_bytes_for_vram()
         assert first == second

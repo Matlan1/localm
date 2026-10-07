@@ -769,30 +769,37 @@ class VramSizingMixin:
             return int(effective)
         return int(getattr(self, "n_cpu_moe", 0) or 0)
 
-    def _moe_expert_bytes_by_layer(self) -> "dict[int, int]":
-        """``gguf_moe_expert_bytes_by_layer`` for this model, read at most once
-        per instance. ``{}`` for a dense model and on a probe failure, which
-        charges every expert byte to VRAM."""
-        cached = getattr(self, "_moe_expert_bytes_cache", None)
+    def _block_bytes(self) -> "dict[int, tuple[int, int]]":
+        """``gguf_block_bytes`` for this model (``{block: (all bytes, routed
+        expert bytes)}``), read at most once per instance. ``{}`` on a probe
+        failure, which charges every expert byte to VRAM and sizes GPU layers
+        as equal shares."""
+        cached = getattr(self, "_block_bytes_cache", None)
         if cached is not None:
             return cached
-        from localm.model_manager.gguf import gguf_moe_expert_bytes_by_layer
+        from localm.model_manager.gguf import gguf_block_bytes
         try:
-            by_layer = gguf_moe_expert_bytes_by_layer(
+            blocks = gguf_block_bytes(
                 Path(self.model_path), _parsed=self._gguf_parsed_tensor_entries())
         except Exception as exc:  # contracted not to raise - surface if it does
             from localm.debuglog import logger as _dbg
-            _dbg.debug("gguf MoE expert-byte probe failed (%s); charging every "
+            _dbg.debug("gguf block-byte probe failed (%s); charging every "
                        "expert byte for VRAM sizing", type(exc).__name__)
-            by_layer = None
-        if by_layer is None:
+            blocks = None
+        if blocks is None:
             from localm.debuglog import logger as _dbg
-            _dbg.debug("gguf MoE expert-byte probe could not read %s; charging "
+            _dbg.debug("gguf block-byte probe could not read %s; charging "
                        "every expert byte for VRAM sizing",
                        Path(self.model_path).name)
-            by_layer = {}
-        self._moe_expert_bytes_cache = by_layer
-        return by_layer
+            blocks = {}
+        self._block_bytes_cache = blocks
+        return blocks
+
+    def _moe_expert_bytes_by_layer(self) -> "dict[int, int]":
+        """Routed-expert bytes of each block that has any (``_block_bytes``).
+        ``{}`` for a dense model and on a probe failure."""
+        return {layer: experts for layer, (_total, experts) in self._block_bytes().items()
+                if experts > 0}
 
     def _moe_pinned_bytes(self, n_cpu_moe: int) -> int:
         """Bytes of routed-expert weights the first *n_cpu_moe* layers keep in
@@ -1296,7 +1303,7 @@ class VramSizingMixin:
         layer's experts in system RAM does not fit one GPU, they all stay there
         and ``layers`` is sized over the remaining weights (``moe_cpu_layers`` 0
         when ``layers`` is 0); on 2+ GPUs whole layers are sized as for a dense
-        model. ``model`` is always the VRAM-resident weight bytes WITHOUT that
+        model. ``model`` is always the VRAM-resident weight bytes WITHOUT the
         automatic choice."""
         free, total, split_devices = self._split_free_total_bytes()
         if free is None:

@@ -22,7 +22,7 @@ from localm import discover
 from localm.inference import http_server as hs
 from localm.inference.backends.gguf import GgufBackend
 from localm.inference.backends.llamacpp import _loader
-from localm.model_manager.gguf import (gguf_expert_counts,
+from localm.model_manager.gguf import (gguf_block_bytes, gguf_expert_counts,
                                        gguf_moe_expert_bytes_by_layer,
                                        gguf_moe_pinned_expert_bytes)
 from tests.test_gguf_moe_vram_sizing import (_T_ARRAY, _T_STRING, _T_UINT32,
@@ -204,7 +204,7 @@ class TestAutoChoice:
         b = _backend(_moe_model(tmp_path))
         free = _free_fitting(b, 2)
         b2 = _backend(_moe_model(tmp_path, name="moe2.gguf"))
-        with _Vram(free), patch("localm.model_manager.gguf.gguf_moe_expert_bytes_by_layer",
+        with _Vram(free), patch("localm.model_manager.gguf.gguf_block_bytes",
                                 side_effect=ValueError("simulated probe failure")):
             layers = b2._effective_gpu_layers()
         assert b2.effective_n_cpu_moe == 0
@@ -365,6 +365,12 @@ class TestGgufExpertProbes:
     def test_by_layer_sums_every_expert_projection(self, tmp_path):
         assert gguf_moe_expert_bytes_by_layer(_moe_model(tmp_path)) == dict(
             enumerate(EXPERT_BYTES))
+
+    def test_block_bytes_count_every_tensor_and_the_experts_apart(self, tmp_path):
+        assert gguf_block_bytes(_moe_model(tmp_path)) == {
+            il: (2_300 + size, size) for il, size in enumerate(EXPERT_BYTES)}
+        assert gguf_block_bytes(_dense_model(tmp_path)) == {
+            il: (112_000, 0) for il in range(4)}
 
     def test_by_layer_is_empty_for_a_dense_model(self, tmp_path):
         assert gguf_moe_expert_bytes_by_layer(_dense_model(tmp_path)) == {}
@@ -542,3 +548,4 @@ class TestPlacementHeal:
                            "degraded": True},
                           {"mode": "auto", "n_cpu_moe": 0, "n_cpu_moe_auto": False})
         assert isinstance(heal, hs.PlacementHeal)
+
