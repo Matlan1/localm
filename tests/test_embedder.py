@@ -773,7 +773,7 @@ def test_get_embedder_on_progress_reports_no_model_available(monkeypatch):
                         lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
-                        lambda *, allow_download=None: None)
+                        lambda *, allow_download=None, on_progress=None: None)
 
     messages: list[str] = []
     assert emb.get_embedder(on_progress=messages.append) is None
