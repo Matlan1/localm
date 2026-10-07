@@ -1261,8 +1261,9 @@ const MEMORY_DEGRADE_LABELS = {
  *  needed. *routed* is { from, gaps: [capability, ...], placement? }, or
  *  { fallback } when the selected model answered because a model that could
  *  have answered was skipped or failed to load: `fallback` is the server's
- *  explanation. `placement` ({ gpu, total }) marks an answering model that
- *  runs partly on the CPU. */
+ *  explanation. `placement` ({ gpu, total, moe? }) marks an answering model
+ *  that runs partly on the CPU; `moe` counts the layers whose routed experts
+ *  stayed in system RAM. */
 export function buildRoutedChip(routed) {
   const chip = routed.suggest ? el("button", "routed-chip routed-suggest")
     : el("span", "routed-chip");
@@ -1290,9 +1291,11 @@ export function buildRoutedChip(routed) {
   chip.title = t("chat.routed.title", {
     from: routed.from || "?", needs: gaps.join(", ") || "?" });
   if (routed.placement) {
-    const counts = { gpu: routed.placement.gpu, total: routed.placement.total };
+    const counts = { gpu: routed.placement.gpu, total: routed.placement.total,
+      moe: routed.placement.moe };
     chip.appendChild(document.createTextNode(", " + t("chat.routed.partial", counts)));
-    chip.title += " " + t("chat.routed.partialTitle", counts);
+    chip.title += " " + t(routed.placement.moe ? "chat.routed.partialMoeTitle"
+      : "chat.routed.partialTitle", counts);
   }
   return chip;
 }

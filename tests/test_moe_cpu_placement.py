@@ -134,7 +134,7 @@ class TestApplyCpuMoe:
             pattern = array[i].pattern.decode()
             assert pattern.startswith(r"blk\.") and str(i) in pattern
             # only the FUSED expert tensors, never the router or shared expert
-            assert "ffn_(gate|down|up)_exps" in pattern
+            assert pattern.endswith(r"\.ffn_(up|down|gate|gate_up)_(ch|)exps")
             assert "ffn_gate_inp" not in pattern
         assert array[3].pattern is None, "array must be NULL-terminated"
 

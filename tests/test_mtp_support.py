@@ -1364,7 +1364,7 @@ def test_bench_mtp_names_cpu_offload_when_mtp_loses(cli_runner):
         res = cli_runner.invoke(models_mod.bench_mtp,
                                 ["model.gguf", "--rounds", "1"])
 
-    assert "12 of 28 layers are on the GPU" in res.output
+    assert "12/28 layers on the GPU, the rest on the CPU" in res.output
 
 
 def test_bench_mtp_never_writes_the_setting(cli_runner):

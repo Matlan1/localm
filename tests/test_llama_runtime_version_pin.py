@@ -854,9 +854,10 @@ def test_check_runtime_update_prefers_the_pin_over_a_release_lookup(
 
 
 def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatch, tmp_path):
-    """amd-rocm's build is fixed by the localm release (_ROCM_TAG), never
-    resolved from an upstream release listing - the check must not query one
-    for this backend either."""
+    """amd-rocm's build is fixed by the localm release (_ROCM_BUILD: the
+    lemonade-sdk build plus its SIMD CPU backend), never resolved from an
+    upstream release listing - the check must not query one for this backend
+    either."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     monkeypatch.setattr(sl, "_latest_tag",
                         lambda: pytest.fail("amd-rocm must not query releases"))
@@ -864,7 +865,7 @@ def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatc
 
     result = sl.check_runtime_update()
 
-    assert result["target"] == sl._ROCM_TAG
+    assert result["target"] == sl._ROCM_BUILD
     assert result["newer"] is True
 
 

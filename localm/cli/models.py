@@ -311,11 +311,11 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
             f"({on_med:.1f} vs {off_med:.1f} tok/s, {ratio:.2f}x). "
             "Leave it off.")
         if placement and placement.get("degraded"):
+            from localm.inference.engine import describe_gpu_placement
             console.print(
-                f"[dim]Only {placement['gpu_layers_offloaded']} of "
-                f"{placement['gpu_layers_total']} layers are on the GPU. "
+                f"[dim]This load has {describe_gpu_placement(placement)}. "
                 "Speculation pays when checking two tokens costs about what "
-                "checking one costs, which stops holding once layers run on "
+                "checking one costs, which stops holding once weights run on "
                 "the CPU. Fitting the whole model on the GPU, or a smaller "
                 "quantisation, changes this answer.[/dim]")
     else:

@@ -1441,9 +1441,9 @@ async def _switch_free_for_reload(loop, name: str, engine,
     why = ("its earlier eviction's VRAM release was not confirmed"
            if heal is not None and heal.release_unconfirmed
            else "a model that held the VRAM it lacked is idle or gone")
-    _dbg.info("switch_engine: reloading '%s' (%s/%s layers on the GPU) for a full "
-              "GPU placement: %s", name, placement.get("gpu_layers_offloaded"),
-              placement.get("gpu_layers_total"), why)
+    from localm.inference.engine import describe_gpu_placement
+    _dbg.info("switch_engine: reloading '%s' (%s) for a full GPU placement: %s",
+              name, describe_gpu_placement(placement), why)
     try:
         return await _switch_free_victim(loop, name, engine, probe, needed=needed)
     finally:
@@ -1461,10 +1461,10 @@ def _describe_load_placement(name: str, engine, evictions=()) -> str:
     placement = placement if isinstance(placement, dict) else None
     sizing = sizing if isinstance(sizing, dict) else None
     if placement:
-        where = (f"{placement['gpu_layers_offloaded']}/{placement['gpu_layers_total']} "
-                 f"layers on the GPU")
+        from localm.inference.engine import describe_gpu_placement
+        where = describe_gpu_placement(placement)
         if placement.get("degraded"):
-            where += ", the rest on the CPU (slower)"
+            where += " (slower)"
     else:
         where = "GPU layer placement not reported by this backend"
     parts = [f"loaded '{name}': {where}"]
@@ -5709,7 +5709,8 @@ def _capability_route_header(route, placement=None) -> dict:
     the decision's one-line description (cut to 600 characters) whenever either
     is present. A routed decision whose answering model runs partly on the CPU
     (*placement*, an ``Engine.gpu_placement`` dict, with ``degraded`` true)
-    adds ``"placement":{"gpu_layers","total_layers"}``."""
+    adds ``"placement":{"gpu_layers","total_layers"}``, with
+    ``"moe_cpu_layers"`` when routed experts stayed in system RAM."""
     if route is None or not getattr(route, "has_gap", False):
         return {}
     payload = {
@@ -5738,6 +5739,8 @@ def _capability_route_header(route, placement=None) -> dict:
     if route.routed and isinstance(placement, dict) and placement.get("degraded"):
         payload["placement"] = {"gpu_layers": placement.get("gpu_layers_offloaded"),
                                 "total_layers": placement.get("gpu_layers_total")}
+        if placement.get("moe_cpu_layers"):
+            payload["placement"]["moe_cpu_layers"] = placement["moe_cpu_layers"]
     try:
         blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):

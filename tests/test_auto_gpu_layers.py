@@ -254,7 +254,8 @@ class TestEffectiveGpuLayers:
         b = _model(tmp_path, 8 * GB, n_gpu_layers=layers, auto=auto)
         with _vram(free, None if free is None else 16 * GB):
             assert b._effective_gpu_layers() == layers
-        assert b.last_gpu_sizing == {"mode": mode, "layers": layers, "n_ctx": 4096}
+        assert b.last_gpu_sizing == {"mode": mode, "layers": layers, "n_ctx": 4096,
+                                     "n_cpu_moe": 0, "n_cpu_moe_auto": False}
 
     @staticmethod
     def _flat(capsys) -> str:

@@ -418,13 +418,34 @@ class TestBackendWiring:
         out_on = next(c for c in on.default if c.holds_output)
         assert out_on.logits == 2 * self._VOCAB * 2048 * 4
 
-    def test_configured_split_or_cpu_load_skips_the_fit(self, tmp_path):
+    def test_a_cpu_load_skips_the_fit(self, tmp_path):
         b, devices = self._backend(tmp_path, [10**9, 10**9])
         with mock.patch.object(discover, "implicit_split_devices",
                                return_value=devices):
             assert b._implicit_split_fit(0) is None
-            b.n_cpu_moe = 2
-            assert b._implicit_split_fit(99) is None
+
+    def test_experts_kept_in_system_ram_are_not_charged_to_any_device(self, tmp_path):
+        tensors = [("token_embd.weight", 4000)]
+        for il in range(4):
+            tensors += [(f"blk.{il}.attn_q.weight", 3000),
+                        (f"blk.{il}.ffn_up_exps.weight", 2000),
+                        (f"blk.{il}.ffn_down_exps.weight", 2000)]
+        tensors += [("output_norm.weight", 64), ("output.weight", 5000)]
+        path = _write_gguf(tmp_path / "moe.gguf", arch="qwen3moe", block_count=4,
+                           vocab=self._VOCAB, tensors=tensors)
+        devices = [{"index": i, "free": 10**9, "total": 10**9 + 10} for i in range(2)]
+        plans = {}
+        for n_cpu_moe in (0, 3):
+            b = GgufBackend(str(path), n_ctx=4096, n_gpu_layers=99, n_cpu_moe=n_cpu_moe)
+            b._VRAM_OVERHEAD_BYTES = 1000
+            b._gguf_kv_bpt = 10
+            with mock.patch.object(discover, "implicit_split_devices",
+                                   return_value=devices), \
+                    mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+                plans[n_cpu_moe] = b._implicit_split_fit(99)
+        weights = {n: sum(c.weights for c in plan.default) for n, plan in plans.items()}
+        assert weights[0] == 4 * 7000
+        assert weights[0] - weights[3] == 3 * 4000
 
     def test_load_native_passes_the_mapping_and_reports_it(self, tmp_path):
         b, devices = self._backend(tmp_path, self._FREES)

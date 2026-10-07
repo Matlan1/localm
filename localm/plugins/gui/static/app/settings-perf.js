@@ -2317,7 +2317,9 @@ export function parseRoutingHeader(resp) {
       ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
       ...(data.placement && typeof data.placement === "object"
         && Number.isFinite(data.placement.gpu_layers) && Number.isFinite(data.placement.total_layers)
-        ? { placement: { gpu: data.placement.gpu_layers, total: data.placement.total_layers } } : {}),
+        ? { placement: { gpu: data.placement.gpu_layers, total: data.placement.total_layers,
+          ...(Number.isFinite(data.placement.moe_cpu_layers) && data.placement.moe_cpu_layers > 0
+            ? { moe: data.placement.moe_cpu_layers } : {}) } } : {}),
     };
   } catch { return null; }
 }

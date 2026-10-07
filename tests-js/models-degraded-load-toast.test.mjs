@@ -95,6 +95,22 @@ test("a backend that cannot report placement (no gpu_layers_* fields) still toas
   assert.ok(!toastEl.className.includes("error"));
 });
 
+test("a load with MoE experts in system RAM warns with the expert count, not a layer split", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "moe-model",
+    gpu_layers_offloaded: 48, gpu_layers_total: 48, moe_cpu_layers: 18, degraded: true,
+  });
+
+  await selectAndLoad(window, "moe-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent, /moe-model \(experts of 18 layers in system RAM - slower\)/);
+  assert.ok(!/48\/48 layers on GPU/.test(toastEl.textContent),
+    "every layer is on the GPU, so no layer split is named");
+  assert.ok(toastEl.className.includes("error"));
+});
+
 test("a superseded load skips the toast entirely, degraded or not", async () => {
   const { window } = loadApp();
   stubLoad(window, {
