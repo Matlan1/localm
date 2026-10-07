@@ -717,7 +717,7 @@ class _DraftPacer:
     """
 
     def __init__(self, probe_every: int = 24, bootstrap_every: int = 3,
-                 min_samples: int = 4, window: int = 16, pause_steps: int = 32,
+                 min_samples: int = 6, window: int = 16, pause_steps: int = 32,
                  max_pause_steps: int = 256) -> None:
         self.probe_every = probe_every
         self.bootstrap_every = bootstrap_every
@@ -1891,17 +1891,18 @@ class LlamaCpp:
                         accepted: List[int] = []
                         timed = speculate = False
                         if (self._mtp_ctx_ptr is not None and draft_sampler is not None
-                                and self._mtp_usable and self._mtp_drafting
-                                and self._pending_h_pos == pos - 1):
-                            n_max = self._mtp_draft_budget(
-                                pos, max_new_tokens - tokens_generated
-                                if max_new_tokens > 0 else None)
-                            if n_max > 0:
+                                and self._mtp_usable and self._mtp_drafting):
+                            if pacer.paused:
                                 timed = True
-                                was_paused = pacer.paused
-                                speculate = pacer.speculate()
-                                if was_paused:
-                                    self.mtp_paused_steps += 1
+                                pacer.speculate()
+                                self.mtp_paused_steps += 1
+                            elif self._pending_h_pos == pos - 1:
+                                n_max = self._mtp_draft_budget(
+                                    pos, max_new_tokens - tokens_generated
+                                    if max_new_tokens > 0 else None)
+                                if n_max > 0:
+                                    timed = True
+                                    speculate = pacer.speculate()
                             step_t0 = clock()
                             consumer_s = 0.0
                             if speculate:
@@ -2624,14 +2625,23 @@ class LlamaCpp:
 
         Queues it for the draft cache, paired with the hidden state of the
         position before it, unless a draft step already put it there, and keeps
-        its own hidden state for the next draft. A draft cache that is neither
-        at *pos* nor past it is out of step, which stops drafting for this call.
+        its own hidden state for the next draft. While the pacer has drafting
+        paused, nothing is recorded; the first token after the pause first
+        mirrors the skipped positions without hidden states. A draft cache that
+        is past *pos* by more than one token is out of step, which stops
+        drafting for this call.
         """
+        pacer = self._draft_pacer
+        if pacer is not None and pacer.paused:
+            return
         if self._draft_tracking():
             covered = self._draft_pos + len(self._queued_tokens)
+            if covered < pos and self._flush_queued_rows():
+                self._prefill_mtp(self._cached_tokens[covered:pos], covered)
+                covered = self._draft_pos
             if covered == pos:
                 self._queue_draft_rows([token], [self._pending_h_addr(pos)])
-            elif covered != pos + 1:
+            elif covered != pos + 1 and self._draft_tracking():
                 self._stop_drafting_this_call("draft-out-of-step")
         self._capture_h(0, pos)
 

@@ -652,3 +652,30 @@ def test_a_new_conversation_starts_the_draft_cache_without_a_hidden_state():
     assert fake.draft_cache[0] == (21, 0.0)
     for p in sorted(fake.draft_cache)[1:]:
         assert fake.draft_cache[p][1] == HIDDEN_BASE + p - 1, p
+
+
+def test_paused_steps_leave_the_draft_cache_alone_until_drafting_resumes():
+    """While paused, plain steps record nothing for the draft cache; when the
+    pause ends the skipped positions are mirrored in one decode and drafting
+    picks up in step with the main cache."""
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    llm = _llama(draft_tokens=1)
+    pacer = _DraftPacer(probe_every=1 << 30, bootstrap_every=1 << 30)
+    pacer._pause_left = 10
+    llm._draft_pacer = pacer
+    fake = FakeNative(llm)
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=30)
+
+    assert tokens == _reference(PROMPT, 30)
+    assert llm.mtp_paused_steps == 10
+    assert llm.mtp_steps > 0
+    reply_decodes = [d for d in fake.draft_decodes if d[0][-1] >= len(PROMPT)]
+    catch_up = reply_decodes[0]
+    # Steps at positions 6..15 run paused; the last of them mirrors 6..14.
+    assert catch_up[0] == list(range(len(PROMPT), len(PROMPT) + 9))
+    assert not any(catch_up[3]), "the catch-up decode asked for an output"
+    main_tokens = PROMPT + tokens
+    assert len(fake.draft_cache) == len(fake.main_cache)
+    for p in sorted(fake.draft_cache):
+        assert fake.draft_cache[p][0] == main_tokens[p]
