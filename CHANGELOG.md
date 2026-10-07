@@ -223,8 +223,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "answer without the web", which led some models to present invented findings.
 - **Web search and page reads are more reliable, and failures read as plain
   sentences.** A search whose connection is reset or cut is sent again (up to
-  three tries), and a DuckDuckGo bot check is reported as such instead of "no
-  results". A failed search or page read now says what happened, for example
+  three tries). When DuckDuckGo still fails or answers with a bot check, localm
+  tries DuckDuckGo's lite page and then Brave Search by itself, asks a
+  bot-checked service once more after a short pause, and reports a failure only
+  when every service failed, naming each cause. A configured SearXNG instance is
+  repaired instead (a stray `/search` in its URL is removed, and its HTML
+  results are read when its JSON format is off). A failed search or page read
+  now says what happened, for example
   "html.duckduckgo.com closed the connection before answering" or
   "stackoverflow.com refused access, HTTP 403", instead of a Python error.
   A page that hangs no longer holds a search for up to 30 seconds: page reads

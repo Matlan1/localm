@@ -17,6 +17,8 @@ from typing import Callable, Optional
 import requests
 
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
+LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"
+BRAVE_SEARCH = "https://search.brave.com/search?"
 PUBLIC_IP = "93.184.216.34"
 
 QUERY = "Linz museum opening hours"
@@ -42,11 +44,11 @@ def allow_public(monkeypatch, **extra_cfg) -> dict:
 
 
 def no_sleep(monkeypatch) -> list[float]:
-    """Make the search providers' DuckDuckGo spacing zero and record their
+    """Make the search providers' request spacing zero and record their
     retry backoff sleeps instead of sleeping. Returns the recorded list."""
     slept: list[float] = []
     monkeypatch.setattr(
-        "localm.web_retrieval.providers._DDG_MIN_INTERVAL", 0.0)
+        "localm.web_retrieval.providers._MIN_INTERVAL", 0.0)
     monkeypatch.setattr("localm.web_retrieval.providers._sleep", slept.append)
     return slept
 

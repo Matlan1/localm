@@ -300,15 +300,15 @@ class TestSearchFailures:
         b = retrieve(QUERY)
         assert b.provider == "searxng"
         assert b.search_status == "failed"
-        assert b.search_error == (
-            "Could not connect to searx.example. Check that the Search backend "
-            "URL in Settings > Network points at a running SearXNG instance "
-            "with the JSON format enabled.")
+        assert b.search_error == ("The search backend set in Settings > "
+                                  "Network failed: could not connect to "
+                                  "searx.example.")
         assert b.sources == [] and b.chunks == []
         assert b.grounding == GROUNDING_FAILED
         assert t.urls("POST") == []
         assert len(t.urls("GET")) == 3
-        assert "Search failed: Could not connect to searx.example." in             b.to_prompt_text()
+        assert ("Search failed: The search backend set in Settings > Network "
+                "failed: could not connect to searx.example.") in             b.to_prompt_text()
 
     def test_searxng_http_error_is_in_the_bundle(self, monkeypatch):
         allow_public(monkeypatch, net_search_url="https://searx.example")
@@ -316,8 +316,9 @@ class TestSearchFailures:
             "GET", "https://searx.example/search?*", FakeResponse(status=500))
         b = retrieve(QUERY)
         assert b.search_status == "failed"
-        assert b.search_error.startswith(
-            "searx.example had a server error, HTTP 500. Check that")
+        assert b.search_error == ("The search backend set in Settings > "
+                                  "Network failed: searx.example had a server "
+                                  "error, HTTP 500.")
 
     def test_searxng_empty_results_is_empty_not_failed(self, monkeypatch):
         allow_public(monkeypatch, net_search_url="https://searx.example")

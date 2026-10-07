@@ -17,7 +17,9 @@ from localm.web_retrieval import (
     search,
 )
 from tests._web_retrieval_fixtures import (
+    BRAVE_SEARCH,
     DDG_ENDPOINT,
+    LITE_ENDPOINT,
     FakeResponse,
     Transport,
     allow_public,
@@ -167,8 +169,14 @@ class TestSearXNGProvider:
 
 
 class TestProviderFromConfig:
-    def test_default_is_duckduckgo(self):
-        assert isinstance(provider_from_config({}), DuckDuckGoHTMLProvider)
+    def test_default_is_the_search_chain(self):
+        from localm.web_retrieval import (BraveSearchProvider,
+                                          DefaultSearchProvider,
+                                          DuckDuckGoLiteProvider)
+        p = provider_from_config({})
+        assert isinstance(p, DefaultSearchProvider)
+        assert [type(r) for r in p.routes] == [
+            DuckDuckGoHTMLProvider, DuckDuckGoLiteProvider, BraveSearchProvider]
 
     def test_net_search_url_selects_searxng_and_strips_trailing_slash(self):
         p = provider_from_config({"net_search_url": "http://127.0.0.1:8080/"})
@@ -187,7 +195,8 @@ class TestProviderFromConfig:
         monkeypatch.setattr("localm.config.load_config", boom)
         with caplog.at_level("WARNING", logger=netpolicy.logger.name):
             provider = provider_from_config()
-        assert isinstance(provider, DuckDuckGoHTMLProvider)
+        from localm.web_retrieval import DefaultSearchProvider
+        assert isinstance(provider, DefaultSearchProvider)
         assert any("could not load config" in r.getMessage()
                    for r in caplog.records)
 
@@ -213,7 +222,7 @@ class TestSearchFunction:
         assert stub.calls[0][0] == "hello"
 
     def test_no_results_is_a_provider_error_and_a_runtime_error(self):
-        with pytest.raises(SearchProviderError, match="no parseable results"):
+        with pytest.raises(SearchProviderError, match="no results"):
             search("q", provider=_StubProvider())
         with pytest.raises(RuntimeError):
             search("q", provider=_StubProvider())
@@ -281,22 +290,28 @@ class TestDuckDuckGoResilience:
         assert len(t.urls("POST")) == 2
         assert slept == [1.0]
 
-    def test_reset_every_time_gives_a_readable_bundle_error(self, monkeypatch):
+    def test_reset_everywhere_names_every_service_and_cause(self, monkeypatch):
         from localm.web_retrieval import retrieve
-        from localm.web_retrieval.providers import REMEDY
         from tests._web_retrieval_fixtures import no_sleep
         allow_public(monkeypatch)
         slept = no_sleep(monkeypatch)
         t = Transport().install(monkeypatch)
-        t.route("POST", DDG_ENDPOINT,
-                lambda url, **kw: (_ for _ in ()).throw(_reset_exc()))
+        reset = lambda url, **kw: (_ for _ in ()).throw(_reset_exc())  # noqa: E731
+        t.route("POST", DDG_ENDPOINT, reset)
+        t.route("POST", LITE_ENDPOINT, reset)
+        t.route("GET", BRAVE_SEARCH + "*", reset)
         b = retrieve("Matlan1 LocalM GitHub repository")
         assert b.search_status == "failed"
-        assert b.search_error == ("html.duckduckgo.com closed the connection "
-                                  "before answering. " + REMEDY)
-        assert "10054" not in b.search_error and "(" not in b.search_error[:60]
-        assert len(t.urls("POST")) == 3
-        assert slept == [1.0, 2.0]
+        assert b.search_error == (
+            "Web search failed on every search service localm tried ("
+            "DuckDuckGo: html.duckduckgo.com closed the connection before "
+            "answering; DuckDuckGo lite: lite.duckduckgo.com closed the "
+            "connection before answering; Brave Search: search.brave.com "
+            "closed the connection before answering).")
+        for banned in ("10054", "localm config", "Try again", "try again"):
+            assert banned not in b.search_error
+        assert len(t.urls("POST")) == 6 and len(t.urls("GET")) == 3
+        assert slept == [1.0, 2.0] * 3
 
     @pytest.mark.parametrize("status", [202, 403, 418, 429])
     def test_bot_check_status_is_reported_and_not_retried(self, monkeypatch,
@@ -311,16 +326,16 @@ class TestDuckDuckGoResilience:
         assert len(t.urls("POST")) == 1
 
     def test_challenge_form_page_is_a_bot_check(self, monkeypatch):
-        from localm.web_retrieval import retrieve
-        from localm.web_retrieval.providers import BOT_CHECK_MESSAGE
+        from localm.web_retrieval.providers import (BOT_CHECK_MESSAGE,
+                                                    BotCheckError)
         allow_public(monkeypatch)
         t = Transport().install(monkeypatch)
         t.route("POST", DDG_ENDPOINT, FakeResponse(text=(
             '<html><body><form id="challenge-form" action="/anomaly">'
             "</form></body></html>")))
-        b = retrieve("q")
-        assert b.search_status == "failed"
-        assert b.search_error == BOT_CHECK_MESSAGE
+        with pytest.raises(BotCheckError) as info:
+            DuckDuckGoHTMLProvider().search("q", 5)
+        assert str(info.value) == BOT_CHECK_MESSAGE
         assert len(t.urls("POST")) == 1
 
     def test_tls_failure_is_not_retried(self, monkeypatch):
@@ -341,8 +356,9 @@ class TestDuckDuckGoResilience:
         from tests._web_retrieval_fixtures import no_sleep
         allow_public(monkeypatch)
         slept = no_sleep(monkeypatch)
-        monkeypatch.setattr(providers, "_DDG_MIN_INTERVAL", 5.0)
-        monkeypatch.setattr(providers, "_ddg_last", time.monotonic())
+        monkeypatch.setattr(providers, "_MIN_INTERVAL", 5.0)
+        monkeypatch.setitem(providers._last_request, "duckduckgo",
+                            time.monotonic())
         Transport().install(monkeypatch).route("POST", DDG_ENDPOINT, _ddg_ok())
         DuckDuckGoHTMLProvider().search("q", 5)
         assert len(slept) == 1 and 4.0 < slept[0] <= 5.0
