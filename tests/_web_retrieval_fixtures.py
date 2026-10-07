@@ -194,6 +194,22 @@ def ddg_html(results: list[tuple[str, str, str]]) -> str:
     return "<html><body>\n" + "".join(rows) + "</body></html>"
 
 
+def ddg_no_results(lite: bool = False) -> str:
+    """DuckDuckGo's no-results page for a query with no hits: the html
+    endpoint's, or the lite endpoint's with *lite* (the markup measured on
+    2026-10-07)."""
+    container = ("<div class='no-results__container'>" if lite else
+                 '<div class="no-results__container result__title">')
+    block = (container + "<span class='no-results'>"
+             '<div class="no-results__message"><h1>No results found for '
+             "<strong>&quot;q&quot;</strong></h1><p><strong>Suggestions"
+             "</strong>:<ul><li>Check spelling</li></ul></p></div></span>"
+             "</div>")
+    if lite:
+        block = f'<table><tr><td colspan="2">{block}</td></tr></table>'
+    return f"<html><body>{block}</body></html>"
+
+
 def searx_json(results: list[tuple[str, str, str]]) -> dict:
     return {"results": [{"title": t, "url": u, "content": s}
                         for t, u, s in results]}

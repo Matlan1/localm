@@ -878,13 +878,15 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     """
     Search the web. Returns [{"title", "url", "snippet"}, ...].
 
-    Backend: a SearXNG instance when net_search_url is configured (its JSON
-    API must be enabled), otherwise DuckDuckGo's no-key HTML endpoint. The
-    providers live in ``localm.web_retrieval.providers`` and send their
-    request (up to three times on a transient transport failure) through
-    this module's policy check and pinned transport.
-    Raises NetworkPolicyError when the policy refuses, or RuntimeError when
-    the backend yields nothing parseable.
+    Backend: the SearXNG instance set in net_search_url (its JSON API, or
+    its HTML results page when the instance refuses JSON), otherwise the
+    built-in chain of DuckDuckGo's HTML page, DuckDuckGo's lite page and
+    Brave Search. The providers live in ``localm.web_retrieval.providers``
+    and send every request through this module's policy check and pinned
+    transport.
+    Raises NetworkPolicyError when the policy refuses, or RuntimeError
+    (``SearchProviderError``) when the search returns no results or every
+    service failed.
     """
     from localm.web_retrieval.providers import search
     return [r.to_legacy() for r in search(query, max_results)]

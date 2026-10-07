@@ -40,6 +40,7 @@ from .providers import (
     DuckDuckGoHTMLProvider,
     DuckDuckGoLiteProvider,
     SearXNGProvider,
+    UnreadableResultsError,
     provider_from_config,
     search,
 )
@@ -68,6 +69,7 @@ __all__ = [
     "SearchProviderError",
     "SearchResult",
     "Source",
+    "UnreadableResultsError",
     "canonicalize_url",
     "dedup_key",
     "dedup_results",

@@ -659,19 +659,38 @@ class TestWebSearch:
         assert results == [{"title": "T1", "url": "https://a.example/",
                             "snippet": "c1"}]
 
-    def test_no_results_is_an_error(self, monkeypatch):
+    def _search_pages(self, monkeypatch, text):
+        from localm.web_retrieval import providers
         _with_config(monkeypatch, {"net_mode": "allow"})
+        monkeypatch.setattr(providers, "_MIN_INTERVAL", 0.0)
         monkeypatch.setattr(
             "socket.getaddrinfo",
             lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
 
         class _R:
-            text = "<html><body>captcha?</body></html>"
+            status_code = 200
             def raise_for_status(self):
                 pass
-        _patch_session(monkeypatch, post=lambda url, **kw: _R())
-        with pytest.raises(RuntimeError, match="no parseable results"):
+        _R.text = text
+        _patch_session(monkeypatch, post=lambda url, **kw: _R(),
+                       get=lambda url, **kw: _R())
+
+    def test_no_results_is_an_error(self, monkeypatch):
+        from tests._web_retrieval_fixtures import ddg_no_results
+        self._search_pages(monkeypatch, ddg_no_results())
+        with pytest.raises(RuntimeError) as info:
             web_search("anything")
+        assert str(info.value) == "The search returned no results."
+
+    def test_unreadable_pages_are_an_error_naming_each_service(self,
+                                                               monkeypatch):
+        self._search_pages(monkeypatch, "<html><body>captcha?</body></html>")
+        with pytest.raises(RuntimeError) as info:
+            web_search("anything")
+        message = str(info.value)
+        for service in ("DuckDuckGo:", "DuckDuckGo lite:", "Brave Search:"):
+            assert service in message
+        assert "no results" not in message
 
     def test_mode_off_blocks_search(self, monkeypatch):
         _with_config(monkeypatch, {"net_mode": "off"})

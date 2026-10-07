@@ -24,6 +24,7 @@ from tests._web_retrieval_fixtures import (
     Transport,
     allow_public,
     ddg_html,
+    ddg_no_results,
     searx_json,
 )
 
@@ -98,12 +99,22 @@ class TestDuckDuckGoHTMLProvider:
         with pytest.raises(requests.HTTPError, match="HTTP 503"):
             DuckDuckGoHTMLProvider().search("q", 5)
 
-    def test_no_result_markup_yields_empty_list(self, monkeypatch):
+    def test_no_results_page_yields_empty_list(self, monkeypatch):
+        allow_public(monkeypatch)
+        Transport().install(monkeypatch).route(
+            "POST", DDG_ENDPOINT, FakeResponse(text=ddg_no_results()))
+        assert DuckDuckGoHTMLProvider().search("q", 5) == []
+
+    def test_page_without_results_or_no_results_message_is_unreadable(
+            self, monkeypatch):
         allow_public(monkeypatch)
         Transport().install(monkeypatch).route(
             "POST", DDG_ENDPOINT,
             FakeResponse(text="<html><body>captcha?</body></html>"))
-        assert DuckDuckGoHTMLProvider().search("q", 5) == []
+        with pytest.raises(SearchProviderError) as info:
+            DuckDuckGoHTMLProvider().search("q", 5)
+        assert str(info.value) == ("DuckDuckGo answered with a page localm "
+                                   "could not read results from.")
 
     def test_policy_off_refuses_before_any_request(self, monkeypatch):
         monkeypatch.setattr("localm.config.load_config",

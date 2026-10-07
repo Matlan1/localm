@@ -235,7 +235,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   three tries). When DuckDuckGo still fails or answers with a bot check, localm
   tries DuckDuckGo's lite page and then Brave Search by itself, asks a
   bot-checked service once more after a short pause, and reports a failure only
-  when every service failed, naming each cause. A configured SearXNG instance is
+  when every service failed, naming each cause. A results page localm cannot
+  read is reported as such instead of as "no results". A configured SearXNG instance is
   repaired instead (a stray `/search` in its URL is removed, and its HTML
   results are read when its JSON format is off). A failed search or page read
   now says what happened, for example

@@ -130,7 +130,9 @@ The default backend is a chain of no-key search services - no account, no API
 key, nothing to configure: DuckDuckGo's HTML page, then DuckDuckGo's lite page,
 then Brave Search. A search whose connection is reset or cut is sent again (up
 to three tries); when a service still fails, answers with a bot check or
-returns nothing parseable, localm moves on to the next one, and a service that
+returns a page without results it can read, localm moves on to the next one. A
+page counts as "no results" only when it says so itself; any other page
+without readable results is reported as a failure. A service that
 answered with a bot check is asked once more after a short pause. Only when
 every service failed does the search report it, naming each one's cause. A
 query can therefore reach Brave Search when DuckDuckGo does not answer.

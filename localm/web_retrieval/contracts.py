@@ -48,9 +48,9 @@ CHUNK_SNIPPET = "snippet"
 
 
 class SearchProviderError(RuntimeError):
-    """The search backend answered but yielded nothing parseable, or its
-    response was malformed. A policy refusal is a ``NetworkPolicyError``,
-    never this."""
+    """The search returned no results, every search service failed, or a
+    backend's response was malformed or unreadable. A policy refusal is a
+    ``NetworkPolicyError``, never this."""
 
 
 @dataclass(frozen=True)

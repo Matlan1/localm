@@ -15,8 +15,10 @@ least ``_MIN_INTERVAL`` seconds apart.
 
 ``DefaultSearchProvider`` (no ``net_search_url`` configured) tries, in order,
 DuckDuckGo's HTML page, DuckDuckGo's lite page and Brave Search, moving on
-when one fails, answers with a bot check (``BotCheckError``) or returns no
-parseable results, and returns the first non-empty result list. A service
+when one fails, answers with a bot check (``BotCheckError``) or returns a
+page with no results it can read (``UnreadableResultsError``), and returns
+the first non-empty result list. A page with no results counts as an empty
+answer only when it carries the service's own no-results message. A service
 that answered with a bot check is asked once more after ``_BOT_CHECK_WAIT``
 seconds. The whole chain stops starting new requests after
 ``_SEARCH_BUDGET`` seconds. When every service failed, ``SearchProviderError``
@@ -26,8 +28,8 @@ policy, the first ``NetworkPolicyError`` is raised.
 ``SearXNGProvider`` (``net_search_url`` configured) queries only that
 instance: the configured URL is normalised (query, fragment and a trailing
 ``/search`` removed) and an instance that refuses the JSON format (HTTP 403)
-is read through its HTML results page instead. It never falls back to
-another search service.
+is read through its HTML results page instead, with the same no-results
+rule. It never falls back to another search service.
 """
 
 from __future__ import annotations
@@ -61,6 +63,10 @@ _BOT_CHECK_WAIT = 3.0
 _BOT_CHECK_STATUSES = frozenset({202, 403, 418, 429})
 _CHALLENGE_RE = re.compile(r"""id\s*=\s*["']?challenge-form\b""",
                            re.IGNORECASE)
+_DDG_NO_RESULTS_RE = re.compile(r"""class\s*=\s*["'][^"']*\bno-results\b""",
+                                re.IGNORECASE)
+_SEARXNG_NO_RESULTS_RE = re.compile(
+    r"""class\s*=\s*["'][^"']*\bdialog-error-block\b""", re.IGNORECASE)
 _BROWSER_ACCEPT = ("text/html,application/xhtml+xml,application/xml;q=0.9,"
                    "*/*;q=0.8")
 
@@ -98,6 +104,24 @@ def _notify(url: str) -> None:
 class BotCheckError(SearchProviderError):
     """A search service answered with a bot check (a challenge page or a
     rate-limit status) instead of results."""
+
+
+class UnreadableResultsError(SearchProviderError):
+    """A search service answered with a page that has no results localm can
+    read and no no-results message."""
+
+
+def _checked_results(items: list[dict], text: str, max_results: int,
+                     provider: str, label: str,
+                     no_results: Optional[re.Pattern]) -> list[SearchResult]:
+    """The results parsed from *text*; an empty list only when *no_results*
+    matches *text*, otherwise ``UnreadableResultsError``."""
+    out = _results(items, max_results, provider)
+    if not out and (no_results is None or not no_results.search(text)):
+        raise UnreadableResultsError(
+            f"{label} answered with a page localm could not read results "
+            "from.")
+    return out
 
 
 def _pace(service: str) -> None:
@@ -409,7 +433,8 @@ class DuckDuckGoHTMLProvider:
                 raise BotCheckError(BOT_CHECK_MESSAGE)
             return text
         text = _with_retries(send)
-        return _results(_parse(_DDGParser(), text), max_results, self.name)
+        return _checked_results(_parse(_DDGParser(), text), text, max_results,
+                                self.name, self.label, _DDG_NO_RESULTS_RE)
 
 
 class DuckDuckGoLiteProvider:
@@ -435,7 +460,9 @@ class DuckDuckGoLiteProvider:
                     f"{self.label} answered with a bot check instead of results")
             return text
         text = _with_retries(send)
-        return _results(_parse(_DDGLiteParser(), text), max_results, self.name)
+        return _checked_results(_parse(_DDGLiteParser(), text), text,
+                                max_results, self.name, self.label,
+                                _DDG_NO_RESULTS_RE)
 
 
 class BraveSearchProvider:
@@ -459,11 +486,11 @@ class BraveSearchProvider:
             return resp.text
         text = _with_retries(send)
         items = _parse(_BraveParser(), text)
-        out = _results(items, max_results, self.name)
-        if not out and "captcha" in text.lower():
+        if not items and "captcha" in text.lower():
             raise BotCheckError(
                 f"{self.label} answered with a bot check instead of results")
-        return out
+        return _checked_results(items, text, max_results, self.name,
+                                self.label, None)
 
 
 def _cause(exc: BaseException, url: str) -> str:
@@ -471,6 +498,8 @@ def _cause(exc: BaseException, url: str) -> str:
         return "blocked by the network policy"
     if isinstance(exc, BotCheckError):
         return "it answered with a bot check instead of results"
+    if isinstance(exc, UnreadableResultsError):
+        return "it answered with a page localm could not read results from"
     return describe_failure(exc, url)
 
 
@@ -593,8 +622,13 @@ class SearXNGProvider:
                         f"{urllib.parse.urlencode({'q': query})}")
             text = _with_retries(
                 lambda: self._get(html_url, _BROWSER_ACCEPT).text)
-            return _results(_parse(_SearXNGHTMLParser(), text), max_results,
-                            self.name)
+            return _checked_results(
+                _parse(_SearXNGHTMLParser(), text), text, max_results,
+                self.name,
+                "The search backend set in Settings > Network ("
+                + (urllib.parse.urlparse(self.base_url).hostname
+                   or self.base_url) + ")",
+                _SEARXNG_NO_RESULTS_RE)
         if not isinstance(payload, dict):
             raise SearchProviderError(
                 "The SearXNG search backend returned a non-object JSON body.")

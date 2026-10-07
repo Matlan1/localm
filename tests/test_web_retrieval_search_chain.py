@@ -31,6 +31,7 @@ from tests._web_retrieval_fixtures import (
     Transport,
     allow_public,
     ddg_html,
+    ddg_no_results,
     no_sleep,
 )
 
@@ -215,11 +216,12 @@ class TestFallbackChain:
     def test_all_services_answering_empty_is_an_empty_search(self, monkeypatch):
         allow_public(monkeypatch)
         t = Transport().install(monkeypatch)
-        t.route("POST", DDG_ENDPOINT, _ok(ddg_html([])))
-        t.route("POST", LITE_ENDPOINT, _ok(lite_html([])))
+        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
+        t.route("POST", LITE_ENDPOINT, _ok(ddg_no_results(lite=True)))
         t.route("GET", BRAVE_SEARCH + "*", _ok(brave_html([])))
         b = retrieve("q")
         assert b.search_status == "empty"
+        assert t.urls() == [DDG_ENDPOINT, LITE_ENDPOINT, t.urls("GET")[0]]
 
     def test_out_of_time_services_are_named(self, monkeypatch):
         from localm.web_retrieval import providers
@@ -232,6 +234,74 @@ class TestFallbackChain:
             "Web search failed on every search service localm tried ("
             "DuckDuckGo: not tried: out of time; DuckDuckGo lite: not tried: "
             "out of time; Brave Search: not tried: out of time).")
+
+
+class TestNoResultsVersusUnreadable:
+    def test_no_results_message_on_both_ddg_pages_is_recognised(self,
+                                                                monkeypatch):
+        from localm.web_retrieval import DuckDuckGoHTMLProvider
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
+        t.route("POST", LITE_ENDPOINT, _ok(ddg_no_results(lite=True)))
+        assert DuckDuckGoHTMLProvider().search("q", 5) == []
+        assert DuckDuckGoLiteProvider().search("q", 5) == []
+
+    def test_pages_without_results_or_a_no_results_message_fail_by_name(
+            self, monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, _ok("<html><body>changed</body></html>"))
+        t.route("POST", LITE_ENDPOINT, _ok(lite_html([])))
+        t.route("GET", BRAVE_SEARCH + "*", _ok(brave_html([])))
+        b = retrieve("q")
+        assert b.search_status == "failed"
+        assert b.search_error == (
+            "Web search failed on every search service localm tried ("
+            "DuckDuckGo: it answered with a page localm could not read results "
+            "from; DuckDuckGo lite: it answered with a page localm could not "
+            "read results from; Brave Search: it answered with a page localm "
+            "could not read results from).")
+
+    def test_one_service_saying_no_results_makes_the_search_empty(
+            self, monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
+        t.route("POST", LITE_ENDPOINT, _raise(_reset))
+        t.route("GET", BRAVE_SEARCH + "*", FakeResponse(status=503, text=""))
+        assert retrieve("q").search_status == "empty"
+
+    def test_searxng_html_no_results_message_is_empty(self, monkeypatch):
+        allow_public(monkeypatch, net_search_url="https://searx.example")
+        t = Transport().install(monkeypatch)
+
+        def answer(url, **kw):
+            if "format=json" in url:
+                return FakeResponse(status=403, text="Forbidden")
+            return _ok('<main><div id="urls" role="main">'
+                       '<div class="dialog-error-block" role="alert"><p>'
+                       "<strong>Sorry!</strong></p><p>No results were found. "
+                       "You can try to:</p></div></div></main>")
+        t.route("GET", "https://searx.example/search?*", answer)
+        b = retrieve("q")
+        assert b.search_status == "empty"
+
+    def test_searxng_html_without_results_or_message_fails(self, monkeypatch):
+        allow_public(monkeypatch, net_search_url="https://searx.example")
+        t = Transport().install(monkeypatch)
+
+        def answer(url, **kw):
+            if "format=json" in url:
+                return FakeResponse(status=403, text="Forbidden")
+            return _ok("<main><p>a theme localm does not know</p></main>")
+        t.route("GET", "https://searx.example/search?*", answer)
+        b = retrieve("q")
+        assert b.search_status == "failed"
+        assert b.search_error == (
+            "The search backend set in Settings > Network (searx.example) "
+            "answered with a page localm could not read results from.")
+        assert all("searx.example" in u for u in t.urls())
 
 
 class TestPolicy:

@@ -27,6 +27,7 @@ from tests._web_retrieval_fixtures import (
     Transport,
     allow_public,
     ddg_html,
+    ddg_no_results,
     html_page,
     html_response,
     nav_heavy_page,
@@ -329,12 +330,23 @@ class TestSearchFailures:
         assert b.search_status == "empty" and b.sources == []
         assert b.grounding == GROUNDING_FAILED
 
-    def test_duckduckgo_unparseable_page_is_empty(self, monkeypatch):
+    def test_duckduckgo_no_results_page_is_empty(self, monkeypatch):
+        allow_public(monkeypatch)
+        Transport().install(monkeypatch).route(
+            "POST", DDG_ENDPOINT, FakeResponse(text=ddg_no_results()))
+        assert retrieve(QUERY).search_status == "empty"
+
+    def test_duckduckgo_unreadable_page_is_not_reported_as_empty(
+            self, monkeypatch):
         allow_public(monkeypatch)
         Transport().install(monkeypatch).route(
             "POST", DDG_ENDPOINT,
             FakeResponse(text="<html><body>captcha</body></html>"))
-        assert retrieve(QUERY).search_status == "empty"
+        b = retrieve(QUERY)
+        assert b.search_error.startswith(
+            "Web search failed on every search service localm tried (DuckDuckGo: "
+            "it answered with a page localm could not read results from;")
+        assert b.search_status == "failed"
 
     def test_policy_off_raises(self, monkeypatch):
         monkeypatch.setattr("localm.config.load_config",
