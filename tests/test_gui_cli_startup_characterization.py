@@ -52,6 +52,12 @@ STRONG_KEY = "characterization-owner-key-0123456789"
 PEER_PORT = 8793
 
 
+@pytest.fixture(autouse=True)
+def _no_real_crash_watchdog(monkeypatch):
+    """A server started here never spawns a real detached crash-recovery watchdog."""
+    monkeypatch.setenv("LOCALM_CRASH_WATCHDOG", "off")
+
+
 def _flat(text: str) -> str:
     return " ".join(text.split())
 

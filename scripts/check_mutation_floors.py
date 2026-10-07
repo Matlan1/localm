@@ -15,8 +15,10 @@ source. This script compares those results against the committed baseline
   that used to catch it was weakened or removed, or the mutant's outcome is
   nondeterministic);
 * a mutant has no disposition: it is new, or the source of its function
-  changed since the baseline (mutant ids are numbered per function, so a
-  changed function's dispositions are stale), or its disposition is not one
+  changed since the baseline, or its function gained mutants the baseline does
+  not list (mutant ids are numbered per function in source order over the
+  covered lines, so either change renumbers them and the function's
+  dispositions are stale), or its disposition is not one
   of ``killed`` / ``survived`` / ``{"equivalent": "<reason>"}`` /
   ``{"unstable": "<reason>"}``;
 * a control mutant (the ``controls`` section: concrete mutants, at least one
@@ -207,6 +209,14 @@ def floor_two_decimals(score: float) -> float:
     return math.floor(score * 100 + 1e-9) / 100
 
 
+def grown_functions(statuses: dict, base_mutants: dict) -> set[str]:
+    """Functions with a generated mutant id the baseline does not list while
+    the baseline does list other mutants of that function."""
+    listed = {function_of(m) for m in base_mutants}
+    return {function_of(m) for m in statuses
+            if m not in base_mutants and function_of(m) in listed}
+
+
 def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str], list[str], list[dict]]:
     """Pure check of parsed results against a parsed baseline. Returns
     ``(problems, warnings, rows)``: a non-empty ``problems`` is a failure;
@@ -272,6 +282,7 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
 
         changed_functions = {
             fn for fn, h in hashes.items() if base_hashes.get(fn) != h}
+        changed_functions |= grown_functions(statuses, base_mutants)
         equivalents: set[str] = set()
         unstables: set[str] = set()
         undispositioned: list[str] = []
@@ -307,7 +318,8 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
 
         vanished = sorted(m for m in base_mutants if m not in statuses)
         unexplained = [m for m in vanished
-                       if hashes.get(function_of(m)) == base_hashes.get(function_of(m))]
+                       if hashes.get(function_of(m)) == base_hashes.get(function_of(m))
+                       and function_of(m) not in changed_functions]
         if unexplained:
             problems.append(
                 f"{module}: {len(unexplained)} baseline mutant(s) were not generated "
@@ -421,7 +433,8 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
 def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
     """A baseline built from ``results``: floors ratchet up from ``baseline``,
     equivalent and unstable classifications survive, everything else follows
-    the outcome, and the mutants of a changed or removed function are dropped.
+    the outcome, and the mutants of a changed, grown or removed function are
+    dropped.
     A vanished mutant of an unchanged function keeps its old entry."""
     old_modules = baseline.get("modules") or {}
     new_modules: dict[str, dict] = {}
@@ -436,6 +449,7 @@ def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
         old_hashes = old.get("function_hashes") or {}
         changed = {fn for fn, h in res["function_hashes"].items()
                    if old_hashes.get(fn) != h}
+        changed |= grown_functions(res["mutants"], old_mutants)
         mutants: dict = {}
         excluded: set[str] = set()
         for mutant, status in sorted(res["mutants"].items()):

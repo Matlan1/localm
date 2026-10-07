@@ -52,3 +52,50 @@ def test_interface_addresses_skip_an_address_that_does_not_parse(monkeypatch):
     ]})
     assert bindhost._interface_addresses() == frozenset({
         ipaddress.ip_address("192.0.2.7"), ipaddress.ip_address("fe80::1")})
+
+
+def test_an_interface_address_is_cut_at_its_first_zone_separator(monkeypatch):
+    import socket
+    from types import SimpleNamespace
+
+    import psutil
+
+    from localm import bindhost
+    monkeypatch.setattr(psutil, "net_if_addrs", lambda: {"eth0": [
+        SimpleNamespace(family=socket.AF_INET6, address="fe80::2%a%b"),
+    ]})
+    assert bindhost.is_own_address("fe80::2") is True
+
+
+@pytest.mark.parametrize("bind_host,expected", [
+    (None, "127.0.0.1"), ("", "127.0.0.1"), ("   ", "127.0.0.1"),
+    ("0.0.0.0", "127.0.0.1"), ("localhost", "127.0.0.1"), (" localhost ", "127.0.0.1"),
+    ("::", "::1"), ("::1", "::1"), ("192.0.2.5", "192.0.2.5"), (" 192.0.2.5 ", "192.0.2.5"),
+])
+def test_self_connect_host_maps_a_wildcard_to_loopback_and_keeps_a_literal(bind_host, expected):
+    from localm.bindhost import self_connect_host
+    assert self_connect_host(bind_host) == expected
+
+
+@pytest.mark.parametrize("host", [None, "", 12345, b"::1", "::1%1", "127.0.0.1%lo", "not-an-ip"])
+def test_is_own_address_refuses_a_non_string_a_zone_id_and_a_non_literal(host, monkeypatch):
+    import psutil
+
+    from localm import bindhost
+    monkeypatch.setattr(psutil, "net_if_addrs", lambda: {})
+    assert bindhost.is_own_address(host) is False
+
+
+def test_is_own_address_accepts_loopback_and_only_listed_interface_addresses(monkeypatch):
+    import socket
+    from types import SimpleNamespace
+
+    import psutil
+
+    from localm import bindhost
+    monkeypatch.setattr(psutil, "net_if_addrs", lambda: {"eth0": [
+        SimpleNamespace(family=socket.AF_INET, address="192.0.2.7")]})
+    assert bindhost.is_own_address("127.0.0.1") is True
+    assert bindhost.is_own_address("::1") is True
+    assert bindhost.is_own_address("192.0.2.7") is True
+    assert bindhost.is_own_address("192.0.2.8") is False

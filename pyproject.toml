@@ -487,7 +487,16 @@ only_mutate = [
 ]
 mutate_only_covered_lines = true
 also_copy = ["scripts"]
-pytest_add_cli_args = ["-m", "not integration"]
+# The deselected tests run a child interpreter from a temporary working
+# directory, where the child cannot import mutmut's mutated localm.
+pytest_add_cli_args = ["-m", "not integration",
+    "--deselect", "tests/test_hf_cache_containment.py::test_huggingface_hub_resolves_every_cache_inside_the_data_dir",
+    "--deselect", "tests/test_hf_cache_containment.py::test_a_login_saved_outside_localm_still_authenticates",
+    "--deselect", "tests/test_hf_cache_containment.py::test_a_child_process_inherits_the_pin",
+    "--deselect", "tests/test_hf_cache_containment.py::test_a_user_hf_home_survives_import_in_a_fresh_interpreter",
+    "--deselect", "tests/test_hf_cache_containment.py::test_containment_that_cannot_take_effect_is_reported",
+    "--deselect", "tests/test_gpu_cache_containment.py::test_a_child_process_inherits_the_pins",
+    "--deselect", "tests/test_gpu_cache_containment.py::test_a_user_value_survives_import_in_a_fresh_interpreter"]
 pytest_add_cli_args_test_selection = [
     "tests/test_bindhost.py",
     "tests/test_bindhost_adversarial.py",
@@ -523,10 +532,13 @@ pytest_add_cli_args_test_selection = [
     "tests/test_config_reg586_reg566_regressions.py",
     "tests/test_config_schema_endpoint.py",
     "tests/test_config_validation.py",
+    "tests/test_hf_cache_containment.py",
+    "tests/test_gpu_cache_containment.py",
     "tests/test_tls.py",
     "tests/test_tls_cli.py",
     "tests/test_portmux.py",
     "tests/test_portmux_lifecycle.py",
+    "tests/test_portmux_failure_paths.py",
 ]
 
 [tool.hatch.build.targets.wheel]
