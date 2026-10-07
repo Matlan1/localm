@@ -451,12 +451,15 @@ class TestChatAndEmbed:
         messages, kwargs = engine.chat_stream.call_args.args[0], engine.chat_stream.call_args.kwargs
         assert messages == [{"role": "system", "content": "be brief"},
                             {"role": "user", "content": "hi"}]
+        from localm.plugins.mcpserver.server import report_progress
+        assert kwargs.pop("on_status") is report_progress
         assert kwargs == {"max_tokens": 7, "temperature": 0.2, "seed": 3}
 
     def test_chat_omits_unset_generation_knobs(self, all_tools):
         _call(all_tools, "chat", {"prompt": "hi"})
         engine = all_tools["_engines"]._engines["stub-model"]
-        assert engine.chat_stream.call_args.kwargs == {}
+        from localm.plugins.mcpserver.server import report_progress
+        assert engine.chat_stream.call_args.kwargs == {"on_status": report_progress}
         assert engine.chat_stream.call_args.args[0] == [{"role": "user", "content": "hi"}]
 
     def test_embed_returns_the_vectors_as_json(self, all_tools):

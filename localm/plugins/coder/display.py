@@ -146,6 +146,12 @@ def print_thinking(label: str = "Thinking…") -> None:
     console.print(f"\n[dim]{label}[/dim]")
 
 
+def print_status(text: str) -> None:
+    """One dim, indented line naming what the model is doing before it
+    answers."""
+    console.print(_sanitized_text(f"  {text}", style="dim"))
+
+
 def print_assistant_label(name: str = "Agent") -> None:
     console.print(f"\n[bold blue]{name}[/bold blue]: ", end="")
 

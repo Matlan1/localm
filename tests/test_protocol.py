@@ -72,6 +72,21 @@ class TestStatusChunk(unittest.TestCase):
         self.assertEqual(delta["status"], "Processing prompt...")
         self.assertEqual(delta["status_code"], "processing")
 
+    def test_every_status_code_has_a_gui_label_in_every_catalog(self):
+        import re
+        from pathlib import Path
+        static = (Path(__file__).resolve().parents[1]
+                  / "localm" / "plugins" / "gui" / "static")
+        en = (static / "app" / "i18n-en.js").read_text(encoding="utf-8")
+        catalogs = {"en": set(re.findall(r'^\s*"(chat\.status\.[A-Za-z]+)":', en, re.M))}
+        for path in sorted((static / "i18n").glob("*.json")):
+            catalogs[path.stem] = {k for k in json.loads(path.read_text(encoding="utf-8"))
+                                   if k.startswith("chat.status.")}
+        for code in STATUS_CODE_BY_TEXT.values():
+            key = "chat.status." + re.sub(r"_([a-z])", lambda m: m.group(1).upper(), code)
+            for lang, keys in catalogs.items():
+                self.assertIn(key, keys, f"{lang} has no label for status code {code!r}")
+
     def test_token_chunk_has_no_status_code(self):
         chunk = ChatChunk.token("hello", "localm", "id123", 0)
         self.assertIsNone(chunk.choices[0].delta.status_code)

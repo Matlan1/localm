@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ..server import EngineCache, _log, _quiet_stdout, _text_result
+from ..server import EngineCache, _log, _quiet_stdout, _text_result, report_progress
 from ._common import MODEL_PARAM
 
 # Largest image file the chat tool reads from disk.
@@ -143,7 +143,8 @@ def build(engines: EngineCache) -> Dict[str, dict]:
 
         def _run(engine, _name):
             with engines.serving(engine):
-                return "".join(engine.chat_stream(messages, **gen))
+                return "".join(engine.chat_stream(
+                    messages, on_status=report_progress, **gen))
 
         text, decision = answer_with(engines, decision, _run)
         result = _text_result(text)

@@ -53,6 +53,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
+from localm.inference.backends.base import LOADING_MODEL_STATUS
+
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
 SERVER_VERSION = "0.2.0"
@@ -77,6 +79,22 @@ class ModelBusyError(RuntimeError):
 def _log(msg: str) -> None:
     """Server-side logging - stderr only, stdout belongs to the protocol."""
     print(f"[localm-mcp] {msg}", file=sys.stderr, flush=True)
+
+
+_progress_sink: Optional[Callable[[str], None]] = None
+
+
+def report_progress(text: str) -> None:
+    """Report *text* (what the tool call being handled is doing) to the
+    client as an MCP progress notification, when the call asked for progress.
+    No-op otherwise. Callable from any thread; never raises."""
+    sink = _progress_sink
+    if sink is None:
+        return
+    try:
+        sink(text)
+    except Exception as e:
+        _log(f"warning: could not send a progress notification: {e}")
 
 
 def _redirect_consoles_to_stderr() -> None:
@@ -375,6 +393,7 @@ class EngineCache:
         from localm.inference.backends.base import ModelLoadCancelled
         latch = self.routing_latch()
         fingerprint = latch.fingerprint(name)
+        report_progress(LOADING_MODEL_STATUS)
         try:
             engine.load()
         except ModelLoadCancelled:
@@ -495,9 +514,11 @@ class EngineCache:
                 # free-VRAM probe cannot see it. Run the gate, then hand back the
                 # SAME object so the pulled engine is reused rather than silently
                 # replaced.
+                report_progress(LOADING_MODEL_STATUS)
                 self._make_room_for(name)
                 self._touch(name)
                 return engine
+            report_progress(LOADING_MODEL_STATUS)
             self._make_room_for(name)
             _log(f"loading model {name}")
             engine = self._factory(name)
@@ -637,6 +658,8 @@ class EngineCache:
                         and residency.is_serving(self._engines.get(n))]
                 waited = time.monotonic() - started
                 if busy and waited < BUSY_WAIT_SECONDS:
+                    from localm.inference.protocol import WAITING_FOR_MODEL_STATUS
+                    report_progress(WAITING_FOR_MODEL_STATUS)
                     if not announced:
                         announced = True
                         _log(f"waiting for {busy} to finish serving before "
@@ -904,10 +927,42 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 # ---------------------------------------------------------------------------
 
 class MCPStdioServer:
-    """Dispatches MCP JSON-RPC messages to tool handlers."""
+    """Dispatches MCP JSON-RPC messages to tool handlers.
+
+    A ``tools/call`` whose ``params._meta.progressToken`` is a string or an
+    integer gets a ``notifications/progress`` message, carrying the text as
+    ``message``, for each new status its handler passes to
+    ``report_progress`` while ``run_stdio`` serves it."""
 
     def __init__(self, tools: Dict[str, dict]) -> None:
         self.tools = tools
+        self._out = None
+        self._write_lock = threading.Lock()
+
+    def _write(self, msg: dict) -> None:
+        with self._write_lock:
+            self._out.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            self._out.flush()
+
+    def _progress_for(self, token) -> Optional[Callable[[str], None]]:
+        """The progress sink for a call carrying *token*, or None."""
+        if self._out is None or isinstance(token, bool) \
+                or not isinstance(token, (str, int)):
+            return None
+        state = {"n": 0, "last": None}
+        lock = threading.Lock()
+
+        def _sink(text: str) -> None:
+            with lock:
+                if not text or text == state["last"]:
+                    return
+                state["last"] = text
+                state["n"] += 1
+                n = state["n"]
+            self._write({"jsonrpc": "2.0", "method": "notifications/progress",
+                         "params": {"progressToken": token, "progress": n,
+                                    "message": text}})
+        return _sink
 
     def handle(self, msg: dict) -> Optional[dict]:
         """Process one message. Returns the response dict, or None for
@@ -953,11 +1008,17 @@ class MCPStdioServer:
             spec = self.tools.get(name)
             if spec is None:
                 return self._error(mid, -32602, f"Unknown tool: {name}")
+            meta = params.get("_meta")
+            token = meta.get("progressToken") if isinstance(meta, dict) else None
+            global _progress_sink
+            _progress_sink = self._progress_for(token)
             try:
                 result = spec["handler"](params.get("arguments", {}) or {})
             except Exception as e:
                 _log(f"tool {name} crashed: {e}")
                 result = _text_result(f"Tool failed: {e}", is_error=True)
+            finally:
+                _progress_sink = None
             return self._result(mid, result)
 
         return self._error(mid, -32601, f"Method not found: {method}")
@@ -977,6 +1038,7 @@ class MCPStdioServer:
         """Blocking loop: read newline-delimited JSON until EOF."""
         stdin = stdin or sys.stdin
         stdout = stdout or sys.stdout
+        self._out = stdout
         _log("ready - waiting for MCP client")
         for line in stdin:
             line = line.strip()
@@ -997,8 +1059,7 @@ class MCPStdioServer:
             for one in batch:
                 response = self.handle(one)
                 if response is not None:
-                    stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-                    stdout.flush()
+                    self._write(response)
         _log("stdin closed - shutting down")
 
 

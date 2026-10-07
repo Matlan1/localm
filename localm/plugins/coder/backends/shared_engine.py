@@ -28,7 +28,7 @@ from localm.textnorm import ThinkSplitter, split_think
 
 from .base import BaseLLMBackend
 from .http import CoderServerError
-from .local_engine import _ENGINE_GEN_KWARGS
+from .local_engine import _ENGINE_GEN_KWARGS, engine_status_relay
 
 # Everything Engine.chat_stream accepts, including the lazy-grammar pair the
 # coder sends with its tool-call grammar on every turn.
@@ -211,11 +211,14 @@ class SharedEngineBackend(BaseLLMBackend):
 
     def chat_stream(self, messages: list[dict],
                     on_reasoning: Optional[Callable[[str], None]] = None,
+                    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
                     **kwargs) -> Iterator[str]:
         self._local.usage = {}
         self._local.reasoning = ""
         self._check_cancelled()
         gen = self._gen(kwargs)
+        if on_status is not None:
+            gen["on_status"] = engine_status_relay(on_status)
         parts: list[str] = []
         reasoning_parts: list[str] = []
         splitter = ThinkSplitter(exit_marker=_exit_marker(gen))

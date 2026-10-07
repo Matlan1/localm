@@ -2243,6 +2243,12 @@ function statusIndicatorI18nKey(code) {
   return "chat.status." + code.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
 
+/** The label for a server status: the localized text for its status `code`
+ *  when the catalog has one, otherwise `text` as given. */
+export function statusLabel(text, code = null) {
+  return code ? tOr(statusIndicatorI18nKey(code), text) : text;
+}
+
 /** Update the text and warning state of an existing status indicator in bodyEl,
  *  or mount a new one if not present. `code` is the server's delta.status_code:
  *  when it resolves to a catalog entry, that localized text and the code's
@@ -2250,7 +2256,7 @@ function statusIndicatorI18nKey(code) {
  *  style is matched from its English wording. */
 export function updateStatusIndicator(bodyEl, text, code = null) {
   if (!bodyEl) return null;
-  const label = code ? tOr(statusIndicatorI18nKey(code), text) : text;
+  const label = statusLabel(text, code);
   const shouldWarn = code
     ? WARN_STATUS_CODES.has(code)
     : (typeof text === "string" && (

@@ -2342,6 +2342,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   let routing = null;   // which model answered, when not the one asked for
+  let serverCompacted = false;
 
   async function postChatCompletions(reqBody) {
     const r = await fetch("/v1/chat/completions", {
@@ -2371,34 +2372,31 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     return r;
   }
 
-  try {
-    let r;
-    try {
-      r = await postChatCompletions(body);
-    } catch (e) {
-      // The backend refused the grammar itself (this exact wording is shared by
-      // GRAMMAR_UNSUPPORTED_MESSAGE and GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in
-      // localm/inference/backends/base.py, and by neither of the route's other
-      // grammar 400s) - retry this turn unconstrained, and stop asking for the
-      // rest of this page's session.
-      if (e.status === 400 && body.grammar_lazy && String(e.detail).includes("would be ignored")) {
-        chat.toolGrammarUnsupported = true;
-        delete body.grammar;
-        delete body.grammar_lazy;
-        delete body.grammar_triggers;
-        r = await postChatCompletions(body);
-      } else {
-        throw e;
-      }
-    }
+  // Posts reqBody and reads the reply stream. A stream the server opened
+  // before it finished preparing carries the response headers in a
+  // `localm_headers` chunk, and a refusal in its terminal chunk's
+  // `localm_error`, which is thrown like an HTTP error.
+  async function postAndRead(reqBody) {
+    const r = await postChatCompletions(reqBody);
     memUsed = parseMemoryHeader(r);   // F11: read before the body stream
     routing = parseRoutingHeader(r);
-    const serverCompacted = !!(r.headers && typeof r.headers.get === "function"
+    serverCompacted = !!(r.headers && typeof r.headers.get === "function"
         && r.headers.get("X-Localm-Context-Compacted"));
+    let streamErr = null;
     await readSSE(r, (payload) => {
       if (payload === "[DONE]") return;
       let chunk;
       try { chunk = JSON.parse(payload); } catch { return; }
+      if (chunk.localm_headers && typeof chunk.localm_headers === "object") {
+        const meta = chunk.localm_headers;
+        const inStream = {
+          headers: { get: (k) => (typeof meta[k] === "string" ? meta[k] : null) },
+        };
+        memUsed = parseMemoryHeader(inStream) || memUsed;
+        routing = parseRoutingHeader(inStream) || routing;
+        if (inStream.headers.get("X-Localm-Context-Compacted")) serverCompacted = true;
+      }
+      if (chunk.localm_error) streamErr = chunk.localm_error;
       if (chunk.usage) usage = chunk.usage;
       if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const d = chunk.choices?.[0]?.delta || {};
@@ -2423,6 +2421,39 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         if (chat.stick) box.scrollTop = box.scrollHeight;
       }
     });
+    if (streamErr) {
+      full = "";
+      reasoning = "";
+      finishReason = null;
+      const err = new Error(`${streamErr.status}: ${streamErr.detail || ""}`);
+      err.status = streamErr.status;
+      err.detail = streamErr.detail || "";
+      throw err;
+    }
+  }
+
+  try {
+    try {
+      await postAndRead(body);
+    } catch (e) {
+      // The backend refused the grammar itself (this exact wording is shared by
+      // GRAMMAR_UNSUPPORTED_MESSAGE and GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in
+      // localm/inference/backends/base.py, and by neither of the route's other
+      // grammar 400s) - retry this turn unconstrained, and stop asking for the
+      // rest of this page's session.
+      if (e.status === 400 && body.grammar_lazy && String(e.detail).includes("would be ignored")) {
+        chat.toolGrammarUnsupported = true;
+        delete body.grammar;
+        delete body.grammar_lazy;
+        delete body.grammar_triggers;
+        finishReason = null;
+        renderMarkdown(liveBody, "");
+        mountStatusIndicator(liveBody, t("chat.status.processing"));
+        await postAndRead(body);
+      } else {
+        throw e;
+      }
+    }
     // A compacted reply marks the conversation as server-compacted unless the
     // reply failed.
     if (serverCompacted && finishReason !== "error") conv.serverCompacted = true;

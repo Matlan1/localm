@@ -22,6 +22,17 @@ from localm.textnorm import ThinkSplitter, split_think
 
 from .base import BaseLLMBackend
 
+
+def engine_status_relay(on_status: Callable[[str, Optional[str]], None]
+                        ) -> Callable[[str], None]:
+    """An ``Engine.chat_stream`` ``on_status`` that passes each status to
+    *on_status* with its code from ``STATUS_CODE_BY_TEXT``."""
+    from localm.inference.protocol import STATUS_CODE_BY_TEXT
+
+    def _relay(text: str) -> None:
+        on_status(text, STATUS_CODE_BY_TEXT.get(text))
+    return _relay
+
 # Generation kwargs the inference Engine.chat_stream accepts; anything else the
 # coder passes (it forwards arbitrary gen_kwargs) is dropped so the call cannot
 # raise a TypeError.
@@ -92,12 +103,15 @@ class LocalEngineBackend(BaseLLMBackend):
 
     def chat_stream(self, messages: list[dict],
                     on_reasoning: Optional[Callable[[str], None]] = None,
+                    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
                     **kwargs) -> Iterator[str]:
         """The answer's pieces; reasoning pieces go to ``on_reasoning`` and are
-        never yielded."""
+        never yielded. Engine statuses go to ``on_status``."""
         self._ensure_loaded()
         self._last_reasoning = ""
         gen = self._gen(kwargs)
+        if on_status is not None:
+            gen["on_status"] = engine_status_relay(on_status)
         splitter = ThinkSplitter(exit_marker=_exit_marker(gen))
         reasoning_parts: list[str] = []
 
