@@ -1102,8 +1102,9 @@ CORE_FIELDS: list = [
     # receive the owner's queries - the same "where does data go" boundary that
     # makes bugreport_upload_url and update_url admin_only.
     SettingField("net_search_url", Widget.TEXT, "Search backend URL",
-                 "A SearXNG JSON search endpoint for web search. Blank uses "
-                 "DuckDuckGo (no key needed).",
+                 "A SearXNG instance for web search; when set, searches use "
+                 "only this service. Blank uses the built-in search: DuckDuckGo, "
+                 "then Brave Search when DuckDuckGo fails (no key needed).",
                  group="Network", owner="web", admin_only=True),
     # owner="core", not "web": this is the GUI's own renderer, so it must stay
     # visible on an install with no web plugin. admin_only for the same reason
