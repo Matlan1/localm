@@ -155,3 +155,82 @@ class TestImageNoticesReachTheJob:
             lora_strength_clip=0.5, input_image=None, denoise=None,
             fast_dequant=True, say=said.append)
         assert any("fast fp16 GGUF dequant" in s for s in said)
+
+
+class TestHeartbeatUnreadableQueue:
+    def test_a_failed_read_keeps_the_queued_state(self, comfy_queue):
+        url, state = comfy_queue
+        said = []
+        tick = comfy_client.comfy_wait_heartbeat(url, "mine", said.append)
+        state["queue"] = {"queue_running": [_job(1, "other")],
+                          "queue_pending": [_job(2, "mine")]}
+        tick(0.0)
+        state["status"] = 500
+        tick(2.0)
+        tick(4.0)
+        assert said == ["Waiting for ComfyUI to finish 1 other job..."]
+
+    def test_the_queue_is_not_read_after_three_failures(self, comfy_queue):
+        url, state = comfy_queue
+        state["status"] = 500
+        tick = comfy_client.comfy_wait_heartbeat(url, "mine", lambda t: None)
+        for t in (0.0, 2.0, 4.0, 6.0, 8.0):
+            tick(t)
+        assert state["gets"] == 3
+
+
+def _fake_comfy(output_node, output_key, filename, gets):
+    """A ComfyUI urlopen stub: /prompt -> p1, /queue -> p1 behind one running
+    job, /history -> finished, /view -> bytes. Records each /queue read."""
+    from unittest.mock import MagicMock
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        m = MagicMock()
+        m.__enter__ = lambda s=m: s
+        m.__exit__ = MagicMock(return_value=False)
+        if "/prompt" in url:
+            m.read.return_value = b'{"prompt_id": "p1"}'
+        elif url.endswith("/queue"):
+            gets.append(url)
+            m.read.return_value = json.dumps(
+                {"queue_running": [_job(0, "other")],
+                 "queue_pending": [_job(1, "p1")]}).encode()
+        elif "/history/" in url:
+            m.read.return_value = json.dumps({"p1": {"outputs": {output_node: {
+                output_key: [{"filename": filename, "subfolder": "", "type": "output"}],
+                "animated": [True]}}}}).encode()
+        elif "/view" in url:
+            m.read.return_value = b"BYTES"
+        else:
+            m.read.return_value = b"{}"
+        return m
+    return fake_urlopen
+
+
+@pytest.mark.parametrize("medium", ["video", "music"])
+@pytest.mark.parametrize("listening", [True, False])
+def test_video_and_music_report_a_queued_wait_only_to_a_listener(
+        tmp_path, monkeypatch, medium, listening):
+    from unittest.mock import patch
+    if medium == "video":
+        from localm.video_gen import comfy as mod
+        node, key, name, out = "11", "images", "clip.mp4", tmp_path / "out.mp4"
+        call = lambda **kw: mod.generate_video("a fox", out, **kw)  # noqa: E731
+        monkeypatch.setenv("COMFY_OUTPUT_DIR", str(tmp_path / "comfy_out"))
+    else:
+        from localm.music_gen import comfy as mod
+        node, key, name, out = "8", "audio", "track.flac", tmp_path / "out.flac"
+        call = lambda **kw: mod.generate_music("synthwave", out, **kw)  # noqa: E731
+    gets: list = []
+    lines: list = []
+    with patch.object(mod, "ensure_comfy", return_value=(True, "ComfyUI is running.")), \
+         patch.object(mod, "_localm_unload"), \
+         patch.object(comfy_client, "_comfy_urlopen", _fake_comfy(node, key, name, gets)), \
+         patch.object(mod.time, "sleep"):
+        ok, msg = call(on_progress=lines.append) if listening else call()
+    assert ok, msg
+    if listening:
+        assert "Waiting for ComfyUI to finish 1 other job..." in lines
+    else:
+        assert gets == []

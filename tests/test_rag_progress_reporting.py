@@ -277,3 +277,19 @@ class TestAddPathsPerPhaseLines:
         for i in embedding:
             assert events[i + 1] == "embed"
         assert reading[1] > embedding[0]
+
+    def test_uploads_say_reading_and_embedding_before_each_step(self, tmp_path):
+        c = Collection("kb", base=tmp_path / "store").create()
+        events = []
+
+        def _embed(texts):
+            events.append("embed")
+            return [[0.1] * 8 for _ in texts]
+
+        c.add_uploads([{"filename": "a.txt", "data": ("alpha " * 50).encode()}],
+                      embed_fn=_embed,
+                      on_progress=lambda text, **kw: events.append(text))
+        assert events[events.index("[1/1] reading a.txt..."):][:3] == [
+            "[1/1] reading a.txt...",
+            next(e for e in events if e.startswith("[1/1] embedding a.txt (")),
+            "embed"]

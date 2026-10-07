@@ -290,3 +290,15 @@ class TestSubAgentProgress:
         with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY", {"read_file": tool_def}):
             child._execute_tool(call, interactive=False)
         assert lines == ["● read_file(path='a.py')"]
+
+
+class TestChildStatusesToTheSink:
+    def test_a_child_with_a_sink_streams_and_reports_each_status_there(self, tmp_path):
+        lines = []
+        agent = _make_agent(tmp_path)
+        agent.report_progress = True
+        agent.progress_sink = lines.append
+        assert agent._call_llm([{"role": "user", "content": "hi"}],
+                               interactive=False) == "The answer."
+        assert lines == ["Waiting for test-model...", "Loading model...",
+                         "Processing prompt...", "Generating response..."]

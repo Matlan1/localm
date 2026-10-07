@@ -1435,12 +1435,14 @@ def _memory_inlet(messages, ctx, announce=None):
         from localm.inference.protocol import (
             DOWNLOADING_EMBEDDER_STATUS, RECALLING_MEMORY_STATUS,
         )
+        downloading = False
         if announce is not None:
             from localm.inference.embedder import will_download_on_first_use
-            if will_download_on_first_use():
-                announce(DOWNLOADING_EMBEDDER_STATUS)
+            downloading = will_download_on_first_use()
+            announce(DOWNLOADING_EMBEDDER_STATUS if downloading
+                     else RECALLING_MEMORY_STATUS)
         embed_fn = _embed_fn()
-        if announce is not None:
+        if downloading:
             announce(RECALLING_MEMORY_STATUS)
         # Resolve the SAME namespace the write path and the outlet write to
         # (ADMIN/owner -> "owner"), so an owner's saved memories are recalled in

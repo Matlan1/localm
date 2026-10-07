@@ -446,6 +446,11 @@ def _download_progress_class(label: str, on_progress, every: float = 2.0):
                     logger.debug("download progress callback raised: %s", e)
             return super().update(n)
 
+        def update_transfer(self, n=1):
+            """Transfer bytes are not reported; huggingface_hub then routes a
+            Xet download through this one bar."""
+            return None
+
     return _Reporter
 
 

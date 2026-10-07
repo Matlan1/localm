@@ -123,3 +123,37 @@ class TestWillDownloadOnFirstUse:
         else:
             monkeypatch.setattr(embedder, "_current_spec", lambda: "/path/to/x.gguf")
         assert embedder.will_download_on_first_use() is False
+
+
+class TestXetDownloads:
+    def test_a_xet_download_reports_through_one_bar(self):
+        from huggingface_hub.utils._xet_progress_reporting import (
+            XetDownloadProgressReporter,
+        )
+        lines = []
+        cls = embedder._download_progress_class("m", lines.append, every=0.0)
+        reporter = XetDownloadProgressReporter(
+            reconstruction_desc="model.gguf", total=4 * MB, log_level=logging.INFO,
+            name="huggingface_hub.xet_get", tqdm_class=cls)
+        assert reporter.transfer_bar is reporter.reconstruction_bar
+
+
+class TestGetEmbedderForwardsProgress:
+    def test_a_first_use_download_reports_to_the_caller(self, monkeypatch):
+        monkeypatch.setattr(embedder, "_EMBEDDER", None)
+        monkeypatch.setattr(embedder, "_TRIED_DOWNLOAD", False)
+        monkeypatch.setattr(embedder, "_LOAD_FAILED_SPEC", None)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"embedding_model": "bge-small-en-v1.5",
+                                     "net_mode": "allow"})
+
+        def _resolve(*, allow_download=None, on_progress=None):
+            if allow_download is False:
+                return None
+            on_progress("Downloading the embedding model bge: 1 of 24 MB (4%)...")
+            return None
+
+        monkeypatch.setattr(embedder, "resolve_embedding_model_path", _resolve)
+        messages = []
+        assert embedder.get_embedder(on_progress=messages.append) is None
+        assert any("1 of 24 MB" in m for m in messages), messages

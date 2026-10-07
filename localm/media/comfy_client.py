@@ -2432,13 +2432,22 @@ def comfy_wait_heartbeat(api_url: str, prompt_id: str, say, *,
     while the job is queued behind other work, "Rendering… (Ns elapsed)"
     otherwise. A change between the two is said at once; the same state is
     repeated at most every *every* seconds, rendering first at *every*. The
-    queue is no longer read once the job has been seen running."""
-    state = {"kind": "rendering", "said": 0.0, "started": False}
+    queue is no longer read once the job has been seen running or after three
+    reads in a row fail; a failed read keeps the last state."""
+    state = {"kind": "rendering", "said": 0.0, "started": False, "misses": 0,
+             "ahead": None}
 
     def _tick(elapsed: float) -> None:
-        ahead = None if state["started"] else comfy_jobs_ahead(api_url, prompt_id)
-        if ahead == 0:
-            state["started"] = True
+        if not state["started"] and state["misses"] < 3:
+            read = comfy_jobs_ahead(api_url, prompt_id, timeout=1.0)
+            if read is None:
+                state["misses"] += 1
+            else:
+                state["misses"] = 0
+                state["ahead"] = read
+                if read == 0:
+                    state["started"] = True
+        ahead = 0 if state["started"] else state["ahead"]
         if ahead:
             kind = f"queued:{ahead}"
             text = (f"Waiting for ComfyUI to finish {ahead} other "

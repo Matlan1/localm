@@ -462,7 +462,7 @@ def generate_video(
     # position while queued and the elapsed rendering time every 15s. start_time
     # is taken here so the sidecar's elapsed_seconds covers poll + download.
     start_time = time.time()
-    _tick = comfy_wait_heartbeat(api_url, prompt_id, _say)
+    _tick = comfy_wait_heartbeat(api_url, prompt_id, _say) if on_progress else None
 
     status, payload = comfy_poll_until_done(
         api_url, prompt_id,
