@@ -523,6 +523,46 @@ class TestEngineCacheMultiResidency:
         assert cache.resident == ["b"]
         assert cache._engines["b"] is b
 
+    @pytest.mark.parametrize("need_gb,resident", [(8, ["b"]), (6, ["a", "b"])])
+    def test_the_backend_full_offload_need_decides_whether_the_lru_peer_goes(
+            self, need_gb, resident):
+        cache = _resident_cache()
+        with _fits(free_gb=20), _sized(gb=4), _cfg():
+            a = cache.get("a")
+        with _fits(free_gb=7), _no_vram_wait(), _sized(gb=4), _cfg(),                 patch.object(EngineCache, "_backend_need_bytes",
+                             lambda self, name: need_gb * GB):
+            cache.get("b")
+        assert cache.resident == resident
+        assert a.unload.call_count == (0 if "a" in resident else 1)
+
+    def test_backend_need_reads_the_registered_models_backend(self):
+        from types import SimpleNamespace
+        cache = _resident_cache()
+        sized = SimpleNamespace(full_offload_vram_bytes=lambda: 9 * GB)
+        with patch("localm.model_manager.get_model_info",
+                   return_value=("models/b.gguf", "b")),                 patch("localm.inference.engine.create_backend",
+                      return_value=sized) as made:
+            assert cache._backend_need_bytes("b") == 9 * GB
+        made.assert_called_once_with("models/b.gguf")
+
+    @pytest.mark.parametrize("backend,info", [
+        (object(), ("models/b", "b")),
+        (None, None),
+    ])
+    def test_backend_need_is_unknown_without_a_sizing_backend(self, backend, info):
+        cache = _resident_cache()
+        with patch("localm.model_manager.get_model_info", return_value=info),                 patch("localm.inference.engine.create_backend",
+                      return_value=backend) as made:
+            assert cache._backend_need_bytes("b") is None
+        assert made.call_count == (0 if info is None else 1)
+
+    def test_backend_need_is_unknown_when_sizing_fails(self):
+        cache = _resident_cache()
+        with patch("localm.model_manager.get_model_info",
+                   return_value=("models/b.gguf", "b")),                 patch("localm.inference.engine.create_backend",
+                      side_effect=ValueError("bad file")):
+            assert cache._backend_need_bytes("b") is None
+
     def test_eviction_picks_the_lru_and_leaves_the_rest_resident(self):
         cache = _resident_cache()
         with _fits(free_gb=20), _sized(gb=4), _cfg():

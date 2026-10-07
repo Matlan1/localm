@@ -561,8 +561,31 @@ class EngineCache:
                          "to itself: %s", name, e)
             return None
 
+    def _backend_need_bytes(self, name: str) -> Optional[int]:
+        """Free VRAM a GGUF load of ``name`` needs for every layer to go on the
+        GPU, as the backend sizes it (``full_offload_vram_bytes``), or None when
+        that is not known: an unregistered model, a backend that does not size
+        its layers, or a sizing failure (logged at debug)."""
+        try:
+            from localm.inference.engine import create_backend
+            from localm.model_manager import get_model_info
+            from localm.model_manager.registry import get_operator_model_info
+            info = (get_operator_model_info(self.default_model)
+                    if self._operator_supplied(name) else get_model_info(name))
+            if info is None:
+                return None
+            size = getattr(create_backend(str(info[0])), "full_offload_vram_bytes", None)
+            return size() if callable(size) else None
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("mcp: could not size a full GPU offload of %s, using "
+                         "the whole-model estimate: %s", name, e)
+            return None
+
     def _fits_alongside(self, name: str, required: Optional[int]) -> bool:
-        """True when ``name`` may load with NO eviction, next to the residents."""
+        """True when ``name`` may load with NO eviction, next to the residents:
+        free VRAM covers ``required`` plus headroom and the backend's own
+        full-offload need (``_backend_need_bytes``)."""
         if required is None:
             return False
         from localm import discover
@@ -588,8 +611,10 @@ class EngineCache:
             # (each lives in its own isolated worker subprocess), so they can
             # only over-report free space and are never trusted for the PERMIT
             # decision.
+            needed = max(required + DEFAULT_HEADROOM_BYTES,
+                         self._backend_need_bytes(name) or 0)
             return fits_alongside_residents(
-                free_vram=v_info.get("free"), vram_required=required,
+                free_vram=v_info.get("free"), vram_required=needed, headroom=0,
                 probe_ok=probe_ok, shortfall=shortfall,
                 is_process_scoped=(
                     v_info.get("free_scope") == discover.FREE_SCOPE_PROCESS))

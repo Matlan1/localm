@@ -1090,6 +1090,32 @@ class VramSizingMixin:
         from localm.model_meta import cached_n_layers
         return cached_n_layers(self.model_path)
 
+    def _full_offload_parts(self, split_devices: int) -> "tuple[int, int, int]":
+        """``(model, kv, overhead)`` bytes a full GPU offload of this load
+        charges: the VRAM-resident weights (``_effective_model_bytes_for_vram``),
+        the KV cache for ``self.n_ctx`` tokens, and the compute overhead for
+        *split_devices* devices plus the MTP draft context."""
+        model = self._effective_model_bytes_for_vram()
+        kv = self.n_ctx * self._kv_bytes_per_token()
+        overhead = (self._split_overhead_bytes(split_devices)
+                    + self._mtp_draft_context_vram_bytes())
+        return model, kv, overhead
+
+    def full_offload_vram_bytes(self) -> Optional[int]:
+        """Free VRAM this load needs for every layer to go on the GPU: the
+        ``model + kv + overhead`` that ``_auto_gpu_layers_budget`` compares
+        free VRAM with, for the devices the load spreads over
+        (``_split_free_total_bytes``, one when no combined reading applies).
+
+        None when ``n_gpu_layers`` asks for fewer than all layers or the model
+        file's size cannot be read. Reads the GGUF header and may take a GPU
+        reading, so it must not run on an event loop thread."""
+        if self.n_gpu_layers < self._DEFAULT_GPU_LAYERS or self._model_bytes() <= 0:
+            return None
+        _free, _total, split_devices = self._split_free_total_bytes()
+        model, kv, overhead = self._full_offload_parts(split_devices or 1)
+        return model + kv + overhead
+
     def _auto_gpu_layers_budget(self) -> Optional[_AutoLayerBudget]:
         """The full computation behind ``_auto_gpu_layers()``: the same
         layer-count decision, plus the free/total/model/kv/overhead breakdown
@@ -1115,10 +1141,7 @@ class VramSizingMixin:
                                      split_devices)
         # Only the EXISTENCE check above needs the raw file size; an n_cpu_moe
         # load's pinned expert weights never draw on this budget.
-        model = self._effective_model_bytes_for_vram()
-        kv = self.n_ctx * self._kv_bytes_per_token()
-        overhead = (self._split_overhead_bytes(split_devices)
-                    + self._mtp_draft_context_vram_bytes())
+        model, kv, overhead = self._full_offload_parts(split_devices)
         if model <= 0 or free >= model + kv + overhead:
             layers = self._DEFAULT_GPU_LAYERS  # full offload fits (or nothing left to size)
         else:

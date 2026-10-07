@@ -1443,6 +1443,114 @@ class TestPlacementHeal:
         assert a.loaded and hs._engines == {"model-a": a, "model-b": b}
 
 
+class _BackendSizedEngine(_SizedEngine):
+    """_SizedEngine whose backend reports *need* bytes for a full GPU offload,
+    or raises *error* when asked."""
+
+    def __init__(self, name, need, *, error=None):
+        super().__init__(name)
+        self._need = need
+        self._error = error
+        self.need_calls = 0
+
+    def full_offload_vram_bytes(self):
+        self.need_calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._need
+
+
+class TestBackendSizedAdmission:
+    """At 12 GB total with model-a resident, 7.2 GB is free: enough for the
+    whole-model estimate (NEED + HEADROOM), so the backend's own full-offload
+    need decides whether model-a has to go."""
+
+    def _beside_a(self, monkeypatch, b, *, preempt=False):
+        a = GatedEngine("model-a")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB)
+        _seat("model-a", a, active=True)
+        result = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=preempt,
+                                              activate=False))
+        return a, env, result
+
+    def test_an_idle_model_is_evicted_when_the_backend_needs_more_than_is_free(
+            self, monkeypatch):
+        b = _BackendSizedEngine("model-b", 8 * GB)
+
+        a, env, result = self._beside_a(monkeypatch, b)
+
+        assert not a.loaded and a.unload_calls == 1
+        assert hs._engines == {"model-b": b} and b.load_calls == 1
+        assert env.release_waits == [(12 * GB - NEED, 12 * GB)]
+        assert env.built == ["model-b"] and b.need_calls == 1
+        assert result["status"] == "loaded"
+
+    def test_an_idle_model_stays_when_the_backend_need_fits_beside_it(self, monkeypatch):
+        b = _BackendSizedEngine("model-b", 12 * GB - NEED)
+
+        a, env, result = self._beside_a(monkeypatch, b)
+
+        assert a.loaded and a.unload_calls == 0
+        assert hs._engines == {"model-a": a, "model-b": b}
+        assert env.built == ["model-b"] and env.release_waits == []
+        assert result["status"] == "loaded"
+
+    def test_a_backend_that_cannot_size_falls_back_to_the_estimate(
+            self, monkeypatch, caplog):
+        b = _BackendSizedEngine("model-b", None, error=OSError("header unreadable"))
+
+        with caplog.at_level("WARNING", logger="localm"):
+            a, env, result = self._beside_a(monkeypatch, b)
+
+        assert a.loaded and hs._engines == {"model-a": a, "model-b": b}
+        assert any("could not size a full GPU offload of 'model-b'" in r.getMessage()
+                   and "OSError: header unreadable" in r.getMessage()
+                   for r in caplog.records)
+        assert result["status"] == "loaded"
+
+    def test_the_split_check_keeps_the_estimate(self, monkeypatch):
+        a = GatedEngine("model-a")
+        b = _BackendSizedEngine("model-b", 8 * GB)
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB)
+        _seat("model-a", a, active=True)
+        asked = []
+
+        def _split(vram_required, *args, **kwargs):
+            asked.append(vram_required)
+            return [], False
+
+        monkeypatch.setattr("localm.discover.gpu_split_shortfall", _split)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                     activate=False))
+
+        assert not a.loaded and hs._engines == {"model-b": b}
+        assert asked and set(asked) == {NEED + HEADROOM}
+
+    def test_an_explicit_switch_asks_when_even_an_empty_card_is_short(self, monkeypatch):
+        b = _BackendSizedEngine("model-b", 13 * GB)
+
+        a, env, result = self._beside_a(monkeypatch, b, preempt=True)
+
+        assert not a.loaded and "model-b" not in hs._engines and b.load_calls == 0
+        assert result == {
+            "status": "confirm_required", "model": "model-b",
+            "detail": ("'model-b' does not fit the estimated free VRAM "
+                       f"(need ~{13 * 1024} MB, {12 * 1024} MB free) even after "
+                       "eviction; loading it anyway will let the backend "
+                       "fall back to partial CPU offload, which is slower")}
+
+    def test_a_non_explicit_load_short_on_an_empty_card_defers_and_records_no_blocker(
+            self, monkeypatch):
+        b = _BackendSizedEngine("model-b", 13 * GB)
+        b._placements = [_PARTIAL]
+
+        a, env, result = self._beside_a(monkeypatch, b)
+
+        assert not a.loaded and hs._engines == {"model-b": b}
+        assert b.gpu_placement == _PARTIAL and result["status"] == "loaded"
+        assert b.placement_heal is None
+
+
 class TestVictimReleaseWait:
     def _wait_answers(self, monkeypatch, answers, *, estimate=8 * GB, after=None):
         """Each wait_for_vram_release call returns the next of *answers* (the
