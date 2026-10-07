@@ -10,7 +10,10 @@ can be checked on the data itself.
 The target "model" continues a token t with next_token(t). The draft head
 predicts the same continuation except at the positions a test marks wrong. A
 hidden state is a row filled with HIDDEN_BASE + position for the main context
-and DRAFT_HIDDEN_BASE + position for the draft head's own output.
+and DRAFT_HIDDEN_BASE + position for the draft head's own output. The request
+sampler records every token it returns (llama_sampler_sample accepts what it
+returns); an optional grammar rewrites its choice by how many tokens it has
+accepted so far, so an extra, missing or out-of-order accept changes the reply.
 """
 
 import ctypes
@@ -38,7 +41,8 @@ class FakeNative:
     """The native calls _generate makes, over a modelled main and draft cache."""
 
     def __init__(self, llm, *, wrong_draft_positions=(), n_rs_seq=None,
-                 fail_draft_decode=None, main_cost=1.0, row_cost=0.1, draft_cost=0.2):
+                 fail_draft_decode=None, main_cost=1.0, row_cost=0.1, draft_cost=0.2,
+                 grammar=None):
         self.llm = llm
         self.now = 0.0                # virtual seconds, advanced by each decode
         self.main_cost, self.row_cost, self.draft_cost = main_cost, row_cost, draft_cost
@@ -56,6 +60,8 @@ class FakeNative:
         self._keep = []
         self._last = {}               # ctx id -> (positions, tokens, logits, h rows buffer)
         self.draft_samples = 0
+        self.grammar = grammar        # (tokens accepted so far, proposed token) -> token
+        self.main_accepted = []       # every token the request sampler returned, in order
 
     # -- batches ----------------------------------------------------------
     def batch_init(self, n, embd, n_seq_max):
@@ -160,7 +166,11 @@ class FakeNative:
             guess = next_token(token)
             return guess + 1 if (pos + 1) in self.wrong else guess
         assert sampler is self.main_sampler
-        return next_token(token)
+        chosen = next_token(token)
+        if self.grammar is not None:
+            chosen = self.grammar(len(self.main_accepted), chosen)
+        self.main_accepted.append(chosen)
+        return chosen
 
     # -- memory -----------------------------------------------------------
     def seq_rm(self, ctx, p0):
@@ -366,16 +376,16 @@ def test_drafted_and_accepted_counts_follow_the_verification_outcomes():
     assert llm.mtp_active_this_call is True
 
 
-def test_a_grammar_reply_never_drafts_but_keeps_the_draft_cache_in_step():
+def test_a_grammar_reply_drafts_and_keeps_the_draft_cache_in_step():
     llm = _llama(draft_tokens=2)
     fake = FakeNative(llm)
 
     tokens, mock_api = _generate(llm, fake, max_new_tokens=12, grammar='root ::= "a"')
 
     assert tokens == _reference(PROMPT, 12)
-    assert fake.draft_samples == 0
-    assert llm.mtp_drafted == 0 and llm.mtp_active_this_call is False
-    assert llm.mtp_skipped == "grammar"
+    assert fake.draft_samples > 0
+    assert llm.mtp_drafted > 0 and llm.mtp_skipped == ""
+    mock_api.llama_sampler_accept.assert_not_called()
     assert len(fake.draft_cache) == len(fake.main_cache)
     for p in sorted(fake.draft_cache)[1:]:
         assert fake.draft_cache[p][1] == HIDDEN_BASE + p - 1
@@ -411,8 +421,8 @@ def test_a_failing_queued_row_decode_stops_drafting_and_says_why():
 
 
 def test_a_failing_end_of_reply_flush_is_reported():
-    """A grammar reply never drafts; the rows it queued for the draft cache are
-    decoded when it ends, and a failure there is reported, not swallowed."""
+    """The rows a reply queued for the draft cache are decoded when it ends, and
+    a failure there is reported, not swallowed."""
     llm = _llama(draft_tokens=1)
     fake = FakeNative(llm)
 
@@ -427,7 +437,7 @@ def test_a_failing_end_of_reply_flush_is_reported():
         fake.install(mock_api)
         gen = llm._generate(prompt_tokens=list(PROMPT), max_new_tokens=6,
                             temperature=0.0, top_k=40, top_p=0.95,
-                            repeat_penalty=1.0, grammar='root ::= "a"')
+                            repeat_penalty=1.0)
         tokens = [next(gen) for _ in range(6)]
         fail.armed = True
         assert list(gen) == []
@@ -731,20 +741,6 @@ def test_drafting_that_loses_with_most_drafts_accepted_is_paused():
     assert decisions.count(True) < 300 * 0.4
 
 
-def test_a_reply_after_a_grammar_reply_says_nothing_was_skipped():
-    """The reason a grammar reply could not draft belongs to that reply only."""
-    llm = _llama(draft_tokens=1)
-    fake = FakeNative(llm)
-    _generate(llm, fake, max_new_tokens=6, grammar='root ::= "a"')
-    assert llm.mtp_skipped == "grammar"
-
-    tokens, _ = _generate(llm, fake, max_new_tokens=6)
-
-    assert tokens == _reference(PROMPT, 6)
-    assert llm.mtp_drafted > 0
-    assert llm.mtp_skipped == ""
-
-
 def test_a_failing_mirror_when_a_pause_ends_stops_drafting_for_this_reply_only():
     """The decode mirroring the positions a pause skipped fails: this reply
     stops drafting and says why, the model keeps MTP, and the next reply
@@ -778,21 +774,51 @@ def test_a_failing_mirror_when_a_pause_ends_stops_drafting_for_this_reply_only()
     assert llm.mtp_drafted > 0
 
 
-def test_a_grammar_reply_while_drafting_is_paused_keeps_the_draft_cache_in_step():
-    """A grammar reply never drafts and so never ends a pause, but its tokens
-    still reach the draft cache with their hidden states."""
+def test_a_grammar_reply_ends_a_pause_and_drafts_like_any_other_reply():
+    """A pause carried over from an earlier reply runs out during a grammar
+    reply, which then drafts, with the draft cache in step."""
     from localm.inference.backends.llamacpp.llama import _DraftPacer
     llm = _llama(draft_tokens=1)
     pacer = _DraftPacer(probe_every=1 << 30, bootstrap_every=1 << 30)
-    pacer._pause_left = 100
+    pacer._pause_left = 5
     llm._draft_pacer = pacer
     fake = FakeNative(llm)
 
-    tokens, _ = _generate(llm, fake, max_new_tokens=12, grammar='root ::= "a"')
+    tokens, _ = _generate(llm, fake, max_new_tokens=20, grammar='root ::= "a"')
 
-    assert tokens == _reference(PROMPT, 12)
-    assert pacer._pause_left == 100
-    assert llm.mtp_skipped == "grammar" and llm.mtp_paused_steps == 0
+    assert tokens == _reference(PROMPT, 20)
+    assert pacer._pause_left == 0 and llm.mtp_paused_steps == 5
+    assert llm.mtp_drafted > 0
+    main_tokens = PROMPT + tokens
     assert len(fake.draft_cache) == len(fake.main_cache)
-    for p in sorted(fake.draft_cache)[1:]:
-        assert fake.draft_cache[p][1] == HIDDEN_BASE + p - 1, p
+    for p in sorted(fake.draft_cache):
+        assert fake.draft_cache[p][0] == main_tokens[p]
+
+
+def _grammar_every(nth, shift):
+    """A grammar that moves every *nth* accepted token by *shift*: what it
+    allows depends on how many tokens the sampler has already accepted."""
+    return lambda accepted, token: token + shift if accepted % nth == nth - 1 else token
+
+
+@pytest.mark.parametrize("draft_tokens", [1, 2, 3])
+@pytest.mark.parametrize("grammar", [_grammar_every(4, 1), _grammar_every(3, 7),
+                                     lambda accepted, token: token])
+def test_a_grammar_reply_drafts_and_its_sampler_sees_only_emitted_tokens(draft_tokens, grammar):
+    """With a grammar in the request's sampler, MTP drafts, its reply is the
+    reply without MTP, and the sampler accepted exactly the emitted tokens, in
+    order: a draft is never accepted into it, and a rejected draft never was."""
+    off = _llama(mtp=False)
+    off_fake = FakeNative(off, grammar=grammar)
+    reference, _ = _generate(off, off_fake, max_new_tokens=30, grammar='root ::= "a"')
+    assert off_fake.main_accepted == reference
+
+    llm = _llama(draft_tokens=draft_tokens)
+    fake = FakeNative(llm, grammar=grammar)
+
+    tokens, mock_api = _generate(llm, fake, max_new_tokens=30, grammar='root ::= "a"')
+
+    assert tokens == reference
+    assert fake.main_accepted == tokens
+    assert llm.mtp_drafted > 0 and llm.mtp_call_status == ""
+    mock_api.llama_sampler_accept.assert_not_called()

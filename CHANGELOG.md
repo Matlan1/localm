@@ -219,15 +219,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Multi-Token Prediction is faster and shows how well it is working.** Each
   speculation step does less extra work, can draft several tokens at once (the
   new "MTP draft tokens" setting, `mtp_draft_tokens`, default 1), and gives the
-  draft head the right context for every token. It also measures, while a reply
-  is being written, whether drafting is actually faster than generating one
-  token at a time, and pauses itself when it is not (common on small models and
-  when sampling with a temperature). The chat shows the share of drafted tokens
-  the model accepted next to the reply's speed, or that MTP paused, stopped, or
-  was off for the reply (it does not run on grammar-constrained replies, which
-  by default include replies that may call the web tools, or on image turns),
-  the chat API reports it as `usage.mtp`, and `localm bench-mtp` prints the
-  acceptance rate and whether the replies matched MTP off.
+  draft head the right context for every token. It now also runs on replies
+  constrained by a grammar, which includes every chat reply while web access is
+  on; those replies never used it before. It measures, while a reply is being
+  written, whether drafting is actually faster than generating one token at a
+  time, and pauses itself when it is not (common on small models and when
+  sampling with a temperature). The chat shows the share of drafted tokens the
+  model accepted next to the reply's speed, or that MTP paused, stopped, or was
+  off for the reply (it does not run on image turns), the chat API reports it
+  as `usage.mtp`, and `localm bench-mtp` prints the acceptance rate and whether
+  the replies matched MTP off.
 
 ### Fixed
 - **Replies start appearing as soon as the model writes them.** Every reply was

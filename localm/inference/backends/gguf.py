@@ -325,8 +325,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         slower than one-token decoding for at least as many steps as it ran,
         "on" when it speculated, "unavailable" when the model cannot speculate
         (the reason is the model status), "off" when this reply could not
-        draft at all (reason "grammar" for grammar-constrained output, "image"
-        for a turn with an image), and "idle" otherwise. ``drafted`` and
+        draft at all (reason "image" for a turn with an image), and "idle"
+        otherwise. ``drafted`` and
         ``accepted`` count draft tokens sent to verification and kept;
         ``paused_steps`` counts the steps run without drafting because it was
         slower.

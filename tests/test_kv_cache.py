@@ -489,11 +489,10 @@ class TestGenerateEarlyExitCleanup:
 # ---------------------------------------------------------------------------
 
 class TestMtpDraftingRespectsGrammar:
-    """Drafting picks tokens with a bare greedy sampler and then accepts them
-    into the main chain. With a grammar in that chain the accepted token was
-    never masked by the grammar, so a JSON-schema or tool-calling reply could
-    emit text the schema forbids - and the out-of-step accept is the documented
-    cause of a native abort. Constrained requests take the single-token path."""
+    """Drafting picks tokens with its own greedy chain on the draft context and
+    never accepts them into the request's chain; every token that chain accepts
+    is one it sampled. So a grammar request drafts like any other, and nothing
+    off-grammar ever reaches the grammar sampler."""
 
     _MTP_CTX = 444
 
@@ -535,13 +534,9 @@ class TestMtpDraftingRespectsGrammar:
             "the prompt did not grow the main context and recreate the draft context")
         return mock_api, drafted
 
-    def test_no_drafting_while_a_grammar_constrains_sampling(self):
+    def test_a_grammar_request_drafts_without_accepting_drafts_into_its_chain(self):
         mock_api, drafted = self._drive(grammar='root ::= "a"')
-        # The only sampler chains built are the ones attached to a draft
-        # context when it is created; no draft sampler is built for the call.
-        assert (mock_api.llama_sampler_chain_init.call_count
-                == mock_api.llama_set_sampler.call_count)
-        assert drafted == []
+        assert drafted, "MTP drafting should run with a grammar too"
         # A token chosen off-grammar must never be pushed into the real chain.
         mock_api.llama_sampler_accept.assert_not_called()
 

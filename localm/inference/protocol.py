@@ -300,8 +300,7 @@ class MtpUsage(BaseModel):
     state is "on" (the reply speculated), "paused" (drafting was measured
     slower than one-token decoding and was paused for at least as many steps
     as it ran), "stopped" (it stopped partway, see reason), "off" (this reply
-    could not draft at all: reason "grammar" for grammar-constrained output
-    such as tool calls, "image" for a turn with an image), "idle" (MTP is
+    could not draft at all: reason "image" for a turn with an image), "idle" (MTP is
     available but this reply drafted nothing) or "unavailable" (this model
     cannot speculate, see reason).
     """
