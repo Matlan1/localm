@@ -844,6 +844,7 @@ class _VisionFeatureCache:
                 "hf vision cache: get_image_features received pixel_values of "
                 "shape %s, expected %s; encoding every image of this request",
                 None if pixel_values is None else tuple(pixel_values.shape), pixel_shape)
+            self.last_encoded = len(keys)
             return self._original(*args, **kwargs)
 
         import torch
@@ -856,6 +857,7 @@ class _VisionFeatureCache:
                 logger.warning(
                     "hf vision cache: no per-image value for %s; encoding every "
                     "image of this request", ", ".join(absent))
+                self.last_encoded = len(keys)
                 return self._original(*args, **kwargs)
 
         entries = []
@@ -1457,7 +1459,9 @@ class HFWorker:
 
         vision_cache = getattr(self, "_vision_cache", None)
         image_keys: Optional[List[str]] = None
+        vision_plan: Optional[tuple] = None
         if vision_cache is not None:
+            vision_cache.disarm()
             keys = [_image_content_key(img) for img in images]
             if images and all(keys):
                 image_keys = keys
@@ -1515,7 +1519,7 @@ class HFWorker:
                 raise
             pixel_values = inputs.get("pixel_values")
             if image_keys is not None and pixel_values is not None:
-                vision_cache.arm(image_keys, image_inputs, tuple(pixel_values.shape))
+                vision_plan = (image_keys, image_inputs, tuple(pixel_values.shape))
         else:
             # Text-only path (even if processor exists, no media was provided)
             _require_chat_template(tokenizer)
@@ -1627,6 +1631,8 @@ class HFWorker:
             except Exception:
                 logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
 
+        if vision_plan is not None:
+            vision_cache.arm(*vision_plan)
         thread = threading.Thread(target=_run_generate, daemon=True)
         thread.start()
 
@@ -1646,7 +1652,7 @@ class HFWorker:
         finally:
             if vision_cache is not None:
                 vision_cache.disarm()
-        if image_keys is not None:
+        if vision_plan is not None:
             logger.debug("hf vision: %d image(s), %d encoded, %d from cache",
                          len(image_keys), vision_cache.last_encoded,
                          len(image_keys) - vision_cache.last_encoded)

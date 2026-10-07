@@ -316,6 +316,36 @@ class TestBounds:
         assert calls.take() == [1]
 
 
+class TestRefusedRequests:
+    def test_a_refused_request_leaves_nothing_armed(self, setup, monkeypatch):
+        from localm.inference.backends.base import ContextCapacityExceededError
+        model, processor, calls = setup
+        worker = _worker(model, processor)
+        red, blue = _image("red"), _image("blue")
+        worker.context_capacity = 4
+        with pytest.raises(ContextCapacityExceededError):
+            _run(worker, [_user("what is this ?", red)])
+        assert worker._vision_cache._armed is None
+        assert calls.take() == []
+
+        worker.context_capacity = 512
+        fed = []
+        model.model.vision_tower.register_forward_pre_hook(
+            lambda _m, args, kwargs: fed.append(
+                (args[0] if args else kwargs["pixel_values"]).clone()),
+            with_kwargs=True)
+
+        def _refuse(*_a, **_k):
+            raise RuntimeError("per-image processing failed")
+
+        monkeypatch.setattr(worker, "_single_image_inputs", _refuse)
+        _run(worker, [_user("what is this ?", blue)])
+        blue_pixels = processor(text="<image>", images=[blue],
+                                return_tensors="pt")["pixel_values"]
+        assert len(fed) == 1
+        assert torch.equal(fed[0], blue_pixels)
+
+
 class TestPassThrough:
     def test_an_unarmed_call_runs_the_original_method(self, setup):
         model, processor, calls = setup
