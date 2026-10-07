@@ -4195,7 +4195,10 @@ def _mtp_usage(engine) -> Optional[MtpUsage]:
         return None
     try:
         return MtpUsage(**data)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("usage.mtp left out: the engine's MTP figures did not validate (%s)",
+                   type(exc).__name__)
         return None
 
 

@@ -1889,12 +1889,15 @@ class LlamaCpp:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
                                     batch = self._create_batch([token], pos, logits_at_last_only=True)
                                     try:
-                                        if api.llama_decode(self._ctx_ptr, batch) == 0:
-                                            self._after_main_token(token, pos)
+                                        decoded = api.llama_decode(self._ctx_ptr, batch) == 0
                                         self._cached_tokens.append(token)
                                         pos += 1
-                                    except Exception:
-                                        pass
+                                        if decoded:
+                                            self._after_main_token(token, pos - 1)
+                                    except Exception as exc:
+                                        from localm.debuglog import logger as _dbg
+                                        _dbg.debug("gguf generate: final-token bookkeeping raised %s",
+                                                   type(exc).__name__)
                                     finally:
                                         if batch is not None:
                                             api.llama_batch_free(batch)
@@ -2642,18 +2645,20 @@ class LlamaCpp:
         Queues it for the draft cache, paired with the hidden state of the
         position before it, unless a draft step already put it there, and keeps
         its own hidden state for the next draft. While the pacer has drafting
-        paused, nothing is recorded; the first token after the pause first
-        mirrors the skipped positions without hidden states. A draft cache that
-        is past *pos* by more than one token is out of step, which stops
-        drafting for this call.
+        paused in a call that drafts, nothing is recorded; the first token after
+        the pause first flushes the rows queued before it and mirrors the
+        skipped positions, the first of them with the hidden state held from
+        before the pause and the rest with zeros. A failing mirror, or a draft
+        cache that is past *pos* by more than one token, stops drafting for this
+        call.
         """
         pacer = self._draft_pacer
-        if pacer is not None and pacer.paused:
+        if pacer is not None and pacer.paused and self._mtp_drafting:
             return
         if self._draft_tracking():
             covered = self._draft_pos + len(self._queued_tokens)
             if covered < pos and self._flush_queued_rows():
-                self._prefill_mtp(self._cached_tokens[covered:pos], covered)
+                self._prefill_mtp(self._cached_tokens[covered:pos], covered, mid_reply=True)
                 covered = self._draft_pos
             if covered == pos:
                 self._queue_draft_rows([token], [self._pending_h_addr(pos)])
@@ -2862,7 +2867,8 @@ class LlamaCpp:
         _dbg.info("MTP: speculation disabled - %s", detail)
 
     def _prefill_mtp(self, tokens: List[int], base_pos: int,
-                     h_rows: Optional[List[Optional[int]]] = None) -> None:
+                     h_rows: Optional[List[Optional[int]]] = None,
+                     mid_reply: bool = False) -> None:
         """Mirror prefilled *tokens*, at base_pos.., into the MTP draft cache.
 
         Token i is paired with the hidden state at ``h_rows[i]``, which belongs
@@ -2875,7 +2881,9 @@ class LlamaCpp:
         main one is, so a position the main cache holds fits the draft cache. A
         prompt that still would not fit stops speculation here rather than
         paying a failing decode per token. A draft decode that fails leaves the
-        draft cache out of step with the main one, which is the same dead end.
+        draft cache out of step with the main one, which is the same dead end;
+        with *mid_reply* it stops drafting for this call only, and the next
+        prefill refills the draft cache.
         """
         if not tokens:
             return
@@ -2893,12 +2901,18 @@ class LlamaCpp:
                 ret = self._decode_draft(piece, base_pos + i,
                                          h_rows[i:i + _PREFILL_CHUNK], output_last=False)
             except Exception as exc:
-                self._disable_mtp("draft-prefill-error:%s" % type(exc).__name__,
-                                  "the draft prefill raised %s" % type(exc).__name__)
+                if mid_reply:
+                    self._stop_drafting_this_call("draft-catchup-error:%s" % type(exc).__name__)
+                else:
+                    self._disable_mtp("draft-prefill-error:%s" % type(exc).__name__,
+                                      "the draft prefill raised %s" % type(exc).__name__)
                 return
             if ret != 0:
-                self._disable_mtp("draft-prefill-failed:%d" % ret,
-                                  "the draft prefill returned %d" % ret)
+                if mid_reply:
+                    self._stop_drafting_this_call("draft-catchup-failed:%d" % ret)
+                else:
+                    self._disable_mtp("draft-prefill-failed:%d" % ret,
+                                      "the draft prefill returned %d" % ret)
                 return
             self._draft_pos = base_pos + i + len(piece)
 

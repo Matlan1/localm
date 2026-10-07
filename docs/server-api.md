@@ -133,7 +133,7 @@ example on a very short reply) or `unavailable` (this model cannot speculate;
 `reason` says why). `drafted` and `accepted` count the
 draft tokens sent to verification and kept; `paused_steps` counts the steps
 generated without drafting because drafting was slower. The field is `null`
-when MTP is off.
+when `mtp_enabled` is off.
 
 #### How a generation failure is reported
 

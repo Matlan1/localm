@@ -108,7 +108,7 @@
   "chat.usage.mtpOn": "MTP {pct}% angenommen",
   "chat.usage.mtpOn.title": "Multi-Token Prediction: {accepted} von {drafted} Entwurfstokens angenommen",
   "chat.usage.mtpPaused": "MTP pausiert",
-  "chat.usage.mtpPaused.title": "Multi-Token Prediction war bei dieser Antwort langsamer als die Erzeugung Token für Token und pausierte deshalb für {steps} Schritte",
+  "chat.usage.mtpPaused.title": "Multi-Token Prediction war bei diesem Modell messbar langsamer als die Erzeugung Token für Token und pausierte deshalb für {steps} Schritte dieser Antwort",
   "chat.usage.mtpOff": "MTP aus",
   "chat.usage.mtpOff.grammar": "Multi-Token Prediction läuft nicht bei eingeschränkter Ausgabe, etwa einer Antwort, die die Web-Tools aufrufen darf",
   "chat.usage.mtpOff.image": "Multi-Token Prediction läuft nicht bei einer Nachricht mit Bild",

@@ -680,6 +680,15 @@ def test_paused_steps_leave_the_draft_cache_alone_until_drafting_resumes():
     assert len(fake.draft_cache) == len(fake.main_cache)
     for p in sorted(fake.draft_cache):
         assert fake.draft_cache[p][0] == main_tokens[p]
+    # The first skipped position keeps the state held from before the pause,
+    # the other skipped ones and the resume token get zeros, later ones their own.
+    first, resume = len(PROMPT), len(PROMPT) + 9
+    for p in sorted(fake.draft_cache)[1:]:
+        h = fake.draft_cache[p][1]
+        if first < p <= resume:
+            assert h == 0.0, (p, h)
+        else:
+            assert h == HIDDEN_BASE + p - 1, (p, h)
 
 
 def _feed_cycle(pacer, spec_seconds, cycle, plain_cost, steps):
@@ -734,3 +743,56 @@ def test_a_reply_after_a_grammar_reply_says_nothing_was_skipped():
     assert tokens == _reference(PROMPT, 6)
     assert llm.mtp_drafted > 0
     assert llm.mtp_skipped == ""
+
+
+def test_a_failing_mirror_when_a_pause_ends_stops_drafting_for_this_reply_only():
+    """The decode mirroring the positions a pause skipped fails: this reply
+    stops drafting and says why, the model keeps MTP, and the next reply
+    drafts again."""
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    llm = _llama(draft_tokens=1)
+    pacer = _DraftPacer(probe_every=1 << 30, bootstrap_every=1 << 30)
+    pacer._pause_left = 10
+    llm._draft_pacer = pacer
+    calls = {"n": 0}
+
+    def fail(index, positions):
+        if positions[0] == len(PROMPT) and len(positions) == 9 and not calls["n"]:
+            calls["n"] += 1
+            return True
+        return False
+
+    fake = FakeNative(llm, fail_draft_decode=fail)
+    tokens, _ = _generate(llm, fake, max_new_tokens=30)
+
+    assert tokens == _reference(PROMPT, 30)
+    assert calls["n"] == 1
+    assert llm.mtp_call_status == "draft-catchup-failed:1"
+    assert llm.mtp_drafted == 0
+    assert (llm.supports_mtp, llm._mtp_usable) == (True, True)
+
+    again, _ = _generate(llm, fake, max_new_tokens=12)
+
+    assert again == _reference(PROMPT, 12)
+    assert llm.mtp_call_status == ""
+    assert llm.mtp_drafted > 0
+
+
+def test_a_grammar_reply_while_drafting_is_paused_keeps_the_draft_cache_in_step():
+    """A grammar reply never drafts and so never ends a pause, but its tokens
+    still reach the draft cache with their hidden states."""
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    llm = _llama(draft_tokens=1)
+    pacer = _DraftPacer(probe_every=1 << 30, bootstrap_every=1 << 30)
+    pacer._pause_left = 100
+    llm._draft_pacer = pacer
+    fake = FakeNative(llm)
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=12, grammar='root ::= "a"')
+
+    assert tokens == _reference(PROMPT, 12)
+    assert pacer._pause_left == 100
+    assert llm.mtp_skipped == "grammar" and llm.mtp_paused_steps == 0
+    assert len(fake.draft_cache) == len(fake.main_cache)
+    for p in sorted(fake.draft_cache)[1:]:
+        assert fake.draft_cache[p][1] == HIDDEN_BASE + p - 1, p

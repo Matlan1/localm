@@ -478,7 +478,9 @@ MTP is disabled for the rest of the loaded model's life (not just the current
 generation) - speculation needs that rewind. **Drafting never runs while a
 grammar is active** - a mis-sequenced `llama_sampler_accept` on a grammar
 sampler throws across the C ABI, so a constrained request always takes the
-plain, one-token-at-a-time path (the draft cache is still kept in step).
+plain, one-token-at-a-time path (the draft cache is still kept in step, also
+while drafting is paused, and the reply reports MTP as `off` with reason
+`grammar`).
 
 Prefill mirrors each main chunk into the draft cache with the hidden states
 shifted by one position, and the first draft of a reply reads the hidden state
@@ -490,17 +492,20 @@ relatively expensive), on how often drafts are accepted (lower when sampling
 with a temperature) and on how busy the machine is. Each loaded model keeps a
 `_DraftPacer` that measures the time per emitted token of speculative steps and
 of plain one-token steps as the reply runs (one step in 24 runs plain to keep
-that figure current). Over the last 16 steps of each kind, speculation costs the
+that figure current, one in 3 until there are 6 plain figures). Over the last 16 steps of each kind, speculation costs the
 median time of a speculative step divided by the mean number of tokens one
 made available, and plain decoding the median time of a plain step. When
 speculation is the slower of the two it is paused for 32 steps, doubling on
-each consecutive pause up to 256, and then measured again; paused steps do no
-draft-cache work, and the positions they skipped are mirrored in one decode
-when drafting resumes. Paused steps are reported per reply
-(`mtp_paused_steps`, `usage.mtp`).
+each consecutive pause up to 256, and then measured again. The pacer belongs
+to the loaded model, so a pause can carry over into the next reply. Paused
+steps of a reply that drafts do no draft-cache work; on the last paused step
+the rows queued before the pause are flushed and the skipped positions are
+mirrored, and a failing mirror stops drafting for that reply only. Paused steps
+are reported per reply (`mtp_paused_steps`, `usage.mtp`).
 
-**Why it declines**, recorded in `mtp_status` and logged
-(`MTP: active=%s status=%s`) rather than surfaced through an HTTP route yet:
+**Why it declines**, recorded in `mtp_status`, logged
+(`MTP: active=%s status=%s`) and returned as `usage.mtp.reason` when a reply
+reports MTP `unavailable` or `stopped`:
 `disabled` (config off); `native-refused` / `no-metadata-api` /
 `no-mtp-metadata` / `unknown-architecture` / `no-mtp-graph:<arch>` (from
 `llama_model_mtp_support` - the runtime or the GGUF's own declaration refuses
