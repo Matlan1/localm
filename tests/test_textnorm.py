@@ -174,6 +174,27 @@ class TestEngineLayerScrub:
         assert "<|channel" not in out and "channel|>" not in out
         assert out == "<think>\ninternal reasoning\n</think>\nHello there!"
 
+    def test_engine_releases_each_piece_before_the_backend_makes_the_next(self):
+        """A reply with no marker characters reaches the caller piece by piece,
+        not after the backend has produced dozens more characters (or, for a
+        short reply, after the whole generation)."""
+        produced = []
+
+        class _Backend:
+            loaded = True
+
+            def chat_stream(self, messages, **kwargs):
+                for piece in ("The circle", " is the", " largest shape."):
+                    produced.append(piece)
+                    yield piece
+
+        eng = Engine.__new__(Engine)
+        eng._backend = _Backend()
+        eng.display_name = "fake"
+        seen = [(len(produced), piece)
+                for piece in eng.chat_stream([{"role": "user", "content": "hi"}])]
+        assert seen == [(1, "The circle"), (2, " is the"), (3, " largest shape.")]
+
 
 #  Turn-open markers emitted as plain text.
 #
@@ -244,6 +265,81 @@ class TestTurnOpenMarkers:
         for marker in _TURN_MARKERS:
             text = f"a {marker}b"
             assert _scrub([text]) == scrub_text(text)
+
+
+_PROSE = "The quick brown fox jumps over the lazy dog, twice over. "
+
+#  Marker strings scrub_text rewrites or removes, beyond _TURN_MARKERS.
+_OTHER_MARKERS = [
+    "<|channel|>analysis<|message|>",
+    "<|channel|>final<|message|>",
+    "<|channel>thought\n",
+    "<channel|>",
+    "<reasoning>",
+    "</ reasoning >",
+    '<|"|>',
+    "<|turn>model\n",
+    "<turn|>",
+    "<|return|>",
+    "<unused12>",
+]
+
+
+def _chunked(text, size):
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+class TestStreamRelease:
+    """scrub_stream releases text as it arrives and holds back only what could
+    still turn out to be a marker."""
+
+    def test_plain_text_is_released_piece_by_piece(self):
+        pulled = []
+
+        def source():
+            for piece in ("The circle", " is the", " largest shape."):
+                pulled.append(piece)
+                yield piece
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen == [(1, "The circle"), (2, " is the"), (3, " largest shape.")]
+
+    def test_a_possible_marker_tail_is_held_until_it_resolves(self):
+        out = list(scrub_stream(iter(["Answer: <start_of", "_turn>model\nHi"])))
+        assert out == ["Answer: ", "Hi"]
+
+    def test_a_marker_character_in_prose_is_held_only_briefly(self):
+        pulled = []
+        tail = "x" * 60
+
+        def source():
+            for piece in ("if a < b then", tail, " done"):
+                pulled.append(piece)
+                yield piece
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen[0] == (1, "if a ")
+        assert seen[1][0] == 2
+        assert "".join(out for _, out in seen) == "if a < b then" + tail + " done"
+
+    def test_streaming_matches_one_shot_for_every_marker_and_chunking(self):
+        """Markers placed before, inside and after the hold window, next to
+        prose that contains marker characters, cut into pieces of many sizes."""
+        for marker in _TURN_MARKERS + _OTHER_MARKERS:
+            for lead in (0, 1, 30, 47, 48, 49, 95):
+                text = (_PROSE * 2)[:lead] + marker + "Hello [1] a<b " + _PROSE \
+                    + marker + marker + "bye"
+                want = scrub_text(text)
+                for size in (1, 2, 3, 5, 7, 11, 13, 29, 64, len(text)):
+                    got = _scrub(_chunked(text, size))
+                    assert got == want, (marker, lead, size, got)
+
+    def test_streaming_matches_one_shot_at_every_two_piece_split(self):
+        for marker in _TURN_MARKERS + _OTHER_MARKERS:
+            text = _PROSE + marker + "after " + _PROSE
+            want = scrub_text(text)
+            for i in range(len(text) + 1):
+                assert _scrub([text[:i], text[i:]]) == want, (marker, i)
 
     def test_turn_open_scrub_is_idempotent(self):
         for marker in _TURN_MARKERS:

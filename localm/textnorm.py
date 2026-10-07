@@ -265,14 +265,58 @@ def _note_marker_flood() -> None:
         "the reply was cut", _MARKER_FLOOD_LIMIT)
 
 
+# Every pattern scrub_text applies. Each one starts with a character in
+# _MARKER_START.
+_SCRUB_RES = (re.compile(re.escape('<|"|>')), _THINK_OPEN_RE, _THINK_CLOSE_RE,
+              _THINK_BARE_OPEN_RE, _THINK_BARE_CLOSE_RE, _MARKER_RE)
+_MARKER_START = "<["
+
+
+def _marker_end(buf: str, at: int) -> int:
+    """End of the longest scrub_text match starting at *at* in *buf*, or *at*
+    when none starts there."""
+    end = at
+    for rx in _SCRUB_RES:
+        m = rx.match(buf, at)
+        if m is not None and m.end() > end:
+            end = m.end()
+    return end
+
+
+def _commit_point(buf: str) -> int:
+    """How much of *buf* scrub_stream can scrub and release now.
+
+    Holds from the first marker-start character among the last
+    ``_MARKER_HOLD`` characters (a marker there may still be incomplete), then
+    backs up to the start of any complete marker that would straddle the cut.
+    Text with no marker-start character in that window is released whole."""
+    n = len(buf)
+    cut = n
+    for i in range(max(0, n - _MARKER_HOLD), n):
+        if buf[i] in _MARKER_START:
+            cut = i
+            break
+    moved = True
+    while moved:
+        moved = False
+        for q in range(max(0, cut - _MARKER_HOLD), cut):
+            if buf[q] in _MARKER_START and _marker_end(buf, q) > cut:
+                cut = q
+                moved = True
+                break
+    return cut
+
+
 def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     """Normalise/remove internal model markers in a text stream.
 
-    The trailing ``_MARKER_HOLD`` characters stay buffered because a marker
-    (or its optional role suffix, e.g. ``<|turn>model``) can straddle two
-    pieces - scrubbing them too early would strip the marker head and leak its
-    tail as text. Only the committed region is scrubbed and yielded; the cut
-    never lands inside a potential marker (markers start with ``<`` or ``[``).
+    Each piece is scrubbed and yielded as soon as it arrives, except text from
+    a ``<`` or ``[`` within the last ``_MARKER_HOLD`` characters: a marker (or
+    its optional role suffix, e.g. ``<|turn>model``) starting there can
+    straddle two pieces, and scrubbing it early would strip the marker head and
+    leak its tail as text. That tail stays buffered until it is
+    ``_MARKER_HOLD`` characters old or the stream ends. The cut never lands
+    inside a marker.
 
     A stream that emits ``[TOOL_CALLS]`` more than ``_MARKER_FLOOD_LIMIT`` times
     is cut at that marker and the source iterator is closed, ending the
@@ -282,15 +326,7 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     seen = 0
     for piece in pieces:
         buf += piece
-        cut = len(buf) - _MARKER_HOLD
-        if cut <= 0:
-            continue
-        # Back the cut up to the last '<' before the boundary so a marker
-        # straddling it stays whole in the buffer.
-        lo = max(0, cut - _MARKER_HOLD)
-        lt = max(buf.rfind("<", lo, cut), buf.rfind("[", lo, cut))
-        if lt != -1:
-            cut = lt
+        cut = _commit_point(buf)
         if cut <= 0:
             continue
         chunk = buf[:cut]
