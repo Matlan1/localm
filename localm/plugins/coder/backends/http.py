@@ -88,6 +88,12 @@ def _response_detail(resp) -> str:
     return ""
 
 
+def _header(headers, name: str):
+    """*headers*' value for *name*, or None when absent or unreadable."""
+    getter = getattr(headers, "get", None)
+    return getter(name) if callable(getter) else None
+
+
 def _raise_for_status(resp) -> None:
     """Turn a 401/403 into a CoderAuthError whose message tells the user how to
     supply an API key. Any other non-2xx response with server-provided detail
@@ -684,7 +690,12 @@ class HTTPBackend(BaseLLMBackend):
 
     def chat_stream(self, messages: list[dict],
                     on_reasoning: Optional[Callable[[str], None]] = None,
+                    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
                     **kwargs) -> Iterator[str]:
+        """Stream the reply's visible pieces. A stream the server opened before
+        it finished preparing delivers its routing header in a
+        ``localm_headers`` chunk and a refusal as ``localm_error``, raised as
+        ``CoderServerError`` with the same message an HTTP error would carry."""
         if self.anthropic:
             # Anthropic extended-thinking events are a distinct shape this
             # backend does not translate.
@@ -709,7 +720,10 @@ class HTTPBackend(BaseLLMBackend):
             pinned=self._pinned,
         ) as resp:
             _raise_for_status(resp)
-            self._note_routing(getattr(resp, "headers", None))
+            headers = getattr(resp, "headers", None)
+            routing_noted = bool(_header(headers, "X-Localm-Model-Routing"))
+            if routing_noted:
+                self._note_routing(headers)
             for line in resp.iter_lines():
                 if not line:
                     continue
@@ -726,10 +740,25 @@ class HTTPBackend(BaseLLMBackend):
                 if chunk.get("usage"):
                     self._last_usage = chunk["usage"]
                 self._note_answer(chunk.get("model"), chunk.get("usage"))
+                meta = chunk.get("localm_headers")
+                if isinstance(meta, dict):
+                    self._note_routing(meta)
+                    routing_noted = True
+                refusal = chunk.get("localm_error")
+                if isinstance(refusal, dict):
+                    raise CoderServerError(
+                        f"HTTP {refusal.get('status')} error from {self._chat_url()}: "
+                        f"{refusal.get('detail') or 'request refused'}")
                 if (chunk.get("choices") or [{}])[0].get("finish_reason") == "error":
                     raise CoderServerError(
                         f"server error: {_last_piece.strip() or 'generation failed'}")
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
+                status = delta.get("status")
+                if status and on_status is not None:
+                    try:
+                        on_status(status, delta.get("status_code"))
+                    except Exception:
+                        pass  # a broken sink must not kill the stream
                 # Reasoning delta: routed to on_reasoning (a SEPARATE channel
                 # from the yielded content), never yielded inline - see chat()'s
                 # comment and BaseLLMBackend.chat_stream's docstring.
@@ -758,6 +787,8 @@ class HTTPBackend(BaseLLMBackend):
                         _tc_buf[idx]["arguments"] += fn["arguments"]
 
         self._last_reasoning = "".join(_reasoning_parts)
+        if not routing_noted:
+            self._note_routing(headers)
 
         # Emit accumulated tool calls as XML after the stream ends
         flushed = self._flush_tool_calls_as_xml(_tc_buf)

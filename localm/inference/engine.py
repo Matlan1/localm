@@ -12,7 +12,7 @@ from typing import Callable, Iterator, List, Optional
 from localm.config import load_config
 from localm.console import console
 from localm.debuglog import logger
-from localm.inference.backends.base import BaseBackend
+from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
 from localm.textnorm import scrub_stream
 
 
@@ -446,6 +446,8 @@ class Engine:
         if not self._backend.loaded:
             with _LOAD_LOCK:
                 if not self._backend.loaded:
+                    if on_status is not None:
+                        on_status(LOADING_MODEL_STATUS)
                     console.print(
                         f"[dim]Reloading [bold]{self.display_name}[/bold]…[/dim]"
                     )

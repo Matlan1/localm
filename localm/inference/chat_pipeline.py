@@ -75,6 +75,10 @@ class ChatHookContext:
     and "length"; an "error" turn skips the outlet on every path, and an
     "abort" turn never reaches it (the value is still set on the context so
     a caller holding it can tell the cases apart).
+    ``on_status`` reports what an inlet hook is doing to a client waiting for
+    the reply (a status from ``localm.inference.protocol``, such as
+    ``RECALLING_MEMORY_STATUS``). Call it from the event loop thread only;
+    it is None when no client is told.
     """
     model_id: str
     stream: bool
@@ -83,6 +87,7 @@ class ChatHookContext:
     principal: Optional[str] = None
     scopes: tuple = ()
     outcome: str = "success"
+    on_status: Optional[Callable[[str], None]] = None
 
 
 @dataclass(order=True)

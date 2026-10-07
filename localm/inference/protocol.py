@@ -8,7 +8,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
-from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+from localm.inference.backends.base import LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS
 
 
 # ------------------------------------------------------------------ #
@@ -240,6 +240,9 @@ class ChoiceDelta(BaseModel):
     status_code: Optional[str] = None
 
 
+# Emitted while the prompt is tokenized and evaluated, before the first token.
+PROCESSING_PROMPT_STATUS = "Processing prompt..."
+
 # Emitted by the SSE route (not a backend's on_status) while a request sits
 # behind the per-model semaphore, before the model has started on it.
 WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."
@@ -248,12 +251,24 @@ WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."
 # context window, before the reply starts.
 COMPACTING_STATUS = "Compacting conversation..."
 
+# Emitted by the SSE route while the memory plugin looks up memories for the
+# turn, before the reply starts.
+RECALLING_MEMORY_STATUS = "Recalling memories..."
+
+# Emitted by the SSE route while chat-pipeline inlet hooks run, before the
+# reply starts.
+RUNNING_CHAT_HOOKS_STATUS = "Running chat plugins..."
+
+# Emitted by the SSE route while a requested grammar is checked against the
+# model, before the reply starts.
+CHECKING_GRAMMAR_STATUS = "Checking grammar..."
+
 
 # Stable ids for the status strings backends pass to on_status(), keyed by the
 # exact English text. `status` always carries the English text for CLI, MCP,
 # and any other client that does not know the code.
 STATUS_CODE_BY_TEXT: dict[str, str] = {
-    "Processing prompt...": "processing",
+    PROCESSING_PROMPT_STATUS: "processing",
     "Generating response...": "generating",
     "Encoding image...": "encoding_image",
     "Encoding image (GPU)...": "encoding_image_gpu",
@@ -261,6 +276,10 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     VISION_CPU_FALLBACK_STATUS: "vision_cpu_retry",
     WAITING_FOR_MODEL_STATUS: "waiting",
     COMPACTING_STATUS: "compacting",
+    LOADING_MODEL_STATUS: "loading_model",
+    RECALLING_MEMORY_STATUS: "recalling_memory",
+    RUNNING_CHAT_HOOKS_STATUS: "chat_hooks",
+    CHECKING_GRAMMAR_STATUS: "checking_grammar",
 }
 
 

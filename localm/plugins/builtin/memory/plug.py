@@ -1410,12 +1410,14 @@ def _stash_memory_used(ctx, records, diag) -> None:
         logger.debug("memory stash skipped: %s", e)
 
 
-def _memory_inlet(messages, ctx):
+def _memory_inlet(messages, ctx, announce=None):
     """Inject recalled memories into the system message. Off when the `memory_enabled`
     recall knob is off. In privacy mode it is off too UNLESS the user opted into
     read-only recall for chat (`memory_recall_in_privacy` + ..._chat) - and even
     then it only READS: no reinforcement, no migration, no write. Best-effort: any
-    failure is logged at debug and skipped (the pipeline also isolates it)."""
+    failure is logged at debug and skipped (the pipeline also isolates it).
+    *announce*, when given, is called once with no arguments just before a
+    recall starts."""
     if ctx is not None and ctx.state.get("client_id") == "coder":
         return None
     if not _recall_enabled():
@@ -1429,6 +1431,8 @@ def _memory_inlet(messages, ctx):
         query = _recall_query(messages)
         if not query.strip():
             return None
+        if announce is not None:
+            announce()
         # Resolve the SAME namespace the write path and the outlet write to
         # (ADMIN/owner -> "owner"), so an owner's saved memories are recalled in
         # protected mode.
@@ -1481,8 +1485,19 @@ async def _memory_inlet_hook(messages, ctx):
 
     A thin wrapper, so _memory_inlet stays sync and directly unit-testable;
     run_inlet awaits an awaitable hook.
+
+    A recall that runs is reported through ``ctx.on_status`` as
+    ``RECALLING_MEMORY_STATUS``.
     """
-    return await _off_loop(lambda: _memory_inlet(messages, ctx))
+    announce = None
+    on_status = getattr(ctx, "on_status", None)
+    if on_status is not None:
+        from localm.inference.protocol import RECALLING_MEMORY_STATUS
+        loop = asyncio.get_running_loop()
+
+        def announce() -> None:
+            loop.call_soon_threadsafe(on_status, RECALLING_MEMORY_STATUS)
+    return await _off_loop(lambda: _memory_inlet(messages, ctx, announce=announce))
 
 
 def register(host) -> None:

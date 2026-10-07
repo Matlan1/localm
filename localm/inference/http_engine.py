@@ -134,7 +134,9 @@ class HttpEngine:
         a text-only model (so the REPL shows the same vision guidance as in-process),
         and ``RuntimeError`` for an unreachable server, other error responses, or a
         stream that ends with ``finish_reason: "error"`` (its message is the last
-        content piece, the server's error text)."""
+        content piece, the server's error text). A refusal the server sends
+        in-stream (``localm_error``, on a stream it opened before it finished
+        preparing) raises exactly what the same HTTP error would."""
         import requests
 
         body: dict = {
@@ -192,6 +194,13 @@ class HttpEngine:
                 self.answered_model = chunk["model"]
             choices = chunk.get("choices") or [{}]
             delta = (choices[0] or {}).get("delta") or {}
+            refusal = chunk.get("localm_error")
+            if isinstance(refusal, dict):
+                code = refusal.get("status")
+                detail = str(refusal.get("detail") or "request refused")
+                if code == 400 and "image" in detail.lower():
+                    raise UnsupportedInputError(detail)
+                raise RuntimeError(f"server error (HTTP {code}): {detail}")
             if (choices[0] or {}).get("finish_reason") == "error":
                 raise RuntimeError(
                     f"server error: {last_piece.strip() or 'generation failed'}")

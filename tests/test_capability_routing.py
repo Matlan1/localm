@@ -333,6 +333,18 @@ def _ask(client, **body):
     return client.post("/v1/chat/completions", json=body)
 
 
+def _stream_headers(r) -> dict:
+    """A streamed reply's response headers, merged with the ``localm_headers``
+    chunk a stream that opened before its preparation finished carries."""
+    merged = dict(r.headers)
+    for line in r.text.splitlines():
+        if line.startswith("data: {"):
+            meta = json.loads(line[len("data: "):]).get("localm_headers")
+            if meta:
+                merged.update(meta)
+    return merged
+
+
 def _answering_model(engines):
     """The model that actually produced the reply, read from the engines
     themselves rather than from anything the response claims."""
@@ -435,7 +447,8 @@ class TestRoutingOverHTTP:
         client, engines = server
         r = _ask(client, required_capabilities=["tool_use"], stream=True)
         assert r.status_code == 200
-        assert json.loads(r.headers["X-Localm-Model-Routing"])["resolved"] == "tooly"
+        routing = _stream_headers(r)["X-Localm-Model-Routing"]
+        assert json.loads(routing)["resolved"] == "tooly"
 
 
 class TestPinnedDiscriminator(unittest.TestCase):

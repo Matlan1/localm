@@ -10,7 +10,8 @@ from typing import Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    print_assistant_label, print_info, print_reasoning_token,
+    print_assistant_label, print_info, print_progress, print_reasoning_token,
+    print_status,
     print_streaming_done, print_streaming_token, print_thinking,
 )
 from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
@@ -18,6 +19,50 @@ from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TO
 from localm.textguard import compose, slice_guarded
 
 _JSON_WS = " \t\r\n"
+
+
+class _TerminalReply:
+    """The interactive terminal's view of one streamed reply: each new status
+    on its own dim line until the first piece arrives, then the assistant
+    label once, then the pieces. Statuses after the first piece are not
+    shown."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._labelled = False
+        self._last_status = None
+
+    def _label(self) -> None:
+        if not self._labelled:
+            self._labelled = True
+            print_assistant_label(self._name)
+
+    def status(self, text: str, code=None) -> None:
+        if self._labelled or not text or text == self._last_status:
+            return
+        self._last_status = text
+        print_status(text)
+
+    def token(self, piece: str) -> None:
+        self._label()
+        print_streaming_token(piece)
+
+    def reasoning(self, piece: str) -> None:
+        self._label()
+        print_reasoning_token(piece)
+
+
+class _ProgressLines:
+    """Each new status of one model call, as a progress line on stderr."""
+
+    def __init__(self) -> None:
+        self._last = None
+
+    def status(self, text: str, code=None) -> None:
+        if not text or text == self._last:
+            return
+        self._last = text
+        print_progress(text)
 
 
 class _NameKeyGate:
@@ -878,7 +923,7 @@ ws     ::= [ \t\n\r]*
         return kw
 
     def _stream_and_record(self, messages: list[dict], *, on_token, on_reasoning,
-                           on_interrupt=None) -> str:
+                           on_interrupt=None, on_status=None) -> str:
         """
         Consume backend.chat_stream, hiding tool-call blocks from *on_token*,
         routing reasoning deltas to *on_reasoning*, honouring a mid-stream stop
@@ -891,9 +936,13 @@ ws     ::= [ \t\n\r]*
         mid-stream instead of letting it propagate (the interactive terminal's
         "(interrupted)" display); the partial text streamed so far is still
         recorded and returned.
+
+        *on_status*, when given, is passed to the backend as its
+        ``on_status(text, code)`` channel.
         """
         full = ""
         reasoning_parts: list[str] = []
+        status_kw = {"on_status": on_status} if on_status is not None else {}
 
         def _capture_reasoning(piece: str) -> None:
             reasoning_parts.append(piece)
@@ -908,7 +957,8 @@ ws     ::= [ \t\n\r]*
             # tool-call grammar through this shared helper.
             for piece, hidden in self._stream_hiding_tool_calls(
                 self.backend.chat_stream(
-                    messages, on_reasoning=_capture_reasoning, **self._llm_kwargs()),
+                    messages, on_reasoning=_capture_reasoning, **status_kw,
+                    **self._llm_kwargs()),
                 tool_names=tool_names,
             ):
                 full += piece
@@ -943,12 +993,14 @@ ws     ::= [ \t\n\r]*
                         messages,
                         on_token=lambda piece: self._emit("token", text=piece),
                         on_reasoning=lambda piece: self._emit("reasoning", text=piece),
+                        on_status=lambda text, code: self._emit(
+                            "status", text=text, code=code),
                     )
                 if interactive:
                     if first_attempt:
                         print_thinking()
-                        print_assistant_label(self.name)
                         first_attempt = False
+                    terminal = _TerminalReply(self.name)
 
                     interrupted = False
 
@@ -960,13 +1012,25 @@ ws     ::= [ \t\n\r]*
 
                     full = self._stream_and_record(
                         messages,
-                        on_token=print_streaming_token,
-                        on_reasoning=print_reasoning_token,
+                        on_token=terminal.token,
+                        on_reasoning=terminal.reasoning,
                         on_interrupt=_on_interrupt,
+                        on_status=terminal.status,
                     )
                     if not interrupted:
                         print_streaming_done()
                     return full
+                elif self.report_progress:
+                    # Non-interactive run that reports progress: the reply is
+                    # not shown, each new model status is.
+                    progress = _ProgressLines()
+                    progress.status(f"Waiting for {self.backend.model_id}...")
+                    return self._stream_and_record(
+                        messages,
+                        on_token=lambda piece: None,
+                        on_reasoning=lambda piece: None,
+                        on_status=progress.status,
+                    )
                 else:
                     # Silent call - used by sub-agents and non-interactive mode.
                     # No live display, but last_reasoning (when the backend

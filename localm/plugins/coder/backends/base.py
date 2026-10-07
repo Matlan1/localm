@@ -40,8 +40,16 @@ class BaseLLMBackend(ABC):
     @abstractmethod
     def chat_stream(self, messages: list[dict],
                     on_reasoning: Optional[Callable[[str], None]] = None,
+                    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
                     **kwargs) -> Iterator[str]:
         """Send messages, yield VISIBLE text pieces as they arrive.
+
+        ``on_status`` is an OPTIONAL side channel called with
+        ``(text, code)`` for each status the model or server reports before
+        or between pieces (loading the model, processing the prompt, waiting
+        for another request): ``text`` is the English status and ``code`` its
+        stable id from ``localm.inference.protocol.STATUS_CODE_BY_TEXT``, or
+        None. A backend without statuses ignores it.
 
         ``on_reasoning`` is an OPTIONAL side channel: a backend that can split a
         thinking model's reasoning from its answer (e.g. the OpenAI-compatible

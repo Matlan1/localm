@@ -18,6 +18,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 console = Console(highlight=False)
+err_console = Console(stderr=True, highlight=False)
 
 _ESC = "\x1b"
 
@@ -85,6 +86,22 @@ def print_banner(
 # ---------------------------------------------------------------------------
 
 def print_tool_call(tool_name: str, args: dict, index: int = 0) -> None:
+    console.print(_tool_call_line(tool_name, args))
+
+
+def print_progress(text: str) -> None:
+    """One dim line on stderr naming what a run without a live display is
+    doing."""
+    err_console.print(_sanitized_text(f"  {text}", style="dim"))
+
+
+def print_progress_tool_call(tool_name: str, args: dict) -> None:
+    """The tool call a run without a live display is about to make, on
+    stderr."""
+    err_console.print(_tool_call_line(tool_name, args))
+
+
+def _tool_call_line(tool_name: str, args: dict) -> Text:
     # The tool name and every argument key/value are model-generated text,
     # composed via Text so none of it is parsed as Rich markup.
     line = Text("  ")
@@ -109,7 +126,7 @@ def print_tool_call(tool_name: str, args: dict, index: int = 0) -> None:
         line.append("content", style="cyan")
         line.append(f"=<{n} lines>", style="dim")
     line.append(")")
-    console.print(line)
+    return line
 
 
 def print_tool_result(tool_name: str, result, verbose: bool = False) -> None:
@@ -144,6 +161,12 @@ def print_tool_error(tool_name: str, message: str) -> None:
 
 def print_thinking(label: str = "Thinking…") -> None:
     console.print(f"\n[dim]{label}[/dim]")
+
+
+def print_status(text: str) -> None:
+    """One dim, indented line naming what the model is doing before it
+    answers."""
+    console.print(_sanitized_text(f"  {text}", style="dim"))
 
 
 def print_assistant_label(name: str = "Agent") -> None:

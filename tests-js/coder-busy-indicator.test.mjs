@@ -157,3 +157,25 @@ test("tickCoderBusyIndicator leaves the pill alone when no frame has been receiv
   assert.equal(window.document.getElementById("coder-state").textContent, "working…",
     "with no lastEventAt yet there is nothing to count from, so the base label is left untouched");
 });
+
+test("a status event shows in the busy pill until the next event", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  runScript(window, `
+    coder.activeId = "sid1";
+    window.__s = { info: { id: "sid1" }, busy: true, lastEventAt: Date.now() };
+    coder.sessions.set("sid1", window.__s);
+    const node = document.getElementById("coder-state");
+    node.textContent = "working…";
+    node.className = "job-state st-running";
+  `);
+  const pill = () => window.document.getElementById("coder-state").textContent;
+  window.handleCoderEvent(window.__s, { type: "status", text: "Loading model...", code: "loading_model" });
+  assert.match(pill(), /^Loading model… \d+s$/);
+  window.handleCoderEvent(window.__s, { type: "status", text: "Something new...", code: null });
+  assert.match(pill(), /^Something new\.\.\. \d+s$/);
+  window.handleCoderEvent(window.__s, { type: "some_later_event" });
+  window.tickCoderBusyIndicator();
+  assert.match(pill(), /^working… \d+s$/, "the status clears once the model answers");
+  assert.ok(!(window.__s.eventLog || []).some((e) => e.type === "status"),
+    "statuses are not kept in the exported event log");
+});

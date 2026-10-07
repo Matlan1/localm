@@ -213,6 +213,9 @@ class Agent(
         # display. "reasoning" is a thinking model's reasoning text, kept
         # separate from "token" - see _call_llm.
         self.on_event       = on_event
+        # A run without a live display or event sink prints each model
+        # status and each tool call to stderr when True.
+        self.report_progress = False
         # External approval hook: Callable[[ToolCall], bool]. When set it is used
         # for destructive-tool confirmation instead of the terminal prompt, in
         # both interactive and non-interactive runs.

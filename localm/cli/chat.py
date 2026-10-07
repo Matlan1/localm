@@ -631,6 +631,35 @@ class _ThinkPrinter:
 
 
 
+class _StatusLines:
+    """What the model is doing before it answers, for the terminal: each new
+    status as one dim line on stderr until the first token, the vision CPU
+    fallback warning in yellow whenever it comes. *before_first* runs once,
+    just before the first token is printed."""
+
+    def __init__(self, before_first=None) -> None:
+        self._before_first = before_first
+        self._started = False
+        self._last: Optional[str] = None
+
+    def status(self, text: str) -> None:
+        from rich.markup import escape
+        from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
+        if text == VISION_CPU_FALLBACK_STATUS:
+            err_console.print(f"\n[yellow]{escape(text)}[/yellow]")
+            return
+        if self._started or not text or text == self._last:
+            return
+        self._last = text
+        err_console.print(f"[dim]{escape(text)}[/dim]")
+
+    def first_token(self) -> None:
+        if not self._started:
+            self._started = True
+            if self._before_first is not None:
+                self._before_first()
+
+
 # A floor on plausible per-token decode time (mirrors http_server.py's
 # _MIN_SEC_PER_TOKEN - kept local rather than imported, so this module does not
 # pull in the HTTP server's FastAPI/uvicorn import surface for a single
@@ -679,22 +708,20 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         ChatTemplateMissingError,
         ImageDecodeUnavailable,
         UnsupportedInputError,
-        VISION_CPU_FALLBACK_STATUS,
     )
     parts: list[str] = []
     printer = _ThinkPrinter()
     t0 = _time.monotonic()
     first_at: Optional[float] = None
     stream_kwargs = dict(kwargs)
+    status_lines = _StatusLines()
     if "on_status" not in stream_kwargs:
-        def _cli_status(s: str) -> None:
-            if s == VISION_CPU_FALLBACK_STATUS:
-                err_console.print(f"\n[yellow]{escape(s)}[/yellow]")
-        stream_kwargs["on_status"] = _cli_status
+        stream_kwargs["on_status"] = status_lines.status
     try:
         for token in engine.chat_stream(messages, **stream_kwargs):
             if first_at is None:
                 first_at = _time.monotonic()
+                status_lines.first_token()
             parts.append(token)
             printer.feed(token)
         printer.flush()
@@ -833,7 +860,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             messages[:] = compacted_msgs
             console.print("[dim](older conversation summarised to free context)[/dim]")
 
-        console.print("\n[bold blue]Assistant[/bold blue]: ", end="")
+        console.print()
 
         parts: list[str] = []
         printer = _ThinkPrinter()
@@ -843,20 +870,15 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         interactive_opts = dict(gen_opts)
         if router.min_context and not router.in_process:
             interactive_opts["min_context"] = router.min_context
+        status_lines = _StatusLines(before_first=lambda: console.print(
+            "[bold blue]Assistant[/bold blue]: ", end=""))
         if "on_status" not in interactive_opts:
-            from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
-            from localm.inference.protocol import COMPACTING_STATUS
-
-            def _cli_interactive_status(s: str) -> None:
-                if s == VISION_CPU_FALLBACK_STATUS:
-                    err_console.print(f"\n[yellow]{escape(s)}[/yellow]")
-                elif s == COMPACTING_STATUS:
-                    err_console.print(f"\n[dim]{escape(s)}[/dim]")
-            interactive_opts["on_status"] = _cli_interactive_status
+            interactive_opts["on_status"] = status_lines.status
         try:
             for token in engine.chat_stream(messages, **interactive_opts):
                 if first_at is None:
                     first_at = _time.monotonic()
+                    status_lines.first_token()
                 parts.append(token)
                 printer.feed(token)
             printer.flush()

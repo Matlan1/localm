@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { addMessageRow, lsSetScoped } from "./chat.js";
+import { addMessageRow, lsSetScoped, statusLabel } from "./chat.js";
 import { $, authHeaders, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
@@ -57,15 +57,18 @@ function setCoderState(stateKey) {
 // Updates the busy pill with the seconds elapsed since the active session's
 // last SSE frame (a token, a tool event, or a keepalive comment), so a long
 // silent generation still visibly changes instead of sitting on a static
-// "working…" label. No-op unless the active session is busy and its pill is
-// currently showing the running state.
+// "working…" label, and with the model's latest status (loading the model,
+// processing the prompt) until the next event. No-op unless the active
+// session is busy and its pill is currently showing the running state.
 export function tickCoderBusyIndicator() {
   const s = activeSession();
   if (!s || !s.busy || typeof s.lastEventAt !== "number") return;
   const node = $("coder-state");
   if (!node.classList.contains("st-running")) return;
   const secs = Math.max(0, Math.floor((Date.now() - s.lastEventAt) / 1000));
-  node.textContent = t("coder.state.workingElapsed", { secs });
+  node.textContent = s.statusText
+    ? t("coder.state.workingStatus", { status: s.statusText, secs })
+    : t("coder.state.workingElapsed", { secs });
 }
 setInterval(tickCoderBusyIndicator, 1000);
 
@@ -720,10 +723,19 @@ export function buildConfirmCard(s, ev) {
 export function handleCoderEvent(s, ev) {
   // Keep a light event log (no token/reasoning spam) so "export" can rebuild
   // the session as markdown without another server round-trip.
-  if (ev.type !== "token" && ev.type !== "reasoning") {
+  if (ev.type !== "token" && ev.type !== "reasoning" && ev.type !== "status") {
     (s.eventLog = s.eventLog || []).push(ev);
   }
+  if (ev.type !== "status") s.statusText = null;
   switch (ev.type) {
+    case "status": {
+      // What the model is doing before it answers; shown in the busy pill
+      // until the next event.
+      if (!s.busy) break;
+      s.statusText = statusLabel(ev.text || "", ev.code || null);
+      if (s.info.id === coder.activeId) tickCoderBusyIndicator();
+      break;
+    }
     case "token": {
       startAssistantBlock(s);
       s.liveText += ev.text;
