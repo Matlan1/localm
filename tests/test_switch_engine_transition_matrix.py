@@ -549,7 +549,7 @@ class TestInconclusiveProbe:
         assert _inconclusive_refusal("model-a", attempts).fullmatch(ei.value.detail), (
             ei.value.detail)
         assert env.probes == attempts
-        assert env.built == [] and not a.loaded and hs._engines == {}
+        assert env.built == ["model-a"] and not a.loaded and hs._engines == {}
 
     def test_a_probe_that_clears_within_the_retries_loads(self, monkeypatch):
         a = GatedEngine("model-a")
@@ -661,7 +661,7 @@ class TestPinnedVictim:
 
         assert res == {"status": "confirm_required", "model": "model-b",
                        "detail": _estimate_confirm_detail("model-b", 10 * GB - NEED)}
-        assert env.built == [] and env.cancelled == []
+        assert env.built == ["model-b"] and env.cancelled == []
         assert hs._engines == {"model-a": a} and a.unload_calls == 0
         assert hs._active_model_name == "model-a"
 
@@ -725,7 +725,7 @@ class TestBusyVictim:
                        "detail": "loading 'model-b' needs to free 'model-a', "
                                  "which is 1 other active request"}
         assert env.cancelled == ["model-a"], "its generation was asked to stop"
-        assert env.built == []
+        assert env.built == ["model-b"]
         assert hs._engines == {"model-a": a} and hs._engines_lru == ["model-a"]
         assert a.loaded and a.unload_calls == 0 and a.unloading is False
         assert hs._active_model_name == "model-a"
@@ -797,7 +797,7 @@ class TestUnloadRace:
         assert refused.detail == ("'model-a' is currently being freed by another "
                                   "request; retry shortly.")
         assert res_b == {"status": "loaded", "model": "model-b"}
-        assert env.built == ["model-b"]
+        assert env.built == ["model-b", "model-a"]
         assert a.unload_calls == 1 and not a.loaded
 
         # Once the free lands the name is loadable again.
@@ -836,7 +836,7 @@ class TestUnloadRace:
 
         assert _registered_anywhere("model-a") == set(), "stays detached"
         assert a.unloading is True
-        assert "model-b" not in hs._engines and env.built == []
+        assert "model-b" not in hs._engines and env.built == ["model-b"]
         assert hs._active_model_name is None and hs._engine is None
 
         again = asyncio.run(hs.switch_engine("model-a", env.factory, preempt=False))
@@ -925,7 +925,7 @@ class TestSplitShortfall:
         assert ei.value.detail == (
             "Not enough VRAM on the configured split device(s) to load 'model-a' "
             "(GPU 0 needs ~3000 MB, 2048 MB free; GPU 1 needs ~3000 MB, 1024 MB free).")
-        assert env.built == [] and hs._engines == {}
+        assert env.built == ["model-a"] and hs._engines == {}
 
     def test_adaptive_shares_short_defer_to_the_backend_for_an_api_load(
             self, monkeypatch):
