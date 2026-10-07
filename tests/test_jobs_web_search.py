@@ -208,6 +208,9 @@ class TestRunChatWithWeb:
         assert injected.startswith("[Web request failed: ")
         assert "rate-limited" in injected
         assert "Results of web_search" not in injected
+        assert "Answer without the web" not in injected, \
+            "a failed lookup must not invite an answer from the model's own knowledge"
+        assert webtool.WEB_FAILED_INSTRUCTION in injected
 
     # This loop calls localm.web_retrieval directly, bypassing the chat plugin's
     # /api/web/retrieve endpoint and its server-side neutralise(), so it defangs
@@ -254,7 +257,7 @@ class TestGrammarWiring:
         out = webtool.run_chat_with_web(eng, "what is 2+2?")
 
         assert out == _ANSWER
-        assert eng.kw_seen[0]["grammar"] == gbnf.TOOL_CALLS_ONLY
+        assert eng.kw_seen[0]["grammar"] == gbnf.TOOL_CALL_SINGLE
         assert eng.kw_seen[0]["grammar_lazy"] is True
         assert eng.kw_seen[0]["grammar_triggers"] == [gbnf.TOOL_CALL_TRIGGER]
 
@@ -352,16 +355,21 @@ class TestEvidenceGroundingRules:
 
 class TestGrammarMirroredInGuiSurface:
     """The GUI's interactive web-tool loop (settings-perf.js) carries its own
-    JS copy of gbnf.TOOL_CALLS_ONLY/TOOL_CALL_TRIGGER (String.raw, so no
+    JS copy of gbnf.TOOL_CALL_SINGLE/TOOL_CALL_TRIGGER (String.raw, so no
     character needs re-escaping to mirror the Python raw string). Bound to the
     REAL shipped file."""
 
-    def test_tool_calls_only_grammar_is_mirrored_byte_for_byte(self):
+    def test_tool_call_single_grammar_is_mirrored_byte_for_byte(self):
         from localm.inference import gbnf
         js = _JS_WEB_SURFACE.read_text(encoding="utf-8")
-        assert gbnf.TOOL_CALLS_ONLY in js, (
-            "settings-perf.js's TOOL_CALLS_ONLY has drifted from "
+        assert gbnf.TOOL_CALL_SINGLE in js, (
+            "settings-perf.js's TOOL_CALL_SINGLE has drifted from "
             "localm/inference/gbnf.py's - update the JS copy to match")
+
+    def test_failed_lookup_wording_is_mirrored(self):
+        js = re.sub(r'"\s*\+\s*\n\s*"', "",
+                    _JS_WEB_SURFACE.read_text(encoding="utf-8"))
+        assert webtool.WEB_FAILED_INSTRUCTION in js
 
     def test_tool_call_trigger_is_mirrored_byte_for_byte(self):
         from localm.inference import gbnf

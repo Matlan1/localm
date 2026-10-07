@@ -830,6 +830,10 @@ DEFAULT_CONFIG: dict = {
     # web_search/fetch_url loop, scheduled jobs and the interactive GUI alike):
     # once the model starts a <tool_call>, force it to be valid tool-call JSON.
     "chat_tool_grammar": True,
+    # Most web lookups (searches and page reads) the chat runs for one message
+    # before it stops looking things up and answers from what it found. 0 = no
+    # ceiling. Repeated and no-progress lookups end the loop sooner either way.
+    "chat_web_max_lookups": 20,
     # Chat avatars: an emoji or a small data:image URI, never a URL. See
     # settings_schema.py's _validate_avatar_value / _AVATAR_DATA_URI_RE.
     "user_avatar": "",

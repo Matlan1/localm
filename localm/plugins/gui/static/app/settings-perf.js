@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, setConversationPin, stripUserImages, syncPinModelToggle, updateStatusIndicator } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -527,7 +527,20 @@ export function setupResidencyControls() {
 
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */
 
-export const WEB_MAX_ROUNDS = 3;
+// Default of the chat_web_max_lookups setting: web lookups one message may run
+// before the loop stops looking things up (0 = no ceiling).
+export const WEB_DEFAULT_MAX_LOOKUPS = 20;
+// Consecutive web lookups that add nothing new before the loop stops looking
+// things up.
+export const WEB_MAX_STALE_ROUNDS = 2;
+
+/** The web lookup ceiling per message from Settings (chat.webMaxLookups): a
+ *  whole number of 0 or more, 0 meaning no ceiling. Anything else gives
+ *  WEB_DEFAULT_MAX_LOOKUPS. */
+export function webMaxLookups() {
+  const n = chat.webMaxLookups;
+  return Number.isInteger(n) && n >= 0 ? n : WEB_DEFAULT_MAX_LOOKUPS;
+}
 
 // R27: a remembered "don't ask again this session" choice. null = ask each time;
 // true = allow all this session; false = deny all this session. In-memory only
@@ -543,8 +556,8 @@ export function setWebAskSession(v) { webAskSession = v; }
 // net_mode = ask means the GUI must APPROVE each model-initiated web request
 // before it runs (the settings promise: "ask = approve each request"). Read it
 // fresh from /v1/config so a change in Settings takes effect without a reload;
-// the cost is one small GET per model-initiated round (bounded by
-// WEB_MAX_ROUNDS). Unknown / unreachable -> do not block (the per-conversation
+// the cost is one small GET per message that makes a web request (the answer
+// is cached for the rest of that message). Unknown / unreachable -> do not block (the per-conversation
 // toggle is the standing consent; only "off", enforced server-side, blocks).
 export async function webModeIsAsk() {
   try {
@@ -613,14 +626,14 @@ export function confirmWebRequest(call) {
 window.confirmWebRequest = confirmWebRequest;
 
 // Lazy tool-call grammar: once the model starts a <tool_call>, force it to be
-// valid tool-call JSON; free text and thinking stay unconstrained. Mirrors
-// localm/inference/gbnf.py's TOOL_CALLS_ONLY/TOOL_CALL_TRIGGER byte for byte -
-// tests/test_jobs_web_search.py pins the two copies together so they cannot
-// silently drift apart. String.raw so no character here needs re-escaping to
-// match the Python raw string it mirrors.
-export const TOOL_CALLS_ONLY = String.raw`
-root       ::= opt-ws tool-block+ opt-ws
-tool-block ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>" opt-ws
+// one valid tool-call block, after which only end of generation is legal; free
+// text and thinking before it stay unconstrained. Mirrors
+// localm/inference/gbnf.py's TOOL_CALL_SINGLE/TOOL_CALL_TRIGGER byte for byte,
+// pinned by tests/test_jobs_web_search.py. String.raw so no character here
+// needs re-escaping to match the Python raw string it mirrors.
+export const TOOL_CALL_SINGLE = String.raw`
+root       ::= opt-ws tool-block opt-ws
+tool-block ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>"
 json-obj   ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws object ws "}"
 object     ::= "{" ws (member ws ("," ws member ws)*)? "}"
 member     ::= string ws ":" ws value
@@ -665,6 +678,19 @@ export const WEB_TOOL_PROMPT =
   "searched or read a page unless you actually emitted a tool call " +
   "and received its result. If a search fails or finds nothing useful, say " +
   "so plainly instead of making something up.";
+
+// System floor of the last completion of a message once the web loop has
+// stopped looking things up: no tool is taught and no tool grammar is sent.
+export const WEB_FINAL_PROMPT =
+  "Web lookups for this message are finished: no further web request will " +
+  "run and tool calls are not available in this reply, so do not write one. " +
+  "Answer the user now from the web results above and the conversation. " +
+  "Cite the source IDs (S1, S2, ...) you relied on and never cite a URL " +
+  "whose page was not read. If a web request failed, was not run, or the " +
+  "results do not answer the question, say so plainly: you have no " +
+  "information from a lookup that failed, so never describe, simulate or " +
+  "guess what it would have found, and never present anything as a result " +
+  "of it.";
 
 // Untrusted-content fence for web_search/fetch_url results (LM-DA-014): a
 // fetched page or search snippet is DATA an outside site chose, not something
@@ -934,7 +960,109 @@ export function looksLikeWebToolAttempt(text) {
   const clean = stripThink(text);
   if (/<\|?\/?tool_call\|?>/.test(clean) || /```[ \t]*tool_call\b/.test(clean)) return true;
   if (/<\/?(web_search|fetch_url)\b/.test(clean)) return true;
+  if (_WEB_MARKER_LINE_TEST.test(clean)) return true;
   return /"name"\s*:/.test(clean) && /web_search|fetch_url/.test(clean);
+}
+
+// A line in the shape of the display marker formatToolCalls renders for a tool
+// call (a quote mark, the globe, then italic text), as a model writes it when it
+// copies the marker instead of calling the tool.
+const _WEB_MARKER_LINE_TEST = /^[ \t]*>[ \t]*\u{1F310}[ \t]*\*/mu;
+const _WEB_MARKER_LINES = /^[ \t]*>[ \t]*\u{1F310}[ \t]*\*[^\n]*(?:\n|$)/gmu;
+
+// A closed tool-call wrapper in any dialect parseWebCalls reads.
+const _TOOL_CALL_BLOCK = /<\|?\/?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g;
+
+// How the server's text for a failed generation begins (inference_error_text,
+// localm/inference/http_server.py).
+const _INFERENCE_ERROR_MARK = "[inference error:";
+
+/** *text* with every web tool call removed, in every dialect parseWebCalls
+ *  reads (closed wrappers, an unclosed trailing wrapper, stray wrapper tags,
+ *  the XML-tag dialect, fences and bare JSON objects naming a web tool), plus
+ *  every copied display-marker line. Runs of blank lines are collapsed and the
+ *  result is trimmed. */
+export function stripWebCallText(text) {
+  let s = String(text || "").replace(_TOOL_CALL_BLOCK, "");
+  s = s.replace(/<\|?tool_call\|?>[\s\S]*$/, "").replace(/<\|?\/?tool_call\|?>/g, "");
+  s = s.replace(_WEB_TOOL_TAG_RE, "");
+  s = s.replace(/```[ \t]*[A-Za-z_]*[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g,
+    (whole, body) => (_asWebCall(_lenientJSON(body.trim())) ? "" : whole));
+  for (const chunk of [..._topLevelObjects(s)]) {
+    if (_asWebCall(_lenientJSON(chunk))) s = s.replace(chunk, "");
+  }
+  s = s.replace(_WEB_MARKER_LINES, "");
+  return s.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** The canonical tool-call block for *call*, as WEB_TOOL_PROMPT teaches it. */
+export function canonicalToolCall(call) {
+  return "<tool_call>" + JSON.stringify({ name: call.name, args: call.args || {} }) +
+         "</tool_call>";
+}
+
+/** An assistant reply as re-sent to the model on later requests: reasoning
+ *  removed, every tool call and copied display marker removed (stripWebCallText),
+ *  and, when *answered* (a web tool event follows the reply), the first web call
+ *  of the reply appended in canonical form: the first call of the visible text,
+ *  or of the reasoning when the visible text has none. Holds no UI-language text. */
+export function assistantHistoryText(content, answered) {
+  const clean = stripThink(content);
+  const prose = stripWebCallText(clean);
+  const call = answered
+    ? (parseWebCall(clean) || parseWebCall(splitThink(content || "").think || ""))
+    : null;
+  if (!call) return prose;
+  return (prose ? prose + "\n" : "") + canonicalToolCall(call);
+}
+
+/** Index just past the first closed tool-call wrapper in *text* that lies
+ *  outside <think> blocks, or -1 when there is none. */
+export function firstToolCallEnd(text) {
+  _TOOL_CALL_BLOCK.lastIndex = 0;
+  let m;
+  while ((m = _TOOL_CALL_BLOCK.exec(text))) {
+    const before = text.slice(0, m.index);
+    const opens = (before.match(/<think>/g) || []).length;
+    const closes = (before.match(/<\/think>/g) || []).length;
+    if (opens <= closes) {
+      _TOOL_CALL_BLOCK.lastIndex = 0;
+      return m.index + m[0].length;
+    }
+  }
+  _TOOL_CALL_BLOCK.lastIndex = 0;
+  return -1;
+}
+
+/** The dedupe key of a web call: tool name plus its query or URL, trimmed,
+ *  lower-cased and with runs of whitespace collapsed. */
+export function webCallKey(call) {
+  const a = call.args || call.arguments || {};
+  return call.name + ":" + String(a.query || a.url || "")
+    .trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** True when the completed tool event *ev* added something this message had
+ *  not seen yet: a search source URL not returned before, or the text of a
+ *  page not read before. Records what it saw in *seen* (a Set). A failed
+ *  lookup, an empty result and a repeat of known sources add nothing. */
+export function webEventAddsNew(ev, seen) {
+  if (!ev || ev.status !== "done") return false;
+  let fresh = false;
+  if (ev.tool === "search") {
+    for (const s of ev.sources || []) {
+      const u = String((s && (s.final_url || s.url)) || "").trim().toLowerCase();
+      if (u && !seen.has("src:" + u)) { seen.add("src:" + u); fresh = true; }
+    }
+  } else if (ev.tool === "fetch") {
+    const page = ev.page || {};
+    const u = String(page.url || ev.url || "").trim().toLowerCase();
+    if ((page.text || "").trim() && !seen.has("page:" + u)) {
+      seen.add("page:" + u);
+      fresh = true;
+    }
+  }
+  return fresh;
 }
 
 const _ACTION_VERBS =
@@ -988,15 +1116,18 @@ export function looksLikeActionAnnouncement(text) {
 /** The grounding states an evidence bundle can carry (web_retrieval). */
 export const GROUNDING_PAGE_BACKED = "page-backed";
 
-const _WEB_FAILED_INSTRUCTION =
-  "Answer without the web, and say that web access did not work.";
+export const WEB_FAILED_INSTRUCTION =
+  "This lookup returned no information. Tell the user plainly that it " +
+  "failed. Do not describe, simulate or guess what it would have found, and " +
+  "do not present anything as a result of it.";
 
 /** The fenced user-role text a tool event contributes to an inference
  *  request, as {content, untrusted_spans}: a completed search is its header
  *  (query and grounding summary) plus the evidence text fenced as untrusted
  *  content; a completed page read is its header plus the page text fenced;
- *  a failure names the error and tells the model to answer without the web;
- *  a denied or duplicate call and a control note are their note text. The
+ *  a failure names the error and says the lookup returned no information
+ *  (WEB_FAILED_INSTRUCTION); a call that did not run (denied, duplicate,
+ *  skipped) and a control note are their note text. The
  *  event's note, when set, follows the result after a blank line. A row
  *  migrated from the legacy shape returns its stored text and spans. */
 export function toolEventPrompt(ev) {
@@ -1016,7 +1147,7 @@ export function toolEventPrompt(ev) {
              fenceUntrusted([untrustedPart(page.text || "")])];
   } else if (ev.status === "failed") {
     parts = ["[Web request failed: ", untrustedPart(ev.error || "unknown error"), "] " +
-             _WEB_FAILED_INSTRUCTION];
+             WEB_FAILED_INSTRUCTION];
   } else if (ev.status === "running") {
     parts = ["[Web request still in progress; no result is available yet]"];
   }
@@ -1074,21 +1205,25 @@ export async function requestWebTool(call) {
 }
 
 /** A tool event for a model-requested call that did not run: *status* is
- *  "denied" or "duplicate", *note* the text the model reads instead. */
-export function webCallOutcomeEvent(call, status, note) {
+ *  "denied", "duplicate" or "skipped" (the per-message lookup ceiling was
+ *  reached), *note* the text the model reads instead. *extra* fields (for
+ *  example `limit`) are copied onto the event. */
+export function webCallOutcomeEvent(call, status, note, extra = {}) {
   const a = call.args || call.arguments || {};
   const now = Date.now();
   const ev = newToolEvent({
     tool: call.name === "fetch_url" ? "fetch" : "search",
-    status, started_at: now, finished_at: now, note,
+    status, started_at: now, finished_at: now, note, ...extra,
   });
   if (ev.tool === "search") ev.query = a.query || "";
   else ev.url = a.url || "";
   return ev;
 }
 
-/** A control-note tool event: *reason* is "format", "limit" or "pending",
- *  *note* the text the model reads. */
+/** A control-note tool event: *reason* is "format" (a botched call, the
+ *  model is asked to re-emit it), "unparsed" (a botched call after that, the
+ *  lookups stop) or "pending" (an announced action), *note* the text the
+ *  model reads. Stored rows may also carry the retired reason "limit". */
 export function webNoteEvent(reason, note) {
   const now = Date.now();
   return newToolEvent({ tool: "note", status: "done", reason,
@@ -1099,8 +1234,9 @@ export function webNoteEvent(reason, note) {
  *  (shown, not saved; chat.webCall holds it so nothing else can send or
  *  edit meanwhile), then complete it with the result or the failure (so the
  *  model can adapt) and save. *extraNote* is stored as the event's note, so
- *  the user/assistant alternation the chat templates expect is unchanged. */
-export async function runWebCall(conv, call, extraNote = "") {
+ *  the user/assistant alternation the chat templates expect is unchanged, and
+ *  *reason*, when given, as the event's reason. Returns the completed event. */
+export async function runWebCall(conv, call, extraNote = "", reason = "") {
   const a = call.args || call.arguments || {};
   const ev = newToolEvent({
     tool: call.name === "fetch_url" ? "fetch" : "search",
@@ -1122,8 +1258,10 @@ export async function runWebCall(conv, call, extraNote = "") {
   }
   ev.finished_at = Date.now();
   if (extraNote) ev.note = extraNote;
+  if (reason) ev.reason = reason;
   saveConversations(conv);
   renderChat();
+  return ev;
 }
 
 /* ---- voice: mic (Whisper STT) + read-aloud (browser TTS) ---- */
@@ -2208,11 +2346,17 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
   const signal = chat.abort.signal;
   if (signal.aborted) return { stopped: true, liveRow: null };
-  // R36: per-send web state. `seen` dedupes already-issued queries so the model
-  // cannot loop on the same search; `ask` caches the net policy so a transient
-  // /v1/config blip mid-loop cannot silently flip approval off; `forced` ensures
-  // we only inject the "limit reached, answer now" nudge once per send.
-  if (!web) web = { seen: new Set(), ask: null, forced: false, repaired: false };
+  // Per-send web state: `seen` holds the keys of calls already issued, `found`
+  // the sources and pages already returned, `lookups` the calls run, `stale`
+  // the consecutive lookups that added nothing new, `formatRepairs` the
+  // consecutive botched calls already re-prompted, `ask` the cached net policy,
+  // `repaired` whether the pending-action repair ran, and `final` that the next
+  // completion is the tool-free last one of this send.
+  if (!web) {
+    web = { seen: new Set(), found: new Set(), lookups: 0, stale: 0,
+            formatRepairs: 0, ask: null, repaired: false, final: false,
+            max: webMaxLookups() };
+  }
   const contextRouting = await maybeCompactConversation(conv, signal);
   if (signal.aborted) return { stopped: true, liveRow: null };
   const params = chatParams();
@@ -2226,14 +2370,15 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // brain toggle drives. We deliberately no longer prepend it here, so it is not
   // injected twice.
   // Always give the model an honesty floor:
-  //  - web ON  -> teach the tools so it searches instead of guessing.
+  //  - web ON  -> teach the tools so it searches instead of guessing; on the
+  //    last completion of a send, tell it the lookups are finished instead.
   //  - results just injected (explicit /web, toggle off) -> tell it to use and
   //    cite them; the offline-denial floor would contradict results in hand.
   //  - web OFF, no results -> tell it plainly it is offline and must not
   //    fabricate current facts or claim it looked anything up. This is what
   //    stops the model hallucinating instead of admitting it cannot reach the net.
   let webFloor;
-  if (webEnabled) webFloor = WEB_TOOL_PROMPT;
+  if (webEnabled) webFloor = web.final ? WEB_FINAL_PROMPT : WEB_TOOL_PROMPT;
   else if (lastTurnHasWebResults(conv)) webFloor = WEB_GROUNDED_PROMPT;
   else webFloor = NO_WEB_PROMPT;
   sysText = (sysText ? sysText + "\n\n" : "") + webFloor;
@@ -2244,7 +2389,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // its untrusted spans then take the same alternation-merge path below. It is
   // marked origin "tool" so the server keeps it out of what it treats as the
   // user's own words (the memory recall query, the audit's user line).
-  const mapped = conv.messages.map((m) => {
+  const mapped = conv.messages.map((m, i) => {
     if (isToolEvent(m)) {
       const { content, untrusted_spans } = toolEventPrompt(m);
       return { role: "user", content, origin: "tool",
@@ -2256,12 +2401,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       return { role: m.role,
                content: msgText(m) + "\n[An image was generated and shown to the user.]" };
     }
-    // Reasoning blocks are display-only - never resend them as context. Tool-call
-    // blocks are ALSO defanged to a "web search: X" note before re-sending, so the
-    // model never re-ingests its own raw <|tool_call> control tokens (echoing those
-    // back destabilised some finetunes into repetition - CHAT-TOOL-1).
+    // An assistant reply is re-sent as assistantHistoryText: no reasoning, no
+    // raw tool-call text in any dialect, no display markers, and the call it
+    // made in canonical form only when a web tool event answered it.
     if (m.role === "assistant" && typeof m.content === "string") {
-      return { role: m.role, content: formatToolCalls(stripThink(m.content)) };
+      const next = conv.messages[i + 1];
+      const answered = isToolEvent(next) && next.tool !== "note";
+      return { role: m.role, content: assistantHistoryText(m.content, answered) };
     }
     return {
       role: m.role, content: m.content,
@@ -2313,9 +2459,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
   if (params.grammar) {
     body.grammar = params.grammar;
-  } else if (webEnabled && chat.toolGrammar && !chat.toolGrammarUnsupported) {
-    // Once the model starts a <tool_call>, force it to be valid tool-call JSON.
-    body.grammar = TOOL_CALLS_ONLY;
+  } else if (webEnabled && !web.final && chat.toolGrammar && !chat.toolGrammarUnsupported) {
+    // Once the model starts a <tool_call>, force it to be one valid tool-call
+    // block, after which the generation ends.
+    body.grammar = TOOL_CALL_SINGLE;
     body.grammar_lazy = true;
     body.grammar_triggers = [TOOL_CALL_TRIGGER];
   }
@@ -2343,13 +2490,22 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   let routing = null;   // which model answered, when not the one asked for
   let serverCompacted = false;
+  // With web on, the reply is cut just past its first complete tool-call block
+  // once anything other than whitespace follows it (in the last, tool-free
+  // completion: where a second tool-call block starts), and the request is
+  // aborted through reqCtl (which the turn's own Stop also aborts).
+  let cutAtCall = false;
+  let readOk = false;   // the request and its stream completed without throwing
+  const reqCtl = new AbortController();
+  const forwardAbort = () => reqCtl.abort();
+  signal.addEventListener("abort", forwardAbort, { once: true });
 
   async function postChatCompletions(reqBody) {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify(reqBody),
-      signal,
+      signal: reqCtl.signal,
     });
     if (!r.ok) {
       // Same shape as every other fetch error site in the GUI (chat.js:1193,
@@ -2384,7 +2540,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         && r.headers.get("X-Localm-Context-Compacted"));
     let streamErr = null;
     await readSSE(r, (payload) => {
-      if (payload === "[DONE]") return;
+      if (payload === "[DONE]" || cutAtCall) return;
       let chunk;
       try { chunk = JSON.parse(payload); } catch { return; }
       if (chunk.localm_headers && typeof chunk.localm_headers === "object") {
@@ -2413,6 +2569,27 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         removeStatusIndicator(liveBody);
         full += cDelta;
         reasoning += rDelta;
+        if (webEnabled && cDelta && full.includes("tool_call")) {
+          const end = firstToolCallEnd(full);
+          const rest = end >= 0 ? full.slice(end) : "";
+          const after = rest.trimStart();
+          let cutAt = -1;
+          if (end >= 0 && web.final) {
+            const next = rest.search(/<\|?\/?tool_call\|?>/);
+            if (next >= 0) cutAt = end + next;
+          } else if (after &&
+                     !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
+            // The server's inference-error text after the block (or the start
+            // of it) does not cut the reply; the turn then ends as failed.
+            cutAt = end;
+          }
+          if (cutAt >= 0) {
+            full = full.slice(0, cutAt);
+            cutAtCall = true;
+            finishReason = "stop";
+            reqCtl.abort();
+          }
+        }
         // Rebuild <think> from the reasoning stream so splitThink renders the
         // collapsible block exactly as before. Back-compat: an older server that
         // still inlines <think> in content also renders (reasoning stays empty).
@@ -2457,12 +2634,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         throw e;
       }
     }
-    // A compacted reply marks the conversation as server-compacted unless the
-    // reply failed.
-    if (serverCompacted && finishReason !== "error") conv.serverCompacted = true;
+    readOk = true;
   } catch (e) {
     removeStatusIndicator(liveBody);
-    if (e.name === "AbortError") {
+    if (e.name === "AbortError" && cutAtCall && !signal.aborted) {
+      // The stream was cut at its first tool call: the reply is complete.
+      readOk = true;
+    } else if (e.name === "AbortError") {
       aborted = true;
     } else if (sentImage && e.status === 400 && !full.trim()) {
       // VIS-1: a text-only model rejected the image. Drop it from history so the
@@ -2481,8 +2659,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       toast("Chat request failed: " + e.message, true);
     }
   } finally {
+    signal.removeEventListener("abort", forwardAbort);
     removeStatusIndicator(liveBody);
   }
+  // A compacted reply that was read to its end (or cut at its first tool call)
+  // marks the conversation as server-compacted unless the reply failed.
+  if (serverCompacted && readOk && finishReason !== "error") conv.serverCompacted = true;
   const outcome = { stopped: aborted, liveRow };
 
   // User pressed Stop (BUG-13 / U-STOP). BUG-13's original bug was that the
@@ -2610,112 +2792,121 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // the session that generated them. renderChat() below reads it back off the
   // last message via updateUsageDisplay().
   if (usage) reply.usage = usage;
-  conv.messages.push(reply);
-  saveConversations(conv);
-  renderChat();
-
-  // Web-access loop: when the model requested a search/page and the toggle
-  // is on, run it and let the model continue - bounded rounds per send.
-  const canWeb = webEnabled && webDepth < WEB_MAX_ROUNDS;
   // A reply with reasoning but no visible text ended inside its reasoning, so
   // a call it wrote there is read from the reasoning instead.
   const thought = reasoning || splitThink(full).think || "";
   const onlyThought = !stripThink(full).trim() && !!thought.trim();
   const callText = onlyThought ? thought : full;
-  // Limit 2: the loop runs the first call and only needs to know whether ANY
-  // further call was present, so it never pays to enumerate the rest.
-  const webCalls = canWeb ? parseWebCalls(callText, 2) : [];
-  const nextCall = webCalls[0] || null;
-  if (nextCall) {
-    // R36: dedupe - the model re-issuing a search it already ran this send is the
-    // loop. Do not repeat it; tell the model the results are already in hand and
-    // to answer from them, and end the web rounds for this send.
-    const key = nextCall.name + ":" + String(
-      (nextCall.args && (nextCall.args.query || nextCall.args.url)) || "")
-      .trim().toLowerCase();
-    if (web.seen.has(key)) {
-      conv.messages.push(webCallOutcomeEvent(nextCall, "duplicate",
-        "[duplicate web request] You already ran that exact search this turn; " +
-        "its results are above. Do not search again - answer now from those " +
-        "results and cite the sources, or say plainly if they are insufficient."));
+  let finalText = full;
+  if (webEnabled && web.final &&
+      (parseWebCalls(callText, 1).length || looksLikeWebToolAttempt(callText))) {
+    // The last, tool-free completion of a send still wrote a web call: the call
+    // text is dropped from the stored reply, which is flagged webUnfinished.
+    finalText = stripWebCallText(stripThink(full));
+    reply.content = thought ? "<think>\n" + thought + "\n</think>\n" + finalText : finalText;
+    reply.webUnfinished = true;
+  }
+  conv.messages.push(reply);
+  saveConversations(conv);
+  renderChat();
+
+  // Web-access loop: with the toggle on, a web call in the reply is run and the
+  // model continues, until it answers or the loop stops looking things up (a
+  // repeated call, lookups that add nothing new, a call that cannot be parsed
+  // after one re-prompt, a denied request, or the per-message ceiling). Then
+  // one last completion runs without tools (web.final).
+  const endWebLookups = (ev) => {
+    conv.messages.push(ev);
+    web.final = true;
+    saveConversations(conv);
+    renderChat();
+    return runCompletion(conv, webDepth + 1, web);
+  };
+  if (webEnabled && !web.final) {
+    // Limit 2: the loop runs the first call and only needs to know whether ANY
+    // further call was present, so it never pays to enumerate the rest.
+    const webCalls = parseWebCalls(callText, 2);
+    const nextCall = webCalls[0] || null;
+    if (nextCall) {
+      const key = webCallKey(nextCall);
+      if (web.seen.has(key)) {
+        return endWebLookups(webCallOutcomeEvent(nextCall, "duplicate",
+          "[duplicate web request] That exact request already ran in this " +
+          "message and its result is above, so it was not run again."));
+      }
+      if (web.max > 0 && web.lookups >= web.max) {
+        return endWebLookups(webCallOutcomeEvent(nextCall, "skipped",
+          `[web request not run] This message already ran ${web.max} web ` +
+          "lookups, the most allowed per message, so this request did not run.",
+          { limit: web.max }));
+      }
+      // net_mode=ask: approve each MODEL-INITIATED request before it runs (WEB-ask).
+      // The explicit /web command is direct consent and is NOT routed through here.
+      // The policy is cached for this send.
+      if (web.ask === null) web.ask = await webModeIsAsk();
+      const approved = web.ask ? await confirmWebRequest(nextCall) : true;
+      if (!approved) {
+        return endWebLookups(webCallOutcomeEvent(nextCall, "denied",
+          "[web access denied] The user declined this web request, so nothing " +
+          "was looked up. Do not claim you searched or browsed."));
+      }
+      web.seen.add(key);
+      web.lookups += 1;
+      web.formatRepairs = 0;
+      // The ignored-call notice rides on the RESULT message, and only here.
+      const ignored = ignoredCallsNote(webCalls);
+      const ev = await runWebCall(conv, nextCall, ignored, ignored ? "ignored" : "");
+      web.stale = webEventAddsNew(ev, web.found) ? 0 : web.stale + 1;
+      if (web.stale >= WEB_MAX_STALE_ROUNDS) web.final = true;
+      return runCompletion(conv, webDepth + 1, web);
+    }
+    if (looksLikeWebToolAttempt(callText)) {
+      // A web tool call that could not be parsed (a broken block, or a copied
+      // display marker): re-prompted once for the exact format; a second one in
+      // a row ends the lookups.
+      if (web.formatRepairs > 0) {
+        return endWebLookups(webNoteEvent("unparsed",
+          "[tool-call format] That still could not be parsed as a web tool " +
+          "call, so nothing was looked up."));
+      }
+      web.formatRepairs += 1;
+      conv.messages.push(webNoteEvent("format",
+        "[tool-call format] That looked like a web tool call, but I could not " +
+        "parse it. Re-emit it EXACTLY like this and nothing else:\n" +
+        '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
+        "If you did not mean to search, answer in plain text and do not claim " +
+        "you accessed the web."));
       saveConversations(conv);
       renderChat();
-      return runCompletion(conv, WEB_MAX_ROUNDS, web);   // stop web; force an answer
+      return runCompletion(conv, webDepth + 1, web);
     }
-    // net_mode=ask: approve each MODEL-INITIATED request before it runs (WEB-ask).
-    // The explicit /web command is direct consent and is NOT routed through here.
-    // Cache the policy for this send so a mid-loop /v1/config blip cannot flip it.
-    if (web.ask === null) web.ask = await webModeIsAsk();
-    const approved = web.ask ? await confirmWebRequest(nextCall) : true;
-    if (!approved) {
-      conv.messages.push(webCallOutcomeEvent(nextCall, "denied",
-        "[web access denied] The user declined this web request. Do not claim " +
-        "you searched or browsed; answer from what you already know, or say " +
-        "plainly that you could not look it up."));
+    if (!web.repaired && finishReason === "stop" &&
+        (onlyThought || looksLikeActionAnnouncement(full))) {
+      // The model announced a web action ("I will now search ...") and then
+      // stopped without emitting a call, or stopped after its reasoning with no
+      // reply and no call. One repair round per send: `web.repaired` is set
+      // before the recursive call and gates this branch, so the repair reply
+      // cannot enter it again.
+      web.repaired = true;
+      conv.messages.push(webNoteEvent("pending", onlyThought
+        ? "[pending action] Your last reply ended in your reasoning, with no " +
+          "answer and no tool call. Do exactly ONE of these now, after your " +
+          "reasoning: emit exactly one tool call in the required format, or " +
+          "give your final answer. Never say you searched or looked something " +
+          "up unless you actually emitted a tool call and received its result."
+        : "[pending action] Your last reply announced an action but did not " +
+          "perform it. Do exactly ONE of these now: emit exactly one tool call in " +
+          "the required format, or give your final answer now without promising " +
+          "further work. Never say you searched or looked something up unless " +
+          "you actually emitted a tool call and received its result."));
       saveConversations(conv);
       renderChat();
-      return runCompletion(conv, WEB_MAX_ROUNDS, web);   // no further web rounds this send
+      return runCompletion(conv, webDepth + 1, web);
     }
-    web.seen.add(key);
-    // The ignored-call notice rides on the RESULT message, and only here. The
-    // duplicate and denied branches above already tell the model that no web
-    // action is happening this turn ("do not search again" / "answer without
-    // the web"), so nothing is dropped in silence there - and inviting it to
-    // re-issue the extra call would contradict the instruction it just got.
-    await runWebCall(conv, nextCall, ignoredCallsNote(webCalls));
-    return runCompletion(conv, webDepth + 1, web);
-  } else if (canWeb && looksLikeWebToolAttempt(callText)) {
-    // The model tried to call a web tool but emitted a block we could not
-    // parse. Re-prompt for the exact format instead of letting the un-grounded
-    // reply stand (it would otherwise read as a confident, un-searched answer).
-    conv.messages.push(webNoteEvent("format",
-      "[tool-call format] That looked like a web tool call, but I could not " +
-      "parse it. Re-emit it EXACTLY like this and nothing else:\n" +
-      '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
-      "If you did not mean to search, answer in plain text and do not claim " +
-      "you accessed the web."));
-    saveConversations(conv);
-    renderChat();
-    return runCompletion(conv, webDepth + 1, web);
-  } else if (webEnabled && webDepth === WEB_MAX_ROUNDS && !web.forced &&
-             (parseWebCall(callText) || looksLikeWebToolAttempt(callText))) {
-    // R36: web rounds are used up but the model is STILL trying to search instead
-    // of answering (the "never synthesizes an answer" symptom). Force exactly one
-    // synthesizing turn from the results already gathered, then accept its answer.
-    web.forced = true;
-    conv.messages.push(webNoteEvent("limit",
-      "[web search limit reached] You have used the maximum web lookups for " +
-      "this turn. Stop searching and answer the question now using the results " +
-      "already provided above, citing the sources; if they are insufficient, " +
-      "say so plainly."));
-    saveConversations(conv);
-    renderChat();
-    return runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
-  } else if (canWeb && !web.repaired && finishReason === "stop" &&
-             (onlyThought || looksLikeActionAnnouncement(full))) {
-    // The model announced a web action ("I will now search ...") and then
-    // stopped without emitting a call, or stopped after its reasoning with no
-    // reply and no call. One repair round per send: `web.repaired` is set
-    // before the recursive call and gates this branch, so the repair reply
-    // cannot enter it again.
-    web.repaired = true;
-    conv.messages.push(webNoteEvent("pending", onlyThought
-      ? "[pending action] Your last reply ended in your reasoning, with no " +
-        "answer and no tool call. Do exactly ONE of these now, after your " +
-        "reasoning: emit exactly one tool call in the required format, or " +
-        "give your final answer. Never say you searched or looked something " +
-        "up unless you actually emitted a tool call and received its result."
-      : "[pending action] Your last reply announced an action but did not " +
-        "perform it. Do exactly ONE of these now: emit exactly one tool call in " +
-        "the required format, or give your final answer now without promising " +
-        "further work. Never say you searched or looked something up unless " +
-        "you actually emitted a tool call and received its result."));
-    saveConversations(conv);
-    renderChat();
-    return runCompletion(conv, webDepth + 1, web);
-  } else if ($("p-speak").checked && full) {
-    speak(full);   // read the finished reply aloud (offline browser voices)
-  } else if (full && ttsProvider && typeof ttsProvider.ready === "function") {
+  }
+  if ($("p-speak").checked && finalText) {
+    speak(finalText);   // read the finished reply aloud (offline browser voices)
+  } else if (finalText && ttsProvider && typeof ttsProvider.ready === "function") {
     // Warm the voice model now, while the reply is on screen, so the cold
     // model-compile cost is already paid by the time a manual "speak" click
     // happens. passive: true skips this unless it needs no download prompt.
