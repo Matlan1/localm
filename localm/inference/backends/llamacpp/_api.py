@@ -938,14 +938,25 @@ _MTP_HIDDEN_STATE_FNS = (
 )
 
 
+_STAGING: dict = {}
+
+
 def _resolve_staging(name, restype, *argtypes):
-    """Bind a C++-linkage llama.cpp function, or None when it is not exported."""
+    """Bind a C++-linkage llama.cpp function, or None when it is not exported.
+
+    The binding is made once per loaded library and signature and reused.
+    """
+    lib = load_lib()
+    key = (name, restype, argtypes)
+    cached = _STAGING.get(key)
+    if cached is not None and cached[0] is lib:
+        return cached[1]
     from ._symbols import resolve
-    fn = resolve(load_lib(), name)
-    if fn is None:
-        return None
-    fn.restype = restype
-    fn.argtypes = list(argtypes)
+    fn = resolve(lib, name)
+    if fn is not None:
+        fn.restype = restype
+        fn.argtypes = list(argtypes)
+    _STAGING[key] = (lib, fn)
     return fn
 
 
