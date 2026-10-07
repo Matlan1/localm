@@ -413,7 +413,7 @@ def test_every_pinned_asset_belongs_to_a_pinned_tag():
 
     Enforced across every backend, not for ROCm alone, so bumping the pin
     without refreshing the digests fails here."""
-    known = {sl._PINNED_TAG, sl._ROCM_TAG}
+    known = {sl._PINNED_TAG, sl._ROCM_TAG, sl._ROCM_CPU_TAG}
     stale = [k for k in sl._PINNED_FALLBACK_SHA256
              # cudart bundles carry no tag in their names: upstream re-uploads
              # the same file every release, so they are legitimately tag-free.

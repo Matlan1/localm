@@ -141,6 +141,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # The n_cpu_moe the last load used: the configured value, or the one
         # automatic GPU sizing chose. None before the first sizing.
         self.effective_n_cpu_moe: Optional[int] = None
+        # Layers whose routed experts the last load actually kept in system RAM
+        # (0 when none, or when the override did not apply).
+        self.moe_cpu_layers = 0
         # The multi-GPU split distribution the last load applied
         # ({"source": "auto"|"pinned"|"equal", "devices": [{"index", "share"}, ...]}),
         # or None when no split applied. Set in _load_native.
@@ -653,7 +656,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # in the branch where the override actually applied (skip_reason is
         # None).
         n_cpu_moe = self._load_n_cpu_moe()
-        self.moe_applied = False
+        self.moe_cpu_layers = 0
         if n_cpu_moe > 0:
             # Why the override did not apply, rendered here in the parent from the
             # metadata the child returned. The child must never console.print.
@@ -664,7 +667,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     skip_reason,
                     f"[yellow]  n_cpu_moe:[/yellow] did not apply ({skip_reason})."))
             else:
-                self.moe_applied = True
+                self.moe_cpu_layers = n_cpu_moe
                 placement = meta.get("weight_placement") or []
                 if placement:
                     ram_mib = sum(b["mib"] for b in placement if b["is_ram"])

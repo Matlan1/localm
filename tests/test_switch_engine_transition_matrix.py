@@ -1296,9 +1296,9 @@ class TestPlacementHeal:
         assert b.placement_heal is None and b.unloading is False
         assert "model-b" in hs._inference_sems
         lines = [r.getMessage() for r in caplog.records]
-        assert ("switch_engine: reloading 'model-b' (12/32 layers on the GPU) for a "
-                "full GPU placement: a model that held the VRAM it lacked is idle or "
-                "gone") in lines
+        assert ("switch_engine: reloading 'model-b' (12/32 layers on the GPU, the rest "
+                "on the CPU) for a full GPU placement: a model that held the VRAM it "
+                "lacked is idle or gone") in lines
         assert any(line.startswith("switch_engine: loaded 'model-b': 32/32 layers")
                    for line in lines)
 

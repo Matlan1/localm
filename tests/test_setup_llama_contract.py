@@ -37,7 +37,7 @@ import pytest
 from click.testing import CliRunner
 
 import localm.setup_llama as sl
-from localm import config, hwdetect
+from localm import config, cpu_backend_select, hwdetect
 from localm.bugreport import LocalmError
 from localm.http_ssl import RedirectDowngradeRefused
 
@@ -147,6 +147,7 @@ LINUX_CPU = {"build/bin/libllama.so": b"libllama", "build/bin/libggml-base.so.0"
 MAC_METAL = {"build/bin/libllama.dylib": b"libllama", "build/bin/libggml-metal.dylib": b"metal",
              "build/bin/llama-cli": b"macho-exe"}
 AMD_ROCM = {"llama.dll": b"llama@rocm", "ggml-hip.dll": b"ggml-hip", "rocblas.dll": b"rocblas",
+            "ggml-cpu.dll": b"ggml-cpu@rocm",
             "rocblas/library/TensileLibrary_gfx1030.dat": b"tensile",
             "rocblas/library/Kernels.so-000-gfx1030.hsaco": b"kernels"}
 
@@ -193,6 +194,7 @@ class World:
         self.vendors: list = []
         self.gpu_names = ""
         self.recommended = "vulkan"
+        self.cpu_scores: dict = {}
         monkeypatch.setattr(sl, "verified_urlopen", self._urlopen)
         monkeypatch.setattr(subprocess, "run", self._run)
         monkeypatch.setattr(shutil, "which", lambda cmd, *args, **kwargs: None)
@@ -278,6 +280,12 @@ class World:
             self.probe_calls += 1
             rc, err = self.probes.pop(0) if self.probes else (0, "")
             return subprocess.CompletedProcess(cmd, rc, "", err)
+        if len(cmd) >= 3 and cmd[1] == "-c" and cmd[2] == cpu_backend_select._SCORE_PROBE:
+            name = Path(kwargs["env"]["LOCALM_CPU_TIER_CANDIDATE"]).name
+            score = self.cpu_scores.get(name)
+            verdict = {"score": score, "error": None if score is not None else "could not load"}
+            return subprocess.CompletedProcess(
+                cmd, 0, "\n@@VERDICT@@" + json.dumps(verdict) + "\n", "")
         if "nvidia-smi" in Path(cmd[0]).name.lower():
             if self.nvidia is None:
                 raise FileNotFoundError(cmd[0])
@@ -313,6 +321,22 @@ def _in_order(text: str, *fragments: str) -> None:
         i = text.find(frag, pos)
         assert i >= 0, f"missing (or out of order): {frag!r}\n--- output ---\n{text}"
         pos = i + len(frag)
+
+
+ROCM_CPU = {"ggml-base.dll": b"base@b10270", "ggml-cpu-x64.dll": b"cpu-x64",
+            "ggml-cpu-haswell.dll": b"cpu-haswell", "ggml-cpu-zen4.dll": b"cpu-zen4",
+            "libomp140.x86_64.dll": b"openmp"}
+
+
+def _rocm_cpu_overlay(world, *, scores=None, digest_ok=True):
+    """Serve the pinned upstream CPU archive the amd-rocm provision installs its
+    CPU backend from, with this CPU's ggml_backend_score() per variant."""
+    body = _zip(ROCM_CPU, 7)
+    world.mp.setitem(sl._PINNED_FALLBACK_SHA256, sl._ROCM_CPU_ASSET,
+                     _sha(body) if digest_ok else "0" * 64)
+    world.cpu_scores = ({"ggml-cpu-x64.dll": 1, "ggml-cpu-haswell.dll": 64}
+                        if scores is None else scores)
+    return world.serve(sl.rocm_cpu_overlay_url(), body)
 
 
 def _upstream_win_vulkan(world, tag=PIN, digest="ok", body=None):
@@ -569,6 +593,7 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
         (f"llama-{ROCM}-windows-rocm-gfx110X-x64.zip", _zip({"llama.dll": b"x"}, 4), "ok"),
         (name, _zip(AMD_ROCM), "ok"),
     ])
+    cpu_url = _rocm_cpu_overlay(world)
     r = world.invoke("--backend", "amd-rocm")
     assert r.exit_code == 0, r.output
     if note:
@@ -576,15 +601,82 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
     else:
         assert "Note:" not in r.text
     _in_order(r.text, "Backend: amd-rocm (self-contained AMD ROCm build (gfx103X / RX 6000))",
-              f"Downloading {urls[name]}", "OK - amd-rocm runtime loads on this machine.")
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "ggml-hip.dll", "llama.dll",
+              f"Downloading {urls[name]}", f"Downloading {cpu_url}",
+              f"CPU backend: ggml-cpu-haswell from llama.cpp {sl._ROCM_CPU_TAG} (SIMD), "
+              "replacing the amd-rocm build's own",
+              "OK - amd-rocm runtime loads on this machine.")
+    assert world.files() == [".localm-backend", ".localm-cpu-overlay", "LICENSE.llama-cpp",
+                             "ggml-cpu.dll", "ggml-hip.dll", "libomp140.x86_64.dll", "llama.dll",
                              "rocblas.dll", "rocblas/library/Kernels.so-000-gfx1030.hsaco",
                              "rocblas/library/TensileLibrary_gfx1030.dat"]
+    assert (world.lib / "ggml-cpu.dll").read_bytes() == b"cpu-haswell"
+    assert (world.lib / "libomp140.x86_64.dll").read_bytes() == b"openmp"
+    assert json.loads((world.lib / ".localm-cpu-overlay").read_text(encoding="utf-8")) == {
+        "tag": sl._ROCM_CPU_TAG, "variant": "ggml-cpu-haswell.dll"}
     assert (world.lib / "LICENSE.llama-cpp").read_text(encoding="utf-8") == sl._LLAMA_CPP_MIT_NOTICE
-    assert world.marker() == f"amd-rocm {ROCM}\n"
-    assert world.history() == [("amd-rocm", ROCM)]
-    assert world.requests == [f"{API}/{LEMONADE}/releases/tags/{ROCM}", urls[name]]
+    assert world.marker() == f"amd-rocm {sl._ROCM_BUILD}\n"
+    assert world.history() == [("amd-rocm", sl._ROCM_BUILD)]
+    assert world.requests == [f"{API}/{LEMONADE}/releases/tags/{ROCM}", urls[name], cpu_url]
+    assert world.probe_calls == 2
     assert sl.blas_kernel_problems(world.lib) == []
+    assert sl.check_runtime_update()["newer"] is False
+
+
+def _amd_rocm_release(world):
+    world.vendors, world.gpu_names = ["amd"], "amd radeon rx 6900 xt"
+    world.release(LEMONADE, ROCM, [(f"llama-{ROCM}-windows-rocm-gfx103X-x64.zip",
+                                    _zip(AMD_ROCM), "ok")])
+
+
+def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
+    assert r.exit_code == 0, r.output
+    _in_order(r.text, f"Warning: the SIMD CPU backend for the amd-rocm build was not installed "
+                      f"({why}", "Retry with localm setup-llama --backend amd-rocm --force.",
+              "OK - amd-rocm runtime loads on this machine.")
+    assert (world.lib / "ggml-cpu.dll").read_bytes() == b"ggml-cpu@rocm"
+    assert not (world.lib / "libomp140.x86_64.dll").exists()
+    assert not (world.lib / "ggml-cpu.dll.amd-rocm").exists()
+    assert not (world.lib / ".localm-cpu-overlay").exists()
+    assert world.marker() == f"amd-rocm {ROCM}\n"
+    assert sl.check_runtime_update()["newer"] is True
+
+
+def test_amd_rocm_cpu_overlay_that_does_not_load_is_rolled_back(world):
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world)
+    world.probes = [(1, "OSError: [WinError 127] The specified procedure could not be found"),
+                    (0, "")]
+    r = world.invoke("--backend", "amd-rocm")
+    _assert_kept_the_amd_rocm_cpu_backend(
+        world, r, "the runtime did not load with it (OSError: [WinError 127] The specified "
+                  "procedure could not be found)")
+    assert world.probe_calls == 2
+
+
+def test_amd_rocm_cpu_overlay_download_failure_keeps_the_build(world):
+    _amd_rocm_release(world)
+    r = world.invoke("--backend", "amd-rocm")
+    _assert_kept_the_amd_rocm_cpu_backend(world, r, "ArtifactError: the connection was "
+                                                    "interrupted after 0 of an unknown number "
+                                                    "of bytes (HTTP Error 404: Not Found)")
+    assert world.probe_calls == 1
+
+
+def test_amd_rocm_cpu_overlay_checksum_mismatch_installs_nothing(world):
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world, digest_ok=False)
+    r = world.invoke("--backend", "amd-rocm")
+    _assert_kept_the_amd_rocm_cpu_backend(world, r, "ArtifactError")
+    assert world.probe_calls == 1
+
+
+def test_amd_rocm_cpu_overlay_with_no_supported_variant_keeps_the_build(world):
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world, scores={"ggml-cpu-x64.dll": 0, "ggml-cpu-haswell.dll": None})
+    r = world.invoke("--backend", "amd-rocm")
+    _assert_kept_the_amd_rocm_cpu_backend(
+        world, r, "no CPU backend variant reports support for this CPU")
+    assert world.probe_calls == 1
 
 
 @pytest.mark.parametrize("cap, cuda, line, ver, need, blackwell", [
@@ -1124,7 +1216,9 @@ def test_an_explicit_backend_replaces_a_different_install(world, marker, message
 
 
 @pytest.mark.parametrize("marker, backend, message", [
-    ("amd-rocm b1288", "amd-rocm", f"Upgrading the amd-rocm build: b1288 -> {ROCM}."),
+    ("amd-rocm b1288", "amd-rocm", f"Upgrading the amd-rocm build: b1288 -> {sl._ROCM_BUILD}."),
+    (f"amd-rocm {ROCM}", "amd-rocm",
+     f"Upgrading the amd-rocm build: {ROCM} -> {sl._ROCM_BUILD}."),
     ("vulkan b10000", "vulkan", "Re-downloading the vulkan build (b10000)."),
     ("vulkan", "vulkan", "Re-downloading the vulkan build."),
 ])
@@ -1337,7 +1431,12 @@ def test_check_runtime_update_states(world):
     assert sl.check_runtime_update()["target"] == "b99997"
     assert (sl.pinned_tag(), sl.tracks_latest()) == (None, True)
     (world.lib / ".localm-backend").write_text("amd-rocm b1288\n", encoding="utf-8")
-    assert sl.check_runtime_update()["target"] == ROCM
+    assert sl.check_runtime_update()["target"] == sl._ROCM_BUILD
+    (world.lib / ".localm-backend").write_text(f"amd-rocm {ROCM}\n", encoding="utf-8")
+    assert sl.check_runtime_update()["newer"] is True
+    (world.lib / ".localm-backend").write_text(f"amd-rocm {sl._ROCM_BUILD}\n",
+                                               encoding="utf-8")
+    assert sl.check_runtime_update()["newer"] is False
 
 
 def test_an_unsafe_stored_pin_is_ignored_out_loud(world, capsys):
