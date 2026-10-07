@@ -1054,6 +1054,7 @@ class LlamaCpp:
     # draft's KV cell cannot be removed; speculation needs that rewind, so it
     # stays off for the rest of the model's life.
     _mtp_usable = True
+    _mtp_ctx_ptr = None          # the MTP draft context, None until created
     _mtp_ctx_capacity = 0        # the draft context's own n_ctx, 0 until created
     _mtp_wants_h = False         # True once both contexts expose the next-n state
     mtp_active_this_call = False # whether THIS generation actually speculated
