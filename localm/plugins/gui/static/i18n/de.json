@@ -1285,6 +1285,8 @@
   "settings.field.chatSystemPrompt.label": "Standard-Systemprompt",
   "settings.field.chatToolGrammar.help": "Sobald das Modell einen <tool_call> beginnt (das Websuche-/Abruf-Tool), wird gültiges Tool-Call-JSON erzwungen (lazy GBNF-Grammatik; nur lokale grammatikfähige Backends). Freier Text und Denken bleiben unbeeinflusst.",
   "settings.field.chatToolGrammar.label": "Chat-Tool-Aufrufe grammatikbeschränken",
+  "settings.field.chatWebMaxLookups.help": "Bei aktivem Web-Zugriff die meisten Suchen und Seitenabrufe, die das Modell für eine Nachricht ausführen darf, bevor es mit dem Gefundenen antwortet. Die Suchen enden auch, wenn das Modell eine Suche oder Seite wiederholt oder zwei Suchen in Folge nichts Neues finden. 0 = kein Limit.",
+  "settings.field.chatWebMaxLookups.label": "Websuchen pro Nachricht",
   "settings.field.civitaiApiKey.help": "Optional: erhöht Ratenlimits und schaltet gesperrte/anmeldepflichtige CivitAI-Modelle frei. Leer = anonymer Zugriff. Fällt auf die Umgebungsvariable CIVITAI_API_KEY zurück.",
   "settings.field.civitaiApiKey.label": "CivitAI-API-Schlüssel",
   "settings.field.civitaiApiKey.link.label": "Einen Schlüssel holen (Account, dann API Keys)",

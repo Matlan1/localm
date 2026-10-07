@@ -1421,6 +1421,8 @@ export const I18N_EN = {
   "settings.field.maxTokens.help": "Upper limit on tokens per reply, a runaway guard not a target. Thinking models need plenty of room. 0 = unlimited.",
   "settings.field.chatToolGrammar.label": "Grammar-constrain chat tool calls",
   "settings.field.chatToolGrammar.help": "Once the model starts a <tool_call> (the web search/fetch tool), force it to be valid tool-call JSON (lazy GBNF grammar; local grammar-capable backends only). Free text and thinking are unaffected.",
+  "settings.field.chatWebMaxLookups.label": "Web lookups per message",
+  "settings.field.chatWebMaxLookups.help": "With web access on, the most searches and page reads the model may run for one message before it answers from what it found. The lookups also stop when the model repeats a search or page, or when two lookups in a row find nothing new. 0 = no limit.",
   "settings.field.guiPreviewEnabled.label": "Preview generated pages in a sandboxed canvas",
   "settings.field.guiPreviewEnabled.help": "Adds a canvas button to a self-contained HTML or SVG block in a reply, rendering it in a sandboxed frame with no network access and no access to this app. On by default.",
   "settings.field.guiPreviewOwnerOnly.label": "Restrict the preview canvas to owner sessions",
