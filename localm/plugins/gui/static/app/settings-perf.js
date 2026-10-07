@@ -973,6 +973,10 @@ const _WEB_MARKER_LINES = /^[ \t]*(?:>[ \t]*)?\u{1F310}[^\n]*(?:\n|$)/gmu;
 // A closed tool-call wrapper in any dialect parseWebCalls reads.
 const _TOOL_CALL_BLOCK = /<\|?\/?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g;
 
+// How the server's text for a failed generation begins (inference_error_text,
+// localm/inference/http_server.py).
+const _INFERENCE_ERROR_MARK = "[inference error:";
+
 /** *text* with every web tool call removed, in every dialect parseWebCalls
  *  reads (closed wrappers, an unclosed trailing wrapper, stray wrapper tags,
  *  the XML-tag dialect, fences and bare JSON objects naming a web tool), plus
@@ -2564,7 +2568,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         reasoning += rDelta;
         if (webEnabled && cDelta && full.includes("tool_call")) {
           const end = firstToolCallEnd(full);
-          if (end >= 0 && full.slice(end).trim()) {
+          const after = end >= 0 ? full.slice(end).trimStart() : "";
+          // The server's inference-error text after the block (or the start of
+          // it) does not cut the reply; the turn then ends as failed.
+          if (after && !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
             full = full.slice(0, end);
             cutAtCall = true;
             finishReason = "stop";
