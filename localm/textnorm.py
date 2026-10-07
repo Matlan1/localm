@@ -20,6 +20,8 @@ no-op, so a backend that also scrubs internally is safe.
 from __future__ import annotations
 
 import re
+from re import _constants as _sre_constants
+from re import _parser as _sre_parser
 from typing import Iterator, Optional
 
 # Reasoning-channel openers/closers -> canonical think tags. Up to four
@@ -104,6 +106,68 @@ _SCRUB_REPLACEMENTS = {f"s{i}": replacement
 def scrub_text(text: str) -> str:
     """Apply marker normalisation/removal to a complete text chunk."""
     return _SCRUB_RE.sub(lambda m: _SCRUB_REPLACEMENTS[m.lastgroup], text)
+
+
+def _tagged(items, ignorecase: bool) -> list:
+    return [(op, av, ignorecase) for op, av in items]
+
+
+# _SCRUB_RE's parse tree, read by _prefix_fits.
+_SCRUB_TREE = _tagged(_sre_parser.parse(_SCRUB_RE.pattern, _SCRUB_RE.flags), False)
+
+
+def _char_in_class(ch: str, members, ignorecase: bool) -> bool:
+    c = _sre_constants
+    for op, value in members:
+        if op == c.LITERAL:
+            if ch == chr(value) or (ignorecase and ch.lower() == chr(value).lower()):
+                return True
+        elif op == c.CATEGORY and value == c.CATEGORY_SPACE:
+            if ch.isspace():
+                return True
+        elif op == c.CATEGORY and value == c.CATEGORY_DIGIT:
+            if ch.isdecimal():
+                return True
+        else:
+            raise ValueError(f"unsupported character class member {op} {value}")
+    return False
+
+
+def _prefix_fits(items: list, s: str, k: int) -> bool:
+    """True when ``s[k:]`` is a prefix of some string the parsed pattern
+    *items* matches, i.e. more text could still complete a match there.
+
+    Supports the constructs _SCRUB_RE uses (literals, ``\\s`` / ``\\d``
+    classes, alternation, groups, bounded repeats); raises ValueError on any
+    other."""
+    c = _sre_constants
+    if k == len(s):
+        return True
+    if not items:
+        return False
+    (op, av, ignorecase), rest = items[0], items[1:]
+    if op == c.LITERAL:
+        ch = s[k]
+        if ch == chr(av) or (ignorecase and ch.lower() == chr(av).lower()):
+            return _prefix_fits(rest, s, k + 1)
+        return False
+    if op == c.IN:
+        return _char_in_class(s[k], av, ignorecase) and _prefix_fits(rest, s, k + 1)
+    if op == c.BRANCH:
+        return any(_prefix_fits(_tagged(alt, ignorecase) + rest, s, k) for alt in av[1])
+    if op == c.SUBPATTERN:
+        _group, add_flags, _del_flags, sub = av
+        inner = ignorecase or bool(add_flags & re.IGNORECASE)
+        return _prefix_fits(_tagged(sub, inner) + rest, s, k)
+    if op == c.MAX_REPEAT or op == c.MIN_REPEAT:
+        lo, hi, sub = av
+        if lo == 0 and _prefix_fits(rest, s, k):
+            return True
+        if hi == 0:
+            return False
+        again = (op, (max(lo - 1, 0), hi - 1, sub), ignorecase)
+        return _prefix_fits(_tagged(sub, ignorecase) + [again] + rest, s, k)
+    raise ValueError(f"unsupported regex construct {op}")
 
 
 _THINK_OPEN = "<think>"
@@ -294,14 +358,14 @@ def _marker_end(buf: str, at: int) -> int:
 def _commit_point(buf: str) -> int:
     """How much of *buf* scrub_stream can scrub and release now.
 
-    Holds from the first marker-start character among the last
-    ``_MARKER_HOLD`` characters (a marker there may still be incomplete), then
-    backs up to the start of any complete marker that would straddle the cut.
-    Text with no marker-start character in that window is released whole."""
+    Holds from the first marker-start character whose text so far could still
+    grow into a marker (only possible within the last ``_MARKER_HOLD``
+    characters), then backs up to the start of any complete marker that would
+    straddle the cut. Everything else is released."""
     n = len(buf)
     cut = n
     for i in range(max(0, n - _MARKER_HOLD), n):
-        if buf[i] in _MARKER_START:
+        if buf[i] in _MARKER_START and _prefix_fits(_SCRUB_TREE, buf, i):
             cut = i
             break
     moved = True
@@ -319,12 +383,12 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     """Normalise/remove internal model markers in a text stream.
 
     Each piece is scrubbed and yielded as soon as it arrives, except text from
-    a ``<`` or ``[`` within the last ``_MARKER_HOLD`` characters: a marker (or
-    its optional role suffix, e.g. ``<|turn>model``) starting there can
-    straddle two pieces, and scrubbing it early would strip the marker head and
-    leak its tail as text. That tail stays buffered until it is
-    ``_MARKER_HOLD`` characters old or the stream ends. The cut never lands
-    inside a marker.
+    a ``<`` or ``[`` that could still grow into a marker: a marker (or its
+    optional role suffix, e.g. ``<|turn>model``) starting there can straddle
+    two pieces, and scrubbing it early would strip the marker head and leak its
+    tail as text. That tail stays buffered until the text from it can no
+    longer grow into a longer marker match, or the stream ends. The cut never
+    lands inside a marker.
 
     A stream that emits ``[TOOL_CALLS]`` more than ``_MARKER_FLOOD_LIMIT`` times
     is cut at that marker and the source iterator is closed, ending the

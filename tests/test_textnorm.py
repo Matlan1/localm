@@ -338,19 +338,62 @@ class TestStreamRelease:
         out = list(scrub_stream(iter(["Answer: <start_of", "_turn>model\nHi"])))
         assert out == ["Answer: ", "Hi"]
 
-    def test_a_marker_character_in_prose_is_held_only_briefly(self):
+    def test_marker_characters_that_cannot_start_a_marker_are_not_held(self):
+        pieces = ("if a < b then", " see [the docs](u)", " or <br> and", " [1]")
         pulled = []
-        tail = "x" * 60
 
         def source():
-            for piece in ("if a < b then", tail, " done"):
+            for piece in pieces:
                 pulled.append(piece)
                 yield piece
 
         seen = [(len(pulled), out) for out in scrub_stream(source())]
-        assert seen[0] == (1, "if a ")
-        assert seen[1][0] == 2
-        assert "".join(out for _, out in seen) == "if a < b then" + tail + " done"
+        assert seen == [(i + 1, piece) for i, piece in enumerate(pieces)]
+
+    def test_a_reasoning_reply_streams_its_answer_as_it_arrives(self):
+        tokens = ["<think>", "\n", "The", " user", " asks", " for", " the", " capital",
+                  ".", "\n", "</think>", "\n\n", "The", " capital", " of", " France",
+                  " is", " Paris", "."]
+        pulled = []
+
+        def source():
+            for token in tokens:
+                pulled.append(token)
+                yield token
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen == [(i + 1, token) for i, token in enumerate(tokens)]
+
+    def test_a_tag_is_held_only_while_it_could_become_a_marker(self):
+        pulled = []
+
+        def source():
+            for ch in "<think>ok":
+                pulled.append(ch)
+                yield ch
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen[0] == (7, "<think>")
+        assert "".join(out for _, out in seen) == "<think>ok"
+
+    def test_every_prefix_of_every_match_counts_as_a_possible_marker(self):
+        import random
+
+        from localm.textnorm import _SCRUB_RE, _SCRUB_TREE, _prefix_fits
+
+        rng = random.Random(3)
+        frags = _TURN_MARKERS + _OTHER_MARKERS + [
+            "<|", "<", "[", " ", "  ", "\n", "x", "|", ">", "1234", "model",
+            "<| channel |>", "< reasoning>", "</thinking >", "<unused"]
+        found = 0
+        for _ in range(3000):
+            text = "".join(rng.choice(frags) for _ in range(rng.randint(1, 6)))
+            for m in _SCRUB_RE.finditer(text):
+                found += 1
+                whole = m.group(0)
+                for end in range(1, len(whole) + 1):
+                    assert _prefix_fits(_SCRUB_TREE, whole[:end], 0), (whole, end)
+        assert found > 3000
 
     def test_a_llama3_role_header_streamed_as_tokens_is_removed(self):
         """The header holds a second ``<`` inside it; a cut there would release
