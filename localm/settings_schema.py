@@ -302,11 +302,9 @@ CORE_FIELDS: list = [
                  "one. Blank pins nothing.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("model_autoswitch", Widget.SELECT, "Model autoswitch",
-                 "off = never switch models; ask = keep the model and offer one "
-                 "that has what the chat needs; loaded = switch only to a model "
-                 "that is already loaded; auto = switch to an installed model "
-                 "that has it; eager = also switch when the model has never been "
-                 "checked. A chat pinned to a model is never switched.",
+                 "If your model lacks what a chat needs: off = never switch; ask = "
+                 "offer one; loaded = only to a loaded model; auto = to an installed "
+                 "one; eager = also if yours is unchecked. Pinned chats never switch.",
                  group="Models",
                  options=["off", "ask", "loaded", "auto", "eager"]),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
@@ -406,9 +404,8 @@ CORE_FIELDS: list = [
     SettingField("chat_web_max_lookups", Widget.NUMBER,
                  "Web lookups per message",
                  "With web access on, the most searches and page reads the model "
-                 "may run for one message before it answers from what it found. "
-                 "The lookups also stop when the model repeats a search or page, "
-                 "or when two lookups in a row find nothing new. 0 = no limit.",
+                 "may run for one message. They also stop when it repeats a search "
+                 "or page, or two in a row find nothing new. 0 = no limit.",
                  group="Chat", owner="chat", min=0, max=100, step=1,
                  applies=Applies.LIVE),
     # HIDDEN: the Settings > Chat "Avatars" panel renders these with its own
