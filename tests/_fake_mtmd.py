@@ -215,8 +215,16 @@ class FakeLlamaApi:
     def has_memory_api(self):
         return True
 
-    def llama_model_has_mrope(self, model):
-        return self.mrope
+    def has_model_meta_api(self):
+        return True
+
+    def llama_model_meta_val_str(self, model, key):
+        if key == "general.architecture":
+            return "qwen2vl" if self.mrope else "llama"
+        return None
+
+    def llama_model_rope_type(self, model):
+        return 8 if self.mrope else 0
 
     def llama_memory_seq_rm(self, mem, seq_id, p0, p1):
         self.seq_rm_calls.append(p0)

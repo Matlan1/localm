@@ -205,16 +205,37 @@ class TestWhenTheCacheCannotBeReused:
         assert rig.lib.encode_calls == 1
         assert rig.kv.cells == _fresh_cells(TURN2, [IMG_A])
 
-    def test_an_mrope_model_reevaluates_but_does_not_reencode(self):
+    def test_an_mrope_model_keeps_the_prefix_and_decodes_only_the_new_text(self):
         rig = _Rig(mrope=True, image_pos=2)
         rig.prefill(TURN1, [IMG_A])
+        n_turn1 = len(rig.kv.cells)
         clears = rig.api.clears
-        rig.prefill(TURN2, [IMG_A])
+        rig.api.decoded.clear()
 
-        assert rig.api.clears == clears + 1
-        assert rig.api.seq_rm_calls == [], "partial removal attempted on M-RoPE"
-        assert rig.lib.encode_calls == 1
+        pos, reused = rig.prefill(TURN2, [IMG_A])
+
         assert rig.kv.cells == _fresh_cells(TURN2, [IMG_A], mrope=True, image_pos=2)
+        assert rig.api.clears == clears, "the M-RoPE cache was cleared instead of trimmed"
+        assert rig.api.seq_rm_calls == [n_turn1]
+        assert reused == n_turn1
+        assert rig.api.decoded == [(n_turn1, _suffix_tokens(TURN1, TURN2))]
+        assert len(rig.lib.image_decodes) == 1
+        assert rig.lib.encode_calls == 1
+
+    def test_an_mrope_edit_before_the_image_cuts_before_it_and_redecodes_it(self):
+        rig = _Rig(mrope=True, image_pos=2)
+        rig.prefill(TURN2, [IMG_A])
+        clears = rig.api.clears
+        edited = TURN2.replace("be terse", "be brief")
+
+        pos, reused = rig.prefill(edited, [IMG_A])
+
+        assert rig.kv.cells == _fresh_cells(edited, [IMG_A], mrope=True, image_pos=2)
+        assert rig.api.clears == clears
+        assert rig.api.seq_rm_calls == [2]
+        assert reused == 2
+        assert [n_past for _, n_past in rig.lib.image_decodes] == [4, 4]
+        assert rig.lib.encode_calls == 1, "the unchanged image was encoded again"
 
     def test_a_cache_that_cannot_drop_its_tail_is_rebuilt(self):
         rig = _Rig()

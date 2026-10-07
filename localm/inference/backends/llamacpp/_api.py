@@ -1024,39 +1024,6 @@ def llama_model_has_mtp(model: ctypes.c_void_p) -> bool:
     return llama_model_mtp_support(model)[0]
 
 
-def llama_model_has_mrope(model: ctypes.c_void_p) -> bool:
-    """True when the model uses Multimodal RoPE (M-RoPE / 3D positional RoPE)."""
-    lib = load_lib()
-    if hasattr(lib, "llama_model_rope_type"):
-        try:
-            # LLAMA_ROPE_TYPE_MROPE = 3, LLAMA_ROPE_TYPE_VISION = 4
-            rtype = _bind("llama_model_rope_type", ctypes.c_int32, LlamaModel)(model)
-            if rtype in (3, 4):
-                return True
-        except (AttributeError, TypeError):
-            # Only a binding-shape problem is recoverable here: the symbol went
-            # missing between the hasattr above and the bind, or ctypes rejected
-            # the argument. Both mean "this probe is unusable", and the metadata
-            # fallback below can still answer.
-            #
-            # An OSError must NOT be caught. ctypes surfaces a native access
-            # violation as one, which means *model* is not a live model pointer -
-            # and the fallback path dereferences that same pointer again, so
-            # swallowing the first fault only buys a second, worse one reported
-            # from the generic metadata reader instead of from here.
-            pass
-    if has_model_meta_api():
-        arch = llama_model_meta_val_str(model, "general.architecture")
-        if arch and any(arch.startswith(p) for p in ("qwen2vl", "qwen3vl", "qwen_vl", "mrope")):
-            return True
-        for key in ("rope.type", f"{arch}.rope.type" if arch else ""):
-            if key:
-                val = llama_model_meta_val_str(model, key)
-                if val in ("mrope", "vision", "3", "4"):
-                    return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 #  System info (useful for diagnostics)
 # ---------------------------------------------------------------------------

@@ -2300,10 +2300,6 @@ class LlamaCpp:
             or not self._memory_api_available()
         ):
             return False
-        # M-RoPE models use multi-dimensional RoPE coordinate grids that cannot be
-        # partially rewound by sequence removal; always start clean from fresh context.
-        if api.llama_model_has_mrope(self._model_ptr):
-            return False
         return True
 
     def _cache_can_drop_a_speculative_token(self) -> bool:
@@ -2555,8 +2551,8 @@ class LlamaCpp:
         # Without this branch the guard is 0 < 0 (False), the wipe is skipped, and the
         # new prompt decodes onto stale KV at shifted positions (U-1: "sees earlier
         # text out of order"). A zero prefix clears the memory outright instead of
-        # removing a range: recurrent and M-RoPE state cannot be partially rewound,
-        # so a range removal can leave them stale.
+        # removing a range: recurrent state cannot be partially rewound,
+        # so a range removal can leave it stale.
         mtp_needs_full_prefill = False
         if self._mtp_draft_stale and self._mtp_ctx_ptr is not None and self._mtp_usable:
             try:
@@ -2594,7 +2590,7 @@ class LlamaCpp:
                             "draft-trim-error:%s" % type(exc).__name__,
                             "trimming the draft cache raised %s" % type(exc).__name__)
             else:
-                # Partial removal unsupported (e.g. SWA cache / M-RoPE) - start over
+                # Partial removal unsupported (e.g. SWA cache / recurrent state) - start over
                 api.llama_memory_clear(mem, True)
                 if self._mtp_ctx_ptr is not None and self._mtp_usable:
                     try:
@@ -2616,7 +2612,7 @@ class LlamaCpp:
             ret = api.llama_decode(self._ctx_ptr, batch)
             api.llama_batch_free(batch)
             if ret != 0:
-                # If partial reuse failed (e.g. M-RoPE position mismatch or recurrent state conflict),
+                # If partial reuse failed (e.g. a recurrent state conflict),
                 # perform a full clean prefill from position 0
                 self._cached_tokens = []
                 try:

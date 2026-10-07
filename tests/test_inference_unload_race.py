@@ -87,7 +87,6 @@ def _mock_native_api() -> MagicMock:
     mock_api.llama_decode.return_value = 0
     mock_api.llama_batch_init.side_effect = fake_batch_init
     mock_api.llama_sampler_sample.return_value = 42
-    mock_api.llama_model_has_mrope.return_value = False
     return mock_api
 
 

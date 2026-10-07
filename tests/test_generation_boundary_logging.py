@@ -61,10 +61,6 @@ def _mock_native_api() -> MagicMock:
     mock_api.llama_sampler_sample.return_value = 42
     mock_api.llama_sampler_free = MagicMock()
     mock_api.llama_model_chat_template.return_value = None
-    # Every predicate has to be answered explicitly: an unset MagicMock attribute
-    # returns a TRUTHY mock, so leaving this one out claims the model uses M-RoPE
-    # and silently sends _can_reuse_kv down the no-reuse path.
-    mock_api.llama_model_has_mrope.return_value = False
     return mock_api
 
 
