@@ -691,6 +691,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .tool-card[data-status="done"] .tool-status { color: var(--green); border-color: var(--green); }
 .tool-card[data-status="failed"] .tool-status,
 .tool-card[data-status="denied"] .tool-status { color: var(--red); border-color: var(--red); }
+.tool-card[data-status="skipped"] .tool-status,
+.tool-card[data-status="duplicate"] .tool-status { color: var(--yellow); border-color: var(--yellow); }
+/* one-line notice: a control note's row, and the notice line inside a card */
+.tool-notice { font-size: 13px; color: var(--text-dim); font-style: italic; }
+.tool-card .tool-notice { margin-top: 10px; }
 .tool-card .tool-body {
   padding: 2px 12px 10px 28px;
   max-height: 320px;

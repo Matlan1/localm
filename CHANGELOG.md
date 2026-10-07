@@ -188,6 +188,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Before, a fresh install told the model it had no internet access until the
   toggle was switched on by hand. `off` still leaves the toggle off, and a
   choice you saved in the browser still wins.
+- **The chat's web lookups are no longer capped at three per message.** With web
+  access on, the model keeps searching and reading pages until it answers. The
+  lookups stop when it repeats a search or page, when two lookups in a row find
+  nothing new, when a lookup still cannot be read after one retry, or at the new
+  Settings > Chat "Web lookups per message" limit (20 by default, 0 for no
+  limit). The chat no longer sends the model a "web search limit reached ... stop
+  searching" message, and its own web notes show as a one-line status instead of
+  an "Instruction to the model" section.
 - **Settings now translates fully into German.** Server controls, other
   running instances, Report a bug, Changelog, Updates (app update, roll back,
   the app launcher and the inference runtime), Issues, Logs and Upload files
@@ -201,6 +209,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **A chat with web access on now ends on an answer, not on a bare "read page" or
+  "web search" line.** Once the lookups stop, the last reply is requested without
+  the web tools; if the model still writes a lookup, it is not run and the reply
+  says so. A reply that writes lookup after lookup is cut after the first, which
+  runs, instead of going on until you press Stop. Earlier lookups are sent back
+  to the model in the tool's own format instead of as the chat's "web search: ..."
+  lines, which some models copied as text, so a conversation reads the same to the
+  model in every interface language; a copied line is treated as a broken lookup
+  and the model is asked once to make it properly. After a failed lookup the model
+  is told it has no information from it and must not describe or guess what it
+  would have found, in the chat and in scheduled chat jobs; it used to be told to
+  "answer without the web", which led some models to present invented findings.
 - **Chat with a Knowledge collection selected no longer injects excerpts that have
   nothing to do with the question.** The four best-ranked chunks used to be added
   to every question, however weakly they matched, so a question about the
