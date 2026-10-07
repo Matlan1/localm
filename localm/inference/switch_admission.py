@@ -133,10 +133,12 @@ class EvictionAttempt:
 
     ``switch_engine`` updates it as it performs effects; the decisions here only
     read it. Each bounded step (embedder eviction, each peer instance, the busy
-    victim, the wait for a busy model to go idle) runs at most once per attempt,
-    and inconclusive probes are retried ``_INCONCLUSIVE_LOAD_RETRIES`` times, so
-    the loop always terminates. ``started`` is the ``time.monotonic()`` reading
-    the attempt began at.
+    victim, the wait for a busy model to go idle, the longer wait for an evicted
+    model's VRAM release) runs at most once per attempt, and inconclusive probes
+    are retried ``_INCONCLUSIVE_LOAD_RETRIES`` times, so the loop always
+    terminates. ``started`` is the ``time.monotonic()`` reading the attempt began
+    at. ``deferred_to_backend`` is set when the load goes ahead below the
+    whole-model estimate because nothing more could be evicted.
     """
 
     started: float
@@ -144,7 +146,9 @@ class EvictionAttempt:
     embedder_attempted: bool = False
     busy_attempted: bool = False
     busy_waited: bool = False
+    release_wait_extended: bool = False
     inconclusive_retries: int = 0
+    deferred_to_backend: bool = False
 
 
 @dataclass(frozen=True)

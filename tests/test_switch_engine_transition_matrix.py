@@ -1148,16 +1148,93 @@ class TestBusyResidentModel:
         assert res["status"] == "confirm_required"
         assert env.cancelled == ["model-a"] and statuses == []
 
+    def test_two_loads_waiting_for_one_busy_model_both_finish(self, monkeypatch):
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+        c = _SizedEngine("model-c")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b, "model-c": c})
+        _seat("model-a", a, active=True, busy=1)
+
+        async def scenario():
+            asyncio.get_running_loop().call_later(
+                0.1, lambda: setattr(a, "active_requests", 0))
+            return await asyncio.gather(
+                hs.switch_engine("model-b", env.factory, preempt=False, activate=False),
+                hs.switch_engine("model-c", env.factory, preempt=False, activate=False),
+                return_exceptions=True)
+
+        results = asyncio.run(scenario())
+
+        assert [r for r in results if isinstance(r, BaseException)] == []
+        assert [r["status"] for r in results] == ["loaded", "loaded"]
+        assert a.unload_calls == 1 and _registered_anywhere("model-a") == set()
+
+    def test_a_busy_model_another_request_starts_unloading_is_not_unloaded_twice(
+            self, monkeypatch):
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b", (_PARTIAL,))
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True, busy=1)
+
+        def _unload_begins():
+            a.unloading = True
+            a.active_requests = 0
+
+        async def scenario():
+            asyncio.get_running_loop().call_later(0.1, _unload_begins)
+            return await hs.switch_engine("model-b", env.factory, preempt=False,
+                                          activate=False)
+
+        res = asyncio.run(scenario())
+
+        assert a.unload_calls == 0, "only the unload already under way frees it"
+        assert res["status"] == "loaded" and b.loaded
+
+    def test_get_engine_passes_the_wait_status_to_the_load(self, monkeypatch):
+        from localm.inference.protocol import (LOADING_MODEL_STATUS,
+                                               WAITING_FOR_MODEL_STATUS)
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        _seat("model-a", a, active=True, busy=1)
+        statuses = []
+
+        async def scenario():
+            asyncio.get_running_loop().call_later(
+                0.1, lambda: setattr(a, "active_requests", 0))
+            return await hs.get_engine("model-b", activate=False,
+                                       on_status=statuses.append)
+
+        got = asyncio.run(scenario())
+
+        assert got is b and b.gpu_placement == _FULL
+        assert statuses == [WAITING_FOR_MODEL_STATUS, LOADING_MODEL_STATUS]
+
+    @staticmethod
+    def _worst_wait():
+        """The longest a load can wait before it starts: a heal's own unload, one
+        busy model's wait, one eviction, and the one longer release wait a load
+        may take."""
+        import inspect
+        from localm.vram import wait_for_vram_release
+        first_release_wait = inspect.signature(
+            wait_for_vram_release).parameters["timeout_s"].default
+        return _REAL_BUSY_WAIT_S + 2 * first_release_wait + _REAL_EXTRA_RELEASE_WAIT_S
+
     def test_the_waits_fit_inside_the_coder_http_request_timeout(self):
         import inspect
         from localm.plugins.coder.backends.http import HTTPBackend
-        from localm.vram import wait_for_vram_release
         coder_timeout = inspect.signature(HTTPBackend.__init__).parameters["timeout"].default
-        first_release_wait = inspect.signature(
-            wait_for_vram_release).parameters["timeout_s"].default
-        worst_wait = _REAL_BUSY_WAIT_S + first_release_wait + _REAL_EXTRA_RELEASE_WAIT_S
-        assert worst_wait <= coder_timeout / 4, (
+        assert self._worst_wait() <= coder_timeout / 4, (
             "the waits must leave the coder's request most of its timeout for the load")
+
+    def test_the_waits_leave_an_image_description_a_minute_for_load_and_reply(self):
+        from localm.plugins.builtin.rag import plug as rag_plug
+        assert rag_plug._DESCRIBE_TIMEOUT_S - self._worst_wait() >= 60
 
 
 class TestPlacementHeal:
@@ -1263,6 +1340,65 @@ class TestPlacementHeal:
 
         assert hs._active_model_name == "model-b" and hs._engine is b
 
+    def test_an_unnamed_request_still_resolves_to_the_model_while_it_reloads(
+            self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        monkeypatch.setattr(hs, "_default_model_name", "model-a")
+        hs._active_model_name, hs._engine = "model-b", b
+        hs._inference_sem = hs._inference_sems["model-b"]
+        a.active_requests = 0
+        resolved_during_reload = []
+        unload = b.unload
+
+        def _unload():
+            resolved_during_reload.append(hs._resolve_unnamed_model_name())
+            unload()
+
+        b.unload = _unload
+
+        asyncio.run(hs.get_engine("model-b"))
+
+        assert b.load_calls == 2 and b.gpu_placement == _FULL
+        assert resolved_during_reload == ["model-b"]
+        assert hs._active_model_name == "model-b" and hs._last_active_model_name is None
+
+    def test_no_reload_when_the_load_was_admitted_beside_an_idle_model(self, monkeypatch):
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b", (_PARTIAL, _FULL))
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=20 * GB)
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        _seat("model-a", a, active=True)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False, activate=False))
+        assert a.loaded and b.gpu_placement == _PARTIAL
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        assert b.placement_heal is None
+
+    def test_no_reload_while_the_vram_probe_is_inconclusive(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+        stalled = probe_double(lambda: {"total": 10 * GB}, status=GPU_PROBE_TIMEOUT)
+        monkeypatch.setattr("localm.discover.vram_capacity", stalled)
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        assert a.loaded and a.unload_calls == 0
+        assert hs._engines == {"model-a": a, "model-b": b}
+        assert b.placement_heal is not None
+
+    def test_a_model_whose_files_are_gone_is_used_as_loaded(self, monkeypatch):
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+        monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: None)
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        assert a.loaded and hs._engines == {"model-a": a, "model-b": b}
+
 
 class TestVictimReleaseWait:
     def _wait_answers(self, monkeypatch, answers, *, estimate=8 * GB, after=None):
@@ -1330,6 +1466,37 @@ class TestVictimReleaseWait:
             reading=lambda: {"total": 10 * GB, "free": 1 * GB, "free_scope": "process"})
 
         assert calls == [None]
+
+    def test_a_process_scoped_reading_reports_the_release_as_not_verifiable(
+            self, monkeypatch, caplog):
+        with caplog.at_level("INFO", logger="localm"):
+            a, b, env, calls = self._switch(
+                monkeypatch, [False], placements=(_PARTIAL, _FULL),
+                reading=lambda: {"total": 10 * GB, "free": 1 * GB,
+                                 "free_scope": "process"})
+
+        assert a.unload_calls == 1
+        assert any(r.levelname == "INFO" and r.getMessage().startswith(
+            "switch_engine: evicting 'model-a': VRAM release could not be verified")
+            for r in caplog.records)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"
+                    and r.getMessage().startswith("switch_engine: evicting")]
+        assert b.placement_heal is None
+
+    def test_only_one_longer_wait_per_load(self, monkeypatch):
+        a1 = GatedEngine("model-a1")
+        a2 = GatedEngine("model-a2")
+        b = _SizedEngine("model-b")
+        env = _install(monkeypatch, {"model-a1": a1, "model-a2": a2, "model-b": b})
+        monkeypatch.setattr(hs, "_VICTIM_RELEASE_EXTRA_WAIT_S", 7.0)
+        calls = self._wait_answers(monkeypatch, [False])
+        _seat("model-a1", a1)
+        _seat("model-a2", a2)
+
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        assert a1.unload_calls == 1 and a2.unload_calls == 1
+        assert calls == [None, 7.0, None]
 
     def test_a_victim_too_small_to_show_a_release_is_neither_waited_for_nor_warned(
             self, monkeypatch, caplog):
