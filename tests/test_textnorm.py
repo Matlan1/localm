@@ -289,9 +289,34 @@ def _chunked(text, size):
     return [text[i:i + size] for i in range(0, len(text), size)]
 
 
+def _first_chars(sub):
+    """Characters a parsed regex can start matching on."""
+    from re import _constants as c
+
+    op, av = sub.data[0]
+    if op is c.LITERAL:
+        return {chr(av)}
+    if op is c.BRANCH:
+        return set().union(*(_first_chars(alt) for alt in av[1]))
+    if op is c.SUBPATTERN:
+        return _first_chars(av[3])
+    if op is c.IN and all(o is c.LITERAL for o, _ in av):
+        return {chr(v) for _, v in av}
+    raise AssertionError(f"cannot tell what {sub!r} starts with ({op})")
+
+
 class TestStreamRelease:
     """scrub_stream releases text as it arrives and holds back only what could
     still turn out to be a marker."""
+
+    def test_every_scrub_pattern_starts_with_a_marker_start_character(self):
+        from re import _parser
+
+        from localm.textnorm import _MARKER_START, _SCRUB_SUBS
+
+        for rx, _ in _SCRUB_SUBS:
+            starts = _first_chars(_parser.parse(rx.pattern, rx.flags))
+            assert starts <= set(_MARKER_START), (rx.pattern, starts)
 
     def test_plain_text_is_released_piece_by_piece(self):
         pulled = []

@@ -77,14 +77,25 @@ _MARKER_RE = re.compile(
 _MARKER_HOLD = 48
 
 
+# Every substitution scrub_text applies, in order. Each pattern starts with a
+# character in _MARKER_START, which scrub_stream relies on to release text early.
+# See test_every_scrub_pattern_starts_with_a_marker_start_character.
+_SCRUB_SUBS = (
+    (re.compile(re.escape('<|"|>')), '"'),            # Gemma 4 quote token
+    (_THINK_OPEN_RE, "<think>\n"),
+    (_THINK_CLOSE_RE, "\n</think>\n"),
+    (_THINK_BARE_OPEN_RE, "<think>"),                  # native <reasoning> etc.
+    (_THINK_BARE_CLOSE_RE, "</think>"),
+    (_MARKER_RE, ""),
+)
+_MARKER_START = "<["
+
+
 def scrub_text(text: str) -> str:
     """Apply marker normalisation/removal to a complete text chunk."""
-    text = text.replace('<|"|>', '"')          # Gemma 4 quote token
-    text = _THINK_OPEN_RE.sub("<think>\n", text)
-    text = _THINK_CLOSE_RE.sub("\n</think>\n", text)
-    text = _THINK_BARE_OPEN_RE.sub("<think>", text)    # native <reasoning> etc.
-    text = _THINK_BARE_CLOSE_RE.sub("</think>", text)
-    return _MARKER_RE.sub("", text)
+    for rx, replacement in _SCRUB_SUBS:
+        text = rx.sub(replacement, text)
+    return text
 
 
 _THINK_OPEN = "<think>"
@@ -265,18 +276,11 @@ def _note_marker_flood() -> None:
         "the reply was cut", _MARKER_FLOOD_LIMIT)
 
 
-# Every pattern scrub_text applies. Each one starts with a character in
-# _MARKER_START.
-_SCRUB_RES = (re.compile(re.escape('<|"|>')), _THINK_OPEN_RE, _THINK_CLOSE_RE,
-              _THINK_BARE_OPEN_RE, _THINK_BARE_CLOSE_RE, _MARKER_RE)
-_MARKER_START = "<["
-
-
 def _marker_end(buf: str, at: int) -> int:
     """End of the longest scrub_text match starting at *at* in *buf*, or *at*
     when none starts there."""
     end = at
-    for rx in _SCRUB_RES:
+    for rx, _replacement in _SCRUB_SUBS:
         m = rx.match(buf, at)
         if m is not None and m.end() > end:
             end = m.end()
