@@ -347,6 +347,11 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "mtp_status": worker.mtp_status,
                     "mtp_active": worker.mtp_active_this_call,
                     "mtp_call_status": worker.mtp_call_status,
+                    "mtp_drafted": worker.mtp_drafted,
+                    "mtp_accepted": worker.mtp_accepted,
+                    "mtp_steps": worker.mtp_steps,
+                    "mtp_paused_steps": worker.mtp_paused_steps,
+                    "mtp_skipped": worker.mtp_skipped,
                 }))
             except ContextCapacityExceededError as e:
                 # An oversized prompt exceeding the configured context capacity or

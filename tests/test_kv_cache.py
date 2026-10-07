@@ -15,7 +15,7 @@ from localm.inference.backends.llamacpp.llama import (
     _common_prefix_len,
 )
 from localm.inference.backends.llamacpp._structs import LLAMA_CONTEXT_TYPE_MTP
-from tests._bare_llama import make_bare_llama
+from tests._bare_llama import make_bare_llama, stub_mtp_native
 from tests._fake_batch import fake_batch_init
 
 
@@ -518,13 +518,7 @@ class TestMtpDraftingRespectsGrammar:
         # there is none, so a fixture without one exercises the fail-closed path
         # rather than the grammar gate this class is about. The batch helpers do
         # ctypes work that cannot run against a mock api.
-        llm._mtp_wants_h = True
-        llm._pending_h = object()
-        llm._n_embd = 4
-        llm._capture_h = lambda row=-1: True
-        llm._create_draft_batch = lambda token, pos: (
-            llm._create_batch([token], pos, logits_at_last_only=True), None, None)
-        llm._free_draft_batch = staticmethod(lambda batch, original: None)
+        stub_mtp_native(llm)
         mock_api = self._mock_api()
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
              patch("localm.inference.backends.llamacpp.llama._build_sampler",
@@ -543,7 +537,10 @@ class TestMtpDraftingRespectsGrammar:
 
     def test_no_drafting_while_a_grammar_constrains_sampling(self):
         mock_api, drafted = self._drive(grammar='root ::= "a"')
-        mock_api.llama_sampler_init_greedy.assert_not_called()
+        # The only sampler chains built are the ones attached to a draft
+        # context when it is created; no draft sampler is built for the call.
+        assert (mock_api.llama_sampler_chain_init.call_count
+                == mock_api.llama_set_sampler.call_count)
         assert drafted == []
         # A token chosen off-grammar must never be pushed into the real chain.
         mock_api.llama_sampler_accept.assert_not_called()
@@ -552,5 +549,5 @@ class TestMtpDraftingRespectsGrammar:
         """The gate is narrow on purpose: MTP models keep their speedup on
         ordinary chat, which is what makes this a refusal and not a disable."""
         mock_api, drafted = self._drive(grammar=None)
-        mock_api.llama_sampler_init_greedy.assert_called_once()
+        mock_api.llama_sampler_init_greedy.assert_called()
         assert drafted, "MTP drafting should still run without a grammar"

@@ -294,6 +294,24 @@ class StreamChoice(BaseModel):
     finish_reason: Optional[str] = None
 
 
+class MtpUsage(BaseModel):
+    """Multi-Token Prediction for one reply.
+
+    state is "on" (the reply speculated), "paused" (drafting was measured
+    slower than one-token decoding and was paused for at least as many steps
+    as it ran), "stopped" (it stopped partway, see reason), "off" (this reply
+    could not draft at all: reason "grammar" for grammar-constrained output
+    such as tool calls, "image" for a turn with an image), "idle" (MTP is
+    available but this reply drafted nothing) or "unavailable" (this model
+    cannot speculate, see reason).
+    """
+    state: str
+    drafted: int = 0                 # draft tokens sent to verification
+    accepted: int = 0                # how many of them the model accepted
+    paused_steps: int = 0            # steps run without drafting because it was slower
+    reason: Optional[str] = None
+
+
 class UsageInfo(BaseModel):
     prompt_tokens:     int = 0
     completion_tokens: int = 0
@@ -302,6 +320,7 @@ class UsageInfo(BaseModel):
     ttft_ms:        Optional[float] = None   # time to first generated token
     tokens_per_sec: Optional[float] = None   # completion tokens / generation time
     context_capacity: Optional[int] = None   # total tokens allowed in context
+    mtp: Optional[MtpUsage] = None           # set when MTP is enabled for the model
 
 
 class ChatChunk(BaseModel):

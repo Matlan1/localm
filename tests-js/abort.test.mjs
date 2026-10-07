@@ -126,6 +126,47 @@ test("A completed turn's usage is saved on the reply, not just shown in the DOM"
     "the live DOM display still works exactly as before");
 });
 
+test("the usage line shows MTP acceptance, a pause, a stop, an off reply or unavailability, and nothing for an idle turn", async () => {
+  const { window } = loadApp();
+  const usage = $id => window.document.getElementById($id);
+  window.updateUsageDisplay({ total_tokens: 7, tokens_per_sec: 3,
+                              mtp: { state: "on", drafted: 40, accepted: 30, reason: null } });
+  assert.match(usage("chat-usage").textContent, /3 tok\/s · MTP 75% accepted/);
+  assert.match(usage("chat-usage").title, /30 of 40/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "stopped", drafted: 4, accepted: 3,
+                                                       reason: "draft-decode-failed:1" } });
+  assert.match(usage("chat-usage").textContent, /MTP stopped/);
+  assert.match(usage("chat-usage").title, /draft-decode-failed:1/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "paused", drafted: 6, accepted: 3,
+                                                       paused_steps: 40, reason: "slower-than-plain" } });
+  assert.match(usage("chat-usage").textContent, /MTP paused/);
+  assert.match(usage("chat-usage").title, /40 steps/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "unavailable", drafted: 0, accepted: 0,
+                                                       reason: "no-mtp-graph:llama" } });
+  assert.match(usage("chat-usage").textContent, /MTP unavailable/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "off", drafted: 0, accepted: 0,
+                                                       reason: "grammar" } });
+  assert.match(usage("chat-usage").textContent, /MTP off/);
+  assert.match(usage("chat-usage").title, /constrained output/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "off", drafted: 0, accepted: 0,
+                                                       reason: "image" } });
+  assert.match(usage("chat-usage").textContent, /MTP off/);
+  assert.match(usage("chat-usage").title, /with an image/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "idle", drafted: 0, accepted: 0 } });
+  assert.doesNotMatch(usage("chat-usage").textContent, /MTP/);
+  assert.equal(usage("chat-usage").title, "");
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "on", drafted: 0, accepted: 0 } });
+  assert.doesNotMatch(usage("chat-usage").textContent, /MTP/,
+    "a reply that verified no drafts has no acceptance rate to show");
+});
+
 test("updateUsageDisplay renders tok/s and clears it back out for a null usage", async () => {
   const { window } = loadApp();
   window.updateUsageDisplay({ total_tokens: 7, tokens_per_sec: 3 });

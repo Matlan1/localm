@@ -134,17 +134,22 @@ _MTP_PROBE_SEED = 20260901
 
 
 def _mtp_probe_arm(model_path, display, mtp_enabled, gen_tokens, ctx,
-                   gpu_layers):
+                   gpu_layers, draft_tokens=None):
     """Load *model_path* with MTP forced on or off and return
-    ``(decode rates, supports_mtp, mtp_status, gpu_placement)``."""
+    ``(decode rates, supports_mtp, mtp_status, gpu_placement, (drafted,
+    accepted), texts)``: the draft tokens sent to verification and kept over
+    every prompt, and the generated text per prompt in prompt order."""
     import time as _time
 
     from ..inference.engine import Engine
 
     engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
-                    display_name=display, mtp_enabled=mtp_enabled)
+                    display_name=display, mtp_enabled=mtp_enabled,
+                    mtp_draft_tokens=draft_tokens)
     engine.load()
     rates = []
+    texts = []
+    drafted = accepted = 0
     try:
         # A discarded generation absorbs one-off native warm-up, which would
         # otherwise land entirely on whichever arm ran first.
@@ -155,13 +160,19 @@ def _mtp_probe_arm(model_path, display, mtp_enabled, gen_tokens, ctx,
         for prompt in _MTP_PROBE_PROMPTS:
             first_at = None
             generated = 0
-            for _token in engine.chat_stream(
+            pieces = []
+            for piece in engine.chat_stream(
                     [{"role": "user", "content": prompt}],
                     max_tokens=gen_tokens, seed=_MTP_PROBE_SEED,
                     **_MTP_PROBE_SAMPLING):
                 if first_at is None:
                     first_at = _time.perf_counter()
                 generated += 1
+                pieces.append(piece)
+            texts.append("".join(pieces))
+            usage = engine.mtp_usage() or {}
+            drafted += int(usage.get("drafted") or 0)
+            accepted += int(usage.get("accepted") or 0)
             if first_at is None or generated < 2:
                 continue
             decode_s = _time.perf_counter() - first_at
@@ -170,7 +181,7 @@ def _mtp_probe_arm(model_path, display, mtp_enabled, gen_tokens, ctx,
         backend = getattr(engine, "_backend", None)
         return (rates, bool(getattr(backend, "supports_mtp", False)),
                 getattr(backend, "last_mtp_status", None),
-                engine.gpu_placement)
+                engine.gpu_placement, (drafted, accepted), texts)
     finally:
         engine.unload()
 
@@ -184,12 +195,16 @@ def _mtp_probe_arm(model_path, display, mtp_enabled, gen_tokens, ctx,
               help="Times to repeat the paired measurement.")
 @click.option("-c", "--ctx",        default=None, type=int)
 @click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
-def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers):
+@click.option("-d", "--draft-tokens", default=None, type=click.IntRange(1, 3),
+              help="Draft tokens per MTP step for the 'on' runs "
+                   "(default: the mtp_draft_tokens setting).")
+def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
     """Measure whether Multi-Token Prediction makes MODEL faster on this machine.
 
     Loads MODEL twice per round, once with MTP off and once with MTP on, and
     generates the same prompts through each. Reports the decode throughput of
-    both and which setting won.
+    both, which setting won, how many drafted tokens the model accepted, and
+    whether MTP changed the generated text.
 
     Whether speculation pays depends on the model, the quantisation, how much
     of it fits on the GPU, and the speed of this specific machine, so it is
@@ -211,13 +226,16 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers):
 
     off_rates, on_rates = [], []
     placement = None
+    drafted = accepted = 0
+    texts_off, texts_on = [], []
     for rnd in range(rounds):
         for enabled in (False, True):
             console.print(f"  round {rnd + 1}, MTP "
                           f"{'on' if enabled else 'off'} … ", end="")
             try:
-                rates, sup, st, plc = _mtp_probe_arm(
-                    model_path, model, enabled, gen_tokens, ctx, gpu_layers)
+                rates, sup, st, plc, counts, texts = _mtp_probe_arm(
+                    model_path, model, enabled, gen_tokens, ctx, gpu_layers,
+                    draft_tokens=draft_tokens if enabled else None)
             except Exception as e:
                 console.print()
                 console.print(f"[red]Run failed:[/red] {escape(str(e))}")
@@ -225,6 +243,9 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers):
             console.print("done")
             placement = plc or placement
             if enabled:
+                drafted += counts[0]
+                accepted += counts[1]
+                texts_on += texts
                 on_rates += rates
                 if not sup:
                     console.print(
@@ -235,6 +256,7 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers):
                           "setting makes no difference to it.")
                     return
             else:
+                texts_off += texts
                 off_rates += rates
 
     if not off_rates or not on_rates:
@@ -255,6 +277,25 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers):
         table.add_row(name, f"{_stats.median(vals):.1f}",
                       f"{min(vals):.1f} - {max(vals):.1f}")
     console.print(table)
+    if drafted:
+        console.print(f"Drafts accepted: {accepted} of {drafted} "
+                      f"({100.0 * accepted / drafted:.0f}%).")
+    else:
+        console.print("[yellow]No draft tokens were verified in the MTP runs."
+                      "[/yellow]")
+    same = sum(1 for a, b in zip(texts_off, texts_on) if a == b)
+    pairs = min(len(texts_off), len(texts_on))
+    if pairs:
+        if same == pairs:
+            console.print(f"Output identical to MTP off: {same} of {pairs} replies.")
+        else:
+            console.print(
+                f"[yellow]Output differs from MTP off in {pairs - same} of "
+                f"{pairs} replies.[/yellow] MTP checks several tokens in one "
+                "batch, whose arithmetic can round slightly differently, so "
+                "where two tokens are almost equally likely the reply can take "
+                "the other one. It is still the same model's reply; with more "
+                "draft tokens this happens more often.")
 
     # 3% either way is inside the run-to-run spread seen on an idle machine, so
     # a smaller difference is reported as no difference rather than a winner.

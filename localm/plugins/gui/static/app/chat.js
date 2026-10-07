@@ -1729,18 +1729,54 @@ export function buildEmptyHint() {
 // reloaded or switched-to conversation shows the same figures a live
 // generation would have, instead of the last conversation's stats lingering
 // on screen or reload wiping them entirely.
+// The MTP part of the usage line for a reply's usage.mtp, as {text, title}:
+// the acceptance rate when the reply speculated, that MTP paused itself for
+// being slower, that it was off for this reply (grammar-constrained output or
+// an image), or that it stopped or is unavailable, with the reason as the
+// tooltip. Empty for no MTP figures or an idle turn.
+export function mtpUsageText(mtp) {
+  if (!mtp || typeof mtp !== "object") return { text: "", title: "" };
+  if (mtp.state === "on" && mtp.drafted > 0) {
+    const pct = Math.round((100 * mtp.accepted) / mtp.drafted);
+    return { text: t("chat.usage.mtpOn", { pct }),
+             title: t("chat.usage.mtpOn.title", { accepted: mtp.accepted, drafted: mtp.drafted }) };
+  }
+  if (mtp.state === "paused") {
+    return { text: t("chat.usage.mtpPaused"),
+             title: t("chat.usage.mtpPaused.title", { steps: mtp.paused_steps || 0 }) };
+  }
+  if (mtp.state === "off") {
+    const why = { grammar: "chat.usage.mtpOff.grammar", image: "chat.usage.mtpOff.image" }[mtp.reason];
+    return { text: t("chat.usage.mtpOff"),
+             title: why ? t(why) : t("chat.usage.mtpReason", { reason: mtp.reason || "" }) };
+  }
+  if (mtp.state === "stopped") {
+    return { text: t("chat.usage.mtpStopped"),
+             title: t("chat.usage.mtpReason", { reason: mtp.reason || "" }) };
+  }
+  if (mtp.state === "unavailable") {
+    return { text: t("chat.usage.mtpUnavailable"),
+             title: t("chat.usage.mtpReason", { reason: mtp.reason || "" }) };
+  }
+  return { text: "", title: "" };
+}
+
 export function updateUsageDisplay(usage) {
   const gaugeContainer = $("context-gauge-container");
   const gaugeBar = $("context-gauge-bar");
   if (!usage) {
     $("chat-usage").textContent = "";
+    $("chat-usage").title = "";
     if (gaugeContainer) gaugeContainer.classList.remove("visible");
     return;
   }
   const bits = [`${usage.total_tokens} tok`];
   if (usage.ttft_ms != null) bits.push(`TTFT ${usage.ttft_ms} ms`);
   if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
+  const mtp = mtpUsageText(usage.mtp);
+  if (mtp.text) bits.push(mtp.text);
   $("chat-usage").textContent = bits.join(" · ");
+  $("chat-usage").title = mtp.title;
   if (gaugeContainer && gaugeBar && usage.context_capacity) {
     const pct = Math.min(100, Math.max(0, (usage.total_tokens / usage.context_capacity) * 100));
     gaugeBar.style.width = pct + "%";

@@ -23,7 +23,7 @@ from localm.inference.backends.llamacpp._structs import (
 from localm.inference.backends.llamacpp import _api as api
 from localm.inference.engine import Engine
 from localm.inference.backends.llamacpp import llama as LlamaCppModule
-from tests._bare_llama import make_bare_llama
+from tests._bare_llama import make_bare_llama, prime_after_prefill, stub_mtp_native
 from tests._fake_mtmd import fake_vision_prompt
 from tests._real_gguf import fetch_gguf, require_native_runtime
 
@@ -440,15 +440,14 @@ def _arm_drafting(llm):
     when there is none, which is the fail-closed behaviour these fixtures would
     otherwise exercise instead of the speculative path they are about. The batch
     helpers do real ctypes work that cannot run against a mock api, so they are
-    stubbed here.
+    stubbed here, and a mocked prefill leaves the state a real one does.
+    Pacing is held open so every step drafts, as the scripted samples assume.
     """
-    llm._mtp_wants_h = True
-    llm._pending_h = object()
-    llm._n_embd = 4
-    llm._capture_h = lambda row=-1: True
-    llm._create_draft_batch = lambda token, pos: (
-        llm._create_batch([token], pos, logits_at_last_only=True), None, None)
-    llm._free_draft_batch = staticmethod(lambda batch, original: None)
+    stub_mtp_native(llm)
+    llm._prefill_fresh_context = MagicMock(
+        side_effect=lambda tokens, needed: prime_after_prefill(llm, tokens))
+    # Every step drafts: no plain probe step, so no pause decision either.
+    llm._draft_pacer = LlamaCppModule._DraftPacer(probe_every=1 << 30, bootstrap_every=1 << 30)
     return llm
 
 
@@ -471,13 +470,12 @@ def _run_generate(recorder, *, max_new_tokens, decode=None, llm_holder=None, **k
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
     llm._fit_generation_budget = lambda n_prompt, max_new: max_new
     llm._can_reuse_kv = lambda needed: False
-    llm._prefill_fresh_context = MagicMock()
     llm._create_batch = MagicMock(return_value=MagicMock())
 
     with patch("localm.inference.backends.llamacpp.llama.api") as mock_api, \
          patch("localm.inference.backends.llamacpp.llama._build_sampler",
                return_value=recorder.main_sampler):
-        mock_api.llama_sampler_init_greedy.return_value = recorder.draft_sampler
+        mock_api.llama_sampler_chain_init.return_value = recorder.draft_sampler
         mock_api.llama_sampler_sample.side_effect = recorder.sample
         mock_api.llama_sampler_accept.side_effect = recorder.accept
         mock_api.llama_decode.side_effect = decode or recorder.decode
@@ -599,6 +597,7 @@ def test_mtp_drafting_is_disabled_while_a_grammar_is_active():
     assert tokens == [400]
     assert "DRAFT" not in rec.shapes(), rec.shapes()
     mock_api.llama_sampler_init_greedy.assert_not_called()
+    mock_api.llama_sampler_chain_init.assert_not_called()
 
 
 def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
@@ -625,7 +624,6 @@ def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
     llm._fit_generation_budget = lambda n_prompt, max_new: max_new
     llm._can_reuse_kv = lambda needed: False
-    llm._prefill_fresh_context = MagicMock()
     llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace(
         tokens=list(tokens), pos=pos)
 
@@ -652,7 +650,7 @@ def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
 
     with patch("localm.inference.backends.llamacpp.llama.api") as mock_api,          patch("localm.inference.backends.llamacpp.llama._build_sampler",
                return_value=rec.main_sampler):
-        mock_api.llama_sampler_init_greedy.return_value = rec.draft_sampler
+        mock_api.llama_sampler_chain_init.return_value = rec.draft_sampler
         mock_api.llama_sampler_sample.side_effect = rec.sample
         mock_api.llama_sampler_accept.side_effect = rec.accept
         mock_api.llama_decode.side_effect = decode
@@ -799,13 +797,12 @@ def _suspended_on_an_accepted_draft():
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
     llm._fit_generation_budget = lambda n_prompt, max_new: max_new
     llm._can_reuse_kv = lambda needed: False
-    llm._prefill_fresh_context = MagicMock()
     llm._create_batch = MagicMock(return_value=MagicMock())
 
     with patch("localm.inference.backends.llamacpp.llama.api") as mock_api, \
          patch("localm.inference.backends.llamacpp.llama._build_sampler",
                return_value=rec.main_sampler):
-        mock_api.llama_sampler_init_greedy.return_value = rec.draft_sampler
+        mock_api.llama_sampler_chain_init.return_value = rec.draft_sampler
         mock_api.llama_sampler_sample.side_effect = rec.sample
         mock_api.llama_sampler_accept.side_effect = rec.accept
         mock_api.llama_decode.side_effect = rec.decode
@@ -1024,6 +1021,7 @@ def test_generate_image_never_samples_or_decodes_the_draft_context():
     assert llm.mtp_active_this_call is False, (
         "an image turn read as having speculated - supports_mtp staying True "
         "is a model capability, not a statement about this call")
+    assert llm.mtp_skipped == "image"
 
     decode_ctxs = [call.args[0] for call in mock_api.llama_decode.call_args_list]
     assert llm._mtp_ctx_ptr not in decode_ctxs, (
@@ -1294,11 +1292,18 @@ def test_engine_forwards_the_mtp_override_to_create_backend():
 
 
 def _bench_mtp_result(rates_off, rates_on, supports=True, status=None,
-                      placement=None):
-    """Build a _mtp_probe_arm double returning fixed rates per arm."""
-    def _arm(model_path, display, mtp_enabled, gen_tokens, ctx, gpu_layers):
-        return ((rates_on if mtp_enabled else rates_off), supports, status,
-                placement)
+                      placement=None, counts=(10, 8), texts_off=("a", "b", "c"),
+                      texts_on=None, seen=None):
+    """Build a _mtp_probe_arm double returning fixed rates per arm; *seen*
+    collects the draft_tokens each MTP-on arm was asked for."""
+    def _arm(model_path, display, mtp_enabled, gen_tokens, ctx, gpu_layers,
+             draft_tokens=None):
+        if seen is not None and mtp_enabled:
+            seen.append(draft_tokens)
+        if mtp_enabled:
+            return (rates_on, supports, status, placement, counts,
+                    list(texts_on if texts_on is not None else texts_off))
+        return (rates_off, supports, status, placement, (0, 0), list(texts_off))
     return _arm
 
 
@@ -1422,10 +1427,9 @@ def _growing_llama(target):
         supports_mtp=True,
         mtp_status="ok:qwen35",
     )
-    _arm_drafting(llm)
+    stub_mtp_native(llm)
     llm._mtp_ctx_capacity = 2048
     llm._target_ctx = lambda needed: target
-    llm._capture_h = lambda row=-1: True
     return llm
 
 
@@ -1504,29 +1508,33 @@ def test_a_draft_cache_left_stale_by_a_failed_reply_is_refilled_from_the_whole_p
         llm._mtp_ctx_capacity = 4096
         llm._mtp_draft_stale = stale
         llm._cached_tokens = [1, 2, 3]
+        llm._draft_pos = 3
         llm._can_reuse_kv = lambda needed: True
-        decoded = {}
+        decoded = {2: [], 3: []}
         llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace(tokens=list(tokens), pos=pos)
         with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
             mock_api.llama_memory_seq_rm.return_value = True
             mock_api.llama_decode.side_effect = (
-                lambda ctx, batch: decoded.__setitem__(ctx.value, (batch.tokens, batch.pos)) or 0)
+                lambda ctx, batch: decoded[ctx.value].append((batch.tokens, batch.pos)) or 0)
             llm._prefill_with_reuse([1, 2, 3, 4])
         return llm, decoded
 
     llm, decoded = run(stale=True)
-    assert decoded[3] == ([1, 2, 3, 4], 0)       # draft cache refilled from position 0
-    assert decoded[2] == ([4], 3)                # main cache keeps its prefix
+    # The draft cache is refilled from position 0: the kept prefix, then the
+    # suffix the main context decoded.
+    assert decoded[3] == [([1, 2, 3], 0), ([4], 3)]
+    assert decoded[2] == [([4], 3)]              # main cache keeps its prefix
     assert llm._mtp_draft_stale is False
+    assert llm._draft_pos == 4
 
     _, decoded = run(stale=False)
-    assert decoded[3] == ([4], 3)                # control: a synced draft cache gets the suffix
+    assert decoded[3] == [([4], 3)]              # control: a synced draft cache gets the suffix
 
 
 def _decode_that_fails_the_draft(recorder, fail_from, how):
     """A decode that serves the recorder, except the draft context's decodes from
-    number *fail_from* on, which return 1 or raise. Draft-context decodes are the
-    draft step and, after an accepted draft, its mirror."""
+    number *fail_from* on, which return 1 or raise. A draft step is one
+    draft-context decode, carrying the previous step's accepted tokens."""
     seen = {"draft": 0}
 
     def decode(ctx, batch):
@@ -1548,14 +1556,14 @@ def _decode_that_fails_the_draft(recorder, fail_from, how):
 def test_a_draft_decode_failing_mid_reply_stops_drafting_and_reports_it(how, status):
     rec = _SpecRecorder(head=[500, 502, 504, _SpecRecorder.EOG],
                         draft=[501, 503], verify=[501])
-    decode, seen = _decode_that_fails_the_draft(rec, fail_from=3, how=how)
+    decode, seen = _decode_that_fails_the_draft(rec, fail_from=2, how=how)
     llm_holder = []
 
     tokens, _ = _run_generate(rec, max_new_tokens=8, decode=decode, llm_holder=llm_holder)
 
     llm = llm_holder[0]
     assert tokens == [500, 501, 502, 504], tokens          # data before the flags
-    assert seen["draft"] == 3, "drafting continued after the draft decode failed"
+    assert seen["draft"] == 2, "drafting continued after the draft decode failed"
     assert llm.mtp_active_this_call is False
     assert llm.mtp_call_status == status
     # The model keeps its capability: only this reply stopped speculating.
@@ -1575,7 +1583,7 @@ def test_a_reply_that_never_fails_a_draft_reports_no_stop():
 
 def test_a_new_reply_drafts_again_after_one_that_stopped():
     rec = _SpecRecorder(head=[500, 502, _SpecRecorder.EOG], draft=[501], verify=[501])
-    decode, _ = _decode_that_fails_the_draft(rec, fail_from=3, how="return")
+    decode, _ = _decode_that_fails_the_draft(rec, fail_from=2, how="return")
     llm_holder = []
     _run_generate(rec, max_new_tokens=8, decode=decode, llm_holder=llm_holder)
     llm = llm_holder[0]
@@ -1585,7 +1593,7 @@ def test_a_new_reply_drafts_again_after_one_that_stopped():
     with patch("localm.inference.backends.llamacpp.llama.api") as mock_api, \
          patch("localm.inference.backends.llamacpp.llama._build_sampler",
                return_value=rec2.main_sampler):
-        mock_api.llama_sampler_init_greedy.return_value = rec2.draft_sampler
+        mock_api.llama_sampler_chain_init.return_value = rec2.draft_sampler
         mock_api.llama_sampler_sample.side_effect = rec2.sample
         mock_api.llama_sampler_accept.side_effect = rec2.accept
         mock_api.llama_decode.side_effect = rec2.decode
@@ -1716,3 +1724,208 @@ def test_a_draft_context_is_never_created_for_a_model_without_an_mtp_graph():
         assert llm._create_mtp_context(4096) == "no-mtp-graph"
 
     assert made == []
+
+
+# --------------------------------------------------------------------------- #
+#  Draft-count setting and per-reply MTP figures                              #
+# --------------------------------------------------------------------------- #
+
+def test_the_draft_count_setting_defaults_to_the_native_default():
+    from localm.inference.backends.llamacpp.llama import (
+        MTP_DRAFT_TOKENS_DEFAULT,
+        MTP_DRAFT_TOKENS_MAX,
+    )
+    assert DEFAULT_CONFIG["mtp_draft_tokens"] == MTP_DRAFT_TOKENS_DEFAULT
+    field = next(f for f in CORE_FIELDS if f.key == "mtp_draft_tokens")
+    assert (field.group, field.min, field.max) == ("Engine", 1, MTP_DRAFT_TOKENS_MAX)
+
+
+@pytest.mark.parametrize("cfg_value, override, expected", [
+    (3, None, 3), (3, 1, 1), (0, None, 1), (99, None, 3), ("x", None, 1), (None, None, 1),
+])
+def test_the_draft_count_is_read_from_config_clamped_and_overridable(cfg_value, override, expected):
+    from localm.inference.engine import _resolve_mtp_draft_tokens
+    cfg = {} if cfg_value is None else {"mtp_draft_tokens": cfg_value}
+    assert _resolve_mtp_draft_tokens(cfg, override) == expected
+
+
+def test_the_draft_count_reaches_the_native_instance(tmp_path):
+    from localm.inference.engine import create_backend
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"GGUF")
+    with patch("localm.inference.engine.load_config",
+               return_value={**DEFAULT_CONFIG, "mtp_draft_tokens": 3}):
+        backend = create_backend(str(model))
+    assert backend.mtp_draft_tokens == 3
+
+    from localm.inference.backends.llamacpp import _worker
+    w = _worker.GgufWorker.__new__(_worker.GgufWorker)
+    w._llm = SimpleNamespace(mtp_drafted=7, mtp_accepted=5, mtp_skipped="grammar")
+    assert (w.mtp_drafted, w.mtp_accepted, w.mtp_skipped) == (7, 5, "grammar")
+    w._llm = None
+    assert (w.mtp_drafted, w.mtp_accepted, w.mtp_skipped) == (0, 0, "")
+
+
+def test_the_done_envelope_carries_the_draft_counts():
+    import inspect as _inspect
+
+    from localm.inference.backends.llamacpp import _runner
+
+    src = _inspect.getsource(_runner)
+    assert '"mtp_drafted": worker.mtp_drafted' in src
+    assert '"mtp_accepted": worker.mtp_accepted' in src
+    assert '"mtp_steps": worker.mtp_steps' in src
+    assert '"mtp_paused_steps": worker.mtp_paused_steps' in src
+    assert '"mtp_skipped": worker.mtp_skipped' in src
+
+
+@pytest.mark.parametrize("done, supports, expected", [
+    ({"mtp_status": "ok:qwen35", "mtp_active": True, "mtp_drafted": 40, "mtp_accepted": 31},
+     True, {"state": "on", "drafted": 40, "accepted": 31, "paused_steps": 0, "reason": None}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": False, "mtp_call_status": "draft-decode-failed:1",
+      "mtp_drafted": 4, "mtp_accepted": 3},
+     True, {"state": "stopped", "drafted": 4, "accepted": 3, "paused_steps": 0,
+            "reason": "draft-decode-failed:1"}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": False}, True,
+     {"state": "idle", "drafted": 0, "accepted": 0, "paused_steps": 0, "reason": None}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": True, "mtp_drafted": 6, "mtp_accepted": 3,
+      "mtp_steps": 6, "mtp_paused_steps": 40}, True,
+     {"state": "paused", "drafted": 6, "accepted": 3, "paused_steps": 40,
+      "reason": "slower-than-plain"}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": True, "mtp_drafted": 60, "mtp_accepted": 50,
+      "mtp_steps": 60, "mtp_paused_steps": 10}, True,
+     {"state": "on", "drafted": 60, "accepted": 50, "paused_steps": 10, "reason": None}),
+    ({"mtp_status": "no-mtp-graph:llama", "mtp_active": False}, False,
+     {"state": "unavailable", "drafted": 0, "accepted": 0, "paused_steps": 0,
+      "reason": "no-mtp-graph:llama"}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": False, "mtp_skipped": "grammar"}, True,
+     {"state": "off", "drafted": 0, "accepted": 0, "paused_steps": 0, "reason": "grammar"}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": False, "mtp_skipped": "image"}, True,
+     {"state": "off", "drafted": 0, "accepted": 0, "paused_steps": 0, "reason": "image"}),
+])
+def test_the_backend_summarises_the_last_reply_for_the_api(done, supports, expected):
+    backend = GgufBackend("test_model.gguf", mtp_enabled=True)
+    backend._loaded = True
+    backend._supports_mtp = supports
+
+    backend._record_mtp(done)
+
+    assert backend.last_mtp_usage == expected
+
+
+def test_no_mtp_figures_when_mtp_is_off():
+    backend = GgufBackend("test_model.gguf", mtp_enabled=False)
+    backend._loaded = True
+    backend._record_mtp({"mtp_status": "disabled", "mtp_active": False})
+    assert backend.last_mtp_usage is None
+
+
+def test_a_malformed_count_in_the_envelope_reads_as_zero():
+    backend = GgufBackend("test_model.gguf", mtp_enabled=True)
+    backend._loaded = True
+    backend._supports_mtp = True
+    backend._record_mtp({"mtp_status": "ok", "mtp_active": True,
+                         "mtp_drafted": "lots", "mtp_accepted": -3})
+    assert (backend.last_mtp_drafted, backend.last_mtp_accepted) == (0, 0)
+
+
+def test_the_chat_usage_carries_the_mtp_figures():
+    from localm.inference import http_server
+    from localm.inference.protocol import UsageInfo
+
+    engine = SimpleNamespace(mtp_usage=lambda: {
+        "state": "on", "drafted": 10, "accepted": 8, "paused_steps": 2, "reason": None})
+    usage = UsageInfo(total_tokens=5, mtp=http_server._mtp_usage(engine))
+    assert usage.model_dump()["mtp"] == {
+        "state": "on", "drafted": 10, "accepted": 8, "paused_steps": 2, "reason": None}
+
+    # Engines without figures (mocks, HF, MTP off) leave the field out.
+    assert http_server._mtp_usage(MagicMock()) is None
+    assert http_server._mtp_usage(SimpleNamespace(mtp_usage=lambda: None)) is None
+    assert http_server._mtp_usage(SimpleNamespace()) is None
+    assert http_server._mtp_usage(SimpleNamespace(mtp_usage=lambda: {"drafted": 1})) is None
+
+
+def test_engine_mtp_usage_passes_the_backend_summary_through():
+    eng = Engine.__new__(Engine)
+    eng._backend = SimpleNamespace(last_mtp_usage={"state": "idle", "drafted": 0,
+                                                   "accepted": 0, "reason": None})
+    assert eng.mtp_usage()["state"] == "idle"
+    eng._backend = SimpleNamespace()
+    assert eng.mtp_usage() is None
+
+
+def test_bench_mtp_reports_acceptance_and_identical_output(cli_runner):
+    from localm.cli import models as models_mod
+
+    seen = []
+    with patch.object(models_mod, "get_operator_model_info",
+                      return_value=("model.gguf", None)), \
+         patch.object(models_mod, "_mtp_probe_arm",
+                      _bench_mtp_result([50.0], [70.0], counts=(40, 30), seen=seen)):
+        res = cli_runner.invoke(models_mod.bench_mtp,
+                                ["model.gguf", "--rounds", "1", "--draft-tokens", "3"])
+
+    assert res.exit_code == 0, res.output
+    assert "Drafts accepted: 30 of 40 (75%)" in res.output
+    assert "Output identical to MTP off: 3 of 3 replies" in res.output
+    assert seen == [3]
+
+
+def test_bench_mtp_flags_output_that_differs_from_mtp_off(cli_runner):
+    from localm.cli import models as models_mod
+
+    with patch.object(models_mod, "get_operator_model_info",
+                      return_value=("model.gguf", None)), \
+         patch.object(models_mod, "_mtp_probe_arm",
+                      _bench_mtp_result([50.0], [70.0], texts_on=("a", "X", "c"))):
+        res = cli_runner.invoke(models_mod.bench_mtp, ["model.gguf", "--rounds", "1"])
+
+    assert res.exit_code == 0, res.output
+    assert "Output differs from MTP off in 1 of 3 replies" in res.output
+
+
+
+@pytest.mark.parametrize("status", ["rewind-unsupported", "context-refused"])
+def test_a_reply_that_turned_mtp_off_for_the_model_reports_it_stopped(status):
+    """A reply that speculated and then lost MTP for the model (a stuck rollback,
+    a draft context that could not be recreated) reports that it stopped and
+    why; the next reply reports MTP unavailable."""
+    backend = GgufBackend("test_model.gguf", mtp_enabled=True)
+    backend._loaded = True
+    backend._supports_mtp = True
+
+    backend._record_mtp({"mtp_status": status, "mtp_active": True,
+                         "mtp_drafted": 5, "mtp_accepted": 4, "mtp_steps": 5})
+
+    usage = backend.last_mtp_usage
+    assert (usage["state"], usage["reason"], usage["drafted"]) == ("stopped", status, 5)
+
+    backend._reset_mtp_call()
+    backend._record_mtp({"mtp_status": status, "mtp_active": False})
+    assert backend.last_mtp_usage["state"] == "unavailable"
+
+
+def test_a_reply_that_ends_without_a_report_shows_no_figures_from_the_last_one():
+    """A cancelled reply never sends its done envelope; it must not show the
+    previous reply's MTP figures."""
+    backend = GgufBackend("test_model.gguf", mtp_enabled=True)
+    backend._loaded = True
+    backend._supports_mtp = True
+    backend._record_mtp({"mtp_status": "ok", "mtp_active": True,
+                         "mtp_drafted": 40, "mtp_accepted": 30, "mtp_steps": 40})
+
+    class _Runner:
+        last_done = None
+
+        def chat_stream(self, **kwargs):
+            yield "a"
+            yield "b"
+
+    backend._runner = _Runner()
+    gen = backend.chat_stream([{"role": "user", "content": "hi"}])
+    assert next(gen) == "a"
+    gen.close()
+
+    usage = backend.last_mtp_usage
+    assert (usage["state"], usage["drafted"], usage["accepted"]) == ("idle", 0, 0)
