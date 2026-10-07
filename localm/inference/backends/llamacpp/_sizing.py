@@ -472,7 +472,8 @@ class VramSizingMixin:
         are charged only when MTP is enabled, since llama.cpp skips loading
         them otherwise; with MTP enabled the MTP draft context
         (:meth:`_mtp_draft_context_vram_bytes`) is charged as the KV cache of
-        those layers. A plan that writes a split or reports a shortfall is
+        those layers. The recurrent state (:meth:`_recurrent_state_vram_bytes`)
+        is charged in equal parts to the layers that keep one. A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
         integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`),
@@ -532,7 +533,13 @@ class VramSizingMixin:
             kv_per_layer = (self.n_ctx * self._kv_bytes_per_token()) // repeating
             draft_per_layer = (-(-self._mtp_draft_context_vram_bytes() // nextn)
                                if mtp_on else 0)
-            layer_kv = [kv_per_layer if il < n_layer_all - nextn else draft_per_layer
+            from localm.model_manager.gguf import _RECURRENT_LAYER_TENSOR_RE
+            recurrent = {int(m.group(1)) for name in sizes
+                         if (m := _RECURRENT_LAYER_TENSOR_RE.match(name))}
+            state_per_layer = (-(-self._recurrent_state_vram_bytes() // len(recurrent))
+                               if recurrent else 0)
+            layer_kv = [(kv_per_layer if il < n_layer_all - nextn else draft_per_layer)
+                        + (state_per_layer if il in recurrent else 0)
                         for il in range(n_layer_all)]
             logits = logits_buffer_bytes(layout["n_vocab"], self.n_ctx,
                                          max_batch=self._MAX_BATCH,
