@@ -2093,7 +2093,7 @@ class Collection:
                 skipped += 1
                 _finished(n_done, f"skip {filename} (unchanged)")
                 continue
-            say(f"[{n_done}/{len(uploads)}] reading {filename}...")
+            say(f"[{n_done}/{n_total}] reading {filename}...")
             try:
                 text = extract_bytes(data, filename, describe_image_fn=describe_image_fn)
             except ExtractError as e:
@@ -2109,7 +2109,7 @@ class Collection:
 
             vectors: list = [None] * len(new_chunks)
             if not embed_broken and new_chunks:
-                say(f"[{n_done}/{len(uploads)}] embedding {filename} "
+                say(f"[{n_done}/{n_total}] embedding {filename} "
                     f"({len(new_chunks)} chunks)...")
                 try:
                     vecs = embed_fn([c["text"] for c in new_chunks])

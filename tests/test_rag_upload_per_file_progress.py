@@ -13,6 +13,8 @@ WHAT THE FIXTURES HAVE TO EXPRESS:
   a one-positional lambda.
 """
 
+import re
+
 import pytest
 
 from localm.rag import store as store_mod
@@ -143,13 +145,20 @@ class TestEveryExitFromTheLoopTicks:
 class TestBothChannelsTravelTogether:
     def test_the_line_and_the_numbers_arrive_on_one_call(self, coll):
         """The prose and the structured numbers ride the SAME call, so they
-        cannot drift; this asserts neither is dropped."""
+        cannot drift; this asserts neither is dropped. The step lines naming
+        the file being read or embedded are text only."""
         rec = _Recorder()
         coll.add_uploads(_files(2), embed_fn=_embed, on_progress=rec)
 
+        step = re.compile(r"^\[\d+/\d+\] (reading|embedding) ")
+        steps = [t for t, kw in rec.calls if step.match(t)]
+        assert len(steps) == 4, f"each file was not read and embedded: {rec.calls}"
         for text, kw in rec.calls:
             assert text, f"a structured tick carried no line: {kw}"
-            assert kw.get("done") is not None, f"a line carried no numbers: {text!r}"
+            if step.match(text):
+                assert "done" not in kw, f"a step line moved the bar: {text!r}"
+            else:
+                assert kw.get("done") is not None, f"a line carried no numbers: {text!r}"
 
     def test_no_callback_at_all_does_not_raise(self, coll):
         """The live path for almost every caller. The structured keywords would
