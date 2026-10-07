@@ -18,9 +18,10 @@ DuckDuckGo's HTML page, DuckDuckGo's lite page and Brave Search, moving on
 when one fails, answers with a bot check (``BotCheckError``) or returns a
 page with no results it can read (``UnreadableResultsError``), and returns
 the first non-empty result list. A page with no results counts as an empty
-answer only when it carries the service's own no-results message. A service
-that answered with a bot check is asked once more after ``_BOT_CHECK_WAIT``
-seconds. The whole chain stops starting new requests after
+answer only when it carries the service's own no-results message; after one,
+the same service's other page is skipped. When no service returned results or
+a no-results message, a service that answered with a bot check is asked once
+more after ``_BOT_CHECK_WAIT`` seconds. The whole chain stops starting new requests after
 ``_SEARCH_BUDGET`` seconds. When every service failed, ``SearchProviderError``
 names each one's cause; when every service was refused by the network
 policy, the first ``NetworkPolicyError`` is raised.
@@ -412,6 +413,7 @@ class DuckDuckGoHTMLProvider:
 
     name = "duckduckgo-html"
     label = "DuckDuckGo"
+    service = "duckduckgo"
     endpoint = "https://html.duckduckgo.com/html/"
 
     def search(self, query: str, max_results: int,
@@ -419,7 +421,7 @@ class DuckDuckGoHTMLProvider:
         def send() -> str:
             try:
                 resp = _request(
-                    "POST", self.endpoint, service="duckduckgo",
+                    "POST", self.endpoint, service=self.service,
                     label=self.label, timeout=timeout,
                     data={"q": query, "b": "", "kl": "wt-wt"},
                     headers={"Accept": _BROWSER_ACCEPT,
@@ -442,13 +444,14 @@ class DuckDuckGoLiteProvider:
 
     name = "duckduckgo-lite"
     label = "DuckDuckGo lite"
+    service = "duckduckgo"
     endpoint = "https://lite.duckduckgo.com/lite/"
 
     def search(self, query: str, max_results: int,
                timeout: float = _SEARCH_TIMEOUT) -> list[SearchResult]:
         def send() -> str:
             resp = _request(
-                "POST", self.endpoint, service="duckduckgo", label=self.label,
+                "POST", self.endpoint, service=self.service, label=self.label,
                 timeout=timeout, data={"q": query, "kl": "wt-wt"},
                 headers={"Accept": _BROWSER_ACCEPT,
                          "Accept-Language": "en-US,en;q=0.9",
@@ -470,6 +473,7 @@ class BraveSearchProvider:
 
     name = "brave"
     label = "Brave Search"
+    service = "brave"
     endpoint = "https://search.brave.com/search"
 
     def search(self, query: str, max_results: int,
@@ -479,7 +483,8 @@ class BraveSearchProvider:
 
         def send() -> str:
             resp = _request(
-                "GET", url, service="brave", label=self.label, timeout=timeout,
+                "GET", url, service=self.service, label=self.label,
+                timeout=timeout,
                 headers={"Accept": _BROWSER_ACCEPT,
                          "Accept-Language": "en-US,en;q=0.9"},
                 bot_statuses=frozenset({403, 429}))
@@ -518,10 +523,13 @@ class DefaultSearchProvider:
     def search(self, query: str, max_results: int) -> list[SearchResult]:
         finish_by = time.monotonic() + _SEARCH_BUDGET
         outcomes: dict[int, Optional[BaseException]] = {}
-        answered_empty = False
+        empty_services: set[str] = set()
+
+        def service(index: int) -> str:
+            route = self.routes[index]
+            return getattr(route, "service", None) or route.name
 
         def attempt(index: int) -> Optional[list[SearchResult]]:
-            nonlocal answered_empty
             left = finish_by - time.monotonic()
             if left < _MIN_TIME_FOR_ROUTE:
                 return None
@@ -534,22 +542,25 @@ class DefaultSearchProvider:
                 return None
             outcomes[index] = None
             if not found:
-                answered_empty = True
+                empty_services.add(service(index))
             return found or None
 
         for i in range(len(self.routes)):
+            if service(i) in empty_services:
+                continue
             found = attempt(i)
             if found:
                 return found
         checked = [i for i, exc in outcomes.items()
                    if isinstance(exc, BotCheckError)]
-        if checked and finish_by - time.monotonic() > _BOT_CHECK_WAIT:
+        if (checked and not empty_services
+                and finish_by - time.monotonic() > _BOT_CHECK_WAIT):
             _sleep(_BOT_CHECK_WAIT)
             for i in checked:
                 found = attempt(i)
                 if found:
                     return found
-        if answered_empty:
+        if empty_services:
             return []
         failures = [(self.routes[i], outcomes.get(i))
                     for i in range(len(self.routes))]

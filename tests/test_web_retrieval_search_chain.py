@@ -221,7 +221,8 @@ class TestFallbackChain:
         t.route("GET", BRAVE_SEARCH + "*", _ok(brave_html([])))
         b = retrieve("q")
         assert b.search_status == "empty"
-        assert t.urls() == [DDG_ENDPOINT, LITE_ENDPOINT, t.urls("GET")[0]]
+        assert t.urls("POST") == [DDG_ENDPOINT]
+        assert len(t.urls("GET")) == 1
 
     def test_out_of_time_services_are_named(self, monkeypatch):
         from localm.web_retrieval import providers
@@ -271,6 +272,28 @@ class TestNoResultsVersusUnreadable:
         t.route("POST", LITE_ENDPOINT, _raise(_reset))
         t.route("GET", BRAVE_SEARCH + "*", FakeResponse(status=503, text=""))
         assert retrieve("q").search_status == "empty"
+        assert LITE_ENDPOINT not in t.urls()
+
+    def test_no_results_from_duckduckgo_skips_its_lite_page_but_asks_brave(
+            self, monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
+        t.route("POST", LITE_ENDPOINT, _ok(lite_html([ROW])))
+        t.route("GET", BRAVE_SEARCH + "*", _ok(brave_html([ROW])))
+        out = DefaultSearchProvider().search("q", 5)
+        assert [(r.provider, r.url) for r in out] == [("brave", ROW[1])]
+        assert t.urls("POST") == [DDG_ENDPOINT]
+
+    def test_no_second_try_after_a_no_results_answer(self, monkeypatch):
+        allow_public(monkeypatch)
+        slept = no_sleep(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
+        t.route("GET", BRAVE_SEARCH + "*", FakeResponse(status=429, text=""))
+        assert DefaultSearchProvider().search("q", 5) == []
+        assert 3.0 not in slept
+        assert len(t.urls("GET")) == 1
 
     def test_searxng_html_no_results_message_is_empty(self, monkeypatch):
         allow_public(monkeypatch, net_search_url="https://searx.example")
