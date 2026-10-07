@@ -3314,9 +3314,8 @@ class TestWebEndpoints:
         assert fetch.json()["detail"] == (
             "Fetch failed: www.accuweather.com closed the connection before "
             "answering")
-        assert search.json()["detail"].startswith(
-            "Search failed: html.duckduckgo.com closed the connection before "
-            "answering. Try again in a moment")
+        assert search.json()["detail"] == (
+            "Search failed: The site closed the connection before answering.")
         assert "10054" not in fetch.text + search.text
         assert fetch.status_code == 502 and search.status_code == 502
 

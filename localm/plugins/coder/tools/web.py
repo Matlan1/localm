@@ -82,8 +82,9 @@ def tool_web_search(
     are read). Use fetch_url to read a page the evidence did not cover.
     Every request goes through localm.netpolicy like fetch_url. A provider
     failure or an empty search is a tool error. In privacy mode
-    (``_privacy=True``) the query, every GitHub / Stack Exchange content
-    endpoint requested (as it is requested), every attempted page read and
+    (``_privacy=True``) the query, every search service and GitHub / Stack
+    Exchange content endpoint requested (as it is requested), every
+    attempted page read and
     the address a page was read from when it differs are echoed to stderr
     as network audit lines.
 

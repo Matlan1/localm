@@ -13,7 +13,8 @@ def _patch_query(monkeypatch):
     monkeypatch.setattr(store.Collection, "exists", lambda self: True)
     monkeypatch.setattr(
         store.Collection, "query",
-        lambda self, text, k=4, embed_fn=None: captured.update(embed_fn=embed_fn) or [])
+        lambda self, text, k=4, embed_fn=None, relevant_only=False:
+        captured.update(embed_fn=embed_fn, relevant_only=relevant_only) or [])
     return captured
 
 

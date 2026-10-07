@@ -17,6 +17,8 @@ from typing import Callable, Optional
 import requests
 
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
+LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"
+BRAVE_SEARCH = "https://search.brave.com/search?"
 PUBLIC_IP = "93.184.216.34"
 
 QUERY = "Linz museum opening hours"
@@ -42,11 +44,11 @@ def allow_public(monkeypatch, **extra_cfg) -> dict:
 
 
 def no_sleep(monkeypatch) -> list[float]:
-    """Make the search providers' DuckDuckGo spacing zero and record their
+    """Make the search providers' request spacing zero and record their
     retry backoff sleeps instead of sleeping. Returns the recorded list."""
     slept: list[float] = []
     monkeypatch.setattr(
-        "localm.web_retrieval.providers._DDG_MIN_INTERVAL", 0.0)
+        "localm.web_retrieval.providers._MIN_INTERVAL", 0.0)
     monkeypatch.setattr("localm.web_retrieval.providers._sleep", slept.append)
     return slept
 
@@ -190,6 +192,21 @@ def ddg_html(results: list[tuple[str, str, str]]) -> str:
             f'  <a class="result__snippet" href="#">{snippet}</a>\n'
             "</div>\n")
     return "<html><body>\n" + "".join(rows) + "</body></html>"
+
+
+def ddg_no_results(lite: bool = False) -> str:
+    """DuckDuckGo's no-results page for a query with no hits: the html
+    endpoint's, or the lite endpoint's with *lite*."""
+    container = ("<div class='no-results__container'>" if lite else
+                 '<div class="no-results__container result__title">')
+    block = (container + "<span class='no-results'>"
+             '<div class="no-results__message"><h1>No results found for '
+             "<strong>&quot;q&quot;</strong></h1><p><strong>Suggestions"
+             "</strong>:<ul><li>Check spelling</li></ul></p></div></span>"
+             "</div>")
+    if lite:
+        block = f'<table><tr><td colspan="2">{block}</td></tr></table>'
+    return f"<html><body>{block}</body></html>"
 
 
 def searx_json(results: list[tuple[str, str, str]]) -> dict:

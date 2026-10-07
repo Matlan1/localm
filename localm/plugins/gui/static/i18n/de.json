@@ -1445,7 +1445,7 @@
   "settings.field.netDeny.label": "Verweigerte Domains",
   "settings.field.netMode.help": "Vom Modell ausgehender Webzugriff: off = jede Anfrage schlägt fehl; ask = die GUI fragt zuerst nach; allow = keine Nachfrage. Die SSRF-Schutzmaßnahme und die Domainlisten gelten in allen drei Fällen.",
   "settings.field.netMode.label": "Netzwerkzugriff",
-  "settings.field.netSearchUrl.help": "Ein SearXNG-JSON-Suchendpunkt für die Websuche. Leer verwendet DuckDuckGo (kein Schlüssel nötig).",
+  "settings.field.netSearchUrl.help": "Eine SearXNG-Instanz für die Websuche; wenn gesetzt, verwenden Suchen nur diesen Dienst. Leer verwendet die eingebaute Suche: DuckDuckGo, dann Brave Search, wenn DuckDuckGo fehlschlägt (kein Schlüssel nötig).",
   "settings.field.netSearchUrl.label": "Such-Backend-URL",
   "settings.field.pathlistAddButton": "Ordner hinzufügen",
   "settings.field.pathlistPickTitle": "Einen zu erlaubenden Ordner wählen",

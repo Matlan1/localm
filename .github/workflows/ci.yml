@@ -765,9 +765,9 @@ jobs:
   # Live canary for the web-search retrieval pipeline (ADR-0022 Phase 5, item
   # 25). Every OTHER test of localm.web_retrieval runs against a recorded
   # fixture double on purpose - offline PR CI must never depend on the
-  # internet - so nothing else here ever makes a real call to DuckDuckGo or a
-  # configured SearXNG instance. A markup change or a datacenter-IP rate limit
-  # would otherwise go unnoticed until a user hit it.
+  # internet - so nothing else here ever makes a real call to DuckDuckGo, Brave
+  # Search or a configured SearXNG instance. A markup change or a datacenter-IP
+  # rate limit would otherwise go unnoticed until a user hit it.
   #
   # UNLIKE comfyui-pin-check/llama-rocm-pin-check above, this job is NOT left
   # to run on every trigger: `if:` restricts it to `schedule` and
@@ -795,7 +795,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Run one real search and report whether the layout still parses
+      - name: Run one real search per search service and report whether each layout still parses
         continue-on-error: true
         run: python scripts/check_web_search_canary.py
 

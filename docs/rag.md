@@ -15,7 +15,11 @@ fully offline. Two ways in:
 2. **Knowledge collections** (persistent): index folders or files once, then
    select the collection in the chat parameters drawer. Every question
    retrieves the most relevant excerpts, injects them with `[1]`-style
-   citations (file + line), and the model answers from them.
+   citations (file + line), and the model answers from them. Only excerpts
+   that clear a relevance floor are injected (see
+   [How retrieval works](#how-retrieval-works-and-why-its-lexical-first)); when none do, the chat shows a
+   "No excerpts ... were relevant" note instead, and the model answers
+   without the collection.
 
 ## Collections
 
@@ -191,6 +195,28 @@ embedder too rather than quietly returning those vectors.
   or just read the job's own outcome. A query that cannot use its vectors
   falls back to BM25 and records the reason on the collection's status (a
   corrupt or dimension-mismatched vector sidecar is also logged at WARNING).
+
+- **Relevance floor.** Ranking is relative: the best chunk for a question
+  always ranks first, however weakly it matches. Before chat injects excerpts
+  it therefore also checks each of the top hits against an absolute floor and
+  drops the ones below it. With vectors from `bge-small-en-v1.5` or
+  `nomic-embed-text-v1.5`, a hit passes on a strong cosine similarity alone,
+  or on a moderate one when it also contains enough of the question's
+  distinctive words. Without vectors, for a passage indexed without one, or
+  with vectors from any other embedding model, a hit passes only when it
+  contains most of the question's words, not counting question and
+  conversation words such as "how", "explain" or "tell me about", and
+  matching simple plural and tense forms ("resynced" matches "resync"). This
+  keyword-only check cannot tell a chatty question that happens to share
+  words with the collection from a real one, so installing the embedding
+  model makes the floor noticeably sharper. A question that points back at
+  the conversation ("why did that search fail?", "your previous answer",
+  "the second one") gets excerpts only on a strong cosine match, and none
+  from the keyword-only check. The
+  Knowledge page's search box, `localm rag query` and the coder's search tool
+  show the plain ranking; `localm rag query --relevant-only` and the API's
+  `"relevant_only": true` apply the floor. Each injected excerpt is the whole
+  chunk.
 
 By default CLI indexing is lexical-only (no running engine); pass `--embed` to
 `localm rag add` / `query` / `resync` / `repair` to compute vectors via a

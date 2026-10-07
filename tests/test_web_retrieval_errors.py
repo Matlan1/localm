@@ -171,8 +171,9 @@ class TestSearchRetries:
         cfg["net_search_url"] = f"http://searx.test:{srv.port}"
         b = retrieve("linz", fetch_top=0)
         assert b.search_status == "failed"
-        assert b.search_error.startswith(
-            "searx.test closed the connection before answering. Check that")
+        assert b.search_error == ("The search backend set in Settings > "
+                                  "Network failed: searx.test closed the "
+                                  "connection before answering.")
         assert "ConnectionResetError" not in b.search_error
         assert srv.connections == 3
         assert slept == [1.0, 2.0]

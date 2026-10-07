@@ -20,7 +20,9 @@ to disk in every session mode. Rewrites are whole-file + atomic rename.
 
 Retrieval is hybrid: BM25 always; when vectors exist for (almost) all chunks
 and the caller can embed the query, scores become an equal blend of
-max-normalised BM25 and cosine similarity.
+max-normalised BM25 and cosine similarity. Those scores are relative to the
+best chunk; ``query(relevant_only=True)`` additionally drops hits below an
+absolute relevance floor, so an unrelated query returns nothing.
 """
 
 from __future__ import annotations
@@ -178,6 +180,42 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".vscode"}
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
+
+#: Absolute relevance floors applied by ``Collection.query(relevant_only=True)``
+#: when the collection's vectors were built with one of these embedding models:
+#: ``(strong, weak, coverage)``. A hit is relevant when its raw query cosine
+#: reaches *strong*, or reaches *weak* while the hit holds at least *coverage*
+#: of the query's IDF-weighted terms (``BM25.coverage``).
+RELEVANCE_FLOORS: dict[str, tuple[float, float, float]] = {
+    "bge-small-en-v1.5": (0.67, 0.60, 0.65),
+    "nomic-embed-text-v1.5": (0.72, 0.56, 0.55),
+}
+#: Phrasings that point back at the conversation rather than at a topic
+#: ("why did that search fail", "your previous answer", "the second one").
+#: Every alternative is a fixed sequence of words, so matching stays linear.
+_CONVERSATION_REF_RE = re.compile(
+    r"\b(?:that|this|those|these|it)\W*\Z"
+    r"|\b(?:why|how|what|when|where)\s+(?:did|does|do|is|was|were|has|had)\s+"
+    r"(?:that|this|those|these|it)\b"
+    r"|\b(?:your|my|our)\s+(?:last|previous|earlier|first|second)\b"
+    r"|\b(?:previous|last|earlier)\s+(?:answer|reply|message|response|question|search)\b"
+    r"|\bwe\s+(?:just\s+)?(?:talked|discussed|said|did)\b"
+    r"|\b(?:first|second|third|other|last)\s+one\b"
+    r"|\b(?:say|explain|do|try)\s+(?:that|it)\s+again\b",
+    re.IGNORECASE)
+
+
+def refers_to_conversation(text: str) -> bool:
+    """True when *text* is phrased as a reference back to the conversation
+    (see ``_CONVERSATION_REF_RE``)."""
+    return _CONVERSATION_REF_RE.search(text) is not None
+
+
+#: Coverage a hit needs under ``relevant_only`` when there is no calibrated
+#: cosine: lexical-only scoring, vectors from a model not in RELEVANCE_FLOORS,
+#: or a chunk stored without a vector.
+LEXICAL_RELEVANCE_COVERAGE = 0.6
+
 # Called with a human-readable message as the sole positional argument. A call
 # site with an exact numerator/denominator additionally passes phase/done/total/
 # unit as keywords; any sink such a site can reach must accept and ignore them
@@ -2292,28 +2330,72 @@ class Collection:
     # ------------------------------------------------------------- #
 
     def query(self, text: str, k: int = 4,
-              embed_fn: Optional[EmbedFn] = None) -> list[dict]:
+              embed_fn: Optional[EmbedFn] = None, *,
+              relevant_only: bool = False) -> list[dict]:
         """Top-*k* chunks for *text*: max-normalised BM25, blended 50/50 with
-        cosine similarity when vectors cover the corpus and the query can be
-        embedded."""
+        max-normalised cosine similarity when vectors cover the corpus and the
+        query can be embedded. ``score`` is that blend, relative to the best
+        chunk for this query, so the top hit scores near 1.0 however weak it is.
+
+        With *relevant_only*, each of the top-*k* hits is also checked against
+        an absolute floor and dropped when it falls below it: the raw cosine
+        floors in ``RELEVANCE_FLOORS`` for the collection's embedding model, or
+        ``LEXICAL_RELEVANCE_COVERAGE`` of the query's words (``BM25.coverage``)
+        for a chunk with no calibrated cosine. A query that ``refers_to_conversation``
+        keeps only hits over the strong cosine floor, and none without one. A
+        query unrelated to the collection then returns []."""
         if not text.strip() or not self._chunks:
             return []
-        scores = self._lexical_index().scores(text)
+        index = self._lexical_index()
+        scores = index.scores(text)
         top = max(scores) if scores else 0.0
         if top > 0:
             scores = [s / top for s in scores]
 
-        vec_scores = self._vector_scores(text, embed_fn)
-        if vec_scores is not None:
+        cosines = self._raw_cosines(text, embed_fn)
+        if cosines is not None:
+            vec_scores = _maxnorm(cosines)
             scores = [0.5 * lex + 0.5 * vec
                       for lex, vec in zip(scores, vec_scores)]
 
         order = sorted(range(len(scores)), key=lambda i: scores[i],
                        reverse=True)[:max(1, k)]
+        order = [i for i in order if scores[i] > 0]
+        if relevant_only:
+            order = self._relevant(text, order, index, cosines)
         return [
             {**self._chunks[i], "score": round(scores[i], 4)}
-            for i in order if scores[i] > 0
+            for i in order
         ]
+
+    def _relevant(self, text: str, order: list[int], index: BM25,
+                  cosines: Optional[list[float]]) -> list[int]:
+        """The members of *order* that clear the absolute relevance floor
+        documented on ``query``, in the same order."""
+        if not order:
+            return []
+        floors = None
+        if cosines is not None and not self.embedding_model_mixed():
+            floors = RELEVANCE_FLOORS.get(self.embedding_model() or "")
+        vectors = self._vectors or []
+        conversational = refers_to_conversation(text)
+        coverage = index.coverage(text, order)
+
+        def passes(i: int, cov: float) -> bool:
+            if floors is not None and i < len(vectors) and vectors[i]:
+                strong, weak, need = floors
+                if conversational:
+                    return cosines[i] >= strong
+                return cosines[i] >= strong or (cosines[i] >= weak and cov >= need)
+            return not conversational and cov >= LEXICAL_RELEVANCE_COVERAGE
+
+        keep = [i for i, cov in zip(order, coverage) if passes(i, cov)]
+        if len(keep) < len(order):
+            _log.debug("RAG collection %r: %d of %d hit(s) below the relevance "
+                       "floor (%s%s)", self.name, len(order) - len(keep), len(order),
+                       "cosine" if floors is not None else "keyword coverage",
+                       ", conversation reference" if conversational else "")
+        return keep
 
     def _lexical_index(self) -> BM25:
         """The BM25 index over this instance's current chunks, built once per
@@ -2359,6 +2441,17 @@ class Collection:
 
     def _vector_scores(self, text: str,
                        embed_fn: Optional[EmbedFn]) -> Optional[list[float]]:
+        """``_raw_cosines`` divided by its maximum, so the best chunk scores
+        1.0; None when vector scoring is unavailable."""
+        cosines = self._raw_cosines(text, embed_fn)
+        return None if cosines is None else _maxnorm(cosines)
+
+    def _raw_cosines(self, text: str,
+                     embed_fn: Optional[EmbedFn]) -> Optional[list[float]]:
+        """Cosine similarity of the embedded *text* to every chunk, in chunk
+        order; None when vector scoring is unavailable (no embedder, no or
+        partial vectors, mixed or mismatched dimensions, a failed or non-finite
+        query embedding), with the reason recorded by _note_vector_degrade."""
         if embed_fn is None or self._vectors is None:
             return None
         present = [v for v in self._vectors if v]
@@ -2427,18 +2520,12 @@ class Collection:
                     qv = qv / qnorm
                     sims = np.dot(self._norm_matrix, qv)
                     sims = np.where(np.isfinite(sims), sims, 0.0)
-                    top = float(np.max(sims)) if len(sims) > 0 else 0.0
-                    return [float(s / top) for s in sims] if top > 0 else [float(s) for s in sims]
+                    return [float(s) for s in sims]
                 else:
                     return [0.0] * len(self._vectors)
             except Exception:
                 pass
-        out = []
-        for v in self._vectors:
-            out.append(_cosine(qvec, v) if v else 0.0)
-        # normalise to [0, 1] like the lexical side
-        top = max(out, default=0.0)
-        return [s / top for s in out] if top > 0 else out
+        return [_cosine(qvec, v) if v else 0.0 for v in self._vectors]
 
     # ------------------------------------------------------------- #
     #  Introspection                                                 #
@@ -2838,6 +2925,13 @@ def collection_provenance_note(model: str, affected: list, *,
     # and ..._with_same_active_model_reports_nothing_to_invalidate.
     return (f"Switching to '{model}' has nothing to invalidate: no existing "
             f"collection's semantic search would change.")
+
+
+def _maxnorm(scores: list[float]) -> list[float]:
+    """*scores* divided by their maximum; unchanged when the maximum is not
+    positive."""
+    top = max(scores, default=0.0)
+    return [s / top for s in scores] if top > 0 else list(scores)
 
 
 def _cosine(a: list, b: list) -> float:

@@ -230,10 +230,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is told it has no information from it and must not describe or guess what it
   would have found, in the chat and in scheduled chat jobs; it used to be told to
   "answer without the web", which led some models to present invented findings.
+- **Chat with a Knowledge collection selected no longer injects excerpts that have
+  nothing to do with the question.** The four best-ranked chunks used to be added
+  to every question, however weakly they matched, so a question about the
+  conversation itself pulled in unrelated passages the model then answered from.
+  Only excerpts that clear a relevance floor are added now, and when none do, the
+  chat says that no excerpts were relevant. `localm rag query --relevant-only`
+  shows the same filtered result.
+- **Knowledge excerpts are no longer cut off mid-word.** Each excerpt added to the
+  chat is the whole retrieved passage, and the question echoed above them ends on
+  a whole word with "…" when it is shortened.
 - **Web search and page reads are more reliable, and failures read as plain
   sentences.** A search whose connection is reset or cut is sent again (up to
-  three tries), and a DuckDuckGo bot check is reported as such instead of "no
-  results". A failed search or page read now says what happened, for example
+  three tries). When DuckDuckGo still fails or answers with a bot check, localm
+  tries DuckDuckGo's lite page and then Brave Search by itself, asks a
+  bot-checked service once more after a short pause, and reports a failure only
+  when every service failed, naming each cause. A results page localm cannot
+  read is reported as such instead of as "no results". A configured SearXNG
+  instance is the only service asked, and localm repairs it rather than
+  replacing it: a stray `/search` in its URL is removed, its HTML results are
+  read when its JSON format is off, and "no results" while its own search
+  engines failed is reported as a failure. A failed search or page read
+  now says what happened, for example
   "html.duckduckgo.com closed the connection before answering" or
   "stackoverflow.com refused access, HTTP 403", instead of a Python error.
   A page that hangs no longer holds a search for up to 30 seconds: page reads

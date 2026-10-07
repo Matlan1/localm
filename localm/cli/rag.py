@@ -452,11 +452,16 @@ def _cli_rag_embed_fn(url):
 @click.option("--url", default=None,
               help="Server base URL for --embed (default: auto-discover a running "
                    "instance, else the configured port on localhost).")
-def rag_query(collection, text, k, embed, url):
+@click.option("--relevant-only", is_flag=True,
+              help="Drop hits below the relevance floor the GUI chat applies "
+                   "before injecting excerpts.")
+def rag_query(collection, text, k, embed, url, relevant_only):
     """Show the top-K chunks COLLECTION returns for TEXT.
 
     By default the CLI scores lexically (BM25). Pass --embed to also embed the
     query against a running localm server, matching the GUI's hybrid ranking.
+    Every top-K hit is shown however weak it is, unless --relevant-only drops
+    those below the relevance floor.
     """
     from rich.console import Console
     from rich.markup import escape
@@ -468,9 +473,10 @@ def rag_query(collection, text, k, embed, url):
         console.print(f"[red]No such collection:[/red] {escape(collection)}")
         sys.exit(1)
     embed_fn = _cli_rag_embed_fn(url) if embed else None
-    hits = coll.query(text, k=k, embed_fn=embed_fn)
+    hits = coll.query(text, k=k, embed_fn=embed_fn, relevant_only=relevant_only)
     if not hits:
-        console.print("[dim](no matches)[/dim]")
+        console.print("[dim](no relevant matches)[/dim]" if relevant_only
+                      else "[dim](no matches)[/dim]")
         return
     for i, h in enumerate(hits, 1):
         console.print(f"[cyan][{i}][/cyan] [bold]{escape(h['source'])}[/bold]:{h['pos']} "
