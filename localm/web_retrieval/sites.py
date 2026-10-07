@@ -11,7 +11,7 @@ first tries the site's own content endpoint and falls back to the page itself:
   the same way, at *ref*; the path segment after ``tree`` is taken as the
   whole ref.
 - ``github.com/<owner>/<repo>/blob/<ref>/<path>``: the raw file from
-  ``raw.githubusercontent.com``.
+  ``raw.githubusercontent.com`` when it is served as ``text/*``.
 - a Stack Overflow / Stack Exchange question URL: the question and its top
   answers from the Stack Exchange API (``api.stackexchange.com``).
 
@@ -163,7 +163,7 @@ def _github_reader(url: str) -> Optional[Reader]:
                    f"{_quote_path(rest[1:])}")
 
         def read_blob(fetch: Fetcher, timeout: float) -> Optional[SiteRead]:
-            text = _try_text(fetch, raw_url, timeout)
+            text = _try_text(fetch, raw_url, timeout, text_only=True)
             return SiteRead(raw_url, text) if text else None
 
         return read_blob
@@ -255,14 +255,19 @@ def _stackexchange_reader(url: str) -> Optional[Reader]:
     return read_question
 
 
-def _try_text(fetch: Fetcher, url: str, timeout: float) -> Optional[str]:
+def _try_text(fetch: Fetcher, url: str, timeout: float, *,
+              text_only: bool = False) -> Optional[str]:
     """*url*'s body through *fetch*, or None when the read fails or is
-    blank. A failure is logged at debug level by exception type only."""
+    blank, or, with *text_only*, when its content type is neither empty nor
+    ``text/*``. A failure is logged at debug level by exception type
+    only."""
     try:
-        _final, _ctype, body = fetch(url, timeout=timeout)
+        _final, ctype, body = fetch(url, timeout=timeout)
     except Exception as exc:
         logger.debug("web retrieval: content endpoint read failed (%s)",
                      type(exc).__name__)
+        return None
+    if text_only and ctype and not ctype.lower().lstrip().startswith("text/"):
         return None
     return body if body and body.strip() else None
 
@@ -280,7 +285,8 @@ def site_reader(url: str) -> Optional[Reader]:
     return None
 
 
-def read_url(url: str, fetch: Fetcher, *, timeout: float
+def read_url(url: str, fetch: Fetcher, *, timeout: float,
+             on_endpoint: Optional[Callable[[str], None]] = None
              ) -> tuple[str, str, str]:
     """Read *url* through *fetch* as ``(final_url, content_type, text)``.
 
@@ -290,12 +296,19 @@ def read_url(url: str, fetch: Fetcher, *, timeout: float
     content endpoint when that yields text, reported as plain text under the
     endpoint's URL (a Stack Exchange question keeps its own URL). Otherwise,
     or when every endpoint fails, *url* itself is fetched and its failure, if
-    any, is raised."""
+    any, is raised. *on_endpoint*, when given, is called with each content
+    endpoint URL just before it is requested (not with *url* itself); an
+    exception it raises counts as a failed endpoint read."""
     reader = site_reader(url)
     if reader is not None:
         from localm import netpolicy
         netpolicy.check_url(url)
-        got = reader(fetch, timeout)
+        endpoint_fetch = fetch
+        if on_endpoint is not None:
+            def endpoint_fetch(target: str, *, timeout: float):
+                on_endpoint(target)
+                return fetch(target, timeout=timeout)
+        got = reader(endpoint_fetch, timeout)
         if got is not None:
             return got.url, CONTENT_TYPE_TEXT, got.text
     return fetch(url, timeout=timeout)

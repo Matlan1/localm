@@ -214,7 +214,7 @@ def test_full_fetch_falls_back_across_resolved_addresses(echo_server, dial_log,
                                                          monkeypatch):
     """End to end through safe_fetch_bytes: the host resolves to an
     unreachable address first and a reachable one second; the fetch succeeds
-    on the second, and the blocked address in the same answer is never dialled."""
+    on the second."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"net_allow_private": True})
     monkeypatch.setattr("socket.getaddrinfo",
@@ -229,3 +229,107 @@ def test_full_fetch_falls_back_across_resolved_addresses(echo_server, dial_log,
 def test_empty_address_list_rejected():
     with pytest.raises(ValueError):
         netpin.PinnedIPAdapter([])
+
+
+def test_refused_connect_classified_as_refused_not_timeout(dial_log):
+    from localm.web_retrieval.errors import (describe_failure, failure_kind,
+                                             is_transient)
+    dial_log["refuse"] = {"192.0.2.10"}
+    with netpin.pinned_session(["192.0.2.10"]) as session:
+        with pytest.raises(requests.ConnectionError) as info:
+            session.get("http://vhost.test:8/", timeout=5)
+    assert failure_kind(info.value) == "refused"
+    assert describe_failure(info.value) == "vhost.test refused the connection"
+    assert is_transient(info.value)
+
+
+def test_unreachable_connect_classified_as_unreachable(monkeypatch):
+    import errno
+
+    from localm.web_retrieval.errors import describe_failure, failure_kind
+
+    def unreachable(address, *a, **k):
+        raise OSError(errno.ENETUNREACH, "Network is unreachable")
+    monkeypatch.setattr(urllib3.connection.connection, "create_connection",
+                        unreachable)
+    with netpin.pinned_session(["2001:db8::1"]) as session:
+        with pytest.raises(requests.ConnectionError) as info:
+            session.get("http://v6only.test/", timeout=5)
+    assert failure_kind(info.value) == "unreachable"
+    assert describe_failure(info.value) == "could not connect to v6only.test"
+
+
+def test_connect_timeout_still_classified_as_timeout(monkeypatch):
+    from localm.web_retrieval.errors import describe_failure, failure_kind
+
+    def times_out(address, *a, **k):
+        raise socket.timeout("timed out")
+    monkeypatch.setattr(urllib3.connection.connection, "create_connection",
+                        times_out)
+    with netpin.pinned_session(["192.0.2.10"]) as session:
+        with pytest.raises(requests.exceptions.ConnectTimeout) as info:
+            session.get("http://slow.test/", timeout=5)
+    assert failure_kind(info.value) == "connect-timeout"
+    assert describe_failure(info.value) == "could not connect to slow.test in time"
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+def test_connect_attempts_share_a_budget_of_two_timeouts(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(netpin, "time", clock)
+    seen: list[tuple[str, float]] = []
+
+    def blackholed(address, timeout=None, *a, **k):
+        seen.append((address[0], timeout))
+        clock.now += timeout
+        raise socket.timeout("timed out")
+    monkeypatch.setattr(urllib3.connection.connection, "create_connection",
+                        blackholed)
+    ips = ["192.0.2.10", "192.0.2.11", "192.0.2.12", "192.0.2.13"]
+    with netpin.pinned_session(ips) as session:
+        with pytest.raises(requests.exceptions.ConnectTimeout):
+            session.get("http://blackhole.test/", timeout=(3, 9))
+    assert seen == [("192.0.2.10", 3), ("192.0.2.11", 3)]
+    assert sum(t for _, t in seen) == netpin._CONNECT_BUDGET_FACTOR * 3
+
+
+def test_fast_failures_reach_every_address_within_the_budget(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(netpin, "time", clock)
+    seen: list[str] = []
+
+    def refused(address, timeout=None, *a, **k):
+        seen.append(address[0])
+        clock.now += 0.01
+        raise ConnectionRefusedError(10061, "refused")
+    monkeypatch.setattr(urllib3.connection.connection, "create_connection",
+                        refused)
+    ips = ["192.0.2.10", "192.0.2.11", "192.0.2.12", "192.0.2.13"]
+    with netpin.pinned_session(ips) as session:
+        with pytest.raises(requests.ConnectionError):
+            session.get("http://down.test/", timeout=3)
+    assert seen == ips
+
+
+def test_last_attempt_gets_only_the_budget_left(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(netpin, "time", clock)
+    seen: list[float] = []
+
+    def slow_refuse(address, timeout=None, *a, **k):
+        seen.append(timeout)
+        clock.now += 2.5
+        raise ConnectionRefusedError(10061, "refused")
+    monkeypatch.setattr(urllib3.connection.connection, "create_connection",
+                        slow_refuse)
+    with netpin.pinned_session(["192.0.2.10", "192.0.2.11", "192.0.2.12"]) as s:
+        with pytest.raises(requests.ConnectionError):
+            s.get("http://down.test/", timeout=3)
+    assert seen == [3, 3, pytest.approx(1.0)]

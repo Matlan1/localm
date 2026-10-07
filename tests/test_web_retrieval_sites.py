@@ -293,3 +293,68 @@ class TestCoderPrivacyEcho:
         tool_fetch_url(tmp_path, "https://plain.example/", _privacy=True)
         err = capsys.readouterr().err
         assert err.count("[localm privacy]") == 1
+
+    def test_fetch_url_echoes_stack_exchange_endpoints(self, monkeypatch,
+                                                       capsys, tmp_path):
+        from localm.plugins.coder.tools.web import tool_fetch_url
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("GET", SO_API_Q, _se([{"title": "Q", "body": "<p>Body.</p>"}]))
+        t.route("GET", SO_API_A, _se([{"is_accepted": True, "score": 3,
+                                       "body": "<p>Answer.</p>"}]))
+        tool_fetch_url(tmp_path, SO_URL, _privacy=True)
+        err = capsys.readouterr().err
+        assert f"[localm privacy] fetch_url: {SO_URL}" in err
+        assert f"[localm privacy] fetch_url endpoint: {SO_API_Q}" in err
+        assert f"[localm privacy] fetch_url endpoint: {SO_API_A}" in err
+
+    def test_fetch_url_echoes_failed_github_endpoints(self, monkeypatch,
+                                                      capsys, tmp_path):
+        from localm.plugins.coder.tools.web import tool_fetch_url
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("GET", RAW_README, FakeResponse(status=404))
+        t.route("GET", API_README, FakeResponse(status=403))
+        t.route("GET", REPO, html_response(FILE_LIST_CHROME))
+        tool_fetch_url(tmp_path, REPO, _privacy=True)
+        err = capsys.readouterr().err
+        assert f"[localm privacy] fetch_url endpoint: {RAW_README}" in err
+        assert f"[localm privacy] fetch_url endpoint: {API_README}" in err
+        assert "fetch_url read:" not in err
+
+    def test_web_search_echoes_endpoints(self, monkeypatch, capsys, tmp_path):
+        from localm.plugins.coder.tools.web import tool_web_search
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        _search(t, REPO)
+        t.route("GET", RAW_README, _text(README))
+        tool_web_search(tmp_path, "localm repository", max_results=1,
+                        _privacy=True)
+        err = capsys.readouterr().err
+        assert f"[localm privacy] web_search endpoint: {RAW_README}" in err
+        assert f"[localm privacy] web_search read: {REPO}" in err
+
+    def test_no_echo_without_privacy(self, monkeypatch, capsys, tmp_path):
+        from localm.plugins.coder.tools.web import tool_fetch_url
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("GET", RAW_README, _text(README))
+        tool_fetch_url(tmp_path, REPO)
+        assert "[localm privacy]" not in capsys.readouterr().err
+
+
+class TestBinaryBlob:
+    def test_binary_raw_file_falls_back_to_the_page(self, monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        raw = ("https://raw.githubusercontent.com/Matlan1/localm/master/"
+               ".github/images/logo.png")
+        page = "https://github.com/Matlan1/localm/blob/master/.github/images/logo.png"
+        t.route("GET", raw, FakeResponse(headers={"Content-Type": "image/png"},
+                                         body=b"\x89PNG\r\n\x1a\n" + b"\x00" * 64))
+        t.route("GET", page, html_response(html_page(
+            "<main><p>" + "logo.png 12 KB. " * 20 + "</p></main>")))
+        final_url, text = netpolicy.fetch_text(page)
+        assert t.urls("GET") == [raw, page]
+        assert final_url == page
+        assert "PNG" not in text

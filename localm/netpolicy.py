@@ -526,32 +526,106 @@ def pinned_request(method: str, url: str, **kwargs):
 _BODY_CHUNK = 65536
 
 
-def _body_chunks(resp, per_read: bool):
-    """Yield *resp*'s decoded body. With *per_read* and a raw response that
-    has ``read1``, each chunk is one network read (at most ``_BODY_CHUNK``
-    bytes), so a caller can stop between reads; urllib3 read errors are
-    raised as the ``requests`` exceptions ``iter_content`` raises
-    (``ConnectionError`` for a read timeout, ``ChunkedEncodingError``,
-    ``ContentDecodingError``). Otherwise this is ``iter_content``."""
+PER_READ_ACCEPT_ENCODING = "gzip, deflate"
+
+
+class _BodyDecoder:
+    """Content-Encoding decoder for identity, ``gzip`` / ``x-gzip`` (several
+    members included) and ``deflate`` (zlib-wrapped or raw). Raises
+    ``requests.exceptions.ContentDecodingError`` for any other encoding and
+    for corrupt data."""
+
+    def __init__(self, encoding: str):
+        import zlib
+        self._zlib = zlib
+        parts = [p.strip().lower() for p in (encoding or "").split(",")
+                 if p.strip()]
+        name = ",".join(parts)
+        self._first = True
+        if name in ("", "identity"):
+            self._mode = None
+        elif name in ("gzip", "x-gzip"):
+            self._mode = "gzip"
+            self._obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        elif name == "deflate":
+            self._mode = "deflate"
+            self._obj = zlib.decompressobj()
+        else:
+            self._fail(f"unsupported content encoding {encoding!r}")
+
+    @staticmethod
+    def _fail(message: str):
+        import requests
+        raise requests.exceptions.ContentDecodingError(message)
+
+    def decode(self, data: bytes, limit: int) -> bytes:
+        """Decoded bytes for *data*, at most *limit* per decompression step
+        (a caller stops once it holds *limit* bytes)."""
+        if self._mode is None:
+            return data
+        zlib = self._zlib
+        try:
+            if self._mode == "deflate":
+                if self._first:
+                    self._first = False
+                    try:
+                        return self._obj.decompress(data, limit)
+                    except zlib.error:
+                        self._obj = zlib.decompressobj(-zlib.MAX_WBITS)
+                return self._obj.decompress(data, limit)
+            out = self._obj.decompress(data, limit)
+            while self._obj.eof and self._obj.unused_data and len(out) < limit:
+                rest = self._obj.unused_data
+                self._obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                out += self._obj.decompress(rest, limit - len(out))
+            return out
+        except zlib.error as exc:
+            self._fail(f"corrupt {self._mode} body: {exc}")
+
+    def flush(self) -> bytes:
+        if self._mode is None:
+            return b""
+        try:
+            return self._obj.flush()
+        except self._zlib.error as exc:
+            self._fail(f"corrupt {self._mode} body: {exc}")
+
+
+def _body_chunks(resp, per_read: bool, limit: int):
+    """Yield *resp*'s decoded body.
+
+    With *per_read* and a raw response that has ``read1``, every yielded
+    chunk (possibly empty) comes from exactly one network read of at most
+    ``_BODY_CHUNK`` bytes, decoded here by ``_BodyDecoder``, so a caller can
+    stop between any two reads; urllib3 read errors are raised as the
+    ``requests`` exceptions ``iter_content`` raises (``ConnectionError`` for
+    a read timeout, ``ChunkedEncodingError``, ``SSLError``) and decoding
+    errors as ``ContentDecodingError``. The request must have been sent with
+    ``Accept-Encoding: PER_READ_ACCEPT_ENCODING``. Otherwise this is
+    ``iter_content``."""
     raw = getattr(resp, "raw", None)
     read1 = getattr(raw, "read1", None) if per_read else None
     if read1 is None:
         yield from resp.iter_content(chunk_size=_BODY_CHUNK)
         return
     import requests
-    from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError
+    from urllib3.exceptions import ProtocolError, ReadTimeoutError, SSLError
+    decoder = _BodyDecoder(resp.headers.get("Content-Encoding", ""))
     while True:
         try:
-            chunk = read1(_BODY_CHUNK, decode_content=True)
+            data = read1(_BODY_CHUNK, decode_content=False)
         except ReadTimeoutError as exc:
             raise requests.exceptions.ConnectionError(exc)
         except ProtocolError as exc:
             raise requests.exceptions.ChunkedEncodingError(exc)
-        except DecodeError as exc:
-            raise requests.exceptions.ContentDecodingError(exc)
-        if not chunk:
+        except SSLError as exc:
+            raise requests.exceptions.SSLError(exc)
+        if not data:
+            tail = decoder.flush()
+            if tail:
+                yield tail
             return
-        yield chunk
+        yield decoder.decode(data, limit)
 
 
 def safe_fetch_bytes(
@@ -583,17 +657,23 @@ def safe_fetch_bytes(
     hop whose host differs from the ORIGINAL request's host, so a redirect
     can never carry a caller's credential to a different host.
 
-    *timeout* bounds each connect and each wait for data. *total_timeout*,
-    when set, bounds the whole call across hops: a body still arriving when
-    it runs out raises ``netpin.ReadBudgetExceeded`` (a
-    ``requests.exceptions.Timeout``), and later hops get at most the time
-    left as their *timeout*.
+    *timeout* bounds each connect attempt and each wait for data; a host
+    with several addresses may use up to ``netpin._CONNECT_BUDGET_FACTOR``
+    times it to connect. *total_timeout*, when set, bounds the whole call
+    across hops: each hop's connect gets at most the time left divided by
+    that factor and each wait for data at most the time left; the body is
+    read and decoded one network read at a time (``_body_chunks``) and a
+    body still arriving when the time runs out raises
+    ``netpin.ReadBudgetExceeded`` (a ``requests.exceptions.Timeout``), so
+    the call overruns *total_timeout* by at most one wait for data. Such
+    a request advertises only gzip and deflate and raises
+    ``ContentDecodingError`` for any other Content-Encoding.
 
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
     import time
 
-    from localm.netpin import ReadBudgetExceeded
+    from localm.netpin import _CONNECT_BUDGET_FACTOR, ReadBudgetExceeded
 
     deadline = (time.monotonic() + total_timeout
                 if total_timeout is not None else None)
@@ -604,11 +684,14 @@ def safe_fetch_bytes(
         parsed = urllib.parse.urlparse(current)
         hop_headers = extra_headers if parsed.hostname == original_host else None
         hop_timeout = timeout
+        fixed_headers = {"User-Agent": _USER_AGENT, "Host": _host_header(parsed)}
         if deadline is not None:
             left = deadline - time.monotonic()
             if left <= 0:
                 raise ReadBudgetExceeded(total_timeout, url)
-            hop_timeout = min(timeout, left)
+            hop_timeout = (min(timeout, left / _CONNECT_BUDGET_FACTOR),
+                           min(timeout, left))
+            fixed_headers["Accept-Encoding"] = PER_READ_ACCEPT_ENCODING
         # Pin the socket to the just-validated IP for this hop; each redirect
         # target is independently re-checked and re-pinned.
         with _session_for(current) as session:
@@ -617,8 +700,7 @@ def safe_fetch_bytes(
                 timeout=hop_timeout,
                 stream=True,
                 allow_redirects=False,
-                headers={**(hop_headers or {}),
-                         "User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
+                headers={**(hop_headers or {}), **fixed_headers},
             )
             try:
                 if resp.is_redirect or resp.is_permanent_redirect:
@@ -631,7 +713,8 @@ def safe_fetch_bytes(
                 resp.raise_for_status()
                 content_type = resp.headers.get("Content-Type", "")
                 chunks, size = [], 0
-                for chunk in _body_chunks(resp, deadline is not None):
+                for chunk in _body_chunks(resp, deadline is not None,
+                                          max_bytes):
                     chunks.append(chunk)
                     size += len(chunk)
                     if size >= max_bytes:
@@ -764,20 +847,24 @@ def fetch_text(
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
     total_timeout: Optional[float] = _DEFAULT_TOTAL_TIMEOUT,
+    on_endpoint=None,
 ) -> tuple[str, str]:
     """safe_fetch + HTML stripping. Returns (final_url, plain_text).
 
     A GitHub repository or file URL, or a Stack Exchange question URL, is
     read from that site's content endpoint when it yields text, with the
     page itself as the fallback (``localm.web_retrieval.sites.read_url``).
-    *total_timeout* bounds each underlying fetch (see safe_fetch_bytes)."""
+    *total_timeout* bounds each underlying fetch (see safe_fetch_bytes).
+    *on_endpoint* is called with each content-endpoint URL before it is
+    requested (see ``read_url``)."""
     from localm.web_retrieval.sites import read_url
 
     def _fetch(target: str, *, timeout: float) -> tuple[str, str, str]:
         return safe_fetch(target, max_bytes=max_bytes, timeout=timeout,
                           total_timeout=total_timeout)
 
-    final_url, content_type, body = read_url(url, _fetch, timeout=timeout)
+    final_url, content_type, body = read_url(url, _fetch, timeout=timeout,
+                                             on_endpoint=on_endpoint)
     if "html" in content_type.lower():
         return final_url, html_to_text(body)
     return final_url, body.strip()
@@ -793,8 +880,9 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
 
     Backend: a SearXNG instance when net_search_url is configured (its JSON
     API must be enabled), otherwise DuckDuckGo's no-key HTML endpoint. The
-    providers live in ``localm.web_retrieval.providers`` and send their one
-    request through this module's policy check and pinned transport.
+    providers live in ``localm.web_retrieval.providers`` and send their
+    request (up to three times on a transient transport failure) through
+    this module's policy check and pinned transport.
     Raises NetworkPolicyError when the policy refuses, or RuntimeError when
     the backend yields nothing parseable.
     """

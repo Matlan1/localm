@@ -26,6 +26,7 @@ per-request adapter rather than process-wide state, so it is thread-safe.
 
 from __future__ import annotations
 
+import time
 from typing import Sequence, Union
 
 import requests
@@ -34,6 +35,11 @@ from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from urllib3.poolmanager import PoolManager
+
+
+#: All connect attempts to one host's addresses together take at most this
+#: many times the connect timeout.
+_CONNECT_BUDGET_FACTOR = 2
 
 
 class ReadBudgetExceeded(requests.exceptions.Timeout):
@@ -56,7 +62,11 @@ class _AddressFallbackMixin:
     """Connection whose socket dials each address of ``_localm_pinned_ips`` in
     order, moving to the next one only when the TCP connect itself fails
     (``NewConnectionError`` / ``ConnectTimeoutError``). No address is
-    re-resolved. With no list set it dials ``_dns_host`` as urllib3 does."""
+    re-resolved. With no list set it dials ``_dns_host`` as urllib3 does.
+
+    With a numeric connect timeout T, all attempts together take at most
+    ``_CONNECT_BUDGET_FACTOR`` * T: each attempt gets T or the budget left,
+    whichever is smaller, and no further address is tried once it is spent."""
 
     _localm_pinned_ips: tuple[str, ...] = ()
 
@@ -64,13 +74,25 @@ class _AddressFallbackMixin:
         ips = self._localm_pinned_ips
         if not ips:
             return super()._new_conn()
+        original = self.timeout
+        finish_by = None
+        if isinstance(original, (int, float)) and original > 0:
+            finish_by = time.monotonic() + _CONNECT_BUDGET_FACTOR * original
         last_exc = None
-        for ip in ips:
-            self._dns_host = ip
-            try:
-                return super()._new_conn()
-            except (NewConnectionError, ConnectTimeoutError) as exc:
-                last_exc = exc
+        try:
+            for ip in ips:
+                if finish_by is not None:
+                    left = finish_by - time.monotonic()
+                    if left <= 0:
+                        break
+                    self.timeout = min(original, left)
+                self._dns_host = ip
+                try:
+                    return super()._new_conn()
+                except (NewConnectionError, ConnectTimeoutError) as exc:
+                    last_exc = exc
+        finally:
+            self.timeout = original
         raise last_exc
 
 

@@ -327,16 +327,19 @@ def test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case():
     for a wedged one - so it has to sit above safe_fetch_bytes' real worst case.
 
     That case is not one timeout: netpolicy applies its timeout separately to
-    the connect and to each read, and follows redirects manually, so every hop
-    re-pays both. Asserted as a RELATION rather than a number, since the two
-    bounds live in netpolicy and the arithmetic lives in imgproxy."""
-    from localm import netpolicy
-    worst_case = (netpolicy._MAX_REDIRECTS + 1) * 2 * netpolicy._DEFAULT_TIMEOUT
+    the connect and to each read, a host with several addresses may spend
+    netpin._CONNECT_BUDGET_FACTOR timeouts connecting, and redirects are
+    followed manually, so every hop re-pays both. Asserted as a RELATION
+    rather than a number, since the bounds live in netpolicy/netpin and the
+    arithmetic lives in imgproxy."""
+    from localm import netpin, netpolicy
+    per_hop = (netpin._CONNECT_BUDGET_FACTOR + 1) * netpolicy._DEFAULT_TIMEOUT
+    worst_case = (netpolicy._MAX_REDIRECTS + 1) * per_hop
     assert imgproxy._fetch_budget_s() > worst_case, (
         f"the offload budget ({imgproxy._fetch_budget_s()}s) is below "
         f"safe_fetch_bytes' own legitimate worst case ({worst_case}s: "
-        f"{netpolicy._MAX_REDIRECTS + 1} hops x connect+read x "
-        f"{netpolicy._DEFAULT_TIMEOUT}s), so a slow but working image would 504")
+        f"{netpolicy._MAX_REDIRECTS + 1} hops x connect+read {per_hop}s), "
+        "so a slow but working image would 504")
 
 
 # --------------------------------------------------------------------------- #

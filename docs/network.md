@@ -88,7 +88,8 @@ The hostname is resolved and validated once, then the connection is pinned to
 the validated addresses of that lookup, so the connect cannot re-resolve to a
 different address. When the first address cannot be connected to (for example
 an IPv6 address on a network without working IPv6), the next validated address
-from the same lookup is tried, up to four. This closes the check-and-connect
+from the same lookup is tried, up to four, all within twice the connect
+timeout. This closes the check-and-connect
 DNS-rebinding race: a rebind or an unresolvable host is refused, not
 reconnected through a fresh lookup. The domain deny/allow lists remain an
 additional control.
@@ -107,8 +108,8 @@ single page on request. The same retrieval is exposed to API clients as
 `POST /api/web/retrieve` (`{"query": "..."}`); `/api/web/search` and
 `/api/web/fetch` remain for explicit low-level use.
 
-Page reads during a search wait at most 8 seconds for a connection or for
-data, and the search waits at most 15 seconds for all of them together; a
+Once the results are in, localm waits at most 15 seconds for all of the
+page reads together, and a page that keeps trickling in is cut off; a
 page that could not be read keeps its search snippet as evidence and is
 labelled with the reason (for example `stackoverflow.com refused access, HTTP
 403`). A few sites are read from their own content endpoints instead of the
@@ -162,8 +163,9 @@ localm config net_allow_private true    # if the instance is on your LAN
 
 `web_search` and `fetch_url` appear in the coder's toolset automatically.
 In `ask` mode each request shows an approval (the GUI approval card displays
-the exact URL or query). In privacy mode, every requested URL/query, and the
-address a page was actually read from when it differs, is also echoed to
+the exact URL or query). In privacy mode, every requested URL/query, every
+GitHub or Stack Exchange content endpoint contacted for it, and the address
+a page was actually read from when it differs, are also echoed to
 stderr (`[localm privacy] fetch_url: …`) so the session leaves a
 visible trace *on your terminal* of what went out, without writing anything
 to disk.

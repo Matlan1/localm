@@ -28,8 +28,9 @@ def tool_fetch_url(
 
     In privacy mode (``_privacy=True``) a one-line network audit message is
     emitted to stderr before the request so the user can see outbound URLs,
-    and a second one names the address the content was read from when it
-    differs (a redirect, or a GitHub / Stack Exchange content endpoint).
+    one more before each GitHub / Stack Exchange content endpoint it
+    requests, and one naming the address the content was read from when it
+    differs (a redirect, or a content endpoint).
     """
     import sys as _sys
 
@@ -38,8 +39,14 @@ def tool_fetch_url(
     if _privacy:
         print(f"[localm privacy] fetch_url: {url}", file=_sys.stderr, flush=True)
 
+    on_endpoint = None
+    if _privacy:
+        def on_endpoint(endpoint: str) -> None:
+            print(f"[localm privacy] fetch_url endpoint: {endpoint}",
+                  file=_sys.stderr, flush=True)
+
     try:
-        final_url, text = fetch_text(url)
+        final_url, text = fetch_text(url, on_endpoint=on_endpoint)
     except NetworkPolicyError as e:
         return ToolResult.error(str(e))
     except Exception as e:
@@ -75,9 +82,10 @@ def tool_web_search(
     are read). Use fetch_url to read a page the evidence did not cover.
     Every request goes through localm.netpolicy like fetch_url. A provider
     failure or an empty search is a tool error. In privacy mode
-    (``_privacy=True``) the query, every attempted page read and the address
-    a page was read from when it differs are echoed to stderr as network
-    audit lines.
+    (``_privacy=True``) the query, every GitHub / Stack Exchange content
+    endpoint requested (as it is requested), every attempted page read and
+    the address a page was read from when it differs are echoed to stderr
+    as network audit lines.
 
     The evidence text is remote-controlled: the output is built with
     ``untrusted_span``, which neutralises it and records it as an untrusted
@@ -91,8 +99,15 @@ def tool_web_search(
     if _privacy:
         print(f"[localm privacy] web_search: {query}", file=_sys.stderr, flush=True)
 
+    on_endpoint = None
+    if _privacy:
+        def on_endpoint(endpoint: str) -> None:
+            print(f"[localm privacy] web_search endpoint: {endpoint}",
+                  file=_sys.stderr, flush=True)
+
     try:
-        bundle = retrieve(query, search_candidates=max_results)
+        bundle = retrieve(query, search_candidates=max_results,
+                          on_endpoint=on_endpoint)
     except NetworkPolicyError as e:
         return ToolResult.error(str(e))
     except Exception as e:

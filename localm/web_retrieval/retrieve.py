@@ -112,10 +112,12 @@ def _looks_like_html(content_type: str, body: str) -> bool:
     return "<html" in head or "<!doctype html" in head
 
 
-def _read_page(source: Source, fetch: Fetcher, timeout: float) -> PageDocument:
+def _read_page(source: Source, fetch: Fetcher, timeout: float,
+               on_endpoint: Optional[Callable[[str], None]] = None
+               ) -> PageDocument:
     try:
-        final_url, content_type, body = read_url(source.url, fetch,
-                                                 timeout=timeout)
+        final_url, content_type, body = read_url(
+            source.url, fetch, timeout=timeout, on_endpoint=on_endpoint)
     except netpolicy.NetworkPolicyError:
         raise
     except Exception as exc:
@@ -123,8 +125,8 @@ def _read_page(source: Source, fetch: Fetcher, timeout: float) -> PageDocument:
             raise
         logger.debug("web retrieval: page read retried after %s",
                      type(exc).__name__)
-        final_url, content_type, body = read_url(source.url, fetch,
-                                                 timeout=timeout)
+        final_url, content_type, body = read_url(
+            source.url, fetch, timeout=timeout, on_endpoint=on_endpoint)
     if _looks_like_html(content_type, body):
         page = extract_page(body)
         return PageDocument(url=source.url, final_url=final_url,
@@ -152,8 +154,10 @@ def _record_page(source: Source, page: PageDocument,
         source.error = "page had no extractable text"
 
 
-def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
-                deadline: float) -> dict[str, PageDocument]:
+def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: float,
+                deadline: float,
+                on_endpoint: Optional[Callable[[str], None]] = None
+                ) -> dict[str, PageDocument]:
     """Read every source in *to_fetch* concurrently. A read still running at
     *deadline* seconds is recorded as failed; its worker finishes on its own
     transport timeout."""
@@ -161,7 +165,7 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
     pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=len(to_fetch), thread_name_prefix="web-retrieval")
     try:
-        futures = {pool.submit(_read_page, s, fetch, timeout): s
+        futures = {pool.submit(_read_page, s, fetch, timeout, on_endpoint): s
                    for s in to_fetch}
         done, pending = concurrent.futures.wait(futures, timeout=deadline)
         for fut in pending:
@@ -222,6 +226,7 @@ def retrieve(
     fetch: Optional[Fetcher] = None,
     fetch_timeout: Optional[int] = None,
     deadline_seconds: Optional[float] = None,
+    on_endpoint: Optional[Callable[[str], None]] = None,
 ) -> EvidenceBundle:
     """Search *query*, read the top pages and return an ``EvidenceBundle``.
 
@@ -231,11 +236,13 @@ def retrieve(
     duplicate removal the first *search_candidates* become sources. *fetch*
     defaults to ``netpolicy.safe_fetch``, every call of it (content endpoints
     and retries included) given only the time left until one second after
-    the read deadline;
-    *fetch_timeout* (each connect and each wait for data) to
+    the page-read deadline, which starts when the page reads start;
+    *fetch_timeout* (each connect attempt and each wait for data) to
     ``PAGE_READ_TIMEOUT``; *deadline_seconds* (the wait for all
     page reads together) to ``PAGE_READ_DEADLINE``, or twice *fetch_timeout*
-    when only *fetch_timeout* is given.
+    when only *fetch_timeout* is given. *on_endpoint*, when given, is
+    called with every site content-endpoint URL (``sites.read_url``)
+    before it is requested, from the page-read worker threads.
 
     Raises ``ValueError`` for an empty query and ``NetworkPolicyError`` when
     the policy refuses the search request. Every other search failure is
@@ -258,10 +265,7 @@ def retrieve(
         deadline = float(2 * timeout)
     else:
         deadline = float(PAGE_READ_DEADLINE)
-    if fetch is None:
-        fetch = functools.partial(
-            _default_fetch,
-            finish_by=time.monotonic() + deadline + _WORKER_GRACE)
+    default_fetch = fetch is None
 
     bundle = EvidenceBundle(query=query, provider=provider.name,
                             budget_chars=budget_chars,
@@ -297,7 +301,11 @@ def retrieve(
     to_fetch = sources[:fetch_top]
     pages: dict[str, PageDocument] = {}
     if to_fetch:
-        pages = _read_pages(to_fetch, fetch, timeout, deadline)
+        if default_fetch:
+            fetch = functools.partial(
+                _default_fetch,
+                finish_by=time.monotonic() + deadline + _WORKER_GRACE)
+        pages = _read_pages(to_fetch, fetch, timeout, deadline, on_endpoint)
         _drop_duplicate_pages(to_fetch, pages)
 
     inputs: list[tuple[str, str, str]] = []

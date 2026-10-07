@@ -208,12 +208,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "html.duckduckgo.com closed the connection before answering" or
   "stackoverflow.com refused access, HTTP 403", instead of a Python error.
   A page that hangs no longer holds a search for up to 30 seconds: page reads
-  give up after 15. A GitHub repository link reads the repository's README, a
-  GitHub file link reads the file itself, and a Stack Overflow or other Stack
-  Exchange question reads the question and its top answers through the Stack
-  Exchange API, so these no longer come back as page navigation or a refusal. A
-  site with several addresses is reached on the next one when the first cannot
-  be connected to, for example when IPv6 does not work on your network.
+  give up after 15 seconds, and a page that keeps trickling in is cut off. A
+  GitHub repository link reads the repository's README, a GitHub file link
+  reads the file itself, and a Stack Overflow or other Stack Exchange question
+  reads the question and its top answers through the Stack Exchange API, so
+  these no longer come back as page navigation or a refusal. A site with
+  several addresses is reached on the next one when the first cannot be
+  connected to, for example when IPv6 does not work on your network.
 - **A very large request no longer stays in memory through the activity log.** The 
   recent-activity log (shown in the control window and attached to bug reports) now 
   keeps at most 2000 characters of each entry, marked as truncated, so a multi-megabyte 

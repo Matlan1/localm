@@ -80,7 +80,10 @@ def failure_kind(exc: BaseException) -> str:
     """The kind of failure *exc* is: ``tls``, ``connect-timeout``,
     ``read-timeout``, ``budget`` (``ReadBudgetExceeded``), ``reset``,
     ``refused``, ``unreachable``, ``incomplete``, ``http`` (an ``HTTPError``
-    carrying a status) or ``other``."""
+    carrying a status) or ``other``. A failed TCP connect (urllib3's
+    ``NewConnectionError``, which subclasses ``ConnectTimeoutError``) is
+    classified by the operating-system error it wraps: ``refused`` or
+    ``unreachable``, never ``connect-timeout``."""
     if isinstance(exc, ReadBudgetExceeded):
         return "budget"
     if isinstance(exc, requests.exceptions.SSLError):
@@ -93,9 +96,15 @@ def failure_kind(exc: BaseException) -> str:
     if isinstance(exc, (requests.exceptions.ChunkedEncodingError,
                         requests.exceptions.ContentDecodingError)):
         return "incomplete"
+    failed_connect = False
     for cur in _chain(exc):
         if isinstance(cur, ReadBudgetExceeded):
             return "budget"
+        if isinstance(cur, urllib3.exceptions.SSLError):
+            return "tls"
+        if isinstance(cur, urllib3.exceptions.NewConnectionError):
+            failed_connect = True
+            continue
         if isinstance(cur, urllib3.exceptions.ConnectTimeoutError):
             return "connect-timeout"
         if isinstance(cur, urllib3.exceptions.ReadTimeoutError):
@@ -112,6 +121,8 @@ def failure_kind(exc: BaseException) -> str:
                 return "refused"
             if cur.errno in _UNREACHABLE_ERRNOS:
                 return "unreachable"
+    if failed_connect:
+        return "unreachable"
     if isinstance(exc, (requests.exceptions.ReadTimeout, TimeoutError)):
         return "read-timeout"
     if isinstance(exc, requests.exceptions.Timeout):
@@ -170,7 +181,7 @@ def describe_failure(exc: BaseException, url: str = "") -> str:
     elif kind == "unreachable":
         text = f"could not connect to {host}"
     elif kind == "incomplete":
-        text = f"{host} sent an incomplete or corrupted response"
+        text = f"{host} sent an incomplete or undecodable response"
     elif kind == "http":
         code = _http_status(exc)
         if code in (401, 403):
