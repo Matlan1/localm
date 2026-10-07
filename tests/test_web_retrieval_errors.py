@@ -432,7 +432,10 @@ class TestEncodedBodies:
         assert sizes and max(sizes) <= 100_000
 
     def test_capped_request_advertises_only_gzip_and_deflate(self, local_net,
-                                                             server):
+                                                             server,
+                                                             monkeypatch):
+        monkeypatch.setattr("requests.utils.DEFAULT_ACCEPT_ENCODING",
+                            "gzip, deflate, br, zstd")
         srv = server(respond(200, b"ok", "text/plain"))
         netpolicy.safe_fetch(f"http://hdr.test:{srv.port}/", timeout=5,
                              total_timeout=5)
@@ -468,9 +471,11 @@ def test_per_read_errors_are_requests_exceptions(make_exc, expected):
     assert isinstance(info.value, requests.RequestException)
 
 
-def test_mid_body_tls_error_reads_as_tls():
-    exc = requests.exceptions.SSLError(urllib3.exceptions.SSLError(
-        "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]"))
+@pytest.mark.parametrize("wrap", [True, False], ids=["requests", "urllib3"])
+def test_mid_body_tls_error_reads_as_tls(wrap):
+    exc = urllib3.exceptions.SSLError("[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]")
+    if wrap:
+        exc = requests.exceptions.SSLError(exc)
     assert failure_kind(exc) == "tls"
     assert describe_failure(exc, "https://tls.example/").startswith(
         "tls.example failed the secure-connection check")
@@ -542,7 +547,7 @@ class TestRealRefusedConnections:
 def test_slow_search_leaves_page_reads_their_full_budget(local_net, server):
     page = server(respond(200, _LINZ_PAGE, "text/html"))
     b = retrieve("linz facts", provider=_OneHit(
-        f"http://ok.test:{page.port}/", delay=1.2), deadline_seconds=0.5)
+        f"http://ok.test:{page.port}/", delay=1.8), deadline_seconds=0.5)
     assert b.sources[0].retrieval_status == "fetched", b.sources[0].error
     assert b.sources[0].grounding == "page-backed"
 
