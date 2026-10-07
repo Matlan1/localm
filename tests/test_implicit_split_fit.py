@@ -418,6 +418,18 @@ class TestBackendWiring:
         out_on = next(c for c in on.default if c.holds_output)
         assert out_on.logits == 2 * self._VOCAB * 2048 * 4
 
+    def test_the_mtp_draft_context_is_charged_where_the_mtp_layers_are(self, tmp_path):
+        b, devices = self._backend(tmp_path, [10**9, 10**9])
+        with mock.patch.object(discover, "implicit_split_devices",
+                               return_value=devices), \
+                mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+            off = b._implicit_split_fit(99)
+            b.mtp_enabled = True
+            on = b._implicit_split_fit(99)
+        draft = b._mtp_draft_context_vram_bytes()
+        assert draft > 0
+        assert [c.kv for c in on.default] == [off.default[0].kv, off.default[1].kv + draft]
+
     def test_a_cpu_load_skips_the_fit(self, tmp_path):
         b, devices = self._backend(tmp_path, [10**9, 10**9])
         with mock.patch.object(discover, "implicit_split_devices",

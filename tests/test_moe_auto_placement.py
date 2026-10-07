@@ -476,23 +476,23 @@ class TestMultiGpu:
 
     FREE = 15_000
 
-    def _run(self, tmp_path, cfg=None):
+    def _run(self, tmp_path, cfg=None, free=FREE, readable=True):
         b = _backend(_split_moe_model(tmp_path))
         b._gguf_kv_bpt = 10
-        devices = [{"index": i, "free": self.FREE, "total": self.FREE + 10} for i in range(2)]
+        devices = [{"index": i, "free": free, "total": free + 10} for i in range(2)]
         with ExitStack() as st:
             st.enter_context(patch.object(
                 GgufBackend, "_split_free_total_bytes",
-                return_value=(2 * self.FREE, 2 * self.FREE + 20, 2)))
+                return_value=(2 * free, 2 * free + 20, 2)))
             st.enter_context(patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 1_000))
             st.enter_context(patch.object(discover, "implicit_split_devices",
-                                          return_value=devices))
+                                          return_value=devices if readable else None))
             st.enter_context(patch.object(discover, "runtime_split_devices_match",
                                           return_value=True))
             st.enter_context(patch.object(_loader, "native_lib_loaded", return_value=False))
-            if cfg is not None:
-                st.enter_context(patch("localm.config.load_config", return_value=cfg))
-            combined = b._smallest_fitting_n_cpu_moe(2 * self.FREE, N_CTX * 10, 2 * 1_000)
+            st.enter_context(patch("localm.config.load_config",
+                                   return_value={} if cfg is None else cfg))
+            combined = b._smallest_fitting_n_cpu_moe(2 * free, N_CTX * 10, 2 * 1_000)
             layers = b._effective_gpu_layers()
             plan = b._implicit_split_fit(layers) if layers else None
         return b, combined, layers, plan
@@ -502,6 +502,27 @@ class TestMultiGpu:
         assert combined == 2
         assert (layers, b.effective_n_cpu_moe) == (99, 4)
         assert plan is not None and plan.default_fits
+
+    def test_a_combined_fit_still_needs_every_device_to_fit(self, tmp_path):
+        b, _combined, layers, plan = self._run(tmp_path, free=25_000)
+        assert b._vram_model_bytes(0) + N_CTX * 10 + 2 * 1_000 <= 2 * 25_000
+        assert (layers, b.effective_n_cpu_moe) == (99, 1)
+        assert plan is not None and plan.default_fits
+
+    def test_every_device_fitting_pins_nothing(self, tmp_path):
+        b, _combined, layers, plan = self._run(tmp_path, free=40_000)
+        assert (layers, b.effective_n_cpu_moe) == (99, 0)
+        assert plan is not None and plan.default_fits
+
+    def test_no_per_device_fit_keeps_every_layers_experts_in_ram(self, tmp_path):
+        b, _combined, layers, _plan = self._run(tmp_path, free=3_000)
+        assert b.effective_n_cpu_moe == 4
+        assert 0 < layers < 99
+
+    def test_an_unreadable_split_pins_every_layers_experts_when_that_fits(self, tmp_path):
+        b, _combined, layers, plan = self._run(tmp_path, readable=False)
+        assert plan is None
+        assert (layers, b.effective_n_cpu_moe) == (99, 4)
 
     def test_a_configured_split_is_not_pinned_automatically(self, tmp_path):
         b, _combined, layers, _plan = self._run(tmp_path, cfg={"gpu_split_indices": [0, 1]})

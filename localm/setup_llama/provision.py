@@ -352,10 +352,10 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         provisioned = False
 
     loaded, detail = (_sl._native_loads_ok() if provisioned else (False, "not provisioned"))
+    if loaded and chosen == "amd-rocm" and _sl.install_rocm_simd_cpu(target) is None:
+        loaded, detail = _sl._native_loads_ok()
     if loaded:
         console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
-        if chosen == "amd-rocm":
-            _sl.install_rocm_simd_cpu(target)
         return chosen, used_tag[0]
 
     # ---- The installer must never hand the user a runtime our OWN gate rejects.

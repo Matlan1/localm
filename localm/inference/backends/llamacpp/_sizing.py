@@ -470,7 +470,9 @@ class VramSizingMixin:
         also charged the output weights and the logits buffer (twice when an
         MTP draft context will be created). The weights of MTP / nextn layers
         are charged only when MTP is enabled, since llama.cpp skips loading
-        them otherwise. A plan that writes a split or reports a shortfall is
+        them otherwise; with MTP enabled the MTP draft context
+        (:meth:`_mtp_draft_context_vram_bytes`) is charged as the KV cache of
+        those layers. A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
         integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`),
@@ -528,7 +530,9 @@ class VramSizingMixin:
             output_bytes += sizes.get("output_norm.weight", 0)
             repeating = max(1, n_layer_all - nextn)
             kv_per_layer = (self.n_ctx * self._kv_bytes_per_token()) // repeating
-            layer_kv = [kv_per_layer if il < n_layer_all - nextn else 0
+            draft_per_layer = (-(-self._mtp_draft_context_vram_bytes() // nextn)
+                               if mtp_on else 0)
+            layer_kv = [kv_per_layer if il < n_layer_all - nextn else draft_per_layer
                         for il in range(n_layer_all)]
             logits = logits_buffer_bytes(layout["n_vocab"], self.n_ctx,
                                          max_batch=self._MAX_BATCH,
@@ -598,20 +602,35 @@ class VramSizingMixin:
 
     def _split_fitting_n_cpu_moe(self) -> "tuple[bool, Optional[int]]":
         """For a load llama.cpp's implicit split spreads over 2+ GPUs: ``(True,
-        n)`` with the smallest n_cpu_moe whose per-device fit
+        n)`` with the smallest n_cpu_moe, 0 included, whose per-device fit
         (:meth:`_implicit_split_plan`, every layer on a GPU) fits every device
         or leaves out a device that does not, ``(True, None)`` when none does,
         and ``(False, None)`` when no per-device fit can be made (a configured
-        ``gpu_split_indices``, an unreadable layout, or no device readings).
+        ``gpu_split_indices``, an unreadable layout, no device readings, or a
+        device numbering the runtime cannot be matched to).
         Must run off the event loop. Never raises."""
         inputs = self._implicit_split_inputs(self._DEFAULT_GPU_LAYERS)
         if inputs is None:
             return False, None
-        for layer in sorted(self._moe_expert_bytes_by_layer()):
-            plan = self._implicit_split_plan(inputs, layer + 1)
-            if plan is not None and (plan.default_fits or plan.tensor_split):
-                return True, layer + 1
+        for n in [0] + [layer + 1 for layer in sorted(self._moe_expert_bytes_by_layer())]:
+            plan = self._implicit_split_plan(inputs, n)
+            if plan is None:
+                return False, None
+            if plan.default_fits or plan.tensor_split:
+                return True, n
         return True, None
+
+    @staticmethod
+    def _gpu_split_configured() -> bool:
+        """Whether ``gpu_split_indices`` is set in the config. False when the
+        config cannot be read. Never raises."""
+        try:
+            from localm.config import load_config
+            return bool(load_config().get("gpu_split_indices"))
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("config unreadable for the GPU split check (%s)", type(e).__name__)
+            return False
 
     def _mtp_draft_context_vram_bytes(self) -> int:
         """Extra VRAM llama.py's MTP draft context (cp_mtp) will need beyond
@@ -772,8 +791,7 @@ class VramSizingMixin:
     def _block_bytes(self) -> "dict[int, tuple[int, int]]":
         """``gguf_block_bytes`` for this model (``{block: (all bytes, routed
         expert bytes)}``), read at most once per instance. ``{}`` on a probe
-        failure, which charges every expert byte to VRAM and sizes GPU layers
-        as equal shares."""
+        failure, which charges every expert byte to VRAM."""
         cached = getattr(self, "_block_bytes_cache", None)
         if cached is not None:
             return cached
@@ -1293,18 +1311,26 @@ class VramSizingMixin:
         _split_free_total_bytes) - a CONFIGURED split, and equally the IMPLICIT
         one llama.cpp performs by default on any multi-GPU box.
 
-        For a Mixture-of-Experts model with no configured ``n_cpu_moe`` that
-        does not fit whole, the routed experts move to system RAM before any
-        layer does: ``moe_cpu_layers`` is the smallest n_cpu_moe that fits
-        every layer on the GPU (``layers`` 99). On one GPU it is fitted against
-        the free reading; on 2+ GPUs against every device's own charge under
-        llama.cpp's implicit split (:meth:`_split_fitting_n_cpu_moe`), and not
-        at all on a configured ``gpu_split_indices`` split. When even every
-        layer's experts in system RAM does not fit one GPU, they all stay there
-        and ``layers`` is sized over the remaining weights (``moe_cpu_layers`` 0
-        when ``layers`` is 0); on 2+ GPUs whole layers are sized as for a dense
-        model. ``model`` is always the VRAM-resident weight bytes WITHOUT the
-        automatic choice."""
+        For a Mixture-of-Experts model with no configured ``n_cpu_moe``, the
+        routed experts move to system RAM before any layer does:
+        ``moe_cpu_layers`` is the smallest n_cpu_moe that fits every layer on
+        the GPU (``layers`` 99).
+
+        - On one GPU it is fitted against the free reading, and only when the
+          whole model does not fit.
+        - On 2+ GPUs under llama.cpp's implicit split it is fitted against every
+          device's own charge (:meth:`_split_fitting_n_cpu_moe`), also when the
+          combined reading fits the whole model. When no n_cpu_moe fits every
+          device and the combined reading fits, nothing is pinned. When that
+          per-device fit cannot be made, the experts of every layer are pinned
+          if that fits the combined reading.
+        - On a configured ``gpu_split_indices`` split nothing is pinned
+          automatically.
+
+        Otherwise, when the model does not fit, the experts of every layer stay
+        in system RAM and ``layers`` is sized over the remaining weights
+        (``moe_cpu_layers`` 0 when ``layers`` is 0). ``model`` is always the
+        VRAM-resident weight bytes WITHOUT the automatic choice."""
         free, total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
@@ -1319,26 +1345,38 @@ class VramSizingMixin:
                                      split_devices)
         # Only the EXISTENCE check above needs the raw file size; an n_cpu_moe
         # load's pinned expert weights never draw on this budget.
-        configured_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
+        auto_moe = int(getattr(self, "n_cpu_moe", 0) or 0) <= 0
         model, kv, overhead = self._full_offload_parts(split_devices)
+        split_checked = False
+        if auto_moe and split_devices >= 2 and self._moe_expert_bytes_by_layer():
+            split_checked, fitting = self._split_fitting_n_cpu_moe()
+            if fitting is not None:
+                return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total,
+                                        model, kv, overhead, split_devices,
+                                        moe_cpu_layers=fitting)
+            if not split_checked and self._gpu_split_configured():
+                auto_moe = False
         if model <= 0 or free >= model + kv + overhead:
             return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total, model,
                                     kv, overhead, split_devices)
         moe_cpu_layers = 0
         weights = model
-        if configured_moe <= 0:
-            if split_devices >= 2:
-                _checked, fitting = self._split_fitting_n_cpu_moe()
-            else:
+        by_layer = self._moe_expert_bytes_by_layer() if auto_moe else {}
+        if by_layer:
+            all_layers = max(by_layer) + 1
+            if split_devices < 2:
                 fitting = self._smallest_fitting_n_cpu_moe(free, kv, overhead)
+            elif (not split_checked
+                  and free >= self._vram_model_bytes(all_layers) + kv + overhead):
+                fitting = all_layers
+            else:
+                fitting = None
             if fitting is not None:
                 return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total,
                                         model, kv, overhead, split_devices,
                                         moe_cpu_layers=fitting)
-            by_layer = self._moe_expert_bytes_by_layer()
-            if by_layer and split_devices < 2:
-                moe_cpu_layers = max(by_layer) + 1
-                weights = self._vram_model_bytes(moe_cpu_layers)
+            moe_cpu_layers = all_layers
+            weights = self._vram_model_bytes(moe_cpu_layers)
         weight_budget = free - kv - overhead
         if weight_budget <= 0 or weights <= 0:
             layers = 0                     # no room even for one layer's share

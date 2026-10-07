@@ -601,10 +601,9 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
     else:
         assert "Note:" not in r.text
     _in_order(r.text, "Backend: amd-rocm (self-contained AMD ROCm build (gfx103X / RX 6000))",
-              f"Downloading {urls[name]}", "OK - amd-rocm runtime loads on this machine.",
-              f"Downloading {cpu_url}",
+              f"Downloading {urls[name]}", f"Downloading {cpu_url}",
               f"CPU backend: ggml-cpu-haswell from llama.cpp {sl._ROCM_CPU_TAG} (SIMD), "
-              "replacing the amd-rocm build's own")
+              "replacing the amd-rocm build's own", "OK - amd-rocm runtime loads on this machine.")
     assert world.files() == [".localm-backend", ".localm-cpu-overlay", "LICENSE.llama-cpp",
                              "ggml-cpu.dll", "ggml-hip.dll", "libomp140.x86_64.dll", "llama.dll",
                              "rocblas.dll", "rocblas/library/Kernels.so-000-gfx1030.hsaco",
@@ -630,9 +629,9 @@ def _amd_rocm_release(world):
 
 def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
     assert r.exit_code == 0, r.output
-    _in_order(r.text, "OK - amd-rocm runtime loads on this machine.",
-              f"Warning: the SIMD CPU backend for the amd-rocm build was not installed "
-              f"({why}", "Retry with localm setup-llama --backend amd-rocm --force.")
+    _in_order(r.text, f"Warning: the SIMD CPU backend for the amd-rocm build was not installed "
+              f"({why}", "Retry with localm setup-llama --backend amd-rocm --force.",
+              "OK - amd-rocm runtime loads on this machine.")
     assert (world.lib / "ggml-cpu.dll").read_bytes() == b"ggml-cpu@rocm"
     assert not (world.lib / "libomp140.x86_64.dll").exists()
     assert not (world.lib / "ggml-cpu.dll.amd-rocm").exists()
@@ -650,7 +649,7 @@ def test_amd_rocm_cpu_overlay_that_does_not_load_is_rolled_back(world):
     _assert_kept_the_amd_rocm_cpu_backend(
         world, r, "the runtime did not load with it (OSError: [WinError 127] The specified "
                   "procedure could not be found)")
-    assert world.probe_calls == 2
+    assert world.probe_calls == 3
 
 
 def test_amd_rocm_cpu_overlay_whose_marker_cannot_be_written_is_rolled_back(world):
@@ -661,7 +660,7 @@ def test_amd_rocm_cpu_overlay_whose_marker_cannot_be_written_is_rolled_back(worl
     r = world.invoke("--backend", "amd-rocm")
     _assert_kept_the_amd_rocm_cpu_backend(world, r, "")
     assert (world.lib / ".localm-cpu-overlay").is_dir()
-    assert world.probe_calls == 2
+    assert world.probe_calls == 3
 
 
 def test_amd_rocm_build_that_does_not_load_gets_no_cpu_overlay(world):
@@ -681,7 +680,7 @@ def test_amd_rocm_cpu_overlay_download_failure_keeps_the_build(world):
     _assert_kept_the_amd_rocm_cpu_backend(world, r, "ArtifactError: the connection was "
                                                     "interrupted after 0 of an unknown number "
                                                     "of bytes (HTTP Error 404: Not Found)")
-    assert world.probe_calls == 1
+    assert world.probe_calls == 2
 
 
 def test_amd_rocm_cpu_overlay_checksum_mismatch_installs_nothing(world):
@@ -689,7 +688,7 @@ def test_amd_rocm_cpu_overlay_checksum_mismatch_installs_nothing(world):
     _rocm_cpu_overlay(world, digest_ok=False)
     r = world.invoke("--backend", "amd-rocm")
     _assert_kept_the_amd_rocm_cpu_backend(world, r, "ArtifactError")
-    assert world.probe_calls == 1
+    assert world.probe_calls == 2
 
 
 def test_amd_rocm_cpu_overlay_with_no_supported_variant_keeps_the_build(world):
@@ -698,7 +697,33 @@ def test_amd_rocm_cpu_overlay_with_no_supported_variant_keeps_the_build(world):
     r = world.invoke("--backend", "amd-rocm")
     _assert_kept_the_amd_rocm_cpu_backend(
         world, r, "no CPU backend variant reports support for this CPU")
-    assert world.probe_calls == 1
+    assert world.probe_calls == 2
+
+
+def test_amd_rocm_cpu_overlay_that_cannot_be_rolled_back_is_not_reported_as_loading(world):
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world)
+    _upstream_win_vulkan(world)
+    real_replace = os.replace
+
+    def _backup_locked(src, dst):
+        if str(src).endswith("ggml-cpu.dll.amd-rocm"):
+            raise PermissionError(13, "The process cannot access the file", str(src))
+        return real_replace(src, dst)
+
+    world.mp.setattr(os, "replace", _backup_locked)
+    world.probes = [(0, ""),
+                    (1, "OSError: [WinError 127] The specified procedure could not be found"),
+                    (1, "OSError: [WinError 127] The specified procedure could not be found"),
+                    (0, "")]
+    r = world.invoke("--backend", "amd-rocm", "--yes")
+    assert world.marker().startswith("vulkan "), r.output
+    assert "ggml-cpu.dll.amd-rocm" not in world.files()
+    assert "OK - amd-rocm runtime loads" not in r.text
+    _in_order(r.text, "Warning: the SIMD CPU backend for the amd-rocm build was not installed",
+              "'amd-rocm' backend provisioned but failed to load: OSError: [WinError 127]",
+              "OK - vulkan runtime loads.")
+    assert world.probe_calls == 4
 
 
 @pytest.mark.parametrize("cap, cuda, line, ver, need, blackwell", [
