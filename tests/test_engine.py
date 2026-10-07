@@ -239,5 +239,32 @@ class TestEngineGpuPlacement(unittest.TestCase):
         self.assertIsNone(engine.gpu_placement)
 
 
+
+class TestEngineFullOffloadVramBytes:
+    """Engine.full_offload_vram_bytes: the backend's own full-offload need."""
+
+    def _engine(self, backend):
+        from localm.inference.engine import Engine
+        engine = object.__new__(Engine)
+        engine.model_path = "/fake/model.gguf"
+        engine.display_name = "fake-model"
+        engine._backend = backend
+        return engine
+
+    def test_forwards_the_gguf_backends_need(self, tmp_path):
+        from localm.inference.backends.gguf import GgufBackend
+        f = tmp_path / "model.gguf"
+        f.write_bytes(bytes(4096))
+        backend = GgufBackend(str(f), n_ctx=4096)
+        backend._model_bytes = lambda: 3 * 1024 ** 3
+        with patch.object(GgufBackend, "_split_free_total_bytes",
+                          return_value=(None, None, 0)):
+            need = self._engine(backend).full_offload_vram_bytes()
+            assert need == backend.full_offload_vram_bytes()
+        assert need > 3 * 1024 ** 3
+
+    def test_none_for_a_backend_that_does_not_size_its_layers(self):
+        assert self._engine(object()).full_offload_vram_bytes() is None
+
 if __name__ == "__main__":
     unittest.main()

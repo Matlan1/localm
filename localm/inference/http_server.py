@@ -15,6 +15,7 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import hashlib
 import hmac
@@ -627,6 +628,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
                               "it is used as loaded: %s", name, exc.detail)
             if heal_budget is not None:
+                heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
                 if not (heal_probe.probe_ok and heal_probe.measurable
                         and _engines.get(name) is resident
@@ -647,7 +649,16 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             if name in latched:
                 raise LoadSkipped(latched[name])
 
-        budget = heal_budget if healing is not None else _switch_load_budget(name)
+        built = None
+        if healing is not None:
+            budget = heal_budget
+        else:
+            budget = _switch_load_budget(name)
+            if budget is not None and budget.check_split_fit:
+                sized = _engines.get(name)
+                if sized is None:
+                    built = sized = _engine_factory(name)
+                budget = await _switch_with_backend_need(loop, budget, sized)
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
         evictions: list[VictimRelease] = []
         if healing is not None:
@@ -671,8 +682,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
         if healing is not None:
             new_engine = healing
+        elif name in _engines:
+            new_engine = _engines[name]
         else:
-            new_engine = _engines[name] if name in _engines else _engine_factory(name)
+            new_engine = built if built is not None else _engine_factory(name)
         interrupted = await _switch_load(loop, name, new_engine, preempt=preempt)
         if interrupted is not None:
             return interrupted
@@ -747,6 +760,34 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
         pinned=residency.pinned_model_names(cfg),
         check_split_fit=_is_gguf(m_path),
     )
+
+
+async def _switch_with_backend_need(loop, budget: switch_admission.LoadBudget,
+                                    engine) -> switch_admission.LoadBudget:
+    """*budget* with ``backend_need`` set to *engine*'s
+    ``full_offload_vram_bytes()``, read off the event loop. *budget* is
+    returned unchanged when *engine* has no such method or it answers None.
+    An exception from it is logged at WARNING and *budget* is returned
+    unchanged."""
+    size = getattr(engine, "full_offload_vram_bytes", None)
+    if not callable(size):
+        return budget
+    from localm.debuglog import logger as _dbg
+    try:
+        need = await loop.run_in_executor(None, size)
+    except Exception as exc:
+        _dbg.warning("switch_engine: could not size a full GPU offload of '%s' "
+                     "(%s: %s); admitting it on the whole-model estimate",
+                     budget.name, type(exc).__name__, exc)
+        return budget
+    if not need:
+        return budget
+    sized = dataclasses.replace(budget, backend_need=int(need))
+    _dbg.debug("switch_engine: '%s' needs ~%s MB free for a full GPU offload; "
+               "admission bar %s MB (estimate %s MB + headroom %s MB)",
+               budget.name, need // 1024 ** 2, sized.needed_bytes // 1024 ** 2,
+               budget.vram_required // 1024 ** 2, budget.headroom // 1024 ** 2)
+    return sized
 
 
 async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
@@ -831,7 +872,7 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
                              ) -> switch_admission.VramProbe:
     """Take one VRAM reading off the event loop: ``vram_capacity()`` and, when
     ``budget.check_split_fit``, the configured split's
-    ``gpu_split_shortfall()`` for ``budget.needed_bytes``.
+    ``gpu_split_shortfall()`` for ``budget.split_share_bytes``.
 
     ``vram_capacity`` is given the full CLI deadline on this first call and
     joins a probe already in flight (``wait_for_inflight``); joining is only
@@ -861,7 +902,7 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
     shortfall, shares_adaptive = (
         await loop.run_in_executor(
             None, functools.partial(
-                gpu_split_shortfall, budget.needed_bytes,
+                gpu_split_shortfall, budget.split_share_bytes,
                 return_shares_adaptive=True))
         if budget.check_split_fit else ([], False))
     return switch_admission.VramProbe(
@@ -944,13 +985,13 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if final == switch_admission.CONFIRM_DEGRADED_LOAD:
         return step(switch_admission.RETURN_RESULT,
                     result=switch_admission.degraded_load_confirm(
-                        budget.name, budget.vram_required, probe.free))
+                        budget.name, budget.whole_model_bytes, probe.free))
     from localm.debuglog import logger as _dbg
     _dbg.info(
         "switch_engine: '%s' exceeds the whole-model VRAM estimate "
         "(need ~%s MB, %s MB free) after eviction - deferring to the "
         "backend's own load-time sizing instead of refusing",
-        budget.name, budget.vram_required // 1024 ** 2, probe.free // 1024 ** 2)
+        budget.name, budget.whole_model_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
     return step(switch_admission.PROCEED_TO_LOAD)
 
