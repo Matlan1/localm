@@ -1148,7 +1148,7 @@ class TestBusyResidentModel:
         assert res["status"] == "confirm_required"
         assert env.cancelled == ["model-a"] and statuses == []
 
-    def test_two_loads_waiting_for_one_busy_model_both_finish(self, monkeypatch):
+    def test_two_loads_waiting_for_one_busy_model_both_finish(self, monkeypatch, caplog):
         monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
         a = GatedEngine("model-a")
         b = _SizedEngine("model-b")
@@ -1164,14 +1164,17 @@ class TestBusyResidentModel:
                 hs.switch_engine("model-c", env.factory, preempt=False, activate=False),
                 return_exceptions=True)
 
-        results = asyncio.run(scenario())
+        with caplog.at_level("INFO", logger="localm"):
+            results = asyncio.run(scenario())
 
         assert [r for r in results if isinstance(r, BaseException)] == []
         assert [r["status"] for r in results] == ["loaded", "loaded"]
         assert a.unload_calls == 1 and _registered_anywhere("model-a") == set()
+        assert sum("'model-a' was freed by another request while" in r.getMessage()
+                   for r in caplog.records) == 1
 
     def test_a_busy_model_another_request_starts_unloading_is_not_unloaded_twice(
-            self, monkeypatch):
+            self, monkeypatch, caplog):
         monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
         a = GatedEngine("model-a")
         b = _SizedEngine("model-b", (_PARTIAL,))
@@ -1187,10 +1190,50 @@ class TestBusyResidentModel:
             return await hs.switch_engine("model-b", env.factory, preempt=False,
                                           activate=False)
 
-        res = asyncio.run(scenario())
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(scenario())
 
         assert a.unload_calls == 0, "only the unload already under way frees it"
         assert res["status"] == "loaded" and b.loaded
+        assert any("'model-a' was freed by another request while 'model-b' waited"
+                   in r.getMessage() for r in caplog.records)
+
+    def test_an_explicit_switch_skips_a_claimed_model_another_request_removed(
+            self, monkeypatch):
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+
+        def _removed_elsewhere(name):
+            hs._engines.pop("model-a", None)
+            hs._engines_lru.remove("model-a")
+            a.active_requests = 0
+            a._loaded = False
+
+        env = _install(monkeypatch, {"model-a": a, "model-b": b},
+                       on_cancel=_removed_elsewhere)
+        _seat("model-a", a, active=True, busy=1)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "loaded", "model": "model-b", **_FULL}
+        assert a.unload_calls == 0
+
+    def test_an_explicit_switch_does_not_unload_a_claimed_model_twice(self, monkeypatch):
+        a = GatedEngine("model-a")
+        b = _SizedEngine("model-b")
+
+        def _unload_begins(name):
+            a.unloading = True
+            a.active_requests = 0
+
+        env = _install(monkeypatch, {"model-a": a, "model-b": b},
+                       on_cancel=_unload_begins)
+        _seat("model-a", a, active=True, busy=1)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert a.unload_calls == 0, "only the unload already under way frees it"
+        assert res["status"] == "confirm_required"
 
     def test_get_engine_passes_the_wait_status_to_the_load(self, monkeypatch):
         from localm.inference.protocol import (LOADING_MODEL_STATUS,
