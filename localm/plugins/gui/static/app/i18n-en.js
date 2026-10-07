@@ -198,7 +198,7 @@ export const I18N_EN = {
   "chat.routed.chip": "instead of {from}",
   "chat.routed.fallbackChip": "a capable model was not used",
   "chat.routed.partial": "partly on CPU",
-  "chat.routed.partialTitle": "It was loaded with {gpu} of {total} layers on the GPU and the rest on the CPU, so replies are slower. Unload other models, then load it again.",
+  "chat.routed.partialTitle": "It was loaded with {gpu} of {total} layers on the GPU and the rest on the CPU, so replies are slower. It is reloaded fully once the model in its way is idle; if it stays slow, free GPU memory and load it again.",
   "chat.routed.suggestChip": "{model} suits this better",
   "chat.routed.suggestTitle": "{from} lacks what this request needed ({needs}), so this reply came from it anyway. Click to use {model}, which has it, for your next message.",
   "chat.routed.title": "{from} lacks what this request needed ({needs}), so an installed model that has it answered. Pin the chat in its parameters to always use one model.",
