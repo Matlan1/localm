@@ -201,6 +201,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   too, completing the page.
 
 ### Fixed
+- **Chat with a Knowledge collection selected no longer injects excerpts that have
+  nothing to do with the question.** The four best-ranked chunks used to be added
+  to every question, however weakly they matched, so a question about the
+  conversation itself pulled in unrelated passages the model then answered from.
+  Only excerpts that clear a relevance floor are added now, and when none do, the
+  chat says that no excerpts were relevant. `localm rag query --relevant-only`
+  shows the same filtered result.
+- **Knowledge excerpts are no longer cut off mid-word.** Each excerpt added to the
+  chat is the whole retrieved passage, and the question echoed above them ends on
+  a whole word with "…" when it is shortened.
 - **A very large request no longer stays in memory through the activity log.** The 
   recent-activity log (shown in the control window and attached to bug reports) now 
   keeps at most 2000 characters of each entry, marked as truncated, so a multi-megabyte 

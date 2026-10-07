@@ -80,6 +80,9 @@ class RagAddRequest(BaseModel):
 class RagQueryRequest(BaseModel):
     query: str
     k: int = 4
+    # Drop hits below the collection's absolute relevance floor
+    # (Collection.query relevant_only).
+    relevant_only: bool = False
 
 
 class RagRemoveDocRequest(BaseModel):
@@ -873,13 +876,15 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         # test_confinement_is_decided_on_the_chunks_that_would_be_served.
         if key_roots and not coll.is_confined_to(key_roots):
             raise HTTPException(403, _CONFINED_DETAIL)
-        return _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed))
+        return _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed,
+                                           relevant_only=req.relevant_only))
 
     # Defang control/frame tokens in the untrusted chunk text before it can be
     # spliced into a chat prompt. Runs inside the executor, with the query and
     # collection load, so unbounded CPU does not stall the event loop.
     hits = await loop.run_in_executor(get_plugin_executor(), _execute)
-    return {"collection": name, "query": req.query, "hits": hits}
+    return {"collection": name, "query": req.query, "hits": hits,
+            "relevant_only": req.relevant_only}
 
 
 @_router.post("/api/rag/collections/{name}/reembed")

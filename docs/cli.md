@@ -338,7 +338,8 @@ actually uploaded.
 localm rag add NAME PATH... [--embed] [--force]   # index files/folders into a collection
 localm rag list                  # collections with doc/chunk counts
 localm rag docs NAME             # list a collection's documents: path, chunks, status
-localm rag query NAME "text" [--embed] [-k N]   # show the top matching excerpts
+localm rag query NAME "text" [--embed] [-k N] [--relevant-only]   # show the top matching excerpts
+                                 # (--relevant-only: only those over the chat's relevance floor)
 localm rag resync NAME [--embed] [--prune-missing]  # re-walk the indexed folders: pick up new and
                                  # changed files, flag ones that have vanished
 localm rag repair NAME [--embed]  # re-index every known document from scratch
