@@ -190,11 +190,11 @@ class TestAgent:
 
 class TestOneShotProgress:
     def test_a_run_reporting_progress_prints_each_new_model_status(self, tmp_path):
-        from localm.plugins.coder.agent import context
+        from localm.plugins.coder import display
         out = []
         agent = _make_agent(tmp_path)
         agent.report_progress = True
-        with patch.object(context, "print_progress", out.append):
+        with patch.object(display, "print_progress", out.append):
             result = agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
         assert result == "The answer."
         assert out == ["Waiting for test-model...", "Loading model...",
@@ -202,11 +202,11 @@ class TestOneShotProgress:
         agent.backend.chat.assert_not_called()
 
     def test_a_silent_run_prints_nothing_and_does_not_stream(self, tmp_path):
-        from localm.plugins.coder.agent import context
+        from localm.plugins.coder import display
         out = []
         agent = _make_agent(tmp_path)
         agent.backend.chat.return_value = "quiet"
-        with patch.object(context, "print_progress", out.append):
+        with patch.object(display, "print_progress", out.append):
             assert agent._call_llm([{"role": "user", "content": "hi"}],
                                    interactive=False) == "quiet"
         assert out == []
@@ -228,3 +228,77 @@ class TestOneShotProgress:
                           lambda name, args: calls.append((name, args))):
             agent._execute_tool(call, interactive=False)
         assert calls == [("read_file", {"path": "a.py"})]
+
+
+class TestSubAgentProgress:
+    def test_a_gui_parent_shows_child_progress_as_status_events(self, tmp_path):
+        events = []
+        parent = _make_agent(tmp_path, on_event=events.append)
+        sink = parent.child_progress_sink("worker")
+        sink("Loading model...")
+        assert [e for e in events if e["type"] == "status"] == [
+            {"type": "status", "text": "worker: Loading model...", "code": None}]
+
+    def test_a_terminal_parent_prints_child_progress(self, tmp_path):
+        from localm.plugins.coder import display
+        out = []
+        parent = _make_agent(tmp_path)
+        parent._interactive = True
+        with patch.object(display, "print_progress", out.append):
+            parent.child_progress_sink("worker")("read_file(path='a')")
+        assert out == ["worker: read_file(path='a')"]
+
+    def test_a_quiet_parent_gets_no_child_progress(self, tmp_path):
+        parent = _make_agent(tmp_path)
+        assert parent.child_progress_sink("worker") is None
+
+    def test_spawn_agent_wires_the_child_to_the_parent(self, tmp_path, monkeypatch):
+        from localm.plugins.coder.tools import agents
+        events = []
+        parent = _make_agent(tmp_path, on_event=events.append)
+        child = MagicMock()
+        child.turns = 1
+        child.last_run_ok = True
+        child.denied_unconfirmed = []
+        child.report_progress = False
+        child.progress_sink = None
+
+        def _run(task):
+            child.progress_sink("Processing prompt...")
+            return "done"
+
+        child.run_task.side_effect = _run
+        monkeypatch.setattr(agents, "_prepare_child", lambda *a, **k: (child, "task"))
+        result = agents.tool_spawn_agent(tmp_path, "task", name="worker",
+                                         _parent_agent=parent)
+        assert result.ok
+        assert child.report_progress is True
+        assert {"type": "status", "text": "worker: Processing prompt...",
+                "code": None} in events
+
+    def test_a_child_reporting_to_a_sink_sends_its_tool_calls_there(self, tmp_path):
+        from localm.plugins.coder.parser import ToolCall
+        from localm.plugins.coder.tools import ToolResult
+        lines = []
+        child = _make_agent(tmp_path)
+        child.report_progress = True
+        child.progress_sink = lines.append
+        tool_def = MagicMock()
+        tool_def.destructive = False
+        tool_def.fn = MagicMock(return_value=ToolResult.success("ok"))
+        call = ToolCall(name="read_file", args={"path": "a.py"}, raw="", start=0, end=0)
+        with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY", {"read_file": tool_def}):
+            child._execute_tool(call, interactive=False)
+        assert lines == ["● read_file(path='a.py')"]
+
+
+class TestChildStatusesToTheSink:
+    def test_a_child_with_a_sink_streams_and_reports_each_status_there(self, tmp_path):
+        lines = []
+        agent = _make_agent(tmp_path)
+        agent.report_progress = True
+        agent.progress_sink = lines.append
+        assert agent._call_llm([{"role": "user", "content": "hi"}],
+                               interactive=False) == "The answer."
+        assert lines == ["Waiting for test-model...", "Loading model...",
+                         "Processing prompt...", "Generating response..."]

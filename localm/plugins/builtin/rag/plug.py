@@ -1177,7 +1177,9 @@ async def rag_embedding_download(request: Request):
         job.push({"type": "line",
                   "text": f"Downloading embedding model '{model}' (one-time)..."})
         try:
-            path = resolve_embedding_model_path(allow_download=True)
+            path = resolve_embedding_model_path(
+                allow_download=True,
+                on_progress=lambda t: job.push({"type": "line", "text": t}))
         except Exception as e:
             job.push({"type": "line", "text": f"error: download failed ({e})"})
             return False
@@ -1273,7 +1275,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
         # one-click setup). A registered model / path already present is a no-op.
         line("Resolving (downloading if needed)…")
         try:
-            path = resolve_embedding_model_path(allow_download=True)
+            path = resolve_embedding_model_path(allow_download=True, on_progress=line)
         except Exception as e:                      # network / HF error
             line(f"error: could not fetch '{model}' ({e}). Check your network "
                  "settings, or switch to the internal default (bge-small-en-v1.5).")

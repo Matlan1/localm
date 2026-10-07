@@ -212,6 +212,7 @@ export const I18N_EN = {
   "chat.status.chatHooks": "Running chat plugins…",
   "chat.status.checkingGrammar": "Checking grammar…",
   "chat.status.compacting": "Compacting conversation…",
+  "chat.status.downloadingEmbedder": "Downloading the embedding model…",
   "chat.status.encodingImage": "Encoding image…",
   "chat.status.encodingImageCpu": "Encoding image (CPU)…",
   "chat.status.encodingImageGpu": "Encoding image (GPU)…",

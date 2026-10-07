@@ -57,6 +57,7 @@ from localm.media.comfy_client import (
     comfy_http_error_detail,
     comfy_object_info,
     comfy_poll_until_done,
+    comfy_wait_heartbeat,
     comfy_submit_prompt,
     contain_comfy_artifacts,
     default_api_url,
@@ -209,7 +210,7 @@ def _build_image_workflow(
     input_image: Optional[Path],
     denoise: Optional[float],
     fast_dequant: bool,
-    con,
+    say,
 ) -> tuple[bool, str, Optional[str]]:
     """Shape the FLUX workflow in place from the call's parameters.
 
@@ -222,8 +223,8 @@ def _build_image_workflow(
     # caller opted out.
     if fast_dequant:
         if apply_fast_dequant(workflow):
-            con.print("[dim]Using fast fp16 GGUF dequant (was float32) for speed; "
-                      "set comfy_fast_dequant=false to keep your workflow's value.[/dim]")
+            say("Using fast fp16 GGUF dequant (was float32) for speed; "
+                "set comfy_fast_dequant=false to keep your workflow's value.")
 
     # 3. Override text encoder models if requested
     if clip_name1 is not None or clip_name2 is not None:
@@ -597,13 +598,23 @@ def generate_image(
         ``ok=True`` and a success description, or ``ok=False`` and an error.
     """
     from rich.console import Console
+    from rich.markup import escape
     from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
     _con = Console()
 
+    def _say(text: str) -> None:
+        if on_progress:
+            try:
+                on_progress(text)
+            except Exception:
+                pass
+        else:
+            _con.print(f"[dim]{escape(text)}[/dim]")
+
     # 0. Make sure ComfyUI is up (auto-launching when configured), before the
     # LLM unload below.
-    ok, msg = ensure_comfy(api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"),
+    ok, msg = ensure_comfy(api_url, on_progress=_say,
                            launch_cmd=launch_cmd, workdir=workdir)
     if not ok:
         return False, msg
@@ -640,7 +651,7 @@ def generate_image(
         input_image=input_image,
         denoise=denoise,
         fast_dequant=fast_dequant,
-        con=_con,
+        say=_say,
     )
     if not ok:
         return False, msg
@@ -649,8 +660,7 @@ def generate_image(
     # loader's model file exists (auto-substituting an unambiguous precision
     # variant) and fail with the exact missing filename, before the LLM unload
     # below. Best-effort: a no-op when /object_info is unreachable.
-    pf_ok, pf_msg = preflight_models(
-        workflow, api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"))
+    pf_ok, pf_msg = preflight_models(workflow, api_url, on_progress=_say)
     if not pf_ok:
         return False, pf_msg
 
@@ -700,12 +710,12 @@ def generate_image(
     prompt_id = value
 
     # 10. Poll /history with a visible progress spinner (CLI console only) and a
-    # heartbeat on the job stream throttled to once every 15s.
+    # heartbeat on the job stream: the ComfyUI queue position while queued,
+    # elapsed rendering time every 15s once running.
     start_time = time.time()
     filename = None
     subfolder = ""
     img_type = "output"
-    last_said = [0.0]
 
     with Progress(
         SpinnerColumn(),
@@ -715,16 +725,14 @@ def generate_image(
         console=_con,
     ) as progress:
         task_id = progress.add_task("Generating image…", total=None)
+        _heartbeat = (comfy_wait_heartbeat(api_url, prompt_id, on_progress)
+                      if on_progress else None)
 
         def _tick(elapsed: float) -> None:
             progress.update(task_id,
                             description=f"Generating image… ({int(elapsed)}s)")
-            if on_progress and elapsed - last_said[0] >= 15:
-                last_said[0] = elapsed
-                try:
-                    on_progress(f"Rendering… ({int(elapsed)}s elapsed)")
-                except Exception:
-                    pass
+            if _heartbeat is not None:
+                _heartbeat(elapsed)
 
         status, payload = comfy_poll_until_done(
             api_url, prompt_id,

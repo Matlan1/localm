@@ -314,6 +314,11 @@ def tool_spawn_agent(
     if child is None:
         return prepared
     full_task = prepared
+    sink = (_parent_agent.child_progress_sink(name)
+            if hasattr(_parent_agent, "child_progress_sink") else None)
+    if sink is not None:
+        child.report_progress = True
+        child.progress_sink = sink
 
     result_text = child.run_task(full_task)
     turns_used  = child.turns

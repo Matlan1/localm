@@ -488,6 +488,17 @@ class TestCompactionIsAnnounced:
         assert any("Compacting the session history" in str(c.args[0])
                    for c in pi.call_args_list)
 
+    def test_a_child_reporting_to_its_parent_sends_the_notice_there(self):
+        agent = _make_agent()
+        agent.on_event = None
+        lines = []
+        agent.progress_sink = lines.append
+        agent._messages = _messages(8)
+        with patch("localm.plugins.coder.agent.context.print_info") as pi:
+            agent._compact_history()
+        assert any("Compacting the session history" in line for line in lines)
+        pi.assert_not_called()
+
     def test_nothing_is_announced_when_there_is_nothing_to_compact(self):
         agent = _make_agent()
         events = []
