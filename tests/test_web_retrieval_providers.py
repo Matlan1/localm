@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
 from localm import netpolicy
 from localm.web_retrieval import (
@@ -63,8 +64,11 @@ class TestDuckDuckGoHTMLProvider:
         method, url, kw = t.calls[0]
         assert (method, url) == ("POST", DDG_ENDPOINT)
         assert kw["allow_redirects"] is False
-        assert kw["data"] == {"q": "example docs"}
+        assert kw["data"] == {"q": "example docs", "b": "", "kl": "wt-wt"}
         assert kw["headers"]["Host"] == "html.duckduckgo.com"
+        assert kw["headers"]["Referer"] == "https://html.duckduckgo.com/"
+        assert kw["headers"]["Accept-Language"]
+        assert kw["headers"]["Accept"].startswith("text/html")
 
     def test_max_results_and_caps(self, monkeypatch):
         allow_public(monkeypatch)
@@ -89,7 +93,7 @@ class TestDuckDuckGoHTMLProvider:
         allow_public(monkeypatch)
         Transport().install(monkeypatch).route(
             "POST", DDG_ENDPOINT, FakeResponse(status=503, text=""))
-        with pytest.raises(RuntimeError, match="HTTP 503"):
+        with pytest.raises(requests.HTTPError, match="HTTP 503"):
             DuckDuckGoHTMLProvider().search("q", 5)
 
     def test_no_result_markup_yields_empty_list(self, monkeypatch):
@@ -243,3 +247,112 @@ class TestNetpolicyWebSearchDelegate:
         with pytest.raises(ConnectionError):
             netpolicy.web_search("query")
         assert t.urls("POST") == []
+
+
+def _reset_exc():
+    import urllib3.exceptions
+    return requests.ConnectionError(urllib3.exceptions.ProtocolError(
+        "Connection aborted.", ConnectionResetError(
+            10054, "An existing connection was forcibly closed by the remote "
+            "host", None, 10054, None)))
+
+
+def _ddg_ok():
+    return FakeResponse(text=ddg_html([
+        ("Matlan1/localm", "https://github.com/Matlan1/localm", "localm repo")]))
+
+
+class TestDuckDuckGoResilience:
+    def test_reset_then_success_returns_results(self, monkeypatch):
+        from tests._web_retrieval_fixtures import no_sleep
+        allow_public(monkeypatch)
+        slept = no_sleep(monkeypatch)
+        t = Transport().install(monkeypatch)
+        answers = [_reset_exc(), _ddg_ok()]
+
+        def flaky(url, **kw):
+            nxt = answers.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+        t.route("POST", DDG_ENDPOINT, flaky)
+        out = DuckDuckGoHTMLProvider().search("Matlan1 LocalM GitHub repository", 5)
+        assert [r.url for r in out] == ["https://github.com/Matlan1/localm"]
+        assert len(t.urls("POST")) == 2
+        assert slept == [1.0]
+
+    def test_reset_every_time_gives_a_readable_bundle_error(self, monkeypatch):
+        from localm.web_retrieval import retrieve
+        from localm.web_retrieval.providers import REMEDY
+        from tests._web_retrieval_fixtures import no_sleep
+        allow_public(monkeypatch)
+        slept = no_sleep(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT,
+                lambda url, **kw: (_ for _ in ()).throw(_reset_exc()))
+        b = retrieve("Matlan1 LocalM GitHub repository")
+        assert b.search_status == "failed"
+        assert b.search_error == ("html.duckduckgo.com closed the connection "
+                                  "before answering. " + REMEDY)
+        assert "10054" not in b.search_error and "(" not in b.search_error[:60]
+        assert len(t.urls("POST")) == 3
+        assert slept == [1.0, 2.0]
+
+    @pytest.mark.parametrize("status", [202, 403, 418, 429])
+    def test_bot_check_status_is_reported_and_not_retried(self, monkeypatch,
+                                                          status):
+        from localm.web_retrieval.providers import BOT_CHECK_MESSAGE
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, FakeResponse(status=status, text="x"))
+        with pytest.raises(SearchProviderError) as info:
+            DuckDuckGoHTMLProvider().search("q", 5)
+        assert str(info.value) == BOT_CHECK_MESSAGE
+        assert len(t.urls("POST")) == 1
+
+    def test_challenge_form_page_is_a_bot_check(self, monkeypatch):
+        from localm.web_retrieval import retrieve
+        from localm.web_retrieval.providers import BOT_CHECK_MESSAGE
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, FakeResponse(text=(
+            '<html><body><form id="challenge-form" action="/anomaly">'
+            "</form></body></html>")))
+        b = retrieve("q")
+        assert b.search_status == "failed"
+        assert b.search_error == BOT_CHECK_MESSAGE
+        assert len(t.urls("POST")) == 1
+
+    def test_tls_failure_is_not_retried(self, monkeypatch):
+        from tests._web_retrieval_fixtures import no_sleep
+        allow_public(monkeypatch)
+        slept = no_sleep(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, lambda url, **kw: (_ for _ in ()).throw(
+            requests.exceptions.SSLError("certificate verify failed")))
+        with pytest.raises(requests.exceptions.SSLError):
+            DuckDuckGoHTMLProvider().search("q", 5)
+        assert len(t.urls("POST")) == 1 and slept == []
+
+    def test_requests_are_spaced(self, monkeypatch):
+        import time
+
+        from localm.web_retrieval import providers
+        from tests._web_retrieval_fixtures import no_sleep
+        allow_public(monkeypatch)
+        slept = no_sleep(monkeypatch)
+        monkeypatch.setattr(providers, "_DDG_MIN_INTERVAL", 5.0)
+        monkeypatch.setattr(providers, "_ddg_last", time.monotonic())
+        Transport().install(monkeypatch).route("POST", DDG_ENDPOINT, _ddg_ok())
+        DuckDuckGoHTMLProvider().search("q", 5)
+        assert len(slept) == 1 and 4.0 < slept[0] <= 5.0
+
+    def test_user_agent_names_this_project(self, monkeypatch):
+        import localm
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, _ddg_ok())
+        DuckDuckGoHTMLProvider().search("q", 5)
+        ua = t.calls[0][2]["headers"]["User-Agent"]
+        assert f"localm/{localm.__version__}" in ua
+        assert "+https://github.com/Matlan1/localm" in ua

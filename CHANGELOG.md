@@ -156,6 +156,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   processed; the status line reads "Processing prompt..." instead of
   "Encoding image..." when no image needs encoding. Encoded images are kept in memory only for the most recent image
   conversation and are released when the model unloads.
+- **Follow-up messages in a chat with an image answer faster on HuggingFace-format
+  vision models too** (Gemma 3, Gemma 4, Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA,
+  SmolVLM). Each image is encoded once and reused on later turns: a follow-up
+  encodes no image, and adding an image encodes only that one. Images are now
+  encoded one at a time, so in a chat with several images a LLaVA or Gemma 3
+  reply can be worded slightly differently than before. Encoded images are kept
+  in memory only for the current image conversation and are released when the
+  model unloads. The status line no longer starts with "Encoding image..." on a
+  turn where no image is encoded.
 - **Settings' "Library" section is now called "Model Library & Sources".**
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
 - **Web activity in the chat is its own collapsed card, not a user turn.** A
@@ -231,6 +240,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Knowledge excerpts are no longer cut off mid-word.** Each excerpt added to the
   chat is the whole retrieved passage, and the question echoed above them ends on
   a whole word with "…" when it is shortened.
+- **Web search and page reads are more reliable, and failures read as plain
+  sentences.** A search whose connection is reset or cut is sent again (up to
+  three tries), and a DuckDuckGo bot check is reported as such instead of "no
+  results". A failed search or page read now says what happened, for example
+  "html.duckduckgo.com closed the connection before answering" or
+  "stackoverflow.com refused access, HTTP 403", instead of a Python error.
+  A page that hangs no longer holds a search for up to 30 seconds: page reads
+  give up after 15 seconds, and a page that keeps trickling in is cut off. A
+  GitHub repository link reads the repository's README, a GitHub file link
+  reads the file itself, and a Stack Overflow or other Stack Exchange question
+  reads the question and its top answers through the Stack Exchange API, so
+  these no longer come back as page navigation or a refusal. A site with
+  several addresses is reached on the next one when the first cannot be
+  connected to, for example when IPv6 does not work on your network.
 - **A very large request no longer stays in memory through the activity log.** The 
   recent-activity log (shown in the control window and attached to bug reports) now 
   keeps at most 2000 characters of each entry, marked as truncated, so a multi-megabyte 

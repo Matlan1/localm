@@ -85,10 +85,14 @@ localm config net_allow_private true
 ```
 
 The hostname is resolved and validated once, then the connection is pinned to
-that exact IP, so the connect cannot re-resolve to a different address. This
-closes the check-and-connect DNS-rebinding race: a rebind or an unresolvable
-host is refused, not reconnected through a fresh lookup. The domain deny/allow
-lists remain an additional control.
+the validated addresses of that lookup, so the connect cannot re-resolve to a
+different address. When the first address cannot be connected to (for example
+an IPv6 address on a network without working IPv6), the next validated address
+from the same lookup is tried, up to four, all within twice the connect
+timeout. This closes the check-and-connect
+DNS-rebinding race: a rebind or an unresolvable host is refused, not
+reconnected through a fresh lookup. The domain deny/allow lists remain an
+additional control.
 
 ## Web search
 
@@ -104,9 +108,30 @@ single page on request. The same retrieval is exposed to API clients as
 `POST /api/web/retrieve` (`{"query": "..."}`); `/api/web/search` and
 `/api/web/fetch` remain for explicit low-level use.
 
+Once the results are in, localm waits at most 15 seconds for all of the
+page reads together, and a page that keeps trickling in is cut off; a
+page that could not be read keeps its search snippet as evidence and is
+labelled with the reason (for example `stackoverflow.com refused access, HTTP
+403`). A few sites are read from their own content endpoints instead of the
+page, by `web_search` and `fetch_url` alike:
+
+- `github.com/<owner>/<repo>` (and `/tree/<ref>/...`): the README, from
+  `raw.githubusercontent.com`, then the GitHub REST API (`api.github.com`).
+- `github.com/<owner>/<repo>/blob/...`: the raw file from
+  `raw.githubusercontent.com`.
+- A Stack Overflow or other Stack Exchange question: the question and its top
+  three answers from the Stack Exchange API (`api.stackexchange.com`).
+
+The original URL must pass the domain rules first, and each endpoint is
+checked like any other request, so with a `net_allow` list the endpoint is
+used only when its host is allowed too; otherwise the page itself is read.
+
 The default backend is DuckDuckGo's no-key HTML endpoint - no account, no API
-key, nothing to configure. It can rate-limit or change markup; for a sturdier
-self-hosted option, point localm at a SearXNG instance (JSON API enabled):
+key, nothing to configure. A search whose connection is reset or cut is sent
+again (up to three tries). DuckDuckGo limits automated searches from one
+address: when it answers with a bot check, localm reports that instead of
+trying again. For a sturdier self-hosted option, point localm at a SearXNG
+instance (JSON API enabled):
 
 ```bash
 localm config net_search_url http://192.168.1.10:8080
@@ -138,8 +163,10 @@ localm config net_allow_private true    # if the instance is on your LAN
 
 `web_search` and `fetch_url` appear in the coder's toolset automatically.
 In `ask` mode each request shows an approval (the GUI approval card displays
-the exact URL or query). In privacy mode, every outbound URL/query is also
-echoed to stderr (`[localm privacy] fetch_url: …`) so the session leaves a
+the exact URL or query). In privacy mode, every requested URL/query, every
+GitHub or Stack Exchange content endpoint contacted for it, and the address
+a page was actually read from when it differs, are also echoed to
+stderr (`[localm privacy] fetch_url: …`) so the session leaves a
 visible trace *on your terminal* of what went out, without writing anything
 to disk.
 

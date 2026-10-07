@@ -131,14 +131,15 @@ class TestEvidenceStatesAndDuplicates:
         d = json.loads(json.dumps(bundle.to_dict()))
         assert d["grounding"] == GROUNDING_PAGE_BACKED
         assert [s["id"] for s in d["sources"]] == ["S1", "S2", "S3", "S4", "S5"]
-        assert d["sources"][0]["error"].startswith("RuntimeError: HTTP 503")
+        assert d["sources"][0]["error"] == "a.example had a server error, HTTP 503"
         assert d["chunks"] and {"source_id", "text", "score", "offset", "kind"} \
             <= set(d["chunks"][0])
 
     def test_prompt_text_names_sources_and_states(self, bundle):
         text = bundle.to_prompt_text()
         assert text.startswith("Grounding: page-backed: 2 of 5 sources read\n")
-        assert "[S1] Broken - https://a.example/down (failed, RuntimeError: HTTP 503)" in text
+        assert ("[S1] Broken - https://a.example/down (failed, a.example had a "
+                "server error, HTTP 503)") in text
         assert "[S2] Good B - https://b.example/page (page-backed)" in text
         assert "[S1 snippet] Snippet for the broken page" in text
         assert "[S2] " in text and ANSWER in text
@@ -299,18 +300,24 @@ class TestSearchFailures:
         b = retrieve(QUERY)
         assert b.provider == "searxng"
         assert b.search_status == "failed"
-        assert b.search_error == "ConnectionError: down"
+        assert b.search_error == (
+            "Could not connect to searx.example. Check that the Search backend "
+            "URL in Settings > Network points at a running SearXNG instance "
+            "with the JSON format enabled.")
         assert b.sources == [] and b.chunks == []
         assert b.grounding == GROUNDING_FAILED
         assert t.urls("POST") == []
-        assert "Search failed: ConnectionError: down" in b.to_prompt_text()
+        assert len(t.urls("GET")) == 3
+        assert "Search failed: Could not connect to searx.example." in             b.to_prompt_text()
 
     def test_searxng_http_error_is_in_the_bundle(self, monkeypatch):
         allow_public(monkeypatch, net_search_url="https://searx.example")
         Transport().install(monkeypatch).route(
             "GET", "https://searx.example/search?*", FakeResponse(status=500))
         b = retrieve(QUERY)
-        assert b.search_status == "failed" and "HTTP 500" in b.search_error
+        assert b.search_status == "failed"
+        assert b.search_error.startswith(
+            "searx.example had a server error, HTTP 500. Check that")
 
     def test_searxng_empty_results_is_empty_not_failed(self, monkeypatch):
         allow_public(monkeypatch, net_search_url="https://searx.example")
@@ -373,13 +380,18 @@ class TestPageFailures:
                           ("B", "https://b.example/", "snippet b")])
         t.route("GET", "https://a.example/", FakeResponse(status=500))
         t.route("GET", "https://b.example/",
-                lambda url, **kw: (_ for _ in ()).throw(OSError("reset")))
+                lambda url, **kw: (_ for _ in ()).throw(ConnectionResetError(
+                    10054, "An existing connection was forcibly closed by the "
+                    "remote host")))
         b = retrieve(QUERY)
         assert b.grounding == GROUNDING_SNIPPET_ONLY
         assert b.page_backed is False
         assert all(c.kind == "snippet" for c in b.chunks)
         assert all(s.grounding == GROUNDING_FAILED for s in b.sources)
-        assert b.sources[1].error == "OSError: reset"
+        assert b.sources[0].error == "a.example had a server error, HTTP 500"
+        assert b.sources[1].error ==             "b.example closed the connection before answering"
+        assert t.urls("GET").count("https://a.example/") == 1
+        assert t.urls("GET").count("https://b.example/") == 2
 
     def test_page_without_text_is_snippet_only(self, monkeypatch):
         allow_public(monkeypatch)
@@ -429,7 +441,7 @@ class TestPageFailures:
         b = retrieve(QUERY, deadline_seconds=0.4)
         assert time.monotonic() - started < 2.5
         assert b.sources[0].grounding == GROUNDING_FAILED
-        assert b.sources[0].error == "timed out after 0.4s"
+        assert b.sources[0].error ==             "slow.example did not finish loading within 0.4s"
         assert b.sources[1].grounding == GROUNDING_PAGE_BACKED
 
 
@@ -486,7 +498,7 @@ class TestConcurrencyAndOptions:
 
         def gated(url, **kw):
             barrier.wait()
-            return html_response(_page(_LONG))
+            return html_response(_page(f"{_LONG} Served from {url}."))
         for u in urls:
             t.route("GET", u, gated)
         b = retrieve(QUERY)

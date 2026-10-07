@@ -33,7 +33,7 @@ and online coder providers (OpenAI/Anthropic opt-ins) are explicit user
 choices outside this policy.
 
 SSRF guard: the hostname is resolved and validated once, then the socket is
-pinned to that IP (see netpin.py), so the connection cannot
+pinned to the validated IPs (see netpin.py), so the connection cannot
 re-resolve to a rebound address and an unresolvable host fails closed.
 Redirects are re-validated hop by hop.
 """
@@ -49,15 +49,19 @@ import socket
 import urllib.parse
 from typing import Optional
 
+from localm import __version__
 from localm.debuglog import logger
 
 NET_MODES = ("off", "ask", "allow")
 NET_MODE_ENV_VAR = "LOCALM_NET_MODE"
 
 _DEFAULT_TIMEOUT = 15
+_DEFAULT_TOTAL_TIMEOUT = 45
 _DEFAULT_MAX_BYTES = 1_000_000
 _MAX_REDIRECTS = 5
-_USER_AGENT = "Mozilla/5.0 (compatible; localm/0.1; +https://github.com/localm)"
+_MAX_PINNED_ADDRESSES = 4
+_USER_AGENT = (f"Mozilla/5.0 (compatible; localm/{__version__}; "
+               "+https://github.com/Matlan1/localm)")
 
 
 class NetworkPolicyError(Exception):
@@ -371,21 +375,40 @@ def is_link_local_host(host: str) -> bool:
     return False
 
 
-def _resolve_pinned(host: str) -> Optional[str]:
-    """Resolve *host* to ONE IP to pin the connection to, closing the
-    check-and-connect DNS-rebinding TOCTOU. ``check_url`` resolves
-    and validates the host, but ``requests`` re-resolves at connect time, so a
-    TTL-0 attacker can answer 'public' for the check and 'internal' for the
-    connect. This resolves ONCE, validates the address(es), and returns the
-    exact IP the socket will dial, so there is no second lookup.
+def _interleave_families(ips: list) -> list:
+    """*ips* (ipaddress objects, resolver order) reordered to alternate address
+    families, starting with the family of the first one; order within a family
+    is kept."""
+    if not ips:
+        return []
+    first = [ip for ip in ips if ip.version == ips[0].version]
+    other = [ip for ip in ips if ip.version != ips[0].version]
+    out = []
+    for i in range(max(len(first), len(other))):
+        if i < len(first):
+            out.append(first[i])
+        if i < len(other):
+            out.append(other[i])
+    return out
 
-    Returns the canonical IP string to pin, or None when the host is
-    unresolvable (the caller then lets the request fail with a normal DNS
-    error, so nothing connects). Numeric/short-form and IPv6 literals are
-    pinned directly, already validated by check_url. When net_allow_private is
-    False, an address that fails the SSRF class check is refused HERE too, on
-    the exact IP to be dialled, which catches a rebind that slipped past
-    check_url's separate lookup."""
+
+def _resolve_pinned_all(host: str) -> list[str]:
+    """Resolve *host* ONCE to the addresses a connection may be pinned to, in
+    dial order, closing the check-and-connect DNS-rebinding TOCTOU.
+    ``check_url`` resolves and validates the host, but ``requests``
+    re-resolves at connect time, so a TTL-0 attacker can answer 'public' for
+    the check and 'internal' for the connect. Every address returned here is
+    one the socket may dial and none is looked up again.
+
+    Returns at most ``_MAX_PINNED_ADDRESSES`` canonical IP strings,
+    de-duplicated, address families interleaved (first family first), or an
+    empty list when the host is unresolvable (the caller then fails closed).
+    Numeric/short-form and IPv6 literals are returned directly, already
+    validated by check_url. When net_allow_private is False, an address that
+    fails the SSRF class check is never returned, and a host whose every
+    address fails it raises ``NetworkPolicyError``, on the exact IPs to be
+    dialled, which catches a rebind that slipped past check_url's separate
+    lookup."""
     allow_private = bool(_config().get("net_allow_private", False))
 
     def _guard(ip_obj) -> None:
@@ -398,34 +421,47 @@ def _resolve_pinned(host: str) -> Optional[str]:
     literal = _literal_ipv4(host)
     if literal is not None:
         _guard(literal)
-        return str(literal)
+        return [str(literal)]
     try:
         ip_obj = ipaddress.ip_address(host)
         _guard(ip_obj)
-        return str(ip_obj)
+        return [str(ip_obj)]
     except ValueError:
         pass
 
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, ValueError, OSError):
-        return None
+        return []
     blocked = None
+    usable: list = []
     for info in infos:
         try:
             ip_obj = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
         if not allow_private and _is_blocked_ip(ip_obj):
-            blocked = ip_obj          # remember, keep scanning for a usable one
+            blocked = ip_obj
             continue
-        return str(ip_obj)            # first usable (and now pinned) address
-    if blocked is not None:
-        raise NetworkPolicyError(
-            f"'{host}' resolves to the non-public address {blocked}. "
-            "Requests to local/private networks are blocked "
-            "(set net_allow_private true to permit them).")
-    return None
+        if ip_obj not in usable:
+            usable.append(ip_obj)
+    if not usable:
+        if blocked is not None:
+            raise NetworkPolicyError(
+                f"'{host}' resolves to the non-public address {blocked}. "
+                "Requests to local/private networks are blocked "
+                "(set net_allow_private true to permit them).")
+        return []
+    ordered = _interleave_families(usable)[:_MAX_PINNED_ADDRESSES]
+    return [str(ip) for ip in ordered]
+
+
+def _resolve_pinned(host: str) -> Optional[str]:
+    """The first address ``_resolve_pinned_all`` returns for *host* (the first
+    usable one in resolver order), or None when the host is unresolvable.
+    Raises ``NetworkPolicyError`` exactly when ``_resolve_pinned_all`` does."""
+    ips = _resolve_pinned_all(host)
+    return ips[0] if ips else None
 
 
 def _host_header(parsed) -> str:
@@ -442,7 +478,9 @@ def _host_header(parsed) -> str:
 
 def _session_for(url: str):
     """A ``requests.Session`` whose socket is pinned to *url*'s pre-validated
-    IP. ``check_url`` MUST already have passed on *url*. This is the single
+    IPs (``_resolve_pinned_all``: the next one is dialled only when the TCP
+    connect to the previous one fails). ``check_url`` MUST already have
+    passed on *url*. This is the single
     network-transport seam: production pins here, tests double it here.
     The caller sends ``_host_header(url)`` as the Host header and closes the
     session (use it as a context manager).
@@ -454,12 +492,12 @@ def _session_for(url: str):
     reach an internal service unvalidated."""
     from localm import netpin
     parsed = urllib.parse.urlparse(url)
-    ip = _resolve_pinned(parsed.hostname or "")
-    if not ip:
+    ips = _resolve_pinned_all(parsed.hostname or "")
+    if not ips:
         raise NetworkPolicyError(
             f"Could not resolve '{parsed.hostname}' to an address; refusing the "
             "request rather than connecting through an unvalidated re-resolution.")
-    return netpin.pinned_session(ip)
+    return netpin.pinned_session(ips)
 
 
 def pinned_request(method: str, url: str, **kwargs):
@@ -485,6 +523,111 @@ def pinned_request(method: str, url: str, **kwargs):
 #  Fetching
 # ---------------------------------------------------------------------------
 
+_BODY_CHUNK = 65536
+
+
+PER_READ_ACCEPT_ENCODING = "gzip, deflate"
+
+
+class _BodyDecoder:
+    """Content-Encoding decoder for identity, ``gzip`` / ``x-gzip`` (several
+    members included) and ``deflate`` (zlib-wrapped or raw). Raises
+    ``requests.exceptions.ContentDecodingError`` for any other encoding and
+    for corrupt data."""
+
+    def __init__(self, encoding: str):
+        import zlib
+        self._zlib = zlib
+        parts = [p.strip().lower() for p in (encoding or "").split(",")
+                 if p.strip()]
+        name = ",".join(parts)
+        self._first = True
+        if name in ("", "identity"):
+            self._mode = None
+        elif name in ("gzip", "x-gzip"):
+            self._mode = "gzip"
+            self._obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        elif name == "deflate":
+            self._mode = "deflate"
+            self._obj = zlib.decompressobj()
+        else:
+            self._fail(f"unsupported content encoding {encoding!r}")
+
+    @staticmethod
+    def _fail(message: str):
+        import requests
+        raise requests.exceptions.ContentDecodingError(message)
+
+    def decode(self, data: bytes, limit: int) -> bytes:
+        """Decoded bytes for *data*, at most *limit* per decompression step
+        (a caller stops once it holds *limit* bytes)."""
+        if self._mode is None:
+            return data
+        zlib = self._zlib
+        try:
+            if self._mode == "deflate":
+                if self._first:
+                    self._first = False
+                    try:
+                        return self._obj.decompress(data, limit)
+                    except zlib.error:
+                        self._obj = zlib.decompressobj(-zlib.MAX_WBITS)
+                return self._obj.decompress(data, limit)
+            out = self._obj.decompress(data, limit)
+            while self._obj.eof and self._obj.unused_data and len(out) < limit:
+                rest = self._obj.unused_data
+                self._obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                out += self._obj.decompress(rest, limit - len(out))
+            return out
+        except zlib.error as exc:
+            self._fail(f"corrupt {self._mode} body: {exc}")
+
+    def flush(self) -> bytes:
+        if self._mode is None:
+            return b""
+        try:
+            return self._obj.flush()
+        except self._zlib.error as exc:
+            self._fail(f"corrupt {self._mode} body: {exc}")
+
+
+def _body_chunks(resp, per_read: bool, limit: int):
+    """Yield *resp*'s decoded body.
+
+    With *per_read* and a raw response that has ``read1``, every yielded
+    chunk (possibly empty) comes from exactly one network read of at most
+    ``_BODY_CHUNK`` bytes, decoded here by ``_BodyDecoder``, so a caller can
+    stop between any two reads; urllib3 read errors are raised as the
+    ``requests`` exceptions ``iter_content`` raises (``ConnectionError`` for
+    a read timeout, ``ChunkedEncodingError``, ``SSLError``) and decoding
+    errors as ``ContentDecodingError``. The request must have been sent with
+    ``Accept-Encoding: PER_READ_ACCEPT_ENCODING``. Otherwise this is
+    ``iter_content``."""
+    raw = getattr(resp, "raw", None)
+    read1 = getattr(raw, "read1", None) if per_read else None
+    if read1 is None:
+        yield from resp.iter_content(chunk_size=_BODY_CHUNK)
+        return
+    import requests
+    from urllib3.exceptions import ProtocolError, ReadTimeoutError, SSLError
+    decoder = _BodyDecoder(resp.headers.get("Content-Encoding", ""))
+    while True:
+        try:
+            data = read1(_BODY_CHUNK, decode_content=False)
+        except ReadTimeoutError as exc:
+            raise requests.exceptions.ConnectionError(exc)
+        except ProtocolError as exc:
+            raise requests.exceptions.ChunkedEncodingError(exc)
+        except SSLError as exc:
+            raise requests.exceptions.SSLError(exc)
+        if not data:
+            tail = decoder.flush()
+            if tail:
+                yield tail
+            return
+        yield decoder.decode(data, limit)
+
+
 def safe_fetch_bytes(
     url: str,
     *,
@@ -492,6 +635,7 @@ def safe_fetch_bytes(
     timeout: int = _DEFAULT_TIMEOUT,
     allow_when_off: bool = False,
     extra_headers: Optional[dict] = None,
+    total_timeout: Optional[float] = None,
 ) -> tuple[str, str, bytes]:
     """
     Policy-checked GET returning RAW bytes. Returns (final_url, content_type,
@@ -513,24 +657,50 @@ def safe_fetch_bytes(
     hop whose host differs from the ORIGINAL request's host, so a redirect
     can never carry a caller's credential to a different host.
 
+    *timeout* bounds each connect attempt and each wait for data; a host
+    with several addresses may use up to ``netpin._CONNECT_BUDGET_FACTOR``
+    times it to connect. *total_timeout*, when set, bounds the whole call
+    across hops: each hop's connect gets at most the time left divided by
+    that factor and each wait for data at most the time left; the body is
+    read and decoded one network read at a time (``_body_chunks``) and a
+    body still arriving when the time runs out raises
+    ``netpin.ReadBudgetExceeded`` (a ``requests.exceptions.Timeout``), so
+    the call overruns *total_timeout* by at most one wait for data. Such
+    a request advertises only gzip and deflate and raises
+    ``ContentDecodingError`` for any other Content-Encoding.
+
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
+    import time
+
+    from localm.netpin import _CONNECT_BUDGET_FACTOR, ReadBudgetExceeded
+
+    deadline = (time.monotonic() + total_timeout
+                if total_timeout is not None else None)
     current = url
     original_host = urllib.parse.urlparse(url).hostname
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current, allow_when_off=allow_when_off)
         parsed = urllib.parse.urlparse(current)
         hop_headers = extra_headers if parsed.hostname == original_host else None
+        hop_timeout = timeout
+        fixed_headers = {"User-Agent": _USER_AGENT, "Host": _host_header(parsed)}
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ReadBudgetExceeded(total_timeout, url)
+            hop_timeout = (min(timeout, left / _CONNECT_BUDGET_FACTOR),
+                           min(timeout, left))
+            fixed_headers["Accept-Encoding"] = PER_READ_ACCEPT_ENCODING
         # Pin the socket to the just-validated IP for this hop; each redirect
         # target is independently re-checked and re-pinned.
         with _session_for(current) as session:
             resp = session.get(
                 current,
-                timeout=timeout,
+                timeout=hop_timeout,
                 stream=True,
                 allow_redirects=False,
-                headers={**(hop_headers or {}),
-                         "User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
+                headers={**(hop_headers or {}), **fixed_headers},
             )
             try:
                 if resp.is_redirect or resp.is_permanent_redirect:
@@ -543,11 +713,14 @@ def safe_fetch_bytes(
                 resp.raise_for_status()
                 content_type = resp.headers.get("Content-Type", "")
                 chunks, size = [], 0
-                for chunk in resp.iter_content(chunk_size=65536):
+                for chunk in _body_chunks(resp, deadline is not None,
+                                          max_bytes):
                     chunks.append(chunk)
                     size += len(chunk)
                     if size >= max_bytes:
                         break
+                    if deadline is not None and time.monotonic() > deadline:
+                        raise ReadBudgetExceeded(total_timeout, url)
                 return current, content_type, b"".join(chunks)[:max_bytes]
             finally:
                 resp.close()
@@ -586,12 +759,14 @@ def safe_fetch(
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
+    total_timeout: Optional[float] = None,
 ) -> tuple[str, str, str]:
     """
     Policy-checked GET. Returns (final_url, content_type, body_text).
 
     Thin text wrapper over safe_fetch_bytes (which does the policy check,
-    per-hop redirect re-validation and size cap). The body is decoded using
+    per-hop redirect re-validation, size cap and the optional
+    *total_timeout*). The body is decoded using
     the charset the response declares - the Content-Type header, then an
     HTML <meta charset> tag - falling back to UTF-8 when neither declares
     one or the declared one fails to decode.
@@ -599,7 +774,7 @@ def safe_fetch(
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
     final_url, content_type, body = safe_fetch_bytes(
-        url, max_bytes=max_bytes, timeout=timeout)
+        url, max_bytes=max_bytes, timeout=timeout, total_timeout=total_timeout)
     charset = _declared_charset(content_type, body)
     if charset:
         try:
@@ -671,10 +846,25 @@ def fetch_text(
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
+    total_timeout: Optional[float] = _DEFAULT_TOTAL_TIMEOUT,
+    on_endpoint=None,
 ) -> tuple[str, str]:
-    """safe_fetch + HTML stripping. Returns (final_url, plain_text)."""
-    final_url, content_type, body = safe_fetch(
-        url, max_bytes=max_bytes, timeout=timeout)
+    """safe_fetch + HTML stripping. Returns (final_url, plain_text).
+
+    A GitHub repository or file URL, or a Stack Exchange question URL, is
+    read from that site's content endpoint when it yields text, with the
+    page itself as the fallback (``localm.web_retrieval.sites.read_url``).
+    *total_timeout* bounds each underlying fetch (see safe_fetch_bytes).
+    *on_endpoint* is called with each content-endpoint URL before it is
+    requested (see ``read_url``)."""
+    from localm.web_retrieval.sites import read_url
+
+    def _fetch(target: str, *, timeout: float) -> tuple[str, str, str]:
+        return safe_fetch(target, max_bytes=max_bytes, timeout=timeout,
+                          total_timeout=total_timeout)
+
+    final_url, content_type, body = read_url(url, _fetch, timeout=timeout,
+                                             on_endpoint=on_endpoint)
     if "html" in content_type.lower():
         return final_url, html_to_text(body)
     return final_url, body.strip()
@@ -690,8 +880,9 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
 
     Backend: a SearXNG instance when net_search_url is configured (its JSON
     API must be enabled), otherwise DuckDuckGo's no-key HTML endpoint. The
-    providers live in ``localm.web_retrieval.providers`` and send their one
-    request through this module's policy check and pinned transport.
+    providers live in ``localm.web_retrieval.providers`` and send their
+    request (up to three times on a transient transport failure) through
+    this module's policy check and pinned transport.
     Raises NetworkPolicyError when the policy refuses, or RuntimeError when
     the backend yields nothing parseable.
     """

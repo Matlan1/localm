@@ -51,8 +51,8 @@ from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
     COMPACTING_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
-    FullChoice, Message, STATUS_CODE_BY_TEXT, StreamChoice, UsageInfo,
-    WAITING_FOR_MODEL_STATUS, make_chunk_id,
+    FullChoice, Message, PROCESSING_PROMPT_STATUS, STATUS_CODE_BY_TEXT, StreamChoice,
+    UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
 
 # Models whose last load failed; capability routing leaves them out of its
@@ -4739,9 +4739,8 @@ async def _stream_sse(
 
     # Serialise inference - only one request runs at a time
     async with sem:
-        from localm.inference.backends.base import messages_contain_image
-        initial_status = "Encoding image..." if messages_contain_image(messages) else "Processing prompt..."
-        status_chunk = ChatChunk.status_chunk(initial_status, model_id, chunk_id, ts)
+        # The backend reports image encoding itself, only when an image is encoded.
+        status_chunk = ChatChunk.status_chunk(PROCESSING_PROMPT_STATUS, model_id, chunk_id, ts)
         yield f"data: {status_chunk.model_dump_json()}\n\n"
 
         gen_start = time.perf_counter()

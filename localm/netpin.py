@@ -9,7 +9,8 @@ TTL 0 can answer a public address for the validation and an internal one
 Nothing in between is re-checked.
 
 The host is resolved ONCE, every address it returns is validated, and the socket
-is pinned to that address so there is no second lookup to poison. The original
+is pinned to the validated addresses (dialled in order, the next one only when a
+TCP connect fails) so there is no second lookup to poison. The original
 hostname is still presented for TLS SNI, certificate matching and the ``Host``
 header, so pinning is transparent to normal servers (virtual hosts and HTTPS keep
 working).
@@ -25,46 +26,136 @@ per-request adapter rather than process-wide state, so it is thread-safe.
 
 from __future__ import annotations
 
+import time
+from typing import Sequence, Union
+
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from urllib3.poolmanager import PoolManager
 
 
-class _PinnedHTTPConnectionPool(HTTPConnectionPool):
-    """HTTP pool whose new connections dial a fixed, pre-validated IP."""
+#: All connect attempts to one host's addresses together take at most this
+#: many times the connect timeout.
+_CONNECT_BUDGET_FACTOR = 2
 
+
+class ReadBudgetExceeded(requests.exceptions.Timeout):
+    """A response body was still arriving when the total time allowed for the
+    whole read ran out. *seconds* is that allowance, *url* the request URL."""
+
+    def __init__(self, seconds: float, url: str = ""):
+        super().__init__(f"read did not finish within {seconds:g}s")
+        self.seconds = seconds
+        self.url = url
+
+
+def _as_ip_tuple(pinned: Union[str, Sequence[str]]) -> tuple[str, ...]:
+    if isinstance(pinned, str):
+        return (pinned,)
+    return tuple(pinned)
+
+
+class _AddressFallbackMixin:
+    """Connection whose socket dials each address of ``_localm_pinned_ips`` in
+    order, moving to the next one only when the TCP connect itself fails
+    (``NewConnectionError`` / ``ConnectTimeoutError``). No address is
+    re-resolved. With no list set it dials ``_dns_host`` as urllib3 does.
+
+    With a numeric connect timeout T, all attempts together take at most
+    ``_CONNECT_BUDGET_FACTOR`` * T: each attempt gets T or the budget left,
+    whichever is smaller, and no further address is tried once it is spent."""
+
+    _localm_pinned_ips: tuple[str, ...] = ()
+
+    def _new_conn(self):
+        ips = self._localm_pinned_ips
+        if not ips:
+            return super()._new_conn()
+        original = self.timeout
+        finish_by = None
+        if isinstance(original, (int, float)) and original > 0:
+            finish_by = time.monotonic() + _CONNECT_BUDGET_FACTOR * original
+        last_exc = None
+        try:
+            for ip in ips:
+                if finish_by is not None:
+                    left = finish_by - time.monotonic()
+                    if left <= 0:
+                        break
+                    self.timeout = min(original, left)
+                self._dns_host = ip
+                try:
+                    return super()._new_conn()
+                except (NewConnectionError, ConnectTimeoutError) as exc:
+                    last_exc = exc
+        finally:
+            self.timeout = original
+        raise last_exc
+
+
+class _PinnedHTTPConnection(_AddressFallbackMixin, HTTPConnection):
+    pass
+
+
+class _PinnedHTTPSConnection(_AddressFallbackMixin, HTTPSConnection):
+    pass
+
+
+def _pool_ips(pool) -> tuple[str, ...]:
+    if pool._pinned_ips:
+        return pool._pinned_ips
+    return (pool._pinned_ip,) if pool._pinned_ip else ()
+
+
+class _PinnedHTTPConnectionPool(HTTPConnectionPool):
+    """HTTP pool whose new connections dial fixed, pre-validated IPs: the
+    first of ``_pinned_ips`` (or ``_pinned_ip`` when no list is set), then the
+    others in order when a TCP connect fails."""
+
+    ConnectionCls = _PinnedHTTPConnection
     _pinned_ip: str | None = None
+    _pinned_ips: tuple[str, ...] = ()
 
     def _new_conn(self):
         conn = super()._new_conn()
-        if self._pinned_ip:
-            conn._dns_host = self._pinned_ip   # the socket target; .host stays for the Host header via the caller
+        ips = _pool_ips(self)
+        if ips:
+            conn._dns_host = ips[0]   # the socket target; .host stays for the Host header via the caller
+            conn._localm_pinned_ips = ips
         return conn
 
 
 class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
-    """HTTPS pool whose new connections dial a fixed IP while presenting the
-    real hostname for SNI + certificate validation."""
+    """HTTPS pool whose new connections dial fixed IPs (as
+    ``_PinnedHTTPConnectionPool``) while presenting the real hostname for SNI +
+    certificate validation."""
 
+    ConnectionCls = _PinnedHTTPSConnection
     _pinned_ip: str | None = None
+    _pinned_ips: tuple[str, ...] = ()
 
     def _new_conn(self):
         conn = super()._new_conn()
-        if self._pinned_ip:
+        ips = _pool_ips(self)
+        if ips:
             # Capture the real hostname for SNI and cert matching before
             # repointing the socket at the pinned IP.
             if conn.server_hostname is None:
                 conn.server_hostname = conn.host
-            conn._dns_host = self._pinned_ip
+            conn._dns_host = ips[0]
+            conn._localm_pinned_ips = ips
         return conn
 
 
 class _PinnedPoolManager(PoolManager):
-    """PoolManager that stamps a pinned IP onto every pool it creates."""
+    """PoolManager that stamps the pinned IPs onto every pool it creates."""
 
-    def __init__(self, pinned_ip: str, **kwargs):
-        self._pinned_ip = pinned_ip
+    def __init__(self, pinned_ip: Union[str, Sequence[str]], **kwargs):
+        self._pinned_ips = _as_ip_tuple(pinned_ip)
+        self._pinned_ip = self._pinned_ips[0]
         super().__init__(**kwargs)
         # Instance-local scheme->pool map so we do not mutate urllib3's global.
         self.pool_classes_by_scheme = {
@@ -75,15 +166,21 @@ class _PinnedPoolManager(PoolManager):
     def _new_pool(self, scheme, host, port, request_context=None):
         pool = super()._new_pool(scheme, host, port, request_context=request_context)
         pool._pinned_ip = self._pinned_ip
+        pool._pinned_ips = self._pinned_ips
         return pool
 
 
 class PinnedIPAdapter(HTTPAdapter):
-    """A ``requests`` transport adapter that forces every connection to a single
-    pre-validated IP address (see the module docstring)."""
+    """A ``requests`` transport adapter that forces every connection to
+    pre-validated IP addresses (see the module docstring). *pinned_ip* is one
+    address or a non-empty sequence dialled in order, the next one only when
+    the TCP connect to the previous one fails. Raises ``ValueError`` for an
+    empty sequence."""
 
-    def __init__(self, pinned_ip: str, **kwargs):
-        self._pinned_ip = pinned_ip
+    def __init__(self, pinned_ip: Union[str, Sequence[str]], **kwargs):
+        self._pinned_ip = _as_ip_tuple(pinned_ip)
+        if not self._pinned_ip or not all(self._pinned_ip):
+            raise ValueError("PinnedIPAdapter needs at least one address")
         super().__init__(**kwargs)
 
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
@@ -96,8 +193,11 @@ class PinnedIPAdapter(HTTPAdapter):
         )
 
 
-def pinned_session(pinned_ip: str) -> requests.Session:
-    """A ``requests.Session`` whose http(s) traffic is pinned to ``pinned_ip``.
+def pinned_session(pinned_ip: Union[str, Sequence[str]]) -> requests.Session:
+    """A ``requests.Session`` whose http(s) traffic is pinned to
+    ``pinned_ip``: one address, or a non-empty sequence of pre-validated
+    addresses of the same host dialled in order, the next one only when the
+    TCP connect to the previous one fails.
 
     The caller owns the session lifetime (use it as a context manager, or close
     it after a streamed body is fully read) and must send the original hostname

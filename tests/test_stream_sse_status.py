@@ -76,7 +76,9 @@ def test_stream_sse_emits_initial_and_live_status_chunks():
     assert "".join(tokens_received) == "Hello world"
 
 
-def test_stream_sse_image_initial_status():
+def test_stream_sse_image_initial_status_leaves_encoding_to_the_backend():
+    # The first status is "Processing prompt..." even when the request holds
+    # an image; image encoding is reported by the backend.
     engine = _make_status_mock_engine(
         statuses=[VISION_CPU_FALLBACK_STATUS],
         supports_images=True,
@@ -112,7 +114,7 @@ def test_stream_sse_image_initial_status():
                 statuses_received.append(delta["status"])
 
     assert statuses_received == [
-        "Encoding image...",
+        "Processing prompt...",
         VISION_CPU_FALLBACK_STATUS,
     ]
 
@@ -120,6 +122,7 @@ def test_stream_sse_image_initial_status():
 def test_stream_sse_status_chunks_carry_a_stable_code():
     engine = _make_status_mock_engine(
         statuses=[
+            "Encoding image...",
             "Encoding image (GPU)...",
             VISION_CPU_FALLBACK_STATUS,
             "Generating response...",
@@ -157,6 +160,7 @@ def test_stream_sse_status_chunks_carry_a_stable_code():
                 codes_by_status[delta["status"]] = delta.get("status_code")
 
     assert codes_by_status == {
+        "Processing prompt...": "processing",
         "Encoding image...": "encoding_image",
         "Encoding image (GPU)...": "encoding_image_gpu",
         VISION_CPU_FALLBACK_STATUS: "vision_cpu_retry",
