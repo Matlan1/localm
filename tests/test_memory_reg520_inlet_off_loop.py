@@ -76,7 +76,7 @@ class TestInletHookIsOffLoaded:
         body_thread: dict = {}
         loop_thread: dict = {}
 
-        def _fake_body(messages, ctx):
+        def _fake_body(messages, ctx, announce=None):
             body_thread["id"] = threading.get_ident()
             return None
 
@@ -98,20 +98,20 @@ class TestInletHookIsOffLoaded:
         """NEGATIVE CASE: offloading must not change the contract - the hook
         returns the body's result unchanged."""
         sentinel = [{"role": "system", "content": "MEMORY BLOCK"}]
-        monkeypatch.setattr(plug, "_memory_inlet", lambda m, c: sentinel)
+        monkeypatch.setattr(plug, "_memory_inlet", lambda m, c, announce=None: sentinel)
         fn = _registered_inlet()
         out = asyncio.run(fn([{"role": "user", "content": "hi"}], None))
         assert out is sentinel
 
     def test_a_none_result_is_preserved(self, monkeypatch):
-        monkeypatch.setattr(plug, "_memory_inlet", lambda m, c: None)
+        monkeypatch.setattr(plug, "_memory_inlet", lambda m, c, announce=None: None)
         fn = _registered_inlet()
         assert asyncio.run(fn([{"role": "user", "content": "hi"}], None)) is None
 
     def test_the_body_receives_the_real_arguments(self, monkeypatch):
         seen: dict = {}
 
-        def _fake_body(messages, ctx):
+        def _fake_body(messages, ctx, announce=None):
             seen["messages"] = messages
             seen["ctx"] = ctx
             return None

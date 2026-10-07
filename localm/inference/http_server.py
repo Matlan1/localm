@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, List, Optional
+from typing import AsyncIterator, Callable, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -50,8 +50,8 @@ from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
-    COMPACTING_STATUS, ChatChunk, ChatResponse,
-    FullChoice, Message, STATUS_CODE_BY_TEXT, UsageInfo,
+    COMPACTING_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
+    FullChoice, Message, STATUS_CODE_BY_TEXT, StreamChoice, UsageInfo,
     WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
 
@@ -4422,6 +4422,143 @@ async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[
             _unpin(engine)
 
 
+# How long a streaming chat request may spend preparing (loading the model,
+# running inlet hooks, checking the request) before its stream is opened early
+# to report what it is doing.
+PREP_STATUS_GRACE_S = 0.4
+
+# Interval between SSE keepalive comments while a request is still preparing.
+PREP_KEEPALIVE_S = 15.0
+
+
+class PrepProgress:
+    """The live status text of one chat request's preparation phase.
+
+    ``set`` and ``wait_changed`` must be called on the event loop thread."""
+
+    def __init__(self) -> None:
+        self.text: Optional[str] = None
+        self._changed = asyncio.Event()
+
+    def set(self, text: str) -> None:
+        if text != self.text:
+            self.text = text
+            self._changed.set()
+
+    async def wait_changed(self, task: "asyncio.Future", timeout: float) -> None:
+        """Return when the text changes, *task* finishes, or *timeout* passes."""
+        self._changed.clear()
+        waiter = asyncio.ensure_future(self._changed.wait())
+        try:
+            await asyncio.wait({task, waiter}, timeout=timeout,
+                               return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+
+
+def release_prepared_on_done(task: "asyncio.Future", engine_of) -> None:
+    """Unpin the engine a preparation *task* pinned, once it finishes, for a
+    caller that will never stream it. ``engine_of(result)`` returns that
+    engine, or None when the result holds no pin. A failed or cancelled task
+    holds no pin."""
+    def _release(t: "asyncio.Future") -> None:
+        if t.cancelled() or t.exception() is not None:
+            return
+        engine = engine_of(t.result())
+        if engine is not None:
+            _unpin(engine)
+    if task.done():
+        _release(task)
+    else:
+        task.add_done_callback(_release)
+
+
+async def stream_after_prep(
+    task: "asyncio.Future",
+    progress: PrepProgress,
+    model_id: str,
+    start_stream: Callable[[object, str], AsyncIterator[str]],
+    *,
+    engine_of: Callable[[object], Optional[Engine]],
+    headers_of: Callable[[object], dict],
+) -> AsyncIterator[str]:
+    """SSE body for a chat request whose preparation outlasted
+    ``PREP_STATUS_GRACE_S``: a role chunk, a status chunk for every change of
+    *progress*, then the reply.
+
+    *task* resolves to the prepared request, which holds an engine pin.
+    ``start_stream(prepared, chunk_id)`` returns the reply's SSE lines and
+    takes over that pin. ``headers_of(prepared)`` is sent as a chunk carrying
+    ``localm_headers`` (the response headers the early stream could not set)
+    when non-empty. A preparation that raises ends the stream with its message
+    as an error reply (``finish_reason: "error"``) whose terminal chunk carries
+    ``localm_error: {"status": <HTTP status>, "detail": <message>}``. A client
+    that disconnects before the reply starts leaves the preparation running;
+    its pin is released when it finishes."""
+    chunk_id = make_chunk_id()
+    ts = int(time.time())
+    handed = False
+    try:
+        role = ChatChunk(id=chunk_id, created=ts, model=model_id,
+                         choices=[StreamChoice(delta=ChoiceDelta(role="assistant"))])
+        yield f"data: {role.model_dump_json()}\n\n"
+        shown: Optional[str] = None
+        while True:
+            if progress.text is not None and progress.text != shown:
+                shown = progress.text
+                status = ChatChunk.status_chunk(shown, model_id, chunk_id, ts)
+                yield f"data: {status.model_dump_json()}\n\n"
+            if task.done():
+                break
+            before = progress.text
+            await progress.wait_changed(task, PREP_KEEPALIVE_S)
+            if not task.done() and progress.text == before:
+                yield ": keepalive\n\n"
+        try:
+            prepared = task.result()
+        except HTTPException as e:
+            detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)
+            for line in _prep_error_lines(detail, e.status_code, model_id, chunk_id, ts):
+                yield line
+            return
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("chat request preparation failed")
+            for line in _prep_error_lines(
+                    inference_error_text(e).strip(), 500, model_id, chunk_id, ts):
+                yield line
+            return
+        meta = headers_of(prepared)
+        if meta:
+            yield "data: " + json.dumps({
+                "id": chunk_id, "object": "chat.completion.chunk", "created": ts,
+                "model": model_id,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                "localm_headers": meta,
+            }) + "\n\n"
+        handed = True
+        inner = start_stream(prepared, chunk_id)
+        try:
+            async for line in inner:
+                yield line
+        finally:
+            await inner.aclose()
+    finally:
+        if not handed:
+            release_prepared_on_done(task, engine_of)
+
+
+def _prep_error_lines(detail: str, status: int, model_id: str, chunk_id: str,
+                      ts: int) -> list:
+    """The error reply and terminal lines that end an early-opened stream."""
+    err = ChatChunk.token(detail, model_id, chunk_id, ts)
+    done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error").model_dump()
+    done["localm_error"] = {"status": status, "detail": detail}
+    return [f"data: {err.model_dump_json()}\n\n",
+            "data: " + json.dumps(done) + "\n\n",
+            "data: [DONE]\n\n"]
+
+
 async def _stream_sse(
     engine: Engine,
     messages: list,
@@ -4433,9 +4570,14 @@ async def _stream_sse(
     ctx=None,
     prompt_tokens: Optional[int] = None,
     compact: bool = False,
+    chunk_id: Optional[str] = None,
+    role_sent: bool = False,
     **gen_kwargs,
 ) -> AsyncIterator[str]:
     """Stream the reply to *messages* as SSE ``data:`` lines.
+
+    *chunk_id* reuses the id of a stream the caller already opened, and
+    *role_sent* skips the role chunk that caller already sent.
 
     With *compact* (or, when *prompt_tokens* is not given, when the prompt
     nearly fills the context), the conversation is compacted after the role
@@ -4444,10 +4586,9 @@ async def _stream_sse(
     the refusal as an error reply and no generation."""
     from localm.inference.compact import compactable
     from localm.inference.gbnf import think_exit_marker
-    from localm.inference.protocol import ChoiceDelta, StreamChoice
     from localm.textnorm import ThinkSplitter
 
-    chunk_id = make_chunk_id()
+    chunk_id = chunk_id or make_chunk_id()
     ts = int(time.time())
     # route <think> reasoning into delta.reasoning_content; a tool call the lazy
     # grammar forced inside an open think block is the reply, not reasoning
@@ -4460,14 +4601,14 @@ async def _stream_sse(
             _needs_compaction(engine.context_capacity(), prompt_tokens, messages)
             and compactable(messages))
 
-    # Role announcement
-    role_chunk = ChatChunk(
-        id=chunk_id,
-        created=ts,
-        model=model_id,
-        choices=[StreamChoice(delta=ChoiceDelta(role="assistant"))],
-    )
-    yield f"data: {role_chunk.model_dump_json()}\n\n"
+    if not role_sent:
+        role_chunk = ChatChunk(
+            id=chunk_id,
+            created=ts,
+            model=model_id,
+            choices=[StreamChoice(delta=ChoiceDelta(role="assistant"))],
+        )
+        yield f"data: {role_chunk.model_dump_json()}\n\n"
 
     if compact:
         compacting = ChatChunk.status_chunk(COMPACTING_STATUS, model_id, chunk_id, ts)

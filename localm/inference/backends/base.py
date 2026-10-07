@@ -205,6 +205,10 @@ VISION_CPU_FALLBACK_STATUS = (
     "GPU vision encode failed; retrying on CPU (this may take longer)..."
 )
 
+# Emitted via on_status while a model is loaded (or reloaded after an unload)
+# before it can answer.
+LOADING_MODEL_STATUS = "Loading model..."
+
 
 # Shown when a grammar is requested of a backend that cannot apply one. Names
 # both routes out: a GGUF model has native grammar support, an HF model needs the

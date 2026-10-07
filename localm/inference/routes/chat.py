@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import time
+from types import SimpleNamespace
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -33,7 +34,9 @@ from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.pretokenizer_guard import count_tokens_or_estimate
 from localm.inference.protocol import (
-    ChatRequest, CompletionRequest, EmbeddingRequest, make_chunk_id,
+    CHECKING_GRAMMAR_STATUS, LOADING_MODEL_STATUS, PROCESSING_PROMPT_STATUS,
+    RUNNING_CHAT_HOOKS_STATUS, ChatRequest, CompletionRequest, EmbeddingRequest,
+    make_chunk_id,
 )
 
 
@@ -61,43 +64,17 @@ def register(app: FastAPI, ctx) -> None:
         The client's own copy of the history is unchanged."""
         return {"X-Localm-Context-Compacted": "1"} if compacted else {}
 
-    @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
-    async def chat_completions(req: ChatRequest, request: Request):
-        from localm import peer_routing
+    def _no_status(_text: str) -> None:
+        return None
 
-        # Plain-dict messages for the backend. Hoisted above engine resolution
-        # because capability routing reads them to decide which model answers.
-        messages = _protocol_messages_to_dicts(req.messages)
-
-        # Capability routing. Blocking (a registry read plus a probe per
-        # candidate), so it runs in an executor. It may replace the model only
-        # when the request is not pinned; plan_capability_route decides that
-        # and never moves a pinned one.
-        _loop = asyncio.get_running_loop()
-        route = await _loop.run_in_executor(
-            None, functools.partial(
-                _hs.plan_capability_route, req.model, messages,
-                req.required_capabilities, pin_model=req.pin_model,
-                min_context=req.min_context))
-
-        # An empty model means "no preference" and resolves the same way the None
-        # default does. Still a 400 when there is nothing to resolve to.
-        if not req.model and route.resolved is None:
-            raise HTTPException(400, "Model parameter is required and cannot be empty")
-
-        # A model with an accepted peer route is answered by that peer, raw,
-        # bypassing local engine resolution entirely.
-        _peer = peer_routing.get_route(route.resolved) if route.resolved else None
-        if _peer is not None:
-            if route.has_gap:
-                from localm.debuglog import logger as _dbg
-                _dbg.info("capability routing: %s (answered by peer %s)",
-                          route.describe(), _peer.instance_id)
-            return await peer_routing.forward(
-                _peer, request, "/v1/chat/completions",
-                body=peer_routing.forward_body(_peer, await request.body()),
-                headers=_capability_route_header(route))
-
+    async def _prepare_chat(req: ChatRequest, request: Request, messages: list,
+                            route, say) -> SimpleNamespace:
+        """Resolve (loading if needed) the engine that answers *req*, run the
+        inlet hooks and every pre-generation check. Returns the prepared request,
+        which holds an engine pin the caller must release; raises HTTPException
+        for a refused request, holding no pin. ``say(text)`` is called with the
+        status of each phase as it starts, on the event loop thread."""
+        say(LOADING_MODEL_STATUS)
         engine = None
         if route.routed:
             load_errors = []
@@ -141,10 +118,9 @@ def register(app: FastAPI, ctx) -> None:
         reported_model = (engine.display_name if route.routed
                           else (req.model or engine.display_name))
         # Pin the engine synchronously, before the inlet or any other await, so a
-        # concurrent model load cannot evict it mid-request. Released in the finally
-        # below, or by _pin_engine at stream end for a streaming response.
+        # concurrent model load cannot evict it mid-request. Released below when
+        # preparation fails, otherwise by whoever answers the prepared request.
         _hs._pin(engine)
-        streaming_handoff = False
         try:
             _touch_activity(engine.display_name)
 
@@ -167,7 +143,9 @@ def register(app: FastAPI, ctx) -> None:
                 )
                 ctx.state["client_id"] = request.headers.get("x-client-id", "")
                 ctx.state["capacity"] = engine.context_capacity()
+                ctx.on_status = say
                 if pipeline.has("inlet"):
+                    say(RUNNING_CHAT_HOOKS_STATUS)
                     messages = await pipeline.run_inlet(messages, ctx)
 
             sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
@@ -177,6 +155,7 @@ def register(app: FastAPI, ctx) -> None:
             # multimodal support is known only after loading, so load first.
             if messages_contain_image(messages) and not engine.supports_images:
                 if not engine.loaded and engine.can_be_multimodal:
+                    say(LOADING_MODEL_STATUS)
                     loop = asyncio.get_running_loop()
                     async with sem:
                         await loop.run_in_executor(None, engine.load)
@@ -223,6 +202,7 @@ def register(app: FastAPI, ctx) -> None:
                 # against an uncapped, growing buffer on every token, so it is rejected
                 # up front. run_in_executor, not a direct call: the probe can block
                 # until its timeout and must not hold the event loop.
+                say(CHECKING_GRAMMAR_STATUS)
                 try:
                     await asyncio.get_running_loop().run_in_executor(
                         None, validate_trigger_patterns, req.grammar_triggers)
@@ -238,6 +218,7 @@ def register(app: FastAPI, ctx) -> None:
             # Reject a malformed grammar with a 400 up front, before streaming starts,
             # so both the stream and non-stream paths get a real 4xx.
             if req.grammar:
+                say(CHECKING_GRAMMAR_STATUS)
                 try:
                     # Pure-Python structural check first and unconditionally, with no
                     # RPC, so it also covers the RunnerBusy-deferred path below.
@@ -275,6 +256,7 @@ def register(app: FastAPI, ctx) -> None:
             # inlet-transformed messages, compact when approaching the ceiling, and
             # reject an oversized request with HTTP 413.
             loop = asyncio.get_running_loop()
+            say(PROCESSING_PROMPT_STATUS)
             try:
                 prompt_tokens = await loop.run_in_executor(
                     None, engine.count_messages_tokens, messages)
@@ -318,43 +300,131 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(
                     413, _hs.context_overflow_detail(prompt_tokens, capacity))
 
-            if req.stream:
-                # Ownership of the pin transfers to _pin_engine, which releases it
-                # when the stream ends - do NOT unpin in the finally below.
-                streaming_handoff = True
-                return StreamingResponse(
-                    _pin_engine(engine, _stream_sse(engine, messages, reported_model, sem,
-                                audit=_audit, transcript=_transcript,
-                                pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens,
-                                compact=compact_in_stream, **gen_kwargs)),
-                    media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "X-Accel-Buffering": "no",
-                        # "used N memories" plus the recall degrade reason; the inlet
-                        # already ran, so ctx.state is populated. No-op when memory
-                        # did not run this turn.
-                        **_memory_used_header(ctx),
-                        # Which model answered and why, when the choice needed
-                        # explaining. No-op otherwise.
-                        **_capability_route_header(route),
-                        **_compacted_header(compacted_here),
-                    },
-                )
-            resp = await _complete(engine, messages, reported_model, sem,
-                                   audit=_audit, transcript=_transcript,
-                                   pipeline=pipeline, ctx=ctx,
-                                   request=request, prompt_tokens=prompt_tokens, **gen_kwargs)
-            for _hk, _hv in _memory_used_header(ctx).items():
-                resp.headers[_hk] = _hv          # same surface, non-streaming
-            for _hk, _hv in _capability_route_header(route).items():
-                resp.headers[_hk] = _hv
-            for _hk, _hv in _compacted_header(compacted_here).items():
-                resp.headers[_hk] = _hv
-            return resp
-        finally:
-            if not streaming_handoff:
-                _hs._unpin(engine)
+        except BaseException:
+            _hs._unpin(engine)
+            raise
+        return SimpleNamespace(
+            engine=engine, messages=messages, reported_model=reported_model,
+            sem=sem, pipeline=pipeline, ctx=ctx, gen_kwargs=gen_kwargs,
+            prompt_tokens=prompt_tokens, compact_in_stream=compact_in_stream,
+            compacted_here=compacted_here, route=route)
+
+    def _prepared_engine(prepared) -> object:
+        return prepared.engine
+
+    def _prepared_headers(prepared) -> dict:
+        """The response headers that report how *prepared* was answered."""
+        return {
+            # "used N memories" plus the recall degrade reason. No-op when
+            # memory did not run this turn.
+            **_memory_used_header(prepared.ctx),
+            # Which model answered and why, when the choice needed explaining.
+            **_capability_route_header(prepared.route),
+            **_compacted_header(prepared.compacted_here),
+        }
+
+    def _start_stream(prepared, chunk_id):
+        """The reply's SSE lines for *prepared*; releases its pin at the end.
+        A *chunk_id* continues a stream whose role chunk was already sent."""
+        return _pin_engine(prepared.engine, _stream_sse(
+            prepared.engine, prepared.messages, prepared.reported_model,
+            prepared.sem, audit=_audit, transcript=_transcript,
+            pipeline=prepared.pipeline, ctx=prepared.ctx,
+            prompt_tokens=prepared.prompt_tokens,
+            compact=prepared.compact_in_stream,
+            chunk_id=chunk_id, role_sent=chunk_id is not None,
+            **prepared.gen_kwargs))
+
+    async def _respond_complete(prepared, request: Request):
+        """The non-streaming reply for *prepared*. Does not release its pin."""
+        engine = prepared.engine
+        messages = prepared.messages
+        reported_model = prepared.reported_model
+        sem = prepared.sem
+        pipeline = prepared.pipeline
+        ctx = prepared.ctx
+        prompt_tokens = prepared.prompt_tokens
+        route = prepared.route
+        compacted_here = prepared.compacted_here
+        gen_kwargs = prepared.gen_kwargs
+        resp = await _complete(engine, messages, reported_model, sem,
+                               audit=_audit, transcript=_transcript,
+                               pipeline=pipeline, ctx=ctx,
+                               request=request, prompt_tokens=prompt_tokens, **gen_kwargs)
+        for _hk, _hv in _memory_used_header(ctx).items():
+            resp.headers[_hk] = _hv          # same surface, non-streaming
+        for _hk, _hv in _capability_route_header(route).items():
+            resp.headers[_hk] = _hv
+        for _hk, _hv in _compacted_header(compacted_here).items():
+            resp.headers[_hk] = _hv
+        return resp
+
+    @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
+    async def chat_completions(req: ChatRequest, request: Request):
+        from localm import peer_routing
+
+        # Plain-dict messages for the backend. Hoisted above engine resolution
+        # because capability routing reads them to decide which model answers.
+        messages = _protocol_messages_to_dicts(req.messages)
+
+        # Capability routing. Blocking (a registry read plus a probe per
+        # candidate), so it runs in an executor. It may replace the model only
+        # when the request is not pinned; plan_capability_route decides that
+        # and never moves a pinned one.
+        _loop = asyncio.get_running_loop()
+        route = await _loop.run_in_executor(
+            None, functools.partial(
+                _hs.plan_capability_route, req.model, messages,
+                req.required_capabilities, pin_model=req.pin_model,
+                min_context=req.min_context))
+
+        # An empty model means "no preference" and resolves the same way the None
+        # default does. Still a 400 when there is nothing to resolve to.
+        if not req.model and route.resolved is None:
+            raise HTTPException(400, "Model parameter is required and cannot be empty")
+
+        # A model with an accepted peer route is answered by that peer, raw,
+        # bypassing local engine resolution entirely.
+        _peer = peer_routing.get_route(route.resolved) if route.resolved else None
+        if _peer is not None:
+            if route.has_gap:
+                from localm.debuglog import logger as _dbg
+                _dbg.info("capability routing: %s (answered by peer %s)",
+                          route.describe(), _peer.instance_id)
+            return await peer_routing.forward(
+                _peer, request, "/v1/chat/completions",
+                body=peer_routing.forward_body(_peer, await request.body()),
+                headers=_capability_route_header(route))
+
+        if not req.stream:
+            prepared = await _prepare_chat(req, request, messages, route, _no_status)
+            try:
+                return await _respond_complete(prepared, request)
+            finally:
+                _hs._unpin(prepared.engine)
+
+        # Preparation runs as a task. When it outlasts the grace period, the
+        # stream opens at once and reports each phase until the reply starts.
+        progress = _hs.PrepProgress()
+        task = asyncio.ensure_future(
+            _prepare_chat(req, request, messages, route, progress.set))
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=_hs.PREP_STATUS_GRACE_S)
+        except BaseException:
+            _hs.release_prepared_on_done(task, _prepared_engine)
+            raise
+        sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        if not done:
+            return StreamingResponse(
+                _hs.stream_after_prep(
+                    task, progress, route.resolved or req.model or "localm",
+                    _start_stream, engine_of=_prepared_engine,
+                    headers_of=_prepared_headers),
+                media_type="text/event-stream", headers=sse_headers)
+        prepared = task.result()
+        return StreamingResponse(
+            _start_stream(prepared, None), media_type="text/event-stream",
+            headers={**sse_headers, **_prepared_headers(prepared)})
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
     async def embeddings(req: EmbeddingRequest):
