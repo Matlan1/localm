@@ -158,6 +158,14 @@ class TestAutoChoice:
         assert b.last_gpu_sizing["n_cpu_moe_auto"] is False
         assert "gpu layers auto" not in _flat(capsys)
 
+    def test_the_full_offload_need_ignores_an_earlier_automatic_choice(self, tmp_path):
+        b = _backend(_moe_model(tmp_path))
+        with _Vram(_free_fitting(b, 2)):
+            b._effective_gpu_layers()
+            assert b.effective_n_cpu_moe == 2
+            need = b.full_offload_vram_bytes()
+        assert need == b._vram_model_bytes(0) + KV + OVERHEAD
+
     def test_a_reload_sizes_again_from_the_configured_value(self, tmp_path):
         b = _backend(_moe_model(tmp_path))
         with _Vram(_free_fitting(b, 3)):
