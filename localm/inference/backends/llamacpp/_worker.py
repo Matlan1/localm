@@ -47,12 +47,14 @@ class GgufWorker(VramSizingMixin):
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
         main_gpu: Optional[int] = None,
+        mtp_draft_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         self.mtp_enabled = mtp_enabled
+        self.mtp_draft_tokens = mtp_draft_tokens   # None = LlamaCpp's default
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
@@ -120,6 +122,26 @@ class GgufWorker(VramSizingMixin):
         it did not. Per-call: the model itself can still speculate on its next
         request."""
         return str(getattr(self._llm, "mtp_call_status", "") or "") if self._llm is not None else ""
+
+    @property
+    def mtp_drafted(self) -> int:
+        """Draft tokens the call that just finished sent to verification."""
+        return int(getattr(self._llm, "mtp_drafted", 0) or 0) if self._llm is not None else 0
+
+    @property
+    def mtp_accepted(self) -> int:
+        """How many of the last call's draft tokens the target model accepted."""
+        return int(getattr(self._llm, "mtp_accepted", 0) or 0) if self._llm is not None else 0
+
+    @property
+    def mtp_steps(self) -> int:
+        """Verification batches the last call decoded."""
+        return int(getattr(self._llm, "mtp_steps", 0) or 0) if self._llm is not None else 0
+
+    @property
+    def mtp_paused_steps(self) -> int:
+        """Steps the last call ran without drafting because drafting was measured slower."""
+        return int(getattr(self._llm, "mtp_paused_steps", 0) or 0) if self._llm is not None else 0
 
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
@@ -189,6 +211,8 @@ class GgufWorker(VramSizingMixin):
             n_cpu_moe=self.n_cpu_moe,
             mtp_enabled=self.mtp_enabled,
             verbose=False,
+            **({"mtp_draft_tokens": self.mtp_draft_tokens}
+               if self.mtp_draft_tokens is not None else {}),
         )
         self._loaded = True
         return {

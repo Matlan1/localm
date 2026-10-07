@@ -82,6 +82,29 @@ def _resolve_vram_overhead_bytes(cfg: dict) -> int:
         return VRAM_OVERHEAD_BYTES
 
 
+def _resolve_mtp_draft_tokens(cfg: dict, override: Optional[int]) -> int:
+    """Draft tokens per MTP step: *override* when given, else the
+    ``mtp_draft_tokens`` config key, else the default; clamped to 1..max.
+
+    A hand-edited value that is not a number is logged under --debug and the
+    default is used."""
+    from localm.inference.backends.llamacpp.llama import (
+        MTP_DRAFT_TOKENS_DEFAULT,
+        MTP_DRAFT_TOKENS_MAX,
+    )
+    raw = override if override is not None else cfg.get("mtp_draft_tokens")
+    if raw is None:
+        return MTP_DRAFT_TOKENS_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("mtp_draft_tokens is set but not a valid number (%r); "
+                     "using the default %d", raw, MTP_DRAFT_TOKENS_DEFAULT)
+        return MTP_DRAFT_TOKENS_DEFAULT
+    return max(1, min(value, MTP_DRAFT_TOKENS_MAX))
+
+
 def create_backend(
     model_path: str,
     *,
@@ -90,6 +113,7 @@ def create_backend(
     n_gpu_layers: Optional[int] = None,
     device: Optional[str] = None,
     mtp_enabled: Optional[bool] = None,
+    mtp_draft_tokens: Optional[int] = None,
 ) -> BaseBackend:
     """
     Return the appropriate backend for the given model path, without loading it.
@@ -100,6 +124,8 @@ def create_backend(
     mtp_enabled:  None reads the ``mtp_enabled`` config key; True or False
                   overrides it for this backend only, leaving the stored
                   setting untouched.
+    mtp_draft_tokens: None reads the ``mtp_draft_tokens`` config key; an int
+                  overrides it the same way.
     """
     cfg = load_config()
 
@@ -121,6 +147,7 @@ def create_backend(
             n_cpu_moe=int(cfg.get("n_cpu_moe", 0) or 0),
             mtp_enabled=(bool(cfg.get("mtp_enabled", False))
                          if mtp_enabled is None else bool(mtp_enabled)),
+            mtp_draft_tokens=_resolve_mtp_draft_tokens(cfg, mtp_draft_tokens),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
         )
 
@@ -200,6 +227,7 @@ class Engine:
         device: Optional[str] = None,
         display_name: Optional[str] = None,
         mtp_enabled: Optional[bool] = None,
+        mtp_draft_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
@@ -214,6 +242,7 @@ class Engine:
             n_gpu_layers=n_gpu_layers,
             device=device,
             mtp_enabled=mtp_enabled,
+            mtp_draft_tokens=mtp_draft_tokens,
         )
         self.active_requests = 0
         # Set True by an unload/eviction path for the duration of the native
@@ -305,6 +334,12 @@ class Engine:
     def supports_mtp(self) -> bool:
         """True when the loaded model has active Multi-Token Prediction (MTP) heads."""
         return getattr(self._backend, "supports_mtp", False)
+
+    def mtp_usage(self) -> Optional[dict]:
+        """MTP figures for the reply that just finished (see GgufBackend.last_mtp_usage),
+        or None when the backend reports none."""
+        usage = getattr(self._backend, "last_mtp_usage", None)
+        return usage if isinstance(usage, dict) else None
 
     def count_tokens(self, text: str) -> int:
         """

@@ -450,6 +450,9 @@ DEFAULT_CONFIG: dict = {
     # measures it per model rather than predicting it from the model's size.
     # See test_mtp_default_is_off_until_speculation_is_measured_to_pay.
     "mtp_enabled": False,
+    # Draft tokens one MTP speculation step proposes (1-4). Each step costs one
+    # small draft decode per token plus one verification decode of all of them.
+    "mtp_draft_tokens": 1,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
     # model weights for the GGUF backend, before deciding how many layers fit or
     # refusing outright. This is NOT a discardable safety margin - it funds the

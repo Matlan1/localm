@@ -101,9 +101,10 @@ localm bench-mtp mymodel
 localm bench-mtp mymodel --gen-tokens 256   # tokens per round (default 160)
 localm bench-mtp mymodel --rounds 3         # measurements to average (default 2)
 localm bench-mtp mymodel --ctx 8192 --gpu-layers 99
+localm bench-mtp mymodel --draft-tokens 3   # draft tokens per step for the MTP runs
 ```
 
-Loads the model twice per round, once with Multi-Token Prediction off and once on, and reports which was faster. Nothing is written to your config; the setting is left as it was.
+Loads the model twice per round, once with Multi-Token Prediction off and once on, and reports which was faster, how many drafted tokens the model accepted, and whether the replies were identical to MTP off. Nothing is written to your config; the settings are left as they were.
 
 ---
 

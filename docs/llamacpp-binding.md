@@ -395,17 +395,17 @@ accept advances the grammar sampler's parse state twice per token (it throws
 Some models are trained with an extra "next-n" head that predicts more than
 one token ahead (DeepSeek-V3/R1, the Qwen3.5/3.6 MTP family, Nemotron,
 GLM-DSA, among others - see `MTP_GRAPH_ARCHITECTURES` below for the exact
-set this runtime can drive). `LlamaCpp` can use that head to draft a token
-speculatively and verify it in the same pass as the next real token,
-producing two tokens per verification when the draft is accepted, without a
-separate draft model.
+set this runtime can drive). `LlamaCpp` can use that head to draft tokens
+speculatively and verify them in the same pass as the next real token,
+producing several tokens per verification when the drafts are accepted,
+without a separate draft model.
 
 **Off by default** - `mtp_enabled=False` (config key `mtp_enabled`, one
-setting shared by `GgufBackend`/`GgufWorker`). A rejected draft still costs a
-two-token verification batch every step, which pays only once decode is
-compute-bound enough that verifying two tokens costs about what verifying one
-does; measured slightly slower on a small model. Turn it on per model and
-keep it if it helps.
+setting shared by `GgufBackend`/`GgufWorker`). Each step costs a small draft
+decode per drafted token plus one verification batch, which pays only while
+verifying several tokens costs about what verifying one does (the whole model
+on the GPU). `localm bench-mtp` measures it per model. `mtp_draft_tokens`
+(1-4, default 1) sets how many tokens one step drafts.
 
 **Detection is a capability test, not a metadata test**
 (`llama_model_mtp_support()` in `_api.py`). Both of these must hold:
@@ -424,9 +424,9 @@ keep it if it helps.
   with its own VRAM-pinned KV cache rather than a draft head -
   `llama_model_mtp_support` refuses it instead of allocating one.
 
-When both hold, `LlamaCpp` opens a second, small context (capped at
-`min(n_ctx, 2048)`) as the draft head's own KV cache. Two more things gate
-whether it actually activates:
+When both hold, `LlamaCpp` opens a second context, sized like the main one and
+recreated whenever the main one grows, as the draft head's own KV cache. Two
+more things gate whether it actually activates:
 
 - **Feeding the hidden state.** The draft head predicts from the target
   model's hidden state at the previous position, not from the token
@@ -444,28 +444,55 @@ whether it actually activates:
 - **Rewinding a rejected draft.** Speculation writes a draft token into the
   cache and removes it again when the target rejects it. A cache holding
   recurrent state (the Qwen3.5/3.6 MTP family, Nemotron, DeepSeek V4) cannot
-  be truncated at all unless it was asked to keep per-token snapshots, so
-  the context requests two of them (`n_rs_seq`, on builds whose context
-  params struct has the field) whenever MTP is enabled - enough for a
-  one-token draft with headroom, and a no-op on a model with no recurrent
-  layers. Without this, those models declined MTP outright rather than
-  running it.
+  be truncated at all unless it was asked to keep per-token snapshots, and
+  rolling back r positions needs r snapshots. The context requests
+  `max(2, mtp_draft_tokens)` of them (`n_rs_seq`, on builds whose context
+  params struct has the field) whenever MTP is enabled, a no-op on a model
+  with no recurrent layers. Each snapshot is one more copy of the recurrent
+  state.
 
-**Drafting and verification, per step:** `llama_sampler_init_greedy()`
-proposes one draft token from the draft context; the already-decided token
-and the draft token are then decoded together in one batch on the MAIN
-context, and the REQUEST's own sampler chain - not a bare greedy sampler -
-decides what each position actually emits, so temperature, top-k/top-p and
-the repetition penalty apply identically whether or not a draft is accepted.
-An accepted draft advances the draft context's own cache to match; a
-rejected one is removed from the main context's cache
-(`llama_memory_seq_rm`), and if that removal itself fails, MTP is disabled
-for the rest of the loaded model's life (not just the current generation) -
-speculation needs that rewind, and the flag is an instance attribute that
-persists across every later `_generate()` call until the model is reloaded. **Drafting never runs while a grammar is active** - a
-mis-sequenced `llama_sampler_accept` on a grammar sampler throws across the
-C ABI, so a constrained request always takes the plain, one-token-at-a-time
-path.
+**Drafting and verification, per step.** The token just sampled sits at
+position `pos`. One draft decode carries it, paired with the target's hidden
+state for `pos - 1`, together with any accepted tokens the draft cache has not
+seen yet (each paired with the hidden state of the position before it, with no
+output row). Further drafts are decoded from the draft head's own next-n row,
+up to `mtp_draft_tokens`, stopping at an end-of-generation token; the draft
+cache is then trimmed back to `pos`. Drafts are picked greedily by a sampler
+chain attached to the draft context with `llama_set_sampler`, so the choice is
+made inside `llama_decode` and no vocabulary-sized logits row is copied out
+(a runtime without backend sampling picks the same token on the CPU).
+
+The token and its drafts are then decoded in ONE batch on the MAIN context,
+and the REQUEST's own sampler chain - not a bare greedy sampler - samples each
+row in turn: the drafts it agrees with are emitted, and at the first mismatch
+its own token is emitted instead and the rejected rows are removed from the
+main cache (`llama_memory_seq_rm`). Temperature, top-k/top-p and the
+repetition penalty apply identically whether or not a draft is accepted, and
+every token the sampler sees is a token that is emitted. Verifying several
+tokens in one batch runs different kernels than decoding them one by one, and
+their results can differ in the last bits, so where the two most likely tokens
+are nearly tied (measured: a top-2 logit gap around 0.1) the reply can take the
+other one; with one or two draft tokens no such divergence was seen on the
+test models, with four it was. If the removal fails,
+MTP is disabled for the rest of the loaded model's life (not just the current
+generation) - speculation needs that rewind. **Drafting never runs while a
+grammar is active** - a mis-sequenced `llama_sampler_accept` on a grammar
+sampler throws across the C ABI, so a constrained request always takes the
+plain, one-token-at-a-time path (the draft cache is still kept in step).
+
+Prefill mirrors each main chunk into the draft cache with the hidden states
+shifted by one position, and the first draft of a reply reads the hidden state
+of the last prompt token.
+
+**Pacing.** Whether speculation pays depends on the model (on a small model the
+vocabulary-sized output layer makes a draft step and an extra verification row
+relatively expensive), on how often drafts are accepted (lower when sampling
+with a temperature) and on how busy the machine is. Each loaded model keeps a
+`_DraftPacer` that measures the time per emitted token of speculative steps and
+of plain one-token steps as the reply runs (one step in 24 runs plain to keep
+that figure current). When speculation is the slower of the two it is paused
+for 32 steps, doubling on each consecutive pause up to 512, and then measured
+again. Paused steps are reported per reply (`mtp_paused_steps`, `usage.mtp`).
 
 **Why it declines**, recorded in `mtp_status` and logged
 (`MTP: active=%s status=%s`) rather than surfaced through an HTTP route yet:
@@ -477,8 +504,8 @@ MTP for this model, distinct from the rewind case below);
 rejected draft, checked at load and again during generation);
 `no-hidden-state-api` / `no-ctx-type-field` / `hidden-state-refused` /
 `context-refused` (this runtime cannot build or feed a draft context);
-`draft-context-full` (the conversation outgrew the capped draft context -
-ordinary decoding continues, the reply does not stop); `draft-prefill-error:*`
+`draft-context-full` (the conversation outgrew the draft context - ordinary
+decoding continues, the reply does not stop); `draft-prefill-error:*`
 / `draft-prefill-failed:*` / `draft-trim-error:*` for a failed draft-side
 prefill or cache trim; and `error:<ExceptionName>` for any other exception
 raised while setting up the draft context. `Engine.supports_mtp` /
@@ -494,6 +521,14 @@ Without this, a session whose speculation stopped hours into a conversation
 capability it had at load time. `mtp_active` is the narrower, per-call answer:
 False on a turn carrying an image even while `supports_mtp` stays True, since
 the same model speculates normally on its next text turn.
+
+Per call the child also reports `mtp_call_status` (why this reply stopped
+drafting partway: `draft-decode-failed:*`, `draft-decode-error:*`,
+`draft-catchup-failed:*`, `draft-catchup-error:*`, `draft-trim-failed`,
+`draft-out-of-step`; the next reply drafts again) and `mtp_drafted` /
+`mtp_accepted` (draft tokens sent to verification and kept).
+`GgufBackend.last_mtp_usage` turns these into the `usage.mtp` object of the
+chat API (see server-api.md), which the GUI shows next to the reply's tok/s.
 
 ### Stop-string filter (`_filtered_stream`)
 

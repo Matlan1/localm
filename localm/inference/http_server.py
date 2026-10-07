@@ -51,8 +51,8 @@ from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
     COMPACTING_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
-    FullChoice, Message, PROCESSING_PROMPT_STATUS, STATUS_CODE_BY_TEXT, StreamChoice,
-    UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
+    FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, STATUS_CODE_BY_TEXT,
+    StreamChoice, UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
 
 # Models whose last load failed; capability routing leaves them out of its
@@ -4186,6 +4186,19 @@ def _engine_finish_reason(engine) -> str:
     return fr if isinstance(fr, str) else "stop"
 
 
+def _mtp_usage(engine) -> Optional[MtpUsage]:
+    """The last reply's MTP figures, or None when the engine reports none
+    (MTP off, a non-GGUF backend, or a minimal engine without the method)."""
+    fn = getattr(engine, "mtp_usage", None)
+    data = fn() if callable(fn) else None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return MtpUsage(**data)
+    except (TypeError, ValueError):
+        return None
+
+
 def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
     """Time to first token in milliseconds, or None if nothing was generated."""
     if first_token_at is None:
@@ -4837,6 +4850,7 @@ async def _stream_sse(
         tokens_per_sec=_tokens_per_sec(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=engine.context_capacity(),
+        mtp=_mtp_usage(engine),
     )
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
@@ -5515,6 +5529,7 @@ async def _complete(
         tokens_per_sec=_tokens_per_sec(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=capacity,
+        mtp=_mtp_usage(engine),
     )
 
     response = ChatResponse(

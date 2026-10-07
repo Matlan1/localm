@@ -210,8 +210,8 @@ macOS; no llama-cpp-python). Key behaviour:
 - **Sampler chain**: grammar (GBNF), repetition penalty, top-k, top-p,
   min-p, temperature, dist; greedy when temperature is 0.
 - **Multi-Token Prediction (MTP) speculative decoding**: a model trained
-  with its own next-n draft head can draft and verify two tokens per step
-  through a dedicated draft context, instead of a separate draft model. Off
+  with its own next-n draft head can draft tokens and verify them in one
+  batch through a dedicated draft context, instead of a separate draft model. Off
   by default (`mtp_enabled`) and engages only where the runtime can build
   and feed a real draft head for that model; see
   [llamacpp-binding.md](llamacpp-binding.md) for the mechanism.

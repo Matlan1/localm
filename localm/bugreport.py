@@ -459,7 +459,7 @@ def _scrub_secrets(text: str) -> str:
 # never config.json.
 _SAFE_CONFIG_KEYS = (
     "binary_dir", "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto", "n_gpu_layers",
-    "n_gpu_layers_auto", "n_cpu_moe", "mtp_enabled", "main_gpu_index",
+    "n_gpu_layers_auto", "n_cpu_moe", "mtp_enabled", "mtp_draft_tokens", "main_gpu_index",
     "gpu_split_indices", "gpu_split_ratios", "max_tokens",
     "model_swap_policy", "idle_unload_seconds", "reload_llm_after_imagine",
     "port", "require_auth", "cors_origins", "mode", "chat_mode", "coder_mode",

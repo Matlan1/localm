@@ -17,7 +17,9 @@ pointer to a fake truthy value. tests/conftest.py's autouse
 _neutralise_bare_llama_pointers fixture calls neutralise_fake_pointers()
 after every test, so no test module needs its own teardown for this.
 """
+import ctypes
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from localm.inference.backends.llamacpp.llama import LlamaCpp
@@ -82,3 +84,42 @@ def neutralise_fake_pointers() -> None:
         llm._ctx_ptr = None
         llm._mtp_ctx_ptr = None
     _LIVE.clear()
+
+
+def stub_mtp_native(llm: LlamaCpp) -> LlamaCpp:
+    """Give a bare LlamaCpp the draft-path state and replace the ctypes-level
+    draft helpers, which cannot run against a mock api.
+
+    A draft decode reaches ``api.llama_decode(llm._mtp_ctx_ptr, batch)`` with a
+    SimpleNamespace batch carrying ``tokens`` and ``pos``. Hidden-state rows
+    are zeros, and _capture_h records the position it captured.
+    """
+    from localm.inference.backends.llamacpp import llama as llama_mod
+
+    llm._mtp_wants_h = True
+    llm._n_embd = 4
+    llm._h_buf = (ctypes.c_float * 4)()
+    llm._pending_h = llm._h_buf
+
+    def capture(row, pos):
+        llm._pending_h = llm._h_buf
+        llm._pending_h_pos = pos
+        return True
+
+    llm._capture_h = capture
+    llm._main_h_rows = lambda n: [None] * n
+    llm._decode_draft = lambda tokens, pos0, h_rows, output_last=True: (
+        llama_mod.api.llama_decode(
+            llm._mtp_ctx_ptr,
+            SimpleNamespace(tokens=list(tokens), pos=pos0, n_tokens=len(tokens))))
+    return llm
+
+
+def prime_after_prefill(llm: LlamaCpp, tokens) -> None:
+    """Leave *llm* as a successful prefill of *tokens* does: both caches hold
+    them and the last token's hidden state is held for the first draft."""
+    llm._cached_tokens = list(tokens)
+    llm._pending_h_pos = len(tokens) - 1
+    llm._draft_pos = len(tokens)
+    llm._queued_tokens = []
+    llm._mtp_draft_stale = False
