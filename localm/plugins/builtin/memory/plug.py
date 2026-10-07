@@ -1416,8 +1416,9 @@ def _memory_inlet(messages, ctx, announce=None):
     read-only recall for chat (`memory_recall_in_privacy` + ..._chat) - and even
     then it only READS: no reinforcement, no migration, no write. Best-effort: any
     failure is logged at debug and skipped (the pipeline also isolates it).
-    *announce*, when given, is called once with no arguments just before a
-    recall starts."""
+    *announce*, when given, is called with ``DOWNLOADING_EMBEDDER_STATUS``
+    before a recall that first downloads the embedding model, and with
+    ``RECALLING_MEMORY_STATUS`` just before the recall itself."""
     if ctx is not None and ctx.state.get("client_id") == "coder":
         return None
     if not _recall_enabled():
@@ -1431,8 +1432,16 @@ def _memory_inlet(messages, ctx, announce=None):
         query = _recall_query(messages)
         if not query.strip():
             return None
+        from localm.inference.protocol import (
+            DOWNLOADING_EMBEDDER_STATUS, RECALLING_MEMORY_STATUS,
+        )
         if announce is not None:
-            announce()
+            from localm.inference.embedder import will_download_on_first_use
+            if will_download_on_first_use():
+                announce(DOWNLOADING_EMBEDDER_STATUS)
+        embed_fn = _embed_fn()
+        if announce is not None:
+            announce(RECALLING_MEMORY_STATUS)
         # Resolve the SAME namespace the write path and the outlet write to
         # (ADMIN/owner -> "owner"), so an owner's saved memories are recalled in
         # protected mode.
@@ -1442,7 +1451,7 @@ def _memory_inlet(messages, ctx, announce=None):
             _migrate_legacy(store)                 # migration is a write
         diag: dict = {}
         block_records = store.recall(query, k=_mem.MAX_INJECT,
-                                     embed_fn=_embed_fn(), reinforce=writes_ok,
+                                     embed_fn=embed_fn, reinforce=writes_ok,
                                      diagnostics=diag)
         if not block_records and not writes_ok:
             # Privacy-recall opt-in with an un-migrated store: read the legacy flat
@@ -1487,16 +1496,16 @@ async def _memory_inlet_hook(messages, ctx):
     run_inlet awaits an awaitable hook.
 
     A recall that runs is reported through ``ctx.on_status`` as
-    ``RECALLING_MEMORY_STATUS``.
+    ``RECALLING_MEMORY_STATUS``, preceded by ``DOWNLOADING_EMBEDDER_STATUS``
+    when it first downloads the embedding model.
     """
     announce = None
     on_status = getattr(ctx, "on_status", None)
     if on_status is not None:
-        from localm.inference.protocol import RECALLING_MEMORY_STATUS
         loop = asyncio.get_running_loop()
 
-        def announce() -> None:
-            loop.call_soon_threadsafe(on_status, RECALLING_MEMORY_STATUS)
+        def announce(status: str) -> None:
+            loop.call_soon_threadsafe(on_status, status)
     return await _off_loop(lambda: _memory_inlet(messages, ctx, announce=announce))
 
 

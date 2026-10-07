@@ -1630,7 +1630,7 @@ class Collection:
         failed: list = []
         embed_broken = embed_fn is None
 
-        for f in files:
+        for index, f in enumerate(files, 1):
             key = str(f)
             # An EXPLICITLY-NAMED non-secret binary; a folder walk already filters
             # these out in _expand, so only a direct pick reaches here. Reported as
@@ -1662,6 +1662,7 @@ class Collection:
                     and known.get("hash") == digest:
                 skipped += 1
                 continue
+            say(f"[{index}/{len(files)}] reading {f.name}...")
             try:
                 text = extract_text(f, describe_image_fn=describe_image_fn)
             except ExtractError as e:
@@ -1679,6 +1680,8 @@ class Collection:
 
             vectors: list = [None] * len(new_chunks)
             if not embed_broken and new_chunks:
+                say(f"[{index}/{len(files)}] embedding {f.name} "
+                    f"({len(new_chunks)} chunks)...")
                 try:
                     vecs = embed_fn([c["text"] for c in new_chunks])
                 except Exception as e:

@@ -247,3 +247,33 @@ class TestUploadReportsKnownTotalsAtJobStart:
 
         progress = [e for e in job._history if e.get("type") == "progress"]
         assert progress[0]["total_bytes"] == 300
+
+
+# --------------------------------------------------------------------------- #
+#  add_paths says what it is doing to each file before doing it               #
+# --------------------------------------------------------------------------- #
+
+class TestAddPathsPerPhaseLines:
+    def test_reading_and_embedding_are_said_before_each_step(self, tmp_path):
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha " * 50, encoding="utf-8")
+        (docs / "b.txt").write_text("beta " * 50, encoding="utf-8")
+        c = Collection("kb", base=tmp_path / "store").create()
+        events = []
+
+        def _embed(texts):
+            events.append("embed")
+            return [[0.1] * 8 for _ in texts]
+
+        c.add_paths([str(docs / "a.txt"), str(docs / "b.txt")], embed_fn=_embed,
+                    on_progress=lambda text, **kw: events.append(text))
+        reading = [i for i, e in enumerate(events) if "reading" in e]
+        embedding = [i for i, e in enumerate(events) if "embedding" in e]
+        assert [events[i] for i in reading] == ["[1/2] reading a.txt...",
+                                                "[2/2] reading b.txt..."]
+        assert len(embedding) == 2
+        assert events[embedding[0]].startswith("[1/2] embedding a.txt (")
+        for i in embedding:
+            assert events[i + 1] == "embed"
+        assert reading[1] > embedding[0]

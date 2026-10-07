@@ -317,8 +317,12 @@ def _record_resolve_success(spec: str) -> None:
     _LAST_RESOLVE_WARNED = None
 
 
-def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Optional[str]:
+def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
+                                  on_progress=None) -> Optional[str]:
     """Resolve the configured embedding model to a GGUF path, or None.
+
+    ``on_progress(text)``, when given, receives a line every few seconds while
+    a known model downloads, naming the bytes received so far.
 
     Order: an explicit filesystem path -> a registered model name -> a known key
     (downloaded into <home>/models/embeddings if missing and the net policy allows).
@@ -408,14 +412,56 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     if dest.is_file():
         _record_resolve_success(spec)
         return str(dest)
-    result = _download_known(spec, repo, filename, dest, allow_download)
+    result = _download_known(spec, repo, filename, dest, allow_download,
+                             on_progress=on_progress)
     if result:
         _record_resolve_success(spec)
     return result
 
 
+def _download_progress_class(label: str, on_progress, every: float = 2.0):
+    """A ``tqdm_class`` for ``hf_hub_download`` that draws no bar and passes
+    ``on_progress`` a line naming *label* and the bytes received, at most
+    every *every* seconds. A raising ``on_progress`` is logged and ignored."""
+    import time as _time
+    from huggingface_hub.utils import tqdm as _hf_tqdm
+
+    class _Reporter(_hf_tqdm):
+        def __init__(self, *args, **kwargs):
+            self._report_total = kwargs.get("total")
+            self._report_done = kwargs.get("initial") or 0
+            self._report_at = 0.0
+            kwargs["disable"] = True
+            super().__init__(*args, **kwargs)
+
+        def update(self, n=1):
+            self._report_done += n or 0
+            now = _time.monotonic()
+            if now - self._report_at >= every:
+                self._report_at = now
+                try:
+                    on_progress(download_progress_line(
+                        label, self._report_done, self._report_total))
+                except Exception as e:
+                    logger.debug("download progress callback raised: %s", e)
+            return super().update(n)
+
+    return _Reporter
+
+
+def download_progress_line(label: str, done: int, total: Optional[int]) -> str:
+    """``"Downloading <label>: 12 of 130 MB (9%)..."``, or without the total
+    when it is unknown."""
+    mb = 1024 * 1024
+    if total:
+        return (f"Downloading {label}: {done // mb} of {total // mb} MB "
+                f"({min(100, done * 100 // total)}%)...")
+    return f"Downloading {label}: {done // mb} MB..."
+
+
 def _download_known(name: str, repo: str, filename: str, dest: Path,
-                    allow_download: Optional[bool]) -> Optional[str]:
+                    allow_download: Optional[bool], *,
+                    on_progress=None) -> Optional[str]:
     """Fetch a known embedding GGUF, gated by the network policy.
 
     Every failure path also records into ``last_error()``; both policy
@@ -455,7 +501,11 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         from huggingface_hub import hf_hub_download
         dest.parent.mkdir(parents=True, exist_ok=True)
         logger.info("downloading embedding model %s/%s (one-time)...", repo, filename)
-        got = hf_hub_download(repo, filename, local_dir=str(dest.parent), endpoint=_HF_ENDPOINT)
+        extra = ({"tqdm_class": _download_progress_class(
+                     f"the embedding model {name}", on_progress)}
+                 if on_progress is not None else {})
+        got = hf_hub_download(repo, filename, local_dir=str(dest.parent),
+                              endpoint=_HF_ENDPOINT, **extra)
         # hf may nest under the repo dir; normalise to dest.
         got_p = Path(got)
         if got_p.resolve() != dest.resolve() and got_p.is_file():
@@ -1312,7 +1362,9 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
             # calls does not re-attempt the download on every chunk.
             _TRIED_DOWNLOAD = True
             _emit_stage(on_progress, "Not found locally - attempting a download...")
-            path = resolve_embedding_model_path()
+            path = resolve_embedding_model_path(
+                on_progress=(lambda t: _emit_stage(on_progress, t))
+                if on_progress is not None else None)
         if not path:
             _emit_stage(on_progress, "No embedding model is configured or available.")
             return None
@@ -1432,6 +1484,23 @@ def active_requests() -> int:
     unload_all_models/unload_one_model."""
     with _LOCK:
         return _EMBEDDER.active_requests if _EMBEDDER is not None else 0
+
+
+def will_download_on_first_use() -> bool:
+    """True when the next ``get_embedder()`` call will download the configured
+    model first: nothing is loaded yet, no download was attempted, net_mode is
+    ``allow``, the model is a known key, and its file is not on disk. Does no
+    network I/O."""
+    if _EMBEDDER is not None or _TRIED_DOWNLOAD:
+        return False
+    from localm.netpolicy import network_mode
+    if network_mode() != "allow":
+        return False
+    spec = _current_spec()
+    if spec not in KNOWN_EMBEDDING_MODELS:
+        return False
+    _repo, filename = KNOWN_EMBEDDING_MODELS[spec]
+    return not (_embeddings_dir() / filename).is_file()
 
 
 def last_error() -> Optional[str]:

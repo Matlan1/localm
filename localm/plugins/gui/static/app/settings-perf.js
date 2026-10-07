@@ -2038,7 +2038,10 @@ export async function downloadMemoryEmbedder(btn) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (data.job_id) {
-      const end = await streamJob(data.job_id, () => {});
+      const end = await streamJob(data.job_id, (text) => {
+        const line = String(text || "").trim();
+        if (btn && line) btn.textContent = line;
+      });
       success = end.status === "done";
       toast(success ? "Embedding model ready - semantic recall will resume"
                     : "Embedding model download did not complete", !success);

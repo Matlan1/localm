@@ -17,7 +17,7 @@ from typing import Optional
 import localm.plugins.coder.agent as _agent
 from ..display import (
     console, print_progress_tool_call, print_tool_call, print_tool_error,
-    print_tool_result,
+    print_tool_result, tool_call_text,
 )
 from ..diffutil import (
     compute_multifile_diff, compute_search_replace_diff, compute_tool_diff,
@@ -386,7 +386,10 @@ class _ExecutionMixin:
         if interactive:
             print_tool_call(call.name, call.args)
         elif self.report_progress and self.on_event is None:
-            print_progress_tool_call(call.name, call.args)
+            if self.progress_sink is not None:
+                self._say_progress(tool_call_text(call.name, call.args))
+            else:
+                print_progress_tool_call(call.name, call.args)
         self._emit("tool_call", tool=call.name, args=call.args)
 
         # Patch-mode: intercept write tools, accumulate diffs, do not touch disk.

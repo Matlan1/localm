@@ -49,6 +49,7 @@ from localm.media.comfy_client import (
     comfy_fetch_output,
     comfy_http_error_detail,
     comfy_poll_until_done,
+    comfy_wait_heartbeat,
     comfy_submit_prompt,
     contain_comfy_artifacts,
     default_api_url,
@@ -457,16 +458,11 @@ def generate_video(
 
     _say(f"Rendering {frames} frames ({frames / fps:.1f}s at {fps} fps)…")
 
-    # Poll history until the clip is rendered. Throttle the "Rendering…" line to
-    # once every 15s (the same cadence as before). start_time is taken here (as
-    # the original did) so the sidecar's elapsed_seconds covers poll + download.
+    # Poll history until the clip is rendered, reporting the ComfyUI queue
+    # position while queued and the elapsed rendering time every 15s. start_time
+    # is taken here so the sidecar's elapsed_seconds covers poll + download.
     start_time = time.time()
-    last_said = [0.0]
-
-    def _tick(elapsed: float) -> None:
-        if elapsed - last_said[0] >= 15:
-            _say(f"Rendering… ({int(elapsed)}s elapsed)")
-            last_said[0] = elapsed
+    _tick = comfy_wait_heartbeat(api_url, prompt_id, _say)
 
     status, payload = comfy_poll_until_done(
         api_url, prompt_id,
