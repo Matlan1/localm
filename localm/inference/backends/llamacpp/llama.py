@@ -1066,6 +1066,7 @@ class LlamaCpp:
     mtp_accepted = 0             # how many of those the target model accepted
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
+    mtp_skipped = ""             # why THIS generation could not draft at all: "grammar", "image" or ""
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _clock = time.perf_counter
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
@@ -1780,6 +1781,8 @@ class LlamaCpp:
                 )
 
                 self._mtp_drafting = draft_sampler is not None
+                self.mtp_skipped = ("grammar" if grammar is not None and self._mtp_ctx_ptr is not None
+                                    and self._mtp_usable else "")
                 self.mtp_active_this_call = False
                 self.mtp_call_status = ""
                 self.mtp_drafted = 0
@@ -2151,6 +2154,8 @@ class LlamaCpp:
             # upstream's own driver skips vision batches for the same reason - the
             # draft head reads its hidden state from a batch's embd slot and image
             # embeddings arrive in that same slot.
+            self.mtp_skipped = ("image" if self._mtp_ctx_ptr is not None and self._mtp_usable
+                                else "")
             self.mtp_active_this_call = False
             self.mtp_call_status = ""
             self.mtp_drafted = 0

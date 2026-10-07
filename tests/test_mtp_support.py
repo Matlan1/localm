@@ -1021,6 +1021,7 @@ def test_generate_image_never_samples_or_decodes_the_draft_context():
     assert llm.mtp_active_this_call is False, (
         "an image turn read as having speculated - supports_mtp staying True "
         "is a model capability, not a statement about this call")
+    assert llm.mtp_skipped == "image"
 
     decode_ctxs = [call.args[0] for call in mock_api.llama_decode.call_args_list]
     assert llm._mtp_ctx_ptr not in decode_ctxs, (
@@ -1759,10 +1760,10 @@ def test_the_draft_count_reaches_the_native_instance(tmp_path):
 
     from localm.inference.backends.llamacpp import _worker
     w = _worker.GgufWorker.__new__(_worker.GgufWorker)
-    w._llm = SimpleNamespace(mtp_drafted=7, mtp_accepted=5)
-    assert (w.mtp_drafted, w.mtp_accepted) == (7, 5)
+    w._llm = SimpleNamespace(mtp_drafted=7, mtp_accepted=5, mtp_skipped="grammar")
+    assert (w.mtp_drafted, w.mtp_accepted, w.mtp_skipped) == (7, 5, "grammar")
     w._llm = None
-    assert (w.mtp_drafted, w.mtp_accepted) == (0, 0)
+    assert (w.mtp_drafted, w.mtp_accepted, w.mtp_skipped) == (0, 0, "")
 
 
 def test_the_done_envelope_carries_the_draft_counts():
@@ -1775,6 +1776,7 @@ def test_the_done_envelope_carries_the_draft_counts():
     assert '"mtp_accepted": worker.mtp_accepted' in src
     assert '"mtp_steps": worker.mtp_steps' in src
     assert '"mtp_paused_steps": worker.mtp_paused_steps' in src
+    assert '"mtp_skipped": worker.mtp_skipped' in src
 
 
 @pytest.mark.parametrize("done, supports, expected", [
@@ -1796,6 +1798,10 @@ def test_the_done_envelope_carries_the_draft_counts():
     ({"mtp_status": "no-mtp-graph:llama", "mtp_active": False}, False,
      {"state": "unavailable", "drafted": 0, "accepted": 0, "paused_steps": 0,
       "reason": "no-mtp-graph:llama"}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": False, "mtp_skipped": "grammar"}, True,
+     {"state": "off", "drafted": 0, "accepted": 0, "paused_steps": 0, "reason": "grammar"}),
+    ({"mtp_status": "ok:qwen35", "mtp_active": False, "mtp_skipped": "image"}, True,
+     {"state": "off", "drafted": 0, "accepted": 0, "paused_steps": 0, "reason": "image"}),
 ])
 def test_the_backend_summarises_the_last_reply_for_the_api(done, supports, expected):
     backend = GgufBackend("test_model.gguf", mtp_enabled=True)

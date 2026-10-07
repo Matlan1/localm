@@ -375,6 +375,7 @@ def test_a_grammar_reply_never_drafts_but_keeps_the_draft_cache_in_step():
     assert tokens == _reference(PROMPT, 12)
     assert fake.draft_samples == 0
     assert llm.mtp_drafted == 0 and llm.mtp_active_this_call is False
+    assert llm.mtp_skipped == "grammar"
     assert len(fake.draft_cache) == len(fake.main_cache)
     for p in sorted(fake.draft_cache)[1:]:
         assert fake.draft_cache[p][1] == HIDDEN_BASE + p - 1
@@ -719,3 +720,17 @@ def test_drafting_that_loses_with_most_drafts_accepted_is_paused():
 
     assert pacer.pauses >= 3
     assert decisions.count(True) < 300 * 0.4
+
+
+def test_a_reply_after_a_grammar_reply_says_nothing_was_skipped():
+    """The reason a grammar reply could not draft belongs to that reply only."""
+    llm = _llama(draft_tokens=1)
+    fake = FakeNative(llm)
+    _generate(llm, fake, max_new_tokens=6, grammar='root ::= "a"')
+    assert llm.mtp_skipped == "grammar"
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=6)
+
+    assert tokens == _reference(PROMPT, 6)
+    assert llm.mtp_drafted > 0
+    assert llm.mtp_skipped == ""

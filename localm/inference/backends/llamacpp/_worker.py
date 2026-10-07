@@ -143,6 +143,11 @@ class GgufWorker(VramSizingMixin):
         """Steps the last call ran without drafting because drafting was measured slower."""
         return int(getattr(self._llm, "mtp_paused_steps", 0) or 0) if self._llm is not None else 0
 
+    @property
+    def mtp_skipped(self) -> str:
+        """Why the last call could not draft at all ("grammar", "image"), or ""."""
+        return str(getattr(self._llm, "mtp_skipped", "") or "") if self._llm is not None else ""
+
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",

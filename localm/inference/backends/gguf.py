@@ -164,6 +164,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_accepted = 0     # how many of those the target accepted
         self.last_mtp_steps = 0        # verification batches the last call decoded
         self.last_mtp_paused_steps = 0  # steps it ran plain because drafting was slower
+        self.last_mtp_skipped = ""     # why the last call could not draft at all
         self._mtp_stopped_this_call = False  # the last call turned MTP off for the model
         # Always None in production; the real LlamaCpp instance lives in the
         # child process.
@@ -282,6 +283,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_accepted = 0
         self.last_mtp_steps = 0
         self.last_mtp_paused_steps = 0
+        self.last_mtp_skipped = ""
         self._mtp_stopped_this_call = False
 
     def _record_mtp(self, done: dict) -> None:
@@ -304,6 +306,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_accepted = _count(done.get("mtp_accepted"))
         self.last_mtp_steps = _count(done.get("mtp_steps"))
         self.last_mtp_paused_steps = _count(done.get("mtp_paused_steps"))
+        self.last_mtp_skipped = str(done.get("mtp_skipped") or "")
         if _mtp_status_kind(self.last_mtp_status) in _MTP_STOPPED:
             self._mtp_stopped_this_call = self._supports_mtp
             self._supports_mtp = False
@@ -318,7 +321,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         turned speculation off for the model), "paused" when drafting was measured
         slower than one-token decoding for at least as many steps as it ran,
         "on" when it speculated, "unavailable" when the model cannot speculate
-        (the reason is the model status), and "idle" otherwise. ``drafted`` and
+        (the reason is the model status), "off" when this reply could not
+        draft at all (reason "grammar" for grammar-constrained output, "image"
+        for a turn with an image), and "idle" otherwise. ``drafted`` and
         ``accepted`` count draft tokens sent to verification and kept;
         ``paused_steps`` counts the steps run without drafting because it was
         slower.
@@ -336,6 +341,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             state, reason = "on", None
         elif not self._supports_mtp:
             state, reason = "unavailable", self.last_mtp_status or None
+        elif self.last_mtp_skipped:
+            state, reason = "off", self.last_mtp_skipped
         else:
             state, reason = "idle", None
         return {"state": state, "drafted": self.last_mtp_drafted,

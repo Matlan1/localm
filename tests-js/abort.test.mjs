@@ -126,7 +126,7 @@ test("A completed turn's usage is saved on the reply, not just shown in the DOM"
     "the live DOM display still works exactly as before");
 });
 
-test("the usage line shows MTP acceptance, a stop or unavailability, and nothing for an idle turn", async () => {
+test("the usage line shows MTP acceptance, a pause, a stop, an off reply or unavailability, and nothing for an idle turn", async () => {
   const { window } = loadApp();
   const usage = $id => window.document.getElementById($id);
   window.updateUsageDisplay({ total_tokens: 7, tokens_per_sec: 3,
@@ -147,6 +147,16 @@ test("the usage line shows MTP acceptance, a stop or unavailability, and nothing
   window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "unavailable", drafted: 0, accepted: 0,
                                                        reason: "no-mtp-graph:llama" } });
   assert.match(usage("chat-usage").textContent, /MTP unavailable/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "off", drafted: 0, accepted: 0,
+                                                       reason: "grammar" } });
+  assert.match(usage("chat-usage").textContent, /MTP off/);
+  assert.match(usage("chat-usage").title, /constrained output/);
+
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "off", drafted: 0, accepted: 0,
+                                                       reason: "image" } });
+  assert.match(usage("chat-usage").textContent, /MTP off/);
+  assert.match(usage("chat-usage").title, /with an image/);
 
   window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "idle", drafted: 0, accepted: 0 } });
   assert.doesNotMatch(usage("chat-usage").textContent, /MTP/);

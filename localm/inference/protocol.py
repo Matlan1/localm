@@ -298,10 +298,12 @@ class MtpUsage(BaseModel):
     """Multi-Token Prediction for one reply.
 
     state is "on" (the reply speculated), "paused" (drafting was measured
-    slower than one-token decoding and was paused for most of the reply),
-    "stopped" (it stopped partway, see reason), "idle" (MTP is available but
-    this reply did not speculate, such as an image or grammar-constrained turn)
-    or "unavailable" (this model cannot speculate, see reason).
+    slower than one-token decoding and was paused for at least as many steps
+    as it ran), "stopped" (it stopped partway, see reason), "off" (this reply
+    could not draft at all: reason "grammar" for grammar-constrained output
+    such as tool calls, "image" for a turn with an image), "idle" (MTP is
+    available but this reply drafted nothing) or "unavailable" (this model
+    cannot speculate, see reason).
     """
     state: str
     drafted: int = 0                 # draft tokens sent to verification

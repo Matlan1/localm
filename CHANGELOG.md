@@ -223,7 +223,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is being written, whether drafting is actually faster than generating one
   token at a time, and pauses itself when it is not (common on small models and
   when sampling with a temperature). The chat shows the share of drafted tokens
-  the model accepted next to the reply's speed, or that MTP paused or stopped,
+  the model accepted next to the reply's speed, or that MTP paused, stopped, or
+  was off for the reply (it does not run on web-access tool calls or images),
   the chat API reports it as `usage.mtp`, and `localm bench-mtp` prints the
   acceptance rate and whether the replies matched MTP off.
 
