@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Non-blocking live canary: run ONE real web search through localm's own
-search provider and report whether the result layout still parses (ADR-0022
-Phase 5 quality gates, item 25).
+"""Non-blocking live canary: run one real web search through each of
+localm's own search services and report whether each result layout still
+parses (ADR-0022 Phase 5 quality gates, item 25).
 
-``localm.web_retrieval.providers`` scrapes DuckDuckGo's no-key HTML endpoint
-(or a configured SearXNG instance's JSON API) by hand-written parsing - see
-``localm/web_retrieval/providers.py``'s ``_DDGParser``. Neither backend has a
-stable public contract: DuckDuckGo can change its result markup or rate-limit
-a datacenter IP at any time, and a self-hosted SearXNG's shape depends on its
-own version. Every OTHER test of this pipeline
+``localm.web_retrieval.providers`` scrapes DuckDuckGo's HTML and lite pages
+and Brave Search's result page (or a configured SearXNG instance) by
+hand-written parsing - see ``localm/web_retrieval/providers.py``. None of
+them has a stable public contract: a service can change its result markup or
+rate-limit a datacenter IP at any time, and a self-hosted SearXNG's shape
+depends on its own version. Each built-in service is searched on its own, so
+a layout break on one is reported even while another still answers. Every OTHER test of this pipeline
 (``tests/test_web_retrieval_*.py``) runs against a recorded fixture double, by
 design - offline PR CI must never depend on the internet, see
 ``tests/_web_retrieval_fixtures.py``. Nothing else in this repo makes a REAL
@@ -17,7 +18,8 @@ network call to a live search backend, so a live layout break would otherwise
 go unnoticed until a user hit it.
 
 This script closes that gap as a MAINTENANCE SIGNAL, never a gate: it makes
-exactly one real search and reports whether it returned parseable results,
+one real search per service and reports whether each returned parseable
+results,
 and it ALWAYS exits 0 - the same shape as scripts/check_comfyui_pin.py's
 default (non-``--gate``) mode. It is wired into .github/workflows/ci.yml on
 ``schedule`` and ``workflow_dispatch`` only - never ``pull_request`` and never
@@ -61,22 +63,35 @@ def _summarise(lines: "list[str]") -> None:
         print(f"(could not write the step summary: {e})")
 
 
-def run_canary(query: str = DEFAULT_QUERY) -> dict:
-    """One real search through localm's own provider selection - DuckDuckGo by
-    default, or a configured SearXNG (``localm.web_retrieval.providers.
-    provider_from_config``). Returns a result dict; never raises - every
-    failure (a policy refusal, a transport error, an unparseable response) is
-    captured in the dict so main() has exactly one path to report from."""
+def run_canary(query: str = DEFAULT_QUERY) -> "list[dict]":
+    """One real search per service localm's search uses: each service of the
+    built-in chain separately, or the configured SearXNG instance
+    (``localm.web_retrieval.providers.provider_from_config``). Returns one
+    dict per service: ``{"provider", "ok": True, "count"}``, or
+    ``{"provider", "ok": False, "error", "bot_check"}``. Never raises."""
     from localm.web_retrieval import providers
 
-    provider = providers.provider_from_config()
     try:
-        results = provider.search(query, _RESULTS_TO_REQUEST)
+        provider = providers.provider_from_config()
     except Exception as e:
-        return {"provider": provider.name, "ok": False,
-                "error": f"{type(e).__name__}: {e}"}
-    return {"provider": provider.name, "ok": bool(results),
-            "count": len(results)}
+        return [{"provider": "search", "ok": False, "bot_check": False,
+                 "error": f"{type(e).__name__}: {e}"}]
+    out = []
+    for service in getattr(provider, "routes", None) or [provider]:
+        try:
+            results = service.search(query, _RESULTS_TO_REQUEST)
+        except Exception as e:
+            out.append({"provider": service.name, "ok": False,
+                        "bot_check": isinstance(e, providers.BotCheckError),
+                        "error": f"{type(e).__name__}: {e}"})
+            continue
+        if results:
+            out.append({"provider": service.name, "ok": True,
+                        "count": len(results)})
+        else:
+            out.append({"provider": service.name, "ok": False,
+                        "bot_check": False, "error": "returned no results"})
+    return out
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -86,29 +101,41 @@ def main(argv: "list[str] | None" = None) -> int:
                     help=f"search query to run (default: {DEFAULT_QUERY!r})")
     args = ap.parse_args(argv)
 
-    result = run_canary(args.query)
-    provider = result["provider"]
+    services = run_canary(args.query)
+    lines = []
+    for r in services:
+        if r["ok"]:
+            line = f"{r['provider']}: OK, {r['count']} result(s)"
+        elif r.get("bot_check"):
+            line = (f"{r['provider']}: answered with a bot check (a rate "
+                    f"limit, not a layout break): {r['error']}")
+        else:
+            line = f"{r['provider']}: DEGRADED - {r['error']}"
+        lines.append(line)
+    degraded = [r for r in services if not r["ok"] and not r.get("bot_check")]
 
-    if result["ok"]:
-        print(f"WEB SEARCH CANARY: OK - {provider} returned "
-              f"{result['count']} result(s) for {args.query!r}.")
-        _annotate("notice", f"web search canary: {provider} is working "
-                            f"({result['count']} result(s))")
-        _summarise(["## Web search canary: OK",
-                    f"`{provider}` returned {result['count']} result(s) for "
-                    f"`{args.query}`."])
+    if not degraded:
+        print(f"WEB SEARCH CANARY: OK for {args.query!r}")
+        for line in lines:
+            print(f"  {line}")
+        _annotate("notice", "web search canary: " + "; ".join(lines))
+        _summarise(["## Web search canary: OK", ""]
+                   + [f"- {line}" for line in lines])
         return 0
 
-    reason = result.get("error", "returned no parseable results")
-    print(f"WEB SEARCH CANARY: DEGRADED - {provider}: {reason}")
+    print(f"WEB SEARCH CANARY: DEGRADED for {args.query!r}")
+    for line in lines:
+        print(f"  {line}")
     print("  This is a maintenance signal, not a failure of this build: it "
           "may be a rate limit, a layout change, or a transient network "
           "issue. See localm/web_retrieval/providers.py.")
-    _annotate("warning", f"web search canary: {provider} looks degraded "
-                        f"({reason}); this job never fails the build")
-    _summarise(["## Web search canary: DEGRADED",
-                f"`{provider}`: {reason}", "",
-                "Non-blocking - investigate if this persists across runs."])
+    for r in degraded:
+        _annotate("warning", f"web search canary: {r['provider']} looks "
+                             f"degraded ({r['error']}); this job never fails "
+                             "the build")
+    _summarise(["## Web search canary: DEGRADED", ""]
+               + [f"- {line}" for line in lines]
+               + ["", "Non-blocking - investigate if this persists across runs."])
     return 0
 
 

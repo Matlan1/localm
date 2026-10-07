@@ -22,8 +22,10 @@ net_allow          list of domains (or comma-separated string). Empty = any
 net_deny           same format; matches are always refused (wins over allow).
 net_allow_private  False (default) blocks loopback/private/link-local targets
                    (SSRF guard). True restores access to local dev services.
-net_search_url     None = DuckDuckGo HTML (no API key). Or the base URL of a
-                   SearXNG instance with the JSON API enabled.
+net_search_url     None = the built-in search: DuckDuckGo, then Brave Search
+                   when DuckDuckGo fails (no API key). Or the base URL of a
+                   SearXNG instance (its JSON API, or its HTML results page
+                   when JSON is off); only that instance is then used.
 
 What this module does NOT govern
 --------------------------------
@@ -878,13 +880,17 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     """
     Search the web. Returns [{"title", "url", "snippet"}, ...].
 
-    Backend: a SearXNG instance when net_search_url is configured (its JSON
-    API must be enabled), otherwise DuckDuckGo's no-key HTML endpoint. The
-    providers live in ``localm.web_retrieval.providers`` and send their
-    request (up to three times on a transient transport failure) through
-    this module's policy check and pinned transport.
-    Raises NetworkPolicyError when the policy refuses, or RuntimeError when
-    the backend yields nothing parseable.
+    Backend: the SearXNG instance set in net_search_url (its JSON API, or
+    its HTML results page when the instance refuses JSON), otherwise the
+    built-in chain of DuckDuckGo's HTML page, DuckDuckGo's lite page and
+    Brave Search. The providers live in ``localm.web_retrieval.providers``
+    and send every request through this module's policy check and pinned
+    transport.
+    Raises NetworkPolicyError when the policy refuses; SearchProviderError
+    (a RuntimeError) when the search returns no results, every built-in
+    service failed, or a SearXNG instance's answer is unusable; and a
+    configured SearXNG instance's transport failure as the ``requests``
+    exception.
     """
     from localm.web_retrieval.providers import search
     return [r.to_legacy() for r in search(query, max_results)]

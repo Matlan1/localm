@@ -212,11 +212,22 @@ class TestN3SearchRedirects:
                 netpolicy.web_search("hello")
 
     def test_ddg_redirect_refused(self, monkeypatch):
+        from localm.web_retrieval import providers
         monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        monkeypatch.setattr(providers, "_MIN_INTERVAL", 0.0)
+        asked = []
+
+        def redirect(url, **kw):
+            asked.append(url)
+            return _FakeResp(status=302, location="http://127.0.0.1/")
         with patch("localm.netpolicy._session_for", return_value=_FakeSession(
-                post=_FakeResp(status=302, location="http://127.0.0.1/"))):
+                get=redirect, post=redirect)):
             with pytest.raises(NetworkPolicyError, match="redirect"):
                 netpolicy.web_search("hello")
+        assert [u.split("?")[0] for u in asked] == [
+            "https://html.duckduckgo.com/html/",
+            "https://lite.duckduckgo.com/lite/",
+            "https://search.brave.com/search"]
 
     def test_searxng_passes_allow_redirects_false(self, monkeypatch):
         _cfg(monkeypatch, net_search_url="https://searx.example")

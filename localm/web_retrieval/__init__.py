@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared web retrieval for chat, scheduled jobs and the coder.
 
-Owns provider adaptation (DuckDuckGo HTML, SearXNG), normalised search
+Owns provider adaptation (the DuckDuckGo / Brave search chain, SearXNG), normalised search
 results, URL canonicalization and duplicate removal, page acquisition through
 ``localm.netpolicy``, main-content extraction, query-aware chunk selection and
 the evidence bundle those produce. ``localm.netpolicy`` remains the only
@@ -34,8 +34,13 @@ from .contracts import (
 )
 from .extract import ExtractedPage, extract_page, html_to_main_text
 from .providers import (
+    BotCheckError,
+    BraveSearchProvider,
+    DefaultSearchProvider,
     DuckDuckGoHTMLProvider,
+    DuckDuckGoLiteProvider,
     SearXNGProvider,
+    UnreadableResultsError,
     provider_from_config,
     search,
 )
@@ -50,7 +55,11 @@ __all__ = [
     "GROUNDING_STATES",
     "PER_SOURCE_CAP_CHARS",
     "SEARCH_CANDIDATES",
+    "BotCheckError",
+    "BraveSearchProvider",
+    "DefaultSearchProvider",
     "DuckDuckGoHTMLProvider",
+    "DuckDuckGoLiteProvider",
     "EvidenceBundle",
     "EvidenceChunk",
     "ExtractedPage",
@@ -60,6 +69,7 @@ __all__ = [
     "SearchProviderError",
     "SearchResult",
     "Source",
+    "UnreadableResultsError",
     "canonicalize_url",
     "dedup_key",
     "dedup_results",

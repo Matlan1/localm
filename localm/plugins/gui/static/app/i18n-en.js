@@ -1587,7 +1587,7 @@ export const I18N_EN = {
   "settings.field.netAllowModelDownloads.label": "Allow model downloads while network access is off",
   "settings.field.netAllowModelDownloads.help": "Lets a model pull, HuggingFace search, or vision-projector/voice/embedding fetch proceed while net_mode is off. Model-initiated network access is still blocked.",
   "settings.field.netSearchUrl.label": "Search backend URL",
-  "settings.field.netSearchUrl.help": "A SearXNG JSON search endpoint for web search. Blank uses DuckDuckGo (no key needed).",
+  "settings.field.netSearchUrl.help": "A SearXNG instance for web search; when set, searches use only this service. Blank uses the built-in search: DuckDuckGo, then Brave Search when DuckDuckGo fails (no key needed).",
   "settings.field.guiProxyRemoteImages.label": "Show remote images in replies (fetched by this machine)",
   "settings.field.guiProxyRemoteImages.help": "Off by default. 'on' loads them; 'ask' checks with you once per site per conversation first. Either way this machine fetches the image, so the site never learns your IP or browser.",
   "settings.field.browserEnabled.label": "Let the model drive a web browser",
