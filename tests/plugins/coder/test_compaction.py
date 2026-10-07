@@ -467,3 +467,31 @@ class TestHttpBackendThinking:
         body = self._backend(False)._body([], stream=False, thinking=False)
         assert "thinking" not in body
         assert "chat_template_kwargs" not in body
+
+
+class TestCompactionIsAnnounced:
+    def test_an_info_event_is_emitted_before_compacting(self):
+        agent = _make_agent()
+        events = []
+        agent.on_event = events.append
+        agent._messages = _messages(8)
+        agent._compact_history()
+        info = [e for e in events if e.get("type") == "info"]
+        assert info and "Compacting the session history" in info[0]["text"]
+
+    def test_the_console_gets_the_notice_without_an_event_sink(self):
+        agent = _make_agent()
+        agent.on_event = None
+        agent._messages = _messages(8)
+        with patch("localm.plugins.coder.agent.context.print_info") as pi:
+            agent._compact_history()
+        assert any("Compacting the session history" in str(c.args[0])
+                   for c in pi.call_args_list)
+
+    def test_nothing_is_announced_when_there_is_nothing_to_compact(self):
+        agent = _make_agent()
+        events = []
+        agent.on_event = events.append
+        agent._messages = _messages(4)
+        assert agent._compact_history() is False
+        assert not [e for e in events if e.get("type") == "info"]

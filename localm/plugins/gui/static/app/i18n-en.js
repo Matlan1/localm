@@ -209,6 +209,7 @@ export const I18N_EN = {
   "chat.speak": "Speak replies aloud",
   "chat.speak.title":
     "Reads each finished reply aloud. Install the tts plugin for neural Kokoro voices; otherwise the browser's built-in offline voice is used. Every assistant message also has a speaker button.",
+  "chat.status.compacting": "Compacting conversation…",
   "chat.status.encodingImage": "Encoding image…",
   "chat.status.encodingImageCpu": "Encoding image (CPU)…",
   "chat.status.encodingImageGpu": "Encoding image (GPU)…",

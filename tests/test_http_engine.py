@@ -254,3 +254,35 @@ def test_context_capacity_degrades_gracefully_on_error(monkeypatch):
     monkeypatch.setattr("requests.get", boom)
     assert eng.context_capacity() is None
 
+
+
+def test_chat_stream_raises_on_an_error_finish(monkeypatch):
+    eng = HttpEngine("http://x/v1", token="t", model="m")
+    refusal = "Prompt (9000 tokens) exceeds the model's maximum context capacity (4096 tokens)."
+    lines = ["data: " + json.dumps({"choices": [{"delta": {"content": refusal}}]}),
+             "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "error"}]}),
+             "data: [DONE]"]
+    r = MagicMock()
+    r.status_code = 200
+    r.iter_lines = lambda decode_unicode=False: iter(lines)
+    import requests
+    monkeypatch.setattr(requests, "post", lambda *a, **k: r)
+    got = []
+    with pytest.raises(RuntimeError) as exc:
+        for piece in eng.chat_stream([{"role": "user", "content": "hi"}]):
+            got.append(piece)
+    assert "exceeds the model's maximum context capacity" in str(exc.value)
+    assert got == [refusal]
+
+
+def test_chat_stream_a_normal_finish_does_not_raise(monkeypatch):
+    eng = HttpEngine("http://x/v1", token="t", model="m")
+    lines = ["data: " + json.dumps({"choices": [{"delta": {"content": "ok"}}]}),
+             "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+             "data: [DONE]"]
+    r = MagicMock()
+    r.status_code = 200
+    r.iter_lines = lambda decode_unicode=False: iter(lines)
+    import requests
+    monkeypatch.setattr(requests, "post", lambda *a, **k: r)
+    assert list(eng.chat_stream([{"role": "user", "content": "hi"}])) == ["ok"]

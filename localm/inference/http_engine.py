@@ -132,7 +132,9 @@ class HttpEngine:
 
         Raises :class:`UnsupportedInputError` when the server refuses image input on
         a text-only model (so the REPL shows the same vision guidance as in-process),
-        and ``RuntimeError`` for an unreachable server or other error responses."""
+        and ``RuntimeError`` for an unreachable server, other error responses, or a
+        stream that ends with ``finish_reason: "error"`` (its message is the last
+        content piece, the server's error text)."""
         import requests
 
         body: dict = {
@@ -173,6 +175,7 @@ class HttpEngine:
                 raise UnsupportedInputError(detail)
             raise RuntimeError(f"server error (HTTP {resp.status_code}): {detail}")
 
+        last_piece = ""
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
                 continue
@@ -189,6 +192,9 @@ class HttpEngine:
                 self.answered_model = chunk["model"]
             choices = chunk.get("choices") or [{}]
             delta = (choices[0] or {}).get("delta") or {}
+            if (choices[0] or {}).get("finish_reason") == "error":
+                raise RuntimeError(
+                    f"server error: {last_piece.strip() or 'generation failed'}")
             status = delta.get("status")
             if status and on_status:
                 try:
@@ -211,6 +217,7 @@ class HttpEngine:
                 yield f"<think>{reasoning}</think>"
             piece = delta.get("content")
             if piece:
+                last_piece = piece
                 yield piece
 
 

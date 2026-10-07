@@ -452,3 +452,19 @@ test("an unpinned conversation's summary names the selected model as a preferenc
   assert.equal(summary.body.model, reply.body.model, "the model that answers writes the summary");
   assert.equal(summary.body.pin_model, reply.body.pin_model);
 });
+
+test("a compacted reply that failed does not stop routing to a roomier model", async () => {
+  const { window } = setup({ models: [
+    { name: "plain", model_type: "llm", context_length: 4096 },
+    { name: "roomy", model_type: "llm", context_length: 32768 },
+  ], headers: { "X-Localm-Context-Compacted": "1" } });
+  window.readSSE = async (_r, onData) => {
+    onData(JSON.stringify({ choices: [{ delta: { content: "Prompt (9000 tokens) exceeds the model's maximum context capacity (4096 tokens)." } }] }));
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "error" }] }));
+  };
+  runScript(window, "chat.ctxMax = 4096;");
+  const conv = longConv();
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(conv.serverCompacted, undefined);
+});

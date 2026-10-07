@@ -694,6 +694,7 @@ class HTTPBackend(BaseLLMBackend):
         self._last_usage = {}
         self._last_reasoning = ""
         _reasoning_parts: list[str] = []
+        _last_piece = ""
         # Accumulate streaming native tool_calls: index → {name, arguments_buf}
         _tc_buf: dict[int, dict] = {}
 
@@ -725,6 +726,9 @@ class HTTPBackend(BaseLLMBackend):
                 if chunk.get("usage"):
                     self._last_usage = chunk["usage"]
                 self._note_answer(chunk.get("model"), chunk.get("usage"))
+                if (chunk.get("choices") or [{}])[0].get("finish_reason") == "error":
+                    raise CoderServerError(
+                        f"server error: {_last_piece.strip() or 'generation failed'}")
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
                 # Reasoning delta: routed to on_reasoning (a SEPARATE channel
                 # from the yielded content), never yielded inline - see chat()'s
@@ -740,6 +744,7 @@ class HTTPBackend(BaseLLMBackend):
                 # Regular content tokens
                 piece = delta.get("content") or ""
                 if piece:
+                    _last_piece = piece
                     yield piece
                 # Accumulate native tool_call chunks
                 for tc_delta in delta.get("tool_calls") or []:

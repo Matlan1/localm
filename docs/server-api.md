@@ -41,6 +41,16 @@ request extras:
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
 | `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks to answer without reasoning. Only `enable_thinking` is applied and must be a boolean (otherwise 422); other keys are accepted and ignored. A model without a `<think>` convention is unaffected. |
 
+While a streaming reply is being prepared, localm reports what it is doing in
+chunks whose `delta` carries `status` (English text) and `status_code` (a
+stable id): `waiting` (another request is running on this model), `compacting`
+(older messages are being summarised to fit the context window), `processing`,
+`encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
+`vision_cpu_retry` and `generating`. A streaming request that is compacted
+carries `X-Localm-Context-Compacted: 1`; if the conversation still does not fit
+after compaction, the refusal arrives in the stream as the reply text with
+`finish_reason: "error"` instead of an HTTP 413.
+
 A message may also carry `untrusted_spans`: `[[start, end], ...]` character
 ranges of its own `content` that came from an untrusted source, such as a
 fetched page or a tool result. localm tokenises those ranges with

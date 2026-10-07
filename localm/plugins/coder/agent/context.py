@@ -353,12 +353,18 @@ ws     ::= [ \t\n\r]*
         with a summary exchange. The latest user request is carried verbatim
         into the summary message when it is not in the tail. When the
         summariser fails or returns nothing, the summary message carries a
-        digest of the removed messages instead. Returns False only when there
-        is nothing to compact."""
+        digest of the removed messages instead. Announces itself with an
+        ``info`` event (and on the console when no event sink is set). Returns
+        False only when there is nothing to compact."""
         keep_n = 4
         cut = self._compaction_cut(keep_n)
         if cut <= 0:
             return False
+
+        notice = "Compacting the session history to free context..."
+        self._emit("info", text=notice)
+        if getattr(self, "on_event", None) is None:
+            print_info(notice)
 
         older  = self._messages[:cut]
         recent = self._messages[cut:]
@@ -523,7 +529,7 @@ ws     ::= [ \t\n\r]*
                 )
                 self._compact_warned = True   # warn once per session
         else:
-            # Non-interactive (run_task): auto-compact silently at 90%
+            # Non-interactive (run_task): auto-compact at 90%
             if ratio >= _COMPACT_AUTO_RATIO:
                 self._compact_history()
 
