@@ -498,7 +498,7 @@ class TestConcurrencyAndOptions:
 
         def gated(url, **kw):
             barrier.wait()
-            return html_response(_page(_LONG))
+            return html_response(_page(f"{_LONG} Served from {url}."))
         for u in urls:
             t.route("GET", u, gated)
         b = retrieve(QUERY)

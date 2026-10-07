@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import functools
+import hashlib
+import time
 import urllib.parse
 from typing import Callable, Optional
 
 from localm import netpolicy
 from localm.debuglog import logger
+from localm.netpin import ReadBudgetExceeded
 
 from .canonical import canonicalize_url, dedup_key, dedup_results
 from .chunking import select_evidence
@@ -61,13 +64,22 @@ _MAX_SEARCH_CANDIDATES = 10
 _ERROR_TEXT_CAP = 300
 _HTML_SNIFF_BYTES = 1024
 _PAGE_RETRY_KINDS = frozenset({"reset", "refused", "unreachable", "incomplete"})
+_WORKER_GRACE = 1.0
 
 
 def _default_fetch(url: str, *, timeout: float,
-                   total_timeout: Optional[float] = None
+                   finish_by: Optional[float] = None
                    ) -> tuple[str, str, str]:
-    return netpolicy.safe_fetch(url, timeout=timeout,
-                                total_timeout=total_timeout)
+    """``netpolicy.safe_fetch``. With *finish_by* (a ``time.monotonic()``
+    value) the call gets only the time left until then, and raises
+    ``ReadBudgetExceeded`` when none is left."""
+    if finish_by is None:
+        return netpolicy.safe_fetch(url, timeout=timeout)
+    left = finish_by - time.monotonic()
+    if left <= 0:
+        raise ReadBudgetExceeded(0.0, url)
+    return netpolicy.safe_fetch(url, timeout=min(timeout, left),
+                                total_timeout=left)
 
 
 def search_failure_text(exc: BaseException,
@@ -178,20 +190,25 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
 def _drop_duplicate_pages(fetched: list[Source],
                           pages: dict[str, PageDocument]) -> None:
     """A fetched source whose final URL has the same ``dedup_key`` as a
-    higher-ranked fetched source loses its page and becomes ``duplicate``."""
+    higher-ranked fetched source, or whose page text is the same apart from
+    whitespace, loses its page and becomes ``duplicate``."""
     seen: dict[str, str] = {}
     for source in fetched:
         if source.id not in pages:
             continue
-        key = dedup_key(source.final_url or source.url)
-        if key in seen:
+        normalized = " ".join(pages[source.id].text.split())
+        keys = (dedup_key(source.final_url or source.url),
+                "text:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest())
+        first = next((seen[k] for k in keys if k in seen), None)
+        if first is not None:
             del pages[source.id]
             source.retrieval_status = STATUS_DUPLICATE
             source.grounding = (GROUNDING_SNIPPET_ONLY if source.snippet.strip()
                                 else GROUNDING_FAILED)
-            source.error = f"same page as {seen[key]}"
+            source.error = f"same page as {first}"
         else:
-            seen[key] = source.id
+            for k in keys:
+                seen[k] = source.id
 
 
 def retrieve(
@@ -212,9 +229,11 @@ def retrieve(
     clamped to 1..10 and *fetch_top* to 0..*search_candidates*. The provider
     is asked for twice *search_candidates* results (at most 10); after
     duplicate removal the first *search_candidates* become sources. *fetch*
-    defaults to ``netpolicy.safe_fetch`` with a total time allowance of
-    *deadline_seconds* per call; *fetch_timeout* (each connect and each wait
-    for data) to ``PAGE_READ_TIMEOUT``; *deadline_seconds* (the wait for all
+    defaults to ``netpolicy.safe_fetch``, every call of it (content endpoints
+    and retries included) given only the time left until one second after
+    the read deadline;
+    *fetch_timeout* (each connect and each wait for data) to
+    ``PAGE_READ_TIMEOUT``; *deadline_seconds* (the wait for all
     page reads together) to ``PAGE_READ_DEADLINE``, or twice *fetch_timeout*
     when only *fetch_timeout* is given.
 
@@ -240,7 +259,9 @@ def retrieve(
     else:
         deadline = float(PAGE_READ_DEADLINE)
     if fetch is None:
-        fetch = functools.partial(_default_fetch, total_timeout=deadline)
+        fetch = functools.partial(
+            _default_fetch,
+            finish_by=time.monotonic() + deadline + _WORKER_GRACE)
 
     bundle = EvidenceBundle(query=query, provider=provider.name,
                             budget_chars=budget_chars,

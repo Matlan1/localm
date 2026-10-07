@@ -138,6 +138,37 @@ class TestGitHubRepository:
         assert final_url == RAW_README
         assert text == README.strip()
 
+    def test_tree_url_reads_that_directory_readme(self, monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        raw = ("https://raw.githubusercontent.com/python/cpython/main/Doc/"
+               "README.md")
+        api = "https://api.github.com/repos/python/cpython/readme/Doc?ref=main"
+        t.route("GET", raw, FakeResponse(status=404))
+        t.route("GET", api, _api_readme("Python documentation README. " * 4))
+        final_url, text = netpolicy.fetch_text(
+            "https://github.com/python/cpython/tree/main/Doc")
+        assert t.urls("GET") == [raw, api]
+        assert final_url == api
+        assert text.startswith("Python documentation README.")
+
+    def test_repo_and_tree_hits_with_the_same_readme_count_once(self,
+                                                                monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, FakeResponse(text=ddg_html([
+            ("Repo", REPO, "repo snippet"),
+            ("Tree", REPO + "/tree/master", "tree snippet")])))
+        t.route("GET", RAW_README, _text(README))
+        t.route("GET", "https://raw.githubusercontent.com/Matlan1/localm/"
+                "master/README.md", _text(README + "\n"))
+        b = retrieve("localm repository", search_candidates=2)
+        assert b.sources[0].grounding == "page-backed"
+        assert b.sources[1].retrieval_status == "duplicate"
+        assert b.sources[1].error == "same page as S1"
+        assert not any(c.source_id == "S2" and c.kind == "page"
+                       for c in b.chunks)
+
     def test_blob_url_reads_the_raw_file(self, monkeypatch):
         allow_public(monkeypatch)
         t = Transport().install(monkeypatch)
@@ -156,7 +187,7 @@ class TestUrlRecognition:
         "https://github.com/orgs/python",
         "https://github.com/Matlan1",
         "https://github.com/Matlan1/localm/issues/12",
-        "https://github.com/Matlan1/localm/tree/master/docs",
+        "https://github.com/Matlan1/localm/tree",
         "https://gist.github.com/Matlan1/abc",
         "https://github.com:8443/Matlan1/localm",
         "ftp://github.com/Matlan1/localm",
@@ -172,6 +203,8 @@ class TestUrlRecognition:
         "https://github.com/Matlan1/localm",
         "http://www.github.com/Matlan1/localm/",
         "https://github.com/Matlan1/localm/blob/master/README.md",
+        "https://github.com/Matlan1/localm/tree/master",
+        "https://github.com/Matlan1/localm/tree/master/docs",
         "https://stackoverflow.com/questions/39907742/slug",
         "https://stackoverflow.com/q/39907742",
         "https://superuser.com/questions/1/x",
@@ -236,3 +269,27 @@ class TestStackExchange:
         assert final_url == SO_URL
         assert "Question page text." in text
         assert t.urls("GET") == [SO_API_Q, SO_URL]
+
+
+class TestCoderPrivacyEcho:
+    def test_fetch_url_names_the_address_it_read_from(self, monkeypatch,
+                                                      capsys, tmp_path):
+        from localm.plugins.coder.tools.web import tool_fetch_url
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("GET", RAW_README, _text(README))
+        result = tool_fetch_url(tmp_path, REPO, _privacy=True)
+        err = capsys.readouterr().err
+        assert result.ok and "offline local-LLM inference" in result.output
+        assert f"[localm privacy] fetch_url: {REPO}" in err
+        assert f"[localm privacy] fetch_url read: {RAW_README}" in err
+
+    def test_fetch_url_same_address_echoes_once(self, monkeypatch, capsys,
+                                                tmp_path):
+        from localm.plugins.coder.tools.web import tool_fetch_url
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("GET", "https://plain.example/", _text("plain text page"))
+        tool_fetch_url(tmp_path, "https://plain.example/", _privacy=True)
+        err = capsys.readouterr().err
+        assert err.count("[localm privacy]") == 1

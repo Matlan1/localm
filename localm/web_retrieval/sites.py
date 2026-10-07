@@ -7,6 +7,9 @@ first tries the site's own content endpoint and falls back to the page itself:
 - ``github.com/<owner>/<repo>``: the README from
   ``raw.githubusercontent.com/<owner>/<repo>/HEAD/README.md``, then from the
   GitHub REST ``/repos/<owner>/<repo>/readme`` endpoint (any README name).
+- ``github.com/<owner>/<repo>/tree/<ref>[/<dir>]``: that directory's README
+  the same way, at *ref*; the path segment after ``tree`` is taken as the
+  whole ref.
 - ``github.com/<owner>/<repo>/blob/<ref>/<path>``: the raw file from
   ``raw.githubusercontent.com``.
 - a Stack Overflow / Stack Exchange question URL: the question and its top
@@ -131,9 +134,17 @@ def _github_reader(url: str) -> Optional[Reader]:
     owner, repo, rest = parts[0], parts[1], parts[2:]
     quoted = _quote_path([owner, repo])
 
-    if not rest:
-        raw_url = f"https://raw.githubusercontent.com/{quoted}/HEAD/README.md"
-        api_url = f"https://api.github.com/repos/{quoted}/readme"
+    if not rest or (rest[0] == "tree" and len(rest) >= 2):
+        if rest:
+            ref = urllib.parse.quote(urllib.parse.unquote(rest[1]), safe="")
+            sub = _quote_path(rest[2:]) if rest[2:] else ""
+            raw_url = (f"https://raw.githubusercontent.com/{quoted}/{ref}/"
+                       + (f"{sub}/" if sub else "") + "README.md")
+            api_url = (f"https://api.github.com/repos/{quoted}/readme"
+                       + (f"/{sub}" if sub else "") + f"?ref={ref}")
+        else:
+            raw_url = f"https://raw.githubusercontent.com/{quoted}/HEAD/README.md"
+            api_url = f"https://api.github.com/repos/{quoted}/readme"
 
         def read_readme(fetch: Fetcher, timeout: float) -> Optional[SiteRead]:
             text = _try_text(fetch, raw_url, timeout)
@@ -258,7 +269,7 @@ def _try_text(fetch: Fetcher, url: str, timeout: float) -> Optional[str]:
 
 def site_reader(url: str) -> Optional[Reader]:
     """The content-endpoint reader for *url*, or None when *url* is not a
-    recognised GitHub repository/blob or Stack Exchange question URL."""
+    recognised GitHub repository/tree/blob or Stack Exchange question URL."""
     for make in (_github_reader, _stackexchange_reader):
         try:
             reader = make(url)
