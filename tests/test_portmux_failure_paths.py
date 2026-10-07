@@ -108,12 +108,13 @@ def test_the_waker_requests_a_stop_only_for_a_routed_signal(stop_state, monkeypa
 
 
 def test_no_waker_starts_when_no_socket_pair_can_be_made(monkeypatch, warnings):
+    error = OSError("no socket pair")
+
     def no_pair():
-        raise OSError("no socket pair")
+        raise error
     monkeypatch.setattr(socket, "socketpair", no_pair)
     assert portmux._start_stop_waker([signal.SIGTERM]) is None
-    assert len(warnings) == 1
-    assert "stop signals will wait for the main thread" in warnings[0][0]
+    assert warnings == [("portmux: stop signals will wait for the main thread: %s", error)]
 
 
 def test_no_waker_starts_and_its_sockets_close_when_the_wakeup_fd_is_refused(
@@ -129,7 +130,9 @@ def test_no_waker_starts_and_its_sockets_close_when_the_wakeup_fd_is_refused(
     monkeypatch.setattr(portmux.signal, "set_wakeup_fd", _refuse)
     assert portmux._start_stop_waker([signal.SIGTERM]) is None
     assert len(made) == 2 and all(s.fileno() == -1 for s in made)
-    assert len(warnings) == 1
+    ((message, error),) = warnings
+    assert message == "portmux: stop signals will wait for the main thread: %s"
+    assert isinstance(error, ValueError) and str(error) == "refused"
 
 
 def test_the_waker_ends_even_when_the_previous_wakeup_fd_cannot_be_restored(
@@ -263,3 +266,81 @@ def test_a_spawn_failure_whose_warning_also_fails_still_never_raises(spawn, monk
     monkeypatch.setattr(subprocess, "Popen", fail)
     monkeypatch.setattr(portmux, "_log", types.SimpleNamespace(warning=broken_warning))
     _spawn()
+
+
+def _expected_watchdog_argv(root, *, scheme, history=None):
+    relaunch = [sys.executable, "-m", "localm", "serve", "--no-browser", "-p", "8443"]
+    argv = [sys.executable, str(root / "scripts" / "crash_recovery_watchdog.py"),
+            "--pid", "4242",
+            "--host", "192.0.2.5",
+            "--port", "8443",
+            "--scheme", scheme,
+            "--instance-id", "inst-1",
+            "--crash-dir", str(root / "crashes"),
+            "--relaunch-argv", json.dumps(relaunch)]
+    if history is not None:
+        argv += ["--restart-history", history]
+    return argv
+
+
+@pytest.mark.parametrize("tls,scheme", [(True, "https"), (False, "http")])
+@pytest.mark.parametrize("history", [None, "1700000000,1700000100"])
+def test_the_watchdog_command_line_is_exactly_what_it_parses(
+        spawn, monkeypatch, tls, scheme, history):
+    root, calls = spawn
+    monkeypatch.setattr(portmux.sys, "argv", ["localm", "serve", "--no-browser"])
+    monkeypatch.setattr("os.getpid", lambda: 4242)
+    if history is not None:
+        monkeypatch.setenv("LOCALM_CRASH_WATCHDOG_HISTORY", history)
+    portmux._spawn_crash_recovery_watchdog(host="192.0.2.5", port=8443, tls=tls,
+                                           instance_id="inst-1")
+    assert [c[0] for c in calls] == [_expected_watchdog_argv(root, scheme=scheme,
+                                                             history=history)]
+
+
+def test_on_posix_the_watchdog_is_detached_into_its_own_session(spawn, monkeypatch):
+    _root, calls = spawn
+    monkeypatch.setattr(sys, "platform", "linux")
+    _spawn()
+    assert calls[0][1] == dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, close_fds=True,
+                               start_new_session=True)
+
+
+def test_on_windows_the_watchdog_gets_exactly_the_no_window_group_flags(spawn, monkeypatch):
+    _root, calls = spawn
+    monkeypatch.setattr(sys, "platform", "win32")
+    _spawn()
+    assert calls[0][1] == dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, close_fds=True,
+                               creationflags=0x08000000 | 0x00000200)
+
+
+@pytest.mark.parametrize("instance_id,setting", [
+    (None, None), ("", None), (None, "off"), ("inst-1", "off"), ("inst-1", "0"),
+    ("inst-1", "false"), ("inst-1", "no"), ("inst-1", "  OFF ")])
+def test_no_watchdog_is_spawned_without_an_instance_or_when_disabled(
+        spawn, monkeypatch, instance_id, setting):
+    _root, calls = spawn
+    if setting is not None:
+        monkeypatch.setenv("LOCALM_CRASH_WATCHDOG", setting)
+    portmux._spawn_crash_recovery_watchdog(host="127.0.0.1", port=8443, tls=False,
+                                           instance_id=instance_id)
+    assert calls == []
+
+
+def test_a_spawn_failure_warning_names_the_error(spawn, monkeypatch, warnings):
+    def fail(argv, **kw):
+        raise OSError("spawn failed")
+    monkeypatch.setattr(subprocess, "Popen", fail)
+    _spawn()
+    (args,) = warnings
+    assert args[0] == "could not spawn the crash-recovery watchdog: %s"
+    assert str(args[1]) == "spawn failed"
+
+
+def test_a_watchdog_setting_that_is_not_an_off_value_keeps_it_on(spawn, monkeypatch):
+    _root, calls = spawn
+    monkeypatch.setenv("LOCALM_CRASH_WATCHDOG", "on")
+    _spawn()
+    assert len(calls) == 1

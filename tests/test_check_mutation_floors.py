@@ -183,11 +183,12 @@ class TestCheck:
         assert problems == []
 
     def test_new_mutant_without_disposition_fails(self):
-        res = _results({M1: "killed", M2: "killed"})
+        res = _results({M1: "killed", M3: "killed"})
         base = _baseline({M1: "killed"}, floor=100.0)
         problems, _, _ = cmf.check(res, base, [MOD])
         assert len(problems) == 1
-        assert "no disposition" in problems[0] and M2 in problems[0]
+        assert "no disposition" in problems[0] and M3 in problems[0]
+        assert "1 mutant(s)" in problems[0]
 
     def test_changed_function_makes_all_its_dispositions_stale(self):
         """A function whose source hash moved gets fresh mutant numbering, so
@@ -199,6 +200,20 @@ class TestCheck:
         assert len(problems) == 1
         assert "x_grants" in problems[0] and "2 mutant(s)" in problems[0]
         assert "x_normalize" not in problems[0]
+
+    def test_function_that_gained_mutants_makes_all_its_dispositions_stale(self):
+        """Same source hash, one more generated mutant: mutmut renumbered the
+        function's mutants over its newly covered lines, so the recorded ids no
+        longer describe the same mutations."""
+        m3 = "localm.scopes.x_grants__mutmut_3"
+        res = _results({M1: "survived", M2: "killed", m3: "killed", M3: "killed"})
+        base = _baseline({M1: "killed", M2: {"equivalent": "described the old #2"},
+                          M3: "killed"}, floor=0.0)
+        problems, warnings, _ = cmf.check(res, base, [MOD])
+        assert len(problems) == 1, problems
+        assert "x_grants" in problems[0] and "3 mutant(s)" in problems[0]
+        assert "x_normalize" not in problems[0]
+        assert not any("classified equivalent" in w for w in warnings)
 
     def test_equivalent_with_reason_is_excluded_from_the_score(self):
         res = _results({M1: "killed", M2: "survived"})
@@ -496,6 +511,17 @@ class TestProposeBaseline:
         base = _baseline({M1: "killed", M2: {"equivalent": "was true before the edit"}})
         prop = cmf.propose_baseline(res, base, [MOD])
         assert prop["modules"][MOD]["mutants"][M2] == "survived"
+
+    def test_equivalent_of_a_function_that_gained_mutants_is_re_evaluated(self):
+        m3 = "localm.scopes.x_grants__mutmut_3"
+        res = _results({M1: "killed", M2: "killed", m3: "survived", M3: "killed"})
+        base = _baseline({M1: "killed", M2: {"equivalent": "described the old #2"},
+                          M3: {"equivalent": "x_normalize did not grow"}}, floor=0.0)
+        prop = cmf.propose_baseline(res, base, [MOD])
+        assert prop["modules"][MOD]["mutants"] == {
+            M1: "killed", M2: "killed", m3: "survived",
+            M3: {"equivalent": "x_normalize did not grow"}}
+        assert cmf.check(res, prop, [MOD])[0] == []
 
     def test_mutants_of_a_removed_function_and_incomplete_ones_are_pruned(self):
         res = _results({M1: "killed", M2: "skipped", M3: "not checked"},

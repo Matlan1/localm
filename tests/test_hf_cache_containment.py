@@ -231,3 +231,41 @@ def test_containment_that_cannot_take_effect_is_reported(tmp_path):
     assert "huggingface_hub was imported before localm" in proc.stderr
     quiet = _fresh_interpreter(tmp_path, "import localm.config; print('ok')")
     assert quiet == "ok"
+
+
+def _loaded_hub(monkeypatch, hub_home):
+    from types import SimpleNamespace
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants",
+                        SimpleNamespace(HF_HOME=hub_home))
+
+
+def test_a_hub_loaded_with_another_home_is_reported_in_process(monkeypatch, tmp_path, capsys):
+    _clean_hf_env(monkeypatch)
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "data"))
+    elsewhere = str(tmp_path / "profile" / "huggingface")
+    _loaded_hub(monkeypatch, elsewhere)
+    config.contain_hf_cache()
+    pinned = os.environ["HF_HOME"]
+    assert capsys.readouterr().err == (
+        f"[localm] WARNING: huggingface_hub was imported before localm, so its caches "
+        f"stay at {elsewhere} instead of the data folder ({pinned}).\n")
+
+
+@pytest.mark.parametrize("case", ["same-home", "not-loaded", "user-home", "no-home-attr"])
+def test_containment_in_effect_or_left_to_the_user_is_not_reported(
+        monkeypatch, tmp_path, capsys, case):
+    from types import SimpleNamespace
+    _clean_hf_env(monkeypatch)
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "data"))
+    pinned = str(config.contained_hf_env({})["HF_HOME"])
+    if case == "same-home":
+        _loaded_hub(monkeypatch, pinned + os.sep)
+    elif case == "not-loaded":
+        monkeypatch.delitem(sys.modules, "huggingface_hub.constants", raising=False)
+    elif case == "user-home":
+        monkeypatch.setenv("HF_HOME", str(tmp_path / "mine"))
+        _loaded_hub(monkeypatch, str(tmp_path / "elsewhere"))
+    else:
+        monkeypatch.setitem(sys.modules, "huggingface_hub.constants", SimpleNamespace())
+    config.contain_hf_cache()
+    assert capsys.readouterr().err == ""

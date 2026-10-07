@@ -33,6 +33,12 @@ from localm import bugreport as bugreport_mod
 from localm import portmux, tls
 
 
+@pytest.fixture(autouse=True)
+def _no_real_crash_watchdog(monkeypatch):
+    """run_server() here never spawns a real detached crash-recovery watchdog."""
+    monkeypatch.setenv("LOCALM_CRASH_WATCHDOG", "off")
+
+
 # --------------------------------------------------------------------------- #
 #  Shared helpers
 # --------------------------------------------------------------------------- #
