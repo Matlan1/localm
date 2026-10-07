@@ -27,20 +27,36 @@ def tool_fetch_url(
     unless net_allow_private is set.
 
     In privacy mode (``_privacy=True``) a one-line network audit message is
-    emitted to stderr before the request so the user can see outbound URLs.
+    emitted to stderr before the request so the user can see outbound URLs,
+    one more before each GitHub / Stack Exchange content endpoint it
+    requests, and one naming the address the content was read from when it
+    differs (a redirect, or a content endpoint).
     """
+    import sys as _sys
+
     from localm.netpolicy import NetworkPolicyError, fetch_text
 
     if _privacy:
-        import sys as _sys
         print(f"[localm privacy] fetch_url: {url}", file=_sys.stderr, flush=True)
 
+    on_endpoint = None
+    if _privacy:
+        def on_endpoint(endpoint: str) -> None:
+            print(f"[localm privacy] fetch_url endpoint: {endpoint}",
+                  file=_sys.stderr, flush=True)
+
     try:
-        final_url, text = fetch_text(url)
+        final_url, text = fetch_text(url, on_endpoint=on_endpoint)
     except NetworkPolicyError as e:
         return ToolResult.error(str(e))
     except Exception as e:
-        return ToolResult.error(f"Could not fetch {url}: {e}")
+        from localm.web_retrieval.errors import describe_failure
+        return ToolResult.error(
+            f"Could not fetch {url}: {describe_failure(e, url)}")
+
+    if _privacy and final_url != url:
+        print(f"[localm privacy] fetch_url read: {final_url}",
+              file=_sys.stderr, flush=True)
 
     output, trunc = _truncate(text, max_chars)
     return ToolResult(
@@ -66,8 +82,10 @@ def tool_web_search(
     are read). Use fetch_url to read a page the evidence did not cover.
     Every request goes through localm.netpolicy like fetch_url. A provider
     failure or an empty search is a tool error. In privacy mode
-    (``_privacy=True``) the query and then every attempted page read are
-    echoed to stderr as network audit lines.
+    (``_privacy=True``) the query, every GitHub / Stack Exchange content
+    endpoint requested (as it is requested), every attempted page read and
+    the address a page was read from when it differs are echoed to stderr
+    as network audit lines.
 
     The evidence text is remote-controlled: the output is built with
     ``untrusted_span``, which neutralises it and records it as an untrusted
@@ -81,18 +99,29 @@ def tool_web_search(
     if _privacy:
         print(f"[localm privacy] web_search: {query}", file=_sys.stderr, flush=True)
 
+    on_endpoint = None
+    if _privacy:
+        def on_endpoint(endpoint: str) -> None:
+            print(f"[localm privacy] web_search endpoint: {endpoint}",
+                  file=_sys.stderr, flush=True)
+
     try:
-        bundle = retrieve(query, search_candidates=max_results)
+        bundle = retrieve(query, search_candidates=max_results,
+                          on_endpoint=on_endpoint)
     except NetworkPolicyError as e:
         return ToolResult.error(str(e))
     except Exception as e:
-        return ToolResult.error(f"Web search failed: {e}")
+        from localm.web_retrieval.errors import describe_failure
+        return ToolResult.error(f"Web search failed: {describe_failure(e)}")
 
     if _privacy:
         # Every page read the retrieval attempted is an outbound request too.
         for src in bundle.sources:
             if src.retrieval_status != "skipped":
                 print(f"[localm privacy] web_search read: {src.url}",
+                      file=_sys.stderr, flush=True)
+            if src.final_url and src.final_url != src.url:
+                print(f"[localm privacy] web_search read from: {src.final_url}",
                       file=_sys.stderr, flush=True)
 
     if bundle.search_status != "ok":

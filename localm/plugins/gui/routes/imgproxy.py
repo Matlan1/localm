@@ -57,16 +57,19 @@ def _fetch_budget_s() -> float:
     The budget must sit above safe_fetch_bytes' real worst case, so
     run_in_threadpool_bounded fires only for a wedged call and never for a
     slow-but-working one. That worst case is not one timeout: netpolicy applies
-    its timeout separately to the connect and to each read, and follows
-    redirects MANUALLY (so every hop re-pays both), up to ``_MAX_REDIRECTS``.
+    its timeout separately to the connect and to each read, a host with
+    several addresses may take ``netpin._CONNECT_BUDGET_FACTOR`` times the
+    timeout to connect, and redirects are followed MANUALLY (so every hop
+    re-pays both), up to ``_MAX_REDIRECTS``.
     See ``test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case``.
 
-    Falls back to the same arithmetic on default values if either private name
+    Falls back to the same arithmetic on default values if a private name
     is absent."""
-    from localm import netpolicy
+    from localm import netpin, netpolicy
     per_call = float(getattr(netpolicy, "_DEFAULT_TIMEOUT", 15))
     hops = int(getattr(netpolicy, "_MAX_REDIRECTS", 5)) + 1
-    return hops * 2 * per_call + 20.0        # connect + read per hop, plus slack
+    connect = float(getattr(netpin, "_CONNECT_BUDGET_FACTOR", 2)) * per_call
+    return hops * (connect + per_call) + 20.0    # connect + read per hop, plus slack
 
 # image/svg+xml is absent: served from this origin an SVG renders as a DOCUMENT
 # when its URL is opened directly, and SVG can carry script. Every type listed

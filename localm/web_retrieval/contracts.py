@@ -21,6 +21,10 @@ FETCH_TOP = 3
 EVIDENCE_BUDGET_CHARS = 12_000
 #: Characters of evidence one source may contribute.
 PER_SOURCE_CAP_CHARS = 4_000
+#: Seconds a page read may wait for a connection or for data.
+PAGE_READ_TIMEOUT = 8
+#: Seconds a retrieval waits for all of its page reads together.
+PAGE_READ_DEADLINE = 15
 
 GROUNDING_PAGE_BACKED = "page-backed"
 GROUNDING_SNIPPET_ONLY = "snippet-only"

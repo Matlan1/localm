@@ -369,10 +369,11 @@ class TestHTTPBackendRefusesRedirects(unittest.TestCase):
 
 
 def _fake_pinned_session(calls, ips):
-    """Records every socket.getaddrinfo-derived pin and every session.request()
-    call, and returns a fake session in netpin.pinned_session's shape."""
-    def _make(ip):
-        ips.append(ip)
+    """Records every socket.getaddrinfo-derived pin (the validated address
+    list netpin.pinned_session receives) and every session.request() call,
+    and returns a fake session in netpin.pinned_session's shape."""
+    def _make(pinned):
+        ips.append([pinned] if isinstance(pinned, str) else list(pinned))
         session = MagicMock()
 
         def _request(method, url, **kw):
@@ -404,7 +405,7 @@ def test_pinned_chat_dials_the_validated_ip_not_the_hostname():
         result = backend.chat([{"role": "user", "content": "hi"}])
     mock_post.assert_not_called()
     assert result == "hi"
-    assert ips == ["93.184.216.34"]
+    assert ips == [["93.184.216.34"]]
     assert len(calls) == 1
     method, url, kw = calls[0]
     assert method == "POST"

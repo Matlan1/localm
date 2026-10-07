@@ -109,6 +109,18 @@ def _neutralise_bundle(bundle) -> dict:
     return data
 
 
+def _reason(exc: BaseException, url: str = "") -> str:
+    """A plain-language reason for a failed web request to *url*."""
+    from localm.web_retrieval.errors import describe_failure
+    return describe_failure(exc, url)
+
+
+def _search_reason(exc: BaseException) -> str:
+    """A plain-language reason for a failed search, with the remedy."""
+    from localm.web_retrieval.retrieve import search_failure_text
+    return search_failure_text(exc)
+
+
 class WebSearchRequest(BaseModel):
     query: str
     max_results: int = 5
@@ -126,7 +138,7 @@ class WebRetrieveRequest(BaseModel):
 @_router.post("/api/web/retrieve")
 @route_errors({
     NetworkPolicyError: 403,
-    Exception: lambda e: (502, f"Retrieval failed: {e}"),
+    Exception: lambda e: (502, f"Retrieval failed: {_reason(e)}"),
 })
 async def web_retrieve_endpoint(req: WebRetrieveRequest):
     """Search *query*, read the top result pages and return the evidence
@@ -154,7 +166,7 @@ async def web_retrieve_endpoint(req: WebRetrieveRequest):
 @_router.post("/api/web/search")
 @route_errors({
     NetworkPolicyError: 403,
-    Exception: lambda e: (502, f"Search failed: {e}"),
+    Exception: lambda e: (502, f"Search failed: {_search_reason(e)}"),
 })
 async def web_search_endpoint(req: WebSearchRequest):
     from localm.debuglog import logger
@@ -177,7 +189,7 @@ async def web_search_endpoint(req: WebSearchRequest):
 @_router.post("/api/web/fetch")
 @route_errors({
     NetworkPolicyError: 403,
-    Exception: lambda e: (502, f"Fetch failed: {e}"),
+    Exception: lambda e: (502, f"Fetch failed: {_reason(e)}"),
 })
 async def web_fetch_endpoint(req: WebFetchRequest):
     from localm.debuglog import logger
@@ -193,8 +205,15 @@ async def web_fetch_endpoint(req: WebFetchRequest):
         return final_url, neutralise(text[:max_chars]), len(text) > max_chars
 
     loop = asyncio.get_running_loop()
-    final_url, text, truncated = await loop.run_in_executor(
-        get_plugin_executor(), _fetch_and_defang)
+    try:
+        final_url, text, truncated = await loop.run_in_executor(
+            get_plugin_executor(), _fetch_and_defang)
+    except NetworkPolicyError:
+        raise
+    except Exception as exc:
+        logger.info("web fetch: failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            502, f"Fetch failed: {_reason(exc, req.url)}") from exc
     logger.info("web fetch: retrieved %d chars (truncated=%s)", len(text), truncated)
     return {"url": final_url, "text": text, "truncated": truncated,
             "untrusted_fields": list(_UNTRUSTED_FETCH_FIELDS)}

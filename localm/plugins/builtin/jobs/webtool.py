@@ -394,7 +394,9 @@ def run_web_call(call: dict) -> str:
                        "access was refused, and do not describe, simulate or guess "
                        "what it would have found.")
     except Exception as e:
-        return compose("[Web request failed: ", untrusted_span(str(e)),
+        from localm.web_retrieval.errors import describe_failure
+        return compose("[Web request failed: ",
+                       untrusted_span(describe_failure(e)),
                        "] " + WEB_FAILED_INSTRUCTION)
 
 

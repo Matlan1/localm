@@ -6,15 +6,26 @@ concurrently through ``localm.netpolicy``, extract, select evidence.
 refusal or an empty query. A failing provider is reported in
 ``bundle.search_status`` / ``bundle.search_error`` and is never replaced by
 another provider. A failing page read is reported on its ``Source`` and never
-fails the retrieval.
+fails the retrieval. Both error texts are plain-language sentences from
+``errors.describe_failure``.
+
+A page read goes through ``sites.read_url`` (GitHub and Stack Exchange
+content endpoints first, the page itself last) and is sent once more when it
+fails with a reset, refused or unreachable connection, or an incomplete body.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import functools
+import hashlib
+import time
+import urllib.parse
 from typing import Callable, Optional
 
 from localm import netpolicy
+from localm.debuglog import logger
+from localm.netpin import ReadBudgetExceeded
 
 from .canonical import canonicalize_url, dedup_key, dedup_results
 from .chunking import select_evidence
@@ -26,6 +37,8 @@ from .contracts import (
     GROUNDING_FAILED,
     GROUNDING_PAGE_BACKED,
     GROUNDING_SNIPPET_ONLY,
+    PAGE_READ_DEADLINE,
+    PAGE_READ_TIMEOUT,
     PER_SOURCE_CAP_CHARS,
     SEARCH_CANDIDATES,
     SEARCH_EMPTY,
@@ -39,8 +52,10 @@ from .contracts import (
     SearchProvider,
     Source,
 )
+from .errors import describe_failure, failure_kind
 from .extract import extract_page
-from .providers import provider_from_config
+from .providers import REMEDY, provider_from_config
+from .sites import read_url
 
 #: ``fetch(url, timeout=...) -> (final_url, content_type, text)``.
 Fetcher = Callable[..., tuple[str, str, str]]
@@ -48,15 +63,46 @@ Fetcher = Callable[..., tuple[str, str, str]]
 _MAX_SEARCH_CANDIDATES = 10
 _ERROR_TEXT_CAP = 300
 _HTML_SNIFF_BYTES = 1024
+_PAGE_RETRY_KINDS = frozenset({"reset", "refused", "unreachable", "incomplete"})
+_WORKER_GRACE = 1.0
 
 
-def _describe(exc: BaseException) -> str:
-    text = f"{type(exc).__name__}: {exc}".strip()
-    return text[:_ERROR_TEXT_CAP]
+def _default_fetch(url: str, *, timeout: float,
+                   finish_by: Optional[float] = None
+                   ) -> tuple[str, str, str]:
+    """``netpolicy.safe_fetch``. With *finish_by* (a ``time.monotonic()``
+    value) the call gets only the time left until then, and raises
+    ``ReadBudgetExceeded`` when none is left."""
+    if finish_by is None:
+        return netpolicy.safe_fetch(url, timeout=timeout)
+    left = finish_by - time.monotonic()
+    if left <= 0:
+        raise ReadBudgetExceeded(0.0, url)
+    return netpolicy.safe_fetch(url, timeout=min(timeout, left),
+                                total_timeout=left)
 
 
-def _default_fetch(url: str, *, timeout: int) -> tuple[str, str, str]:
-    return netpolicy.safe_fetch(url, timeout=timeout)
+def search_failure_text(exc: BaseException,
+                        provider: Optional[SearchProvider] = None) -> str:
+    """The ``search_error`` sentence for a failed search by *provider*
+    (default: ``provider_from_config()``): what failed, then what the user
+    can do about it. A ``SearchProviderError`` keeps its own message."""
+    from .contracts import SearchProviderError
+    if isinstance(exc, SearchProviderError):
+        return str(exc).strip()[:_ERROR_TEXT_CAP * 2] or "the search failed"
+    if provider is None:
+        provider = provider_from_config()
+    url = (getattr(provider, "endpoint", "")
+           or getattr(provider, "base_url", "") or "")
+    reason = describe_failure(exc, url)
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not (host and reason.startswith(host)):
+        reason = reason[:1].upper() + reason[1:]
+    if getattr(provider, "name", "") == "searxng":
+        return (f"{reason}. Check that the Search backend URL in Settings > "
+                "Network points at a running SearXNG instance with the JSON "
+                "format enabled.")
+    return f"{reason}. {REMEDY}"
 
 
 def _looks_like_html(content_type: str, body: str) -> bool:
@@ -66,8 +112,21 @@ def _looks_like_html(content_type: str, body: str) -> bool:
     return "<html" in head or "<!doctype html" in head
 
 
-def _read_page(source: Source, fetch: Fetcher, timeout: int) -> PageDocument:
-    final_url, content_type, body = fetch(source.url, timeout=timeout)
+def _read_page(source: Source, fetch: Fetcher, timeout: float,
+               on_endpoint: Optional[Callable[[str], None]] = None
+               ) -> PageDocument:
+    try:
+        final_url, content_type, body = read_url(
+            source.url, fetch, timeout=timeout, on_endpoint=on_endpoint)
+    except netpolicy.NetworkPolicyError:
+        raise
+    except Exception as exc:
+        if failure_kind(exc) not in _PAGE_RETRY_KINDS:
+            raise
+        logger.debug("web retrieval: page read retried after %s",
+                     type(exc).__name__)
+        final_url, content_type, body = read_url(
+            source.url, fetch, timeout=timeout, on_endpoint=on_endpoint)
     if _looks_like_html(content_type, body):
         page = extract_page(body)
         return PageDocument(url=source.url, final_url=final_url,
@@ -95,8 +154,10 @@ def _record_page(source: Source, page: PageDocument,
         source.error = "page had no extractable text"
 
 
-def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
-                deadline: float) -> dict[str, PageDocument]:
+def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: float,
+                deadline: float,
+                on_endpoint: Optional[Callable[[str], None]] = None
+                ) -> dict[str, PageDocument]:
     """Read every source in *to_fetch* concurrently. A read still running at
     *deadline* seconds is recorded as failed; its worker finishes on its own
     transport timeout."""
@@ -104,11 +165,14 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
     pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=len(to_fetch), thread_name_prefix="web-retrieval")
     try:
-        futures = {pool.submit(_read_page, s, fetch, timeout): s
+        futures = {pool.submit(_read_page, s, fetch, timeout, on_endpoint): s
                    for s in to_fetch}
         done, pending = concurrent.futures.wait(futures, timeout=deadline)
         for fut in pending:
-            futures[fut].mark_failed(f"timed out after {deadline:g}s")
+            source = futures[fut]
+            host = urllib.parse.urlparse(source.url).hostname or "the site"
+            source.mark_failed(
+                f"{host} did not finish loading within {deadline:g}s")
             fut.cancel()
         for fut in done:
             source = futures[fut]
@@ -117,7 +181,9 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
             except netpolicy.NetworkPolicyError as exc:
                 source.mark_failed(f"refused by policy: {exc}"[:_ERROR_TEXT_CAP])
             except Exception as exc:
-                source.mark_failed(_describe(exc))
+                logger.debug("web retrieval: page read failed (%s)",
+                             type(exc).__name__)
+                source.mark_failed(describe_failure(exc, source.url))
             else:
                 _record_page(source, page, pages)
     finally:
@@ -128,20 +194,25 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
 def _drop_duplicate_pages(fetched: list[Source],
                           pages: dict[str, PageDocument]) -> None:
     """A fetched source whose final URL has the same ``dedup_key`` as a
-    higher-ranked fetched source loses its page and becomes ``duplicate``."""
+    higher-ranked fetched source, or whose page text is the same apart from
+    whitespace, loses its page and becomes ``duplicate``."""
     seen: dict[str, str] = {}
     for source in fetched:
         if source.id not in pages:
             continue
-        key = dedup_key(source.final_url or source.url)
-        if key in seen:
+        normalized = " ".join(pages[source.id].text.split())
+        keys = (dedup_key(source.final_url or source.url),
+                "text:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest())
+        first = next((seen[k] for k in keys if k in seen), None)
+        if first is not None:
             del pages[source.id]
             source.retrieval_status = STATUS_DUPLICATE
             source.grounding = (GROUNDING_SNIPPET_ONLY if source.snippet.strip()
                                 else GROUNDING_FAILED)
-            source.error = f"same page as {seen[key]}"
+            source.error = f"same page as {first}"
         else:
-            seen[key] = source.id
+            for k in keys:
+                seen[k] = source.id
 
 
 def retrieve(
@@ -155,6 +226,7 @@ def retrieve(
     fetch: Optional[Fetcher] = None,
     fetch_timeout: Optional[int] = None,
     deadline_seconds: Optional[float] = None,
+    on_endpoint: Optional[Callable[[str], None]] = None,
 ) -> EvidenceBundle:
     """Search *query*, read the top pages and return an ``EvidenceBundle``.
 
@@ -162,9 +234,15 @@ def retrieve(
     clamped to 1..10 and *fetch_top* to 0..*search_candidates*. The provider
     is asked for twice *search_candidates* results (at most 10); after
     duplicate removal the first *search_candidates* become sources. *fetch*
-    defaults to ``netpolicy.safe_fetch``; *fetch_timeout* to netpolicy's
-    default; *deadline_seconds* (the wait for all page reads together) to
-    twice *fetch_timeout*.
+    defaults to ``netpolicy.safe_fetch``, every call of it (content endpoints
+    and retries included) given only the time left until one second after
+    the page-read deadline, which starts when the page reads start;
+    *fetch_timeout* (each connect attempt and each wait for data) to
+    ``PAGE_READ_TIMEOUT``; *deadline_seconds* (the wait for all
+    page reads together) to ``PAGE_READ_DEADLINE``, or twice *fetch_timeout*
+    when only *fetch_timeout* is given. *on_endpoint*, when given, is
+    called with every site content-endpoint URL (``sites.read_url``)
+    before it is requested, from the page-read worker threads.
 
     Raises ``ValueError`` for an empty query and ``NetworkPolicyError`` when
     the policy refuses the search request. Every other search failure is
@@ -179,12 +257,15 @@ def retrieve(
     fetch_top = max(0, min(int(fetch_top), search_candidates))
     if provider is None:
         provider = provider_from_config()
-    if fetch is None:
-        fetch = _default_fetch
-    timeout = int(fetch_timeout if fetch_timeout is not None
-                  else netpolicy._DEFAULT_TIMEOUT)
-    deadline = float(deadline_seconds if deadline_seconds is not None
-                     else 2 * timeout)
+    timeout = (fetch_timeout if fetch_timeout is not None
+               else PAGE_READ_TIMEOUT)
+    if deadline_seconds is not None:
+        deadline = float(deadline_seconds)
+    elif fetch_timeout is not None:
+        deadline = float(2 * timeout)
+    else:
+        deadline = float(PAGE_READ_DEADLINE)
+    default_fetch = fetch is None
 
     bundle = EvidenceBundle(query=query, provider=provider.name,
                             budget_chars=budget_chars,
@@ -195,8 +276,9 @@ def retrieve(
     except netpolicy.NetworkPolicyError:
         raise
     except Exception as exc:
+        logger.debug("web retrieval: search failed (%s)", type(exc).__name__)
         bundle.search_status = SEARCH_FAILED
-        bundle.search_error = _describe(exc)
+        bundle.search_error = search_failure_text(exc, provider)
         return bundle
 
     results = dedup_results(results)[:search_candidates]
@@ -219,7 +301,11 @@ def retrieve(
     to_fetch = sources[:fetch_top]
     pages: dict[str, PageDocument] = {}
     if to_fetch:
-        pages = _read_pages(to_fetch, fetch, timeout, deadline)
+        if default_fetch:
+            fetch = functools.partial(
+                _default_fetch,
+                finish_by=time.monotonic() + deadline + _WORKER_GRACE)
+        pages = _read_pages(to_fetch, fetch, timeout, deadline, on_endpoint)
         _drop_duplicate_pages(to_fetch, pages)
 
     inputs: list[tuple[str, str, str]] = []
