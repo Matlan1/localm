@@ -109,6 +109,34 @@ test("a routed reply records the model that answered and why, and shows it", asy
   assert.match(chip.title, /reading images/);
 });
 
+test("a routed reply from a model loaded partly on the CPU says so on its chip", async () => {
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "seer", requested: "plain", routed: true, pinned: false,
+    gaps: { tool_use: "absent" }, unmet: [],
+    placement: { gpu_layers: 12, total_layers: 32 } } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const reply = conv.messages[conv.messages.length - 1];
+  assert.deepEqual(JSON.parse(JSON.stringify(reply.routed)),
+                   { from: "plain", gaps: ["tool_use"], placement: { gpu: 12, total: 32 } });
+  const chip = doc.querySelector(".routed-chip");
+  assert.match(chip.textContent, /partly on CPU/);
+  assert.match(chip.title, /12 of 32 layers on the GPU/);
+});
+
+test("a routed reply with no placement field shows no CPU note", async () => {
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "seer", requested: "plain", routed: true, pinned: false,
+    gaps: { tool_use: "absent" }, unmet: [] } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const chip = doc.querySelector(".routed-chip");
+  assert.doesNotMatch(chip.textContent, /CPU/);
+  assert.doesNotMatch(chip.title, /CPU/);
+});
+
 test("a reply that was not routed records the selected model and no chip", async () => {
   const { window, doc } = setup({ routingHeader: {
     resolved: "plain", requested: "plain", routed: false, pinned: true,
@@ -207,6 +235,9 @@ test("parseRoutingHeader reads the header and survives junk", () => {
   assert.equal(asked.suggested, "b");
   assert.equal(window.parseRoutingHeader(resp(JSON.stringify({
     resolved: "a", requested: "a", gaps: {}, suggested: 5 }))).suggested, undefined);
+  assert.equal(window.parseRoutingHeader(resp(JSON.stringify({
+    resolved: "b", requested: "a", routed: true, gaps: {},
+    placement: { gpu_layers: "x", total_layers: 32 } }))).placement, undefined);
   assert.equal(window.parseRoutingHeader(resp(null)), null);
   assert.equal(window.parseRoutingHeader(resp("not json")), null);
   assert.equal(window.parseRoutingHeader(null), null);

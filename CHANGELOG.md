@@ -327,6 +327,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unloaded and reloaded large models. A model whose tool support is unknown now
   keeps the turn; only a model known to lack a needed capability is swapped out.
   Image and context-length routing are unchanged.
+- **A model loaded by an automatic switch no longer stays slow until you reload it.**
+  When the model it replaced was still busy answering something else, the new model
+  was loaded beside it, partly on the CPU, and kept that slow placement for as long as
+  it stayed loaded. An automatic switch now waits for the busy model to finish (up to
+  30 seconds, showing "Waiting for another request to finish...") and frees it first;
+  a model that still had to load partly on the CPU is reloaded at full speed on its
+  next use once the model that held the memory is idle or gone. The reply's "instead
+  of" chip now says when the answering model runs partly on the CPU.
 - **Small talk no longer ends up in the remembered facts, and one common word no
   longer pulls old session summaries into every chat turn.** A session with
   nothing lasting in it (a greeting, a passing remark, a one-off request) now

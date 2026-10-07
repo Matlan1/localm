@@ -638,6 +638,7 @@ class TestSwitchEngineBusyEviction:
         generation. Falls through to the pre-existing cooperative-unload/
         defer-to-backend path unchanged, ending in the same 503 as before
         this feature existed."""
+        monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 0.2)
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
         from localm.inference import residency

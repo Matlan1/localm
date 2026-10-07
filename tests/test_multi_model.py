@@ -153,6 +153,7 @@ def test_lru_eviction(setup_multi_model, monkeypatch):
 
 
 def test_active_requests_protection_from_eviction(setup_multi_model, monkeypatch):
+    monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 0.2)
     app = hs.create_app(None)
     client = TestClient(app)
 

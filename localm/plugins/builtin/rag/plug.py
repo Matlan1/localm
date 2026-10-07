@@ -215,6 +215,11 @@ def _make_self_classify(self_url: str, active_model):
     return _self_classify
 
 
+# Seconds an image description may take end to end, including any wait for a
+# vision model to load. See test_the_waits_leave_an_image_description_a_minute_for_load_and_reply.
+_DESCRIBE_TIMEOUT_S = 180
+
+
 def _make_self_describe_image(self_url: str, active_model):
     """Describe image via this server's own /chat/completions (vision support).
 
@@ -239,7 +244,7 @@ def _make_self_describe_image(self_url: str, active_model):
                              "temperature": 0.2,
                              "max_tokens": 1000,
                          },
-                         timeout=60, base_url=self_url)
+                         timeout=_DESCRIBE_TIMEOUT_S, base_url=self_url)
         if r.ok:
             body = r.json()["choices"][0]
             if body.get("finish_reason") == "error":

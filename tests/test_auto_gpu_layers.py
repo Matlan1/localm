@@ -164,6 +164,50 @@ class TestEffectiveGpuLayers:
         assert "could not measure" not in out
         assert "gpu layers auto" not in out          # no scary partial-offload line
 
+    def test_auto_full_fit_records_the_budget_it_was_sized_against(self, tmp_path):
+        b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True)
+        with _vram(24 * GB, 24 * GB):
+            assert b._effective_gpu_layers() == 99
+        s = b.last_gpu_sizing
+        assert (s["mode"], s["layers"], s["n_ctx"]) == ("auto", 99, 4096)
+        assert (s["free_bytes"], s["total_bytes"]) == (24 * GB, 24 * GB)
+        assert s["model_bytes"] > 0 and s["kv_bytes"] > 0 and s["overhead_bytes"] > 0
+        assert "cause" not in s
+
+    def test_auto_partial_records_its_cause_and_logs_a_warning(self, tmp_path, caplog):
+        import logging
+        b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True)
+        with _vram(6 * GB, 16 * GB), caplog.at_level(logging.WARNING, logger="localm"):
+            n = b._effective_gpu_layers()
+        s = b.last_gpu_sizing
+        assert 0 < n < 99
+        assert (s["mode"], s["layers"], s["free_bytes"]) == ("auto", n, 6 * GB)
+        assert "GB free" in s["cause"] or "KV cache" in s["cause"]
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING and "gpu layers auto" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "model.gguf" in warnings[0] and f"offloading {n}/" in warnings[0]
+        assert s["cause"] in warnings[0]
+
+    def test_auto_full_fit_logs_no_partial_warning(self, tmp_path, caplog):
+        import logging
+        b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True)
+        with _vram(24 * GB, 24 * GB), caplog.at_level(logging.WARNING, logger="localm"):
+            b._effective_gpu_layers()
+        assert not [r for r in caplog.records if "gpu layers auto" in r.getMessage()]
+
+    @pytest.mark.parametrize("layers, auto, free, mode", [
+        (24, True, 6 * GB, "configured"),
+        (99, False, 6 * GB, "configured"),
+        (99, True, None, "unmeasurable"),
+    ])
+    def test_non_auto_choices_record_how_the_count_was_chosen(
+            self, tmp_path, layers, auto, free, mode):
+        b = _model(tmp_path, 8 * GB, n_gpu_layers=layers, auto=auto)
+        with _vram(free, None if free is None else 16 * GB):
+            assert b._effective_gpu_layers() == layers
+        assert b.last_gpu_sizing == {"mode": mode, "layers": layers, "n_ctx": 4096}
+
     @staticmethod
     def _flat(capsys) -> str:
         # console.print() word-wraps at the Console's detected width (~80 cols

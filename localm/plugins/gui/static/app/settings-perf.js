@@ -2294,8 +2294,9 @@ $("persona-delete").onclick = () => {
  *  model the request asked for, which capabilities drove the choice (`gaps`,
  *  the ones the answering model provides) and which it still lacks (`unmet`).
  *  `note` is present when the server says why a model that could have
- *  answered was skipped or failed to load. Returns null when the header is
- *  absent or unparseable. */
+ *  answered was skipped or failed to load. `placement` ({ gpu, total } layer
+ *  counts) is present when the answering model runs partly on the CPU.
+ *  Returns null when the header is absent or unparseable. */
 export function parseRoutingHeader(resp) {
   try {
     const raw = resp && resp.headers && resp.headers.get
@@ -2314,6 +2315,9 @@ export function parseRoutingHeader(resp) {
       unmet,
       ...(typeof data.suggested === "string" && data.suggested ? { suggested: data.suggested } : {}),
       ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
+      ...(data.placement && typeof data.placement === "object"
+        && Number.isFinite(data.placement.gpu_layers) && Number.isFinite(data.placement.total_layers)
+        ? { placement: { gpu: data.placement.gpu_layers, total: data.placement.total_layers } } : {}),
     };
   } catch { return null; }
 }
@@ -2693,7 +2697,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // that literal marker in its own prior turn on the next request).
   const answeredBy = (routing && routing.routed && routing.resolved) || modelName;
   const routedNote = routing && routing.routed
-    ? { from: routing.requested || modelName, gaps: routing.gaps }
+    ? { from: routing.requested || modelName, gaps: routing.gaps,
+        ...(routing.placement ? { placement: routing.placement } : {}) }
     : (routing && !routing.pinned && routing.suggested
       ? { from: routing.requested || modelName, suggest: routing.suggested,
           gaps: [...routing.gaps, ...routing.unmet] }

@@ -216,6 +216,9 @@ class Engine:
             mtp_enabled=mtp_enabled,
         )
         self.active_requests = 0
+        # Set by http_server.switch_engine after a load placed partly on the
+        # CPU: a PlacementHeal naming what held the VRAM, else None.
+        self.placement_heal = None
         # Set True by an unload/eviction path for the duration of the native
         # free, so get_engine()/switch_engine()'s fast paths refuse to hand this
         # engine back, and so refuse to let a request pin it, while it is being
@@ -281,6 +284,16 @@ class Engine:
             "gpu_layers_total": total,
             "degraded": offloaded < total,
         }
+
+    @property
+    def gpu_sizing(self) -> Optional[dict]:
+        """How the last load chose its GPU layer count (the backend's
+        ``last_gpu_sizing``: ``mode``, ``layers``, ``n_ctx`` and, for an
+        auto-sized load, the free/total/model/KV/overhead bytes it was sized
+        against), or None for a backend that does not size layers or before
+        any load."""
+        sizing = getattr(self._backend, "last_gpu_sizing", None)
+        return dict(sizing) if isinstance(sizing, dict) else None
 
     @property
     def last_finish_reason(self) -> str:
