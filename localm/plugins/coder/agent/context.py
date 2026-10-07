@@ -10,7 +10,8 @@ from typing import Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    print_assistant_label, print_info, print_reasoning_token, print_status,
+    print_assistant_label, print_info, print_progress, print_reasoning_token,
+    print_status,
     print_streaming_done, print_streaming_token, print_thinking,
 )
 from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
@@ -49,6 +50,19 @@ class _TerminalReply:
     def reasoning(self, piece: str) -> None:
         self._label()
         print_reasoning_token(piece)
+
+
+class _ProgressLines:
+    """Each new status of one model call, as a progress line on stderr."""
+
+    def __init__(self) -> None:
+        self._last = None
+
+    def status(self, text: str, code=None) -> None:
+        if not text or text == self._last:
+            return
+        self._last = text
+        print_progress(text)
 
 
 class _NameKeyGate:
@@ -1006,6 +1020,17 @@ ws     ::= [ \t\n\r]*
                     if not interrupted:
                         print_streaming_done()
                     return full
+                elif self.report_progress:
+                    # Non-interactive run that reports progress: the reply is
+                    # not shown, each new model status is.
+                    progress = _ProgressLines()
+                    progress.status(f"Waiting for {self.backend.model_id}...")
+                    return self._stream_and_record(
+                        messages,
+                        on_token=lambda piece: None,
+                        on_reasoning=lambda piece: None,
+                        on_status=progress.status,
+                    )
                 else:
                     # Silent call - used by sub-agents and non-interactive mode.
                     # No live display, but last_reasoning (when the backend

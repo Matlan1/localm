@@ -160,3 +160,45 @@ class TestAgent:
         assert out == ["thinking", "status:Loading model...",
                        "status:Processing prompt...", "label",
                        "tok:The ", "tok:answer.", "done"]
+
+
+class TestOneShotProgress:
+    def test_a_run_reporting_progress_prints_each_new_model_status(self, tmp_path):
+        from localm.plugins.coder.agent import context
+        out = []
+        agent = _make_agent(tmp_path)
+        agent.report_progress = True
+        with patch.object(context, "print_progress", out.append):
+            result = agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+        assert result == "The answer."
+        assert out == ["Waiting for test-model...", "Loading model...",
+                       "Processing prompt...", "Generating response..."]
+        agent.backend.chat.assert_not_called()
+
+    def test_a_silent_run_prints_nothing_and_does_not_stream(self, tmp_path):
+        from localm.plugins.coder.agent import context
+        out = []
+        agent = _make_agent(tmp_path)
+        agent.backend.chat.return_value = "quiet"
+        with patch.object(context, "print_progress", out.append):
+            assert agent._call_llm([{"role": "user", "content": "hi"}],
+                                   interactive=False) == "quiet"
+        assert out == []
+        agent.backend.chat_stream.assert_not_called()
+
+    def test_a_run_reporting_progress_prints_each_tool_call(self, tmp_path):
+        from localm.plugins.coder.agent import execution
+        from localm.plugins.coder.parser import ToolCall
+        from localm.plugins.coder.tools import ToolResult
+        calls = []
+        agent = _make_agent(tmp_path)
+        agent.report_progress = True
+        tool_def = MagicMock()
+        tool_def.destructive = False
+        tool_def.fn = MagicMock(return_value=ToolResult.success("ok"))
+        call = ToolCall(name="read_file", args={"path": "a.py"}, raw="", start=0, end=0)
+        with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY", {"read_file": tool_def}), \
+             patch.object(execution, "print_progress_tool_call",
+                          lambda name, args: calls.append((name, args))):
+            agent._execute_tool(call, interactive=False)
+        assert calls == [("read_file", {"path": "a.py"})]

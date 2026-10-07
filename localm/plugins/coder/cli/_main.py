@@ -397,6 +397,7 @@ def main(
 
         if task:
             # Non-interactive single-task mode (optionally a verify-until-pass loop)
+            agent.report_progress = True
             if until_cmd:
                 success, response = _run_goal_loop(
                     agent, task, until_cmd, goal_max_iters, work_dir)
