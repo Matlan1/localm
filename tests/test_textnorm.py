@@ -376,6 +376,24 @@ class TestStreamRelease:
         assert seen[0] == (7, "<think>")
         assert "".join(out for _, out in seen) == "<think>ok"
 
+    def test_the_cut_backs_up_past_a_complete_marker_that_straddles_it(self, monkeypatch):
+        """With a pattern whose match holds another possible marker inside
+        it, the cut moves to the start of the outer match."""
+        import re
+        from re import _parser
+
+        import localm.textnorm as tn
+
+        rx = re.compile(r"<ab<cd>|<cd>XY")
+        monkeypatch.setattr(tn, "_SCRUB_RE", rx)
+        monkeypatch.setattr(tn, "_SCRUB_TREE",
+                            tn._tagged(_parser.parse(rx.pattern, rx.flags), False))
+        tn._could_become_marker.cache_clear()
+        try:
+            assert tn._commit_point("<ab<cd>X") == 0
+        finally:
+            tn._could_become_marker.cache_clear()
+
     def test_every_prefix_of_every_match_counts_as_a_possible_marker(self):
         import random
 
