@@ -230,6 +230,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   acceptance rate and whether the replies matched MTP off.
 
 ### Fixed
+- **Replies start appearing as soon as the model writes them.** Every reply was
+  held back until about 48 characters had been generated, and a reply shorter
+  than that appeared only once it was complete. On a HuggingFace-format model
+  that added two to three seconds before the first words showed. Only text that
+  could still turn out to be one of a model's internal markers is held back now.
+  A Llama 3 role header that a model writes out as text no longer shows up in
+  a longer reply.
 - **A chat with web access on now ends on an answer, not on a bare "read page" or
   "web search" line.** Once the lookups stop, the last reply is requested without
   the web tools; if the model still writes a lookup, it is not run and the reply
