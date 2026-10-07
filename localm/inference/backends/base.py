@@ -199,6 +199,18 @@ IMAGE_UNSUPPORTED_MESSAGE = (
 )
 
 
+def image_unsupported_message(processor_error: Optional[str] = None) -> str:
+    """IMAGE_UNSUPPORTED_MESSAGE, or - when the checkpoint's processor failed to
+    load - a message naming that failure instead (the model itself may be a
+    vision model whose processor could not be built)."""
+    if not processor_error:
+        return IMAGE_UNSUPPORTED_MESSAGE
+    return (
+        "This model's image processor failed to load, so it is running "
+        f"text-only and the attached image would be ignored: {processor_error}"
+    )
+
+
 # Emitted via on_status when a GPU vision encode fails and the request is
 # retried on CPU.
 VISION_CPU_FALLBACK_STATUS = (
