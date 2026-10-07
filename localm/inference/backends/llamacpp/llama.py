@@ -689,11 +689,8 @@ _MTP_QUEUED_ROWS_MAX = 32
 
 
 def _greedy_chain():
-    """A sampler chain holding one greedy sampler.
-
-    A chain keeps its candidate buffer between samples; a bare greedy sampler
-    allocates a vocabulary-sized array on every call.
-    """
+    """A sampler chain holding one greedy sampler; it reuses its candidate
+    buffer from one sample to the next."""
     params = api.llama_sampler_chain_default_params()
     params.no_perf = True
     chain = api.llama_sampler_chain_init(params)
