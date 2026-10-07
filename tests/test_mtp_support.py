@@ -974,6 +974,70 @@ def test_real_mtp_model_verification_is_distribution_exact(real_mtp_model_path):
         "through the request's own sampler")
 
 
+_TOOL_SYSTEM = (
+    "You can search the web. To search, reply with exactly one block of the form "
+    '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call> and nothing else.')
+
+
+@pytest.mark.integration
+@pytest.mark.real_gguf
+@pytest.mark.parametrize("case", ["json-object", "lazy-tool-call-plain-reply",
+                                  "lazy-tool-call-called", "forced-tool-call"])
+def test_real_mtp_model_with_a_grammar_drafts_and_matches_mtp_off(real_mtp_model_path, case):
+    """With a grammar in the request's sampler a real MTP model drafts, and its
+    reply is byte-identical to the same request without MTP: the grammar only
+    ever sees the emitted tokens, in order."""
+    from localm.inference import gbnf
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+
+    require_native_runtime()
+
+    seed = 20261007
+    if case == "json-object":
+        messages = [{"role": "user", "content": "Describe a cat as a JSON object with "
+                                                "the keys name, color, age and hobbies."}]
+        kwargs = dict(grammar=gbnf.JSON_OBJECT, temperature=0.8, top_p=0.95, top_k=40)
+    elif case == "lazy-tool-call-plain-reply":
+        messages = [{"role": "system", "content": _TOOL_SYSTEM},
+                    {"role": "user", "content": "Explain in two paragraphs how a fridge works."}]
+        kwargs = dict(grammar=gbnf.TOOL_CALL_SINGLE, grammar_lazy=True,
+                      grammar_triggers=[gbnf.TOOL_CALL_TRIGGER], temperature=0.0)
+    elif case == "lazy-tool-call-called":
+        messages = [{"role": "system", "content": _TOOL_SYSTEM},
+                    {"role": "user", "content": "Search the web for today's weather in Vienna."}]
+        kwargs = dict(grammar=gbnf.TOOL_CALL_SINGLE, grammar_lazy=True,
+                      grammar_triggers=[gbnf.TOOL_CALL_TRIGGER], temperature=0.0)
+    else:
+        messages = [{"role": "system", "content": _TOOL_SYSTEM},
+                    {"role": "user", "content": "Search the web for the population of Graz."}]
+        kwargs = dict(grammar=gbnf.TOOL_CALLS_ONLY, temperature=0.0)
+
+    def _run(mtp_enabled):
+        llm = LlamaCpp(real_mtp_model_path, n_ctx=2048, n_gpu_layers=99,
+                       seed=seed, mtp_enabled=mtp_enabled)
+        try:
+            if mtp_enabled:
+                # Every step drafts: the pacer must not pause this short reply.
+                llm._draft_pacer = LlamaCppModule._DraftPacer(
+                    probe_every=1 << 30, bootstrap_every=1 << 30)
+            out = llm.create_chat_completion(messages, max_tokens=160, stream=False,
+                                             seed=seed, repeat_penalty=1.0, **kwargs)
+            return (out["choices"][0]["message"]["content"], llm.mtp_drafted,
+                    llm.mtp_accepted, llm.mtp_call_status)
+        finally:
+            llm.close()
+
+    on_text, drafted, accepted, status = _run(True)
+    off_text, _, _, _ = _run(False)
+
+    assert len(on_text) >= 10, f"suspiciously short output: {on_text!r}"
+    assert status == "", status
+    assert drafted > 0, "MTP never drafted on a grammar request"
+    assert on_text == off_text, (case, on_text, off_text)
+    if case in ("lazy-tool-call-called", "forced-tool-call"):
+        assert "<tool_call>" in on_text, on_text
+
+
 # --------------------------------------------------------------------------- #
 #  _generate_image: an image-bearing turn must never touch the draft context. #
 #  test_an_image_turn_clears_the_draft_cache_too (above) pins the KV-reset    #
