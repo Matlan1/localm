@@ -322,6 +322,13 @@ class TestStreamRelease:
         assert seen[1][0] == 2
         assert "".join(out for _, out in seen) == "if a < b then" + tail + " done"
 
+    def test_a_llama3_role_header_streamed_as_tokens_is_removed(self):
+        """The header holds a second ``<`` inside it; a cut there would release
+        its first half as text."""
+        tokens = ["<|", "start", "_header", "_id", "|>", "assistant", "<|", "end",
+                  "_header", "_id", "|>", "\n", "Hello", " there"] + [" word"] * 12
+        assert _scrub(tokens) == "Hello there" + " word" * 12
+
     def test_streaming_matches_one_shot_for_every_marker_and_chunking(self):
         """Markers placed before, inside and after the hold window, next to
         prose that contains marker characters, cut into pieces of many sizes."""
