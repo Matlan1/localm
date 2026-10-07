@@ -34,7 +34,8 @@ import { applyCoderRailSide } from "./coder.js";
             fetch (done): page {url, text, truncated}
             note?: trusted model-directed prose appended after the result, or
               the whole text of a control note; reason? ("format"|"unparsed"|
-              "pending", or "limit" on stored rows) names a control note
+              "pending", or "limit" on stored rows) names a control note, and
+              "ignored" marks a result whose note says later calls did not run
             text?, untrusted_spans?: a row migrated from the legacy
               {role:"user", web:true} shape, rendered verbatim } */
 export const TOOL_EVENT_KIND = "tool";
@@ -1571,9 +1572,9 @@ function toolTextSection(body, heading, text) {
   body.appendChild(el("div", "tool-evidence", text));
 }
 
-/** The user-facing one-line notice for a tool event's note, in the UI
- *  language: what happened, never the text the model reads. "" when the
- *  event carries no note. */
+/** The user-facing one-line notice for a tool event, in the UI language:
+ *  what happened, never the text the model reads. "" when there is nothing to
+ *  say (a result's own note, such as /web's answering instruction, has none). */
 export function toolEventNotice(ev) {
   if (ev.tool === "note") {
     return t(TOOL_NOTE_NOTICE_KEYS[ev.reason] || "chat.tool.notice.note");
@@ -1581,7 +1582,7 @@ export function toolEventNotice(ev) {
   if (ev.status === "duplicate") return t("chat.tool.notice.duplicate");
   if (ev.status === "denied") return t("chat.tool.notice.denied");
   if (ev.status === "skipped") return t("chat.tool.notice.skipped", { limit: ev.limit ?? "" });
-  return ev.note ? t("chat.tool.notice.ignored") : "";
+  return ev.reason === "ignored" ? t("chat.tool.notice.ignored") : "";
 }
 
 /** Render a tool event: a control note as a one-line notice, anything else as
@@ -1666,14 +1667,15 @@ export function addToolEventRow(container, ev, opts = {}) {
   return { row, card, body };
 }
 
-/** Append a tool event row's meta line: the copy button and, when
- *  *opts.variant* is set, the branch navigation. */
+/** Append a tool event row's meta line: the copy button (a control note
+ *  copies its notice, anything else its text) and, when *opts.variant* is set,
+ *  the branch navigation. */
 function appendToolEventMeta(row, ev, opts) {
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", t("chat.copy"));
   copy.onclick = async () => {
     try {
-      await navigator.clipboard.writeText(msgText(ev));
+      await navigator.clipboard.writeText(ev.tool === "note" ? toolEventNotice(ev) : msgText(ev));
       copy.textContent = t("chat.copied");
       setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
     } catch {

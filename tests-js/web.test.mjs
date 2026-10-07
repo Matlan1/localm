@@ -744,7 +744,7 @@ test("the tool-free last completion that still writes a call ends on text, never
   const lastRow = rows[rows.length - 1].textContent;
   assert.doesNotMatch(lastRow, /read page|web search|\u{1F310}/u,
     "the last item is never a bare tool-call marker");
-  assert.match(lastRow, /no further lookups ran/, "the user is told the lookups ended");
+  assert.match(lastRow, /none were run/, "the user is told the lookups ended");
 });
 
 test("with the default setting, more than three searches run before the answer", async () => {
@@ -883,7 +883,8 @@ for (const lang of ["en", "de"]) {
       'Searching.\n<tool_call>{"name":"web_search","args":{"query":"Matlan1 LocalM"}}</tool_call>',
       '<tool_call>{"name":"fetch_url","args":{"url":"https://github.com/Matlan1/localm"}}</tool_call>',
       "It failed.",
-    ], "answered calls are canonical; the stopped partial nothing answered is not sent");
+      "",
+    ], "answered calls are canonical; the stopped partial nothing answered is sent empty");
     assert.equal((sent.match(/<tool_call>/g) || []).length, 2);
   });
 }
@@ -925,8 +926,11 @@ test("a second botched call in a row ends the lookups instead of re-prompting ag
 test("looksLikeWebToolAttempt and stripWebCallText cover the copied marker and every call dialect", () => {
   const { window: w } = loadApp();
   assert.equal(w.looksLikeWebToolAttempt('> \u{1F310} *read page: https://x*'), true);
-  assert.equal(w.looksLikeWebToolAttempt("\u{1F310} *web search: \"q\"*"), true);
   assert.equal(w.looksLikeWebToolAttempt("I like the globe emoji \u{1F310} a lot."), false);
+  assert.equal(w.looksLikeWebToolAttempt("Contact:\n\u{1F310} Website: https://example.com\n"), false,
+    "a globe bullet in an ordinary answer is not a copied marker");
+  assert.equal(w.stripWebCallText("Contact:\n\u{1F310} Website: https://example.com"),
+    "Contact:\n\u{1F310} Website: https://example.com");
   const text = [
     "Intro.",
     '<tool_call>{"name": "web_search", "args": {"query": "a"}}</tool_call>',
@@ -963,6 +967,109 @@ test("control notes render as a one-line notice, never as an 'Instruction to the
   assert.match(text, /not run again/);
   assert.equal(box.querySelectorAll(".tool-card").length, 2, "only the two calls are cards");
   assert.equal(box.querySelectorAll(".tool-notice-row").length, 2);
+});
+
+test("an ordinary answer with a globe bullet is accepted, kept, and re-sent unchanged", async () => {
+  const answer = "Contact details:\n\u{1F310} Website: https://example.com\n\u{1F4DE} Phone: 123";
+  const { conv, completions } = await runChat({ web: true, rounds: [content(answer)] });
+  assert.equal(completions.length, 1, "no format re-prompt for an ordinary answer");
+  assert.ok(!conv.messages.some((m) => m.kind === "tool"));
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.content, answer);
+  assert.ok(!last.webUnfinished);
+  const again = await runChat({
+    web: true, rounds: [content("ok")],
+    history: [{ role: "user", content: "contact?" }, { role: "assistant", content: answer },
+              { role: "user", content: "thanks" }],
+  });
+  assert.equal(again.completions[0].body.messages.find((m) => m.role === "assistant").content, answer,
+    "the globe line stays in the history sent to the model");
+});
+
+test("a /web result card shows no 'only the first request ran' notice", () => {
+  const { window: w } = loadApp();
+  const ev = { kind: "tool", tool: "search", status: "done", query: "q", sources: [], chunks: [],
+               note: "Using this evidence, answer: q\nCite the source IDs (S1, S2, ...) you relied on." };
+  assert.equal(w.toolEventNotice(ev), "");
+  const box = w.document.createElement("div");
+  w.addToolEventRow(box, ev);
+  assert.doesNotMatch(box.textContent, /Only the first web request|Using this evidence/);
+});
+
+test("an image turn followed by a botched call keeps user and assistant turns alternating", async () => {
+  const history = [{ role: "user", content: [
+    { type: "text", text: "what is this?" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }];
+  const { completions } = await runChat({
+    web: true, history,
+    rounds: [content("<tool_call>{name: web_search}</tool_call>"), content("A cat.")],
+  });
+  assert.equal(completions.length, 2, "the botched call got the format re-prompt");
+  const roles = completions[1].body.messages.filter((m) => m.role !== "system").map((m) => m.role);
+  assert.deepEqual(roles, ["user", "assistant", "user"]);
+});
+
+test("in the tool-free last completion, text after a stray call is kept", async () => {
+  const { conv, completions } = await runChat({
+    web: true, webResults: freshResults,
+    setup: (w) => runScript(w, "chat.webMaxLookups = 1;"),
+    rounds: [
+      searchCall("q1"), searchCall("q2"),
+      [{ choices: [{ delta: { content: '<tool_call>{"name": "web_search", "args": {"query": "q3"}}</tool_call>\n\n' } }] },
+       { choices: [{ delta: { content: "Based on S1, the answer is 42." } }] },
+       { choices: [{ delta: {}, finish_reason: "stop" }] }],
+    ],
+  });
+  assert.equal(completions.length, 3);
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.content, "Based on S1, the answer is 42.");
+  assert.equal(last.webUnfinished, true);
+  assert.equal(completions[2].signal.aborted, false, "a single stray call does not cut the last completion");
+});
+
+test("in the tool-free last completion, a run of calls is cut where the second one starts", async () => {
+  const blk = (q) => `<tool_call>{"name": "web_search", "args": {"query": "${q}"}}</tool_call>`;
+  const last = [blk("a") + "\n", "Partial answer.\n", blk("b"), blk("c")]
+    .map((c) => ({ choices: [{ delta: { content: c } }] }));
+  const { conv, calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    setup: (w) => runScript(w, "chat.webMaxLookups = 1;"),
+    rounds: [searchCall("q1"), searchCall("q2"), last],
+  });
+  assert.equal(retrieves(calls), 1);
+  assert.equal(completions[2].signal.aborted, true, "the runaway was cut and its request aborted");
+  const reply = conv.messages[conv.messages.length - 1];
+  assert.equal(reply.content, "Partial answer.");
+  assert.equal(reply.webUnfinished, true);
+});
+
+test("a call written only in the reasoning is re-sent in canonical form once it ran", async () => {
+  const { calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    rounds: [
+      [{ choices: [{ delta: { reasoning_content:
+          'I should search. <tool_call>{"name": "web_search", "args": {"query": "reasoned"}}</tool_call>' } }] },
+       { choices: [{ delta: {}, finish_reason: "stop" }] }],
+      content("Answer [S1]."),
+    ],
+  });
+  assert.equal(retrieves(calls), 1, "the call written in the reasoning ran");
+  const asst = completions[1].body.messages.find((m) => m.role === "assistant");
+  assert.equal(asst.content,
+    '<tool_call>{"name":"web_search","args":{"query":"reasoned"}}</tool_call>',
+    "the model sees the call that produced the results that follow");
+});
+
+test("copying a control notice copies the notice, not the text the model reads", async () => {
+  const { window: w } = loadApp();
+  let copied = null;
+  Object.defineProperty(w.navigator, "clipboard",
+    { value: { writeText: async (s) => { copied = s; } }, configurable: true });
+  const box = w.document.createElement("div");
+  w.addToolEventRow(box, w.webNoteEvent("format", "[tool-call format] SECRET model-facing text"));
+  await box.querySelector(".copy-btn").onclick();
+  assert.match(copied, /could not be read; the model was asked to send it again/);
+  assert.doesNotMatch(copied, /SECRET/);
 });
 
 test("the webUnfinished flag survives the compaction archive copy", () => {
@@ -1067,6 +1174,8 @@ test("web ON: a second tool call in one reply is reported as ignored, not silent
     "the notice must name what was ignored, not just that something was");
   assert.equal(note.tool, "search");
   assert.equal(note.status, "done");
+  assert.equal(note.reason, "ignored");
+  assert.match(window.toolEventNotice(note), /Only the first web request in that reply ran/);
   const body = window.msgText(note);
   assert.match(body, /Results of web_search/,
     "the notice rides on the result event, keeping user/assistant alternation");

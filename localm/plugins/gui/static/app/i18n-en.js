@@ -274,7 +274,7 @@ export const I18N_EN = {
   "chat.tool.notice.denied": "You declined this web request, so nothing was looked up.",
   "chat.tool.notice.skipped": "Not run: this message reached its limit of {limit} web lookups (Settings > Chat).",
   "chat.tool.notice.ignored": "Only the first web request in that reply ran.",
-  "chat.web.unfinished": "the model kept requesting web lookups instead of answering; no further lookups ran",
+  "chat.web.unfinished": "the model asked for more web lookups; none were run",
   "chat.web": "Web access - the model may search and read pages",
   "chat.web.title":
     "Lets the model search the web and read pages mid-conversation (uses the server's network policy; under net_mode=ask every request the model makes must be approved first). Off = fully offline chat.",

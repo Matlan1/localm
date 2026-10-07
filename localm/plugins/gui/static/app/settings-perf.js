@@ -965,10 +965,10 @@ export function looksLikeWebToolAttempt(text) {
 }
 
 // A line in the shape of the display marker formatToolCalls renders for a tool
-// call (an optional quote mark, then the globe), as a model writes it when it
+// call (a quote mark, the globe, then italic text), as a model writes it when it
 // copies the marker instead of calling the tool.
-const _WEB_MARKER_LINE_TEST = /^[ \t]*(?:>[ \t]*)?\u{1F310}/mu;
-const _WEB_MARKER_LINES = /^[ \t]*(?:>[ \t]*)?\u{1F310}[^\n]*(?:\n|$)/gmu;
+const _WEB_MARKER_LINE_TEST = /^[ \t]*>[ \t]*\u{1F310}[ \t]*\*/mu;
+const _WEB_MARKER_LINES = /^[ \t]*>[ \t]*\u{1F310}[ \t]*\*[^\n]*(?:\n|$)/gmu;
 
 // A closed tool-call wrapper in any dialect parseWebCalls reads.
 const _TOOL_CALL_BLOCK = /<\|?\/?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g;
@@ -1004,11 +1004,14 @@ export function canonicalToolCall(call) {
 /** An assistant reply as re-sent to the model on later requests: reasoning
  *  removed, every tool call and copied display marker removed (stripWebCallText),
  *  and, when *answered* (a web tool event follows the reply), the first web call
- *  of the reply appended in canonical form. Holds no UI-language text. */
+ *  of the reply appended in canonical form: the first call of the visible text,
+ *  or of the reasoning when the visible text has none. Holds no UI-language text. */
 export function assistantHistoryText(content, answered) {
   const clean = stripThink(content);
   const prose = stripWebCallText(clean);
-  const call = answered ? parseWebCall(clean) : null;
+  const call = answered
+    ? (parseWebCall(clean) || parseWebCall(splitThink(content || "").think || ""))
+    : null;
   if (!call) return prose;
   return (prose ? prose + "\n" : "") + canonicalToolCall(call);
 }
@@ -1231,9 +1234,9 @@ export function webNoteEvent(reason, note) {
  *  (shown, not saved; chat.webCall holds it so nothing else can send or
  *  edit meanwhile), then complete it with the result or the failure (so the
  *  model can adapt) and save. *extraNote* is stored as the event's note, so
- *  the user/assistant alternation the chat templates expect is unchanged.
- *  Returns the completed event. */
-export async function runWebCall(conv, call, extraNote = "") {
+ *  the user/assistant alternation the chat templates expect is unchanged, and
+ *  *reason*, when given, as the event's reason. Returns the completed event. */
+export async function runWebCall(conv, call, extraNote = "", reason = "") {
   const a = call.args || call.arguments || {};
   const ev = newToolEvent({
     tool: call.name === "fetch_url" ? "fetch" : "search",
@@ -1255,6 +1258,7 @@ export async function runWebCall(conv, call, extraNote = "") {
   }
   ev.finished_at = Date.now();
   if (extraNote) ev.note = extraNote;
+  if (reason) ev.reason = reason;
   saveConversations(conv);
   renderChat();
   return ev;
@@ -2399,20 +2403,17 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     }
     // An assistant reply is re-sent as assistantHistoryText: no reasoning, no
     // raw tool-call text in any dialect, no display markers, and the call it
-    // made in canonical form only when a web tool event answered it. A reply
-    // left empty by that is not sent.
+    // made in canonical form only when a web tool event answered it.
     if (m.role === "assistant" && typeof m.content === "string") {
       const next = conv.messages[i + 1];
       const answered = isToolEvent(next) && next.tool !== "note";
-      const content = assistantHistoryText(m.content, answered);
-      if (!content && stripThink(m.content)) return null;
-      return { role: m.role, content };
+      return { role: m.role, content: assistantHistoryText(m.content, answered) };
     }
     return {
       role: m.role, content: m.content,
       untrusted_spans: m.untrusted_spans ? m.untrusted_spans.slice() : undefined,
     };
-  }).filter(Boolean);
+  });
   // Attached documents and knowledge excerpts are stored as separate user
   // rows; some chat templates require strict user/assistant alternation, so
   // consecutive plain-text same-role messages are merged before sending. A
@@ -2490,12 +2491,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let routing = null;   // which model answered, when not the one asked for
   let serverCompacted = false;
   // With web on, the reply is cut just past its first complete tool-call block
-  // once anything other than whitespace follows it, and the request is aborted
-  // through reqCtl (which the turn's own Stop also aborts).
+  // once anything other than whitespace follows it (in the last, tool-free
+  // completion: where a second tool-call block starts), and the request is
+  // aborted through reqCtl (which the turn's own Stop also aborts).
   let cutAtCall = false;
   let readOk = false;   // the request and its stream completed without throwing
   const reqCtl = new AbortController();
-  signal.addEventListener("abort", () => reqCtl.abort(), { once: true });
+  const forwardAbort = () => reqCtl.abort();
+  signal.addEventListener("abort", forwardAbort, { once: true });
 
   async function postChatCompletions(reqBody) {
     const r = await fetch("/v1/chat/completions", {
@@ -2568,11 +2571,20 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         reasoning += rDelta;
         if (webEnabled && cDelta && full.includes("tool_call")) {
           const end = firstToolCallEnd(full);
-          const after = end >= 0 ? full.slice(end).trimStart() : "";
-          // The server's inference-error text after the block (or the start of
-          // it) does not cut the reply; the turn then ends as failed.
-          if (after && !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
-            full = full.slice(0, end);
+          const rest = end >= 0 ? full.slice(end) : "";
+          const after = rest.trimStart();
+          let cutAt = -1;
+          if (end >= 0 && web.final) {
+            const next = rest.search(/<\|?\/?tool_call\|?>/);
+            if (next >= 0) cutAt = end + next;
+          } else if (after &&
+                     !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
+            // The server's inference-error text after the block (or the start
+            // of it) does not cut the reply; the turn then ends as failed.
+            cutAt = end;
+          }
+          if (cutAt >= 0) {
+            full = full.slice(0, cutAt);
             cutAtCall = true;
             finishReason = "stop";
             reqCtl.abort();
@@ -2647,6 +2659,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       toast("Chat request failed: " + e.message, true);
     }
   } finally {
+    signal.removeEventListener("abort", forwardAbort);
     removeStatusIndicator(liveBody);
   }
   // A compacted reply that was read to its end (or cut at its first tool call)
@@ -2841,7 +2854,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       web.lookups += 1;
       web.formatRepairs = 0;
       // The ignored-call notice rides on the RESULT message, and only here.
-      const ev = await runWebCall(conv, nextCall, ignoredCallsNote(webCalls));
+      const ignored = ignoredCallsNote(webCalls);
+      const ev = await runWebCall(conv, nextCall, ignored, ignored ? "ignored" : "");
       web.stale = webEventAddsNew(ev, web.found) ? 0 : web.stale + 1;
       if (web.stale >= WEB_MAX_STALE_ROUNDS) web.final = true;
       return runCompletion(conv, webDepth + 1, web);
