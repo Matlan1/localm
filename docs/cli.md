@@ -462,20 +462,31 @@ The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown
 
 ### Mixture-of-Experts: reducing VRAM footprint
 
-`n_cpu_moe` keeps the expert weights of the first N layers of a MoE model in
-system RAM while the rest still runs on the GPU, off by default:
+When a Mixture-of-Experts model does not fit in VRAM and GPU layers are
+auto-sized (`n_gpu_layers_auto`, with `n_gpu_layers` left at 99, the
+defaults), localm keeps the routed experts of as few layers as needed in system
+RAM with every layer on the GPU, before it moves any whole layer to the CPU.
+The load output names the choice and how much expert data each generated token
+reads from RAM, which bounds the speed:
+
+```
+  gpu layers auto: every layer on the GPU, with the routed experts of 18/48 layers in system RAM (Mixture-of-Experts) - ...
+  moe speed: each generated token reads about 0.41 GB of expert weights from system RAM, ...
+```
+
+`n_cpu_moe` sets it yourself: the expert weights of the first N layers stay in
+system RAM while the rest runs on the GPU.
 
 ```bash
 localm config n_cpu_moe 16        # keep 16 layers' worth of experts on CPU
-localm config n_cpu_moe 0         # off - the default
+localm config n_cpu_moe 0         # automatic, only when the model does not fit - the default
 ```
 
-It is a footprint dial, not a speedup - at the same VRAM it runs at about the
-same speed - so it is worth reaching for when a model would not otherwise fit,
-or when something else needs the card. No effect on a normal (dense) model.
-The Settings page has the same field ("MoE expert layers on CPU"). See
+A value above 0, or an explicit `n_gpu_layers`, is used as given. No effect on
+a normal (dense) model. The Settings page has the same field ("MoE expert
+layers on CPU"). See
 [docs/gpu-setup.md](../docs/gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
-for measured VRAM numbers.
+for measured numbers.
 
 ### Multi-GPU: splitting one model across several cards
 

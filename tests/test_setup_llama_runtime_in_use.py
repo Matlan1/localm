@@ -316,4 +316,4 @@ def test_redownload_names_the_build_it_is_fetching(monkeypatch, tmp_path, capsys
     old_tag = f"not-{setup_llama._ROCM_TAG}"
     out = _invoke_provision_notice(monkeypatch, tmp_path, capsys,
                                    have="amd-rocm", have_build=old_tag, want="amd-rocm")
-    assert f"Upgrading the amd-rocm build: {old_tag} -> {setup_llama._ROCM_TAG}." in out
+    assert f"Upgrading the amd-rocm build: {old_tag} -> {setup_llama._ROCM_BUILD}." in out
