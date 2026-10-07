@@ -3294,6 +3294,32 @@ class TestWebEndpoints:
             assert client.post("/api/web/fetch",
                                json={"url": "https://e/"}).status_code == 502
 
+    def test_fetch_and_search_failures_are_plain_sentences(self, web_app,
+                                                           monkeypatch):
+        import requests
+        import urllib3.exceptions
+
+        def reset(*a, **kw):
+            raise requests.ConnectionError(urllib3.exceptions.ProtocolError(
+                "Connection aborted.", ConnectionResetError(
+                    10054, "An existing connection was forcibly closed by the "
+                    "remote host", None, 10054, None)))
+        monkeypatch.setattr("localm.netpolicy.fetch_text", reset)
+        monkeypatch.setattr("localm.netpolicy.web_search", reset)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        with TestClient(web_app) as client:
+            fetch = client.post("/api/web/fetch",
+                                json={"url": "https://www.accuweather.com/x"})
+            search = client.post("/api/web/search", json={"query": "linz"})
+        assert fetch.json()["detail"] == (
+            "Fetch failed: www.accuweather.com closed the connection before "
+            "answering")
+        assert search.json()["detail"].startswith(
+            "Search failed: html.duckduckgo.com closed the connection before "
+            "answering. Try again in a moment")
+        assert "10054" not in fetch.text + search.text
+        assert fetch.status_code == 502 and search.status_code == 502
+
     # Search results and fetched text are UNTRUSTED: a page or a search hit can
     # embed a literal chat-template control token to forge a role once spliced
     # into the model's message list. These prove the endpoints defang it before

@@ -36,6 +36,16 @@ from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from urllib3.poolmanager import PoolManager
 
 
+class ReadBudgetExceeded(requests.exceptions.Timeout):
+    """A response body was still arriving when the total time allowed for the
+    whole read ran out. *seconds* is that allowance, *url* the request URL."""
+
+    def __init__(self, seconds: float, url: str = ""):
+        super().__init__(f"read did not finish within {seconds:g}s")
+        self.seconds = seconds
+        self.url = url
+
+
 def _as_ip_tuple(pinned: Union[str, Sequence[str]]) -> tuple[str, ...]:
     if isinstance(pinned, str):
         return (pinned,)

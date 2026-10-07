@@ -393,7 +393,9 @@ def run_web_call(call: dict) -> str:
         return compose("[Web request refused by policy: ", untrusted_span(str(e)),
                        "] Answer without the web and say web access was refused.")
     except Exception as e:
-        return compose("[Web request failed: ", untrusted_span(str(e)),
+        from localm.web_retrieval.errors import describe_failure
+        return compose("[Web request failed: ",
+                       untrusted_span(describe_failure(e)),
                        "] Answer without the web, and say that web access did not "
                        "work.")
 

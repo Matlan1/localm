@@ -6,15 +6,23 @@ concurrently through ``localm.netpolicy``, extract, select evidence.
 refusal or an empty query. A failing provider is reported in
 ``bundle.search_status`` / ``bundle.search_error`` and is never replaced by
 another provider. A failing page read is reported on its ``Source`` and never
-fails the retrieval.
+fails the retrieval. Both error texts are plain-language sentences from
+``errors.describe_failure``.
+
+A page read goes through ``sites.read_url`` (GitHub and Stack Exchange
+content endpoints first, the page itself last) and is sent once more when it
+fails with a reset, refused or unreachable connection, or an incomplete body.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import functools
+import urllib.parse
 from typing import Callable, Optional
 
 from localm import netpolicy
+from localm.debuglog import logger
 
 from .canonical import canonicalize_url, dedup_key, dedup_results
 from .chunking import select_evidence
@@ -26,6 +34,8 @@ from .contracts import (
     GROUNDING_FAILED,
     GROUNDING_PAGE_BACKED,
     GROUNDING_SNIPPET_ONLY,
+    PAGE_READ_DEADLINE,
+    PAGE_READ_TIMEOUT,
     PER_SOURCE_CAP_CHARS,
     SEARCH_CANDIDATES,
     SEARCH_EMPTY,
@@ -39,8 +49,10 @@ from .contracts import (
     SearchProvider,
     Source,
 )
+from .errors import describe_failure, failure_kind
 from .extract import extract_page
-from .providers import provider_from_config
+from .providers import REMEDY, provider_from_config
+from .sites import read_url
 
 #: ``fetch(url, timeout=...) -> (final_url, content_type, text)``.
 Fetcher = Callable[..., tuple[str, str, str]]
@@ -48,15 +60,37 @@ Fetcher = Callable[..., tuple[str, str, str]]
 _MAX_SEARCH_CANDIDATES = 10
 _ERROR_TEXT_CAP = 300
 _HTML_SNIFF_BYTES = 1024
+_PAGE_RETRY_KINDS = frozenset({"reset", "refused", "unreachable", "incomplete"})
 
 
-def _describe(exc: BaseException) -> str:
-    text = f"{type(exc).__name__}: {exc}".strip()
-    return text[:_ERROR_TEXT_CAP]
+def _default_fetch(url: str, *, timeout: float,
+                   total_timeout: Optional[float] = None
+                   ) -> tuple[str, str, str]:
+    return netpolicy.safe_fetch(url, timeout=timeout,
+                                total_timeout=total_timeout)
 
 
-def _default_fetch(url: str, *, timeout: int) -> tuple[str, str, str]:
-    return netpolicy.safe_fetch(url, timeout=timeout)
+def search_failure_text(exc: BaseException,
+                        provider: Optional[SearchProvider] = None) -> str:
+    """The ``search_error`` sentence for a failed search by *provider*
+    (default: ``provider_from_config()``): what failed, then what the user
+    can do about it. A ``SearchProviderError`` keeps its own message."""
+    from .contracts import SearchProviderError
+    if isinstance(exc, SearchProviderError):
+        return str(exc).strip()[:_ERROR_TEXT_CAP * 2] or "the search failed"
+    if provider is None:
+        provider = provider_from_config()
+    url = (getattr(provider, "endpoint", "")
+           or getattr(provider, "base_url", "") or "")
+    reason = describe_failure(exc, url)
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not (host and reason.startswith(host)):
+        reason = reason[:1].upper() + reason[1:]
+    if getattr(provider, "name", "") == "searxng":
+        return (f"{reason}. Check that the Search backend URL in Settings > "
+                "Network points at a running SearXNG instance with the JSON "
+                "format enabled.")
+    return f"{reason}. {REMEDY}"
 
 
 def _looks_like_html(content_type: str, body: str) -> bool:
@@ -66,8 +100,19 @@ def _looks_like_html(content_type: str, body: str) -> bool:
     return "<html" in head or "<!doctype html" in head
 
 
-def _read_page(source: Source, fetch: Fetcher, timeout: int) -> PageDocument:
-    final_url, content_type, body = fetch(source.url, timeout=timeout)
+def _read_page(source: Source, fetch: Fetcher, timeout: float) -> PageDocument:
+    try:
+        final_url, content_type, body = read_url(source.url, fetch,
+                                                 timeout=timeout)
+    except netpolicy.NetworkPolicyError:
+        raise
+    except Exception as exc:
+        if failure_kind(exc) not in _PAGE_RETRY_KINDS:
+            raise
+        logger.debug("web retrieval: page read retried after %s",
+                     type(exc).__name__)
+        final_url, content_type, body = read_url(source.url, fetch,
+                                                 timeout=timeout)
     if _looks_like_html(content_type, body):
         page = extract_page(body)
         return PageDocument(url=source.url, final_url=final_url,
@@ -108,7 +153,10 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
                    for s in to_fetch}
         done, pending = concurrent.futures.wait(futures, timeout=deadline)
         for fut in pending:
-            futures[fut].mark_failed(f"timed out after {deadline:g}s")
+            source = futures[fut]
+            host = urllib.parse.urlparse(source.url).hostname or "the site"
+            source.mark_failed(
+                f"{host} did not finish loading within {deadline:g}s")
             fut.cancel()
         for fut in done:
             source = futures[fut]
@@ -117,7 +165,9 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: int,
             except netpolicy.NetworkPolicyError as exc:
                 source.mark_failed(f"refused by policy: {exc}"[:_ERROR_TEXT_CAP])
             except Exception as exc:
-                source.mark_failed(_describe(exc))
+                logger.debug("web retrieval: page read failed (%s)",
+                             type(exc).__name__)
+                source.mark_failed(describe_failure(exc, source.url))
             else:
                 _record_page(source, page, pages)
     finally:
@@ -162,9 +212,11 @@ def retrieve(
     clamped to 1..10 and *fetch_top* to 0..*search_candidates*. The provider
     is asked for twice *search_candidates* results (at most 10); after
     duplicate removal the first *search_candidates* become sources. *fetch*
-    defaults to ``netpolicy.safe_fetch``; *fetch_timeout* to netpolicy's
-    default; *deadline_seconds* (the wait for all page reads together) to
-    twice *fetch_timeout*.
+    defaults to ``netpolicy.safe_fetch`` with a total time allowance of
+    *deadline_seconds* per call; *fetch_timeout* (each connect and each wait
+    for data) to ``PAGE_READ_TIMEOUT``; *deadline_seconds* (the wait for all
+    page reads together) to ``PAGE_READ_DEADLINE``, or twice *fetch_timeout*
+    when only *fetch_timeout* is given.
 
     Raises ``ValueError`` for an empty query and ``NetworkPolicyError`` when
     the policy refuses the search request. Every other search failure is
@@ -179,12 +231,16 @@ def retrieve(
     fetch_top = max(0, min(int(fetch_top), search_candidates))
     if provider is None:
         provider = provider_from_config()
+    timeout = (fetch_timeout if fetch_timeout is not None
+               else PAGE_READ_TIMEOUT)
+    if deadline_seconds is not None:
+        deadline = float(deadline_seconds)
+    elif fetch_timeout is not None:
+        deadline = float(2 * timeout)
+    else:
+        deadline = float(PAGE_READ_DEADLINE)
     if fetch is None:
-        fetch = _default_fetch
-    timeout = int(fetch_timeout if fetch_timeout is not None
-                  else netpolicy._DEFAULT_TIMEOUT)
-    deadline = float(deadline_seconds if deadline_seconds is not None
-                     else 2 * timeout)
+        fetch = functools.partial(_default_fetch, total_timeout=deadline)
 
     bundle = EvidenceBundle(query=query, provider=provider.name,
                             budget_chars=budget_chars,
@@ -195,8 +251,9 @@ def retrieve(
     except netpolicy.NetworkPolicyError:
         raise
     except Exception as exc:
+        logger.debug("web retrieval: search failed (%s)", type(exc).__name__)
         bundle.search_status = SEARCH_FAILED
-        bundle.search_error = _describe(exc)
+        bundle.search_error = search_failure_text(exc, provider)
         return bundle
 
     results = dedup_results(results)[:search_candidates]

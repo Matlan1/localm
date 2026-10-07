@@ -40,7 +40,9 @@ def tool_fetch_url(
     except NetworkPolicyError as e:
         return ToolResult.error(str(e))
     except Exception as e:
-        return ToolResult.error(f"Could not fetch {url}: {e}")
+        from localm.web_retrieval.errors import describe_failure
+        return ToolResult.error(
+            f"Could not fetch {url}: {describe_failure(e, url)}")
 
     output, trunc = _truncate(text, max_chars)
     return ToolResult(
@@ -86,7 +88,8 @@ def tool_web_search(
     except NetworkPolicyError as e:
         return ToolResult.error(str(e))
     except Exception as e:
-        return ToolResult.error(f"Web search failed: {e}")
+        from localm.web_retrieval.errors import describe_failure
+        return ToolResult.error(f"Web search failed: {describe_failure(e)}")
 
     if _privacy:
         # Every page read the retrieval attempted is an outbound request too.

@@ -14,6 +14,8 @@ import threading
 import urllib.parse
 from typing import Callable, Optional
 
+import requests
+
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 PUBLIC_IP = "93.184.216.34"
 
@@ -28,12 +30,25 @@ def public_dns(host, port, *args, **kwargs):
 
 def allow_public(monkeypatch, **extra_cfg) -> dict:
     """Configure ``net_mode=allow`` plus *extra_cfg*, resolve every host to a
-    public address, and clear the env override. Returns the config dict."""
+    public address, clear the env override, and turn off the search
+    providers' DuckDuckGo spacing and retry backoff sleeps. Returns the config
+    dict."""
     cfg = {"net_mode": "allow", **extra_cfg}
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
     monkeypatch.setattr("localm.config.load_config", lambda: cfg)
     monkeypatch.setattr("socket.getaddrinfo", public_dns)
+    no_sleep(monkeypatch)
     return cfg
+
+
+def no_sleep(monkeypatch) -> list[float]:
+    """Make the search providers' DuckDuckGo spacing zero and record their
+    retry backoff sleeps instead of sleeping. Returns the recorded list."""
+    slept: list[float] = []
+    monkeypatch.setattr(
+        "localm.web_retrieval.providers._DDG_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr("localm.web_retrieval.providers._sleep", slept.append)
+    return slept
 
 
 class FakeResponse:
@@ -76,7 +91,7 @@ class FakeResponse:
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
 
     def close(self) -> None:
         pass

@@ -49,16 +49,19 @@ import socket
 import urllib.parse
 from typing import Optional
 
+from localm import __version__
 from localm.debuglog import logger
 
 NET_MODES = ("off", "ask", "allow")
 NET_MODE_ENV_VAR = "LOCALM_NET_MODE"
 
 _DEFAULT_TIMEOUT = 15
+_DEFAULT_TOTAL_TIMEOUT = 45
 _DEFAULT_MAX_BYTES = 1_000_000
 _MAX_REDIRECTS = 5
 _MAX_PINNED_ADDRESSES = 4
-_USER_AGENT = "Mozilla/5.0 (compatible; localm/0.1; +https://github.com/localm)"
+_USER_AGENT = (f"Mozilla/5.0 (compatible; localm/{__version__}; "
+               "+https://github.com/Matlan1/localm)")
 
 
 class NetworkPolicyError(Exception):
@@ -520,6 +523,37 @@ def pinned_request(method: str, url: str, **kwargs):
 #  Fetching
 # ---------------------------------------------------------------------------
 
+_BODY_CHUNK = 65536
+
+
+def _body_chunks(resp, per_read: bool):
+    """Yield *resp*'s decoded body. With *per_read* and a raw response that
+    has ``read1``, each chunk is one network read (at most ``_BODY_CHUNK``
+    bytes), so a caller can stop between reads; urllib3 read errors are
+    raised as the ``requests`` exceptions ``iter_content`` raises
+    (``ConnectionError`` for a read timeout, ``ChunkedEncodingError``,
+    ``ContentDecodingError``). Otherwise this is ``iter_content``."""
+    raw = getattr(resp, "raw", None)
+    read1 = getattr(raw, "read1", None) if per_read else None
+    if read1 is None:
+        yield from resp.iter_content(chunk_size=_BODY_CHUNK)
+        return
+    import requests
+    from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError
+    while True:
+        try:
+            chunk = read1(_BODY_CHUNK, decode_content=True)
+        except ReadTimeoutError as exc:
+            raise requests.exceptions.ConnectionError(exc)
+        except ProtocolError as exc:
+            raise requests.exceptions.ChunkedEncodingError(exc)
+        except DecodeError as exc:
+            raise requests.exceptions.ContentDecodingError(exc)
+        if not chunk:
+            return
+        yield chunk
+
+
 def safe_fetch_bytes(
     url: str,
     *,
@@ -527,6 +561,7 @@ def safe_fetch_bytes(
     timeout: int = _DEFAULT_TIMEOUT,
     allow_when_off: bool = False,
     extra_headers: Optional[dict] = None,
+    total_timeout: Optional[float] = None,
 ) -> tuple[str, str, bytes]:
     """
     Policy-checked GET returning RAW bytes. Returns (final_url, content_type,
@@ -548,20 +583,38 @@ def safe_fetch_bytes(
     hop whose host differs from the ORIGINAL request's host, so a redirect
     can never carry a caller's credential to a different host.
 
+    *timeout* bounds each connect and each wait for data. *total_timeout*,
+    when set, bounds the whole call across hops: a body still arriving when
+    it runs out raises ``netpin.ReadBudgetExceeded`` (a
+    ``requests.exceptions.Timeout``), and later hops get at most the time
+    left as their *timeout*.
+
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
+    import time
+
+    from localm.netpin import ReadBudgetExceeded
+
+    deadline = (time.monotonic() + total_timeout
+                if total_timeout is not None else None)
     current = url
     original_host = urllib.parse.urlparse(url).hostname
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current, allow_when_off=allow_when_off)
         parsed = urllib.parse.urlparse(current)
         hop_headers = extra_headers if parsed.hostname == original_host else None
+        hop_timeout = timeout
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ReadBudgetExceeded(total_timeout, url)
+            hop_timeout = min(timeout, left)
         # Pin the socket to the just-validated IP for this hop; each redirect
         # target is independently re-checked and re-pinned.
         with _session_for(current) as session:
             resp = session.get(
                 current,
-                timeout=timeout,
+                timeout=hop_timeout,
                 stream=True,
                 allow_redirects=False,
                 headers={**(hop_headers or {}),
@@ -578,11 +631,13 @@ def safe_fetch_bytes(
                 resp.raise_for_status()
                 content_type = resp.headers.get("Content-Type", "")
                 chunks, size = [], 0
-                for chunk in resp.iter_content(chunk_size=65536):
+                for chunk in _body_chunks(resp, deadline is not None):
                     chunks.append(chunk)
                     size += len(chunk)
                     if size >= max_bytes:
                         break
+                    if deadline is not None and time.monotonic() > deadline:
+                        raise ReadBudgetExceeded(total_timeout, url)
                 return current, content_type, b"".join(chunks)[:max_bytes]
             finally:
                 resp.close()
@@ -621,12 +676,14 @@ def safe_fetch(
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
+    total_timeout: Optional[float] = None,
 ) -> tuple[str, str, str]:
     """
     Policy-checked GET. Returns (final_url, content_type, body_text).
 
     Thin text wrapper over safe_fetch_bytes (which does the policy check,
-    per-hop redirect re-validation and size cap). The body is decoded using
+    per-hop redirect re-validation, size cap and the optional
+    *total_timeout*). The body is decoded using
     the charset the response declares - the Content-Type header, then an
     HTML <meta charset> tag - falling back to UTF-8 when neither declares
     one or the declared one fails to decode.
@@ -634,7 +691,7 @@ def safe_fetch(
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
     final_url, content_type, body = safe_fetch_bytes(
-        url, max_bytes=max_bytes, timeout=timeout)
+        url, max_bytes=max_bytes, timeout=timeout, total_timeout=total_timeout)
     charset = _declared_charset(content_type, body)
     if charset:
         try:
@@ -706,10 +763,21 @@ def fetch_text(
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
+    total_timeout: Optional[float] = _DEFAULT_TOTAL_TIMEOUT,
 ) -> tuple[str, str]:
-    """safe_fetch + HTML stripping. Returns (final_url, plain_text)."""
-    final_url, content_type, body = safe_fetch(
-        url, max_bytes=max_bytes, timeout=timeout)
+    """safe_fetch + HTML stripping. Returns (final_url, plain_text).
+
+    A GitHub repository or file URL, or a Stack Exchange question URL, is
+    read from that site's content endpoint when it yields text, with the
+    page itself as the fallback (``localm.web_retrieval.sites.read_url``).
+    *total_timeout* bounds each underlying fetch (see safe_fetch_bytes)."""
+    from localm.web_retrieval.sites import read_url
+
+    def _fetch(target: str, *, timeout: float) -> tuple[str, str, str]:
+        return safe_fetch(target, max_bytes=max_bytes, timeout=timeout,
+                          total_timeout=total_timeout)
+
+    final_url, content_type, body = read_url(url, _fetch, timeout=timeout)
     if "html" in content_type.lower():
         return final_url, html_to_text(body)
     return final_url, body.strip()
