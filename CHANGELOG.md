@@ -144,13 +144,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with an open session, has to be ended first.
 
 ### Changed
+- **Qwen-VL models answer follow-up messages faster.** Qwen2-VL, Qwen2.5-VL and
+  Qwen3-VL GGUF models reprocessed the whole conversation on every turn, text-only
+  chats included. They now keep the part of the conversation that did not change
+  and process only the rest, as other models do.
 - **Follow-up messages in a chat with an image answer much faster on GGUF
   models.** Once an image has been sent, each later turn used to encode every
   image in the conversation again and reprocess the whole chat, which could take
   minutes per turn when images are encoded on the CPU. Now an image is encoded
   only once, and on most models only the previous reply and the new message are
-  processed (Qwen-VL models still reprocess the conversation text, as they do in
-  text-only chats); the status line reads "Processing prompt..." instead of
+  processed; the status line reads "Processing prompt..." instead of
   "Encoding image..." when no image needs encoding. Encoded images are kept in memory only for the most recent image
   conversation and are released when the model unloads.
 - **Settings' "Library" section is now called "Model Library & Sources".**
