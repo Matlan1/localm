@@ -1289,6 +1289,102 @@ def gguf_input_layer_bytes(
     return total
 
 
+# The metadata keys of the Mamba-family recurrent state, as "<arch>" + suffix.
+_GGUF_SSM_SUFFIXES = (
+    ".ssm.conv_kernel",
+    ".ssm.state_size",
+    ".ssm.inner_size",
+    ".ssm.group_count",
+)
+
+# Tensor that marks a layer as keeping a recurrent state: a linear-attention,
+# state-space or gated-delta-net layer carries it and an attending layer does not.
+_RECURRENT_LAYER_TENSOR_RE = re.compile(r"^blk\.(\d+)\.ssm_conv1d\.")
+
+# llama.cpp stores both recurrent tensors (conv and ssm state) as f32.
+_RECURRENT_STATE_ELEMENT_BYTES = 4
+
+
+def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
+    """Bytes of ONE copy of *path*'s recurrent state across every layer that
+    keeps one, read from the file's own header before the model is loaded.
+
+    Per recurrent layer llama.cpp holds a conv state of
+    ``(conv_kernel - 1) * (inner_size + 2 * group_count * state_size)`` and an
+    ssm state of ``state_size * inner_size`` elements, both f32. The layers that
+    keep one are those carrying a ``blk.<i>.ssm_conv1d`` tensor, so a hybrid's
+    attending layers and its MTP/nextn layer add nothing.
+
+    A hybrid stack keeps this state at a FIXED size however long the context is;
+    the context allocates it once per sequence slot (see the caller for the copy
+    count). Returns 0 - never raises - when the file is not a readable GGUF,
+    declares no conv_kernel/state_size/inner_size, or has no recurrent layer; 0
+    means 'no signal' and the caller charges nothing for it.
+
+    *_parsed*, if given, is a precomputed ``_gguf_tensor_offset_entries(path)``
+    result (or its ``None`` failure), used instead of parsing *path* again."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return 0
+
+    architecture = None
+    vals: dict = {}
+    try:
+        if buf[:4] != b"GGUF":
+            return 0
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return 0
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if any(key.endswith(s) for s in _GGUF_SSM_SUFFIXES):
+                try:
+                    vals[key], off = _gguf_read_scalar(buf, off, vtype)
+                    continue
+                except struct.error:
+                    pass        # not a scalar - skip it normally
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        # Truncated inside the bounded read, or a malformed layout. Answer from
+        # whatever resolved cleanly; a missing key returns 0 below.
+        pass
+
+    if not architecture:
+        return 0
+
+    def _get(suffix: str) -> int:
+        v = vals.get(f"{architecture}{suffix}")
+        return int(v) if isinstance(v, int) and v > 0 else 0
+
+    conv_kernel = _get(".ssm.conv_kernel")
+    state_size = _get(".ssm.state_size")
+    inner_size = _get(".ssm.inner_size")
+    group_count = _get(".ssm.group_count")
+    if not (conv_kernel and state_size and inner_size):
+        return 0
+
+    parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
+    if parsed is None:
+        return 0
+    recurrent_layers = {int(m.group(1)) for name, _off in parsed[0]
+                        if (m := _RECURRENT_LAYER_TENSOR_RE.match(name))}
+    if not recurrent_layers:
+        return 0
+
+    conv = (conv_kernel - 1) * (inner_size + 2 * group_count * state_size)
+    ssm = state_size * inner_size
+    return len(recurrent_layers) * (conv + ssm) * _RECURRENT_STATE_ELEMENT_BYTES
+
+
 def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     """``(block_count, n_vocab)`` from *path*'s GGUF metadata, or ``None`` when
     either is missing or the header does not parse. ``n_vocab`` is the length

@@ -686,6 +686,13 @@ _DECODE_PROGRESS_INTERVAL = 50
 MTP_DRAFT_TOKENS_MAX = 3
 MTP_DRAFT_TOKENS_DEFAULT = 1
 
+
+def mtp_rs_seq(default_n_rs_seq, draft_tokens) -> int:
+    """The ``n_rs_seq`` an MTP-enabled context is created with: the runtime's
+    own default, but at least 2 and at least the (clamped) draft-token count."""
+    draft_max = max(1, min(int(draft_tokens), MTP_DRAFT_TOKENS_MAX))
+    return max(int(default_n_rs_seq or 0), 2, draft_max)
+
 # Accepted tokens queued for the draft cache before they are decoded on their own.
 _MTP_QUEUED_ROWS_MAX = 32
 
@@ -2691,7 +2698,7 @@ class LlamaCpp:
     def _mtp_rollback_snapshots(self, cp) -> int:
         """Recurrent-state snapshots a context needs so a step whose drafts are
         all rejected can still be rolled back."""
-        return max(int(getattr(cp, "n_rs_seq", 0) or 0), 2, self._mtp_draft_max)
+        return mtp_rs_seq(getattr(cp, "n_rs_seq", 0), self._mtp_draft_max)
 
     def _propose_drafts(self, token: int, pos: int, n_max: int, draft_sampler) -> List[int]:
         """Propose up to *n_max* tokens to follow *token* at *pos*.

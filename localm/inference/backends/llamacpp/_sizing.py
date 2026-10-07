@@ -592,6 +592,42 @@ class VramSizingMixin:
         self._mtp_draft_vram_bytes_cached = charge
         return charge
 
+    def _recurrent_state_vram_bytes(self) -> int:
+        """VRAM the main context's recurrent state takes for THIS load - 0 for a
+        model with no recurrent layers.
+
+        A hybrid (linear-attention / state-space) stack keeps a fixed-size state
+        per recurrent layer that does not grow with the context.
+        ``gguf_recurrent_state_bytes`` is one copy of it; the context allocates
+        ``1 + n_rs_seq`` copies. ``n_rs_seq`` is 0 without MTP, and with MTP
+        enabled ``llama.mtp_rs_seq`` of the draft-token count (the same call
+        LlamaCpp makes when it creates the context). Never raises: a probe
+        failure charges 0. Memoised per instance."""
+        cached = getattr(self, "_recurrent_state_vram_bytes_cached", None)
+        if cached is not None:
+            return cached
+        charge = 0
+        try:
+            from localm.model_manager.gguf import gguf_recurrent_state_bytes
+            per_copy = gguf_recurrent_state_bytes(
+                Path(self.model_path), _parsed=self._gguf_parsed_tensor_entries())
+            if per_copy:
+                n_rs_seq = 0
+                if getattr(self, "mtp_enabled", False):
+                    from localm.inference.backends.llamacpp.llama import (
+                        MTP_DRAFT_TOKENS_DEFAULT, mtp_rs_seq)
+                    draft = getattr(self, "mtp_draft_tokens", None)
+                    n_rs_seq = mtp_rs_seq(
+                        0, MTP_DRAFT_TOKENS_DEFAULT if draft is None else draft)
+                charge = per_copy * (1 + n_rs_seq)
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("recurrent-state VRAM probe failed (%s); charging "
+                       "nothing extra for it", type(exc).__name__)
+            charge = 0
+        self._recurrent_state_vram_bytes_cached = charge
+        return charge
+
     def _mtp_draft_kv_per_token(self) -> int:
         """Draft-context KV bytes per token of context, 0 when this load has no
         MTP draft context. The draft context grows with the main one, so a
@@ -867,7 +903,8 @@ class VramSizingMixin:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
         need = (weights + kv_cache + self._split_overhead_bytes(split_devices)
-                + self._mtp_draft_context_vram_bytes())
+                + self._mtp_draft_context_vram_bytes()
+                + self._recurrent_state_vram_bytes())
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
         if total is not None and need > total:
             # On a split box the ceiling exceeded is the split's combined one.
@@ -1047,7 +1084,8 @@ class VramSizingMixin:
         model = self._effective_model_bytes_for_vram()
         budget = (free - model - self._split_overhead_bytes(split_devices)
                   - embedder_ctx_reservation_bytes()
-                  - self._mtp_draft_context_vram_bytes())
+                  - self._mtp_draft_context_vram_bytes()
+                  - self._recurrent_state_vram_bytes())
         if budget <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
         auto = budget // self._kv_bytes_per_token()
@@ -1094,11 +1132,13 @@ class VramSizingMixin:
         """``(model, kv, overhead)`` bytes a full GPU offload of this load
         charges: the VRAM-resident weights (``_effective_model_bytes_for_vram``),
         the KV cache for ``self.n_ctx`` tokens, and the compute overhead for
-        *split_devices* devices plus the MTP draft context."""
+        *split_devices* devices plus the MTP draft context and the recurrent
+        state."""
         model = self._effective_model_bytes_for_vram()
         kv = self.n_ctx * self._kv_bytes_per_token()
         overhead = (self._split_overhead_bytes(split_devices)
-                    + self._mtp_draft_context_vram_bytes())
+                    + self._mtp_draft_context_vram_bytes()
+                    + self._recurrent_state_vram_bytes())
         return model, kv, overhead
 
     def full_offload_vram_bytes(self) -> Optional[int]:
