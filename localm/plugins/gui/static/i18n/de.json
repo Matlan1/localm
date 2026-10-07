@@ -104,6 +104,7 @@
   "chat.status.chatHooks": "Chat-Plugins laufen…",
   "chat.status.checkingGrammar": "Grammatik wird geprüft…",
   "chat.status.compacting": "Unterhaltung wird verdichtet…",
+  "chat.status.downloadingEmbedder": "Einbettungsmodell wird heruntergeladen…",
   "chat.status.encodingImage": "Bild wird kodiert…",
   "chat.status.encodingImageCpu": "Bild wird kodiert (CPU)…",
   "chat.status.encodingImageGpu": "Bild wird kodiert (GPU)…",

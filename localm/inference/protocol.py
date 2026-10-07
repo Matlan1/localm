@@ -255,6 +255,10 @@ COMPACTING_STATUS = "Compacting conversation..."
 # turn, before the reply starts.
 RECALLING_MEMORY_STATUS = "Recalling memories..."
 
+# Emitted by the SSE route while the embedding model memory recall needs is
+# downloaded for the first time, before the reply starts.
+DOWNLOADING_EMBEDDER_STATUS = "Downloading the embedding model..."
+
 # Emitted by the SSE route while chat-pipeline inlet hooks run, before the
 # reply starts.
 RUNNING_CHAT_HOOKS_STATUS = "Running chat plugins..."
@@ -278,6 +282,7 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     COMPACTING_STATUS: "compacting",
     LOADING_MODEL_STATUS: "loading_model",
     RECALLING_MEMORY_STATUS: "recalling_memory",
+    DOWNLOADING_EMBEDDER_STATUS: "downloading_embedder",
     RUNNING_CHAT_HOOKS_STATUS: "chat_hooks",
     CHECKING_GRAMMAR_STATUS: "checking_grammar",
 }

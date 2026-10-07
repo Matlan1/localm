@@ -10,8 +10,7 @@ from typing import Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    print_assistant_label, print_info, print_progress, print_reasoning_token,
-    print_status,
+    print_assistant_label, print_info, print_reasoning_token, print_status,
     print_streaming_done, print_streaming_token, print_thinking,
 )
 from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
@@ -53,16 +52,18 @@ class _TerminalReply:
 
 
 class _ProgressLines:
-    """Each new status of one model call, as a progress line on stderr."""
+    """Each new status of one model call, as a progress line through
+    ``say``."""
 
-    def __init__(self) -> None:
+    def __init__(self, say) -> None:
+        self._say = say
         self._last = None
 
     def status(self, text: str, code=None) -> None:
         if not text or text == self._last:
             return
         self._last = text
-        print_progress(text)
+        self._say(text)
 
 
 class _NameKeyGate:
@@ -409,7 +410,10 @@ ws     ::= [ \t\n\r]*
         notice = "Compacting the session history to free context..."
         self._emit("info", text=notice)
         if getattr(self, "on_event", None) is None:
-            print_info(notice)
+            if getattr(self, "progress_sink", None) is not None:
+                self._say_progress(notice)
+            else:
+                print_info(notice)
 
         older  = self._messages[:cut]
         recent = self._messages[cut:]
@@ -1023,7 +1027,7 @@ ws     ::= [ \t\n\r]*
                 elif self.report_progress:
                     # Non-interactive run that reports progress: the reply is
                     # not shown, each new model status is.
-                    progress = _ProgressLines()
+                    progress = _ProgressLines(self._say_progress)
                     progress.status(f"Waiting for {self.backend.model_id}...")
                     return self._stream_and_record(
                         messages,

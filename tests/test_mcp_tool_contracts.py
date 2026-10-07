@@ -566,6 +566,22 @@ class TestClientSuppliedStringsAreGuarded:
         assert _UNC not in _text(reply)
         gen.assert_not_called()
 
+    def test_generate_image_reports_progress_to_the_client(self, all_tools):
+        from localm.plugins.mcpserver.server import report_progress
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "saved")) as gen:
+            _call(all_tools, "generate_image", {"prompt": "p"})
+        gen.assert_called_once()
+        assert gen.call_args.kwargs["on_progress"] is report_progress
+
+    def test_setup_embeddings_reports_download_progress_to_the_client(self, all_tools):
+        from localm.plugins.mcpserver.server import report_progress
+        with patch("localm.inference.embedder.resolve_embedding_model_path",
+                   return_value=None) as resolve:
+            _call(all_tools, "setup_embeddings", {})
+        resolve.assert_called_once()
+        assert resolve.call_args.kwargs["on_progress"] is report_progress
+
     def test_setup_embeddings_refuses_a_path_and_writes_nothing(self, all_tools):
         import localm.config as cfg
         before = cfg.load_config().get("embedding_model")

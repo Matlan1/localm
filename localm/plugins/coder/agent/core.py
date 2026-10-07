@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import localm.plugins.coder.agent as _agent
 from localm.textguard import GuardedText, compose, compose_join, untrusted_span
@@ -213,9 +213,11 @@ class Agent(
         # display. "reasoning" is a thinking model's reasoning text, kept
         # separate from "token" - see _call_llm.
         self.on_event       = on_event
-        # A run without a live display or event sink prints each model
-        # status and each tool call to stderr when True.
+        # A run without a live display or event sink reports each model
+        # status and each tool call when True: to progress_sink when set,
+        # otherwise to stderr.
         self.report_progress = False
+        self.progress_sink: Optional[Callable[[str], None]] = None
         # External approval hook: Callable[[ToolCall], bool]. When set it is used
         # for destructive-tool confirmation instead of the terminal prompt, in
         # both interactive and non-interactive runs.
@@ -892,6 +894,32 @@ class Agent(
         torn."""
         with self._todos_lock:
             self._todos = [dict(t) for t in todos]
+
+    def _say_progress(self, text: str) -> None:
+        """Report one progress line to ``progress_sink``, or to stderr when
+        none is set. A raising sink is logged and ignored."""
+        sink = self.progress_sink
+        if sink is None:
+            from ..display import print_progress
+            print_progress(text)
+            return
+        try:
+            sink(text)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("progress sink raised: %s", e)
+
+    def child_progress_sink(self, child_name: str) -> Optional[Callable[[str], None]]:
+        """Where a foreground child agent named *child_name* reports its
+        progress, each line prefixed with its name: this agent's event sink as
+        a ``status`` event, this agent's own progress channel when it reports
+        progress or runs interactively, else None."""
+        if self.on_event is not None:
+            return lambda text: self._emit("status", text=f"{child_name}: {text}",
+                                           code=None)
+        if self.report_progress or self._interactive:
+            return lambda text: self._say_progress(f"{child_name}: {text}")
+        return None
 
     def _emit(self, event_type: str, **data) -> None:
         """Send a structured event to the registered sink. Never raises."""

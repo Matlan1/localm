@@ -211,9 +211,11 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                     is_error=True)
             update_config(lambda c: c.update({"embedding_model": model}))
 
+        from ..server import report_progress
         with _quiet_stdout():
             try:
-                path = resolve_embedding_model_path(allow_download=True)
+                path = resolve_embedding_model_path(allow_download=True,
+                                                    on_progress=report_progress)
             except Exception as e:
                 return _text_result(f"Failed to setup embeddings: {e}", is_error=True)
         if not path:
