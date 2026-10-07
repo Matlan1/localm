@@ -465,9 +465,10 @@ The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown
 When a Mixture-of-Experts model does not fit in VRAM and GPU layers are
 auto-sized (`n_gpu_layers_auto`, with `n_gpu_layers` left at 99, the
 defaults), localm keeps the routed experts of as few layers as needed in system
-RAM with every layer on the GPU, before it moves any whole layer to the CPU.
-The load output names the choice and how much expert data each generated token
-reads from RAM, which bounds the speed:
+RAM with every layer on the GPU, before it moves any whole layer to the CPU
+(on several GPUs, checking each card's own share; not with a configured
+`gpu_split_indices` split). The load output names the choice and how much
+expert data each generated token reads from RAM, which bounds the speed:
 
 ```
   gpu layers auto: every layer on the GPU, with the routed experts of 18/48 layers in system RAM (Mixture-of-Experts) - ...

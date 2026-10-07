@@ -260,7 +260,9 @@ instead of VRAM, so it fits in far less GPU memory. When such a model does not
 fit and GPU layers are auto-sized (the default), localm does this by itself: it
 keeps the routed experts of as few layers as needed in system RAM and every
 layer on the GPU, and only moves whole layers to the CPU when even that does
-not fit. To choose it yourself:
+not fit. On several GPUs it checks that each card can hold its own share; with
+a configured split (`gpu_split_indices`) it leaves the choice to you. To choose
+it yourself:
 
 ```bash
 localm config n_cpu_moe 16        # keep 16 layers' worth of experts on system RAM

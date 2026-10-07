@@ -147,7 +147,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
   layers auto-sized (the default), such a model now keeps the experts of as few
   layers as needed in system RAM and every layer on the GPU, instead of moving
-  whole layers to the CPU. On a 16 GB card Qwen3-30B-A3B generates 26 tokens/s
+  whole layers to the CPU (with a configured multi-GPU split, set `n_cpu_moe`
+  yourself). On a 16 GB card Qwen3-30B-A3B generates 26 tokens/s
   where moving whole layers gave 19. The load output, the model
   load response (`moe_cpu_layers`) and the GUI's load message say how many
   layers' experts are in RAM, and the load output says how much each token reads
