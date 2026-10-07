@@ -318,6 +318,8 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
             raise ArtifactError(f"the archive did not contain {lib_name}")
         _sl._bundle_missing_native_deps(target)
         _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
+        if backend == "amd-rocm":
+            _sl.install_rocm_simd_cpu(target)
 
     notes = {
         "vulkan": "universal GPU build (AMD/NVIDIA/Intel via the display driver)",

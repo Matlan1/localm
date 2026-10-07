@@ -12,7 +12,7 @@ import click
 
 from localm.debuglog import logger
 from localm.setup_llama._common import console
-from localm.setup_llama.pins import _ROCM_TAG
+from localm.setup_llama.pins import _ROCM_BUILD, _ROCM_TAG
 from localm.setup_llama.download import ArtifactError
 from localm.setup_llama.runtime_dir import (_exit_provisioning_busy, _exit_runtime_in_use,
                                             _record_provisioned_backend,
@@ -193,9 +193,9 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             # A marker written before tag recording existed still reads back
             # None, and that case keeps its original wording.
             have_build = _sl._provisioned_build(target)
-            if want == "amd-rocm" and have_build and have_build != _ROCM_TAG:
+            if want == "amd-rocm" and have_build and have_build != _ROCM_BUILD:
                 console.print(f"[yellow]Upgrading the {have} build: "
-                              f"{have_build} -> {_ROCM_TAG}.[/yellow]")
+                              f"{have_build} -> {_ROCM_BUILD}.[/yellow]")
             elif have_build:
                 console.print(f"[yellow]Re-downloading the {have} build "
                               f"({have_build}).[/yellow]")
@@ -330,9 +330,10 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
     # SUCCEEDED, so this costs no additional lookup and, on a fallback,
     # records the build actually installed rather than the one that failed.
     #
-    # amd-rocm still supplies _ROCM_TAG from the constant, because its build
-    # is not resolved from an upstream tag at all (used_tag is None for it).
-    build = _ROCM_TAG if result == "amd-rocm" else used_tag
+    # amd-rocm still supplies its build from the constants, because its build
+    # is not resolved from an upstream tag at all (used_tag is None for it):
+    # _ROCM_BUILD with the SIMD CPU backend installed over it, else _ROCM_TAG.
+    build = _sl.rocm_build(target) if result == "amd-rocm" else used_tag
     _record_provisioned_backend(target, result, build=build)
     _record_runtime_history(result, build)
 
