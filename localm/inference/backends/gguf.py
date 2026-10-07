@@ -164,6 +164,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_accepted = 0     # how many of those the target accepted
         self.last_mtp_steps = 0        # verification batches the last call decoded
         self.last_mtp_paused_steps = 0  # steps it ran plain because drafting was slower
+        self._mtp_stopped_this_call = False  # the last call turned MTP off for the model
         # Always None in production; the real LlamaCpp instance lives in the
         # child process.
         self._llm = None
@@ -272,6 +273,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         in the isolated worker process, not here."""
         return bool(self.loaded and self._supports_images)   # a dead worker has no vision
 
+    def _reset_mtp_call(self) -> None:
+        """Clear the per-call MTP figures before a call, so a call that ends
+        without a done envelope reports none of the previous call's."""
+        self.last_mtp_active = False
+        self.last_mtp_call_status = ""
+        self.last_mtp_drafted = 0
+        self.last_mtp_accepted = 0
+        self.last_mtp_steps = 0
+        self.last_mtp_paused_steps = 0
+        self._mtp_stopped_this_call = False
+
     def _record_mtp(self, done: dict) -> None:
         """Take the speculation state from one call's done envelope.
 
@@ -293,6 +305,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_steps = _count(done.get("mtp_steps"))
         self.last_mtp_paused_steps = _count(done.get("mtp_paused_steps"))
         if _mtp_status_kind(self.last_mtp_status) in _MTP_STOPPED:
+            self._mtp_stopped_this_call = self._supports_mtp
             self._supports_mtp = False
 
     @property
@@ -301,7 +314,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         not enabled for this model.
 
         ``state`` is "stopped" when the reply stopped speculating partway (the
-        reason is the per-call status), "paused" when drafting was measured
+        reason is the per-call status, or the model status when this reply
+        turned speculation off for the model), "paused" when drafting was measured
         slower than one-token decoding for at least as many steps as it ran,
         "on" when it speculated, "unavailable" when the model cannot speculate
         (the reason is the model status), and "idle" otherwise. ``drafted`` and
@@ -314,6 +328,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         paused = self.last_mtp_paused_steps
         if self.last_mtp_call_status:
             state, reason = "stopped", self.last_mtp_call_status
+        elif self._mtp_stopped_this_call:
+            state, reason = "stopped", self.last_mtp_status
         elif paused and paused >= self.last_mtp_steps:
             state, reason = "paused", "slower-than-plain"
         elif self.last_mtp_active:
@@ -917,6 +933,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # generator forwards GeneratorExit into the runner's generator, which is
         # what triggers ModelRunner.chat_stream's cancel-and-drain cleanup.
         self.last_finish_reason = "stop"
+        self._reset_mtp_call()
         try:
             yield from self._runner.chat_stream(
                 first_chunk_timeout=self._first_token_timeout_seconds(),

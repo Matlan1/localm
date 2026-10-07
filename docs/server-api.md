@@ -124,8 +124,10 @@ Chat completions on a GGUF model with Multi-Token Prediction enabled
 ```
 
 `state` is `on` (the reply speculated), `paused` (drafting was measured slower
-than generating one token at a time and was paused for most of the reply),
-`stopped` (it stopped partway; `reason` says why), `idle` (it did not
+than generating one token at a time and was paused for at least as many steps
+as it ran),
+`stopped` (it stopped partway, or turned MTP off for the model; `reason` says
+why), `idle` (it did not
 speculate, as on an image or grammar-constrained turn) or `unavailable` (this
 model cannot speculate; `reason` says why). `drafted` and `accepted` count the
 draft tokens sent to verification and kept; `paused_steps` counts the steps

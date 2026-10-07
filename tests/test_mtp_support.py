@@ -1740,7 +1740,7 @@ def test_the_draft_count_setting_defaults_to_the_native_default():
 
 
 @pytest.mark.parametrize("cfg_value, override, expected", [
-    (3, None, 3), (3, 1, 1), (0, None, 1), (99, None, 4), ("x", None, 1), (None, None, 1),
+    (3, None, 3), (3, 1, 1), (0, None, 1), (99, None, 3), ("x", None, 1), (None, None, 1),
 ])
 def test_the_draft_count_is_read_from_config_clamped_and_overridable(cfg_value, override, expected):
     from localm.inference.engine import _resolve_mtp_draft_tokens
@@ -1877,3 +1877,49 @@ def test_bench_mtp_flags_output_that_differs_from_mtp_off(cli_runner):
 
     assert res.exit_code == 0, res.output
     assert "Output differs from MTP off in 1 of 3 replies" in res.output
+
+
+
+@pytest.mark.parametrize("status", ["rewind-unsupported", "context-refused"])
+def test_a_reply_that_turned_mtp_off_for_the_model_reports_it_stopped(status):
+    """A reply that speculated and then lost MTP for the model (a stuck rollback,
+    a draft context that could not be recreated) reports that it stopped and
+    why; the next reply reports MTP unavailable."""
+    backend = GgufBackend("test_model.gguf", mtp_enabled=True)
+    backend._loaded = True
+    backend._supports_mtp = True
+
+    backend._record_mtp({"mtp_status": status, "mtp_active": True,
+                         "mtp_drafted": 5, "mtp_accepted": 4, "mtp_steps": 5})
+
+    usage = backend.last_mtp_usage
+    assert (usage["state"], usage["reason"], usage["drafted"]) == ("stopped", status, 5)
+
+    backend._reset_mtp_call()
+    backend._record_mtp({"mtp_status": status, "mtp_active": False})
+    assert backend.last_mtp_usage["state"] == "unavailable"
+
+
+def test_a_reply_that_ends_without_a_report_shows_no_figures_from_the_last_one():
+    """A cancelled reply never sends its done envelope; it must not show the
+    previous reply's MTP figures."""
+    backend = GgufBackend("test_model.gguf", mtp_enabled=True)
+    backend._loaded = True
+    backend._supports_mtp = True
+    backend._record_mtp({"mtp_status": "ok", "mtp_active": True,
+                         "mtp_drafted": 40, "mtp_accepted": 30, "mtp_steps": 40})
+
+    class _Runner:
+        last_done = None
+
+        def chat_stream(self, **kwargs):
+            yield "a"
+            yield "b"
+
+    backend._runner = _Runner()
+    gen = backend.chat_stream([{"role": "user", "content": "hi"}])
+    assert next(gen) == "a"
+    gen.close()
+
+    usage = backend.last_mtp_usage
+    assert (usage["state"], usage["drafted"], usage["accepted"]) == ("idle", 0, 0)

@@ -243,7 +243,7 @@ CORE_FIELDS: list = [
                  "Tokens MTP proposes per step when it is on. More pays off "
                  "when most drafts are accepted; `localm bench-mtp <model> "
                  "--draft-tokens N` measures it.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.

@@ -405,7 +405,7 @@ setting shared by `GgufBackend`/`GgufWorker`). Each step costs a small draft
 decode per drafted token plus one verification batch, which pays only while
 verifying several tokens costs about what verifying one does (the whole model
 on the GPU). `localm bench-mtp` measures it per model. `mtp_draft_tokens`
-(1-4, default 1) sets how many tokens one step drafts.
+(1-3, default 1) sets how many tokens one step drafts.
 
 **Detection is a capability test, not a metadata test**
 (`llama_model_mtp_support()` in `_api.py`). Both of these must hold:
@@ -472,8 +472,8 @@ every token the sampler sees is a token that is emitted. Verifying several
 tokens in one batch runs different kernels than decoding them one by one, and
 their results can differ in the last bits, so where the two most likely tokens
 are nearly tied (measured: a top-2 logit gap around 0.1) the reply can take the
-other one; with one or two draft tokens no such divergence was seen on the
-test models, with four it was. If the removal fails,
+other one. Up to three draft tokens no such divergence was seen on the test
+models, which is why the setting stops at three. If the removal fails,
 MTP is disabled for the rest of the loaded model's life (not just the current
 generation) - speculation needs that rewind. **Drafting never runs while a
 grammar is active** - a mis-sequenced `llama_sampler_accept` on a grammar

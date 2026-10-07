@@ -229,7 +229,7 @@ def _reference(prompt, n):
     return out
 
 
-@pytest.mark.parametrize("draft_tokens", [1, 2, 3, 4])
+@pytest.mark.parametrize("draft_tokens", [1, 2, 3])
 @pytest.mark.parametrize("wrong", [(), (8, 9, 14), tuple(range(7, 40, 3)), tuple(range(7, 40))])
 def test_mtp_output_matches_the_target_alone_for_every_draft_count(draft_tokens, wrong):
     llm = _llama(draft_tokens=draft_tokens)
@@ -321,7 +321,7 @@ def test_an_accepted_step_costs_one_draft_decode():
         assert all(flag == 0 for flag in logits[:-1]), logits
 
 
-@pytest.mark.parametrize("draft_tokens", [2, 3, 4])
+@pytest.mark.parametrize("draft_tokens", [2, 3])
 def test_a_fully_rejected_step_rolls_back_within_the_snapshots_the_context_asked_for(draft_tokens):
     """The main context is created with _mtp_rollback_snapshots(...) recurrent
     snapshots; a step whose drafts are all rejected must roll back that far."""
@@ -447,7 +447,7 @@ def test_draft_budget_respects_the_reply_budget_and_both_caches():
     assert llm._mtp_draft_budget(47, None) == 2
 
 
-@pytest.mark.parametrize("k", range(1, 5))
+@pytest.mark.parametrize("k", range(1, 4))
 def test_the_contexts_keep_a_snapshot_per_draft_token(k):
     llm = make_bare_llama()
     llm._mtp_draft_max = k
@@ -621,3 +621,34 @@ def test_the_pacer_is_kept_across_replies():
 
     assert llm._draft_pacer is first
     assert llm.mtp_paused_steps > 0
+
+
+def test_one_slow_step_does_not_pause_drafting():
+    """A single step slowed by something else on the machine is outweighed by
+    the steps around it."""
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    pacer = _DraftPacer()
+    _feed(pacer, spec_cost=1.2, plain_cost=1.0, steps=60)
+
+    pacer.record(True, 100.0, 2)
+
+    assert pacer.pauses == 0
+    assert not pacer.paused
+
+
+def test_a_new_conversation_starts_the_draft_cache_without_a_hidden_state():
+    """Position 0 has no position before it: a later reply that rebuilds the
+    draft cache from 0 pairs it with zeros, not with a state left over from the
+    previous reply."""
+    llm = _llama(draft_tokens=1)
+    fake = FakeNative(llm)
+    _generate(llm, fake, max_new_tokens=6)
+    assert llm._pending_h is not None and llm._pending_h_pos > 0
+
+    other = [21, 22, 23, 24, 25]
+    second, _ = _generate(llm, fake, max_new_tokens=6, prompt=other)
+
+    assert second == _reference(other, 6)
+    assert fake.draft_cache[0] == (21, 0.0)
+    for p in sorted(fake.draft_cache)[1:]:
+        assert fake.draft_cache[p][1] == HIDDEN_BASE + p - 1, p
