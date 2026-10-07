@@ -19,10 +19,12 @@ from localm.media import comfy_client
 @pytest.fixture
 def comfy_queue():
     """A local HTTP server answering ``GET /queue`` with ``state["queue"]``."""
-    state = {"queue": {"queue_running": [], "queue_pending": []}, "status": 200}
+    state = {"queue": {"queue_running": [], "queue_pending": []}, "status": 200,
+             "gets": 0}
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            state["gets"] += 1
             body = json.dumps(state["queue"]).encode()
             self.send_response(state["status"])
             self.send_header("Content-Type", "application/json")
@@ -92,6 +94,14 @@ class TestHeartbeat:
         for t in (0.0, 2.0, 14.0, 15.0, 17.0):
             tick(t)
         assert said == ["Rendering… (15s elapsed)"]
+
+    def test_the_queue_is_not_read_once_the_job_runs(self, comfy_queue):
+        url, state = comfy_queue
+        state["queue"] = {"queue_running": [_job(1, "mine")], "queue_pending": []}
+        tick = comfy_client.comfy_wait_heartbeat(url, "mine", lambda t: None)
+        for t in (0.0, 2.0, 4.0, 6.0):
+            tick(t)
+        assert state["gets"] == 1
 
     def test_plural_and_count_changes_are_said(self, comfy_queue):
         url, state = comfy_queue
