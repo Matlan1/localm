@@ -1012,20 +1012,29 @@ def gguf_expert_count(path: Path) -> int:
     contribute NOTHING to the KV cache. Returns 0 - never raises - on an
     unreadable or non-GGUF file, the same 'no signal' contract as the other
     probes here."""
+    return gguf_expert_counts(path)[0]
+
+
+def gguf_expert_counts(path: Path) -> "tuple[int, int]":
+    """``(expert_count, expert_used_count)`` from *path*'s header: how many
+    experts each MoE layer has and how many the router selects per token.
+    ``(0, 0)`` for a dense model; ``expert_used_count`` is 0 when the header
+    does not declare it. Never raises; an unreadable or non-GGUF file reads as
+    ``(0, 0)``."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_META_PROBE_BYTES)
     except OSError:
-        return 0
+        return 0, 0
 
     architecture = None
     counts: dict = {}
     try:
         if buf[:4] != b"GGUF":
-            return 0
+            return 0, 0
         (version,) = struct.unpack_from("<I", buf, 4)
         if version < 2:
-            return 0
+            return 0, 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
         for _ in range(kv_count):
@@ -1035,7 +1044,7 @@ def gguf_expert_count(path: Path) -> int:
             if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
                 architecture, off = _gguf_read_string(buf, off)
                 continue
-            if key.endswith(".expert_count"):
+            if key.endswith((".expert_count", ".expert_used_count")):
                 try:
                     counts[key], off = _gguf_read_scalar(buf, off, vtype)
                     continue
@@ -1046,16 +1055,23 @@ def gguf_expert_count(path: Path) -> int:
         pass
 
     if not architecture:
-        return 0
-    value = counts.get(architecture + ".expert_count")
-    return int(value) if isinstance(value, int) and value > 0 else 0
+        return 0, 0
+
+    def _positive(key: str) -> int:
+        value = counts.get(architecture + key)
+        return int(value) if isinstance(value, int) and value > 0 else 0
+
+    n_expert = _positive(".expert_count")
+    return n_expert, (_positive(".expert_used_count") if n_expert else 0)
 
 
 # The FUSED per-layer expert weight tensors, exactly as llama.cpp's converters
-# name them: blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps - one tensor
-# PER PROJECTION with every expert fused into it, not one tensor per expert.
-# The router (ffn_gate_inp) and any SHARED expert are excluded: they are read
-# every token and are tiny, so llama.cpp never moves them.
+# name them: blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps (and the fused
+# ffn_gate_up_exps, and the ffn_*_chexps variants) - one tensor PER PROJECTION
+# with every expert fused into it, not one tensor per expert. The same pattern
+# as llama.cpp's own --n-cpu-moe (common.h LLM_FFN_EXPS_REGEX). The router
+# (ffn_gate_inp) and any SHARED expert are excluded: they are read every token
+# and are tiny, so llama.cpp never moves them.
 #
 # SINGLE SOURCE OF TRUTH: llamacpp/llama.py's _apply_cpu_moe builds its native
 # tensor_buft_overrides regex from these SAME _MOE_TENSOR_PREFIX/_SUFFIX
@@ -1063,7 +1079,7 @@ def gguf_expert_count(path: Path) -> int:
 # exactly the tensors this pattern matches for its VRAM preflight estimate, so
 # the two cannot disagree about what n_cpu_moe pins.
 _MOE_TENSOR_PREFIX = r"blk\."
-_MOE_TENSOR_SUFFIX = r"\.ffn_(gate|down|up)_exps"
+_MOE_TENSOR_SUFFIX = r"\.ffn_(up|down|gate|gate_up)_(ch|)exps"
 # General matcher (not tied to one layer index) with the index as a capture
 # group, derived from the SAME prefix/suffix so it can never drift from what
 # _apply_cpu_moe actually builds per-layer.
@@ -1249,6 +1265,45 @@ def gguf_moe_pinned_expert_bytes(
         if size > 0:
             total += size
     return total
+
+
+def gguf_moe_expert_bytes_by_layer(
+        path: Path, *, _parsed: object = _UNSET) -> "Optional[dict[int, int]]":
+    """Routed-expert weight bytes per transformer layer, ``{layer index:
+    bytes}``, summed over every part of a split GGUF: the tensors an
+    ``n_cpu_moe`` load pins to system RAM for that layer (see
+    ``_MOE_EXPERT_TENSOR_RE``). Sizes are offset deltas, as in
+    ``_gguf_tensor_offset_entries``.
+
+    *_parsed*, if given, is used for a single-file model instead of reading
+    *path* again (an already-computed ``_gguf_tensor_offset_entries(path)``
+    result, or its ``None`` failure); a split model reads every part.
+
+    ``{}`` for a model with no expert tensors. ``None`` - never raises - when
+    any part does not parse or a part of a split model is missing."""
+    parts = split_gguf_parts(path.name)
+    paths = [path.parent / p for p in parts] if parts else [path]
+    by_layer: dict = {}
+    for part in paths:
+        if not parts and _parsed is not _UNSET:
+            parsed = _parsed
+        elif not part.is_file():
+            return None
+        else:
+            parsed = _gguf_tensor_offset_entries(part)
+        if parsed is None:
+            return None
+        entries, file_size, data_start = parsed
+        for idx, (name, offset) in enumerate(entries):
+            m = _MOE_EXPERT_TENSOR_RE.search(name)
+            if not m:
+                continue
+            nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
+            size = nxt - offset
+            if size > 0:
+                layer = int(m.group(1))
+                by_layer[layer] = by_layer.get(layer, 0) + size
+    return by_layer
 
 
 def gguf_input_layer_bytes(

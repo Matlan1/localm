@@ -138,6 +138,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             self._VRAM_OVERHEAD_BYTES = vram_overhead_bytes
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self.effective_gpu_layers: Optional[int] = None  # resolved gpu layers of the last load
+        # The n_cpu_moe the last load used: the configured value, or the one
+        # automatic GPU sizing chose. None before the first sizing.
+        self.effective_n_cpu_moe: Optional[int] = None
         # The multi-GPU split distribution the last load applied
         # ({"source": "auto"|"pinned"|"equal", "devices": [{"index", "share"}, ...]}),
         # or None when no split applied. Set in _load_native.
@@ -559,7 +562,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # this parent resolved, rather than the class-level default.
             vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
             gpu_split_ratios=worker_split,
-            n_cpu_moe=self.n_cpu_moe,
+            n_cpu_moe=self._load_n_cpu_moe(),
             mtp_enabled=self.mtp_enabled,
         )
         if self.mtp_draft_tokens is not None:
@@ -643,12 +646,15 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                             f", used/free reading not trusted on this platform)")
                 console.print(f"[dim]{line}[/dim]")
 
-        # MoE expert placement (opt-in, n_cpu_moe): llama.cpp's own load_tensors
-        # report of where each backend's share of the weights landed. Gated on
-        # n_cpu_moe > 0, and an empty report is stated rather than shown as
-        # nothing. The placement numbers print only in the branch where the
-        # override actually applied (skip_reason is None).
-        if self.n_cpu_moe > 0:
+        # MoE expert placement (n_cpu_moe, configured or chosen by auto sizing):
+        # llama.cpp's own load_tensors report of where each backend's share of
+        # the weights landed. Gated on n_cpu_moe > 0, and an empty report is
+        # stated rather than shown as nothing. The placement numbers print only
+        # in the branch where the override actually applied (skip_reason is
+        # None).
+        n_cpu_moe = self._load_n_cpu_moe()
+        self.moe_applied = False
+        if n_cpu_moe > 0:
             # Why the override did not apply, rendered here in the parent from the
             # metadata the child returned. The child must never console.print.
             skip_reason = meta.get("moe_skip_reason")
@@ -658,6 +664,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     skip_reason,
                     f"[yellow]  n_cpu_moe:[/yellow] did not apply ({skip_reason})."))
             else:
+                self.moe_applied = True
                 placement = meta.get("weight_placement") or []
                 if placement:
                     ram_mib = sum(b["mib"] for b in placement if b["is_ram"])
@@ -665,12 +672,20 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     console.print(
                         f"[dim]  moe placement: {ram_mib:.2f} MiB system RAM / "
                         f"{vram_mib:.2f} MiB VRAM across {len(placement)} backend "
-                        f"buffer(s) (n_cpu_moe={self.n_cpu_moe})[/dim]")
+                        f"buffer(s) (n_cpu_moe={n_cpu_moe})[/dim]")
                 else:
                     console.print(
                         "[dim]  moe placement: not reported by this llama.cpp "
-                        f"build (n_cpu_moe={self.n_cpu_moe} was still "
+                        f"build (n_cpu_moe={n_cpu_moe} was still "
                         "requested)[/dim]")
+                per_token = self._moe_ram_bytes_per_token(n_cpu_moe)
+                if per_token > 0:
+                    gb = per_token / 1e9
+                    console.print(
+                        f"[dim]  moe speed: each generated token reads about "
+                        f"{gb:.2f} GB of expert weights from system RAM, so "
+                        f"generation speed is limited by RAM bandwidth (at most "
+                        f"about {40 / gb:.0f} tokens/s at 40 GB/s)[/dim]")
 
         console.print("[green]✓[/green] Model loaded")
 
