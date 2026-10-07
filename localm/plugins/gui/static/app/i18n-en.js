@@ -218,7 +218,7 @@ export const I18N_EN = {
   "chat.usage.mtpPaused": "MTP paused",
   "chat.usage.mtpPaused.title": "Multi-Token Prediction was slower than generating one token at a time on this reply, so it paused for {steps} steps",
   "chat.usage.mtpOff": "MTP off",
-  "chat.usage.mtpOff.grammar": "Multi-Token Prediction does not run on replies with constrained output, such as web-access tool calls",
+  "chat.usage.mtpOff.grammar": "Multi-Token Prediction does not run on constrained output, such as a reply that may call the web tools",
   "chat.usage.mtpOff.image": "Multi-Token Prediction does not run on a turn with an image",
   "chat.usage.mtpStopped": "MTP stopped",
   "chat.usage.mtpUnavailable": "MTP unavailable",
