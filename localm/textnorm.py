@@ -22,32 +22,32 @@ from __future__ import annotations
 import re
 from typing import Iterator, Optional
 
-# Reasoning-channel openers/closers -> canonical think tags. Whitespace inside
-# the tag is tolerated.
+# Reasoning-channel openers/closers -> canonical think tags. Up to four
+# whitespace characters inside the tag are tolerated.
 # Harmony: <|channel|>analysis<|message|>REASONING ... <|channel|>final<|message|>ANSWER
 # Gemma 4: <|channel>thought / REASONING / <channel|>ANSWER
 _THINK_OPEN_RE = re.compile(
-    r"<\|?\s*channel\s*\|?>"
+    r"<\|?\s{0,4}channel\s{0,4}\|?>"
     r"(thought|thinking|analysis|reasoning|commentary|reflection)"
-    r"\n?(<\|?\s*message\s*\|?>)?"
+    r"\n?(<\|?\s{0,4}message\s{0,4}\|?>)?"
 )
 _THINK_CLOSE_RE = re.compile(
-    r"<\s*channel\s*\|>"                                      # gemma4 close
-    r"|<\|?\s*channel\s*\|?>final\n?(<\|?\s*message\s*\|?>)?"  # harmony final-channel switch
+    r"<\s{0,4}channel\s{0,4}\|>"                                      # gemma4 close
+    r"|<\|?\s{0,4}channel\s{0,4}\|?>final\n?(<\|?\s{0,4}message\s{0,4}\|?>)?"  # harmony final-channel switch
 )
 
 # Native reasoning tags emitted without the harmony/Gemma channel wrapper.
 # "think" alone is excluded so canonical <think>/</think> tags pass through
 # untouched and the transform stays idempotent.
 _THINK_BARE_OPEN_RE = re.compile(
-    r"<\s*(?:reasoning|thinking|thought|reflection)\s*>", re.IGNORECASE)
+    r"<\s{0,4}(?:reasoning|thinking|thought|reflection)\s{0,4}>", re.IGNORECASE)
 _THINK_BARE_CLOSE_RE = re.compile(
-    r"<\s*/\s*(?:reasoning|thinking|thought|reflection)\s*>", re.IGNORECASE)
+    r"<\s{0,4}/\s{0,4}(?:reasoning|thinking|thought|reflection)\s{0,4}>", re.IGNORECASE)
 
 _MARKER_RE = re.compile(
-    r"<\|?\s*channel\s*\|?>"                                  # leftover channel tag
-    r"|<\s*channel\s*\|>"                                     # leftover gemma4 close
-    r"|<\|?\s*message\s*\|?>"                                 # stray harmony separator
+    r"<\|?\s{0,4}channel\s{0,4}\|?>"                                  # leftover channel tag
+    r"|<\s{0,4}channel\s{0,4}\|>"                                     # leftover gemma4 close
+    r"|<\|?\s{0,4}message\s{0,4}\|?>"                                 # stray harmony separator
     r"|<\|start\|>(assistant|user|system)?"
     r"|<\|return\|>"
     r"|<\|turn>(user|model|assistant|system)?\n?"            # Gemma 4 turn open
@@ -56,7 +56,7 @@ _MARKER_RE = re.compile(
     # them out of this same stream.
     r"|<\|tool>|<tool\|>"                                     # Gemma 4 tool declarations
     r"|<\|think\|>|<think\|>"                                 # Gemma 4 thinking enable token
-    r"|<unused\d+>?"                                          # Gemma reserved tokens
+    r"|<unused\d{1,8}>?"                                          # Gemma reserved tokens
     r"|\[TOOL_CALLS\]"                                        # Mistral tool-call token
     # A turn-OPEN marker carries the role word, so the role suffix is matched
     # with it - removing the marker alone leaves a bare "model" / "assistant" at
@@ -71,14 +71,15 @@ _MARKER_RE = re.compile(
 )
 
 # Longest text a partial marker could span across two stream pieces. Stays at or
-# above the longest string _MARKER_RE can match, or scrub_stream commits a cut
+# above the longest string _SCRUB_RE can match, or scrub_stream commits a cut
 # inside a marker and leaks its tail as text.
-# See test_marker_hold_covers_every_marker_at_every_stream_split.
-_MARKER_HOLD = 48
+# See test_marker_hold_covers_the_longest_possible_match.
+_MARKER_HOLD = 56
 
 
-# Every substitution scrub_text applies, in order. Each pattern starts with a
-# character in _MARKER_START, which scrub_stream relies on to release text early.
+# Every substitution scrub_text makes, first listed wins at a position. Each
+# pattern starts with a character in _MARKER_START, which scrub_stream relies on
+# to release text early.
 # See test_every_scrub_pattern_starts_with_a_marker_start_character.
 _SCRUB_SUBS = (
     (re.compile(re.escape('<|"|>')), '"'),            # Gemma 4 quote token
@@ -90,12 +91,19 @@ _SCRUB_SUBS = (
 )
 _MARKER_START = "<["
 
+# _SCRUB_SUBS as one alternation: scrub_text rewrites every marker in a single
+# left-to-right pass, and a rewrite's output is never matched again.
+# See test_adjacent_markers_stream_like_one_shot.
+_SCRUB_RE = re.compile("|".join(
+    f"(?P<s{i}>{'(?i:' + rx.pattern + ')' if rx.flags & re.IGNORECASE else rx.pattern})"
+    for i, (rx, _replacement) in enumerate(_SCRUB_SUBS)))
+_SCRUB_REPLACEMENTS = {f"s{i}": replacement
+                       for i, (_rx, replacement) in enumerate(_SCRUB_SUBS)}
+
 
 def scrub_text(text: str) -> str:
     """Apply marker normalisation/removal to a complete text chunk."""
-    for rx, replacement in _SCRUB_SUBS:
-        text = rx.sub(replacement, text)
-    return text
+    return _SCRUB_RE.sub(lambda m: _SCRUB_REPLACEMENTS[m.lastgroup], text)
 
 
 _THINK_OPEN = "<think>"
@@ -277,14 +285,10 @@ def _note_marker_flood() -> None:
 
 
 def _marker_end(buf: str, at: int) -> int:
-    """End of the longest scrub_text match starting at *at* in *buf*, or *at*
-    when none starts there."""
-    end = at
-    for rx, _replacement in _SCRUB_SUBS:
-        m = rx.match(buf, at)
-        if m is not None and m.end() > end:
-            end = m.end()
-    return end
+    """End of the scrub_text match starting at *at* in *buf*, or *at* when
+    none starts there."""
+    m = _SCRUB_RE.match(buf, at)
+    return at if m is None else m.end()
 
 
 def _commit_point(buf: str) -> int:

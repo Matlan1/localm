@@ -233,8 +233,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Replies start appearing as soon as the model writes them.** Every reply was
   held back until about 48 characters had been generated, and a reply shorter
   than that appeared only once it was complete. On a HuggingFace-format model
-  that added two to three seconds before the first words showed. Only text that
-  could still turn out to be one of a model's internal markers is held back now.
+  that added two to three seconds before the first words showed. Text is now
+  held back only briefly after a `<` or `[`, where one of a model's internal
+  markers could start.
   A Llama 3 role header that a model writes out as text no longer shows up in
   a longer reply.
 - **A chat with web access on now ends on an answer, not on a bare "read page" or

@@ -266,6 +266,11 @@ class TestTurnOpenMarkers:
             text = f"a {marker}b"
             assert _scrub([text]) == scrub_text(text)
 
+    def test_turn_open_scrub_is_idempotent(self):
+        for marker in _TURN_MARKERS:
+            once = scrub_text(f"{marker}reply")
+            assert scrub_text(once) == once
+
 
 _PROSE = "The quick brown fox jumps over the lazy dog, twice over. "
 
@@ -358,7 +363,7 @@ class TestStreamRelease:
         """Markers placed before, inside and after the hold window, next to
         prose that contains marker characters, cut into pieces of many sizes."""
         for marker in _TURN_MARKERS + _OTHER_MARKERS:
-            for lead in (0, 1, 30, 47, 48, 49, 95):
+            for lead in (0, 1, 30, 47, 48, 49, 55, 56, 57, 95):
                 text = (_PROSE * 2)[:lead] + marker + "Hello [1] a<b " + _PROSE \
                     + marker + marker + "bye"
                 want = scrub_text(text)
@@ -373,11 +378,38 @@ class TestStreamRelease:
             for i in range(len(text) + 1):
                 assert _scrub([text[:i], text[i:]]) == want, (marker, i)
 
-    def test_turn_open_scrub_is_idempotent(self):
-        for marker in _TURN_MARKERS:
-            once = scrub_text(f"{marker}reply")
-            assert scrub_text(once) == once
+    def test_adjacent_markers_stream_like_one_shot(self):
+        """Two markers side by side are each rewritten on their own: a
+        turn-open marker's optional trailing newline never takes the newline a
+        think-close rewrite puts in front of the next one."""
+        want = "\n</think>\n" + "x" * 33
+        assert scrub_text("<|turn><channel|>" + "x" * 33) == want
+        assert _scrub(["<|turn><channel|>" + "x" * 33]) == want
+        for first in _TURN_MARKERS + _OTHER_MARKERS:
+            for second in _TURN_MARKERS + _OTHER_MARKERS:
+                text = _PROSE + first + second + "The answer. " + _PROSE
+                want = scrub_text(text)
+                for size in (1, 3, 7, len(text)):
+                    got = _scrub(_chunked(text, size))
+                    assert got == want, (first, second, size, got)
 
+    def test_marker_hold_covers_the_longest_possible_match(self):
+        from re import _parser
+
+        from localm.textnorm import _MARKER_HOLD, _SCRUB_SUBS
+
+        for rx, _ in _SCRUB_SUBS:
+            longest = _parser.parse(rx.pattern, rx.flags).getwidth()[1]
+            assert longest <= _MARKER_HOLD, (rx.pattern, longest)
+
+    def test_whitespace_padded_tags_stream_like_one_shot(self):
+        for text in ("<|" + " " * 4 + "channel" + " " * 4 + "|>analysis "
+                     + " " * 60 + "Hello",
+                     "<|" + " " * 39 + "channel|>Hello",
+                     "<unused" + "7" * 42 + ">Hello",
+                     "<" + " " * 39 + "reasoning>Hello"):
+            for size in (1, 2, 5):
+                assert _scrub(_chunked(text, size)) == scrub_text(text), (text, size)
 
 class TestToolCallsToken:
     """Mistral's ``[TOOL_CALLS]`` token written out as plain text."""
