@@ -22,17 +22,19 @@ import { applyCoderRailSide } from "./coder.js";
    assistant turn: a web search, a page read, an approval outcome or a control
    note the chat injected. It carries no `role` key. runCompletion renders it
    to fenced user-role text when it assembles a request (toolEventPrompt);
-   renderChat draws it as a collapsed activity card (addToolEventRow).
+   renderChat draws a search or page read as a collapsed activity card and a
+   control note as a one-line notice (addToolEventRow).
 
    Shape: { kind: "tool", id?, tool: "search"|"fetch"|"note",
-            status: "running"|"done"|"failed"|"denied"|"duplicate",
+            status: "running"|"done"|"failed"|"denied"|"duplicate"|"skipped",
+            limit?: the per-message lookup ceiling a "skipped" call hit,
             query?, url?, started_at?, finished_at?, error?,
             search (done): provider, search_status, search_error, grounding,
               grounding_summary, sources[], chunks[], prompt_text
             fetch (done): page {url, text, truncated}
             note?: trusted model-directed prose appended after the result, or
-              the whole text of a control note; reason? ("format"|"limit"|
-              "pending") names a control note
+              the whole text of a control note; reason? ("format"|"unparsed"|
+              "pending", or "limit" on stored rows) names a control note
             text?, untrusted_spans?: a row migrated from the legacy
               {role:"user", web:true} shape, rendered verbatim } */
 export const TOOL_EVENT_KIND = "tool";
@@ -134,6 +136,7 @@ export const chat = {
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
   toolGrammar: true, // chat_tool_grammar from /v1/config - grammar-constrain web-tool calls
+  webMaxLookups: null, // chat_web_max_lookups from /v1/config; null = the built-in default
   userAvatar: "",           // user_avatar from /v1/config: "", an emoji/glyph, or a data: URI
   userName: "",             // user_name from /v1/config: "" falls back to "You"
   modelAvatarDefault: "",   // model_avatar_default from /v1/config, same shape
@@ -231,7 +234,7 @@ export function truncateAtWord(text, max) {
 export function archiveCopy(m) {
   if (isToolEvent(m)) return { ...m };
   const out = { role: m.role, content: msgText(m) };
-  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "bridge"]) {
+  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "webUnfinished", "bridge"]) {
     if (m[k] !== undefined) out[k] = m[k];
   }
   const media = msgImages(m).length + (m.audio ? 1 : 0) + (m.video ? 1 : 0);
@@ -488,6 +491,8 @@ export async function refreshCtxLimit() {
       // field inherits this (the per-chat drawer overrides it).
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
       chat.toolGrammar = cfg.chat_tool_grammar !== false;
+      chat.webMaxLookups = Number.isInteger(cfg.chat_web_max_lookups)
+        ? cfg.chat_web_max_lookups : null;
       chat.userAvatar = cfg.user_avatar || "";
       chat.userName = (cfg.user_name || "").trim();
       chat.modelAvatarDefault = cfg.model_avatar_default || "";
@@ -1525,7 +1530,12 @@ const TOOL_LABEL_KEYS = {
 const TOOL_STATUS_KEYS = {
   running: "chat.tool.status.running", done: "chat.tool.status.done",
   failed: "chat.tool.status.failed", denied: "chat.tool.status.denied",
-  duplicate: "chat.tool.status.duplicate",
+  duplicate: "chat.tool.status.duplicate", skipped: "chat.tool.status.skipped",
+};
+// Catalog keys of the one-line notice shown for a control note, by reason.
+const TOOL_NOTE_NOTICE_KEYS = {
+  format: "chat.tool.notice.format", unparsed: "chat.tool.notice.unparsed",
+  pending: "chat.tool.notice.pending", limit: "chat.tool.notice.limit",
 };
 const TOOL_GROUNDING_KEYS = {
   "page-backed": "chat.tool.grounding.pageBacked",
@@ -1561,13 +1571,35 @@ function toolTextSection(body, heading, text) {
   body.appendChild(el("div", "tool-evidence", text));
 }
 
-/** Render a tool event as a collapsed activity-and-sources card: a summary
- *  line (tool, query or URL, status, grounding, source count, elapsed time)
- *  that expands to the source list and the evidence, page text, error or
- *  note it carries. Every remote string is set as text, never as markup. */
+/** The user-facing one-line notice for a tool event's note, in the UI
+ *  language: what happened, never the text the model reads. "" when the
+ *  event carries no note. */
+export function toolEventNotice(ev) {
+  if (ev.tool === "note") {
+    return t(TOOL_NOTE_NOTICE_KEYS[ev.reason] || "chat.tool.notice.note");
+  }
+  if (ev.status === "duplicate") return t("chat.tool.notice.duplicate");
+  if (ev.status === "denied") return t("chat.tool.notice.denied");
+  if (ev.status === "skipped") return t("chat.tool.notice.skipped", { limit: ev.limit ?? "" });
+  return ev.note ? t("chat.tool.notice.ignored") : "";
+}
+
+/** Render a tool event: a control note as a one-line notice, anything else as
+ *  a collapsed activity-and-sources card whose summary line (tool, query or
+ *  URL, status, grounding, source count, elapsed time) expands to the source
+ *  list and the evidence, page text, error or notice it carries. The text the
+ *  model reads for a note is never shown. Every remote string is set as text,
+ *  never as markup. */
 export function addToolEventRow(container, ev, opts = {}) {
   const row = el("div", "msg-row tool-event");
   row.appendChild(el("div", "msg-role", noteLabel(ev)));
+  if (ev.tool === "note") {
+    row.classList.add("tool-notice-row");
+    row.appendChild(el("div", "tool-notice", toolEventNotice(ev)));
+    appendToolEventMeta(row, ev, opts);
+    container.appendChild(row);
+    return { row, card: null, body: null };
+  }
   const card = el("details", "tool-card");
   card.dataset.status = ev.status || "done";
   const summary = el("summary", "tool-summary");
@@ -1625,10 +1657,18 @@ export function addToolEventRow(container, ev, opts = {}) {
   }
   if (ev.error && typeof ev.text !== "string") toolTextSection(body, t("chat.tool.error"), ev.error);
   if (typeof ev.text === "string") toolTextSection(body, "", ev.text);
-  if (ev.note) toolTextSection(body, t("chat.tool.instruction"), ev.note);
+  const notice = toolEventNotice(ev);
+  if (notice) body.appendChild(el("div", "tool-notice", notice));
   card.appendChild(body);
   row.appendChild(card);
+  appendToolEventMeta(row, ev, opts);
+  container.appendChild(row);
+  return { row, card, body };
+}
 
+/** Append a tool event row's meta line: the copy button and, when
+ *  *opts.variant* is set, the branch navigation. */
+function appendToolEventMeta(row, ev, opts) {
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", t("chat.copy"));
   copy.onclick = async () => {
@@ -1655,8 +1695,6 @@ export function addToolEventRow(container, ev, opts = {}) {
     meta.appendChild(nav);
   }
   row.appendChild(meta);
-  container.appendChild(row);
-  return { row, card, body };
 }
 
 export function buildEmptyHint() {
@@ -1770,6 +1808,8 @@ export function renderChat() {
       ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”]*"
       : m.stopped
       ? "\n\n*[stopped]*"
+      : m.webUnfinished
+      ? "\n\n*[" + t("chat.web.unfinished") + "]*"
       : "";
     addMessageRow(box, m.role, msgText(m) + noteSuffix, {
       images: msgImages(m),

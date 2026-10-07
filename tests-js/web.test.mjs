@@ -22,7 +22,7 @@ function recordingFetch(webResults) {
   const impl = async (url, opts = {}) => {
     let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
-    calls.push({ url: String(url), body });
+    calls.push({ url: String(url), body, signal: opts.signal });
     if (String(url) === "/api/web/retrieve") {
       const q = (body && body.query) || "q";
       return jsonResp(typeof webResults === "function" ? webResults(q) : bundleOf(q, webResults));
@@ -42,8 +42,10 @@ const content = (s) => [
 
 /** Drive runCompletion with a queue of streamed rounds (one per recursion). */
 async function runChat({ web, rounds, webResults = [{ title: "T", url: "https://example.com/", snippet: "S" }],
-                          grammar = "" }) {
-  const { impl, calls } = recordingFetch(webResults);
+                          grammar = "", setup = null, history = null, fetchImpl = null }) {
+  const rec = recordingFetch(webResults);
+  const calls = rec.calls;
+  const impl = fetchImpl ? fetchImpl(rec) : rec.impl;
   const { window } = loadApp({ fetchImpl: impl });
   window.maybeCompactConversation = async () => {};
   const queue = rounds.slice();
@@ -56,7 +58,11 @@ async function runChat({ web, rounds, webResults = [{ title: "T", url: "https://
   doc.getElementById("p-memory").checked = false;       // isolate the system prompt to the floor
   doc.getElementById("p-web").checked = !!web;
   doc.getElementById("p-grammar").value = grammar;
-  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  const conv = { id: "c1", title: "t",
+                 messages: history ? history.slice() : [{ role: "user", content: "hi" }] };
+  window.__testConv = conv;
+  runScript(window, "chat.conversations = [window.__testConv]; chat.activeId = window.__testConv.id;");
+  if (setup) await setup(window);
   await window.runCompletion(conv);
   const completions = calls.filter((c) => c.url === "/v1/chat/completions");
   return { window, conv, calls, completions };
@@ -406,17 +412,19 @@ test("web ON: the model is taught the tools and the honesty rule", async () => {
 
 test("web ON: the request is grammar-constrained for tool calls", async () => {
   const { completions, window } = await runChat({ web: true, rounds: [content("hello")] });
-  // TOOL_CALLS_ONLY/TOOL_CALL_TRIGGER are top-level const in the injected
+  // TOOL_CALL_SINGLE/TOOL_CALL_TRIGGER are top-level const in the injected
   // settings-perf.js classic script - part of the jsdom realm's shared global
   // lexical environment, not a window property and not reachable from this
   // Node module scope directly. Bridge them out the same way the harness's
   // own runScript doc prescribes for reading realm-local state.
-  runScript(window, "window.__gbnf = { TOOL_CALLS_ONLY, TOOL_CALL_TRIGGER };");
-  const { TOOL_CALLS_ONLY, TOOL_CALL_TRIGGER } = window.__gbnf;
+  runScript(window, "window.__gbnf = { TOOL_CALL_SINGLE, TOOL_CALL_TRIGGER };");
+  const { TOOL_CALL_SINGLE, TOOL_CALL_TRIGGER } = window.__gbnf;
   assert.ok(completions[0].body.grammar, "no grammar was sent");
   assert.equal(completions[0].body.grammar_lazy, true);
   assert.deepEqual(completions[0].body.grammar_triggers, [TOOL_CALL_TRIGGER]);
-  assert.equal(completions[0].body.grammar, TOOL_CALLS_ONLY);
+  assert.equal(completions[0].body.grammar, TOOL_CALL_SINGLE);
+  assert.match(TOOL_CALL_SINGLE, /^root\s+::= opt-ws tool-block opt-ws$/m,
+    "one tool-call block per reply, never tool-block+");
 });
 
 test("web OFF: no grammar is sent (nothing taught, nothing to enforce)", async () => {
@@ -630,7 +638,10 @@ test("/web: a provider failure is reported as a failed search, not as results", 
   }));
   assert.equal(webMsg.status, "failed");
   assert.equal(webMsg.error, "Search failed: RuntimeError: backend rate-limited");
-  assert.match(webText, /^\[Web request failed: Search failed: RuntimeError: backend rate-limited\] Answer without the web/);
+  assert.match(webText, /^\[Web request failed: Search failed: RuntimeError: backend rate-limited\] This lookup returned no information\./);
+  assert.doesNotMatch(webText, /Answer without the web/,
+    "a failed lookup must not invite an answer from the model's own knowledge");
+  assert.match(webText, /Do not describe, simulate or guess what it would have found/);
   assert.doesNotMatch(webText, /Results of web_search/);
   assert.match(window.document.getElementById("toast").textContent, /Web search failed/);
   // No results were injected, so the model gets the offline floor, not the grounded one.
@@ -638,47 +649,325 @@ test("/web: a provider failure is reported as a failed search, not as results", 
 });
 
 // ---------------------------------------------------------------------------
-//  R36: the web loop must not spin - dedupe repeats, force a final answer
+//  The web loop stops on a repeated call, on lookups that add nothing new and
+//  at the Settings ceiling; the completion after that is tool-free, and the
+//  turn ends on an answer, never on a bare tool-call marker.
 // ---------------------------------------------------------------------------
 
 const searchCall = (q) =>
   content(`<tool_call>{"name": "web_search", "args": {"query": "${q}"}}</tool_call>`);
+const fetchCall = (u) =>
+  content(`<tool_call>{"name": "fetch_url", "args": {"url": "${u}"}}</tool_call>`);
+// A retrieval double whose every query returns its own, never-seen source.
+const freshResults = (q) => bundleOf(q, [
+  { title: q, url: "https://example.com/" + encodeURIComponent(q), snippet: "about " + q }]);
+const retrieves = (calls) => calls.filter((c) => c.url === "/api/web/retrieve").length;
+const isFinalRequest = (completion) => {
+  const sys = systemOf(completion);
+  return /Web lookups for this message are finished/.test(sys) &&
+    !/access the internet through tools/.test(sys) && !("grammar" in completion.body);
+};
 
-test("R36: a repeated identical search is not re-run; the model is told to answer", async () => {
-  const { conv, calls } = await runChat({
+test("R36: a repeated search is not re-run and the next completion is the tool-free last one", async () => {
+  const { conv, calls, completions } = await runChat({
     web: true,
     rounds: [
       searchCall("weather today"),
-      searchCall("weather today"),   // the loop: same query again
+      searchCall("Weather  Today"),   // the same search again, other case and spacing
       content("It is sunny. Source: https://example.com/"),
     ],
   });
-  assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 1,
-    "the duplicate search was NOT re-issued");
+  assert.equal(retrieves(calls), 1, "the duplicate search was NOT re-issued");
   assert.ok(conv.messages.some((m) => m.kind === "tool" && m.status === "duplicate" &&
-    m.query === "weather today" && /\[duplicate web request\]/.test(m.note)),
-    "the model was told it already searched and to answer from the results");
-  assert.ok(conv.messages.some((m) => m.role === "assistant" && /sunny/i.test(String(m.content))),
-    "the model produced a final answer");
+    /\[duplicate web request\]/.test(m.note)),
+    "the repeated call got a factual 'not run again' result");
+  assert.equal(completions.length, 3);
+  assert.ok(!isFinalRequest(completions[1]));
+  assert.ok(isFinalRequest(completions[2]), "after the repeat the model gets no tools");
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.role, "assistant");
+  assert.match(last.content, /sunny/);
 });
 
-test("R36: when web rounds run out the model is forced to answer, not left mid-search", async () => {
-  const { conv, calls } = await runChat({
-    web: true,
+test("a model that keeps searching stops at the Settings ceiling and the turn still ends on an answer", async () => {
+  const { window, conv, calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    setup: (w) => runScript(w, "chat.webMaxLookups = 3;"),
     rounds: [
       searchCall("q1"), searchCall("q2"), searchCall("q3"),
-      searchCall("q4"),                       // a 4th attempt past the cap
-      content("Final synthesized answer. Source: https://example.com/"),
+      searchCall("q4"),                       // one past the ceiling
+      content("Final synthesized answer from S1."),
     ],
   });
-  assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 3,
-    "exactly WEB_MAX_ROUNDS searches ran, no more");
-  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.reason === "limit" &&
-    /\[web search limit reached\]/.test(m.note)),
-    "the model was told to stop searching and answer");
-  assert.ok(conv.messages.some((m) => m.role === "assistant" &&
-    /Final synthesized answer/.test(String(m.content))),
-    "the conversation ends on a synthesized answer, not a tool call");
+  assert.equal(retrieves(calls), 3, "exactly the configured ceiling of lookups ran");
+  const skipped = conv.messages.find((m) => m.kind === "tool" && m.status === "skipped");
+  assert.ok(skipped, "the call past the ceiling is recorded as not run");
+  assert.equal(skipped.query, "q4");
+  assert.equal(skipped.limit, 3);
+  for (const c of completions.slice(0, 4)) assert.ok(!isFinalRequest(c));
+  assert.ok(isFinalRequest(completions[4]), "the completion after the ceiling is tool-free");
+  assert.equal(completions.length, 5);
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.role, "assistant");
+  assert.equal(last.content, "Final synthesized answer from S1.");
+  assert.ok(!last.webUnfinished);
+  const sent = JSON.stringify(completions.map((c) => c.body.messages));
+  assert.doesNotMatch(sent, /web search limit reached|Stop searching/i,
+    "no fixed-cap order is sent to the model");
+  assert.doesNotMatch(JSON.stringify(conv.messages), /web search limit reached|Stop searching/i);
+  const dom = window.document.getElementById("chat-messages").textContent;
+  assert.doesNotMatch(dom, /Instruction to the model/);
+  assert.match(dom, /limit of 3 web lookups/, "the user is told why the fourth lookup did not run");
+});
+
+test("the tool-free last completion that still writes a call ends on text, never on a bare marker", async () => {
+  const { window, conv, calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    setup: (w) => runScript(w, "chat.webMaxLookups = 1;"),
+    rounds: [
+      searchCall("q1"),
+      searchCall("q2"),                       // past the ceiling of 1
+      content("I will attempt to read your repository structure.\n" +
+              '<tool_call>{"name": "fetch_url", "args": {"url": "https://github.com/x/y"}}</tool_call>'),
+      content("must never be requested"),
+    ],
+  });
+  assert.equal(retrieves(calls), 1);
+  assert.equal(calls.filter((c) => c.url === "/api/web/fetch").length, 0,
+    "a call written on the last completion does not run");
+  assert.equal(completions.length, 3, "nothing is requested after the last completion");
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.role, "assistant");
+  assert.equal(last.content, "I will attempt to read your repository structure.");
+  assert.equal(last.webUnfinished, true);
+  const rows = window.document.querySelectorAll("#chat-messages .msg-row");
+  const lastRow = rows[rows.length - 1].textContent;
+  assert.doesNotMatch(lastRow, /read page|web search|\u{1F310}/u,
+    "the last item is never a bare tool-call marker");
+  assert.match(lastRow, /no further lookups ran/, "the user is told the lookups ended");
+});
+
+test("with the default setting, more than three searches run before the answer", async () => {
+  const qs = ["a", "b", "c", "d", "e"];
+  const { conv, calls } = await runChat({
+    web: true, webResults: freshResults,
+    rounds: [...qs.map(searchCall), content("Answer.")],
+  });
+  assert.equal(retrieves(calls), 5);
+  assert.ok(!conv.messages.some((m) => m.kind === "tool" &&
+    (m.status === "skipped" || m.reason === "limit")));
+  assert.equal(conv.messages[conv.messages.length - 1].content, "Answer.");
+});
+
+test("the default ceiling is generous, and a ceiling of 0 means none", async () => {
+  const qs = Array.from({ length: 22 }, (_, i) => "q" + i);
+  const rounds = () => [...qs.map(searchCall), content("Answer.")];
+  const byDefault = await runChat({ web: true, webResults: freshResults, rounds: rounds() });
+  assert.equal(retrieves(byDefault.calls), 20, "the default stops at 20 lookups");
+  const unlimited = await runChat({
+    web: true, webResults: freshResults, rounds: rounds(),
+    setup: (w) => runScript(w, "chat.webMaxLookups = 0;"),
+  });
+  assert.equal(retrieves(unlimited.calls), 22, "0 lets every distinct lookup run");
+  assert.ok(!unlimited.conv.messages.some((m) => m.kind === "tool" && m.status === "skipped"));
+});
+
+test("two lookups in a row that add nothing new end the lookups", async () => {
+  // Every query returns the same single source (the default retrieval double).
+  const { calls, completions } = await runChat({
+    web: true,
+    rounds: [searchCall("a"), searchCall("b"), searchCall("c"), content("Answer from S1.")],
+  });
+  assert.equal(retrieves(calls), 3, "the first lookup found something; the next two found nothing new");
+  assert.ok(!isFinalRequest(completions[2]), "one empty lookup does not end the lookups");
+  assert.ok(isFinalRequest(completions[3]), "the second one in a row does");
+});
+
+test("failed page reads are reported to the model as failures and two in a row end the lookups", async () => {
+  const fetchImpl = (rec) => async (url, opts = {}) => {
+    if (String(url) === "/api/web/fetch") {
+      rec.calls.push({ url: String(url) });
+      return { ok: false, status: 502, statusText: "Bad Gateway",
+               json: async () => ({ detail: "HTTP 403 from example.org" }) };
+    }
+    return rec.impl(url, opts);
+  };
+  const { conv, completions } = await runChat({
+    web: true, fetchImpl,
+    rounds: [fetchCall("https://example.org/a"), fetchCall("https://example.org/b"),
+             content("I could not read either page.")],
+  });
+  assert.equal(conv.messages.filter((m) => m.kind === "tool" && m.status === "failed").length, 2);
+  const sent = completions[2].body.messages.map((m) => m.content).join("\n");
+  assert.match(sent, /\[Web request failed: HTTP 403 from example\.org\] This lookup returned no information\. Tell the user plainly that it failed\./);
+  assert.doesNotMatch(sent, /Answer without the web/);
+  assert.ok(isFinalRequest(completions[2]));
+  assert.match(systemOf(completions[2]),
+    /never describe, simulate or guess what it would have found/);
+});
+
+test("a reply that keeps emitting <tool_call> blocks is cut after the first; that call runs and the request is aborted", async () => {
+  const block = (q) => `<tool_call>{"name": "web_search", "args": {"query": "${q}"}}</tool_call>`;
+  const runaway = [];
+  for (let i = 0; i < 170; i++) {
+    runaway.push({ choices: [{ delta: { content: block("Matlan1 LocalM " + i) + "\n" } }] });
+  }
+  runaway.push({ choices: [{ delta: { content: '<tool_call>{"name": "web_search", "args": {"query": "Ma' } }] });
+  const { conv, calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    rounds: [runaway, content("Here is what I found [S1].")],
+  });
+  const first = conv.messages.find((m) => m.role === "assistant");
+  assert.equal((first.content.match(/<tool_call>/g) || []).length, 1, "only the first block is kept");
+  assert.ok(!first.stopped, "the turn did not need Stop");
+  assert.equal(retrieves(calls), 1);
+  assert.equal(calls.find((c) => c.url === "/api/web/retrieve").body.query, "Matlan1 LocalM 0");
+  assert.equal(completions[0].signal.aborted, true, "the runaway request was aborted at the cut");
+  assert.equal(completions[1].signal.aborted, false);
+  assert.equal(conv.messages[conv.messages.length - 1].content, "Here is what I found [S1].");
+});
+
+// ---------------------------------------------------------------------------
+//  The history sent back to the model never carries the UI's tool markers or
+//  UI-language text: a call that was answered is re-sent in canonical form,
+//  a call nothing answered is dropped.
+// ---------------------------------------------------------------------------
+
+const DE = JSON.parse(await readFile(
+  new URL("../localm/plugins/gui/static/i18n/de.json", import.meta.url), "utf-8"));
+
+const toolHistory = () => [
+  { role: "user", content: "find the repo" },
+  { role: "assistant", content: 'Searching.\n<tool_call>{"name": "web_search", "args": {"query": "Matlan1 LocalM"}}</tool_call>' },
+  { kind: "tool", tool: "search", status: "done", query: "Matlan1 LocalM", sources: [],
+    chunks: [], prompt_text: "evidence", grounding: "snippet-only", grounding_summary: "snippet-only" },
+  { role: "assistant", content: '<|tool_call>call:fetch_url{"url": "https://github.com/Matlan1/localm"}<tool_call|>' },
+  { kind: "tool", tool: "fetch", status: "failed", url: "https://github.com/Matlan1/localm", error: "timeout" },
+  { role: "assistant", content: 'It failed.\n> \u{1F310} *Failed: Web connection is currently unavailable*' },
+  { role: "user", content: "try again" },
+  { role: "assistant", stopped: true,
+    content: Array.from({ length: 172 }, (_, i) => searchCall("q" + i)[0].choices[0].delta.content).join("\n") +
+             '\n<tool_call>{"name": "web_search", "args": {"query": "Ma' },
+  { role: "user", content: "and now?" },
+];
+
+async function historySent(lang) {
+  const fetchImpl = (rec) => async (url, opts = {}) => {
+    if (String(url).includes("/i18n/de.json")) return jsonResp(DE);
+    return rec.impl(url, opts);
+  };
+  const { window, completions } = await runChat({
+    web: true, history: toolHistory(), fetchImpl, rounds: [content("ok")],
+    setup: async (w) => {
+      if (lang === "de") {
+        runScript(w, 'window.__p = applyLanguage("de");');
+        await w.__p;
+      }
+    },
+  });
+  return { window, messages: completions[0].body.messages };
+}
+
+for (const lang of ["en", "de"]) {
+  test(`history sent to the model holds no UI tool markers or UI-language text (${lang})`, async () => {
+    const { window, messages } = await historySent(lang);
+    const display = window.formatToolCalls('<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>');
+    assert.match(display, lang === "de" ? /Web-Suche/ : /web search/,
+      "control: the DISPLAY transform is localized in this locale");
+    const sent = JSON.stringify(messages.filter((m) => m.role !== "system"));
+    assert.doesNotMatch(sent, /\u{1F310}/u, "no globe marker");
+    assert.doesNotMatch(sent, /web search:|read page:|web request:|Web-Suche:|Seite lesen:|Web-Anfrage:/i,
+      "no UI-language tool text");
+    const asst = messages.filter((m) => m.role === "assistant").map((m) => m.content);
+    assert.deepEqual(asst, [
+      'Searching.\n<tool_call>{"name":"web_search","args":{"query":"Matlan1 LocalM"}}</tool_call>',
+      '<tool_call>{"name":"fetch_url","args":{"url":"https://github.com/Matlan1/localm"}}</tool_call>',
+      "It failed.",
+    ], "answered calls are canonical; the stopped partial nothing answered is not sent");
+    assert.equal((sent.match(/<tool_call>/g) || []).length, 2);
+  });
+}
+
+test("history is identical whatever the UI language", async () => {
+  const en = await historySent("en");
+  const de = await historySent("de");
+  assert.equal(JSON.stringify(de.messages), JSON.stringify(en.messages));
+});
+
+test("a copied display marker is treated as a botched call (re-prompt), not accepted as an answer", async () => {
+  const { conv, calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    rounds: [
+      content('> \u{1F310} *web search: ""*\nThe search query was empty, so the web request failed.'),
+      searchCall("Matlan1 LocalM"),
+      content("Found it [S1]."),
+    ],
+  });
+  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.reason === "format"),
+    "the model was asked to re-emit the call");
+  assert.equal(retrieves(calls), 1, "the re-emitted call ran");
+  assert.doesNotMatch(JSON.stringify(completions[1].body.messages), /\u{1F310}/u,
+    "the copied marker is not re-sent to the model");
+  assert.equal(conv.messages[conv.messages.length - 1].content, "Found it [S1].");
+});
+
+test("a second botched call in a row ends the lookups instead of re-prompting again", async () => {
+  const marker = content('> \u{1F310} *web search: "x"*');
+  const { conv, completions } = await runChat({
+    web: true, rounds: [marker, marker, content("I could not look that up.")],
+  });
+  assert.equal(conv.messages.filter((m) => m.kind === "tool" && m.reason === "format").length, 1);
+  assert.ok(conv.messages.some((m) => m.kind === "tool" && m.reason === "unparsed"));
+  assert.ok(isFinalRequest(completions[2]));
+  assert.equal(completions.length, 3);
+});
+
+test("looksLikeWebToolAttempt and stripWebCallText cover the copied marker and every call dialect", () => {
+  const { window: w } = loadApp();
+  assert.equal(w.looksLikeWebToolAttempt('> \u{1F310} *read page: https://x*'), true);
+  assert.equal(w.looksLikeWebToolAttempt("\u{1F310} *web search: \"q\"*"), true);
+  assert.equal(w.looksLikeWebToolAttempt("I like the globe emoji \u{1F310} a lot."), false);
+  const text = [
+    "Intro.",
+    '<tool_call>{"name": "web_search", "args": {"query": "a"}}</tool_call>',
+    '<|tool_call>call:web_search{"query": "b"}<tool_call|>',
+    '<fetch_url url="https://x"></fetch_url>',
+    '```json\n{"name": "web_search", "args": {"query": "c"}}\n```',
+    '{"name": "fetch_url", "args": {"url": "https://y"}}',
+    '> \u{1F310} *web search: "d"*',
+    "```js\nconst keep = 1;\n```",
+    "Outro.",
+    '<tool_call>{"name": "web_search", "args": {"query": "unclos',
+  ].join("\n");
+  assert.equal(w.stripWebCallText(text), "Intro.\n\n```js\nconst keep = 1;\n```\nOutro.");
+});
+
+test("control notes render as a one-line notice, never as an 'Instruction to the model' card", () => {
+  const { window: w } = loadApp();
+  const box = w.document.createElement("div");
+  w.addToolEventRow(box, w.webNoteEvent("format", "[tool-call format] SECRET model-facing text"));
+  w.addToolEventRow(box, w.legacyWebNoteToToolEvent({
+    role: "user", web: true,
+    content: "[web search limit reached] You have used the maximum web lookups for this " +
+             "turn. Stop searching and answer the question now" }));
+  w.addToolEventRow(box, w.webCallOutcomeEvent({ name: "web_search", args: { query: "q" } },
+    "skipped", "[web request not run] model-facing", { limit: 4 }));
+  w.addToolEventRow(box, w.webCallOutcomeEvent({ name: "web_search", args: { query: "q" } },
+    "duplicate", "[duplicate web request] model-facing"));
+  const text = box.textContent;
+  assert.doesNotMatch(text, /Instruction to the model/);
+  assert.doesNotMatch(text, /SECRET|Stop searching|model-facing/, "the text the model reads is not shown");
+  assert.match(text, /could not be read; the model was asked to send it again/);
+  assert.match(text, /Web lookups for this message were stopped/);
+  assert.match(text, /limit of 4 web lookups/);
+  assert.match(text, /not run again/);
+  assert.equal(box.querySelectorAll(".tool-card").length, 2, "only the two calls are cards");
+  assert.equal(box.querySelectorAll(".tool-notice-row").length, 2);
+});
+
+test("the webUnfinished flag survives the compaction archive copy", () => {
+  const { window: w } = loadApp();
+  assert.equal(w.archiveCopy({ role: "assistant", content: "x", webUnfinished: true }).webUnfinished, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -745,10 +1034,27 @@ test("parseWebCalls: two calls are both reported, and parseWebCall still returns
   assert.equal(w.parseWebCalls(text, 1).length, 1);
 });
 
+test("web ON: a reply is cut at its first <tool_call> block, so only that call is stored and run", async () => {
+  const { conv, calls } = await runChat({
+    web: true,
+    rounds: [twoCalls, content("It is sunny. Source: https://example.com/")],
+  });
+  assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 1, "the first call ran");
+  assert.equal(calls.filter((c) => c.url === "/api/web/fetch").length, 0, "the second never ran");
+  const first = conv.messages.find((m) => m.role === "assistant");
+  assert.equal((first.content.match(/<tool_call>/g) || []).length, 1,
+    "the stored reply holds only the call that ran, so the user sees one lookup");
+  assert.doesNotMatch(first.content, /fetch_url/);
+});
+
+const twoFencedCalls = content(
+  '```json\n{"name": "web_search", "args": {"query": "weather"}}\n```\n' +
+  '```json\n{"name": "fetch_url", "args": {"url": "https://example.com/b"}}\n```');
+
 test("web ON: a second tool call in one reply is reported as ignored, not silently dropped", async () => {
   const { window, conv, calls } = await runChat({
     web: true,
-    rounds: [twoCalls, content("It is sunny. Source: https://example.com/")],
+    rounds: [twoFencedCalls, content("It is sunny. Source: https://example.com/")],
   });
   assert.equal(calls.filter((c) => c.url === "/api/web/retrieve").length, 1,
     "the first call ran");
@@ -1048,10 +1354,12 @@ test("CHAT-TOOL-1: the re-sent context defangs the assistant tool-call turn (no 
   const answerMsgs = completions[completions.length - 1].body.messages;
   const asst = answerMsgs.find((m) => m.role === "assistant");
   assert.ok(asst, "the assistant tool-call turn is present in the re-sent context");
-  assert.ok(!/tool_call/.test(String(asst.content)),
-    "raw <|tool_call> markers are NOT re-fed to the model");
-  assert.match(String(asst.content), /web search/,
-    "the tool call is represented as a readable note instead");
+  assert.ok(!/<\|tool_call|tool_call\|>|call:/.test(String(asst.content)),
+    "the model's raw dialect tokens are NOT re-fed to the model");
+  assert.equal(String(asst.content),
+    '<tool_call>{"name":"web_search","args":{"query":"privacy"}}</tool_call>',
+    "the call that ran is re-sent in the canonical form the tool prompt teaches");
+  assert.doesNotMatch(String(asst.content), /\u{1F310}|web search:/u, "no display marker");
 });
 
 // ---------------------------------------------------------------------------

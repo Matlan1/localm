@@ -251,9 +251,11 @@ def test_check_grammar_structure_accepts_realistic_deeply_nested_grammar():
     grammars. TOOL_CALLS_ONLY (localm's own production tool-call grammar) and a
     moderately nested JSON-schema-derived grammar (nesting comparable to a
     real multi-level object schema) must both pass."""
-    from localm.inference.gbnf import TOOL_CALLS_ONLY, check_grammar_structure
+    from localm.inference.gbnf import (
+        TOOL_CALL_SINGLE, TOOL_CALLS_ONLY, check_grammar_structure)
 
     check_grammar_structure(TOOL_CALLS_ONLY)  # must not raise
+    check_grammar_structure(TOOL_CALL_SINGLE)  # must not raise
 
     moderately_nested = "root ::= " + "(" * 20 + '"leaf"' + ")" * 20
     check_grammar_structure(moderately_nested)  # must not raise

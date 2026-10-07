@@ -403,6 +403,14 @@ CORE_FIELDS: list = [
                  "grammar-capable backends only). Free text and thinking are "
                  "unaffected.",
                  group="Chat", owner="chat", applies=Applies.LIVE),
+    SettingField("chat_web_max_lookups", Widget.NUMBER,
+                 "Web lookups per message",
+                 "With web access on, the most searches and page reads the model "
+                 "may run for one message before it answers from what it found. "
+                 "The lookups also stop when the model repeats a search or page, "
+                 "or when two lookups in a row find nothing new. 0 = no limit.",
+                 group="Chat", owner="chat", min=0, max=100, step=1,
+                 applies=Applies.LIVE),
     # HIDDEN: the Settings > Chat "Avatars" panel renders these with its own
     # upload/emoji picker, not a generic text box - see settings.js.
     SettingField("user_avatar", Widget.HIDDEN, "Your icon",

@@ -81,6 +81,24 @@ ws         ::= ([ \t\n\r])*
 opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 """.strip()
 
+# TOOL_CALLS_ONLY limited to exactly one <tool_call> block: once that block
+# closes, only trailing whitespace and end of generation are legal. For callers
+# that run one call per reply (the chat web loop), used lazily with
+# TOOL_CALL_TRIGGER.
+TOOL_CALL_SINGLE = r"""
+root       ::= opt-ws tool-block opt-ws
+tool-block ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>"
+json-obj   ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws object ws "}"
+object     ::= "{" ws (member ws ("," ws member ws)*)? "}"
+member     ::= string ws ":" ws value
+value      ::= object | array | string | number | "true" | "false" | "null"
+array      ::= "[" ws (value ws ("," ws value ws)*)? "]"
+string     ::= "\"" ([^\"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+number     ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
+ws         ::= ([ \t\n\r])*
+opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
+""".strip()
+
 # Used alone (no trigger, grammar_lazy off). Requires at least one structurally
 # valid tool call, with a bounded reasoning prelude allowed in front of it. The
 # opening "<think>" is required when that prelude is used; a model that does not
