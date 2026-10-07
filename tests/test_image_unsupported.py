@@ -182,6 +182,74 @@ class TestHFCapabilitySplit:
 
 
 # --------------------------------------------------------------------------- #
+#  A processor that failed to load is named in the refusal                     #
+# --------------------------------------------------------------------------- #
+
+_PROCESSOR_ERROR = "ImportError: Package `num2words` is required to run SmolVLM processor."
+
+
+class TestProcessorLoadFailureIsNamed:
+    def test_worker_refusal_names_the_processor_failure(self, tmp_path, monkeypatch):
+        pytest.importorskip("torch")
+        from localm.inference.backends import _hf_worker
+
+        class _BrokenAutoProcessor:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                raise ImportError("Package `num2words` is required to run SmolVLM processor.")
+
+        class _FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return object()
+
+        class _Namespace:
+            AutoProcessor = _BrokenAutoProcessor
+            AutoTokenizer = _FakeAutoTokenizer
+            AutoModelForImageTextToText = _FakeAutoModel
+
+        monkeypatch.setattr(_hf_worker, "_require_transformers", lambda: _Namespace)
+        worker = _hf_worker.HFWorker(str(tmp_path), device="cpu")
+        worker.load()
+
+        assert worker.processor_error == _PROCESSOR_ERROR
+        with pytest.raises(UnsupportedInputError) as excinfo:
+            next(worker.chat_stream(_IMAGE_MSG))
+        assert "num2words" in str(excinfo.value)
+        assert "image processor failed to load" in str(excinfo.value)
+
+    def test_worker_without_a_failure_keeps_the_generic_message(self, tmp_path, monkeypatch):
+        pytest.importorskip("torch")
+        from localm.inference.backends import _hf_worker
+
+        monkeypatch.setattr(
+            _hf_worker, "_require_transformers",
+            lambda: _fake_transformers_namespace(_AudioOnlyFakeProcessor))
+        worker = _hf_worker.HFWorker(str(tmp_path), device="cpu")
+        worker.load()
+
+        assert worker.processor_error is None
+        with pytest.raises(UnsupportedInputError) as excinfo:
+            next(worker.chat_stream(_IMAGE_MSG))
+        assert str(excinfo.value) == IMAGE_UNSUPPORTED_MESSAGE
+
+    def test_backend_refusal_names_the_cached_processor_failure(self):
+        from localm.inference.backends.hf import HFBackend
+        backend = HFBackend("does-not-need-to-exist")
+        backend._processor_error = _PROCESSOR_ERROR
+        with pytest.raises(UnsupportedInputError) as excinfo:
+            next(backend.chat_stream(_IMAGE_MSG))
+        assert "num2words" in str(excinfo.value)
+
+    def test_backend_without_a_failure_keeps_the_generic_message(self):
+        from localm.inference.backends.hf import HFBackend
+        backend = HFBackend("does-not-need-to-exist")
+        with pytest.raises(UnsupportedInputError) as excinfo:
+            next(backend.chat_stream(_IMAGE_MSG))
+        assert str(excinfo.value) == IMAGE_UNSUPPORTED_MESSAGE
+
+
+# --------------------------------------------------------------------------- #
 #  HTTP route returns a clean 400                                              #
 # --------------------------------------------------------------------------- #
 

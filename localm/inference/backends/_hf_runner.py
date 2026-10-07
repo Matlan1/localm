@@ -373,6 +373,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # caching.
                 resp_q.put(("ok", {
                     "supports_images": worker.supports_images,
+                    "processor_error": worker.processor_error,
                     "can_embed": worker.can_embed,
                     "device": worker.resolved_device,
                     "context_capacity": getattr(worker, "context_capacity", None),
