@@ -131,16 +131,19 @@ key, nothing to configure: DuckDuckGo's HTML page, then DuckDuckGo's lite page,
 then Brave Search. A search whose connection is reset or cut is sent again (up
 to three tries); when a service still fails, answers with a bot check or
 returns a page without results it can read, localm moves on to the next one. A
-page counts as "no results" only when it says so itself; any other page
-without readable results is reported as a failure. A service that
+page counts as "no results" only when it says so itself, and that answer ends
+the search; any other page without readable results is reported as a failure.
+A service that
 answered with a bot check is asked once more after a short pause. Only when
 every service failed does the search report it, naming each one's cause. A
 query can therefore reach Brave Search when DuckDuckGo does not answer.
 
 A configured SearXNG instance is the only service a search asks: localm
 removes a stray `/search` path or query from the configured URL and reads the
-instance's HTML results page when its JSON format is turned off. For a
-self-hosted search backend, point localm at a SearXNG instance:
+instance's HTML results page when its JSON format is turned off. When the
+instance returns no results while some of its own search engines failed, the
+search is reported as failed instead of empty. For a self-hosted search
+backend, point localm at a SearXNG instance:
 
 ```bash
 localm config net_search_url http://192.168.1.10:8080

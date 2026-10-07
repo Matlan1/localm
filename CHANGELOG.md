@@ -236,9 +236,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tries DuckDuckGo's lite page and then Brave Search by itself, asks a
   bot-checked service once more after a short pause, and reports a failure only
   when every service failed, naming each cause. A results page localm cannot
-  read is reported as such instead of as "no results". A configured SearXNG instance is
-  repaired instead (a stray `/search` in its URL is removed, and its HTML
-  results are read when its JSON format is off). A failed search or page read
+  read is reported as such instead of as "no results". A configured SearXNG
+  instance is the only service asked, and localm repairs it rather than
+  replacing it: a stray `/search` in its URL is removed, its HTML results are
+  read when its JSON format is off, and "no results" while its own search
+  engines failed is reported as a failure. A failed search or page read
   now says what happened, for example
   "html.duckduckgo.com closed the connection before answering" or
   "stackoverflow.com refused access, HTTP 403", instead of a Python error.

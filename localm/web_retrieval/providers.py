@@ -11,18 +11,22 @@ connection, at most ``_SEARCH_ATTEMPTS`` times in all and at most twice when
 the failure is a timeout, with ``_RETRY_BACKOFF`` seconds between attempts.
 A policy refusal, an HTTP status and a TLS verification failure are never
 retried. Requests to one search service from this process are spaced at
-least ``_MIN_INTERVAL`` seconds apart.
+least ``_MIN_INTERVAL`` seconds apart; requests to other services are not
+held up by that spacing. A redirect is refused (``RedirectRefusedError``,
+a ``NetworkPolicyError``), never followed.
 
 ``DefaultSearchProvider`` (no ``net_search_url`` configured) tries, in order,
 DuckDuckGo's HTML page, DuckDuckGo's lite page and Brave Search, moving on
 when one fails, answers with a bot check (``BotCheckError``) or returns a
 page with no results it can read (``UnreadableResultsError``), and returns
-the first non-empty result list. A page with no results counts as an empty
-answer only when it carries the service's own no-results message; after one,
-the same service's other page is skipped. When no service returned results or
-a no-results message, a service that answered with a bot check is asked once
-more after ``_BOT_CHECK_WAIT`` seconds. The whole chain stops starting new requests after
-``_SEARCH_BUDGET`` seconds. When every service failed, ``SearchProviderError``
+the first service's answer. A page with no results counts as an answer only
+when it carries the service's own no-results message; that answer (an empty
+list) ends the search. When every service failed, a service that answered
+with a bot check is asked once more after ``_BOT_CHECK_WAIT`` seconds. No
+service, retry or second try starts with less than ``_MIN_TIME_FOR_ROUTE`` of
+the ``_SEARCH_BUDGET`` seconds left, and every request's timeout is capped at
+the time left. Each failed service is logged at INFO with its
+cause (never the query). When every service failed, ``SearchProviderError``
 names each one's cause; when every service was refused by the network
 policy, the first ``NetworkPolicyError`` is raised.
 
@@ -30,7 +34,10 @@ policy, the first ``NetworkPolicyError`` is raised.
 instance: the configured URL is normalised (query, fragment and a trailing
 ``/search`` removed) and an instance that refuses the JSON format (HTTP 403)
 is read through its HTML results page instead, with the same no-results
-rule. It never falls back to another search service.
+rule. No results while the instance reports search engines that failed
+(``unresponsive_engines`` in its JSON, ``response-error`` rows on its HTML
+page) is a failure, not an empty answer. The same ``_SEARCH_BUDGET`` applies.
+It never falls back to another search service.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import html.parser
+import logging
 import re
 import threading
 import time
@@ -48,6 +56,8 @@ from localm import netpolicy
 
 from .contracts import SearchProvider, SearchProviderError, SearchResult
 from .errors import describe_failure, failure_kind, is_transient
+
+logger = logging.getLogger(__name__)
 
 _MAX_RESULTS = 10
 _TITLE_CAP = 300
@@ -68,6 +78,9 @@ _DDG_NO_RESULTS_RE = re.compile(r"""class\s*=\s*["'][^"']*\bno-results\b""",
                                 re.IGNORECASE)
 _SEARXNG_NO_RESULTS_RE = re.compile(
     r"""class\s*=\s*["'][^"']*\bdialog-error-block\b""", re.IGNORECASE)
+_SEARXNG_ENGINE_ERROR_RE = re.compile(
+    r"""class\s*=\s*["'][^"']*\bresponse-error\b""", re.IGNORECASE)
+_ENGINES_NAMED = 5
 _BROWSER_ACCEPT = ("text/html,application/xhtml+xml,application/xml;q=0.9,"
                    "*/*;q=0.8")
 
@@ -80,6 +93,7 @@ BOT_CHECK_MESSAGE = (
 _pace_lock = threading.Lock()
 _last_request: dict[str, float] = {}
 _sleep = time.sleep
+_clock = time.monotonic
 _observer: contextvars.ContextVar[Optional[Callable[[str], None]]] = \
     contextvars.ContextVar("search_request_observer", default=None)
 
@@ -107,6 +121,10 @@ class BotCheckError(SearchProviderError):
     rate-limit status) instead of results."""
 
 
+class RedirectRefusedError(netpolicy.NetworkPolicyError):
+    """A search service answered with a redirect, which is refused."""
+
+
 class UnreadableResultsError(SearchProviderError):
     """A search service answered with a page that has no results localm can
     read and no no-results message."""
@@ -114,10 +132,11 @@ class UnreadableResultsError(SearchProviderError):
 
 def _checked_results(items: list[dict], text: str, max_results: int,
                      provider: str, label: str,
-                     no_results: Optional[re.Pattern]) -> list[SearchResult]:
-    """The results parsed from *text*; an empty list only when *no_results*
-    matches *text*, otherwise ``UnreadableResultsError``."""
-    out = _results(items, max_results, provider)
+                     no_results: Optional[re.Pattern],
+                     own_hosts: tuple = ()) -> list[SearchResult]:
+    """The results parsed from *text* (see ``_results``); an empty list only
+    when *no_results* matches *text*, otherwise ``UnreadableResultsError``."""
+    out = _results(items, max_results, provider, own_hosts)
     if not out and (no_results is None or not no_results.search(text)):
         raise UnreadableResultsError(
             f"{label} answered with a page localm could not read results "
@@ -127,18 +146,24 @@ def _checked_results(items: list[dict], text: str, max_results: int,
 
 def _pace(service: str) -> None:
     """Sleep until at least ``_MIN_INTERVAL`` seconds have passed since the
-    previous request to *service* from this process, then record now."""
+    previous request to *service* from this process. The lock is not held
+    while sleeping, so a request to another service is not held up."""
     with _pace_lock:
-        wait = _last_request.get(service, 0.0) + _MIN_INTERVAL - time.monotonic()
-        if wait > 0:
-            _sleep(wait)
-        _last_request[service] = time.monotonic()
+        now = _clock()
+        start = max(now, _last_request.get(service, 0.0) + _MIN_INTERVAL)
+        _last_request[service] = start
+    if start > now:
+        _sleep(start - now)
 
 
-def _with_retries(send: Callable[[], object], attempts: int = _SEARCH_ATTEMPTS):
+def _with_retries(send: Callable[[], object], *,
+                  finish_by: Optional[float] = None,
+                  attempts: int = _SEARCH_ATTEMPTS):
     """Call *send* until it returns, retrying a transient failure (see the
-    module docstring) at most *attempts* times in all. The last failure is
-    raised unchanged."""
+    module docstring) at most *attempts* times in all. With *finish_by* (a
+    ``_clock()`` value), no retry starts when less than
+    ``_MIN_TIME_FOR_ROUTE`` seconds would be left after its backoff. The last
+    failure is raised unchanged."""
     attempt = 0
     while True:
         attempt += 1
@@ -150,18 +175,21 @@ def _with_retries(send: Callable[[], object], attempts: int = _SEARCH_ATTEMPTS):
             limit = (min(_TIMEOUT_ATTEMPTS, attempts)
                      if failure_kind(exc) in ("connect-timeout", "read-timeout")
                      else attempts)
-            if not is_transient(exc) or attempt >= limit:
+            backoff = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF)) - 1]
+            if not is_transient(exc) or attempt >= limit or (
+                    finish_by is not None
+                    and finish_by - _clock() - backoff < _MIN_TIME_FOR_ROUTE):
                 raise
-            _sleep(_RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF)) - 1])
+            _sleep(backoff)
 
 
 def _refuse_redirect(resp, backend: str) -> None:
-    """Raise ``NetworkPolicyError`` when *resp* is a 3xx. Search requests are
+    """Raise ``RedirectRefusedError`` when *resp* is a 3xx. Search requests are
     sent with ``allow_redirects=False`` and their redirect target is never
     policy-checked, so a redirect is refused rather than followed."""
     if getattr(resp, "is_redirect", False) or \
             getattr(resp, "is_permanent_redirect", False):
-        raise netpolicy.NetworkPolicyError(
+        raise RedirectRefusedError(
             f"{backend} tried to redirect (to "
             f"{resp.headers.get('Location', '?')!r}); refusing - a search "
             "backend's redirect target is not policy-checked.")
@@ -184,15 +212,15 @@ def _real_url(href: str) -> str:
     return href
 
 
-def _is_result_url(url: str) -> bool:
-    """True for an http(s) URL that does not point back at the search
-    service itself (an ad or internal redirect)."""
+def _is_result_url(url: str, own_hosts: tuple = ()) -> bool:
+    """True for an http(s) URL whose host is not one of *own_hosts* (the
+    search service's own hosts, where its ads and internal links point) or a
+    subdomain of one."""
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in ("http", "https") or not host:
         return False
-    return not any(host == d or host.endswith("." + d)
-                   for d in ("duckduckgo.com", "search.brave.com"))
+    return not any(host == d or host.endswith("." + d) for d in own_hosts)
 
 
 class _DDGParser(html.parser.HTMLParser):
@@ -353,12 +381,14 @@ class _SearXNGHTMLParser(html.parser.HTMLParser):
             self.results[-1]["snippet"] += data
 
 
-def _results(items: list[dict], max_results: int, provider: str
-             ) -> list[SearchResult]:
+def _results(items: list[dict], max_results: int, provider: str,
+             own_hosts: tuple = ()) -> list[SearchResult]:
+    """At most *max_results* ``SearchResult`` from parsed *items*, skipping
+    URLs that ``_is_result_url`` rejects for *own_hosts*."""
     out: list[SearchResult] = []
     for item in items:
         url = _real_url(str(item.get("url") or "").strip())
-        if not _is_result_url(url):
+        if not _is_result_url(url, own_hosts):
             continue
         out.append(SearchResult(
             title=" ".join(str(item.get("title") or "").split())[:_TITLE_CAP],
@@ -383,13 +413,17 @@ def _parse(parser: html.parser.HTMLParser, text: str) -> list[dict]:
 
 def _request(method: str, url: str, *, service: str, label: str,
              timeout: float, headers: dict, data: Optional[dict] = None,
-             bot_statuses: frozenset = frozenset()):
+             bot_statuses: frozenset = frozenset(),
+             finish_by: Optional[float] = None):
     """One policy-checked, pinned, paced request; returns the response after
     the redirect refusal, the bot-check status check (``BotCheckError``) and
-    ``raise_for_status``."""
+    ``raise_for_status``. With *finish_by*, *timeout* is capped at the time
+    left after pacing (at least one second)."""
     netpolicy.check_url(url)
     parsed = urllib.parse.urlparse(url)
     _pace(service)
+    if finish_by is not None:
+        timeout = min(timeout, max(finish_by - _clock(), 1.0))
     _notify(url)
     with netpolicy._session_for(url) as session:
         send = session.post if method == "POST" else session.get
@@ -417,7 +451,8 @@ class DuckDuckGoHTMLProvider:
     endpoint = "https://html.duckduckgo.com/html/"
 
     def search(self, query: str, max_results: int,
-               timeout: float = _SEARCH_TIMEOUT) -> list[SearchResult]:
+               timeout: float = _SEARCH_TIMEOUT,
+               finish_by: Optional[float] = None) -> list[SearchResult]:
         def send() -> str:
             try:
                 resp = _request(
@@ -427,16 +462,17 @@ class DuckDuckGoHTMLProvider:
                     headers={"Accept": _BROWSER_ACCEPT,
                              "Accept-Language": "en-US,en;q=0.9",
                              "Referer": "https://html.duckduckgo.com/"},
-                    bot_statuses=_BOT_CHECK_STATUSES)
+                    bot_statuses=_BOT_CHECK_STATUSES, finish_by=finish_by)
             except BotCheckError:
                 raise BotCheckError(BOT_CHECK_MESSAGE)
             text = resp.text
             if _CHALLENGE_RE.search(text):
                 raise BotCheckError(BOT_CHECK_MESSAGE)
             return text
-        text = _with_retries(send)
+        text = _with_retries(send, finish_by=finish_by)
         return _checked_results(_parse(_DDGParser(), text), text, max_results,
-                                self.name, self.label, _DDG_NO_RESULTS_RE)
+                                self.name, self.label, _DDG_NO_RESULTS_RE,
+                                ("duckduckgo.com",))
 
 
 class DuckDuckGoLiteProvider:
@@ -448,7 +484,8 @@ class DuckDuckGoLiteProvider:
     endpoint = "https://lite.duckduckgo.com/lite/"
 
     def search(self, query: str, max_results: int,
-               timeout: float = _SEARCH_TIMEOUT) -> list[SearchResult]:
+               timeout: float = _SEARCH_TIMEOUT,
+               finish_by: Optional[float] = None) -> list[SearchResult]:
         def send() -> str:
             resp = _request(
                 "POST", self.endpoint, service=self.service, label=self.label,
@@ -456,16 +493,16 @@ class DuckDuckGoLiteProvider:
                 headers={"Accept": _BROWSER_ACCEPT,
                          "Accept-Language": "en-US,en;q=0.9",
                          "Referer": "https://lite.duckduckgo.com/"},
-                bot_statuses=_BOT_CHECK_STATUSES)
+                bot_statuses=_BOT_CHECK_STATUSES, finish_by=finish_by)
             text = resp.text
             if _CHALLENGE_RE.search(text):
                 raise BotCheckError(
                     f"{self.label} answered with a bot check instead of results")
             return text
-        text = _with_retries(send)
+        text = _with_retries(send, finish_by=finish_by)
         return _checked_results(_parse(_DDGLiteParser(), text), text,
                                 max_results, self.name, self.label,
-                                _DDG_NO_RESULTS_RE)
+                                _DDG_NO_RESULTS_RE, ("duckduckgo.com",))
 
 
 class BraveSearchProvider:
@@ -477,7 +514,8 @@ class BraveSearchProvider:
     endpoint = "https://search.brave.com/search"
 
     def search(self, query: str, max_results: int,
-               timeout: float = _SEARCH_TIMEOUT) -> list[SearchResult]:
+               timeout: float = _SEARCH_TIMEOUT,
+               finish_by: Optional[float] = None) -> list[SearchResult]:
         url = (f"{self.endpoint}?"
                f"{urllib.parse.urlencode({'q': query, 'source': 'web'})}")
 
@@ -487,18 +525,21 @@ class BraveSearchProvider:
                 timeout=timeout,
                 headers={"Accept": _BROWSER_ACCEPT,
                          "Accept-Language": "en-US,en;q=0.9"},
-                bot_statuses=frozenset({403, 429}))
+                bot_statuses=frozenset({403, 429}), finish_by=finish_by)
             return resp.text
-        text = _with_retries(send)
+        text = _with_retries(send, finish_by=finish_by)
         items = _parse(_BraveParser(), text)
         if not items and "captcha" in text.lower():
             raise BotCheckError(
                 f"{self.label} answered with a bot check instead of results")
         return _checked_results(items, text, max_results, self.name,
-                                self.label, None)
+                                self.label, None, ("search.brave.com",))
 
 
 def _cause(exc: BaseException, url: str) -> str:
+    """One service's failure as a plain clause, without the query."""
+    if isinstance(exc, RedirectRefusedError):
+        return "it answered with a redirect, which localm does not follow"
     if isinstance(exc, netpolicy.NetworkPolicyError):
         return "blocked by the network policy"
     if isinstance(exc, BotCheckError):
@@ -521,47 +562,39 @@ class DefaultSearchProvider:
             BraveSearchProvider()]
 
     def search(self, query: str, max_results: int) -> list[SearchResult]:
-        finish_by = time.monotonic() + _SEARCH_BUDGET
+        finish_by = _clock() + _SEARCH_BUDGET
         outcomes: dict[int, Optional[BaseException]] = {}
-        empty_services: set[str] = set()
-
-        def service(index: int) -> str:
-            route = self.routes[index]
-            return getattr(route, "service", None) or route.name
 
         def attempt(index: int) -> Optional[list[SearchResult]]:
-            left = finish_by - time.monotonic()
-            if left < _MIN_TIME_FOR_ROUTE:
+            """The route's answer (an empty list for a no-results answer), or
+            None when it failed or less than ``_MIN_TIME_FOR_ROUTE`` was
+            left to start it."""
+            if finish_by - _clock() < _MIN_TIME_FOR_ROUTE:
                 return None
             route = self.routes[index]
             try:
-                found = route.search(query, max_results,
-                                     timeout=min(_SEARCH_TIMEOUT, left))
+                found = route.search(query, max_results, finish_by=finish_by)
             except Exception as exc:
                 outcomes[index] = exc
+                logger.info("web search: %s failed: %s", route.label,
+                            _cause(exc, getattr(route, "endpoint", "")))
                 return None
             outcomes[index] = None
-            if not found:
-                empty_services.add(service(index))
-            return found or None
+            return found
 
         for i in range(len(self.routes)):
-            if service(i) in empty_services:
-                continue
             found = attempt(i)
-            if found:
+            if found is not None:
                 return found
         checked = [i for i, exc in outcomes.items()
                    if isinstance(exc, BotCheckError)]
-        if (checked and not empty_services
-                and finish_by - time.monotonic() > _BOT_CHECK_WAIT):
+        if checked and (finish_by - _clock()
+                        > _BOT_CHECK_WAIT + _MIN_TIME_FOR_ROUTE):
             _sleep(_BOT_CHECK_WAIT)
             for i in checked:
                 found = attempt(i)
-                if found:
+                if found is not None:
                     return found
-        if empty_services:
-            return []
         failures = [(self.routes[i], outcomes.get(i))
                     for i in range(len(self.routes))]
         tried = [(r, e) for r, e in failures if e is not None]
@@ -604,12 +637,13 @@ class SearXNGProvider:
     def __init__(self, base_url: str):
         self.base_url = _searxng_base(base_url)
 
-    def _get(self, url: str, accept: str):
+    def _get(self, url: str, accept: str, finish_by: float):
         netpolicy.check_url(url)
         parsed = urllib.parse.urlparse(url)
         _notify(url)
+        timeout = min(_SEARCH_TIMEOUT, max(finish_by - _clock(), 1.0))
         with netpolicy._session_for(url) as session:
-            resp = session.get(url, timeout=_SEARCH_TIMEOUT,
+            resp = session.get(url, timeout=timeout,
                                allow_redirects=False,
                                headers={"User-Agent": netpolicy._USER_AGENT,
                                         "Accept": accept,
@@ -618,28 +652,27 @@ class SearXNGProvider:
             resp.raise_for_status()
             return resp
 
-    def search(self, query: str, max_results: int) -> list[SearchResult]:
+    def _label(self) -> str:
+        host = urllib.parse.urlparse(self.base_url).hostname or self.base_url
+        return f"The search backend set in Settings > Network ({host})"
+
+    def search(self, query: str, max_results: int,
+               finish_by: Optional[float] = None) -> list[SearchResult]:
+        if finish_by is None:
+            finish_by = _clock() + _SEARCH_BUDGET
         json_url = (f"{self.base_url}/search?"
                     f"{urllib.parse.urlencode({'q': query, 'format': 'json'})}")
         try:
             payload = _with_retries(
-                lambda: self._get(json_url, "application/json").json())
+                lambda: self._get(json_url, "application/json",
+                                  finish_by).json(),
+                finish_by=finish_by)
         except Exception as exc:
             if failure_kind(exc) != "http" or \
                     getattr(getattr(exc, "response", None), "status_code",
                             None) != 403:
                 raise
-            html_url = (f"{self.base_url}/search?"
-                        f"{urllib.parse.urlencode({'q': query})}")
-            text = _with_retries(
-                lambda: self._get(html_url, _BROWSER_ACCEPT).text)
-            return _checked_results(
-                _parse(_SearXNGHTMLParser(), text), text, max_results,
-                self.name,
-                "The search backend set in Settings > Network ("
-                + (urllib.parse.urlparse(self.base_url).hostname
-                   or self.base_url) + ")",
-                _SEARXNG_NO_RESULTS_RE)
+            return self._search_html(query, max_results, finish_by)
         if not isinstance(payload, dict):
             raise SearchProviderError(
                 "The SearXNG search backend returned a non-object JSON body.")
@@ -658,7 +691,38 @@ class SearXNGProvider:
                 rank=rank,
                 provider=self.name,
             ))
+        failed = payload.get("unresponsive_engines")
+        if not out and isinstance(failed, list) and failed:
+            named = []
+            for entry in failed[:_ENGINES_NAMED]:
+                if isinstance(entry, (list, tuple)) and entry:
+                    reason = (f" ({str(entry[1])[:60]})"
+                              if len(entry) > 1 and entry[1] else "")
+                    named.append(f"{str(entry[0])[:60]}{reason}")
+                else:
+                    named.append(str(entry)[:60])
+            more = (f" and {len(failed) - _ENGINES_NAMED} more"
+                    if len(failed) > _ENGINES_NAMED else "")
+            raise SearchProviderError(
+                f"{self._label()} returned no results, and these of its "
+                f"search engines failed: {', '.join(named)}{more}.")
         return out
+
+    def _search_html(self, query: str, max_results: int,
+                     finish_by: float) -> list[SearchResult]:
+        html_url = (f"{self.base_url}/search?"
+                    f"{urllib.parse.urlencode({'q': query})}")
+        text = _with_retries(
+            lambda: self._get(html_url, _BROWSER_ACCEPT, finish_by).text,
+            finish_by=finish_by)
+        items = _parse(_SearXNGHTMLParser(), text)
+        errors = len(_SEARXNG_ENGINE_ERROR_RE.findall(text))
+        if errors and not _results(items, max_results, self.name):
+            raise SearchProviderError(
+                f"{self._label()} returned no results, and {errors} of its "
+                "search engines reported an error.")
+        return _checked_results(items, text, max_results, self.name,
+                                self._label(), _SEARXNG_NO_RESULTS_RE)
 
 
 def provider_from_config(config: Optional[dict] = None) -> SearchProvider:

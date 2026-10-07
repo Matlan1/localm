@@ -73,10 +73,12 @@ class SearchResult:
 @runtime_checkable
 class SearchProvider(Protocol):
     """A search backend. ``search`` returns at most ``max_results`` results in
-    provider order with ranks starting at 1. Raises ``NetworkPolicyError``
-    when the policy refuses the request and ``SearchProviderError`` (or any
-    transport exception) when the backend fails. Never falls back to another
-    provider."""
+    provider order with ranks starting at 1, or an empty list when the
+    backend answered that it has none. Raises ``NetworkPolicyError`` when the
+    policy refuses the request (for a backend that tries several services:
+    when it refuses every one) and ``SearchProviderError`` (or a transport
+    exception) when the backend fails. ``DefaultSearchProvider`` tries several
+    services in turn; ``SearXNGProvider`` only its configured instance."""
 
     name: str
 

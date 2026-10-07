@@ -10,9 +10,13 @@ policy check and the ``_session_for`` transport seam (``Transport``).
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 import urllib.parse
 
 import pytest
+import requests
 
 from localm import netpolicy
 from localm.web_retrieval import (
@@ -22,6 +26,7 @@ from localm.web_retrieval import (
     SearXNGProvider,
     retrieve,
 )
+from localm.web_retrieval import providers
 from localm.web_retrieval.providers import BotCheckError
 from tests._web_retrieval_fixtures import (
     BRAVE_SEARCH,
@@ -42,8 +47,7 @@ def _clean_env(monkeypatch):
 
 
 def lite_html(rows) -> str:
-    """lite.duckduckgo.com markup for ``(title, url, snippet)`` rows (the
-    shape measured on 2026-10-07)."""
+    """lite.duckduckgo.com markup for ``(title, url, snippet)`` rows."""
     out = ['<html><body><table border="0">']
     for i, (title, url, snippet) in enumerate(rows, 1):
         out.append(
@@ -57,8 +61,8 @@ def lite_html(rows) -> str:
 
 
 def brave_html(rows) -> str:
-    """search.brave.com markup for ``(title, url, snippet)`` rows (the shape
-    measured on 2026-10-07, svelte class suffixes included)."""
+    """search.brave.com markup for ``(title, url, snippet)`` rows, svelte
+    class suffixes included."""
     out = ['<html><body><section id="mixed-main">']
     for i, (title, url, snippet) in enumerate(rows):
         out.append(
@@ -213,16 +217,15 @@ class TestFallbackChain:
         for banned in BANNED:
             assert banned not in b.search_error
 
-    def test_all_services_answering_empty_is_an_empty_search(self, monkeypatch):
+    def test_duckduckgo_no_results_ends_the_search(self, monkeypatch):
         allow_public(monkeypatch)
         t = Transport().install(monkeypatch)
         t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
-        t.route("POST", LITE_ENDPOINT, _ok(ddg_no_results(lite=True)))
-        t.route("GET", BRAVE_SEARCH + "*", _ok(brave_html([])))
+        t.route("POST", LITE_ENDPOINT, _ok(lite_html([ROW])))
+        t.route("GET", BRAVE_SEARCH + "*", _ok(brave_html([ROW])))
         b = retrieve("q")
         assert b.search_status == "empty"
-        assert t.urls("POST") == [DDG_ENDPOINT]
-        assert len(t.urls("GET")) == 1
+        assert t.urls() == [DDG_ENDPOINT]
 
     def test_out_of_time_services_are_named(self, monkeypatch):
         from localm.web_retrieval import providers
@@ -264,36 +267,26 @@ class TestNoResultsVersusUnreadable:
             "read results from; Brave Search: it answered with a page localm "
             "could not read results from).")
 
-    def test_one_service_saying_no_results_makes_the_search_empty(
-            self, monkeypatch):
+    def test_a_later_no_results_answer_also_ends_the_search(self, monkeypatch):
         allow_public(monkeypatch)
+        no_sleep(monkeypatch)
         t = Transport().install(monkeypatch)
-        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
-        t.route("POST", LITE_ENDPOINT, _raise(_reset))
-        t.route("GET", BRAVE_SEARCH + "*", FakeResponse(status=503, text=""))
-        assert retrieve("q").search_status == "empty"
-        assert LITE_ENDPOINT not in t.urls()
-
-    def test_no_results_from_duckduckgo_skips_its_lite_page_but_asks_brave(
-            self, monkeypatch):
-        allow_public(monkeypatch)
-        t = Transport().install(monkeypatch)
-        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
-        t.route("POST", LITE_ENDPOINT, _ok(lite_html([ROW])))
+        t.route("POST", DDG_ENDPOINT, _raise(_reset))
+        t.route("POST", LITE_ENDPOINT, _ok(ddg_no_results(lite=True)))
         t.route("GET", BRAVE_SEARCH + "*", _ok(brave_html([ROW])))
-        out = DefaultSearchProvider().search("q", 5)
-        assert [(r.provider, r.url) for r in out] == [("brave", ROW[1])]
-        assert t.urls("POST") == [DDG_ENDPOINT]
+        assert retrieve("q").search_status == "empty"
+        assert t.urls("GET") == []
 
-    def test_no_second_try_after_a_no_results_answer(self, monkeypatch):
+    def test_no_results_after_a_bot_check_needs_no_second_try(self,
+                                                               monkeypatch):
         allow_public(monkeypatch)
         slept = no_sleep(monkeypatch)
         t = Transport().install(monkeypatch)
-        t.route("POST", DDG_ENDPOINT, _ok(ddg_no_results()))
-        t.route("GET", BRAVE_SEARCH + "*", FakeResponse(status=429, text=""))
+        t.route("POST", DDG_ENDPOINT, FakeResponse(status=202, text=""))
+        t.route("POST", LITE_ENDPOINT, _ok(ddg_no_results(lite=True)))
         assert DefaultSearchProvider().search("q", 5) == []
         assert 3.0 not in slept
-        assert len(t.urls("GET")) == 1
+        assert t.urls() == [DDG_ENDPOINT, LITE_ENDPOINT]
 
     def test_searxng_html_no_results_message_is_empty(self, monkeypatch):
         allow_public(monkeypatch, net_search_url="https://searx.example")
@@ -310,6 +303,70 @@ class TestNoResultsVersusUnreadable:
         b = retrieve("q")
         assert b.search_status == "empty"
 
+    def test_searxng_json_no_results_with_failed_engines_fails(self,
+                                                              monkeypatch):
+        allow_public(monkeypatch, net_search_url="https://searx.example")
+        t = Transport().install(monkeypatch)
+        t.route("GET", "https://searx.example/search?*", FakeResponse(
+            json_body={"results": [], "unresponsive_engines": [
+                ["google", "timeout"], ["duckduckgo", "Suspended: CAPTCHA"]]}))
+        b = retrieve("q")
+        assert b.search_status == "failed"
+        assert b.search_error == (
+            "The search backend set in Settings > Network (searx.example) "
+            "returned no results, and these of its search engines failed: "
+            "google (timeout), duckduckgo (Suspended: CAPTCHA).")
+
+    def test_searxng_json_results_with_some_failed_engines_are_kept(
+            self, monkeypatch):
+        allow_public(monkeypatch, net_search_url="https://searx.example")
+        t = Transport().install(monkeypatch)
+        t.route("GET", "https://searx.example/search?*", FakeResponse(
+            json_body={"results": [{"title": "T", "url": ROW[1],
+                                    "content": "c"}],
+                       "unresponsive_engines": [["google", "timeout"]]}))
+        b = retrieve("q", fetch_top=0)
+        assert b.search_status == "ok"
+
+    def test_searxng_html_no_results_with_engine_errors_fails(self,
+                                                              monkeypatch):
+        allow_public(monkeypatch, net_search_url="https://searx.example")
+        t = Transport().install(monkeypatch)
+
+        def answer(url, **kw):
+            if "format=json" in url:
+                return FakeResponse(status=403, text="Forbidden")
+            return _ok('<main><div id="urls" role="main">'
+                       '<div class="dialog-error-block" role="alert"><p>'
+                       "<strong>Sorry!</strong></p></div></div>"
+                       '<table class="engine-stats"><tr>'
+                       '<td class="engine-name"><a href="/stats">google</a>'
+                       '</td><td class="response-error">timeout</td></tr><tr>'
+                       '<td class="engine-name"><a href="/stats">bing</a></td>'
+                       '<td class="response-error">CAPTCHA</td></tr></table>'
+                       "</main>")
+        t.route("GET", "https://searx.example/search?*", answer)
+        b = retrieve("q")
+        assert b.search_status == "failed"
+        assert b.search_error == (
+            "The search backend set in Settings > Network (searx.example) "
+            "returned no results, and 2 of its search engines reported an "
+            "error.")
+
+    def test_searxng_html_keeps_results_on_any_host(self, monkeypatch):
+        allow_public(monkeypatch, net_search_url="https://searx.example")
+        t = Transport().install(monkeypatch)
+
+        def answer(url, **kw):
+            if "format=json" in url:
+                return FakeResponse(status=403, text="Forbidden")
+            return _ok('<main><article class="result"><h3>'
+                       '<a href="https://duckduckgo.com/about">About '
+                       "DuckDuckGo</a></h3></article></main>")
+        t.route("GET", "https://searx.example/search?*", answer)
+        out = SearXNGProvider("https://searx.example").search("q", 5)
+        assert [r.url for r in out] == ["https://duckduckgo.com/about"]
+
     def test_searxng_html_without_results_or_message_fails(self, monkeypatch):
         allow_public(monkeypatch, net_search_url="https://searx.example")
         t = Transport().install(monkeypatch)
@@ -325,6 +382,105 @@ class TestNoResultsVersusUnreadable:
             "The search backend set in Settings > Network (searx.example) "
             "answered with a page localm could not read results from.")
         assert all("searx.example" in u for u in t.urls())
+
+
+class TestBudget:
+    def _virtual_clock(self, monkeypatch):
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(providers, "_clock", lambda: clock["now"])
+        monkeypatch.setattr(providers, "_MIN_INTERVAL", 0.0)
+        monkeypatch.setattr(providers, "_last_request", {})
+
+        def sleep(seconds):
+            clock["now"] += seconds
+        monkeypatch.setattr(providers, "_sleep", sleep)
+        return clock
+
+    def test_no_request_or_retry_runs_past_the_budget(self, monkeypatch):
+        allow_public(monkeypatch)
+        clock = self._virtual_clock(monkeypatch)
+        sent = []
+
+        def times_out(url, **kw):
+            sent.append((clock["now"] - 1000.0, kw["timeout"]))
+            clock["now"] += kw["timeout"]
+            raise requests.exceptions.ReadTimeout("read timed out")
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, times_out)
+        t.route("POST", LITE_ENDPOINT, times_out)
+        t.route("GET", BRAVE_SEARCH + "*", times_out)
+        with pytest.raises(providers.SearchProviderError) as info:
+            DefaultSearchProvider().search("q", 5)
+        assert sent == [(0.0, 10), (11.0, 10), (21.0, 9.0)]
+        assert max(start + timeout for start, timeout in sent) \
+            <= providers._SEARCH_BUDGET
+        assert "Brave Search: not tried: out of time" in str(info.value)
+
+    @pytest.mark.parametrize("budget,second_try", [(4.5, False), (5.5, True)])
+    def test_second_try_only_when_a_request_still_fits(self, monkeypatch,
+                                                       budget, second_try):
+        allow_public(monkeypatch)
+        slept = no_sleep(monkeypatch)
+        monkeypatch.setattr(providers, "_SEARCH_BUDGET", budget)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, FakeResponse(status=202, text=""))
+        t.route("POST", LITE_ENDPOINT, FakeResponse(status=202, text=""))
+        t.route("GET", BRAVE_SEARCH + "*", FakeResponse(status=429, text=""))
+        with pytest.raises(providers.SearchProviderError):
+            DefaultSearchProvider().search("q", 5)
+        assert (3.0 in slept) is second_try
+        assert t.urls().count(DDG_ENDPOINT) == (2 if second_try else 1)
+
+    def test_pacing_one_service_does_not_hold_up_another(self, monkeypatch):
+        entered, release = threading.Event(), threading.Event()
+        monkeypatch.setattr(providers, "_last_request", {})
+
+        def blocking_sleep(seconds):
+            entered.set()
+            release.wait(5)
+        monkeypatch.setattr(providers, "_sleep", blocking_sleep)
+        providers._pace("duckduckgo")
+        waiter = threading.Thread(target=providers._pace, args=("duckduckgo",))
+        waiter.start()
+        try:
+            assert entered.wait(2)
+            started = time.monotonic()
+            providers._pace("brave")
+            assert time.monotonic() - started < 1.0
+        finally:
+            release.set()
+            waiter.join(5)
+
+
+class TestFailureReporting:
+    def test_redirect_is_named_as_a_redirect_not_a_policy_block(self,
+                                                                monkeypatch):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT,
+                FakeResponse(status=302, redirect="http://127.0.0.1/"))
+        t.route("POST", LITE_ENDPOINT, FakeResponse(status=202, text=""))
+        t.route("GET", BRAVE_SEARCH + "*", FakeResponse(status=503, text=""))
+        b = retrieve("q")
+        assert ("DuckDuckGo: it answered with a redirect, which localm does "
+                "not follow;") in b.search_error
+        assert "network policy" not in b.search_error
+        assert "127.0.0.1" not in t.urls()
+
+    def test_a_failed_service_is_logged_without_the_query(self, monkeypatch,
+                                                          caplog):
+        allow_public(monkeypatch)
+        t = Transport().install(monkeypatch)
+        t.route("POST", DDG_ENDPOINT, _ok("<html><body>changed</body></html>"))
+        t.route("POST", LITE_ENDPOINT, _ok(lite_html([ROW])))
+        with caplog.at_level(logging.INFO, logger=providers.__name__):
+            out = DefaultSearchProvider().search("zebra canary words", 5)
+        assert [r.provider for r in out] == ["duckduckgo-lite"]
+        messages = [r.getMessage() for r in caplog.records
+                    if r.name == providers.__name__]
+        assert messages == ["web search: DuckDuckGo failed: it answered with "
+                            "a page localm could not read results from"]
+        assert not any("zebra" in m for m in messages)
 
 
 class TestPolicy:

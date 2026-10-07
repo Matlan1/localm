@@ -196,8 +196,7 @@ def ddg_html(results: list[tuple[str, str, str]]) -> str:
 
 def ddg_no_results(lite: bool = False) -> str:
     """DuckDuckGo's no-results page for a query with no hits: the html
-    endpoint's, or the lite endpoint's with *lite* (the markup measured on
-    2026-10-07)."""
+    endpoint's, or the lite endpoint's with *lite*."""
     container = ("<div class='no-results__container'>" if lite else
                  '<div class="no-results__container result__title">')
     block = (container + "<span class='no-results'>"
