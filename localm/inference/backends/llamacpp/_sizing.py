@@ -600,12 +600,15 @@ class VramSizingMixin:
                        "llama.cpp's default split", type(e).__name__, e)
             return None
 
-    def _split_fitting_n_cpu_moe(self) -> "tuple[bool, Optional[int]]":
+    def _split_fitting_n_cpu_moe(self, free: int, kv: int,
+                                 overhead: int) -> "tuple[bool, Optional[int]]":
         """For a load llama.cpp's implicit split spreads over 2+ GPUs: ``(True,
         n)`` with the smallest n_cpu_moe, 0 included, whose per-device fit
         (:meth:`_implicit_split_plan`, every layer on a GPU) fits every device
-        or leaves out a device that does not, ``(True, None)`` when none does,
-        and ``(False, None)`` when no per-device fit can be made (a configured
+        or leaves out a device that does not, and whose combined need
+        (``_vram_model_bytes(n) + kv + overhead``, the one ``_check_vram``
+        charges) fits the combined *free*; ``(True, None)`` when none does, and
+        ``(False, None)`` when no per-device fit can be made (a configured
         ``gpu_split_indices``, an unreadable layout, no device readings, or a
         device numbering the runtime cannot be matched to).
         Must run off the event loop. Never raises."""
@@ -616,7 +619,8 @@ class VramSizingMixin:
             plan = self._implicit_split_plan(inputs, n)
             if plan is None:
                 return False, None
-            if plan.default_fits or plan.tensor_split:
+            if ((plan.default_fits or plan.tensor_split)
+                    and self._vram_model_bytes(n) + kv + overhead <= free):
                 return True, n
         return True, None
 
@@ -1319,8 +1323,9 @@ class VramSizingMixin:
         - On one GPU it is fitted against the free reading, and only when the
           whole model does not fit.
         - On 2+ GPUs under llama.cpp's implicit split it is fitted against every
-          device's own charge (:meth:`_split_fitting_n_cpu_moe`), also when the
-          combined reading fits the whole model. When no n_cpu_moe fits every
+          device's own charge and the combined reading
+          (:meth:`_split_fitting_n_cpu_moe`), also when the combined reading
+          fits the whole model. When no n_cpu_moe fits every
           device and the combined reading fits, nothing is pinned. When that
           per-device fit cannot be made, the experts of every layer are pinned
           if that fits the combined reading.
@@ -1349,7 +1354,7 @@ class VramSizingMixin:
         model, kv, overhead = self._full_offload_parts(split_devices)
         split_checked = False
         if auto_moe and split_devices >= 2 and self._moe_expert_bytes_by_layer():
-            split_checked, fitting = self._split_fitting_n_cpu_moe()
+            split_checked, fitting = self._split_fitting_n_cpu_moe(free, kv, overhead)
             if fitting is not None:
                 return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total,
                                         model, kv, overhead, split_devices,
@@ -1415,7 +1420,9 @@ class VramSizingMixin:
         (b) weights + this context's KV cache WOULD fit a clean card (total),
             but not the VRAM actually free right now - something else is
             holding it;
-        (c) neither of the above: the KV cache for the configured context is
+        (c) on 2+ GPUs whose combined free reading holds the whole model: one
+            GPU cannot hold its own share of it;
+        (d) none of the above: the KV cache for the configured context is
             what tips an otherwise-fitting model over the free budget.
 
         Mirrors the same total-vs-free distinction ``_check_vram()`` already
@@ -1439,6 +1446,11 @@ class VramSizingMixin:
             hint = self._vram_holder_hint().rstrip(".")
             return (f"only {budget.free / 1024**3:.1f} of {total / 1024**3:.1f} "
                     f"GB free - {hint}"), True
+        if (budget.split_devices >= 2
+                and budget.free >= budget.model + budget.kv + budget.overhead):
+            return (f"the {budget.split_devices} GPUs have {budget.free / 1024**3:.1f} "
+                    f"GB free combined, but one of them cannot hold its own "
+                    f"share of the model"), True
         return (f"the KV cache for a {self.n_ctx:,}-token context takes "
                 f"{budget.kv / 1024**3:.1f} GB - lower n_ctx to fit more of "
                 f"the model on the GPU"), True

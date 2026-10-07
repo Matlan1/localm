@@ -454,10 +454,12 @@ class TestLeadingDenseBlocks:
         assert engine.gpu_placement["moe_cpu_layers"] == 1
 
 
-def _split_moe_model(tmp_path):
+def _split_moe_model(tmp_path, nextn=0):
     kv = [("general.architecture", _T_STRING, "testmoe"),
           ("testmoe.block_count", _T_UINT32, 4),
           ("tokenizer.ggml.tokens", _T_ARRAY, [f"t{i}" for i in range(10)])]
+    if nextn:
+        kv.append(("testmoe.nextn_predict_layers", _T_UINT32, nextn))
     tensors = [("token_embd.weight", [4], 0, 500)]
     for il in range(4):
         tensors += [(f"blk.{il}.attn_q.weight", [4], 0, 1_000),
@@ -476,14 +478,16 @@ class TestMultiGpu:
 
     FREE = 15_000
 
-    def _run(self, tmp_path, cfg=None, free=FREE, readable=True):
-        b = _backend(_split_moe_model(tmp_path))
+    def _run(self, tmp_path, cfg=None, free=FREE, readable=True, frees=None, nextn=0,
+             check=False):
+        b = _backend(_split_moe_model(tmp_path, nextn=nextn))
         b._gguf_kv_bpt = 10
-        devices = [{"index": i, "free": free, "total": free + 10} for i in range(2)]
+        frees = frees or [free, free]
+        devices = [{"index": i, "free": f, "total": f + 10} for i, f in enumerate(frees)]
         with ExitStack() as st:
             st.enter_context(patch.object(
                 GgufBackend, "_split_free_total_bytes",
-                return_value=(2 * free, 2 * free + 20, 2)))
+                return_value=(sum(frees), sum(frees) + 10 * len(frees), len(frees))))
             st.enter_context(patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 1_000))
             st.enter_context(patch.object(discover, "implicit_split_devices",
                                           return_value=devices if readable else None))
@@ -492,9 +496,16 @@ class TestMultiGpu:
             st.enter_context(patch.object(_loader, "native_lib_loaded", return_value=False))
             st.enter_context(patch("localm.config.load_config",
                                    return_value={} if cfg is None else cfg))
-            combined = b._smallest_fitting_n_cpu_moe(2 * free, N_CTX * 10, 2 * 1_000)
+            combined = b._smallest_fitting_n_cpu_moe(sum(frees), N_CTX * 10, 2 * 1_000)
             layers = b._effective_gpu_layers()
             plan = b._implicit_split_fit(layers) if layers else None
+            b.check_error = None
+            if check:
+                b.effective_gpu_layers = layers
+                try:
+                    b._check_vram()
+                except RuntimeError as exc:
+                    b.check_error = exc
         return b, combined, layers, plan
 
     def test_every_device_must_hold_its_own_share(self, tmp_path):
@@ -503,11 +514,24 @@ class TestMultiGpu:
         assert (layers, b.effective_n_cpu_moe) == (99, 4)
         assert plan is not None and plan.default_fits
 
-    def test_a_combined_fit_still_needs_every_device_to_fit(self, tmp_path):
+    def test_a_combined_fit_still_needs_every_device_to_fit(self, tmp_path, capsys):
         b, _combined, layers, plan = self._run(tmp_path, free=25_000)
         assert b._vram_model_bytes(0) + N_CTX * 10 + 2 * 1_000 <= 2 * 25_000
         assert (layers, b.effective_n_cpu_moe) == (99, 1)
         assert plan is not None and plan.default_fits
+        out = _flat(capsys)
+        assert "but one of them cannot hold its own share of the model" in out
+        assert "KV cache" not in out
+
+    def test_the_choice_also_fits_the_combined_reading(self, tmp_path):
+        # Block 3 is an MTP layer, not loaded with MTP off: the per-device fit
+        # fits at n_cpu_moe 0, the combined need does not.
+        b, _combined, layers, plan = self._run(tmp_path, frees=[38_000, 5_000], nextn=1,
+                                               check=True)
+        assert b._vram_model_bytes(0) + N_CTX * 10 + 2 * 1_000 > 43_020
+        assert (layers, b.effective_n_cpu_moe) == (99, 1)
+        assert plan is not None and plan.default_fits
+        assert b.check_error is None
 
     def test_every_device_fitting_pins_nothing(self, tmp_path):
         b, _combined, layers, plan = self._run(tmp_path, free=40_000)
