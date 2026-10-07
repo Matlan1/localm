@@ -35,6 +35,20 @@ DEFAULT_URL_SHA256 = (
 _ROCM_TAG = "b1307"
 
 
+# The upstream llama.cpp release built from the SAME commit as _ROCM_TAG
+# (07132750825a is upstream b10270). Its Windows CPU archive supplies the
+# SIMD (AVX2/AVX-512) ggml-cpu variants the amd-rocm build lacks: that build
+# compiles its CPU backend with every x86 instruction-set option off. Must name
+# the upstream release of _ROCM_TAG's commit: the variant binds to that build's
+# ggml-base. See localm/setup_llama/rocm_cpu.py.
+_ROCM_CPU_TAG = "b10270"
+_ROCM_CPU_ASSET = f"llama-{_ROCM_CPU_TAG}-bin-win-cpu-x64.zip"
+
+# The amd-rocm build identity recorded in the runtime marker once the SIMD CPU
+# backend is installed over it. Path-segment safe (see versions._TAG_SAFE_RE).
+_ROCM_BUILD = f"{_ROCM_TAG}-cpu-{_ROCM_CPU_TAG}"
+
+
 # Maps hwdetect.amd_gfx_family()'s return value to the lemonade-sdk asset name
 # fragment for the self-contained amd-rocm build of that family. Only the three
 # families amd_gfx_family() can currently distinguish are listed; an
@@ -209,6 +223,9 @@ _PINNED_FALLBACK_SHA256 = {
     "llama-b1307-ubuntu-rocm-gfx120X-x64.zip": "74a38230048a1081a2ebf86825c27f394de6fc5447a155ab4c8ebe81ffc3de30",
     "llama-b1307-ubuntu-rocm-gfx908-x64.zip": "9d10467e59ee05e26d21131a251077d45f41f76ceefee8de88a17222a0c8500b",
     "llama-b1307-ubuntu-rocm-gfx90a-x64.zip": "149e3d871830bf9e429c5edfa2d4d427830529a3813ad4d789925095cdd57ade",
+    # tag b10270 upstream Windows CPU archive (_ROCM_CPU_ASSET), the amd-rocm
+    # build's SIMD CPU backend
+    "llama-b10270-bin-win-cpu-x64.zip": "80406b0faa562ef6268a446cfb4cfd91511770a3a716daf36d9ff1e4e582aea4",
 }
 
 

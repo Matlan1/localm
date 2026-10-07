@@ -125,6 +125,23 @@ test("a routed reply from a model loaded partly on the CPU says so on its chip",
   assert.match(chip.title, /12 of 32 layers on the GPU/);
 });
 
+test("a routed reply from a model with MoE experts in system RAM names them on its chip", async () => {
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "seer", requested: "plain", routed: true, pinned: false,
+    gaps: { tool_use: "absent" }, unmet: [],
+    placement: { gpu_layers: 48, total_layers: 48, moe_cpu_layers: 18 } } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const reply = conv.messages[conv.messages.length - 1];
+  assert.deepEqual(JSON.parse(JSON.stringify(reply.routed.placement)),
+                   { gpu: 48, total: 48, moe: 18 });
+  const chip = doc.querySelector(".routed-chip");
+  assert.match(chip.textContent, /partly on CPU/);
+  assert.match(chip.title, /routed experts of 18 of its 48 layers in system RAM/);
+  assert.doesNotMatch(chip.title, /48 of 48 layers on the GPU/);
+});
+
 test("a routed reply with no placement field shows no CPU note", async () => {
   const { window, doc } = setup({ routingHeader: {
     resolved: "seer", requested: "plain", routed: true, pinned: false,

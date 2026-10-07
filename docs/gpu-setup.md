@@ -89,6 +89,13 @@ matching self-contained build automatically: gfx103X for RX 6000, gfx110X for RX
 build. This is Windows only; on Linux use `--backend hip` (needs a system
 ROCm/HIP toolkit) instead.
 
+That build's own CPU backend uses no SIMD instructions, so setup also installs
+the AVX2/AVX-512 CPU backend from the same llama.cpp commit (the variant this
+CPU supports best) over it. Work that runs on the CPU, such as Mixture-of-Experts
+weights kept in system RAM, runs about twice as fast with it. An install made
+before this shows a runtime update; `localm setup-llama --backend amd-rocm
+--force` applies it.
+
 ### gfx1030 (RX 6000 series: Navi21)
 
 The layout below is illustrative for the gfx103X build specifically - RX 7000
@@ -249,18 +256,31 @@ every box unticked keeps automatic placement.
 ## Mixture-of-Experts: reducing VRAM footprint
 
 A Mixture-of-Experts (MoE) model's expert layers can be kept in system RAM
-instead of VRAM, so it fits in far less GPU memory. Off by default:
+instead of VRAM, so it fits in far less GPU memory. When such a model does not
+fit and GPU layers are auto-sized (the default), localm does this by itself: it
+keeps the routed experts of as few layers as needed in system RAM and every
+layer on the GPU, and only moves whole layers to the CPU when even that does
+not fit. On several GPUs it checks that each card can hold its own share; with
+a configured split (`gpu_split_indices`) it leaves the choice to you. To choose
+it yourself:
 
 ```bash
 localm config n_cpu_moe 16        # keep 16 layers' worth of experts on system RAM
-localm config n_cpu_moe 0         # off - the default
+localm config n_cpu_moe 0         # automatic, only when the model does not fit - the default
 ```
 
-It is a footprint dial, not a speedup - the same VRAM budget runs at about the
-same tokens/sec either way. Measured on a 7B MoE model: GPU footprint dropped
-from 3961 MiB to 241 MiB with all 16 layers set. Has no effect on a normal
-(dense) model, and says so instead of silently doing nothing. The Settings
-page has the same field ("MoE expert layers on CPU").
+A value above 0, or an explicit `n_gpu_layers`, is used as given.
+
+Generation speed is then bounded by system RAM bandwidth: each token reads the
+selected experts of every layer kept in RAM, and the load output prints that
+amount. Measured on Qwen3-30B-A3B Q4_K_M (18.6 GB) with 12.8 GB free on a 16 GB
+card: automatic placement kept the experts of 18 of 48 layers in RAM and
+generated at 26 tokens/s, against 19 tokens/s when whole layers were moved to
+the CPU instead. A model that activates large experts (for example 2 of 8
+experts of several billion parameters each) reads far more per token and is
+slow from RAM by design. Has no effect on a normal (dense) model, and says so
+instead of silently doing nothing. The Settings page has the same field ("MoE
+expert layers on CPU").
 
 ## Vision projector (image understanding) placement
 

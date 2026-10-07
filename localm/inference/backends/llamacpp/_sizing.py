@@ -65,6 +65,9 @@ class _AutoLayerBudget(NamedTuple):
     kv: int
     overhead: int
     split_devices: int
+    # Layers whose routed-expert weights the decision keeps in system RAM
+    # (an automatic n_cpu_moe), 0 when it keeps none.
+    moe_cpu_layers: int = 0
 
 
 class VramSizingMixin:
@@ -75,7 +78,9 @@ class VramSizingMixin:
 
     Expects the host class to provide: ``model_path`` (str), ``n_ctx`` (int),
     ``n_gpu_layers`` (int, the configured/raw value), ``effective_gpu_layers``
-    (Optional[int], the resolved value once known), ``ctx_auto`` (bool),
+    (Optional[int], the resolved value once known), ``n_cpu_moe`` (int, the
+    configured value) and ``effective_n_cpu_moe`` (Optional[int], the resolved
+    value once known; both read via getattr), ``ctx_auto`` (bool),
     ``n_ctx_max`` (Optional[int]), ``mtp_enabled`` (bool, read defensively via
     getattr so a test double may omit it), ``_llm`` (the loaded native model,
     or None - only read by ``_check_context_fit`` for
@@ -448,40 +453,56 @@ class VramSizingMixin:
     # this), n_ubatch = n_batch.
     _MAX_BATCH = 2048
 
-    def _implicit_split_fit(self, gpu_layers: int):
+    def _implicit_split_fit(self, gpu_layers: int, n_cpu_moe: Optional[int] = None):
         """Per-device fit of llama.cpp's IMPLICIT layer split for this load, as
         a :class:`~localm.inference.backends.llamacpp._split_fit.SplitFitPlan`,
         or ``None`` when it does not apply or cannot be measured.
 
         Applies only to a GPU load (``gpu_layers != 0``) with no configured
-        ``gpu_split_indices`` and no ``n_cpu_moe``, on 2+ devices whose
+        ``gpu_split_indices``, on 2+ devices whose
         readings :func:`localm.discover.implicit_split_devices` returns, for a
         model whose GGUF header :func:`localm.model_manager.gguf.gguf_split_layout`
         reads. Each device that receives a layer or the output layer is charged
-        its layers' weights and KV cache and ``_VRAM_OVERHEAD_BYTES``; the device
+        its layers' weights (less the routed experts of the blocks below
+        *n_cpu_moe*, default this load's :meth:`_load_n_cpu_moe`, which stay in
+        system RAM) and KV cache and ``_VRAM_OVERHEAD_BYTES``; the device
         that receives the output layer is
         also charged the output weights and the logits buffer (twice when an
         MTP draft context will be created). The weights of MTP / nextn layers
         are charged only when MTP is enabled, since llama.cpp skips loading
-        them otherwise. A plan that writes a split or reports a shortfall is
+        them otherwise; with MTP enabled the MTP draft context
+        (:meth:`_mtp_draft_context_vram_bytes`) is charged as the KV cache of
+        those layers. The recurrent state (:meth:`_recurrent_state_vram_bytes`)
+        is charged in equal parts to the layers that keep one. A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
         integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`),
         the plan is made over every GPU in torch's numbering. ``_fit_source_index`` maps each
         planned device to its torch index. Must run off the event loop (it
         probes). Never raises."""
-        if gpu_layers == 0 or (getattr(self, "n_cpu_moe", 0) or 0) > 0:
+        if gpu_layers == 0:
             return None
+        inputs = self._implicit_split_inputs(gpu_layers)
+        if inputs is None:
+            return None
+        return self._implicit_split_plan(
+            inputs, self._load_n_cpu_moe() if n_cpu_moe is None else int(n_cpu_moe))
+
+    def _implicit_split_inputs(self, gpu_layers: int) -> Optional[dict]:
+        """What :meth:`_implicit_split_plan` needs that does not depend on
+        n_cpu_moe, read from the GGUF header and probed once: the device
+        readings, every tensor's size, the layer counts and the per-layer KV,
+        output and logits charges for *gpu_layers*. None when the fit does not
+        apply (see :meth:`_implicit_split_fit`). Must run off the event loop.
+        Never raises."""
         from localm.inference.backends.llamacpp import _loader
         if _loader.native_lib_loaded():
             return None
         try:
             from localm.config import load_config
-            from localm.discover import (implicit_split_devices,
-                                         runtime_identity_split_devices,
-                                         runtime_split_devices_match)
+            from localm.discover import implicit_split_devices
             from localm.inference.backends.llamacpp._split_fit import (
-                logits_buffer_bytes, plan_split)
+                logits_buffer_bytes)
             from localm.model_manager.gguf import (
                 gguf_nextn_predict_layers, gguf_split_layout)
             cfg = load_config()
@@ -505,37 +526,78 @@ class VramSizingMixin:
                 from localm.inference.backends.llamacpp._api import (
                     MTP_GRAPH_ARCHITECTURES)
                 mtp_on = arch in MTP_GRAPH_ARCHITECTURES
-            layer_bytes = [0] * n_layer_all
-            for name, size in sizes.items():
-                if not name.startswith("blk."):
-                    continue
-                head, _, _rest = name[4:].partition(".")
-                if head.isdigit() and int(head) < n_layer_all:
-                    layer_bytes[int(head)] += int(size)
-            if not mtp_on:
-                for il in range(n_layer_all - nextn, n_layer_all):
-                    layer_bytes[il] = 0
             output_bytes = (sizes.get("output.weight")
                             or sizes.get("token_embd.weight") or 0)
             output_bytes += sizes.get("output_norm.weight", 0)
             repeating = max(1, n_layer_all - nextn)
             kv_per_layer = (self.n_ctx * self._kv_bytes_per_token()) // repeating
-            layer_kv = [kv_per_layer if il < n_layer_all - nextn else 0
+            draft_per_layer = (-(-self._mtp_draft_context_vram_bytes() // nextn)
+                               if mtp_on else 0)
+            from localm.model_manager.gguf import _RECURRENT_LAYER_TENSOR_RE
+            recurrent = {int(m.group(1)) for name in sizes
+                         if (m := _RECURRENT_LAYER_TENSOR_RE.match(name))}
+            state_per_layer = (-(-self._recurrent_state_vram_bytes() // len(recurrent))
+                               if recurrent else 0)
+            layer_kv = [(kv_per_layer if il < n_layer_all - nextn else draft_per_layer)
+                        + (state_per_layer if il in recurrent else 0)
                         for il in range(n_layer_all)]
             logits = logits_buffer_bytes(layout["n_vocab"], self.n_ctx,
                                          max_batch=self._MAX_BATCH,
                                          contexts=2 if mtp_on else 1)
-            fit_kw = dict(layer_bytes=layer_bytes, output_bytes=int(output_bytes),
-                          layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
-                          logits_bytes=logits,
-                          reserve_bytes=int(self._VRAM_OVERHEAD_BYTES))
-            plan = plan_split(devices, **fit_kw)
-            if (plan.tensor_split or not plan.default_fits) and \
-                    not runtime_split_devices_match(devices):
-                devices = runtime_identity_split_devices()
-                if not devices:
-                    return None
-                plan = plan_split(devices, **fit_kw)
+            return {
+                "devices": devices, "sizes": sizes, "n_layer_all": n_layer_all,
+                "nextn": nextn, "mtp_on": mtp_on, "runtime_match": None,
+                "identity_devices": None,
+                "fit_kw": dict(output_bytes=int(output_bytes),
+                               layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
+                               logits_bytes=logits,
+                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES)),
+            }
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("implicit split fit unavailable (%s: %s); keeping "
+                       "llama.cpp's default split", type(e).__name__, e)
+            return None
+
+    def _implicit_split_plan(self, inputs: dict, n_cpu_moe: int):
+        """The :class:`~localm.inference.backends.llamacpp._split_fit.SplitFitPlan`
+        for *inputs* (:meth:`_implicit_split_inputs`) with the routed experts of
+        the blocks below *n_cpu_moe* charged to no device, and
+        ``_fit_source_index`` set for its devices. The device-numbering checks
+        of :meth:`_implicit_split_fit` run once per *inputs* and are kept in it.
+        None when the runtime's numbering cannot be matched. Never raises."""
+        try:
+            from localm.discover import (runtime_identity_split_devices,
+                                         runtime_split_devices_match)
+            from localm.inference.backends.llamacpp._split_fit import plan_split
+            from localm.model_manager.gguf import _MOE_EXPERT_TENSOR_RE
+            n_layer_all = inputs["n_layer_all"]
+            layer_bytes = [0] * n_layer_all
+            for name, size in inputs["sizes"].items():
+                if not name.startswith("blk."):
+                    continue
+                head, _, _rest = name[4:].partition(".")
+                if not head.isdigit() or int(head) >= n_layer_all:
+                    continue
+                expert = _MOE_EXPERT_TENSOR_RE.search(name)
+                if expert is not None and int(expert.group(1)) < n_cpu_moe:
+                    continue
+                layer_bytes[int(head)] += int(size)
+            if not inputs["mtp_on"]:
+                for il in range(n_layer_all - inputs["nextn"], n_layer_all):
+                    layer_bytes[il] = 0
+            devices = inputs["devices"]
+            plan = plan_split(devices, layer_bytes=layer_bytes, **inputs["fit_kw"])
+            if plan.tensor_split or not plan.default_fits:
+                if inputs["runtime_match"] is None:
+                    inputs["runtime_match"] = bool(runtime_split_devices_match(devices))
+                if not inputs["runtime_match"]:
+                    if inputs["identity_devices"] is None:
+                        inputs["identity_devices"] = runtime_identity_split_devices() or []
+                    devices = inputs["identity_devices"]
+                    if not devices:
+                        return None
+                    plan = plan_split(devices, layer_bytes=layer_bytes, **inputs["fit_kw"])
             self._fit_source_index = {d["index"]: d.get("source_index", d["index"])
                                       for d in devices}
             return plan
@@ -544,6 +606,42 @@ class VramSizingMixin:
             _dbg.debug("implicit split fit unavailable (%s: %s); keeping "
                        "llama.cpp's default split", type(e).__name__, e)
             return None
+
+    def _split_fitting_n_cpu_moe(self, free: int, kv: int,
+                                 overhead: int) -> "tuple[bool, Optional[int]]":
+        """For a load llama.cpp's implicit split spreads over 2+ GPUs: ``(True,
+        n)`` with the smallest n_cpu_moe, 0 included, whose per-device fit
+        (:meth:`_implicit_split_plan`, every layer on a GPU) fits every device
+        or leaves out a device that does not, and whose combined need
+        (``_vram_model_bytes(n) + kv + overhead``, the one ``_check_vram``
+        charges) fits the combined *free*; ``(True, None)`` when none does, and
+        ``(False, None)`` when no per-device fit can be made (a configured
+        ``gpu_split_indices``, an unreadable layout, no device readings, or a
+        device numbering the runtime cannot be matched to).
+        Must run off the event loop. Never raises."""
+        inputs = self._implicit_split_inputs(self._DEFAULT_GPU_LAYERS)
+        if inputs is None:
+            return False, None
+        for n in [0] + [layer + 1 for layer in sorted(self._moe_expert_bytes_by_layer())]:
+            plan = self._implicit_split_plan(inputs, n)
+            if plan is None:
+                return False, None
+            if ((plan.default_fits or plan.tensor_split)
+                    and self._vram_model_bytes(n) + kv + overhead <= free):
+                return True, n
+        return True, None
+
+    @staticmethod
+    def _gpu_split_configured() -> bool:
+        """Whether ``gpu_split_indices`` is set in the config. False when the
+        config cannot be read. Never raises."""
+        try:
+            from localm.config import load_config
+            return bool(load_config().get("gpu_split_indices"))
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("config unreadable for the GPU split check (%s)", type(e).__name__)
+            return False
 
     def _mtp_draft_context_vram_bytes(self) -> int:
         """Extra VRAM llama.py's MTP draft context (cp_mtp) will need beyond
@@ -728,28 +826,59 @@ class VramSizingMixin:
         setattr(self, attr, result)
         return result
 
-    def _effective_model_bytes_for_vram(self) -> int:
-        """VRAM-resident weight bytes for THIS load: ``_model_bytes()``, minus
-        every tensor llama.cpp itself never places in VRAM regardless of
-        settings.
+    def _load_n_cpu_moe(self) -> int:
+        """The n_cpu_moe THIS load uses: ``effective_n_cpu_moe`` once
+        ``_effective_gpu_layers()`` resolved it (an automatic choice or the
+        configured value), else the configured ``n_cpu_moe``."""
+        effective = getattr(self, "effective_n_cpu_moe", None)
+        if effective is not None:
+            return int(effective)
+        return int(getattr(self, "n_cpu_moe", 0) or 0)
 
-        Two independent, always-additive subtractions:
+    def _block_bytes(self) -> "dict[int, tuple[int, int]]":
+        """``gguf_block_bytes`` for this model (``{block: (all bytes, routed
+        expert bytes)}``), read at most once per instance. ``{}`` on a probe
+        failure, which charges every expert byte to VRAM."""
+        cached = getattr(self, "_block_bytes_cache", None)
+        if cached is not None:
+            return cached
+        from localm.model_manager.gguf import gguf_block_bytes
+        try:
+            blocks = gguf_block_bytes(
+                Path(self.model_path), _parsed=self._gguf_parsed_tensor_entries())
+        except Exception as exc:  # contracted not to raise - surface if it does
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("gguf block-byte probe failed (%s); charging every "
+                       "expert byte for VRAM sizing", type(exc).__name__)
+            blocks = None
+        if blocks is None:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("gguf block-byte probe could not read %s; charging "
+                       "every expert byte for VRAM sizing",
+                       Path(self.model_path).name)
+            blocks = {}
+        self._block_bytes_cache = blocks
+        return blocks
 
-        - The INPUT-LAYER tensors (``token_embd`` and its siblings - see
-          ``gguf_input_layer_bytes``/``_INPUT_LAYER_TENSOR_NAMES``). Applies
-          to every load, dense or MoE, n_cpu_moe set or not.
-        - Whatever ``n_cpu_moe`` ADDITIONALLY pins to SYSTEM RAM (see
-          llama.py's ``_apply_cpu_moe`` - the routed-expert tensors of the
-          first ``n_cpu_moe`` layers never touch VRAM at all either). Opt-in,
-          unlike the input layer above: only applies when configured.
+    def _moe_expert_bytes_by_layer(self) -> "dict[int, int]":
+        """Routed-expert bytes of each block that has any (``_block_bytes``).
+        ``{}`` for a dense model and on a probe failure."""
+        return {layer: experts for layer, (_total, experts) in self._block_bytes().items()
+                if experts > 0}
 
-        Both are computed from each excluded tensor's EXACT size via its own
-        file's tensor-info offsets (never a per-quantization-type size
-        table), and both degrade to charging the tensor's bytes anyway on a
-        probe failure or an unparseable header. Each subtraction's result is
-        memoised per instance; the underlying GGUF header/tensor-info parse
-        (``_gguf_tensor_offset_entries``) additionally runs at most once per
-        load, shared by both."""
+    def _moe_pinned_bytes(self, n_cpu_moe: int) -> int:
+        """Bytes of routed-expert weights the first *n_cpu_moe* layers keep in
+        system RAM (0 for a dense model or *n_cpu_moe* <= 0)."""
+        if n_cpu_moe <= 0:
+            return 0
+        return sum(size for layer, size in self._moe_expert_bytes_by_layer().items()
+                   if layer < n_cpu_moe)
+
+    def _vram_model_bytes(self, n_cpu_moe: int) -> int:
+        """VRAM-resident weight bytes for a load that keeps the routed experts
+        of the first *n_cpu_moe* layers in system RAM: ``_model_bytes()`` minus
+        the input-layer tensors (every load) and those experts. See
+        :meth:`_effective_model_bytes_for_vram`."""
         model_bytes = self._model_bytes()
         parsed = self._gguf_parsed_tensor_entries()
 
@@ -759,17 +888,28 @@ class VramSizingMixin:
             lambda: gguf_input_layer_bytes(self.model_path, _parsed=parsed),
             "input-layer byte")
         model_bytes = max(0, model_bytes - input_bytes)
+        return max(0, model_bytes - self._moe_pinned_bytes(n_cpu_moe))
 
-        n_cpu_moe = getattr(self, "n_cpu_moe", 0) or 0
-        if n_cpu_moe <= 0:
-            return model_bytes
-        from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
-        pinned = self._gguf_excluded_bytes(
-            "_gguf_moe_pinned_bytes",
-            lambda: gguf_moe_pinned_expert_bytes(
-                self.model_path, n_cpu_moe, _parsed=parsed),
-            "MoE expert-byte")
-        return max(0, model_bytes - pinned)
+    def _effective_model_bytes_for_vram(self) -> int:
+        """VRAM-resident weight bytes for THIS load: ``_model_bytes()``, minus
+        every tensor llama.cpp never places in VRAM for it.
+
+        Two independent, always-additive subtractions:
+
+        - The INPUT-LAYER tensors (``token_embd`` and its siblings - see
+          ``gguf_input_layer_bytes``/``_INPUT_LAYER_TENSOR_NAMES``). Applies
+          to every load, dense or MoE, n_cpu_moe set or not.
+        - Whatever this load's n_cpu_moe (:meth:`_load_n_cpu_moe`, configured
+          or chosen automatically) pins to SYSTEM RAM (see llama.py's
+          ``_apply_cpu_moe`` - the routed-expert tensors of the first
+          n_cpu_moe layers never touch VRAM at all either).
+
+        Both are computed from each excluded tensor's EXACT size via its
+        file's tensor-info offsets (never a per-quantization-type size
+        table), and both degrade to charging the tensor's bytes anyway on a
+        probe failure or an unparseable header. The input-layer result and the
+        per-layer expert bytes are memoised per instance."""
+        return self._vram_model_bytes(self._load_n_cpu_moe())
 
     def _vram_holder_hint(self) -> str:
         """Best-effort: name a concrete live sibling localm instance holding
@@ -902,9 +1042,10 @@ class VramSizingMixin:
         else:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
-        need = (weights + kv_cache + self._split_overhead_bytes(split_devices)
-                + self._mtp_draft_context_vram_bytes()
-                + self._recurrent_state_vram_bytes())
+        overhead = (self._split_overhead_bytes(split_devices)
+                    + self._mtp_draft_context_vram_bytes()
+                    + self._recurrent_state_vram_bytes())
+        need = weights + kv_cache + overhead
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
         if total is not None and need > total:
             # On a split box the ceiling exceeded is the split's combined one.
@@ -916,13 +1057,16 @@ class VramSizingMixin:
                 f"this GPU only has {total / 1024**3:.1f} GB total - freeing "
                 f"other VRAM will not help, it cannot fit regardless"
             )
+            options = "".join(
+                f"    - {label}:  {command}\n"
+                for label, command in self._vram_fit_options(
+                    total, need, kv_cache, overhead, gpu_layers))
             raise RuntimeError(
                 f"Context too large for available VRAM: this load needs "
                 f"roughly {need / 1024**3:.1f} GB ({ctx_hint}) but "
                 f"{ceiling}.\n"
                 f"  Options:\n"
-                f"    - Lower the context:  -c 32768  (or smaller)\n"
-                f"    - Offload fewer layers:  -g 24  (or -g 0 for CPU-only)\n"
+                f"{options}"
                 f"    - Let localm auto-size GPU offload:  "
                 f"localm config n_gpu_layers_auto true\n"
                 f"    - Let localm auto-size the context:  "
@@ -936,6 +1080,10 @@ class VramSizingMixin:
         # when the device-global correction declined.
         blind_note = ("  [yellow](this reading may not see other processes' "
                       "VRAM use)[/yellow]" if self._free_reading_may_be_blind() else "")
+        options = "".join(
+            f"    • {label}:  [bold]{command}[/bold]\n"
+            for label, command in self._vram_fit_options(
+                free, need, kv_cache, overhead, gpu_layers))
         console.print(
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
             f"[bold]{need / 1024**3:.1f} GB[/bold] ({ctx_hint}) but only "
@@ -944,11 +1092,56 @@ class VramSizingMixin:
             f"  Options:\n"
             f"    • Free VRAM first (close the other app, or POST "
             f"/v1/models/unload on its server)\n"
-            f"    • Lower the context:  [bold]-c 32768[/bold]  (or smaller)\n"
-            f"    • Offload fewer layers:  [bold]-g 24[/bold]  "
-            f"(or [bold]-g 0[/bold] for CPU-only)\n"
+            f"{options}"
             f"  Continuing anyway - load may be slow or fail."
         )
+
+    # Smallest context a "lower the context" suggestion names.
+    _FIT_HINT_MIN_CTX = 1024
+
+    def _vram_fit_options(self, budget: int, need: int, kv_cache: int,
+                          overhead: int, gpu_layers: int) -> "list[tuple[str, str]]":
+        """``(label, command)`` suggestions for a load needing *need* bytes of
+        a *budget* it exceeds, given its *kv_cache* and *overhead* charges:
+
+        - a context that fits *budget*, rounded down to whole KiB of tokens
+          and below the current n_ctx, when one of at least
+          ``_FIT_HINT_MIN_CTX`` tokens fits;
+        - for a Mixture-of-Experts model loaded with every layer on the GPU,
+          the smallest n_cpu_moe that fits *budget*, when one does and it is
+          above this load's;
+        - fewer GPU layers."""
+        options = []
+        per_token = self._kv_bytes_per_token() + self._mtp_draft_kv_per_token()
+        fixed = need - kv_cache - self.n_ctx * self._mtp_draft_kv_per_token()
+        if per_token > 0 and budget > fixed:
+            ctx = ((budget - fixed) // per_token // 1024) * 1024
+            ctx = min(ctx, ((self.n_ctx - 1) // 1024) * 1024)
+            if ctx >= self._FIT_HINT_MIN_CTX:
+                options.append(("Lower the context", f"-c {ctx}"))
+        if gpu_layers >= self._DEFAULT_GPU_LAYERS:
+            n = self._smallest_fitting_n_cpu_moe(budget, kv_cache, overhead)
+            if n is not None and n > self._load_n_cpu_moe():
+                options.append(("Keep MoE experts in system RAM",
+                                f"localm config n_cpu_moe {n}"))
+        options.append(("Offload fewer layers", "-g 24  (or -g 0 for CPU-only)"))
+        return options
+
+    def _smallest_fitting_n_cpu_moe(self, budget: int, kv: int,
+                                    overhead: int) -> Optional[int]:
+        """The smallest n_cpu_moe for which every layer on the GPU fits
+        *budget* alongside *kv* and *overhead*, or None when no n_cpu_moe makes
+        it fit (or the model has no routed experts). Pinning layer i's experts
+        frees exactly their bytes (``_moe_expert_bytes_by_layer``)."""
+        by_layer = self._moe_expert_bytes_by_layer()
+        if not by_layer:
+            return None
+        weights = self._vram_model_bytes(0)
+        for n in range(1, max(by_layer) + 2):
+            weights -= by_layer.get(n - 1, 0)
+            if weights + kv + overhead <= budget:
+                return n
+        return None
 
     def _check_context_fit(self, n_ctx: int, current_ctx: int = 0) -> Optional[bool]:
         """Decide WHERE the KV cache for a context of *n_ctx* tokens must live -
@@ -1130,11 +1323,12 @@ class VramSizingMixin:
 
     def _full_offload_parts(self, split_devices: int) -> "tuple[int, int, int]":
         """``(model, kv, overhead)`` bytes a full GPU offload of this load
-        charges: the VRAM-resident weights (``_effective_model_bytes_for_vram``),
-        the KV cache for ``self.n_ctx`` tokens, and the compute overhead for
-        *split_devices* devices plus the MTP draft context and the recurrent
-        state."""
-        model = self._effective_model_bytes_for_vram()
+        charges: the VRAM-resident weights with the CONFIGURED n_cpu_moe
+        (``_vram_model_bytes``; never an automatic choice of an earlier
+        load), the KV cache for ``self.n_ctx`` tokens, and the compute overhead
+        for *split_devices* devices plus the MTP draft context and the
+        recurrent state."""
+        model = self._vram_model_bytes(int(getattr(self, "n_cpu_moe", 0) or 0))
         kv = self.n_ctx * self._kv_bytes_per_token()
         overhead = (self._split_overhead_bytes(split_devices)
                     + self._mtp_draft_context_vram_bytes()
@@ -1166,7 +1360,29 @@ class VramSizingMixin:
         "Free VRAM" is the COMBINED free across every device the load will
         actually spread over when that is measurable (see
         _split_free_total_bytes) - a CONFIGURED split, and equally the IMPLICIT
-        one llama.cpp performs by default on any multi-GPU box."""
+        one llama.cpp performs by default on any multi-GPU box.
+
+        For a Mixture-of-Experts model with no configured ``n_cpu_moe``, the
+        routed experts move to system RAM before any layer does:
+        ``moe_cpu_layers`` is the smallest n_cpu_moe that fits every layer on
+        the GPU (``layers`` 99).
+
+        - On one GPU it is fitted against the free reading, and only when the
+          whole model does not fit.
+        - On 2+ GPUs under llama.cpp's implicit split it is fitted against every
+          device's own charge and the combined reading
+          (:meth:`_split_fitting_n_cpu_moe`), also when the combined reading
+          fits the whole model. When no n_cpu_moe fits every
+          device and the combined reading fits, nothing is pinned. When that
+          per-device fit cannot be made, the experts of every layer are pinned
+          if that fits the combined reading.
+        - On a configured ``gpu_split_indices`` split nothing is pinned
+          automatically.
+
+        Otherwise, when the model does not fit, the experts of every layer stay
+        in system RAM and ``layers`` is sized over the remaining weights
+        (``moe_cpu_layers`` 0 when ``layers`` is 0). ``model`` is always the
+        VRAM-resident weight bytes WITHOUT the automatic choice."""
         free, total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
@@ -1181,18 +1397,49 @@ class VramSizingMixin:
                                      split_devices)
         # Only the EXISTENCE check above needs the raw file size; an n_cpu_moe
         # load's pinned expert weights never draw on this budget.
+        auto_moe = int(getattr(self, "n_cpu_moe", 0) or 0) <= 0
         model, kv, overhead = self._full_offload_parts(split_devices)
+        split_checked = False
+        if auto_moe and split_devices >= 2 and self._moe_expert_bytes_by_layer():
+            split_checked, fitting = self._split_fitting_n_cpu_moe(free, kv, overhead)
+            if fitting is not None:
+                return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total,
+                                        model, kv, overhead, split_devices,
+                                        moe_cpu_layers=fitting)
+            if not split_checked and self._gpu_split_configured():
+                auto_moe = False
         if model <= 0 or free >= model + kv + overhead:
-            layers = self._DEFAULT_GPU_LAYERS  # full offload fits (or nothing left to size)
-        else:
-            weight_budget = free - kv - overhead
-            if weight_budget <= 0:
-                layers = 0                     # no room even for one layer's share
+            return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total, model,
+                                    kv, overhead, split_devices)
+        moe_cpu_layers = 0
+        weights = model
+        by_layer = self._moe_expert_bytes_by_layer() if auto_moe else {}
+        if by_layer:
+            all_layers = max(by_layer) + 1
+            if split_devices < 2:
+                fitting = self._smallest_fitting_n_cpu_moe(free, kv, overhead)
+            elif (not split_checked
+                  and free >= self._vram_model_bytes(all_layers) + kv + overhead):
+                fitting = all_layers
             else:
-                fraction = min(max(weight_budget / model, 0.0), 1.0)
-                layer_count = self._cached_layer_count() or self._ASSUMED_LAYERS
-                layers = max(0, min(self._DEFAULT_GPU_LAYERS, int(fraction * layer_count)))
-        return _AutoLayerBudget(layers, free, total, model, kv, overhead, split_devices)
+                fitting = None
+            if fitting is not None:
+                return _AutoLayerBudget(self._DEFAULT_GPU_LAYERS, free, total,
+                                        model, kv, overhead, split_devices,
+                                        moe_cpu_layers=fitting)
+            moe_cpu_layers = all_layers
+            weights = self._vram_model_bytes(moe_cpu_layers)
+        weight_budget = free - kv - overhead
+        if weight_budget <= 0 or weights <= 0:
+            layers = 0                     # no room even for one layer's share
+        else:
+            fraction = min(max(weight_budget / weights, 0.0), 1.0)
+            layer_count = self._cached_layer_count() or self._ASSUMED_LAYERS
+            layers = max(0, min(self._DEFAULT_GPU_LAYERS, int(fraction * layer_count)))
+        if layers == 0:
+            moe_cpu_layers = 0
+        return _AutoLayerBudget(layers, free, total, model, kv, overhead, split_devices,
+                                moe_cpu_layers=moe_cpu_layers)
 
     def _auto_gpu_layers(self) -> Optional[int]:
         """Pick how many layers to offload to the GPU from free VRAM, or None when
@@ -1220,7 +1467,9 @@ class VramSizingMixin:
         (b) weights + this context's KV cache WOULD fit a clean card (total),
             but not the VRAM actually free right now - something else is
             holding it;
-        (c) neither of the above: the KV cache for the configured context is
+        (c) on 2+ GPUs whose combined free reading holds the whole model: one
+            GPU cannot hold its own share of it;
+        (d) none of the above: the KV cache for the configured context is
             what tips an otherwise-fitting model over the free budget.
 
         Mirrors the same total-vs-free distinction ``_check_vram()`` already
@@ -1244,33 +1493,14 @@ class VramSizingMixin:
             hint = self._vram_holder_hint().rstrip(".")
             return (f"only {budget.free / 1024**3:.1f} of {total / 1024**3:.1f} "
                     f"GB free - {hint}"), True
+        if (budget.split_devices >= 2
+                and budget.free >= budget.model + budget.kv + budget.overhead):
+            return (f"the {budget.split_devices} GPUs have {budget.free / 1024**3:.1f} "
+                    f"GB free combined, but one of them cannot hold its own "
+                    f"share of the model"), True
         return (f"the KV cache for a {self.n_ctx:,}-token context takes "
-                f"{budget.kv / 1024**3:.1f} GB - lower n_ctx to fit more "
-                f"layers on GPU"), True
-
-    def _moe_hint_applicable(self) -> bool:
-        """Whether a partial-offload notice should point a MoE-model user at
-        n_cpu_moe: the load is not already using it (where the hint would be
-        redundant), and this model actually has routed-expert weight tensors
-        pinning would move off VRAM - probed directly rather than trusting a
-        header flag, so a MoE architecture with nothing pinnable in range
-        stays silent too. Reuses this instance's shared parsed tensor entries
-        (see ``_gguf_parsed_tensor_entries``) rather than parsing again - by
-        the time a partial-offload notice is being considered,
-        ``_effective_model_bytes_for_vram`` has already primed it."""
-        if (getattr(self, "n_cpu_moe", 0) or 0) > 0:
-            return False
-        from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
-        try:
-            pinned = gguf_moe_pinned_expert_bytes(
-                Path(self.model_path), 1,
-                _parsed=self._gguf_parsed_tensor_entries())
-        except Exception as exc:  # contracted not to raise - surface if it does
-            from localm.debuglog import logger as _dbg
-            _dbg.debug("gguf MoE expert-byte probe failed (%s); no n_cpu_moe "
-                       "hint this load", type(exc).__name__)
-            return False
-        return bool(pinned and pinned > 0)
+                f"{budget.kv / 1024**3:.1f} GB - lower n_ctx to fit more of "
+                f"the model on the GPU"), True
 
     def _record_gpu_sizing(self, mode: str, layers: int,
                            budget: Optional[_AutoLayerBudget] = None, *,
@@ -1278,11 +1508,16 @@ class VramSizingMixin:
         """Store how ``_effective_gpu_layers()`` chose *layers* as
         ``self.last_gpu_sizing``, a dict with ``mode`` ("configured": auto off
         or an explicit n_gpu_layers; "unmeasurable": auto on, no VRAM reading;
-        "auto": sized from free VRAM), ``layers`` and ``n_ctx``. An "auto"
-        record also carries ``free_bytes``, ``total_bytes``, ``model_bytes``,
-        ``kv_bytes`` and ``overhead_bytes`` from *budget*, and ``cause`` for a
-        partial offload."""
-        record = {"mode": mode, "layers": layers, "n_ctx": self.n_ctx}
+        "auto": sized from free VRAM), ``layers``, ``n_ctx`` and ``n_cpu_moe``
+        (the load's resolved value) with ``n_cpu_moe_auto`` (True when the
+        automatic sizing chose it). An "auto" record also carries
+        ``free_bytes``, ``total_bytes``, ``model_bytes``, ``kv_bytes`` and
+        ``overhead_bytes`` from *budget*, and ``cause`` for a placement that
+        left weights off the GPU."""
+        record = {"mode": mode, "layers": layers, "n_ctx": self.n_ctx,
+                  "n_cpu_moe": self._load_n_cpu_moe(),
+                  "n_cpu_moe_auto": bool(budget is not None
+                                         and budget.moe_cpu_layers > 0)}
         if budget is not None:
             record.update(free_bytes=budget.free, total_bytes=budget.total,
                           model_bytes=budget.model, kv_bytes=budget.kv,
@@ -1291,17 +1526,38 @@ class VramSizingMixin:
             record["cause"] = cause
         self.last_gpu_sizing = record
 
+    def _moe_ram_bytes_per_token(self, n_cpu_moe: int) -> int:
+        """Expert-weight bytes one generated token reads from system RAM when
+        the experts of the first *n_cpu_moe* layers live there: their bytes
+        times the share of experts the router selects per token
+        (``expert_used_count / expert_count``). 0 for a dense model, for
+        *n_cpu_moe* <= 0, or when the header does not declare both counts."""
+        pinned = self._moe_pinned_bytes(n_cpu_moe)
+        if pinned <= 0:
+            return 0
+        from localm.model_manager.gguf import gguf_expert_counts
+        n_expert, n_used = gguf_expert_counts(Path(self.model_path))
+        if n_expert <= 0 or n_used <= 0:
+            return 0
+        return pinned * min(n_used, n_expert) // n_expert
+
     def _effective_gpu_layers(self) -> int:
-        """The n_gpu_layers this load will actually use.
+        """The n_gpu_layers this load will actually use, and the n_cpu_moe it
+        uses (``effective_n_cpu_moe``).
 
         Auto only acts when it is ON and the user left n_gpu_layers at the
         "everything" default (99): an explicit value (e.g. -g 24) is honoured
-        verbatim. When auto sizes a partial offload it prints a one-line
-        notice naming the actual cause and logs it at WARNING. When VRAM is
-        unmeasurable it says so and attempts the configured value.
+        verbatim, and so is a configured n_cpu_moe above 0. For a
+        Mixture-of-Experts model that does not fit, auto keeps routed experts
+        in system RAM before it moves whole layers to the CPU (see
+        :meth:`_auto_gpu_layers_budget`). Whenever auto leaves weights off the
+        GPU it prints a one-line notice naming the actual cause and logs it at
+        WARNING. When VRAM is unmeasurable it says so and attempts the
+        configured value.
 
         Records the decision in ``last_gpu_sizing`` (see
         :meth:`_record_gpu_sizing`)."""
+        self.effective_n_cpu_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
         if not self.n_gpu_layers_auto or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS:
             # Auto off, or an explicit choice: respected as-is.
             self._record_gpu_sizing("configured", self.n_gpu_layers)
@@ -1317,8 +1573,10 @@ class VramSizingMixin:
                        "n_gpu_layers=%s", self.n_gpu_layers)
             self._record_gpu_sizing("unmeasurable", self.n_gpu_layers)
             return self.n_gpu_layers
+        if budget.moe_cpu_layers > 0:
+            self.effective_n_cpu_moe = budget.moe_cpu_layers
         auto = budget.layers
-        if auto >= self._DEFAULT_GPU_LAYERS:
+        if auto >= self._DEFAULT_GPU_LAYERS and budget.moe_cpu_layers == 0:
             self._record_gpu_sizing("auto", auto, budget)
             return auto                        # full offload fits - no scary notice
         count = self._cached_layer_count()
@@ -1328,20 +1586,29 @@ class VramSizingMixin:
         blind = maybe_blind and self._free_reading_may_be_blind()
         blind_note = ("  [yellow](this reading may not see other processes' "
                       "VRAM use)[/yellow]" if blind else "")
+        by_layer = self._moe_expert_bytes_by_layer()
+        moe_layers = len(by_layer)
+        pinned_layers = sum(1 for layer in by_layer if layer < budget.moe_cpu_layers)
+        if auto >= self._DEFAULT_GPU_LAYERS:
+            what = (f"every layer on the GPU, with the routed experts of "
+                    f"{pinned_layers}/{moe_layers} layers in system RAM "
+                    f"(Mixture-of-Experts)")
+            override = "Set n_cpu_moe or n_gpu_layers to override"
+        elif budget.moe_cpu_layers > 0:
+            what = (f"offloading {auto}/{of} layers to the GPU, the rest on CPU "
+                    f"(slower), with every layer's routed experts in system RAM "
+                    f"(Mixture-of-Experts)")
+            override = "Set n_cpu_moe or n_gpu_layers to override"
+        else:
+            what = (f"offloading {auto}/{of} layers to the GPU, the rest on CPU "
+                    f"(slower)")
+            override = "Set n_gpu_layers to override"
         console.print(
-            f"[yellow]  gpu layers auto:[/yellow] offloading {auto}/{of} layers to "
-            f"the GPU, the rest on CPU (slower) - {cause}.{blind_note} Set "
-            f"n_gpu_layers to override, or n_gpu_layers_auto false."
+            f"[yellow]  gpu layers auto:[/yellow] {what} - {cause}.{blind_note} "
+            f"{override}, or n_gpu_layers_auto false."
         )
         from localm.debuglog import logger as _dbg
-        _dbg.warning("gpu layers auto: %s: offloading %s/%s layers to the GPU, the "
-                     "rest on CPU (slower) - %s%s", Path(self.model_path).name, auto,
-                     of, cause, " (the free reading may not see other processes' "
+        _dbg.warning("gpu layers auto: %s: %s - %s%s", Path(self.model_path).name,
+                     what, cause, " (the free reading may not see other processes' "
                      "VRAM use)" if blind else "")
-        if self._moe_hint_applicable():
-            console.print(
-                "[dim]  hint: this is a Mixture-of-Experts model - n_cpu_moe "
-                "pins routed-expert weights to system RAM instead of VRAM, "
-                "freeing GPU room for more layers.[/dim]"
-            )
         return auto

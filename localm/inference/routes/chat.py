@@ -112,10 +112,9 @@ def register(app: FastAPI, ctx) -> None:
                             if route.routed and engine is not None else None)
         if isinstance(routed_placement, dict) and routed_placement.get("degraded"):
             from localm.debuglog import logger as _dbg
-            _dbg.warning("capability routing: %s answers with %s/%s layers on the GPU, "
-                         "the rest on the CPU (slower)", route.resolved,
-                         routed_placement.get("gpu_layers_offloaded"),
-                         routed_placement.get("gpu_layers_total"))
+            from localm.inference.engine import describe_gpu_placement
+            _dbg.warning("capability routing: %s answers with %s (slower)",
+                         route.resolved, describe_gpu_placement(routed_placement))
 
         if engine is None:
             engine = await _hs.get_engine(req.model, on_status=say)

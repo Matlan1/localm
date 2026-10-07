@@ -205,6 +205,22 @@ def model_display_name(model_path: str) -> str:
     return p.stem
 
 
+def describe_gpu_placement(placement: dict) -> str:
+    """One phrase naming an ``Engine.gpu_placement`` dict's placement:
+    ``"<offloaded>/<total> layers on the GPU"``, followed by ``", the rest on
+    the CPU"`` when fewer than all landed there and by ``", routed experts of
+    <n> layers in system RAM"`` when it carries ``moe_cpu_layers``."""
+    offloaded = placement.get("gpu_layers_offloaded")
+    total = placement.get("gpu_layers_total")
+    text = f"{offloaded}/{total} layers on the GPU"
+    if isinstance(offloaded, int) and isinstance(total, int) and offloaded < total:
+        text += ", the rest on the CPU"
+    moe = placement.get("moe_cpu_layers")
+    if isinstance(moe, int) and moe > 0:
+        text += f", routed experts of {moe} layers in system RAM"
+    return text
+
+
 class Engine:
     """
     High-level wrapper: loads a backend and streams chat completions.
@@ -298,9 +314,14 @@ class Engine:
         e.g. before any load, or for a backend that places layers itself
         without a layer-count knob (HF's device_map="auto").
 
+        ``moe_cpu_layers`` is present when the load kept the routed experts of
+        that many layers in system RAM (a Mixture-of-Experts model with
+        n_cpu_moe, configured or chosen by auto sizing).
+
         ``degraded`` is True whenever fewer than the full layer count landed
-        on the GPU, whatever the reason (VRAM-constrained auto-sizing, or an
-        explicit partial n_gpu_layers): a caller of /v1/models/load has no
+        on the GPU or any layer's experts stayed in system RAM, whatever the
+        reason (VRAM-constrained auto-sizing, or an explicit partial
+        n_gpu_layers or n_cpu_moe): a caller of /v1/models/load has no
         visibility into the server's own config either way, so this is
         reported unconditionally rather than only for the auto-sized case, and
         a load response can tell a full GPU load from a silent CPU fallback."""
@@ -308,11 +329,16 @@ class Engine:
         total = getattr(self._backend, "gpu_layers_total", None)
         if offloaded is None or not total:
             return None
-        return {
+        moe = getattr(self._backend, "moe_cpu_layers", 0)
+        moe = moe if isinstance(moe, int) and moe > 0 else 0
+        placement = {
             "gpu_layers_offloaded": offloaded,
             "gpu_layers_total": total,
-            "degraded": offloaded < total,
+            "degraded": offloaded < total or moe > 0,
         }
+        if moe:
+            placement["moe_cpu_layers"] = moe
+        return placement
 
     def full_offload_vram_bytes(self) -> Optional[int]:
         """Free VRAM the next load needs for every layer to go on the GPU, as

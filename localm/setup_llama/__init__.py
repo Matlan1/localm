@@ -89,7 +89,8 @@ from localm.setup_llama._common import (
     console, _flush_stdin,
 )
 from localm.setup_llama.pins import (
-    DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _AMD_ROCM_ASSET_TAG, _UPSTREAM_REPO,
+    DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _ROCM_BUILD, _ROCM_CPU_ASSET, _ROCM_CPU_TAG,
+    _AMD_ROCM_ASSET_TAG, _UPSTREAM_REPO,
     _PINNED_TAG, _PIN_CONFIRMATION, _TRACK_LATEST, _TRACK_DEFAULT, _CUDA_LINUX_REPO,
     _PINNED_FALLBACK_SHA256, _ASSET_MATCH, _UPSTREAM_BACKENDS,
 )
@@ -139,6 +140,10 @@ from localm.setup_llama.load_probe import (
     _name_missing_shared_lib, _PROBE_NO_BACKENDS, _PROBE_ABI_MISMATCH,
     _ABI_REJECT_PREFIX, _LOAD_PROBE_CODE, _is_abi_rejection, _native_loads_ok,
 )
+from localm.setup_llama.rocm_cpu import (
+    CPU_OVERLAY_MARKER, install_rocm_simd_cpu, installed_cpu_overlay, rocm_build,
+    rocm_cpu_overlay_url,
+)
 from localm.setup_llama.provision import (
     _provision_backend, _warn_off_profile, _FLOOR_TAG_DESCRIPTION, _floor_at_pinned_tag,
     _sycl_backend_note, _provision_with_fallback,
@@ -153,7 +158,8 @@ __all__ = [
     "_BLACKWELL_MIN_CAP", "_BLAS_DIRS_REQUIRING_KERNELS", "blas_kernel_problems",
     "_BLAS_LIBRARY_DIRS", "_bundle_missing_native_deps", "check_runtime_update",
     "_clear_target", "_clear_target_or_refuse", "_clearable_files", "console",
-    "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "_CUDA_LINE",
+    "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",
+    "_CUDA_LINE",
     "_CUDA_LINUX_REPO", "_CUDA_RUNTIME_PYPI_PACKAGES", "_cuda_setup_dialogue",
     "DEFAULT_URL", "DEFAULT_URL_SHA256", "_diagnose_bad_artifact", "_download",
     "_DOWNLOAD_STALL_TIMEOUT", "_DownloadResult", "_ensure_importable",
@@ -162,8 +168,8 @@ __all__ = [
     "_fetch_cuda_runtime_libs", "_fetch_pypi_runtime_lib", "_fetch_verified",
     "_files_in_use", "_floor_at_pinned_tag", "_FLOOR_TAG_DESCRIPTION", "_flush_stdin",
     "_has_vendor_library", "_human_mb", "_informative_error_line",
-    "_install_runtime_wheel", "installed_backend", "installed_build",
-    "installed_runtime_identity",
+    "install_rocm_simd_cpu", "_install_runtime_wheel", "installed_backend",
+    "installed_build", "installed_cpu_overlay", "installed_runtime_identity",
     "_is_abi_rejection", "is_safe_tag", "_is_supported_archive", "_is_wanted",
     "_KNOWN_SHARED_LIB_PACKAGES", "_latest_tag", "_lib_name", "_LIBGOMP_DEB_MIN_BYTES",
     "_LIBGOMP_DEB_SHA256", "_LIBGOMP_DEB_URL", "_LIBGOMP_LICENSE_NOTICE",
@@ -180,7 +186,8 @@ __all__ = [
     "_read_marker", "_recent_tags", "_record_provisioned_backend",
     "_record_runtime_history", "_refresh_install_record", "_release_assets",
     "_RELEASE_TAG_RE", "_repo_runtime_lib", "_resolve_backend_asset",
-    "_resolve_backend_url", "_resolve_cuda_pair", "_ROCM_TAG", "runtime_history",
+    "_resolve_backend_url", "_resolve_cuda_pair", "rocm_build", "_ROCM_BUILD",
+    "_ROCM_CPU_ASSET", "_ROCM_CPU_TAG", "rocm_cpu_overlay_url", "_ROCM_TAG", "runtime_history",
     "_RUNTIME_HISTORY_MAX", "_runtime_pkg_dir", "RuntimeInUseError",
     "_safe_extractall_tar", "_safe_is_file", "set_pinned_tag", "_sha256_file",
     "_sniff_content_kind", "_sycl_backend_note", "_tag_for", "TAG_HELP", "_TAG_SAFE_RE",

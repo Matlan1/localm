@@ -182,9 +182,8 @@ def build(engines: EngineCache) -> Dict[str, dict]:
         # refusing.
         placement = getattr(engine, "gpu_placement", None)
         if placement and placement.get("degraded"):
-            msg += (f" ({placement['gpu_layers_offloaded']}/"
-                    f"{placement['gpu_layers_total']} layers on GPU, "
-                    f"the rest on CPU - slower)")
+            from localm.inference.engine import describe_gpu_placement
+            msg += f" ({describe_gpu_placement(placement)} - slower)"
         return _text_result(msg)
 
     def setup_embeddings(args: dict) -> dict:

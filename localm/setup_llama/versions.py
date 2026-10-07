@@ -17,8 +17,8 @@ import click
 from localm import config
 from localm.debuglog import logger
 from localm.setup_llama._common import console
-from localm.setup_llama.pins import (_PINNED_TAG, _ROCM_TAG, _TRACK_DEFAULT, _TRACK_LATEST,
-                                     _UPSTREAM_REPO)
+from localm.setup_llama.pins import (_PINNED_TAG, _ROCM_BUILD, _ROCM_TAG, _TRACK_DEFAULT,
+                                     _TRACK_LATEST, _UPSTREAM_REPO)
 import localm.setup_llama as _sl
 
 # How many past provisions to remember. Rollback only ever needs the previous
@@ -213,7 +213,8 @@ def check_runtime_update() -> dict:
     newer build is "available" - that newer build is exactly what it pinned away
     from), else upstream's newest when the user opted into tracking, else the
     shipped ``_PINNED_TAG``. ``amd-rocm`` compares against its fixed
-    ``_ROCM_TAG``, since that build is never resolved from an upstream tag at all.
+    ``_ROCM_BUILD`` (the lemonade-sdk build plus its SIMD CPU backend), since
+    that build is never resolved from an upstream tag at all.
 
     ONLY THE TRACKING CASE MAKES A NETWORK CALL. The default path answers from a
     constant, so the GUI's runtime-update card does not reach GitHub on every
@@ -244,7 +245,7 @@ def check_runtime_update() -> dict:
     current = _sl.installed_build()
     pin = _sl.pinned_tag()
     if backend == "amd-rocm":
-        target = _ROCM_TAG
+        target = _ROCM_BUILD
     elif pin:
         target = pin
     elif tracks_latest():

@@ -299,11 +299,12 @@ def _s(text):
     return struct.pack("<Q", len(raw)) + raw
 
 
-def _write_gguf(path, *, arch, block_count, vocab, tensors, nextn=0):
+def _write_gguf(path, *, arch, block_count, vocab, tensors, nextn=0, extra_kv=()):
     kv = [("general.architecture", _T_STRING, arch),
           (f"{arch}.block_count", _T_UINT32, block_count)]
     if nextn:
         kv.append((f"{arch}.nextn_predict_layers", _T_UINT32, nextn))
+    kv += [(f"{arch}.{key}", _T_UINT32, val) for key, val in extra_kv]
     kv.append(("tokenizer.ggml.tokens", _T_ARRAY, [f"t{i}" for i in range(vocab)]))
     out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", len(tensors), len(kv))]
     for key, vtype, val in kv:
@@ -418,13 +419,71 @@ class TestBackendWiring:
         out_on = next(c for c in on.default if c.holds_output)
         assert out_on.logits == 2 * self._VOCAB * 2048 * 4
 
-    def test_configured_split_or_cpu_load_skips_the_fit(self, tmp_path):
+    def test_the_recurrent_state_is_charged_to_the_layers_that_keep_it(self, tmp_path):
+        tensors = [("token_embd.weight", 4000)]
+        for il in range(4):
+            tensors += [(f"blk.{il}.attn_q.weight", 3000), (f"blk.{il}.ffn.weight", 1000)]
+            if il < 2:
+                tensors.append((f"blk.{il}.ssm_conv1d.weight", 256))
+        tensors += [("output_norm.weight", 64), ("output.weight", 5000)]
+        path = _write_gguf(tmp_path / "hybrid.gguf", arch="qwen35moe", block_count=4,
+                           vocab=self._VOCAB, tensors=tensors, nextn=1,
+                           extra_kv=[("ssm.conv_kernel", 4), ("ssm.state_size", 16),
+                                     ("ssm.inner_size", 64), ("ssm.group_count", 1)])
+        b = GgufBackend(str(path), n_ctx=4096, n_gpu_layers=99)
+        b._VRAM_OVERHEAD_BYTES = 1000
+        b._gguf_kv_bpt = 10
+        devices = [{"index": i, "free": 10**9, "total": 10**9 + 10} for i in range(2)]
+        with mock.patch.object(discover, "implicit_split_devices",
+                               return_value=devices), \
+                mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+            plan = b._implicit_split_fit(99)
+        per_layer = (3 * (64 + 2 * 1 * 16) + 16 * 64) * 4
+        assert b._recurrent_state_vram_bytes() == 2 * per_layer
+        kv = 4096 * 10 // 3
+        assert [c.layers for c in plan.default] == [3, 1]
+        assert [c.kv for c in plan.default] == [3 * kv + 2 * per_layer, 0]
+
+    def test_the_mtp_draft_context_is_charged_where_the_mtp_layers_are(self, tmp_path):
+        b, devices = self._backend(tmp_path, [10**9, 10**9])
+        with mock.patch.object(discover, "implicit_split_devices",
+                               return_value=devices), \
+                mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+            off = b._implicit_split_fit(99)
+            b.mtp_enabled = True
+            on = b._implicit_split_fit(99)
+        draft = b._mtp_draft_context_vram_bytes()
+        assert draft > 0
+        assert [c.kv for c in on.default] == [off.default[0].kv, off.default[1].kv + draft]
+
+    def test_a_cpu_load_skips_the_fit(self, tmp_path):
         b, devices = self._backend(tmp_path, [10**9, 10**9])
         with mock.patch.object(discover, "implicit_split_devices",
                                return_value=devices):
             assert b._implicit_split_fit(0) is None
-            b.n_cpu_moe = 2
-            assert b._implicit_split_fit(99) is None
+
+    def test_experts_kept_in_system_ram_are_not_charged_to_any_device(self, tmp_path):
+        tensors = [("token_embd.weight", 4000)]
+        for il in range(4):
+            tensors += [(f"blk.{il}.attn_q.weight", 3000),
+                        (f"blk.{il}.ffn_up_exps.weight", 2000),
+                        (f"blk.{il}.ffn_down_exps.weight", 2000)]
+        tensors += [("output_norm.weight", 64), ("output.weight", 5000)]
+        path = _write_gguf(tmp_path / "moe.gguf", arch="qwen3moe", block_count=4,
+                           vocab=self._VOCAB, tensors=tensors)
+        devices = [{"index": i, "free": 10**9, "total": 10**9 + 10} for i in range(2)]
+        plans = {}
+        for n_cpu_moe in (0, 3):
+            b = GgufBackend(str(path), n_ctx=4096, n_gpu_layers=99, n_cpu_moe=n_cpu_moe)
+            b._VRAM_OVERHEAD_BYTES = 1000
+            b._gguf_kv_bpt = 10
+            with mock.patch.object(discover, "implicit_split_devices",
+                                   return_value=devices), \
+                    mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+                plans[n_cpu_moe] = b._implicit_split_fit(99)
+        weights = {n: sum(c.weights for c in plan.default) for n, plan in plans.items()}
+        assert weights[0] == 4 * 7000
+        assert weights[0] - weights[3] == 3 * 4000
 
     def test_load_native_passes_the_mapping_and_reports_it(self, tmp_path):
         b, devices = self._backend(tmp_path, self._FREES)

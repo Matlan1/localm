@@ -29,6 +29,7 @@ import pytest
 from localm.inference.backends.gguf import GgufBackend
 from localm.model_manager.gguf import (_gguf_tensor_offset_entries,
                                        gguf_input_layer_bytes,
+                                       gguf_block_bytes,
                                        gguf_moe_pinned_expert_bytes)
 
 
@@ -377,8 +378,8 @@ class TestEffectiveModelBytesForVram:
     def test_memoised_across_repeated_calls(self, tmp_path):
         tensors = [("blk.0.ffn_gate_exps.weight", [4], 0, 500)]
         b, f = self._backend(tmp_path, n_cpu_moe=1, tensors=tensors)
-        with patch("localm.model_manager.gguf.gguf_moe_pinned_expert_bytes",
-                   wraps=gguf_moe_pinned_expert_bytes) as spy:
+        with patch("localm.model_manager.gguf.gguf_block_bytes",
+                   wraps=gguf_block_bytes) as spy:
             first = b._effective_model_bytes_for_vram()
             second = b._effective_model_bytes_for_vram()
         assert first == second
@@ -555,10 +556,13 @@ class TestAutoGpuLayersHonoursNCpuMoe:
         kv_bytes_per_token = 1*4*16*4 = 256. n_ctx=64 -> kv_cache = 16,384.
         overhead = 10,000.
           WITHOUT n_cpu_moe: need_full = 902,000+16,384+10,000 = 928,384.
-          free=500,000 < 928,384 -> full offload does NOT fit -> partial (<99).
+          free=500,000 < 928,384 -> the whole model does NOT fit, so auto
+          sizing keeps the only layer's experts in system RAM itself
+          (moe_cpu_layers 1) with the layer on the GPU (99).
           WITH n_cpu_moe=1 (the only layer pinned): effective weights = 2,000
           (just attn). need_full_effective = 2,000+16,384+10,000 = 28,384.
-          free (500,000) >= 28,384 -> full offload FITS -> 99."""
+          free (500,000) >= 28,384 -> full offload FITS -> 99, nothing more
+          to place."""
         tensors = [
             ("blk.0.attn_q.weight", [4], 0, 2_000),
             ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),
@@ -575,38 +579,25 @@ class TestAutoGpuLayersHonoursNCpuMoe:
         p1, p2, p3 = self._vram(500_000, 1_500_000)
         with p1, p2, p3, \
              patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
-            n_off = b_off._auto_gpu_layers()
-        assert n_off is not None and n_off < 99   # cannot fully offload the whole file
+            off = b_off._auto_gpu_layers_budget()
+        assert (off.layers, off.moe_cpu_layers) == (99, 1)   # auto keeps the experts in RAM
 
         b_on = GgufBackend(str(f), n_ctx=64, n_cpu_moe=1)
         p1, p2, p3 = self._vram(500_000, 1_500_000)
         with p1, p2, p3, \
              patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
-            n_on = b_on._auto_gpu_layers()
-        assert n_on == 99   # full offload fits once the experts are pinned
+            on = b_on._auto_gpu_layers_budget()
+        assert (on.layers, on.moe_cpu_layers) == (99, 0)   # fits with the configured pinning
 
 
 # --------------------------------------------------------------------------- #
-#  The partial-offload notice's MoE (n_cpu_moe) hint                          #
+#  One header parse per sizing decision                                        #
 # --------------------------------------------------------------------------- #
 
-class TestAutoGpuLayersMoeHintOnPartialOffload:
-    """A partial-offload notice should point a MoE-model user at n_cpu_moe -
-    but only when it isn't already in use and the model actually has
-    pinnable expert weights (VramSizingMixin._moe_hint_applicable), never for
-    a dense model where the knob would do nothing."""
+class TestAutoGpuLayersSharesOneParse:
+    """The auto decision reads the input-layer bytes and the per-layer expert
+    bytes from ONE tensor-info parse of the file."""
 
-    @staticmethod
-    def _vram(free, total):
-        return patch.object(
-            GgufBackend, "_split_free_total_bytes",
-            return_value=(None, None, 0)), \
-            patch.object(GgufBackend, "_free_vram_bytes", return_value=free), \
-            patch.object(GgufBackend, "_total_vram_bytes", return_value=total)
-
-    # Same single-layer MoE shape as TestAutoGpuLayersHonoursNCpuMoe: attn
-    # 2,000 B + ffn_gate_exps 900,000 B, free=500,000 < model+kv+overhead, so
-    # the load is a partial offload and the notice (and hint) must fire.
     _MOE_KV = [("general.architecture", _T_STRING, "testmoe"),
                ("testmoe.block_count", _T_UINT32, 1),
                ("testmoe.embedding_length", _T_UINT32, 64),
@@ -617,103 +608,20 @@ class TestAutoGpuLayersMoeHintOnPartialOffload:
         ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),
     ]
 
-    @staticmethod
-    def _flat(capsys) -> str:
-        # console.print() word-wraps at the Console's detected width (~80 cols
-        # under capsys, which is not a real terminal), so a multi-word phrase
-        # can straddle a "\n" the wrap inserted. Collapse all whitespace runs
-        # to a single space before checking a phrase.
-        return " ".join(capsys.readouterr().out.lower().split())
-
-    def test_hint_shown_for_moe_model_not_yet_using_n_cpu_moe(self, tmp_path, capsys):
+    def test_underlying_parse_shared_by_the_whole_decision(self, tmp_path, capsys):
         f = tmp_path / "moe.gguf"
         _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
         b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
                         n_cpu_moe=0)
-        p1, p2, p3 = self._vram(500_000, 1_500_000)
-        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
-            n = b._effective_gpu_layers()
-        assert n < 99   # partial - the notice (and hint) must have fired
-        out = self._flat(capsys)
-        assert "n_cpu_moe" in out
-        assert "mixture-of-experts" in out
-
-    def test_hint_not_shown_when_n_cpu_moe_already_set(self, tmp_path, capsys):
-        f = tmp_path / "moe.gguf"
-        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
-        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
-                        n_cpu_moe=1)
-        # n_cpu_moe=1 pins the 900,000 B expert tensor off the VRAM budget, so
-        # the SAME free/total TestAutoGpuLayersHonoursNCpuMoe uses to prove a
-        # pinned load fits FULLY (99) would fit here too and never reach the
-        # notice at all. Free must stay below the PINNED need (attn 2,000 +
-        # kv 16,384 + overhead 10,000 = 28,384) so this load is still partial
-        # with pinning active, and the suppressed hint is actually exercised.
-        p1, p2, p3 = self._vram(15_000, 1_500_000)
-        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
-            n = b._effective_gpu_layers()
-        assert n < 99   # still partial even with the experts pinned
-        out = self._flat(capsys)
-        assert "gpu layers auto" in out   # the partial-offload notice itself still fires
-        assert "n_cpu_moe" not in out     # already using it - the hint would be redundant
-
-    def test_hint_not_shown_for_a_dense_model(self, tmp_path, capsys):
-        tensors = [("blk.0.attn_q.weight", [4], 0, 2_000)]
-        kv = [("general.architecture", _T_STRING, "dense"),
-              ("dense.block_count", _T_UINT32, 1),
-              ("dense.embedding_length", _T_UINT32, 64),
-              ("dense.attention.head_count", _T_UINT32, 4),
-              ("dense.attention.head_count_kv", _T_UINT32, 4)]
-        f = tmp_path / "dense.gguf"
-        _gguf_with_tensors(f, kv, tensors)
-        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
-                        n_cpu_moe=0)
-        p1, p2, p3 = self._vram(500, 1_500_000)
-        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000):
-            n = b._effective_gpu_layers()
-        assert n < 99   # partial - the notice itself must have fired
-        out = self._flat(capsys)
-        assert "gpu layers auto" in out
-        assert "n_cpu_moe" not in out   # nothing pinnable - the hint would be noise
-
-    def test_hint_probe_failure_degrades_to_no_hint_not_a_crash(self, tmp_path, capsys):
-        # gguf_moe_pinned_expert_bytes is documented never-raising, but its
-        # tensor-name matching is not itself wrapped, so a pathological file
-        # (or any other unexpected failure) can still raise there. The hint
-        # probe must degrade to "no hint" like every other sizing probe in
-        # this file, never abort the load over a hint.
-        f = tmp_path / "moe.gguf"
-        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
-        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
-                        n_cpu_moe=0)
-        p1, p2, p3 = self._vram(500_000, 1_500_000)
-        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000), \
-             patch("localm.model_manager.gguf.gguf_moe_pinned_expert_bytes",
-                   side_effect=ValueError("simulated probe failure")):
-            n = b._effective_gpu_layers()   # must not raise
-        assert n < 99
-        out = self._flat(capsys)
-        assert "gpu layers auto" in out   # the main notice still fires
-        assert "n_cpu_moe" not in out     # degraded to no hint, not a crash
-
-    def test_underlying_parse_shared_with_the_hint_probe(self, tmp_path, capsys):
-        # _moe_hint_applicable runs right after the auto-layers budget in the
-        # same _effective_gpu_layers() call, and both used to read the file's
-        # tensor-info section independently. The underlying parse must be
-        # shared across the whole call, not only within
-        # _effective_model_bytes_for_vram.
-        f = tmp_path / "moe.gguf"
-        _gguf_with_tensors(f, self._MOE_KV, self._MOE_TENSORS)
-        b = GgufBackend(str(f), n_ctx=64, n_gpu_layers=99, n_gpu_layers_auto=True,
-                        n_cpu_moe=0)
-        p1, p2, p3 = self._vram(500_000, 1_500_000)
-        with p1, p2, p3, patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000), \
+        with patch.object(GgufBackend, "_split_free_total_bytes",
+                          return_value=(None, None, 0)), \
+             patch.object(GgufBackend, "_free_vram_bytes", return_value=500_000), \
+             patch.object(GgufBackend, "_total_vram_bytes", return_value=1_500_000), \
+             patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 10_000), \
              patch("localm.model_manager.gguf._gguf_tensor_offset_entries",
                    wraps=_gguf_tensor_offset_entries) as spy:
             n = b._effective_gpu_layers()
-        assert n < 99   # partial - both the budget and the hint probe ran
-        out = self._flat(capsys)
-        assert "n_cpu_moe" in out   # confirms the hint probe actually ran
+        assert (n, b.effective_n_cpu_moe) == (99, 1)
         assert spy.call_count == 1
 
 

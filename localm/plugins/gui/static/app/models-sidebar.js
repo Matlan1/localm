@@ -1082,12 +1082,19 @@ export async function switchModel(model) {
 // VRAM still loads (the backend deliberately defers to a partial/zero GPU
 // offload rather than refusing), so a plain "switched" toast would read as
 // success even when the load quietly fell back to (slow) CPU layers -
-// res.degraded (from /api/models/load's gpu_layers_offloaded/gpu_layers_total)
+// res.degraded (from /api/models/load's gpu_layers_offloaded/gpu_layers_total,
+// and moe_cpu_layers when routed experts stayed in system RAM)
 // says so; warn instead of a bare success toast.
 export function toastLoadResult(res, model) {
   if (res && res.degraded) {
-    toast(`Model switched to ${model} (${res.gpu_layers_offloaded}/` +
-          `${res.gpu_layers_total} layers on GPU, rest on CPU - slower)`, true);
+    const parts = [];
+    if (res.gpu_layers_offloaded < res.gpu_layers_total) {
+      parts.push(`${res.gpu_layers_offloaded}/${res.gpu_layers_total} layers on GPU, rest on CPU`);
+    }
+    if (res.moe_cpu_layers > 0) {
+      parts.push(`experts of ${res.moe_cpu_layers} layers in system RAM`);
+    }
+    toast(`Model switched to ${model} (${parts.join(", ") || "partly on CPU"} - slower)`, true);
   } else {
     toast("Model switched to " + model);
   }
