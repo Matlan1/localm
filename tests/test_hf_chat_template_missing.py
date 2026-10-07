@@ -48,6 +48,7 @@ def _drive_dispatch(monkeypatch, chat_stream):
     class _FakeWorker:
         last_finish_reason = "stop"
         supports_images = False
+        processor_error = None
         can_embed = False
         resolved_device = "cpu"
 
