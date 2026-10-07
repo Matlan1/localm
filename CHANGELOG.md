@@ -230,6 +230,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   acceptance rate and whether the replies matched MTP off.
 
 ### Fixed
+- **Replies start appearing as soon as the model writes them.** Every reply was
+  held back until about 48 characters had been generated, and a reply shorter
+  than that appeared only once it was complete. On a HuggingFace-format model
+  that added two to three seconds before the first words showed. Text is now
+  held back only while it could still turn out to be one of a model's internal
+  markers, so the answer after a reasoning block streams at once too.
+  A Llama 3 role header that a model writes out as text no longer shows up in
+  a longer reply.
 - **A model loaded while another one sits idle in VRAM now goes fully on the GPU.**
   localm decided whether a second model fit beside the first from its file size,
   while the loader also needs room for the context's KV cache and its working

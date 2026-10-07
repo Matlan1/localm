@@ -19,35 +19,38 @@ no-op, so a backend that also scrubs internally is safe.
 
 from __future__ import annotations
 
+import functools
 import re
+from re import _constants as _sre_constants
+from re import _parser as _sre_parser
 from typing import Iterator, Optional
 
-# Reasoning-channel openers/closers -> canonical think tags. Whitespace inside
-# the tag is tolerated.
+# Reasoning-channel openers/closers -> canonical think tags. Up to four
+# whitespace characters inside the tag are tolerated.
 # Harmony: <|channel|>analysis<|message|>REASONING ... <|channel|>final<|message|>ANSWER
 # Gemma 4: <|channel>thought / REASONING / <channel|>ANSWER
 _THINK_OPEN_RE = re.compile(
-    r"<\|?\s*channel\s*\|?>"
+    r"<\|?\s{0,4}channel\s{0,4}\|?>"
     r"(thought|thinking|analysis|reasoning|commentary|reflection)"
-    r"\n?(<\|?\s*message\s*\|?>)?"
+    r"\n?(<\|?\s{0,4}message\s{0,4}\|?>)?"
 )
 _THINK_CLOSE_RE = re.compile(
-    r"<\s*channel\s*\|>"                                      # gemma4 close
-    r"|<\|?\s*channel\s*\|?>final\n?(<\|?\s*message\s*\|?>)?"  # harmony final-channel switch
+    r"<\s{0,4}channel\s{0,4}\|>"                                      # gemma4 close
+    r"|<\|?\s{0,4}channel\s{0,4}\|?>final\n?(<\|?\s{0,4}message\s{0,4}\|?>)?"  # harmony final-channel switch
 )
 
 # Native reasoning tags emitted without the harmony/Gemma channel wrapper.
 # "think" alone is excluded so canonical <think>/</think> tags pass through
 # untouched and the transform stays idempotent.
 _THINK_BARE_OPEN_RE = re.compile(
-    r"<\s*(?:reasoning|thinking|thought|reflection)\s*>", re.IGNORECASE)
+    r"<\s{0,4}(?:reasoning|thinking|thought|reflection)\s{0,4}>", re.IGNORECASE)
 _THINK_BARE_CLOSE_RE = re.compile(
-    r"<\s*/\s*(?:reasoning|thinking|thought|reflection)\s*>", re.IGNORECASE)
+    r"<\s{0,4}/\s{0,4}(?:reasoning|thinking|thought|reflection)\s{0,4}>", re.IGNORECASE)
 
 _MARKER_RE = re.compile(
-    r"<\|?\s*channel\s*\|?>"                                  # leftover channel tag
-    r"|<\s*channel\s*\|>"                                     # leftover gemma4 close
-    r"|<\|?\s*message\s*\|?>"                                 # stray harmony separator
+    r"<\|?\s{0,4}channel\s{0,4}\|?>"                                  # leftover channel tag
+    r"|<\s{0,4}channel\s{0,4}\|>"                                     # leftover gemma4 close
+    r"|<\|?\s{0,4}message\s{0,4}\|?>"                                 # stray harmony separator
     r"|<\|start\|>(assistant|user|system)?"
     r"|<\|return\|>"
     r"|<\|turn>(user|model|assistant|system)?\n?"            # Gemma 4 turn open
@@ -56,7 +59,7 @@ _MARKER_RE = re.compile(
     # them out of this same stream.
     r"|<\|tool>|<tool\|>"                                     # Gemma 4 tool declarations
     r"|<\|think\|>|<think\|>"                                 # Gemma 4 thinking enable token
-    r"|<unused\d+>?"                                          # Gemma reserved tokens
+    r"|<unused\d{1,8}>?"                                          # Gemma reserved tokens
     r"|\[TOOL_CALLS\]"                                        # Mistral tool-call token
     # A turn-OPEN marker carries the role word, so the role suffix is matched
     # with it - removing the marker alone leaves a bare "model" / "assistant" at
@@ -71,20 +74,107 @@ _MARKER_RE = re.compile(
 )
 
 # Longest text a partial marker could span across two stream pieces. Stays at or
-# above the longest string _MARKER_RE can match, or scrub_stream commits a cut
+# above the longest string _SCRUB_RE can match, or scrub_stream commits a cut
 # inside a marker and leaks its tail as text.
-# See test_marker_hold_covers_every_marker_at_every_stream_split.
-_MARKER_HOLD = 48
+# See test_marker_hold_covers_the_longest_possible_match.
+_MARKER_HOLD = 56
+
+
+# Every substitution scrub_text makes, first listed wins at a position. Each
+# pattern starts with a character in _MARKER_START, which scrub_stream relies on
+# to release text early.
+# See test_every_scrub_pattern_starts_with_a_marker_start_character.
+_SCRUB_SUBS = (
+    (re.compile(re.escape('<|"|>')), '"'),            # Gemma 4 quote token
+    (_THINK_OPEN_RE, "<think>\n"),
+    (_THINK_CLOSE_RE, "\n</think>\n"),
+    (_THINK_BARE_OPEN_RE, "<think>"),                  # native <reasoning> etc.
+    (_THINK_BARE_CLOSE_RE, "</think>"),
+    (_MARKER_RE, ""),
+)
+_MARKER_START = "<["
+
+# _SCRUB_SUBS as one alternation: scrub_text rewrites every marker in a single
+# left-to-right pass, and a rewrite's output is never matched again.
+# See test_adjacent_markers_stream_like_one_shot.
+_SCRUB_RE = re.compile("|".join(
+    f"(?P<s{i}>{'(?i:' + rx.pattern + ')' if rx.flags & re.IGNORECASE else rx.pattern})"
+    for i, (rx, _replacement) in enumerate(_SCRUB_SUBS)))
+_SCRUB_REPLACEMENTS = {f"s{i}": replacement
+                       for i, (_rx, replacement) in enumerate(_SCRUB_SUBS)}
 
 
 def scrub_text(text: str) -> str:
     """Apply marker normalisation/removal to a complete text chunk."""
-    text = text.replace('<|"|>', '"')          # Gemma 4 quote token
-    text = _THINK_OPEN_RE.sub("<think>\n", text)
-    text = _THINK_CLOSE_RE.sub("\n</think>\n", text)
-    text = _THINK_BARE_OPEN_RE.sub("<think>", text)    # native <reasoning> etc.
-    text = _THINK_BARE_CLOSE_RE.sub("</think>", text)
-    return _MARKER_RE.sub("", text)
+    return _SCRUB_RE.sub(lambda m: _SCRUB_REPLACEMENTS[m.lastgroup], text)
+
+
+def _tagged(items, ignorecase: bool) -> list:
+    return [(op, av, ignorecase) for op, av in items]
+
+
+# _SCRUB_RE's parse tree, read by _prefix_fits.
+_SCRUB_TREE = _tagged(_sre_parser.parse(_SCRUB_RE.pattern, _SCRUB_RE.flags), False)
+
+
+def _char_in_class(ch: str, members, ignorecase: bool) -> bool:
+    c = _sre_constants
+    for op, value in members:
+        if op == c.LITERAL:
+            if ch == chr(value) or (ignorecase and ch.lower() == chr(value).lower()):
+                return True
+        elif op == c.CATEGORY and value == c.CATEGORY_SPACE:
+            if ch.isspace():
+                return True
+        elif op == c.CATEGORY and value == c.CATEGORY_DIGIT:
+            if ch.isdecimal():
+                return True
+        else:
+            raise ValueError(f"unsupported character class member {op} {value}")
+    return False
+
+
+def _prefix_fits(items: list, s: str, k: int) -> bool:
+    """True when ``s[k:]`` is a prefix of some string the parsed pattern
+    *items* matches, i.e. more text could still complete a match there.
+
+    Supports the constructs _SCRUB_RE uses (literals, ``\\s`` / ``\\d``
+    classes, alternation, groups, bounded repeats); raises ValueError on any
+    other."""
+    c = _sre_constants
+    if k == len(s):
+        return True
+    if not items:
+        return False
+    (op, av, ignorecase), rest = items[0], items[1:]
+    if op == c.LITERAL:
+        ch = s[k]
+        if ch == chr(av) or (ignorecase and ch.lower() == chr(av).lower()):
+            return _prefix_fits(rest, s, k + 1)
+        return False
+    if op == c.IN:
+        return _char_in_class(s[k], av, ignorecase) and _prefix_fits(rest, s, k + 1)
+    if op == c.BRANCH:
+        return any(_prefix_fits(_tagged(alt, ignorecase) + rest, s, k) for alt in av[1])
+    if op == c.SUBPATTERN:
+        _group, add_flags, _del_flags, sub = av
+        inner = ignorecase or bool(add_flags & re.IGNORECASE)
+        return _prefix_fits(_tagged(sub, inner) + rest, s, k)
+    if op == c.MAX_REPEAT or op == c.MIN_REPEAT:
+        lo, hi, sub = av
+        if lo == 0 and _prefix_fits(rest, s, k):
+            return True
+        if hi == 0:
+            return False
+        again = (op, (max(lo - 1, 0), hi - 1, sub), ignorecase)
+        return _prefix_fits(_tagged(sub, ignorecase) + [again] + rest, s, k)
+    raise ValueError(f"unsupported regex construct {op}")
+
+
+@functools.lru_cache(maxsize=4096)
+def _could_become_marker(text: str) -> bool:
+    """True when *text* is a prefix of some string scrub_text would rewrite."""
+    return _prefix_fits(_SCRUB_TREE, text, 0)
 
 
 _THINK_OPEN = "<think>"
@@ -265,14 +355,47 @@ def _note_marker_flood() -> None:
         "the reply was cut", _MARKER_FLOOD_LIMIT)
 
 
+def _marker_end(buf: str, at: int) -> int:
+    """End of the scrub_text match starting at *at* in *buf*, or *at* when
+    none starts there."""
+    m = _SCRUB_RE.match(buf, at)
+    return at if m is None else m.end()
+
+
+def _commit_point(buf: str) -> int:
+    """How much of *buf* scrub_stream can scrub and release now.
+
+    Holds from the first marker-start character whose text so far could still
+    grow into a marker (only possible within the last ``_MARKER_HOLD``
+    characters), then backs up to the start of any complete marker that would
+    straddle the cut. Everything else is released."""
+    n = len(buf)
+    cut = n
+    for i in range(max(0, n - _MARKER_HOLD), n):
+        if buf[i] in _MARKER_START and _could_become_marker(buf[i:]):
+            cut = i
+            break
+    moved = True
+    while moved:
+        moved = False
+        for q in range(max(0, cut - _MARKER_HOLD), cut):
+            if buf[q] in _MARKER_START and _marker_end(buf, q) > cut:
+                cut = q
+                moved = True
+                break
+    return cut
+
+
 def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     """Normalise/remove internal model markers in a text stream.
 
-    The trailing ``_MARKER_HOLD`` characters stay buffered because a marker
-    (or its optional role suffix, e.g. ``<|turn>model``) can straddle two
-    pieces - scrubbing them too early would strip the marker head and leak its
-    tail as text. Only the committed region is scrubbed and yielded; the cut
-    never lands inside a potential marker (markers start with ``<`` or ``[``).
+    Each piece is scrubbed and yielded as soon as it arrives, except text from
+    a ``<`` or ``[`` that could still grow into a marker: a marker (or its
+    optional role suffix, e.g. ``<|turn>model``) starting there can straddle
+    two pieces, and scrubbing it early would strip the marker head and leak its
+    tail as text. That tail stays buffered until the text from it can no
+    longer grow into a longer marker match, or the stream ends. The cut never
+    lands inside a marker.
 
     A stream that emits ``[TOOL_CALLS]`` more than ``_MARKER_FLOOD_LIMIT`` times
     is cut at that marker and the source iterator is closed, ending the
@@ -282,15 +405,7 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     seen = 0
     for piece in pieces:
         buf += piece
-        cut = len(buf) - _MARKER_HOLD
-        if cut <= 0:
-            continue
-        # Back the cut up to the last '<' before the boundary so a marker
-        # straddling it stays whole in the buffer.
-        lo = max(0, cut - _MARKER_HOLD)
-        lt = max(buf.rfind("<", lo, cut), buf.rfind("[", lo, cut))
-        if lt != -1:
-            cut = lt
+        cut = _commit_point(buf)
         if cut <= 0:
             continue
         chunk = buf[:cut]

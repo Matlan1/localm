@@ -174,6 +174,27 @@ class TestEngineLayerScrub:
         assert "<|channel" not in out and "channel|>" not in out
         assert out == "<think>\ninternal reasoning\n</think>\nHello there!"
 
+    def test_engine_releases_each_piece_before_the_backend_makes_the_next(self):
+        """A reply with no marker characters reaches the caller piece by piece,
+        not after the backend has produced dozens more characters (or, for a
+        short reply, after the whole generation)."""
+        produced = []
+
+        class _Backend:
+            loaded = True
+
+            def chat_stream(self, messages, **kwargs):
+                for piece in ("The circle", " is the", " largest shape."):
+                    produced.append(piece)
+                    yield piece
+
+        eng = Engine.__new__(Engine)
+        eng._backend = _Backend()
+        eng.display_name = "fake"
+        seen = [(len(produced), piece)
+                for piece in eng.chat_stream([{"role": "user", "content": "hi"}])]
+        assert seen == [(1, "The circle"), (2, " is the"), (3, " largest shape.")]
+
 
 #  Turn-open markers emitted as plain text.
 #
@@ -250,6 +271,207 @@ class TestTurnOpenMarkers:
             once = scrub_text(f"{marker}reply")
             assert scrub_text(once) == once
 
+
+_PROSE = "The quick brown fox jumps over the lazy dog, twice over. "
+
+#  Marker strings scrub_text rewrites or removes, beyond _TURN_MARKERS.
+_OTHER_MARKERS = [
+    "<|channel|>analysis<|message|>",
+    "<|channel|>final<|message|>",
+    "<|channel>thought\n",
+    "<channel|>",
+    "<reasoning>",
+    "</ reasoning >",
+    '<|"|>',
+    "<|turn>model\n",
+    "<turn|>",
+    "<|return|>",
+    "<unused12>",
+]
+
+
+def _chunked(text, size):
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+def _first_chars(sub):
+    """Characters a parsed regex can start matching on."""
+    from re import _constants as c
+
+    op, av = sub.data[0]
+    if op is c.LITERAL:
+        return {chr(av)}
+    if op is c.BRANCH:
+        return set().union(*(_first_chars(alt) for alt in av[1]))
+    if op is c.SUBPATTERN:
+        return _first_chars(av[3])
+    if op is c.IN and all(o is c.LITERAL for o, _ in av):
+        return {chr(v) for _, v in av}
+    raise AssertionError(f"cannot tell what {sub!r} starts with ({op})")
+
+
+class TestStreamRelease:
+    """scrub_stream releases text as it arrives and holds back only what could
+    still turn out to be a marker."""
+
+    def test_every_scrub_pattern_starts_with_a_marker_start_character(self):
+        from re import _parser
+
+        from localm.textnorm import _MARKER_START, _SCRUB_SUBS
+
+        for rx, _ in _SCRUB_SUBS:
+            starts = _first_chars(_parser.parse(rx.pattern, rx.flags))
+            assert starts <= set(_MARKER_START), (rx.pattern, starts)
+
+    def test_plain_text_is_released_piece_by_piece(self):
+        pulled = []
+
+        def source():
+            for piece in ("The circle", " is the", " largest shape."):
+                pulled.append(piece)
+                yield piece
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen == [(1, "The circle"), (2, " is the"), (3, " largest shape.")]
+
+    def test_a_possible_marker_tail_is_held_until_it_resolves(self):
+        out = list(scrub_stream(iter(["Answer: <start_of", "_turn>model\nHi"])))
+        assert out == ["Answer: ", "Hi"]
+
+    def test_marker_characters_that_cannot_start_a_marker_are_not_held(self):
+        pieces = ("if a < b then", " see [the docs](u)", " or <br> and", " [1]")
+        pulled = []
+
+        def source():
+            for piece in pieces:
+                pulled.append(piece)
+                yield piece
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen == [(i + 1, piece) for i, piece in enumerate(pieces)]
+
+    def test_a_reasoning_reply_streams_its_answer_as_it_arrives(self):
+        tokens = ["<think>", "\n", "The", " user", " asks", " for", " the", " capital",
+                  ".", "\n", "</think>", "\n\n", "The", " capital", " of", " France",
+                  " is", " Paris", "."]
+        pulled = []
+
+        def source():
+            for token in tokens:
+                pulled.append(token)
+                yield token
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen == [(i + 1, token) for i, token in enumerate(tokens)]
+
+    def test_a_tag_is_held_only_while_it_could_become_a_marker(self):
+        pulled = []
+
+        def source():
+            for ch in "<think>ok":
+                pulled.append(ch)
+                yield ch
+
+        seen = [(len(pulled), out) for out in scrub_stream(source())]
+        assert seen[0] == (7, "<think>")
+        assert "".join(out for _, out in seen) == "<think>ok"
+
+    def test_the_cut_backs_up_past_a_complete_marker_that_straddles_it(self, monkeypatch):
+        """With a pattern whose match holds another possible marker inside
+        it, the cut moves to the start of the outer match."""
+        import re
+        from re import _parser
+
+        import localm.textnorm as tn
+
+        rx = re.compile(r"<ab<cd>|<cd>XY")
+        monkeypatch.setattr(tn, "_SCRUB_RE", rx)
+        monkeypatch.setattr(tn, "_SCRUB_TREE",
+                            tn._tagged(_parser.parse(rx.pattern, rx.flags), False))
+        tn._could_become_marker.cache_clear()
+        try:
+            assert tn._commit_point("<ab<cd>X") == 0
+        finally:
+            tn._could_become_marker.cache_clear()
+
+    def test_every_prefix_of_every_match_counts_as_a_possible_marker(self):
+        import random
+
+        from localm.textnorm import _SCRUB_RE, _SCRUB_TREE, _prefix_fits
+
+        rng = random.Random(3)
+        frags = _TURN_MARKERS + _OTHER_MARKERS + [
+            "<|", "<", "[", " ", "  ", "\n", "x", "|", ">", "1234", "model",
+            "<| channel |>", "< reasoning>", "</thinking >", "<Thinking>", "</ THOUGHT>",
+            "<unused"]
+        found = 0
+        for _ in range(3000):
+            text = "".join(rng.choice(frags) for _ in range(rng.randint(1, 6)))
+            for m in _SCRUB_RE.finditer(text):
+                found += 1
+                whole = m.group(0)
+                for end in range(1, len(whole) + 1):
+                    assert _prefix_fits(_SCRUB_TREE, whole[:end], 0), (whole, end)
+        assert found > 3000
+
+    def test_a_llama3_role_header_streamed_as_tokens_is_removed(self):
+        """The header holds a second ``<`` inside it; a cut there would release
+        its first half as text."""
+        tokens = ["<|", "start", "_header", "_id", "|>", "assistant", "<|", "end",
+                  "_header", "_id", "|>", "\n", "Hello", " there"] + [" word"] * 12
+        assert _scrub(tokens) == "Hello there" + " word" * 12
+
+    def test_streaming_matches_one_shot_for_every_marker_and_chunking(self):
+        """Markers placed before, inside and after the hold window, next to
+        prose that contains marker characters, cut into pieces of many sizes."""
+        for marker in _TURN_MARKERS + _OTHER_MARKERS:
+            for lead in (0, 1, 30, 47, 48, 49, 55, 56, 57, 95):
+                text = (_PROSE * 2)[:lead] + marker + "Hello [1] a<b " + _PROSE \
+                    + marker + marker + "bye"
+                want = scrub_text(text)
+                for size in (1, 2, 3, 5, 7, 11, 13, 29, 64, len(text)):
+                    got = _scrub(_chunked(text, size))
+                    assert got == want, (marker, lead, size, got)
+
+    def test_streaming_matches_one_shot_at_every_two_piece_split(self):
+        for marker in _TURN_MARKERS + _OTHER_MARKERS:
+            text = _PROSE + marker + "after " + _PROSE
+            want = scrub_text(text)
+            for i in range(len(text) + 1):
+                assert _scrub([text[:i], text[i:]]) == want, (marker, i)
+
+    def test_adjacent_markers_stream_like_one_shot(self):
+        """Two markers side by side are each rewritten on their own: a
+        turn-open marker's optional trailing newline never takes the newline a
+        think-close rewrite puts in front of the next one."""
+        want = "\n</think>\n" + "x" * 33
+        assert scrub_text("<|turn><channel|>" + "x" * 33) == want
+        assert _scrub(["<|turn><channel|>" + "x" * 33]) == want
+        for first in _TURN_MARKERS + _OTHER_MARKERS:
+            for second in _TURN_MARKERS + _OTHER_MARKERS:
+                text = _PROSE + first + second + "The answer. " + _PROSE
+                want = scrub_text(text)
+                for size in (1, 3, 7, len(text)):
+                    got = _scrub(_chunked(text, size))
+                    assert got == want, (first, second, size, got)
+
+    def test_marker_hold_covers_the_longest_possible_match(self):
+        from re import _parser
+
+        from localm.textnorm import _MARKER_HOLD, _SCRUB_SUBS
+
+        for rx, _ in _SCRUB_SUBS:
+            longest = _parser.parse(rx.pattern, rx.flags).getwidth()[1]
+            assert longest <= _MARKER_HOLD, (rx.pattern, longest)
+
+    def test_whitespace_padded_tags_stream_like_one_shot(self):
+        for text in ("<|" + " " * 4 + "channel" + " " * 4 + "|>analysis "
+                     + " " * 60 + "Hello",
+                     "<|" + " " * 39 + "channel|>Hello",
+                     "<unused" + "7" * 42 + ">Hello",
+                     "<" + " " * 39 + "reasoning>Hello"):
+            for size in (1, 2, 5):
+                assert _scrub(_chunked(text, size)) == scrub_text(text), (text, size)
 
 class TestToolCallsToken:
     """Mistral's ``[TOOL_CALLS]`` token written out as plain text."""
