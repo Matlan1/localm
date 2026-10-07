@@ -79,3 +79,18 @@ def test_estimate_wins_over_resume(proj, calls):
     estimate.assert_called_once()
     run_task.assert_not_called()
     agent.load_checkpoint.assert_not_called()
+
+
+def test_a_one_shot_task_reports_its_progress(proj, calls):
+    agent, estimate, run_task = calls
+    agent.report_progress = False
+    seen = {}
+
+    def _run(a, task):
+        seen["report_progress"] = a.report_progress
+        return MagicMock(success=True, response="done", denied=())
+
+    run_task.side_effect = _run
+    result = _invoke(proj, "do x")
+    assert result.exit_code == 0, result.output
+    assert seen == {"report_progress": True}
