@@ -141,6 +141,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # layer count is unknowable for this load.
         self.gpu_layers_offloaded: Optional[int] = None
         self.gpu_layers_total: Optional[int] = None
+        # How the last load chose its n_gpu_layers (see
+        # VramSizingMixin._record_gpu_sizing), or None before the first sizing.
+        self.last_gpu_sizing: Optional[dict] = None
         # The isolated worker process holding the real model. None until load()
         # succeeds.
         self._runner = None

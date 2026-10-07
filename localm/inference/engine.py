@@ -283,6 +283,16 @@ class Engine:
         }
 
     @property
+    def gpu_sizing(self) -> Optional[dict]:
+        """How the last load chose its GPU layer count (the backend's
+        ``last_gpu_sizing``: ``mode``, ``layers``, ``n_ctx`` and, for an
+        auto-sized load, the free/total/model/KV/overhead bytes it was sized
+        against), or None for a backend that does not size layers or before
+        any load."""
+        sizing = getattr(self._backend, "last_gpu_sizing", None)
+        return dict(sizing) if isinstance(sizing, dict) else None
+
+    @property
     def last_finish_reason(self) -> str:
         """Why the most recent generation ended: "stop" (model finished) or
         "length" (the max_tokens budget ran out). Backends that cannot tell

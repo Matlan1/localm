@@ -454,6 +454,40 @@ class TestRoutingOverHTTP:
         routing = _stream_headers(r)["X-Localm-Model-Routing"]
         assert json.loads(routing)["resolved"] == "tooly"
 
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_a_routed_model_running_partly_on_the_cpu_says_so(
+            self, server, stream, caplog):
+        client, engines = server
+        engines["tooly"] = FakeEngine("tooly")
+        engines["tooly"].gpu_placement = {"gpu_layers_offloaded": 12,
+                                          "gpu_layers_total": 32, "degraded": True}
+        with caplog.at_level("WARNING", logger="localm"):
+            r = _ask(client, required_capabilities=["tool_use"], stream=stream)
+        assert _answering_model(engines) == ["tooly"]
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["placement"] == {"gpu_layers": 12, "total_layers": 32}
+        assert ("capability routing: tooly answers with 12/32 layers on the GPU, the "
+                "rest on the CPU (slower)") in [rec.getMessage() for rec in caplog.records]
+        assert r.status_code == 200
+
+    def test_a_routed_model_fully_on_the_gpu_adds_no_placement(self, server, caplog):
+        client, engines = server
+        engines["tooly"] = FakeEngine("tooly")
+        engines["tooly"].gpu_placement = {"gpu_layers_offloaded": 32,
+                                          "gpu_layers_total": 32, "degraded": False}
+        with caplog.at_level("WARNING", logger="localm"):
+            r = _ask(client, required_capabilities=["tool_use"])
+        assert "placement" not in json.loads(r.headers["X-Localm-Model-Routing"])
+        assert not [rec for rec in caplog.records if "answers with" in rec.getMessage()]
+
+    def test_a_degraded_model_that_was_not_routed_adds_no_placement(self, server):
+        client, engines = server
+        engines["plain"].gpu_placement = {"gpu_layers_offloaded": 4,
+                                          "gpu_layers_total": 32, "degraded": True}
+        r = _ask(client, required_capabilities=["tool_use"], pin_model=True)
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["routed"] is False and "placement" not in blob
+
 
 class TestPinnedDiscriminator(unittest.TestCase):
     """The single test that decides whether routing may act at all."""

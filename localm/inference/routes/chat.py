@@ -108,6 +108,14 @@ def register(app: FastAPI, ctx) -> None:
         if route.has_gap:
             from localm.debuglog import logger as _dbg
             _dbg.info("capability routing: %s", route.describe())
+        routed_placement = (getattr(engine, "gpu_placement", None)
+                            if route.routed and engine is not None else None)
+        if isinstance(routed_placement, dict) and routed_placement.get("degraded"):
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("capability routing: %s answers with %s/%s layers on the GPU, "
+                         "the rest on the CPU (slower)", route.resolved,
+                         routed_placement.get("gpu_layers_offloaded"),
+                         routed_placement.get("gpu_layers_total"))
 
         if engine is None:
             engine = await _hs.get_engine(req.model)
@@ -307,7 +315,8 @@ def register(app: FastAPI, ctx) -> None:
             engine=engine, messages=messages, reported_model=reported_model,
             sem=sem, pipeline=pipeline, ctx=ctx, gen_kwargs=gen_kwargs,
             prompt_tokens=prompt_tokens, compact_in_stream=compact_in_stream,
-            compacted_here=compacted_here, route=route)
+            compacted_here=compacted_here, route=route,
+            routed_placement=routed_placement)
 
     def _prepared_engine(prepared) -> object:
         return prepared.engine
@@ -319,7 +328,7 @@ def register(app: FastAPI, ctx) -> None:
             # memory did not run this turn.
             **_memory_used_header(prepared.ctx),
             # Which model answered and why, when the choice needed explaining.
-            **_capability_route_header(prepared.route),
+            **_capability_route_header(prepared.route, prepared.routed_placement),
             **_compacted_header(prepared.compacted_here),
         }
 
@@ -353,7 +362,7 @@ def register(app: FastAPI, ctx) -> None:
                                request=request, prompt_tokens=prompt_tokens, **gen_kwargs)
         for _hk, _hv in _memory_used_header(ctx).items():
             resp.headers[_hk] = _hv          # same surface, non-streaming
-        for _hk, _hv in _capability_route_header(route).items():
+        for _hk, _hv in _capability_route_header(route, prepared.routed_placement).items():
             resp.headers[_hk] = _hv
         for _hk, _hv in _compacted_header(compacted_here).items():
             resp.headers[_hk] = _hv

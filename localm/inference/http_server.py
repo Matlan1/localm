@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, Callable, List, Optional
+from typing import AsyncIterator, Callable, List, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -604,9 +604,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 raise LoadSkipped(latched[name])
 
         budget = _switch_load_budget(name)
+        evictions: list[VictimRelease] = []
         if budget is not None:
             early = await _switch_make_room(loop, budget, preempt=preempt,
-                                            force=force, activate=activate)
+                                            force=force, activate=activate,
+                                            evictions=evictions)
             if early is not None:
                 return early
 
@@ -622,6 +624,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             return interrupted
 
         _switch_commit(name, new_engine, sem, activate=activate, on_active=on_active)
+        _log_switch_placement(name, new_engine, evictions)
         # Off the event loop: registry file I/O and, with a non-zero
         # main_gpu_index, a GPU driver probe.
         await loop.run_in_executor(None, _gpu_registry_sync)
@@ -682,15 +685,16 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
 
 
 async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
-                            preempt: bool, force: bool,
-                            activate: bool) -> Optional[dict]:
+                            preempt: bool, force: bool, activate: bool,
+                            evictions: Optional[list] = None) -> Optional[dict]:
     """Run the eviction loop until ``budget.name`` may load.
 
     Each iteration takes a VRAM reading, asks
     ``switch_admission.decide_admission`` what it allows, and then loads,
     evicts the idle victim it named, or walks the exhaustion ladder
     (``_switch_exhaustion_ladder``). An evicted victim is detached from every
-    live registry, natively unloaded, and the loop re-probes.
+    live registry, natively unloaded, and the loop re-probes. The
+    ``VictimRelease`` of each eviction is appended to *evictions* when given.
 
     Returns None when the load may proceed, or a ``confirm_required`` result
     for switch_engine to return. Raises HTTPException 503 when a static split
@@ -740,7 +744,9 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
         if not force_busy and getattr(victim_engine, "active_requests", 0) != 0:
             continue
         _switch_detach_victim(victim, victim_engine, activate=activate)
-        await _switch_free_victim(loop, victim, victim_engine, probe)
+        release = await _switch_free_victim(loop, victim, victim_engine, probe)
+        if evictions is not None:
+            evictions.append(release)
 
 
 async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
@@ -986,24 +992,72 @@ def _switch_detach_victim(victim: str, engine, *, activate: bool) -> None:
         _inference_sem = None
 
 
+class VictimRelease(NamedTuple):
+    """The outcome of freeing one eviction victim (``_switch_free_victim``).
+
+    ``released`` is ``wait_for_vram_release``'s verdict: True once free VRAM
+    rose, False when it did not rise before the wait ended, None when it could
+    not be verified (no measurable reading). ``before`` and ``after`` are the
+    free-VRAM readings around the free in bytes (None when unmeasurable) and
+    ``seconds`` the time from the start of the unload to the verdict."""
+
+    victim: str
+    released: Optional[bool]
+    before: Optional[int]
+    after: Optional[int]
+    seconds: float
+
+    def describe(self) -> str:
+        """``evicting '<victim>': <outcome>`` for a log line."""
+        if self.released is True:
+            outcome = "VRAM release confirmed"
+        elif self.released is False:
+            outcome = "VRAM release NOT confirmed"
+        else:
+            outcome = "VRAM release could not be verified"
+        if self.before is not None and self.after is not None:
+            outcome += (f" ({self.before // 1024 ** 2} -> {self.after // 1024 ** 2} MB free"
+                        f" in {self.seconds:.1f}s)")
+        else:
+            outcome += f" (after {self.seconds:.1f}s)"
+        return f"evicting '{self.victim}': {outcome}"
+
+
 async def _switch_free_victim(loop, victim: str, engine,
-                              probe: switch_admission.VramProbe) -> None:
+                              probe: switch_admission.VramProbe) -> VictimRelease:
     """Natively unload detached victim *victim* off the event loop, then wait
     for its VRAM to be released when *probe* was measurable, so the next
     reading is not stale. *victim* is in ``_evicting_names`` for the whole
-    free, and is removed again even when ``unload()`` raises."""
+    free, and is removed again even when ``unload()`` raises.
+
+    Returns the ``VictimRelease``. A release that was not confirmed is logged
+    at WARNING, one that could not be verified at INFO, a confirmed one at
+    DEBUG."""
+    from localm.debuglog import logger as _dbg
     from localm.vram import wait_for_vram_release
 
+    started = time.monotonic()
+    released, after = None, None
     _evicting_names.add(victim)
     try:
         await loop.run_in_executor(None, engine.unload)
         if probe.measurable:
-            await loop.run_in_executor(
+            released, after = await loop.run_in_executor(
                 None,
                 lambda: wait_for_vram_release(
                     _probe_free_reader(probe), before_bytes=probe.free))
     finally:
         _evicting_names.discard(victim)
+    result = VictimRelease(victim, released, probe.free, after,
+                           time.monotonic() - started)
+    if released is False:
+        _dbg.warning("switch_engine: %s; free VRAM did not rise, so the next "
+                     "reading may still count its memory", result.describe())
+    elif released is None:
+        _dbg.info("switch_engine: %s", result.describe())
+    else:
+        _dbg.debug("switch_engine: %s", result.describe())
+    return result
 
 
 async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[dict]:
@@ -1072,6 +1126,58 @@ def _switch_commit(name: str, engine, sem, *, activate: bool, on_active) -> None
         _inference_sem = sem
         if on_active is not None:
             on_active(name)
+
+
+def _describe_load_placement(name: str, engine, evictions=()) -> str:
+    """One line naming where *engine*'s load of *name* placed its layers
+    (``Engine.gpu_placement``), how the layer count was chosen
+    (``Engine.gpu_sizing``) and the outcome of each eviction that made room
+    for it (``VictimRelease.describe``)."""
+    placement = getattr(engine, "gpu_placement", None)
+    sizing = getattr(engine, "gpu_sizing", None)
+    placement = placement if isinstance(placement, dict) else None
+    sizing = sizing if isinstance(sizing, dict) else None
+    if placement:
+        where = (f"{placement['gpu_layers_offloaded']}/{placement['gpu_layers_total']} "
+                 f"layers on the GPU")
+        if placement.get("degraded"):
+            where += ", the rest on the CPU (slower)"
+    else:
+        where = "GPU layer placement not reported by this backend"
+    parts = [f"loaded '{name}': {where}"]
+    if sizing:
+        detail = f"n_ctx {sizing.get('n_ctx')}"
+        if sizing.get("mode") == "auto" and sizing.get("free_bytes") is not None:
+            mb = 1024 ** 2
+            need = (sizing.get("model_bytes", 0) + sizing.get("kv_bytes", 0)
+                    + sizing.get("overhead_bytes", 0))
+            detail += (f", sized against {sizing['free_bytes'] // mb} MB free VRAM"
+                       f" (full offload needs ~{need // mb} MB: weights "
+                       f"{sizing.get('model_bytes', 0) // mb} + KV "
+                       f"{sizing.get('kv_bytes', 0) // mb} + overhead "
+                       f"{sizing.get('overhead_bytes', 0) // mb})")
+            if sizing.get("cause"):
+                detail += f" - {sizing['cause']}"
+        elif sizing.get("mode") == "unmeasurable":
+            detail += f", free VRAM not measurable, n_gpu_layers {sizing.get('layers')}"
+        else:
+            detail += f", n_gpu_layers {sizing.get('layers')} as configured"
+        parts.append(detail)
+    parts.extend(e.describe() for e in evictions)
+    return "; ".join(parts)
+
+
+def _log_switch_placement(name: str, engine, evictions=()) -> None:
+    """Log ``_describe_load_placement`` for a load switch_engine just
+    committed: at WARNING when fewer than all layers landed on the GPU, else
+    at INFO."""
+    from localm.debuglog import logger as _dbg
+    placement = getattr(engine, "gpu_placement", None)
+    line = "switch_engine: " + _describe_load_placement(name, engine, evictions)
+    if isinstance(placement, dict) and placement.get("degraded"):
+        _dbg.warning(line)
+    else:
+        _dbg.info(line)
 
 
 def _resolve_unnamed_model_name() -> str | None:
@@ -5232,7 +5338,7 @@ async def _generate_full(engine, messages: list, request=None, *,
         residency.unregister_cancel(engine.display_name, cancel_event)
 
 
-def _capability_route_header(route) -> dict:
+def _capability_route_header(route, placement=None) -> dict:
     """Observability: render a capability-routing decision into a response-header
     dict so a user can answer "why did this request use that model".
 
@@ -5251,7 +5357,9 @@ def _capability_route_header(route) -> dict:
     left out because its last load failed, ``"skipped":[{"model","failed_at",
     "retry_at","reason"}]`` (the times in epoch seconds). ``"note"`` carries
     the decision's one-line description (cut to 600 characters) whenever either
-    is present."""
+    is present. A routed decision whose answering model runs partly on the CPU
+    (*placement*, an ``Engine.gpu_placement`` dict, with ``degraded`` true)
+    adds ``"placement":{"gpu_layers","total_layers"}``."""
     if route is None or not getattr(route, "has_gap", False):
         return {}
     payload = {
@@ -5277,6 +5385,9 @@ def _capability_route_header(route) -> dict:
             for s in skipped]
     if load_errors or skipped:
         payload["note"] = route.describe()[:600]
+    if route.routed and isinstance(placement, dict) and placement.get("degraded"):
+        payload["placement"] = {"gpu_layers": placement.get("gpu_layers_offloaded"),
+                                "total_layers": placement.get("gpu_layers_total")}
     try:
         blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):

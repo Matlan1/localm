@@ -1258,9 +1258,11 @@ const MEMORY_DEGRADE_LABELS = {
 
 /** A chip on an assistant turn that was answered by a different model than
  *  the one selected, because the selected one lacked something the request
- *  needed. *routed* is { from, gaps: [capability, ...] }, or { fallback } when
- *  the selected model answered because a model that could have answered was
- *  skipped or failed to load: `fallback` is the server's explanation. */
+ *  needed. *routed* is { from, gaps: [capability, ...], placement? }, or
+ *  { fallback } when the selected model answered because a model that could
+ *  have answered was skipped or failed to load: `fallback` is the server's
+ *  explanation. `placement` ({ gpu, total }) marks an answering model that
+ *  runs partly on the CPU. */
 export function buildRoutedChip(routed) {
   const chip = routed.suggest ? el("button", "routed-chip routed-suggest")
     : el("span", "routed-chip");
@@ -1287,6 +1289,11 @@ export function buildRoutedChip(routed) {
   chip.appendChild(document.createTextNode(t("chat.routed.chip", { from: routed.from || "?" })));
   chip.title = t("chat.routed.title", {
     from: routed.from || "?", needs: gaps.join(", ") || "?" });
+  if (routed.placement) {
+    const counts = { gpu: routed.placement.gpu, total: routed.placement.total };
+    chip.appendChild(document.createTextNode(", " + t("chat.routed.partial", counts)));
+    chip.title += " " + t("chat.routed.partialTitle", counts);
+  }
   return chip;
 }
 

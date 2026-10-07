@@ -972,3 +972,66 @@ class TestSplitShortfall:
 
         assert res == {"status": "loaded", "model": "model-a"}
         assert env.shortfall_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+#  Load placement log                                                         #
+# --------------------------------------------------------------------------- #
+
+def _switch_lines(caplog):
+    return [(r.levelname, r.getMessage()) for r in caplog.records
+            if r.getMessage().startswith("switch_engine: loaded ")]
+
+
+class TestLoadPlacementLog:
+    def test_a_routed_load_logs_its_placement_and_the_eviction_that_made_room(
+            self, monkeypatch, caplog):
+        a = GatedEngine("model-a")
+        b = PlacementEngine("model-b", gpu_placement={
+            "gpu_layers_offloaded": 32, "gpu_layers_total": 32, "degraded": False})
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True)
+
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                               activate=False))
+
+        assert res["status"] == "loaded" and a.unload_calls == 1
+        [(level, line)] = _switch_lines(caplog)
+        assert level == "INFO"
+        free_before = (10 * GB - NEED) // MB
+        assert line.startswith("switch_engine: loaded 'model-b': 32/32 layers on the GPU; ")
+        assert (f"evicting 'model-a': VRAM release confirmed ({free_before} -> "
+                f"{10 * GB // MB} MB free in ") in line
+
+    def test_a_load_left_partly_on_the_cpu_is_logged_as_a_warning(
+            self, monkeypatch, caplog):
+        b = PlacementEngine("model-b", gpu_placement={
+            "gpu_layers_offloaded": 12, "gpu_layers_total": 32, "degraded": True})
+        b.gpu_sizing = {"mode": "auto", "layers": 12, "n_ctx": 4096,
+                        "free_bytes": 6 * GB, "total_bytes": 16 * GB,
+                        "model_bytes": 8 * GB, "kv_bytes": GB // 2,
+                        "overhead_bytes": GB // 2,
+                        "cause": "only 6.0 of 16.0 GB free - another app holds VRAM"}
+        env = _install(monkeypatch, {"model-b": b})
+
+        with caplog.at_level("INFO", logger="localm"):
+            asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        [(level, line)] = _switch_lines(caplog)
+        assert level == "WARNING"
+        assert line == (
+            "switch_engine: loaded 'model-b': 12/32 layers on the GPU, the rest on the "
+            "CPU (slower); n_ctx 4096, sized against 6144 MB free VRAM (full offload "
+            "needs ~9216 MB: weights 8192 + KV 512 + overhead 512) - only 6.0 of 16.0 "
+            "GB free - another app holds VRAM")
+
+    def test_an_already_resident_model_logs_no_load_line(self, monkeypatch, caplog):
+        a = PlacementEngine("model-a")
+        env = _install(monkeypatch, {"model-a": a})
+        _seat("model-a", a, active=True)
+
+        with caplog.at_level("INFO", logger="localm"):
+            asyncio.run(hs.switch_engine("model-a", env.factory))
+
+        assert _switch_lines(caplog) == []
