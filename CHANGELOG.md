@@ -273,8 +273,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Image, video and music generation say when they are waiting behind other
   ComfyUI jobs instead of claiming to render, and image generation now shows
   ComfyUI start-up and model-substitution notices that previously went only to
-  the server console. A coder sub-agent's model statuses and tool calls appear
-  in the parent session while it works.
+  the server console. MCP clients that ask for progress get the image and
+  embedding-download progress too. A coder sub-agent's model statuses and tool
+  calls appear in the parent session while it works.
 - **`localm run` attached to a server, and the coder talking to a localm server,
   report a failed reply as an error.** A reply the server ended as failed (for
   example a conversation that still does not fit after compacting) used to be
