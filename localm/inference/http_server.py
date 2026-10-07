@@ -1383,7 +1383,9 @@ def _record_placement_heal(name: str, engine, pinned, evictions, *,
                            allowed: bool, deferred: bool) -> None:
     """Set ``engine.placement_heal`` after switch_engine committed a load of
     *name*: a ``PlacementHeal`` when the load landed partly on the CPU with its
-    layer count sized from free VRAM (``Engine.gpu_sizing`` mode "auto"),
+    layer count sized from free VRAM (``Engine.gpu_sizing`` mode "auto") and
+    that sizing put the part there: fewer layers than all on the GPU, or routed
+    experts it chose to keep in system RAM (``n_cpu_moe_auto``),
     *allowed* is True and it has a blocker or an unconfirmed release (from
     *evictions*); None otherwise. Resident models are blockers only when
     *deferred* (the load went ahead below the whole-model estimate because
@@ -1392,7 +1394,9 @@ def _record_placement_heal(name: str, engine, pinned, evictions, *,
     sizing = getattr(engine, "gpu_sizing", None)
     heal = None
     if (allowed and isinstance(placement, dict) and placement.get("degraded")
-            and isinstance(sizing, dict) and sizing.get("mode") == "auto"):
+            and isinstance(sizing, dict) and sizing.get("mode") == "auto"
+            and (placement.get("gpu_layers_offloaded", 0) < placement.get("gpu_layers_total", 0)
+                 or sizing.get("n_cpu_moe_auto"))):
         blockers = (frozenset(n for n in _engines_lru if n != name and n not in pinned)
                     if deferred else frozenset())
         unconfirmed = any(e.released is False and e.expected for e in evictions)

@@ -601,10 +601,10 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
     else:
         assert "Note:" not in r.text
     _in_order(r.text, "Backend: amd-rocm (self-contained AMD ROCm build (gfx103X / RX 6000))",
-              f"Downloading {urls[name]}", f"Downloading {cpu_url}",
+              f"Downloading {urls[name]}", "OK - amd-rocm runtime loads on this machine.",
+              f"Downloading {cpu_url}",
               f"CPU backend: ggml-cpu-haswell from llama.cpp {sl._ROCM_CPU_TAG} (SIMD), "
-              "replacing the amd-rocm build's own",
-              "OK - amd-rocm runtime loads on this machine.")
+              "replacing the amd-rocm build's own")
     assert world.files() == [".localm-backend", ".localm-cpu-overlay", "LICENSE.llama-cpp",
                              "ggml-cpu.dll", "ggml-hip.dll", "libomp140.x86_64.dll", "llama.dll",
                              "rocblas.dll", "rocblas/library/Kernels.so-000-gfx1030.hsaco",
@@ -630,13 +630,13 @@ def _amd_rocm_release(world):
 
 def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
     assert r.exit_code == 0, r.output
-    _in_order(r.text, f"Warning: the SIMD CPU backend for the amd-rocm build was not installed "
-                      f"({why}", "Retry with localm setup-llama --backend amd-rocm --force.",
-              "OK - amd-rocm runtime loads on this machine.")
+    _in_order(r.text, "OK - amd-rocm runtime loads on this machine.",
+              f"Warning: the SIMD CPU backend for the amd-rocm build was not installed "
+              f"({why}", "Retry with localm setup-llama --backend amd-rocm --force.")
     assert (world.lib / "ggml-cpu.dll").read_bytes() == b"ggml-cpu@rocm"
     assert not (world.lib / "libomp140.x86_64.dll").exists()
     assert not (world.lib / "ggml-cpu.dll.amd-rocm").exists()
-    assert not (world.lib / ".localm-cpu-overlay").exists()
+    assert not (world.lib / ".localm-cpu-overlay").is_file()
     assert world.marker() == f"amd-rocm {ROCM}\n"
     assert sl.check_runtime_update()["newer"] is True
 
@@ -644,13 +644,35 @@ def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
 def test_amd_rocm_cpu_overlay_that_does_not_load_is_rolled_back(world):
     _amd_rocm_release(world)
     _rocm_cpu_overlay(world)
-    world.probes = [(1, "OSError: [WinError 127] The specified procedure could not be found"),
-                    (0, "")]
+    world.probes = [(0, ""),
+                    (1, "OSError: [WinError 127] The specified procedure could not be found")]
     r = world.invoke("--backend", "amd-rocm")
     _assert_kept_the_amd_rocm_cpu_backend(
         world, r, "the runtime did not load with it (OSError: [WinError 127] The specified "
                   "procedure could not be found)")
     assert world.probe_calls == 2
+
+
+def test_amd_rocm_cpu_overlay_whose_marker_cannot_be_written_is_rolled_back(world):
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world)
+    world.lib.mkdir(parents=True, exist_ok=True)
+    (world.lib / ".localm-cpu-overlay").mkdir()
+    r = world.invoke("--backend", "amd-rocm")
+    _assert_kept_the_amd_rocm_cpu_backend(world, r, "")
+    assert (world.lib / ".localm-cpu-overlay").is_dir()
+    assert world.probe_calls == 2
+
+
+def test_amd_rocm_build_that_does_not_load_gets_no_cpu_overlay(world):
+    _amd_rocm_release(world)
+    cpu_url = _rocm_cpu_overlay(world)
+    _upstream_win_vulkan(world)
+    world.probes = [(1, "OSError: [WinError 126] The specified module could not be found"),
+                    (0, "")]
+    r = world.invoke("--backend", "amd-rocm", "--yes")
+    assert cpu_url not in world.requests
+    assert "SIMD CPU backend" not in r.text
 
 
 def test_amd_rocm_cpu_overlay_download_failure_keeps_the_build(world):

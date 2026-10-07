@@ -12,15 +12,21 @@ tensor-info entries, tensor data); the sizing runs for real against them and
 only the VRAM readings are patched.
 """
 
+from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from localm import discover
+from localm.inference import http_server as hs
 from localm.inference.backends.gguf import GgufBackend
+from localm.inference.backends.llamacpp import _loader
 from localm.model_manager.gguf import (gguf_expert_counts,
                                        gguf_moe_expert_bytes_by_layer,
                                        gguf_moe_pinned_expert_bytes)
-from tests.test_gguf_moe_vram_sizing import _T_STRING, _T_UINT32, _gguf_with_tensors
+from tests.test_gguf_moe_vram_sizing import (_T_ARRAY, _T_STRING, _T_UINT32,
+                                             _gguf_with_tensors)
 
 OVERHEAD = 10_000
 N_CTX = 64
@@ -399,3 +405,140 @@ class TestGgufExpertProbes:
             tmp_path / "c.gguf", _kv("testmoe", experts=False)
             + [("testmoe.expert_count", _T_UINT32, 8)], [("blk.0.a.weight", [4], 0, 10)])
         assert gguf_expert_counts(only_count) == (8, 0)
+
+
+def _leading_dense_model(tmp_path):
+    tensors = [("token_embd.weight", [4], 0, 5_000),
+               ("blk.0.attn_q.weight", [4], 0, 2_000),
+               ("blk.0.ffn_up.weight", [4], 0, 50_000)]
+    for il, size in ((1, 100_000), (2, 110_000), (3, 120_000)):
+        tensors += [(f"blk.{il}.attn_q.weight", [4], 0, 2_000),
+                    (f"blk.{il}.ffn_up_exps.weight", [4], 0, size)]
+    return _gguf_with_tensors(tmp_path / "lead.gguf", _kv("testmoe"), tensors)
+
+
+class TestLeadingDenseBlocks:
+    """A model whose first block has no experts: n_cpu_moe is a block bound, so
+    pinning the experts of block 1 takes n_cpu_moe 2 and moves ONE layer's
+    experts."""
+
+    def test_the_notice_and_the_placement_count_expert_layers(self, tmp_path, capsys):
+        from localm.inference.engine import Engine
+        b = _backend(_leading_dense_model(tmp_path))
+        free = b._vram_model_bytes(0) - 100_000 + KV + OVERHEAD
+        meta = {"n_layers": 4, "weight_placement": []}
+
+        def _fake(self_runner, params, cancel_event=None, timeout=None, on_progress=None):
+            return dict(meta)
+
+        with _Vram(free), \
+                patch("localm.discover.list_gpus", return_value=([], "ok")), \
+                patch("localm.discover.resolve_auto_split_ratios", return_value=None), \
+                patch.object(GgufBackend, "_implicit_split_fit", return_value=None), \
+                patch.object(GgufBackend, "_effective_ctx_max", return_value=N_CTX), \
+                patch("localm.inference.backends.llamacpp._runner.ModelRunner."
+                      "spawn_and_load", _fake), \
+                patch("localm.model_meta.store_n_layers"):
+            b.load()
+        assert b.effective_n_cpu_moe == 2
+        assert b.moe_cpu_layers == 1
+        assert "with the routed experts of 1/3 layers in system RAM" in _flat(capsys)
+        engine = object.__new__(Engine)
+        engine._backend = b
+        assert engine.gpu_placement["moe_cpu_layers"] == 1
+
+
+def _split_moe_model(tmp_path):
+    kv = [("general.architecture", _T_STRING, "testmoe"),
+          ("testmoe.block_count", _T_UINT32, 4),
+          ("tokenizer.ggml.tokens", _T_ARRAY, [f"t{i}" for i in range(10)])]
+    tensors = [("token_embd.weight", [4], 0, 500)]
+    for il in range(4):
+        tensors += [(f"blk.{il}.attn_q.weight", [4], 0, 1_000),
+                    (f"blk.{il}.ffn_up_exps.weight", [4], 0, 10_000)]
+    tensors += [("output_norm.weight", [4], 0, 64), ("output.weight", [4], 0, 500)]
+    return _gguf_with_tensors(tmp_path / "split-moe.gguf", kv, tensors)
+
+
+class TestMultiGpu:
+    """Two 15,000-byte devices under llama.cpp's implicit split: blocks 0-2 go
+    to device 0, block 3 and the output layer (564 B) with the 2,560-byte
+    logits buffer go to device 1. Device 1 needs 11,000 + 160 KV + 564 + 2,560
+    + 1,000 reserve = 15,284 bytes while block 3's 10,000 bytes of experts are
+    on it, so only n_cpu_moe 4 fits every device, while the combined 30,000
+    bytes already fit at n_cpu_moe 2."""
+
+    FREE = 15_000
+
+    def _run(self, tmp_path, cfg=None):
+        b = _backend(_split_moe_model(tmp_path))
+        b._gguf_kv_bpt = 10
+        devices = [{"index": i, "free": self.FREE, "total": self.FREE + 10} for i in range(2)]
+        with ExitStack() as st:
+            st.enter_context(patch.object(
+                GgufBackend, "_split_free_total_bytes",
+                return_value=(2 * self.FREE, 2 * self.FREE + 20, 2)))
+            st.enter_context(patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", 1_000))
+            st.enter_context(patch.object(discover, "implicit_split_devices",
+                                          return_value=devices))
+            st.enter_context(patch.object(discover, "runtime_split_devices_match",
+                                          return_value=True))
+            st.enter_context(patch.object(_loader, "native_lib_loaded", return_value=False))
+            if cfg is not None:
+                st.enter_context(patch("localm.config.load_config", return_value=cfg))
+            combined = b._smallest_fitting_n_cpu_moe(2 * self.FREE, N_CTX * 10, 2 * 1_000)
+            layers = b._effective_gpu_layers()
+            plan = b._implicit_split_fit(layers) if layers else None
+        return b, combined, layers, plan
+
+    def test_every_device_must_hold_its_own_share(self, tmp_path):
+        b, combined, layers, plan = self._run(tmp_path)
+        assert combined == 2
+        assert (layers, b.effective_n_cpu_moe) == (99, 4)
+        assert plan is not None and plan.default_fits
+
+    def test_a_configured_split_is_not_pinned_automatically(self, tmp_path):
+        b, _combined, layers, _plan = self._run(tmp_path, cfg={"gpu_split_indices": [0, 1]})
+        assert b.effective_n_cpu_moe == 0
+        assert layers < 99
+
+
+class TestRaiseAConfiguredNCpuMoe:
+    def test_the_refusal_names_a_larger_n_cpu_moe_that_fits(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_gpu_layers_auto=False, n_cpu_moe=1)
+        b.n_ctx = 32768
+        total = _free_fitting(b, 3) - KV + 32768 * KV_PER_TOKEN
+        with _Vram(total, total=total), pytest.raises(RuntimeError) as exc:
+            b._check_vram()
+        assert "Keep MoE experts in system RAM:  localm config n_cpu_moe 3" in str(exc.value)
+
+
+class TestPlacementHeal:
+    """A heal reload is recorded only when auto sizing itself put part of the
+    model off the GPU."""
+
+    @staticmethod
+    def _heal(placement, sizing):
+        engine = SimpleNamespace(gpu_placement=placement, gpu_sizing=sizing,
+                                 placement_heal="unset")
+        release = SimpleNamespace(released=False, expected=True)
+        hs._record_placement_heal("m", engine, (), [release], allowed=True, deferred=False)
+        return engine.placement_heal
+
+    def test_experts_auto_sizing_kept_in_ram_can_heal(self):
+        heal = self._heal({"gpu_layers_offloaded": 48, "gpu_layers_total": 48,
+                           "degraded": True, "moe_cpu_layers": 18},
+                          {"mode": "auto", "n_cpu_moe": 18, "n_cpu_moe_auto": True})
+        assert isinstance(heal, hs.PlacementHeal)
+
+    def test_experts_the_user_kept_in_ram_never_heal(self):
+        heal = self._heal({"gpu_layers_offloaded": 48, "gpu_layers_total": 48,
+                           "degraded": True, "moe_cpu_layers": 18},
+                          {"mode": "auto", "n_cpu_moe": 18, "n_cpu_moe_auto": False})
+        assert heal is None
+
+    def test_layers_auto_sizing_left_on_the_cpu_can_heal(self):
+        heal = self._heal({"gpu_layers_offloaded": 12, "gpu_layers_total": 32,
+                           "degraded": True},
+                          {"mode": "auto", "n_cpu_moe": 0, "n_cpu_moe_auto": False})
+        assert isinstance(heal, hs.PlacementHeal)

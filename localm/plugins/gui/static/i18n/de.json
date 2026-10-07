@@ -91,7 +91,7 @@
   "chat.routed.chip": "statt {from}",
   "chat.routed.fallbackChip": "ein geeignetes Modell wurde nicht verwendet",
   "chat.routed.partial": "teils auf der CPU",
-  "chat.routed.partialMoeTitle": "Es wurde mit den Experten von {moe} seiner {total} Schichten im Arbeitsspeicher geladen, daher sind Antworten langsamer. Es wird vollständig neu geladen, sobald das Modell, das im Weg war, frei ist; bleibt es langsam, geben Sie GPU-Speicher frei und laden Sie es erneut.",
+  "chat.routed.partialMoeTitle": "Es wurde mit den Experten von {moe} seiner {total} Schichten im Arbeitsspeicher geladen, daher sind Antworten langsamer.",
   "chat.routed.partialTitle": "Es wurde mit {gpu} von {total} Schichten auf der GPU und dem Rest auf der CPU geladen, daher sind Antworten langsamer. Es wird vollständig neu geladen, sobald das Modell, das im Weg war, frei ist; bleibt es langsam, geben Sie GPU-Speicher frei und laden Sie es erneut.",
   "chat.routed.suggestChip": "{model} passt besser",
   "chat.routed.suggestTitle": "{from} fehlt, was diese Anfrage brauchte ({needs}), deshalb kam diese Antwort trotzdem von ihm. Klicken Sie, um {model}, das es kann, für Ihre nächste Nachricht zu verwenden.",

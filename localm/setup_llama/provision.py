@@ -318,8 +318,6 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
             raise ArtifactError(f"the archive did not contain {lib_name}")
         _sl._bundle_missing_native_deps(target)
         _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
-        if backend == "amd-rocm":
-            _sl.install_rocm_simd_cpu(target)
 
     notes = {
         "vulkan": "universal GPU build (AMD/NVIDIA/Intel via the display driver)",
@@ -356,6 +354,8 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     loaded, detail = (_sl._native_loads_ok() if provisioned else (False, "not provisioned"))
     if loaded:
         console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
+        if chosen == "amd-rocm":
+            _sl.install_rocm_simd_cpu(target)
         return chosen, used_tag[0]
 
     # ---- The installer must never hand the user a runtime our OWN gate rejects.
