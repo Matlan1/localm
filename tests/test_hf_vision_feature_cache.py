@@ -162,6 +162,13 @@ def setup(tiny):
         del model.model.get_image_features
 
 
+def _get_features(model, processor, image):
+    inputs = processor(text="<image>", images=[image], return_tensors="pt")
+    return model.model.get_image_features(
+        inputs["pixel_values"], vision_feature_layer=-1,
+        vision_feature_select_strategy="default", return_dict=True)
+
+
 def _conversation(worker, turns):
     """Run *turns* (user messages) as one growing conversation; return the
     replies."""
@@ -340,15 +347,34 @@ class TestPassThrough:
         worker = _worker(model, processor)
         cache = worker._vision_cache
         red = _image("red")
-        key = hfmod._image_content_key(red)
-        cache.arm([key], {}, (9, 9, 9, 9))
-        inputs = processor(text="<image>", images=[red], return_tensors="pt")
+        _run(worker, [_user("what is this ?", red)])
+        calls.take()
+        cache.arm([hfmod._image_content_key(red)], {}, (9, 9, 9, 9))
         with torch.no_grad():
-            model.model.get_image_features(
-                inputs["pixel_values"], vision_feature_layer=-1,
-                vision_feature_select_strategy="default", return_dict=True)
+            _get_features(model, processor, red)
         assert calls.take() == [1]
-        assert len(cache) == 0
+
+    def test_an_armed_request_serves_exactly_one_call(self, setup):
+        model, processor, calls = setup
+        worker = _worker(model, processor)
+        cache = worker._vision_cache
+        red = _image("red")
+        _run(worker, [_user("what is this ?", red)])
+        calls.take()
+        pixel_shape = tuple(processor(text="<image>", images=[red],
+                                      return_tensors="pt")["pixel_values"].shape)
+        cache.arm([hfmod._image_content_key(red)], {}, pixel_shape)
+        with torch.no_grad():
+            served = _get_features(model, processor, red)
+            again = _get_features(model, processor, red)
+        assert calls.take() == [1]
+        assert torch.equal(torch.cat(list(served.pooler_output)),
+                           torch.cat(list(again.pooler_output)))
+
+    def test_missing_lists_each_uncached_key_once(self, setup):
+        model, processor, _calls = setup
+        cache = _worker(model, processor)._vision_cache
+        assert cache.missing(["a", "b", "a"]) == ["a", "b"]
 
     def test_a_worker_without_a_cache_encodes_every_turn(self, setup):
         model, processor, calls = setup
@@ -360,11 +386,14 @@ class TestPassThrough:
         _run(worker, messages)
         assert calls.take() == [1, 1]
 
-    def test_only_listed_model_classes_get_a_cache(self, tiny):
-        model, _processor = tiny
+    def test_only_listed_model_classes_get_a_cache(self, setup, monkeypatch):
+        model, _processor, _calls = setup
         assert type(model.model).__name__ in hfmod._VISION_CACHE_MODEL_CLASSES
         text_only = transformers.LlamaForCausalLM(model.config.text_config)
         assert hfmod._install_vision_feature_cache(text_only) is None
+        monkeypatch.setattr(hfmod, "_VISION_CACHE_MODEL_CLASSES", frozenset())
+        assert hfmod._install_vision_feature_cache(model) is None
+        assert "get_image_features" not in vars(model.model)
 
 
 class TestJoinImageFeatures:
