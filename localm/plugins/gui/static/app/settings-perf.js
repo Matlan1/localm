@@ -2919,29 +2919,72 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   return outcome;
 }
 
-/** Query the selected knowledge collection and inject cited excerpts. */
+/** Longest excerpt injected for one knowledge hit, in characters. */
+export const KB_EXCERPT_CHARS = 1500;
+/** Longest echo of the user's question in a knowledge header, in characters. */
+export const KB_QUERY_ECHO_CHARS = 120;
+
+/** *text* unchanged when it is at most *max* characters; otherwise cut at the
+ *  last sentence end or line break, else the last whitespace, within the final
+ *  40% of *max*, else at *max*, with "…" appended. */
+export function clipAtBoundary(text, max) {
+  const s = String(text ?? "");
+  if (s.length <= max) return s;
+  const head = s.slice(0, max + 1);
+  const min = Math.floor(max * 0.6);
+  let end = -1;
+  for (const m of head.matchAll(/[.!?](?=\s)|\n/g)) {
+    const e = m[0] === "\n" ? m.index : m.index + 1;
+    if (e >= min && e <= max) end = e;
+  }
+  if (end < 0) {
+    for (const m of head.matchAll(/\s/g)) {
+      if (m.index >= min && m.index <= max) end = m.index;
+    }
+  }
+  if (end < 0) end = max;
+  return s.slice(0, end).trimEnd() + "…";
+}
+
+/** Query the selected knowledge collection for hits that clear its relevance
+ *  floor and inject them as cited excerpts; when none clear it, inject a note
+ *  saying the collection had nothing relevant. */
 export async function retrieveKnowledge(conv, query, opts = {}) {
   const kb = $("p-kb")?.value;
   if (!kb || !query) return;
   try {
     const fetchOpts = {
       method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ query, k: 4 }),
+      body: JSON.stringify({ query, k: 4, relevant_only: true }),
     };
     if (opts.signal) fetchOpts.signal = opts.signal;
     const r = await fetch(
       `/api/rag/collections/${encodeURIComponent(kb)}/query`, fetchOpts);
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    if (!data.hits.length) return;
+    const echo = clipAtBoundary(query, KB_QUERY_ECHO_CHARS);
+    if (!data.hits.length) {
+      conv.messages.push({
+        role: "user", tag: "kb",
+        content:
+          `[No excerpts from the "${kb}" collection were relevant to: ${echo}]` +
+          "\n\nNothing from this collection was added for this message. " +
+          "Answer from the conversation and general knowledge, without " +
+          "citing the collection.",
+      });
+      saveConversations(conv);
+      renderChat();
+      return;
+    }
     const basename = (p) => p.split(/[\\/]/).pop();
     const lines = data.hits.map((h, i) =>
-      `[${i + 1}] ${basename(h.source)}:${h.pos}\n${h.text.slice(0, 900)}`);
+      `[${i + 1}] ${basename(h.source)}:${h.pos}\n` +
+      clipAtBoundary(h.text, KB_EXCERPT_CHARS));
     conv.messages.push({
       role: "user", tag: "kb",
       content:
-        `[Excerpts from the "${kb}" collection relevant to: ` +
-        `${query.slice(0, 120)}]\n\n` + lines.join("\n\n") +
+        `[Excerpts from the "${kb}" collection relevant to: ${echo}]\n\n` +
+        lines.join("\n\n") +
         "\n\nUse these excerpts where relevant and cite them as [1], [2]... " +
         "If they don't answer the question, say so before answering from " +
         "general knowledge.",

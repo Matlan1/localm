@@ -230,6 +230,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is told it has no information from it and must not describe or guess what it
   would have found, in the chat and in scheduled chat jobs; it used to be told to
   "answer without the web", which led some models to present invented findings.
+- **Chat with a Knowledge collection selected no longer injects excerpts that have
+  nothing to do with the question.** The four best-ranked chunks used to be added
+  to every question, however weakly they matched, so a question about the
+  conversation itself pulled in unrelated passages the model then answered from.
+  Only excerpts that clear a relevance floor are added now, and when none do, the
+  chat says that no excerpts were relevant. `localm rag query --relevant-only`
+  shows the same filtered result.
+- **Knowledge excerpts are no longer cut off mid-word.** Each excerpt added to the
+  chat is the whole retrieved passage, and the question echoed above them ends on
+  a whole word with "…" when it is shortened.
 - **Web search and page reads are more reliable, and failures read as plain
   sentences.** A search whose connection is reset or cut is sent again (up to
   three tries). When DuckDuckGo still fails or answers with a bot check, localm
