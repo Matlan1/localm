@@ -655,8 +655,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         else:
             budget = _switch_load_budget(name)
             if budget is not None and budget.check_split_fit:
-                built = _engines[name] if name in _engines else _engine_factory(name)
-                budget = await _switch_with_backend_need(loop, budget, built)
+                sized = _engines.get(name)
+                if sized is None:
+                    built = sized = _engine_factory(name)
+                budget = await _switch_with_backend_need(loop, budget, sized)
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
         evictions: list[VictimRelease] = []
         if healing is not None:

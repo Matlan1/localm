@@ -1539,6 +1539,29 @@ class TestBackendSizedAdmission:
                        "eviction; loading it anyway will let the backend "
                        "fall back to partial CPU offload, which is slower")}
 
+    def test_a_registered_engine_evicted_while_it_is_sized_is_not_committed(
+            self, monkeypatch):
+        stale = _BackendSizedEngine("model-a", GB)
+        fresh = _BackendSizedEngine("model-a", GB)
+        env = _install(monkeypatch, {"model-a": fresh}, total=12 * GB)
+        hs._engines["model-a"] = stale
+        hs._engines_lru.append("model-a")
+
+        def _evicted_meanwhile():
+            stale.need_calls += 1
+            hs._switch_detach_victim("model-a", stale, activate=False)
+            return GB
+
+        stale.full_offload_vram_bytes = _evicted_meanwhile
+
+        result = asyncio.run(hs.switch_engine("model-a", env.factory, preempt=False,
+                                              activate=False))
+
+        assert stale.need_calls == 1 and stale.load_calls == 0
+        assert hs._engines == {"model-a": fresh} and fresh.load_calls == 1
+        assert hs._engines_lru == ["model-a"] and env.built == ["model-a"]
+        assert result["status"] == "loaded"
+
     def test_a_non_explicit_load_short_on_an_empty_card_defers_and_records_no_blocker(
             self, monkeypatch):
         b = _BackendSizedEngine("model-b", 13 * GB)
