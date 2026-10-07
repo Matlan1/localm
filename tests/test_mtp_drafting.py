@@ -679,3 +679,43 @@ def test_paused_steps_leave_the_draft_cache_alone_until_drafting_resumes():
     assert len(fake.draft_cache) == len(fake.main_cache)
     for p in sorted(fake.draft_cache):
         assert fake.draft_cache[p][0] == main_tokens[p]
+
+
+def _feed_cycle(pacer, spec_seconds, cycle, plain_cost, steps):
+    """Drive *pacer*: every speculative step takes *spec_seconds* and makes the
+    next count from *cycle* available, every plain step takes *plain_cost*."""
+    decisions, i = [], 0
+    for _ in range(steps):
+        speculative = pacer.speculate()
+        decisions.append(speculative)
+        if speculative:
+            pacer.record(True, spec_seconds, cycle[i % len(cycle)])
+            i += 1
+        else:
+            pacer.record(False, plain_cost, 1)
+    return decisions
+
+
+def test_drafting_that_pays_with_fewer_than_half_accepted_keeps_speculating():
+    """Two drafts in five accepted at 1.3x the plain step time is 0.93x the plain
+    cost per token: speculation stays on although most steps make one token."""
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    pacer = _DraftPacer()
+
+    decisions = _feed_cycle(pacer, 1.3, [2, 1, 1, 2, 1], 1.0, 300)
+
+    assert pacer.spec_cost < pacer.plain_cost
+    assert pacer.pauses == 0
+    assert decisions[-100:].count(True) >= 95
+
+
+def test_drafting_that_loses_with_most_drafts_accepted_is_paused():
+    """Three drafts in five accepted at 1.7x the plain step time is 1.06x the
+    plain cost per token: speculation pauses although most steps make two."""
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    pacer = _DraftPacer(pause_steps=8, max_pause_steps=32)
+
+    decisions = _feed_cycle(pacer, 1.7, [2, 1, 2, 1, 2], 1.0, 300)
+
+    assert pacer.pauses >= 3
+    assert decisions.count(True) < 300 * 0.4

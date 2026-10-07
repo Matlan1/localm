@@ -705,9 +705,11 @@ class _DraftPacer:
     emitted token than decoding one token at a time.
 
     One per loaded model. ``record`` takes the seconds a step took and the
-    tokens it made available; the last ``window`` seconds-per-token figures of
-    speculative steps and of plain one-token steps are kept and compared by
-    their medians, so a single slow step does not decide anything. While
+    tokens it made available; the last ``window`` speculative and plain steps
+    are kept. The cost per token of speculating is the median seconds of a
+    speculative step divided by the mean tokens one made available, and of
+    plain decoding the median seconds of a plain step, so a single slow step
+    does not decide anything and every accepted draft counts. While
     speculating, one step in every ``probe_every`` (every ``bootstrap_every``
     until there are ``min_samples`` plain figures) runs plain so the plain
     figure stays current. When both sides have ``min_samples`` figures and
@@ -724,8 +726,9 @@ class _DraftPacer:
         self.min_samples = min_samples
         self.first_pause = pause_steps
         self.max_pause_steps = max_pause_steps
-        self._spec = collections.deque(maxlen=window)   # seconds per token, speculating
-        self._plain = collections.deque(maxlen=window)  # seconds per token, one at a time
+        self._spec = collections.deque(maxlen=window)         # seconds per speculative step
+        self._spec_tokens = collections.deque(maxlen=window)  # tokens each one made available
+        self._plain = collections.deque(maxlen=window)        # seconds per plain step
         self.pauses = 0
         self._since_plain = 0
         self._pause_left = 0
@@ -733,12 +736,15 @@ class _DraftPacer:
 
     @property
     def spec_cost(self) -> Optional[float]:
-        """Median seconds per token of recent speculative steps, or None."""
-        return statistics.median(self._spec) if self._spec else None
+        """Seconds per token of recent speculative steps (median step time over
+        mean tokens per step), or None."""
+        if not self._spec:
+            return None
+        return statistics.median(self._spec) / statistics.fmean(self._spec_tokens)
 
     @property
     def plain_cost(self) -> Optional[float]:
-        """Median seconds per token of recent plain steps, or None."""
+        """Median seconds of recent plain one-token steps, or None."""
         return statistics.median(self._plain) if self._plain else None
 
     @property
@@ -760,6 +766,7 @@ class _DraftPacer:
             self._pause_left -= 1
             if self._pause_left == 0:
                 self._spec.clear()
+                self._spec_tokens.clear()
             return False
         every = (self.bootstrap_every if self.n_plain < self.min_samples
                  else self.probe_every)
@@ -771,8 +778,12 @@ class _DraftPacer:
 
     def record(self, speculative: bool, seconds: float, tokens: int) -> None:
         """Account one step: *seconds* spent, *tokens* made available."""
-        per_token = max(0.0, seconds) / max(1, tokens)
-        (self._spec if speculative else self._plain).append(per_token)
+        seconds = max(0.0, seconds)
+        if speculative:
+            self._spec.append(seconds)
+            self._spec_tokens.append(max(1, tokens))
+        else:
+            self._plain.append(seconds / max(1, tokens))
         if (speculative and self.n_spec >= self.min_samples
                 and self.n_plain >= self.min_samples):
             if self.spec_cost > self.plain_cost:

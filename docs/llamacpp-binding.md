@@ -490,9 +490,14 @@ relatively expensive), on how often drafts are accepted (lower when sampling
 with a temperature) and on how busy the machine is. Each loaded model keeps a
 `_DraftPacer` that measures the time per emitted token of speculative steps and
 of plain one-token steps as the reply runs (one step in 24 runs plain to keep
-that figure current). When speculation is the slower of the two it is paused
-for 32 steps, doubling on each consecutive pause up to 512, and then measured
-again. Paused steps are reported per reply (`mtp_paused_steps`, `usage.mtp`).
+that figure current). Over the last 16 steps of each kind, speculation costs the
+median time of a speculative step divided by the mean number of tokens one
+made available, and plain decoding the median time of a plain step. When
+speculation is the slower of the two it is paused for 32 steps, doubling on
+each consecutive pause up to 256, and then measured again; paused steps do no
+draft-cache work, and the positions they skipped are mirrored in one decode
+when drafting resumes. Paused steps are reported per reply
+(`mtp_paused_steps`, `usage.mtp`).
 
 **Why it declines**, recorded in `mtp_status` and logged
 (`MTP: active=%s status=%s`) rather than surfaced through an HTTP route yet:
