@@ -215,6 +215,10 @@ def _handle_command(raw: str, agent: Agent) -> bool:
         else:
             new_model = arg.strip()
             try:
+                load_model = getattr(agent.backend, "load_model", None)
+                if load_model is not None:
+                    print_info(f"Loading {new_model}...")
+                    load_model(new_model)
                 agent.set_model(new_model)
                 print_success(f"Model switched to {new_model}.")
             except Exception as e:

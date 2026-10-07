@@ -24,6 +24,7 @@ from localm.inference.backends.llamacpp import _api as api
 from localm.inference.engine import Engine
 from localm.inference.backends.llamacpp import llama as LlamaCppModule
 from tests._bare_llama import make_bare_llama
+from tests._fake_mtmd import fake_vision_prompt
 from tests._real_gguf import fetch_gguf, require_native_runtime
 
 
@@ -994,9 +995,8 @@ def test_generate_image_never_samples_or_decodes_the_draft_context():
         supports_mtp=True,
         mtp_active_this_call=True,   # as if a PRIOR text turn had speculated
     )
-    llm._mtmd = MagicMock(marker="<image>")
-    llm._mtmd.count_tokens.return_value = 10
-    llm._mtmd.eval_into.return_value = 5   # position after the mtmd prefill
+    llm._mtmd = MagicMock(marker="<image>", encode_count=0)
+    llm._mtmd.tokenize.return_value = fake_vision_prompt(text_tokens=(1, 2, 3, 4, 5))
     llm._create_batch = MagicMock(return_value=MagicMock())
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
 
@@ -1014,6 +1014,7 @@ def test_generate_image_never_samples_or_decodes_the_draft_context():
                       return_value=(messages, [])):
         mock_api.llama_sampler_sample.side_effect = [100, 101, _SpecRecorder.EOG]
         mock_api.llama_decode.return_value = 0
+        mock_api.llama_n_ctx.return_value = 4096
         tokens = list(llm._generate_image(
             messages, max_new_tokens=8, temperature=0.8, top_k=40, top_p=0.95,
             repeat_penalty=1.1,

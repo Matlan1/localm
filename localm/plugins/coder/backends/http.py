@@ -302,10 +302,17 @@ class HTTPBackend(BaseLLMBackend):
         successful fetch. Lets the coder budget its history against the real
         window instead of a static 4096 default. Best-effort: None on any error
         (the caller falls back to its default), and only a localm server exposes
-        it, so non-localm backends stay None."""
+        it, so non-localm backends stay None.
+
+        A localm server also reports which model that ceiling belongs to
+        (``effective_ctx_model``). When it names a model other than this
+        backend's current one, nothing is cached and None is returned: the
+        ceiling is the previous model's, and the answer is fetched again on
+        the next call. A server that does not report the model is cached as
+        before."""
         if self._ctx_capacity_cached:
             return self._ctx_capacity
-        self._ctx_capacity_cached = True
+        latch = True
         try:
             url = f"{self._base_url}/config"
             if self._pinned:
@@ -318,12 +325,46 @@ class HTTPBackend(BaseLLMBackend):
                                     verify=self._verify, allow_redirects=False)
             _raise_on_redirect(resp, url)
             if resp.ok:
-                v = resp.json().get("effective_ctx_max")
-                if isinstance(v, int) and v > 0:
+                body = resp.json()
+                v = body.get("effective_ctx_max")
+                reported = body.get("effective_ctx_model", self._model)
+                if reported != self._model:
+                    latch = False
+                elif isinstance(v, int) and v > 0:
                     self._ctx_capacity = v
         except Exception:
             self._ctx_capacity = None
+        self._ctx_capacity_cached = latch
         return self._ctx_capacity
+
+    def load_model(self, model: str) -> dict:
+        """Ask this backend's localm server to load *model* now (POST
+        /v1/models/load) and return the server's JSON answer, whose ``status``
+        is ``loaded``, ``already_loaded`` or ``peer_routed``.
+
+        Raises CoderServerError with the server's explanation when the server
+        refuses (an unregistered model is a 404 listing the registered ones, a
+        load that failed, was superseded or was cancelled is a 503) and
+        CoderAuthError on a 401/403. Returns ``{}`` without any request for a
+        server that is not localm's own, which has no load endpoint and loads
+        a model when a request names it."""
+        if not self._is_local_server:
+            return {}
+        from urllib.parse import urlencode
+        url = f"{self._base_url}/models/load?{urlencode({'model': model})}"
+        if self._pinned:
+            from localm import netpolicy
+            resp = netpolicy.pinned_request(
+                "POST", url, headers=self._headers(), timeout=self._timeout,
+                verify=self._verify, allow_redirects=False)
+        else:
+            resp = requests.post(url, headers=self._headers(),
+                                 timeout=self._timeout, verify=self._verify,
+                                 allow_redirects=False)
+        _raise_on_redirect(resp, url)
+        _raise_for_status(resp)
+        body = resp.json()
+        return body if isinstance(body, dict) else {}
 
     @property
     def model_id(self) -> str:

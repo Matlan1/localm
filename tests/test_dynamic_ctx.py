@@ -7,6 +7,7 @@ import pytest
 
 from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init
+from tests._fake_mtmd import fake_vision_prompt
 
 
 def _llm(n_ctx=4096, n_ctx_max=16384, n_ctx_grow=4096):
@@ -295,24 +296,26 @@ class TestGenerateImageContextSizing:
     find a memory slot") instead of growing to make room, identically on GPU
     and CPU since it is a KV-capacity limit rather than a compute-backend
     fault - so an undersized context looks exactly like the unrelated
-    gfx1030/RDNA2 hipBLAS bug eval_into's caller already retries on CPU for,
+    gfx1030/RDNA2 hipBLAS bug _generate_image already retries on CPU for,
     and still fails after wasting that retry."""
 
     def _vision_llm(self, *, n_tokens, **ctx_kwargs):
         llm = _llm(**ctx_kwargs)
         llm._model_ptr = 111
         llm._ctx_ptr = 222
-        llm._mtmd = MagicMock(marker="<image>")
-        llm._mtmd.count_tokens.return_value = n_tokens
+        llm._mtmd = MagicMock(marker="<image>", encode_count=0)
+        llm._mtmd.tokenize.return_value = fake_vision_prompt(
+            text_tokens=(1,), image_tokens=n_tokens - 1)
         return llm
 
     def _drive(self, llm, mock_api, *, max_new_tokens=64):
         """Run _generate_image up to (and just past) the prefill/resize
-        decision: eval_into raises immediately so the test never reaches the
+        decision: the first image evaluation raises, so the test never reaches the
         native decode loop, which is not what this class is about."""
         class _StopAfterPrefillDecision(Exception):
             pass
-        llm._mtmd.eval_into.side_effect = _StopAfterPrefillDecision()
+        llm._mtmd.eval_media_chunk.side_effect = _StopAfterPrefillDecision()
+        mock_api.llama_n_ctx.return_value = llm._ctx_capacity
         messages = [{"role": "user", "content": "describe this"}]
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
              patch("localm.inference.backends.llamacpp.llama._apply_model_template",
@@ -363,4 +366,4 @@ class TestGenerateImageContextSizing:
                     messages, max_new_tokens=1024, temperature=0.8, top_k=40,
                     top_p=0.95, repeat_penalty=1.1))
         # Refused before ever touching mtmd - not a failed/wasted eval attempt.
-        llm._mtmd.eval_into.assert_not_called()
+        llm._mtmd.eval_media_chunk.assert_not_called()

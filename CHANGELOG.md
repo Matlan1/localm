@@ -144,6 +144,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with an open session, has to be ended first.
 
 ### Changed
+- **Follow-up messages in a chat with an image answer much faster on GGUF
+  models.** Once an image has been sent, each later turn used to encode every
+  image in the conversation again and reprocess the whole chat, which could take
+  minutes per turn when images are encoded on the CPU. Now an image is encoded
+  only once, and on most models only the previous reply and the new message are
+  processed (Qwen-VL models still reprocess the conversation text, as they do in
+  text-only chats); the status line reads "Processing prompt..." instead of
+  "Encoding image..." when no image needs encoding. Encoded images are kept in memory only for the most recent image
+  conversation and are released when the model unloads.
 - **Settings' "Library" section is now called "Model Library & Sources".**
 - **The bundled llama.cpp runtime moved from b10905 to b11118.** An existing install picks it up with `localm setup-llama --force`.
 - **Web activity in the chat is its own collapsed card, not a user turn.** A
@@ -200,6 +209,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   collections table drops a stale "re-embed needed" badge as soon as the switch
   or the model download finishes. Opening or deleting a large collection no
   longer stalls the rest of the server while it loads.
+- **`/model` in the coder REPL loads the model before it says it switched.** A name the
+  server does not have is refused with the server's explanation instead of failing every
+  turn afterwards, and the coder sizes its history to the new model's context window
+  instead of keeping the previous model's.
 - **Compacting a long conversation now shows that it is happening.** While older
   messages are being summarised to fit the context window, the chat shows
   "Compacting conversation…" instead of sitting silent, in the browser, in
@@ -1149,6 +1162,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Windows, and on Linux and macOS a re-download that failed checksum verification deleted
   the file that was already in place. A pull of a CivitAI file that another pull finished
   moments earlier now uses that finished file instead of failing or replacing it.
+- **`localm coder --estimate` stops after printing the plan.** It used to print the
+  plan and then run the task anyway, writing files and, with `--yes`, running shell
+  commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
 - **Privacy mode no longer leaves the start of tool-enabled replies in the debug
