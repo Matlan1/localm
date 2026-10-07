@@ -195,7 +195,7 @@ def _mtp_probe_arm(model_path, display, mtp_enabled, gen_tokens, ctx,
               help="Times to repeat the paired measurement.")
 @click.option("-c", "--ctx",        default=None, type=int)
 @click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
-@click.option("-d", "--draft-tokens", default=None, type=click.IntRange(1, 4),
+@click.option("-d", "--draft-tokens", default=None, type=click.IntRange(1, 3),
               help="Draft tokens per MTP step for the 'on' runs "
                    "(default: the mtp_draft_tokens setting).")
 def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):

@@ -13,11 +13,13 @@ Implements only the subset used by GgufBackend:
 from __future__ import annotations
 
 import codecs
+import collections
 import contextlib
 import ctypes
 import functools
 import os
 import re
+import statistics
 import tempfile
 import threading
 import time
@@ -681,7 +683,7 @@ _PREFILL_CHUNK = 2048
 _DECODE_PROGRESS_INTERVAL = 50
 
 # Draft tokens one MTP speculation step may propose, and the default.
-MTP_DRAFT_TOKENS_MAX = 4
+MTP_DRAFT_TOKENS_MAX = 3
 MTP_DRAFT_TOKENS_DEFAULT = 1
 
 # Accepted tokens queued for the draft cache before they are decoded on their own.
@@ -703,33 +705,49 @@ class _DraftPacer:
     emitted token than decoding one token at a time.
 
     One per loaded model. ``record`` takes the seconds a step took and the
-    tokens it made available; the seconds per token of speculative steps and
-    of plain one-token steps are kept as exponential moving averages. While
+    tokens it made available; the last ``window`` seconds-per-token figures of
+    speculative steps and of plain one-token steps are kept and compared by
+    their medians, so a single slow step does not decide anything. While
     speculating, one step in every ``probe_every`` (every ``bootstrap_every``
-    until the plain figure has ``min_samples`` samples) runs plain so the plain
-    figure stays current. When both figures have ``min_samples`` samples and
+    until there are ``min_samples`` plain figures) runs plain so the plain
+    figure stays current. When both sides have ``min_samples`` figures and
     speculation is the slower one, ``speculate`` answers False for the next
     ``pause_steps`` steps, doubling on each consecutive pause up to
     ``max_pause_steps``; speculation is measured afresh after a pause.
     """
 
     def __init__(self, probe_every: int = 24, bootstrap_every: int = 3,
-                 min_samples: int = 4, pause_steps: int = 32,
-                 max_pause_steps: int = 512, alpha: float = 0.125) -> None:
+                 min_samples: int = 4, window: int = 16, pause_steps: int = 32,
+                 max_pause_steps: int = 256) -> None:
         self.probe_every = probe_every
         self.bootstrap_every = bootstrap_every
         self.min_samples = min_samples
         self.first_pause = pause_steps
         self.max_pause_steps = max_pause_steps
-        self.alpha = alpha
-        self.spec_cost: Optional[float] = None    # seconds per token, speculating
-        self.plain_cost: Optional[float] = None   # seconds per token, one at a time
-        self.n_spec = 0
-        self.n_plain = 0
+        self._spec = collections.deque(maxlen=window)   # seconds per token, speculating
+        self._plain = collections.deque(maxlen=window)  # seconds per token, one at a time
         self.pauses = 0
         self._since_plain = 0
         self._pause_left = 0
         self._pause_len = pause_steps
+
+    @property
+    def spec_cost(self) -> Optional[float]:
+        """Median seconds per token of recent speculative steps, or None."""
+        return statistics.median(self._spec) if self._spec else None
+
+    @property
+    def plain_cost(self) -> Optional[float]:
+        """Median seconds per token of recent plain steps, or None."""
+        return statistics.median(self._plain) if self._plain else None
+
+    @property
+    def n_spec(self) -> int:
+        return len(self._spec)
+
+    @property
+    def n_plain(self) -> int:
+        return len(self._plain)
 
     @property
     def paused(self) -> bool:
@@ -741,7 +759,7 @@ class _DraftPacer:
         if self._pause_left > 0:
             self._pause_left -= 1
             if self._pause_left == 0:
-                self.spec_cost, self.n_spec = None, 0
+                self._spec.clear()
             return False
         every = (self.bootstrap_every if self.n_plain < self.min_samples
                  else self.probe_every)
@@ -754,12 +772,7 @@ class _DraftPacer:
     def record(self, speculative: bool, seconds: float, tokens: int) -> None:
         """Account one step: *seconds* spent, *tokens* made available."""
         per_token = max(0.0, seconds) / max(1, tokens)
-        if speculative:
-            self.spec_cost = self._ema(self.spec_cost, per_token)
-            self.n_spec += 1
-        else:
-            self.plain_cost = self._ema(self.plain_cost, per_token)
-            self.n_plain += 1
+        (self._spec if speculative else self._plain).append(per_token)
         if (speculative and self.n_spec >= self.min_samples
                 and self.n_plain >= self.min_samples):
             if self.spec_cost > self.plain_cost:
@@ -768,9 +781,6 @@ class _DraftPacer:
                 self.pauses += 1
             else:
                 self._pause_len = self.first_pause
-
-    def _ema(self, current: Optional[float], value: float) -> float:
-        return value if current is None else current + self.alpha * (value - current)
 
 
 def _address(ptr) -> Optional[int]:
@@ -2496,8 +2506,8 @@ class LlamaCpp:
 
     def _pending_h_addr(self, pos: int) -> Optional[int]:
         """The address of the hidden state for position pos - 1, or None when
-        _pending_h holds some other position's."""
-        if self._pending_h is None or self._pending_h_pos != pos - 1:
+        there is none (pos 0) or _pending_h holds some other position's."""
+        if pos <= 0 or self._pending_h is None or self._pending_h_pos != pos - 1:
             return None
         return _address(self._pending_h)
 
