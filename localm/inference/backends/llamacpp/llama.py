@@ -2552,7 +2552,7 @@ class LlamaCpp:
         # new prompt decodes onto stale KV at shifted positions (U-1: "sees earlier
         # text out of order"). A zero prefix clears the memory outright instead of
         # removing a range: recurrent state cannot be partially rewound,
-        # so a range removal can leave them stale.
+        # so a range removal can leave it stale.
         mtp_needs_full_prefill = False
         if self._mtp_draft_stale and self._mtp_ctx_ptr is not None and self._mtp_usable:
             try:

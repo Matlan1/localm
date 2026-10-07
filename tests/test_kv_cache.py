@@ -99,7 +99,11 @@ class TestCanReuseKv:
         llm = _bare_llama()
         llm._kv_supported = True
         api_path = "localm.inference.backends.llamacpp.llama.api"
-        with patch(api_path + ".has_model_meta_api", return_value=True),              patch(api_path + ".llama_model_meta_val_str", return_value="qwen2vl"),              patch(api_path + ".llama_model_rope_type", create=True, return_value=8):
+        with (
+            patch(api_path + ".has_model_meta_api", return_value=True),
+            patch(api_path + ".llama_model_meta_val_str", return_value="qwen2vl"),
+            patch(api_path + ".llama_model_rope_type", create=True, return_value=8),
+        ):
             assert llm._can_reuse_kv(100) is True
 
     def test_probe_result_cached(self):
@@ -507,6 +511,7 @@ class TestMtpDraftingRespectsGrammar:
 
     def _drive(self, grammar):
         llm = _bare_llama()
+        llm._ctx_capacity = 4
         llm._mtp_ctx_ptr = self._MTP_CTX
         llm._tokenizer.is_eog.return_value = False
         # Drafting feeds the head the target's hidden state and is skipped when
@@ -532,6 +537,8 @@ class TestMtpDraftingRespectsGrammar:
         # context's own prefill, which happens either way.
         drafted = [c for c in mock_api.llama_sampler_sample.call_args_list
                    if c[0][1] == self._MTP_CTX]
+        assert mock_api.llama_init_from_model.call_count == 2, (
+            "the prompt did not grow the main context and recreate the draft context")
         return mock_api, drafted
 
     def test_no_drafting_while_a_grammar_constrains_sampling(self):

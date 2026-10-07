@@ -360,7 +360,7 @@ family):
   removed with `llama_memory_seq_rm` and only the new suffix is prefilled.
   Follow-up chat turns skip re-evaluating the whole history.
   M-RoPE models (Qwen2-VL, Qwen2.5-VL, Qwen3-VL) reuse the prefix the same
-  way; for an image prompt the cut always falls between whole images.
+  way; for an image prompt the cut never splits an image.
 - **Full clear**: when the cache refuses to drop a range (a recurrent or
   hybrid model such as Qwen3.5), the cache is cleared and the whole prompt
   is prefilled into the same context.
