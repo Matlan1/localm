@@ -468,3 +468,47 @@ test("a compacted reply that failed does not stop routing to a roomier model", a
   await window.runCompletion(conv);
   assert.equal(conv.serverCompacted, undefined);
 });
+
+test("a compacted reply whose stream ends in a refusal does not mark the conversation compacted", async () => {
+  const { window } = setup({ headers: { "X-Localm-Context-Compacted": "1" } });
+  window.readSSE = async (_r, onData) => {
+    onData(JSON.stringify({ localm_error: { status: 503, detail: "the model could not be loaded" } }));
+  };
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(conv.serverCompacted, undefined);
+});
+
+test("a compacted reply cut at its first tool call still marks the conversation compacted", async () => {
+  const { window, doc } = setup({ headers: { "X-Localm-Context-Compacted": "1" } });
+  const inner = window.fetch;
+  let lastSignal = null;
+  window.fetch = async (url, opts = {}) => {
+    if (String(url) === "/v1/chat/completions") lastSignal = opts.signal;
+    return inner(url, opts);
+  };
+  const block = '<tool_call>{"name": "web_search", "args": {"query": "q"}}</tool_call>';
+  let reads = 0;
+  // Like a browser's fetch body: reading after the request was aborted throws AbortError.
+  window.readSSE = async (_r, onData) => {
+    reads += 1;
+    for (const part of reads === 1 ? [block + "\n", block] : ["done"]) {
+      onData(JSON.stringify({ choices: [{ delta: { content: part } }] }));
+      if (lastSignal && lastSignal.aborted) {
+        throw new window.DOMException("The operation was aborted.", "AbortError");
+      }
+    }
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  };
+  let flagWhenCalled;
+  window.runWebCall = async (c) => { flagWhenCalled = c.serverCompacted; };
+  doc.getElementById("p-web").checked = true;
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(flagWhenCalled, true, "the cut reply's compaction was recorded before its call ran");
+  const first = conv.messages.find((m) => m.role === "assistant");
+  assert.equal(first.stopped, undefined, "the cut is not a user Stop");
+  assert.equal((first.content.match(/<tool_call>/g) || []).length, 1);
+});

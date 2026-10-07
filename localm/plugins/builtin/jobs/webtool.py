@@ -376,8 +376,7 @@ def run_web_call(call: dict) -> str:
                 return compose(
                     "[Web request failed: ",
                     untrusted_span(bundle.search_error or "search failed"),
-                    "] Answer without the web, and say that web access did "
-                    "not work.")
+                    "] " + WEB_FAILED_INSTRUCTION)
             return compose(
                 '[Results of web_search "', untrusted_span(query), '"] (',
                 bundle.grounding_summary(), ")\n",
@@ -391,21 +390,22 @@ def run_web_call(call: dict) -> str:
                        "] Answer without it.")
     except netpolicy.NetworkPolicyError as e:
         return compose("[Web request refused by policy: ", untrusted_span(str(e)),
-                       "] Answer without the web and say web access was refused.")
+                       "] Nothing was looked up. Tell the user plainly that web "
+                       "access was refused, and do not describe, simulate or guess "
+                       "what it would have found.")
     except Exception as e:
         from localm.web_retrieval.errors import describe_failure
         return compose("[Web request failed: ",
                        untrusted_span(describe_failure(e)),
-                       "] Answer without the web, and say that web access did not "
-                       "work.")
+                       "] " + WEB_FAILED_INSTRUCTION)
 
 
 def _tool_call_grammar(engine):
     """(grammar, trigger_patterns) for lazy web-tool-call enforcement, or None.
 
-    Mirrors coder/agent/context.py's lazy branch: once the model starts a
-    <tool_call>, force it to be valid tool-call JSON; free text and thinking
-    stay unconstrained. Chat's web loop never forces a first-token call (it
+    Once the model starts a <tool_call>, force it to be one valid tool-call
+    block, after which the generation ends (the loop runs one call per reply);
+    free text and thinking stay unconstrained. Chat's web loop never forces a first-token call (it
     always has the option to just answer), so there is no forced-grammar rung
     here the way coder has one."""
     if not getattr(engine, "supports_grammar", False):
@@ -416,8 +416,8 @@ def _tool_call_grammar(engine):
             return None
     except Exception:
         return None
-    from localm.inference.gbnf import TOOL_CALL_TRIGGER, TOOL_CALLS_ONLY
-    return TOOL_CALLS_ONLY, [TOOL_CALL_TRIGGER]
+    from localm.inference.gbnf import TOOL_CALL_SINGLE, TOOL_CALL_TRIGGER
+    return TOOL_CALL_SINGLE, [TOOL_CALL_TRIGGER]
 
 
 def _complete(engine, messages: list, *, grammar_pair=None) -> str:
@@ -442,6 +442,14 @@ def _final_answer(reply: str) -> str:
         return ("(The model produced only reasoning output and no final "
                 "answer; the reply was likely truncated.)")
     return text
+
+
+# Follows a failed lookup's error in the text the model reads. Same wording as
+# the GUI's WEB_FAILED_INSTRUCTION (settings-perf.js).
+WEB_FAILED_INSTRUCTION = (
+    "This lookup returned no information. Tell the user plainly that it "
+    "failed. Do not describe, simulate or guess what it would have found, and "
+    "do not present anything as a result of it.")
 
 
 def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> str:

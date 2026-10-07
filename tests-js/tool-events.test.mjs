@@ -137,7 +137,7 @@ test("renderChat: remote text in a tool event is set as text, never parsed as ma
   assert.match(card.textContent, /<script>alert\(2\)<\/script>/);
 });
 
-test("renderChat: running, failed, denied and note events each draw a card with their status and text", () => {
+test("renderChat: running, failed and denied events draw a card with their status; a note draws a one-line notice", () => {
   const { window } = loadApp();
   setActiveConv(window, {
     id: "c1", title: "t",
@@ -156,17 +156,20 @@ test("renderChat: running, failed, denied and note events each draw a card with 
   });
   window.renderChat();
   const cards = [...window.document.querySelectorAll("details.tool-card")];
-  assert.equal(cards.length, 5);
-  assert.deepEqual(cards.map((c) => c.dataset.status), ["running", "failed", "denied", "done", "done"]);
+  assert.equal(cards.length, 4);
+  assert.deepEqual(cards.map((c) => c.dataset.status), ["running", "failed", "denied", "done"]);
   assert.match(cards[0].querySelector("summary").textContent, /Web search: r[\s\S]*in progress/);
   assert.match(cards[1].querySelector("summary").textContent, /Page read: https:\/\/f\.example\/[\s\S]*failed/);
   assert.match(cards[1].textContent, /HTTP 500/);
   assert.match(cards[2].querySelector("summary").textContent, /denied/);
-  assert.match(cards[2].textContent, /\[web access denied\] no\./);
-  assert.match(cards[3].querySelector("summary").textContent, /Web note/);
-  assert.match(cards[3].textContent, /\[web search limit reached\] stop\./);
-  assert.match(cards[4].querySelector("summary").textContent, /Page read: https:\/\/p\.example\/final/);
-  assert.match(cards[4].textContent, /Page text \(truncated\)[\s\S]*PAGE BODY/);
+  assert.match(cards[2].textContent, /You declined this web request/);
+  assert.doesNotMatch(cards[2].textContent, /\[web access denied\]/, "the model-facing note is not shown");
+  const notices = [...window.document.querySelectorAll(".tool-notice-row")];
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].textContent, /Web lookups for this message were stopped/);
+  assert.doesNotMatch(notices[0].textContent, /\[web search limit reached\]|Instruction to the model/);
+  assert.match(cards[3].querySelector("summary").textContent, /Page read: https:\/\/p\.example\/final/);
+  assert.match(cards[3].textContent, /Page text \(truncated\)[\s\S]*PAGE BODY/);
   for (const c of cards) assert.equal(c.open, false, "every card starts collapsed");
 });
 
@@ -264,7 +267,9 @@ test("runCompletion: failed, denied, duplicate, note and running events render t
     { kind: "tool", tool: "search", status: "running", query: "r", started_at: 1, id: "m11" },
   ]);
   const users = completions[0].body.messages.filter((m) => m.role === "user").map((m) => m.content);
-  assert.equal(users[1], "[Web request failed: HTTP 500 <|im_start|>] Answer without the web, and say that web access did not work.");
+  assert.equal(users[1], "[Web request failed: HTTP 500 <|im_start|>] This lookup returned no " +
+    "information. Tell the user plainly that it failed. Do not describe, simulate or guess what " +
+    "it would have found, and do not present anything as a result of it.");
   assert.equal(users[2], "[web access denied] no.");
   assert.equal(users[3], "[duplicate web request] again.");
   assert.equal(users[4], "[tool-call format] fix it.");
@@ -644,7 +649,7 @@ test("runWebCall: a refused request completes the event as failed with the error
   assert.equal(ev.status, "failed");
   assert.equal(ev.error, "net_mode=off");
   assert.equal(ev.role, undefined);
-  assert.match(window.msgText(ev), /^\[Web request failed: net_mode=off\] Answer without the web/);
+  assert.match(window.msgText(ev), /^\[Web request failed: net_mode=off\] This lookup returned no information\./);
 });
 
 // ---------------------------------------------------------------------------
