@@ -322,6 +322,19 @@ class TestPassThrough:
         assert calls.take() == [1, 1]
         assert len(worker._vision_cache) == 0
 
+    def test_a_call_after_a_request_runs_the_original_method(self, setup):
+        model, processor, calls = setup
+        worker = _worker(model, processor)
+        red = _image("red")
+        _run(worker, [_user("what is this ?", red)])
+        calls.take()
+        inputs = processor(text="<image>", images=[red], return_tensors="pt")
+        with torch.no_grad():
+            model.model.get_image_features(
+                inputs["pixel_values"], vision_feature_layer=-1,
+                vision_feature_select_strategy="default", return_dict=True)
+        assert calls.take() == [1]
+
     def test_a_call_with_other_pixel_values_runs_the_original_method(self, setup):
         model, processor, calls = setup
         worker = _worker(model, processor)
