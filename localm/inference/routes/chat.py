@@ -86,7 +86,7 @@ def register(app: FastAPI, ctx) -> None:
                     # request resolves to. skip_if_latched: a load that failed
                     # while this request waited for the model is not repeated.
                     engine = await _hs.get_engine(_cand, activate=False,
-                                                  skip_if_latched=True)
+                                                  skip_if_latched=True, on_status=say)
                 except _hs.LoadSkipped as e:
                     skipped_now.append(e.skipped)
                     continue
@@ -118,7 +118,7 @@ def register(app: FastAPI, ctx) -> None:
                          routed_placement.get("gpu_layers_total"))
 
         if engine is None:
-            engine = await _hs.get_engine(req.model)
+            engine = await _hs.get_engine(req.model, on_status=say)
         # Report the model that actually answered when the request named none
         # or was routed. Both an omitted field (None) and an explicit "" are
         # falsy and fall through to engine.display_name; an explicit "localm"

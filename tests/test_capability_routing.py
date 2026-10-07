@@ -464,7 +464,7 @@ class TestRoutingOverHTTP:
         with caplog.at_level("WARNING", logger="localm"):
             r = _ask(client, required_capabilities=["tool_use"], stream=stream)
         assert _answering_model(engines) == ["tooly"]
-        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        blob = json.loads(_stream_headers(r)["X-Localm-Model-Routing"])
         assert blob["placement"] == {"gpu_layers": 12, "total_layers": 32}
         assert ("capability routing: tooly answers with 12/32 layers on the GPU, the "
                 "rest on the CPU (slower)") in [rec.getMessage() for rec in caplog.records]
@@ -479,6 +479,25 @@ class TestRoutingOverHTTP:
             r = _ask(client, required_capabilities=["tool_use"])
         assert "placement" not in json.loads(r.headers["X-Localm-Model-Routing"])
         assert not [rec for rec in caplog.records if "answers with" in rec.getMessage()]
+
+    @pytest.mark.parametrize("routed", [True, False])
+    def test_a_wait_inside_model_resolution_reaches_the_stream_as_a_status(
+            self, server, monkeypatch, routed):
+        import asyncio
+        from localm.inference.protocol import WAITING_FOR_MODEL_STATUS
+        client, engines = server
+        real_get_engine = hs.get_engine
+
+        async def waiting_get_engine(*args, **kwargs):
+            kwargs["on_status"](WAITING_FOR_MODEL_STATUS)
+            await asyncio.sleep(hs.PREP_STATUS_GRACE_S + 0.5)
+            return await real_get_engine(*args, **kwargs)
+
+        monkeypatch.setattr(hs, "get_engine", waiting_get_engine)
+        body = {"required_capabilities": ["tool_use"]} if routed else {}
+        r = _ask(client, stream=True, **body)
+        assert WAITING_FOR_MODEL_STATUS in r.text
+        assert _answering_model(engines) == (["tooly"] if routed else ["plain"])
 
     def test_a_degraded_model_that_was_not_routed_adds_no_placement(self, server):
         client, engines = server

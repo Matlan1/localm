@@ -50,7 +50,7 @@ from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
-    COMPACTING_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
+    COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
     FullChoice, Message, PROCESSING_PROMPT_STATUS, STATUS_CODE_BY_TEXT, StreamChoice,
     UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
@@ -536,10 +536,20 @@ def _gpu_placement_fields(engine) -> dict:
 _INCONCLUSIVE_LOAD_RETRIES = 2
 _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 
+# How long a load that is not an explicit switch waits for a busy resident
+# model to finish its requests, so that model can be evicted instead of the new
+# one loading beside it on whatever VRAM is left.
+_BUSY_VICTIM_IDLE_WAIT_S = 30.0
+
+# How much longer _switch_free_victim waits for an evicted model's VRAM when
+# the first wait_for_vram_release saw no release.
+_VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
+
 
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
                         force: bool = False, activate: bool = True,
-                        skip_if_latched: bool = False) -> dict:
+                        skip_if_latched: bool = False,
+                        on_status: Optional[Callable[[str], None]] = None) -> dict:
     """Make model *name* resident and, with *activate*, the active model.
 
     *make_engine*, when not None, becomes the engine factory used to build an
@@ -552,7 +562,17 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     With *skip_if_latched* (a load that capability routing chose, not one the
     user asked for) a model that is not resident is not loaded when its last
     load failed and that failure still applies once the model's semaphore is
-    held; ``LoadSkipped`` is raised instead.
+    held; ``LoadSkipped`` is raised instead. *on_status*, when given, is called
+    on the event loop thread with ``WAITING_FOR_MODEL_STATUS`` while the load
+    waits for a busy model to finish and with ``LOADING_MODEL_STATUS`` when it
+    goes on.
+
+    A load that is not an explicit switch waits up to ``_BUSY_VICTIM_IDLE_WAIT_S``
+    for a busy resident model that stands in its way to go idle, then evicts it
+    (``_switch_wait_for_busy_victim``). A resident model left partly on the CPU
+    by an earlier load is reloaded instead of reused, once, when a model that
+    held the VRAM it lacked is idle or gone (``_placement_heal_due``); an
+    explicit switch reuses it as it is.
 
     Returns a dict whose ``status`` is one of:
 
@@ -593,22 +613,35 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
 
+        healing = None
+        was_active = False
+        heal_budget = None
         if name in _engines and _engines[name].loaded and getattr(_engines[name], "unloading", False) is not True:
-            _switch_reuse_resident(name, sem, activate=activate, on_active=on_active)
-            return {"status": "already_active", "model": name,
-                    **_gpu_placement_fields(_engines[name])}
+            resident = _engines[name]
+            if not preempt and _placement_heal_due(name, resident):
+                heal_budget = _switch_load_budget(name)
+            if heal_budget is None:
+                _switch_reuse_resident(name, sem, activate=activate, on_active=on_active)
+                return {"status": "already_active", "model": name,
+                        **_gpu_placement_fields(resident)}
+            # No await since _placement_heal_due read active_requests == 0.
+            healing = resident
+            was_active = _switch_detach_victim(name, resident, activate=activate,
+                                               keep_sem=True)
 
-        if skip_if_latched and _routing_latch.failure(name) is not None:
+        if healing is None and skip_if_latched and _routing_latch.failure(name) is not None:
             latched = await loop.run_in_executor(None, _routing_latch.skipped, [name])
             if name in latched:
                 raise LoadSkipped(latched[name])
 
-        budget = _switch_load_budget(name)
+        budget = heal_budget if healing is not None else _switch_load_budget(name)
         evictions: list[VictimRelease] = []
+        if healing is not None:
+            evictions.append(await _switch_free_for_reload(loop, name, healing, budget))
         if budget is not None:
             early = await _switch_make_room(loop, budget, preempt=preempt,
                                             force=force, activate=activate,
-                                            evictions=evictions)
+                                            evictions=evictions, on_status=on_status)
             if early is not None:
                 return early
 
@@ -618,13 +651,20 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 503, f"'{name}' is currently being freed by another request; "
                 f"retry shortly.")
 
-        new_engine = _engines[name] if name in _engines else _engine_factory(name)
+        if healing is not None:
+            new_engine = healing
+        else:
+            new_engine = _engines[name] if name in _engines else _engine_factory(name)
         interrupted = await _switch_load(loop, name, new_engine, preempt=preempt)
         if interrupted is not None:
             return interrupted
 
-        _switch_commit(name, new_engine, sem, activate=activate, on_active=on_active)
+        _switch_commit(name, new_engine, sem, activate=activate or was_active,
+                       on_active=on_active)
         _log_switch_placement(name, new_engine, evictions)
+        _record_placement_heal(name, new_engine,
+                               budget.pinned if budget is not None else frozenset(),
+                               evictions, allowed=healing is None)
         # Off the event loop: registry file I/O and, with a non-zero
         # main_gpu_index, a GPU driver probe.
         await loop.run_in_executor(None, _gpu_registry_sync)
@@ -686,7 +726,9 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
 
 async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
                             preempt: bool, force: bool, activate: bool,
-                            evictions: Optional[list] = None) -> Optional[dict]:
+                            evictions: Optional[list] = None,
+                            on_status: Optional[Callable[[str], None]] = None
+                            ) -> Optional[dict]:
     """Run the eviction loop until ``budget.name`` may load.
 
     Each iteration takes a VRAM reading, asks
@@ -695,6 +737,7 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     (``_switch_exhaustion_ladder``). An evicted victim is detached from every
     live registry, natively unloaded, and the loop re-probes. The
     ``VictimRelease`` of each eviction is appended to *evictions* when given.
+    *on_status* is passed to ``_switch_exhaustion_ladder``.
 
     Returns None when the load may proceed, or a ``confirm_required`` result
     for switch_engine to return. Raises HTTPException 503 when a static split
@@ -727,7 +770,7 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
         if decision.action == switch_admission.EXHAUSTED:
             step = await _switch_exhaustion_ladder(
                 loop, probe, budget, attempt, _embedder_mod,
-                preempt=preempt, force=force)
+                preempt=preempt, force=force, on_status=on_status)
             if step.kind == switch_admission.REPROBE:
                 continue
             if step.kind == switch_admission.PROCEED_TO_LOAD:
@@ -744,7 +787,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
         if not force_busy and getattr(victim_engine, "active_requests", 0) != 0:
             continue
         _switch_detach_victim(victim, victim_engine, activate=activate)
-        release = await _switch_free_victim(loop, victim, victim_engine, probe)
+        release = await _switch_free_victim(loop, victim, victim_engine, probe,
+                                            needed=budget.needed_bytes)
         if evictions is not None:
             evictions.append(release)
 
@@ -815,12 +859,16 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
                                     budget: switch_admission.LoadBudget,
                                     attempt: switch_admission.EvictionAttempt,
                                     embedder_mod, *, preempt: bool,
-                                    force: bool) -> switch_admission.EvictionStep:
+                                    force: bool,
+                                    on_status: Optional[Callable[[str], None]] = None
+                                    ) -> switch_admission.EvictionStep:
     """Find room once no idle chat model is evictable, in this order: free the
     idle shared embedder; act on the probe verdict (load best-effort when the
     box cannot measure, retry or refuse when the probe was inconclusive); ask
     a sibling localm instance to free its VRAM; cancel and claim a busy
-    resident model; then refuse, ask, or defer to the backend's own sizing
+    resident model (explicit switch) or wait for it to go idle
+    (``_switch_wait_for_busy_victim``, any other load); then refuse, ask, or
+    defer to the backend's own sizing
     (``switch_admission.final_exhaustion_verdict``).
 
     Returns the loop's next ``switch_admission.EvictionStep``. Raises
@@ -849,6 +897,11 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     busy = await _switch_claim_busy_victim(budget, attempt, preempt=preempt, force=force)
     if busy is not None:
         return busy
+
+    idle = await _switch_wait_for_busy_victim(budget, attempt, preempt=preempt,
+                                              on_status=on_status)
+    if idle is not None:
+        return idle
 
     final = switch_admission.final_exhaustion_verdict(probe, preempt=preempt, force=force)
     if final == switch_admission.REFUSE_SPLIT_SHORTFALL:
@@ -967,22 +1020,70 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
         switch_admission.EVICT, victim=busy_name, force_busy=force)
 
 
-def _switch_detach_victim(victim: str, engine, *, activate: bool) -> None:
+async def _switch_wait_for_busy_victim(budget: switch_admission.LoadBudget,
+                                       attempt: switch_admission.EvictionAttempt,
+                                       *, preempt: bool,
+                                       on_status: Optional[Callable[[str], None]] = None
+                                       ) -> switch_admission.EvictionStep | None:
+    """For a load that is not an explicit switch, wait up to
+    ``_BUSY_VICTIM_IDLE_WAIT_S`` for the busy resident model
+    ``switch_admission.idle_wait_candidate`` names to finish its requests,
+    once per load attempt. Nothing is cancelled.
+
+    Returns an EVICT step for that model when it went idle, else None (no
+    candidate, or still busy when the wait ended). *on_status* is called with
+    ``WAITING_FOR_MODEL_STATUS`` before the wait and ``LOADING_MODEL_STATUS``
+    after it."""
+    from localm.debuglog import logger as _dbg
+    busy_name = switch_admission.idle_wait_candidate(
+        budget, _engines_lru, _engines, preempt=preempt,
+        already_waited=attempt.busy_waited)
+    if busy_name is None:
+        return None
+    attempt.busy_waited = True
+    busy_engine = _engines[busy_name]
+    _dbg.info("switch_engine: '%s' needs the VRAM '%s' holds; waiting up to %.0fs "
+              "for '%s' to finish its request(s) so it can be evicted",
+              budget.name, busy_name, _BUSY_VICTIM_IDLE_WAIT_S, busy_name)
+    if on_status is not None:
+        on_status(WAITING_FOR_MODEL_STATUS)
+    try:
+        idle = await _wait_for_pin_clear(busy_engine, timeout=_BUSY_VICTIM_IDLE_WAIT_S,
+                                         poll_interval=0.25)
+    finally:
+        if on_status is not None:
+            on_status(LOADING_MODEL_STATUS)
+    if not idle:
+        _dbg.info("switch_engine: '%s' is still busy after %.0fs; '%s' loads beside "
+                  "it", busy_name, _BUSY_VICTIM_IDLE_WAIT_S, budget.name)
+        return None
+    return switch_admission.EvictionStep(switch_admission.EVICT, victim=busy_name)
+
+
+def _switch_detach_victim(victim: str, engine, *, activate: bool,
+                          keep_sem: bool = False) -> bool:
     """Mark eviction victim *victim* ``unloading`` and remove it from
-    ``_engines``, ``_engines_lru``, ``_inference_sems`` and the active-model
-    pointers, before its native unload. A request then misses get_engine's
-    fast path for it, and a concurrent switch to *victim* builds a fresh
-    engine. With *activate* False, an active victim is kept in
+    ``_engines``, ``_engines_lru``, ``_inference_sems`` (unless *keep_sem*) and
+    the active-model pointers, before its native unload. A request then misses
+    get_engine's fast path for it, and a concurrent switch to *victim* builds a
+    fresh engine. With *activate* False, an active victim is kept in
     ``_last_active_model_name`` as the name an unnamed request resolves to.
+    Returns whether *victim* was the active model.
+
+    *keep_sem* is for a caller that holds *victim*'s own semaphore and reloads
+    it: a request for *victim* then waits on that semaphore instead of building
+    a second engine.
 
     Must run with no await since the victim's pin was last checked. See
     test_eviction_victim_not_pinnable_during_native_free."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
+    was_active = _active_model_name == victim
     engine.unloading = True
     _engines.pop(victim, None)
     if victim in _engines_lru:
         _engines_lru.remove(victim)
-    _inference_sems.pop(victim, None)
+    if not keep_sem:
+        _inference_sems.pop(victim, None)
     if _active_model_name == victim:
         if not activate:
             _last_active_model_name = victim
@@ -990,6 +1091,7 @@ def _switch_detach_victim(victim: str, engine, *, activate: bool) -> None:
     if _engine is engine:
         _engine = None
         _inference_sem = None
+    return was_active
 
 
 class VictimRelease(NamedTuple):
@@ -998,19 +1100,24 @@ class VictimRelease(NamedTuple):
     ``released`` is ``wait_for_vram_release``'s verdict: True once free VRAM
     rose, False when it did not rise before the wait ended, None when it could
     not be verified (no measurable reading). ``before`` and ``after`` are the
-    free-VRAM readings around the free in bytes (None when unmeasurable) and
-    ``seconds`` the time from the start of the unload to the verdict."""
+    free-VRAM readings around the free in bytes (None when unmeasurable),
+    ``seconds`` the time from the start of the unload to the verdict and
+    ``expected`` whether the victim was expected to free enough VRAM for the
+    wait to see it."""
 
     victim: str
     released: Optional[bool]
     before: Optional[int]
     after: Optional[int]
     seconds: float
+    expected: bool = True
 
     def describe(self) -> str:
         """``evicting '<victim>': <outcome>`` for a log line."""
         if self.released is True:
             outcome = "VRAM release confirmed"
+        elif self.released is False and not self.expected:
+            outcome = "no VRAM release seen, none expected"
         elif self.released is False:
             outcome = "VRAM release NOT confirmed"
         else:
@@ -1023,38 +1130,71 @@ class VictimRelease(NamedTuple):
         return f"evicting '{self.victim}': {outcome}"
 
 
+def _victim_vram_estimate(engine) -> int:
+    """Bytes of VRAM *engine*'s current load is expected to hold: the
+    ``residency.required_vram_bytes`` of its model files, scaled by the share
+    of its layers on the GPU when ``gpu_placement`` reports it. 0 when its
+    model path is unknown or does not exist. Reads the filesystem."""
+    from pathlib import Path
+    path = getattr(engine, "model_path", None)
+    if not path or not Path(path).exists():
+        return 0
+    size = residency.model_footprint_bytes(path)
+    placement = getattr(engine, "gpu_placement", None)
+    if isinstance(placement, dict) and placement.get("gpu_layers_total"):
+        size = size * placement.get("gpu_layers_offloaded", 0) // placement["gpu_layers_total"]
+    return residency.required_vram_bytes(size)
+
+
 async def _switch_free_victim(loop, victim: str, engine,
-                              probe: switch_admission.VramProbe) -> VictimRelease:
+                              probe: switch_admission.VramProbe,
+                              needed: Optional[int] = None) -> VictimRelease:
     """Natively unload detached victim *victim* off the event loop, then wait
     for its VRAM to be released when *probe* was measurable, so the next
     reading is not stale. *victim* is in ``_evicting_names`` for the whole
     free, and is removed again even when ``unload()`` raises.
 
-    Returns the ``VictimRelease``. A release that was not confirmed is logged
-    at WARNING, one that could not be verified at INFO, a confirmed one at
-    DEBUG."""
+    A release is expected when ``_victim_vram_estimate`` is at least the rise
+    ``wait_for_vram_release`` looks for. When the first wait sees none, a
+    release was expected, the reading is device-global and free VRAM is still
+    below *needed* (the bytes the pending load needs), it waits up to
+    ``_VICTIM_RELEASE_EXTRA_WAIT_S`` more.
+
+    Returns the ``VictimRelease``. An expected release that was not confirmed
+    is logged at WARNING, one that could not be verified or needed the extra
+    wait at INFO, any other outcome at DEBUG."""
     from localm.debuglog import logger as _dbg
-    from localm.vram import wait_for_vram_release
+    from localm.vram import _MIN_RELEASE_RISE, wait_for_vram_release
 
     started = time.monotonic()
     released, after = None, None
+    extended = False
+    expected = await loop.run_in_executor(None, _victim_vram_estimate, engine)
+    expect_rise = expected >= _MIN_RELEASE_RISE
     _evicting_names.add(victim)
     try:
         await loop.run_in_executor(None, engine.unload)
         if probe.measurable:
+            reader = _probe_free_reader(probe)
             released, after = await loop.run_in_executor(
-                None,
-                lambda: wait_for_vram_release(
-                    _probe_free_reader(probe), before_bytes=probe.free))
+                None, lambda: wait_for_vram_release(reader, before_bytes=probe.free))
+            if (released is False and expect_rise and not probe.process_scoped
+                    and needed is not None and after is not None and after < needed):
+                extended = True
+                released, after = await loop.run_in_executor(
+                    None, lambda: wait_for_vram_release(
+                        reader, before_bytes=probe.free,
+                        timeout_s=_VICTIM_RELEASE_EXTRA_WAIT_S))
     finally:
         _evicting_names.discard(victim)
     result = VictimRelease(victim, released, probe.free, after,
-                           time.monotonic() - started)
-    if released is False:
+                           time.monotonic() - started, expect_rise)
+    if released is False and expect_rise:
         _dbg.warning("switch_engine: %s; free VRAM did not rise, so the next "
                      "reading may still count its memory", result.describe())
-    elif released is None:
-        _dbg.info("switch_engine: %s", result.describe())
+    elif released is None or extended:
+        _dbg.info("switch_engine: %s%s", result.describe(),
+                  " after an extended wait" if extended else "")
     else:
         _dbg.debug("switch_engine: %s", result.describe())
     return result
@@ -1128,6 +1268,93 @@ def _switch_commit(name: str, engine, sem, *, activate: bool, on_active) -> None
             on_active(name)
 
 
+class PlacementHeal(NamedTuple):
+    """Why a load left partly on the CPU may get a full placement later
+    (``_record_placement_heal``): ``blockers`` are the resident models, other
+    than the loaded one and the ``pinned_models``, that held VRAM when it
+    loaded; ``release_unconfirmed`` is True when an eviction made for it did
+    not see the VRAM release it expected."""
+
+    blockers: frozenset
+    release_unconfirmed: bool
+
+
+def _record_placement_heal(name: str, engine, pinned, evictions, *,
+                           allowed: bool) -> None:
+    """Set ``engine.placement_heal`` after switch_engine committed a load of
+    *name*: a ``PlacementHeal`` when the load landed partly on the CPU with its
+    layer count sized from free VRAM (``Engine.gpu_sizing`` mode "auto"),
+    *allowed* is True and it has a blocker or an unconfirmed release (from
+    *evictions*); None otherwise. Models in *pinned* are never blockers."""
+    placement = getattr(engine, "gpu_placement", None)
+    sizing = getattr(engine, "gpu_sizing", None)
+    heal = None
+    if (allowed and isinstance(placement, dict) and placement.get("degraded")
+            and isinstance(sizing, dict) and sizing.get("mode") == "auto"):
+        blockers = frozenset(n for n in _engines_lru if n != name and n not in pinned)
+        unconfirmed = any(e.released is False and e.expected for e in evictions)
+        if blockers or unconfirmed:
+            heal = PlacementHeal(blockers, unconfirmed)
+    engine.placement_heal = heal
+
+
+def _placement_heal_due(name: str, engine) -> bool:
+    """Whether resident *engine* (model *name*) should be reloaded before it
+    serves a request: it is still placed partly on the CPU, no request holds
+    it, and its ``placement_heal`` names an unconfirmed release or a blocker
+    that is now gone, unloaded or idle. Reads state only."""
+    heal = getattr(engine, "placement_heal", None)
+    if not isinstance(heal, PlacementHeal):
+        return False
+    placement = getattr(engine, "gpu_placement", None)
+    if not (isinstance(placement, dict) and placement.get("degraded")):
+        return False
+    if getattr(engine, "active_requests", 0) != 0:
+        return False
+    if heal.release_unconfirmed:
+        return True
+    for blocker in heal.blockers:
+        other = _engines.get(blocker)
+        if other is None or not other.loaded:
+            return True
+        if (getattr(other, "active_requests", 0) == 0
+                and getattr(other, "unloading", False) is not True):
+            return True
+    return False
+
+
+async def _switch_free_for_reload(loop, name: str, engine,
+                                  budget: Optional[switch_admission.LoadBudget]
+                                  ) -> VictimRelease:
+    """Unload resident *engine* (model *name*, already detached with its
+    semaphore kept) so switch_engine can load it again at a better placement.
+    Logs why at INFO, frees it like an eviction victim
+    (``_switch_free_victim``, after a fresh VRAM reading) and clears its
+    ``unloading`` flag and ``placement_heal``. Returns the ``VictimRelease``."""
+    from localm.debuglog import logger as _dbg
+    heal = getattr(engine, "placement_heal", None)
+    placement = getattr(engine, "gpu_placement", None) or {}
+    why = ("its earlier eviction's VRAM release was not confirmed"
+           if heal is not None and heal.release_unconfirmed
+           else "a model that held the VRAM it lacked is idle or gone")
+    _dbg.info("switch_engine: reloading '%s' (%s/%s layers on the GPU) for a full "
+              "GPU placement: %s", name, placement.get("gpu_layers_offloaded"),
+              placement.get("gpu_layers_total"), why)
+    if budget is not None:
+        probe = await _switch_probe_vram(loop, budget)
+    else:
+        probe = switch_admission.VramProbe(free=None, probe_ok=False,
+                                           process_scoped=False, shortfall=[],
+                                           shares_adaptive=False)
+    try:
+        return await _switch_free_victim(
+            loop, name, engine, probe,
+            needed=budget.needed_bytes if budget is not None else None)
+    finally:
+        engine.unloading = False
+        engine.placement_heal = None
+
+
 def _describe_load_placement(name: str, engine, evictions=()) -> str:
     """One line naming where *engine*'s load of *name* placed its layers
     (``Engine.gpu_placement``), how the layer count was chosen
@@ -1160,8 +1387,10 @@ def _describe_load_placement(name: str, engine, evictions=()) -> str:
                 detail += f" - {sizing['cause']}"
         elif sizing.get("mode") == "unmeasurable":
             detail += f", free VRAM not measurable, n_gpu_layers {sizing.get('layers')}"
-        else:
+        elif sizing.get("mode") == "configured":
             detail += f", n_gpu_layers {sizing.get('layers')} as configured"
+        else:
+            detail += f", n_gpu_layers {sizing.get('layers')}"
         parts.append(detail)
     parts.extend(e.describe() for e in evictions)
     return "; ".join(parts)
@@ -1272,7 +1501,8 @@ def plan_capability_route(model_name: str | None, messages: list,
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
-                     activate: bool = True, skip_if_latched: bool = False) -> Engine:
+                     activate: bool = True, skip_if_latched: bool = False,
+                     on_status: Optional[Callable[[str], None]] = None) -> Engine:
     """Resolve the engine for *model_name*, loading it if necessary.
 
     With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
@@ -1288,6 +1518,10 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     With ``skip_if_latched`` a model that is not resident is not loaded when its
     last load failed and that failure still applies: ``LoadSkipped`` is raised.
     Capability routing sets it for the models it chose.
+
+    A resident model left partly on the CPU whose ``_placement_heal_due`` holds
+    is passed to switch_engine, which reloads it, instead of being returned as
+    it is. *on_status* is passed to switch_engine.
     """
     global _engines, _engines_lru, _active_model_name, _default_model_name, _last_active_model_name, _inference_sems, _engine, _inference_sem
 
@@ -1341,7 +1575,9 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     # unload-await race. An engine flagged unloading falls through to switch_engine
     # below, which reloads it cleanly under its per-model semaphore (the unloader
     # holds that semaphore for the native free, so the reload serializes AFTER it).
-    if name in _engines and _engines[name].loaded and getattr(_engines[name], "unloading", False) is not True:
+    if (name in _engines and _engines[name].loaded
+            and getattr(_engines[name], "unloading", False) is not True
+            and not (load and _placement_heal_due(name, _engines[name]))):
         if name in _engines_lru:
             _engines_lru.remove(name)
         _engines_lru.append(name)
@@ -1358,7 +1594,8 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         return _engines.get(name) or _engine_factory(name)
 
     res = await switch_engine(name, _engine_factory, preempt=False,
-                              activate=activate, skip_if_latched=skip_if_latched)
+                              activate=activate, skip_if_latched=skip_if_latched,
+                              on_status=on_status)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
     if res.get("status") == "cancelled":

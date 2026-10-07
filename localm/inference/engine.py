@@ -216,6 +216,9 @@ class Engine:
             mtp_enabled=mtp_enabled,
         )
         self.active_requests = 0
+        # Set by http_server.switch_engine after a load placed partly on the
+        # CPU: a PlacementHeal naming what held the VRAM, else None.
+        self.placement_heal = None
         # Set True by an unload/eviction path for the duration of the native
         # free, so get_engine()/switch_engine()'s fast paths refuse to hand this
         # engine back, and so refuse to let a request pin it, while it is being
