@@ -52,20 +52,6 @@ def _bare_llama() -> LlamaCpp:
     return make_bare_llama(_model_ptr=111, _ctx_ptr=222)
 
 
-@pytest.fixture(autouse=True)
-def _no_native_mrope_probe():
-    """_can_reuse_kv asks the model whether it uses M-RoPE, and that probe is a
-    REAL native call. Handed this file's fake integer model pointer it loads the
-    llama.cpp runtime and faults on a bad address, so answering it here is what
-    keeps the module docstring's promise that the DLL is never touched. Tests
-    that care about the M-RoPE branch patch it themselves."""
-    with patch(
-        "localm.inference.backends.llamacpp.llama.api.llama_model_has_mrope",
-        return_value=False,
-    ):
-        yield
-
-
 # Fake-pointer teardown is now handled globally by tests/conftest.py's
 # autouse _neutralise_bare_llama_pointers fixture.
 
@@ -107,16 +93,14 @@ class TestCanReuseKv:
             assert llm._can_reuse_kv(100) is False
         assert llm._kv_supported is False
 
-    def test_no_reuse_for_mrope_models(self):
-        """M-RoPE positions tokens on a multi-dimensional coordinate grid that
-        sequence removal cannot rewind, so the context must start clean."""
+    def test_mrope_models_reuse_the_cache(self):
+        """A Qwen2-VL style model (M-RoPE rope type, qwen2vl architecture) keeps
+        its KV prefix like any other model."""
         llm = _bare_llama()
         llm._kv_supported = True
-        with patch(
-            "localm.inference.backends.llamacpp.llama.api.llama_model_has_mrope",
-            return_value=True,
-        ):
-            assert llm._can_reuse_kv(100) is False
+        api_path = "localm.inference.backends.llamacpp.llama.api"
+        with patch(api_path + ".has_model_meta_api", return_value=True),              patch(api_path + ".llama_model_meta_val_str", return_value="qwen2vl"),              patch(api_path + ".llama_model_rope_type", create=True, return_value=8):
+            assert llm._can_reuse_kv(100) is True
 
     def test_probe_result_cached(self):
         llm = _bare_llama()
@@ -481,6 +465,8 @@ class TestGenerateEarlyExitCleanup:
         the user to start a new chat or lower n_ctx_max. Cleanup must not
         replace it, and must not swallow it either."""
         llm = _bare_llama()
+        # The request outgrows the live context, so a bigger one is created.
+        llm._ctx_capacity = 4
         # A NULL context back from llama_init_from_model is how the native
         # library reports that the requested window does not fit.
         mock_api = self._mock_api(

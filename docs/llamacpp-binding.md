@@ -310,7 +310,7 @@ Covered functions (grouped):
 **Inference**: `llama_decode`, `llama_get_logits_ith`, `llama_get_logits`  
 **Embeddings** (export-probed via `has_embeddings_api()`): `llama_get_embeddings_seq`, `llama_get_embeddings_ith` - bound here but unused by `LlamaCpp`/`GgufBackend`; `llama_get_embeddings_seq` is called by the separate dedicated embedding-model loader (`localm.inference.embedder`, see Known Limitations), `llama_get_embeddings_ith` currently has no caller anywhere in the codebase  
 **Model metadata**: `has_model_meta_api()` / `llama_model_meta_val_str`  
-**Model introspection**: `has_kv_head_api()` / `llama_model_n_head` / `llama_model_n_head_kv`, `has_hybrid_api()` / `llama_model_is_recurrent` / `llama_model_is_hybrid`, `llama_model_has_mrope`, `has_max_devices()` / `llama_max_devices`  
+**Model introspection**: `has_kv_head_api()` / `llama_model_n_head` / `llama_model_n_head_kv`, `has_hybrid_api()` / `llama_model_is_recurrent` / `llama_model_is_hybrid`, `has_max_devices()` / `llama_max_devices`  
 **Sampler chain**: `llama_sampler_chain_default_params`, `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_grammar_lazy_patterns` (export-probed via `has_lazy_grammar()`), `llama_sampler_init_penalties` (export-probed via `has_penalties_sampler()`)  
 **Memory (KV cache)**: `llama_get_memory`, `llama_memory_clear`, `llama_memory_seq_rm` (all probed at runtime via `has_memory_api()`), `llama_kv_cache_seq_rm` (a combined wrapper that prefers the memory API and falls back to the legacy call on an older DLL)  
 **Multi-Token Prediction (MTP)**: `llama_model_mtp_support` / `llama_model_has_mtp` (plain export; whether an MTP draft context on this model would run a real draft head), `llama_set_embeddings_nextn`, `llama_get_embeddings_nextn` (declared without `extern "C"` in an internal header, resolved via `_symbols.py` rather than a plain `getattr`, and probed as a group via `mtp_hidden_state_available()`), `llama_get_embeddings_nextn_ith`, `llama_set_nextn_layer_offset` (same C++-linkage resolution, but each probed individually rather than as part of the group check) - see below  
@@ -359,12 +359,14 @@ family):
   the previous call stays in the KV cache; diverging cached tokens are
   removed with `llama_memory_seq_rm` and only the new suffix is prefilled.
   Follow-up chat turns skip re-evaluating the whole history.
-- **Fresh rebuild** (old DLLs, when the request outgrows the live context,
-  or the model is M-RoPE/vision): the context is freed and re-created at the
-  next dynamic-window size (`n_ctx_grow` steps up to `n_ctx_max`), then the
-  full prompt is prefilled. M-RoPE models always take this path regardless of
-  DLL age or capacity - their multi-dimensional RoPE coordinate grids cannot
-  be partially rewound by sequence removal.
+  M-RoPE models (Qwen2-VL, Qwen2.5-VL, Qwen3-VL) reuse the prefix the same
+  way; for an image prompt the cut always falls between whole images.
+- **Full clear**: when the cache refuses to drop a range (a recurrent or
+  hybrid model such as Qwen3.5), the cache is cleared and the whole prompt
+  is prefilled into the same context.
+- **Fresh rebuild** (old DLLs, or when the request outgrows the live context):
+  the context is freed and re-created at the next dynamic-window size
+  (`n_ctx_grow` steps up to `n_ctx_max`), then the full prompt is prefilled.
 - Prefill is chunked to a fixed 2048-token constant, not the context's actual
   `n_batch` (which is `min(n_ctx, 2048)` and can be smaller on a small-context
   configuration): a single oversized `llama_decode` batch aborts the native
