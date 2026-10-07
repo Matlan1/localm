@@ -234,10 +234,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   held back until about 48 characters had been generated, and a reply shorter
   than that appeared only once it was complete. On a HuggingFace-format model
   that added two to three seconds before the first words showed. Text is now
-  held back only briefly after a `<` or `[`, where one of a model's internal
-  markers could start.
+  held back only while it could still turn out to be one of a model's internal
+  markers, so the answer after a reasoning block streams at once too.
   A Llama 3 role header that a model writes out as text no longer shows up in
   a longer reply.
+- **A model loaded while another one sits idle in VRAM now goes fully on the GPU.**
+  localm decided whether a second model fit beside the first from its file size,
+  while the loader also needs room for the context's KV cache and its working
+  buffers. For small models, models without grouped-query attention (Llama 2
+  class) or a large context, the second model was loaded next to the idle one with
+  part of it on the CPU, and stayed that slow. localm now checks what the loader
+  will actually need and frees the idle model first, in the server and in the MCP
+  server. When even an empty card is too small, a model you pick still asks before
+  loading partly on the CPU.
 - **A chat with web access on now ends on an answer, not on a bare "read page" or
   "web search" line.** Once the lookups stop, the last reply is requested without
   the web tools; if the model still writes a lookup, it is not run and the reply

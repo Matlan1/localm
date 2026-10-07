@@ -122,6 +122,54 @@ class TestAutoGpuLayers:
 #  _effective_gpu_layers                                                       #
 # --------------------------------------------------------------------------- #
 
+def _split(free, total, devices):
+    """Patch the combined split reading: *devices* 0 means no combined reading."""
+    reading = (free, total, devices) if devices else (None, None, 0)
+    return patch.object(GgufBackend, "_split_free_total_bytes", return_value=reading)
+
+
+class TestFullOffloadVramBytes:
+    @pytest.mark.parametrize("devices", [0, 2])
+    def test_is_the_free_vram_where_auto_sizing_stops_offloading_everything(
+            self, tmp_path, devices):
+        b = _model(tmp_path, 6 * GB, n_ctx=8192)
+        with _split(None, None, devices):
+            need = b.full_offload_vram_bytes()
+
+        layers = {}
+        for free in (need, need - 1):
+            with _vram(free, 24 * GB), _split(free, 24 * GB, devices):
+                layers[free] = b._auto_gpu_layers()
+
+        assert layers[need] == 99
+        assert layers[need - 1] < 99
+
+    def test_charges_the_overhead_once_per_split_device(self, tmp_path):
+        b = _model(tmp_path, 6 * GB)
+        with _split(None, None, 0):
+            one = b.full_offload_vram_bytes()
+        with _split(None, None, 3):
+            three = b.full_offload_vram_bytes()
+        assert three - one == 2 * b._VRAM_OVERHEAD_BYTES
+
+    def test_grows_with_the_context_by_the_kv_cache(self, tmp_path):
+        small = _model(tmp_path, 6 * GB, n_ctx=4096)
+        large = _model(tmp_path, 6 * GB, n_ctx=32768)
+        with _split(None, None, 0):
+            assert (large.full_offload_vram_bytes() - small.full_offload_vram_bytes()
+                    == (32768 - 4096) * small._kv_bytes_per_token())
+
+    def test_none_for_an_explicit_partial_offload(self, tmp_path):
+        b = _model(tmp_path, 6 * GB, n_gpu_layers=24)
+        with _split(None, None, 0):
+            assert b.full_offload_vram_bytes() is None
+
+    def test_none_when_the_model_size_is_unreadable(self, tmp_path):
+        b = _model(tmp_path, 0)
+        with _split(None, None, 0):
+            assert b.full_offload_vram_bytes() is None
+
+
 class TestEffectiveGpuLayers:
     def test_defers_to_explicit_gpu_layers(self, tmp_path, capsys):
         # A user who set -g 24 gets 24, even with auto on and a partial fit.

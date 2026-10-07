@@ -314,6 +314,15 @@ class Engine:
             "degraded": offloaded < total,
         }
 
+    def full_offload_vram_bytes(self) -> Optional[int]:
+        """Free VRAM the next load needs for every layer to go on the GPU, as
+        the backend sizes it (``full_offload_vram_bytes`` of a GGUF backend),
+        or None for a backend that does not size its GPU layers, or when the
+        backend cannot answer. Blocking: reads the model file and may take a
+        GPU reading."""
+        size = getattr(self._backend, "full_offload_vram_bytes", None)
+        return size() if callable(size) else None
+
     @property
     def gpu_sizing(self) -> Optional[dict]:
         """How the last load chose its GPU layer count (the backend's

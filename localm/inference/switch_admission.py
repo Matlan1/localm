@@ -57,6 +57,9 @@ class LoadBudget:
     top of it, ``resident_cap`` the ``max_resident_models`` setting (None for
     no cap), ``pinned`` the ``pinned_models`` names and ``check_split_fit``
     whether the configured split's per-device shares are checked (a GGUF load).
+    ``backend_need`` is the free VRAM the backend's own sizing needs to put
+    every layer on the GPU (``Engine.full_offload_vram_bytes``), or None when
+    it is not known.
     """
 
     name: str
@@ -65,11 +68,27 @@ class LoadBudget:
     resident_cap: Optional[int]
     pinned: frozenset
     check_split_fit: bool
+    backend_need: Optional[int] = None
 
     @property
     def needed_bytes(self) -> int:
-        """``vram_required + headroom``: the bar every VRAM comparison uses."""
+        """The larger of ``vram_required + headroom`` and ``backend_need``: the
+        free VRAM a load must see to be admitted beside resident models, and
+        the bar every other free-VRAM comparison uses, except the split's
+        per-device check (``split_share_bytes``)."""
+        return max(self.vram_required + self.headroom, self.backend_need or 0)
+
+    @property
+    def split_share_bytes(self) -> int:
+        """``vram_required + headroom``: the amount the configured split's
+        per-device shares are checked against."""
         return self.vram_required + self.headroom
+
+    @property
+    def whole_model_bytes(self) -> int:
+        """The larger of ``vram_required`` and ``backend_need``: the VRAM the
+        load is reported to need."""
+        return max(self.vram_required, self.backend_need or 0)
 
 
 @dataclass(frozen=True)
@@ -171,8 +190,9 @@ def decide_admission(probe: VramProbe, budget: LoadBudget, lru: Iterable[str],
     """Decide whether ``budget.name`` may load on this reading, and if not,
     which idle resident model to evict first.
 
-    ADMIT when the model fits alongside the residents
-    (``residency.fits_alongside_residents``) and stays within the resident cap.
+    ADMIT when free VRAM covers ``budget.needed_bytes`` alongside the
+    residents (``residency.fits_alongside_residents``) and the load stays
+    within the resident cap.
     Otherwise the least-recently-used safe victim
     (``residency.pick_eviction_victim``) is EVICT_IDLE; with no victim it is
     ADMIT_OVER_CAP when VRAM fits and only the cap wanted room, and EXHAUSTED
@@ -180,8 +200,8 @@ def decide_admission(probe: VramProbe, budget: LoadBudget, lru: Iterable[str],
     """
     over_cap = residency.exceeds_resident_cap(lru, budget.name, budget.resident_cap)
     vram_ok = residency.fits_alongside_residents(
-        free_vram=probe.free, vram_required=budget.vram_required,
-        probe_ok=probe.probe_ok, headroom=budget.headroom,
+        free_vram=probe.free, vram_required=budget.needed_bytes,
+        probe_ok=probe.probe_ok, headroom=0,
         shortfall=probe.shortfall, is_process_scoped=probe.process_scoped)
     if vram_ok and not over_cap:
         return AdmissionDecision(ADMIT, vram_ok, over_cap)

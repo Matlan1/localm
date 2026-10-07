@@ -20,10 +20,10 @@ NEED = residency.required_vram_bytes(4 * GB)
 HEADROOM = residency.DEFAULT_HEADROOM_BYTES
 
 
-def _budget(name="model-new", *, cap=None, pinned=(), split=False):
+def _budget(name="model-new", *, cap=None, pinned=(), split=False, backend_need=None):
     return sa.LoadBudget(name=name, vram_required=NEED, headroom=HEADROOM,
                          resident_cap=cap, pinned=frozenset(pinned),
-                         check_split_fit=split)
+                         check_split_fit=split, backend_need=backend_need)
 
 
 def _probe(free=20 * GB, *, ok=True, process_scoped=False, shortfall=(),
@@ -50,6 +50,18 @@ class TestLoadBudget:
     def test_needed_bytes_is_the_requirement_plus_headroom(self):
         assert _budget().needed_bytes == NEED + HEADROOM
 
+    def test_a_larger_backend_need_raises_the_bar_but_not_the_split_share(self):
+        budget = _budget(backend_need=NEED + HEADROOM + GB)
+        assert budget.needed_bytes == NEED + HEADROOM + GB
+        assert budget.whole_model_bytes == NEED + HEADROOM + GB
+        assert budget.split_share_bytes == NEED + HEADROOM
+
+    def test_a_smaller_backend_need_never_lowers_the_bar(self):
+        budget = _budget(backend_need=NEED // 2)
+        assert budget.needed_bytes == NEED + HEADROOM
+        assert budget.whole_model_bytes == NEED
+        assert budget.split_share_bytes == NEED + HEADROOM
+
 
 class TestVramProbe:
     @pytest.mark.parametrize("ok,free,measurable,cannot_measure,inconclusive", [
@@ -70,6 +82,21 @@ class TestDecideAdmission:
     def test_a_fitting_load_under_the_cap_is_admitted_without_a_victim_lookup(self):
         decision = sa.decide_admission(_probe(), _budget(), ["model-a"],
                                        _NoLookups(model_a=_engine()))
+        assert decision == sa.AdmissionDecision(sa.ADMIT, vram_ok=True, over_cap=False)
+
+    def test_free_vram_above_the_estimate_but_below_the_backend_need_evicts(self):
+        free = NEED + HEADROOM + GB
+        engines = {"model-a": _engine()}
+        decision = sa.decide_admission(
+            _probe(free=free), _budget(backend_need=free + MB), ["model-a"], engines)
+        assert decision == sa.AdmissionDecision(
+            sa.EVICT_IDLE, vram_ok=False, over_cap=False, victim="model-a")
+
+    def test_free_vram_covering_the_backend_need_is_admitted(self):
+        free = NEED + HEADROOM + GB
+        decision = sa.decide_admission(
+            _probe(free=free), _budget(backend_need=free), ["model-a"],
+            _NoLookups(model_a=_engine()))
         assert decision == sa.AdmissionDecision(sa.ADMIT, vram_ok=True, over_cap=False)
 
     def test_the_least_recently_used_idle_model_is_the_victim(self):
