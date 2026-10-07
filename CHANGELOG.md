@@ -241,6 +241,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **The VRAM estimate now counts the fixed-size state that hybrid models keep.**
+  Models that mix linear-attention and full-attention layers (the Qwen3.5 family)
+  hold a recurrent state in VRAM beside the context, and with MTP on the context holds
+  three or four copies of it. The estimate behind the context ceiling, the GPU-layer
+  choice and the low-VRAM warning left it out, so a load that looked like it fit could
+  spill layers to the CPU or fail to allocate on a small card.
+- **SmolVLM2 models now see images.** Their image processor needs the `num2words`
+  package, which the HuggingFace install did not include, so the model loaded as
+  text-only and refused every image. It is now installed with the HuggingFace
+  stack, and when an image processor does fail to load, the refusal says why
+  instead of claiming the model cannot see images.
 - **Replies start appearing as soon as the model writes them.** Every reply was
   held back until about 48 characters had been generated, and a reply shorter
   than that appeared only once it was complete. On a HuggingFace-format model

@@ -160,6 +160,7 @@ class TestHfWorkerRegistersThemBeforeTorch:
 
         class _FakeWorker:
             supports_images = False
+            processor_error = None
             can_embed = False
             resolved_device = "xpu"
             context_capacity = None

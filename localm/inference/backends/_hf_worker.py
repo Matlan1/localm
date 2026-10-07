@@ -938,6 +938,9 @@ class HFWorker:
         self._is_multimodal = False
         self._supports_image = False
         self._supports_audio = False
+        # "ExcType: message" when AutoProcessor failed and the model fell back
+        # to its tokenizer; None when the processor loaded or none exists.
+        self.processor_error: Optional[str] = None
         self._loaded = False
         self._vision_cache: Optional[_VisionFeatureCache] = None
         # The RESOLVED device ("cuda"/"xpu"/"cpu"), set once load() picks
@@ -1037,6 +1040,7 @@ class HFWorker:
                 type(e).__name__, e,
             )
             self._processor = None
+            self.processor_error = f"{type(e).__name__}: {e}"
             with _filter_docstring_leak():
                 self._tokenizer = tr.AutoTokenizer.from_pretrained(
                     self.model_path, trust_remote_code=trust_remote_code
@@ -1410,12 +1414,13 @@ class HFWorker:
         # text alone). Checked before importing transformers so it fails
         # fast and clearly.
         from .base import (
-            IMAGE_UNSUPPORTED_MESSAGE,
             UnsupportedInputError,
+            image_unsupported_message,
             messages_contain_image,
         )
         if messages_contain_image(messages) and not self._supports_image:
-            raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+            raise UnsupportedInputError(
+                image_unsupported_message(self.processor_error))
         if _messages_contain_audio(messages) and not self._supports_audio:
             raise UnsupportedInputError(_AUDIO_UNSUPPORTED_MESSAGE)
 
