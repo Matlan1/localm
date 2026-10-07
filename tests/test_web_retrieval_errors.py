@@ -414,12 +414,22 @@ class TestEncodedBodies:
             netpolicy.safe_fetch(f"http://bad.test:{srv.port}/", timeout=5,
                                  total_timeout=5)
 
-    def test_decompression_is_capped_at_max_bytes(self, local_net, server):
+    def test_decompression_is_capped_at_max_bytes(self, local_net, server,
+                                                  monkeypatch):
+        sizes: list[int] = []
+        real_decode = netpolicy._BodyDecoder.decode
+
+        def spy(self, data, limit):
+            out = real_decode(self, data, limit)
+            sizes.append(len(out))
+            return out
+        monkeypatch.setattr(netpolicy._BodyDecoder, "decode", spy)
         srv = server(encoded(gzip.compress(b"\x00" * 20_000_000), "gzip"))
         _final, _ctype, body = netpolicy.safe_fetch_bytes(
             f"http://bomb.test:{srv.port}/", timeout=5, total_timeout=10,
             max_bytes=100_000)
         assert len(body) == 100_000
+        assert sizes and max(sizes) <= 100_000
 
     def test_capped_request_advertises_only_gzip_and_deflate(self, local_net,
                                                              server):
@@ -535,3 +545,9 @@ def test_slow_search_leaves_page_reads_their_full_budget(local_net, server):
         f"http://ok.test:{page.port}/", delay=1.2), deadline_seconds=0.5)
     assert b.sources[0].retrieval_status == "fetched", b.sources[0].error
     assert b.sources[0].grounding == "page-backed"
+
+
+def test_decoder_output_per_read_is_bounded():
+    bomb = gzip.compress(b"\x00" * 20_000_000)
+    out = netpolicy._BodyDecoder("gzip").decode(bomb, 4096)
+    assert 0 < len(out) <= 4096
