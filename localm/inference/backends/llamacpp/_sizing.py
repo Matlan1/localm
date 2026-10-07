@@ -1419,10 +1419,12 @@ class VramSizingMixin:
         blind = maybe_blind and self._free_reading_may_be_blind()
         blind_note = ("  [yellow](this reading may not see other processes' "
                       "VRAM use)[/yellow]" if blind else "")
-        moe_layers = len(self._moe_expert_bytes_by_layer())
+        by_layer = self._moe_expert_bytes_by_layer()
+        moe_layers = len(by_layer)
+        pinned_layers = sum(1 for layer in by_layer if layer < budget.moe_cpu_layers)
         if auto >= self._DEFAULT_GPU_LAYERS:
             what = (f"every layer on the GPU, with the routed experts of "
-                    f"{budget.moe_cpu_layers}/{moe_layers} layers in system RAM "
+                    f"{pinned_layers}/{moe_layers} layers in system RAM "
                     f"(Mixture-of-Experts)")
             override = "Set n_cpu_moe or n_gpu_layers to override"
         elif budget.moe_cpu_layers > 0:

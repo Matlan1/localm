@@ -120,9 +120,9 @@ def install_rocm_simd_cpu(target: Path) -> Optional[str]:
             _restore(original, backup, omp)
             _warn(f"the runtime did not load with it ({detail})")
             return None
-        backup.unlink()
         (target / CPU_OVERLAY_MARKER).write_text(
             json.dumps({"tag": _ROCM_CPU_TAG, "variant": winner.name}), encoding="utf-8")
+        backup.unlink()
     except Exception as e:  # noqa: BLE001 - reported below, provisioning continues
         try:
             _restore(original, backup, omp)
@@ -138,11 +138,15 @@ def install_rocm_simd_cpu(target: Path) -> Optional[str]:
 
 def _restore(original: Path, backup: Path, omp: Path) -> None:
     """Put the amd-rocm build's own ggml-cpu.dll back from *backup* (when one
-    was made) and remove the copied OpenMP runtime."""
-    if backup.is_file():
-        os.replace(backup, original)
+    was made) and remove the copied OpenMP runtime and the overlay marker."""
+    if not backup.is_file():
+        return
+    os.replace(backup, original)
     if omp.is_file():
         omp.unlink()
+    marker = original.parent / CPU_OVERLAY_MARKER
+    if marker.is_file():
+        marker.unlink()
 
 
 def _warn(why: str) -> None:

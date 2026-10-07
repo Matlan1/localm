@@ -667,7 +667,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     skip_reason,
                     f"[yellow]  n_cpu_moe:[/yellow] did not apply ({skip_reason})."))
             else:
-                self.moe_cpu_layers = n_cpu_moe
+                by_layer = self._moe_expert_bytes_by_layer()
+                self.moe_cpu_layers = (sum(1 for layer in by_layer if layer < n_cpu_moe)
+                                       if by_layer else n_cpu_moe)
                 placement = meta.get("weight_placement") or []
                 if placement:
                     ram_mib = sum(b["mib"] for b in placement if b["is_ram"])
