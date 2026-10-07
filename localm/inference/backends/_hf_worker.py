@@ -23,12 +23,15 @@ GPU: uses torch.cuda (which maps to ROCm on AMD systems with PyTorch+ROCm).
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import inspect
 import io
 import logging
 import sys
 import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from localm.debuglog import logger
 
@@ -681,6 +684,219 @@ def _build_audio_process_kwargs(processor, audios: List[tuple]) -> Tuple[dict, b
     return {"audio": audio_value, "sampling_rate": clip_rate}, expected_rate is not None
 
 
+# Inner multimodal model classes whose forward() takes image features only from
+# ``get_image_features(...)``: ``pooler_output``, plus ``deepstack_features`` on
+# Qwen3-VL. Only these get a vision feature cache.
+_VISION_CACHE_MODEL_CLASSES = frozenset({
+    "Gemma3Model",
+    "Gemma4Model",
+    "Idefics3Model",
+    "LlavaModel",
+    "Qwen2VLModel",
+    "Qwen2_5_VLModel",
+    "Qwen3VLModel",
+    "SmolVLMModel",
+})
+
+# get_image_features output fields kept per image and joined per request.
+_VISION_FEATURE_FIELDS = ("pooler_output", "deepstack_features")
+
+# Most images whose vision features are kept at once.
+_VISION_CACHE_MAX_IMAGES = 16
+
+# Processor outputs that describe the text, not an image.
+_TEXT_PROCESSOR_KEYS = frozenset({
+    "input_ids", "attention_mask", "token_type_ids", "mm_token_type_ids",
+})
+
+
+def _image_content_key(image) -> Optional[str]:
+    """sha256 hex digest of a PIL image's mode, size and pixel bytes, or None
+    when *image* is not a PIL-like image."""
+    try:
+        mode = image.mode
+        width, height = image.size
+        data = image.tobytes()
+    except Exception:
+        return None
+    digest = hashlib.sha256()
+    digest.update(f"{mode}:{width}x{height}:".encode("ascii"))
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _join_image_features(entries: List[dict]) -> dict:
+    """Join per-image feature entries (field name to value) in request order.
+
+    ``pooler_output``: tensors are concatenated along dim 0; tuples/lists are
+    joined into one tuple. ``deepstack_features`` (a list with one tensor per
+    layer): each layer's tensors are concatenated along dim 0. A field is
+    returned only when every entry has it.
+    """
+    import torch
+    joined: dict = {}
+    pooled = [e["pooler_output"] for e in entries]
+    if all(isinstance(p, (tuple, list)) for p in pooled):
+        joined["pooler_output"] = tuple(t for p in pooled for t in p)
+    else:
+        joined["pooler_output"] = torch.cat(list(pooled), dim=0)
+    if all("deepstack_features" in e for e in entries):
+        joined["deepstack_features"] = [
+            torch.cat(list(layer), dim=0)
+            for layer in zip(*(e["deepstack_features"] for e in entries))]
+    return joined
+
+
+class _VisionFeatureCache:
+    """Per-image vision features for the current conversation, served through
+    the inner multimodal model's ``get_image_features``.
+
+    Installed over that method as an instance attribute. While a request is
+    armed (:meth:`arm`), the next call returns the features of the request's
+    images in order: cached images are not encoded again; the rest are encoded
+    one image at a time by the original method from that image's own processor
+    output, then cached. Unarmed calls go straight to the original method.
+
+    Holds at most ``max_images`` entries (least recently used dropped first).
+    Not thread-safe: the worker runs one ``chat_stream`` at a time.
+    """
+
+    def __init__(self, inner, max_images: int = _VISION_CACHE_MAX_IMAGES) -> None:
+        self._inner = inner
+        self._original = inner.get_image_features
+        self._signature = inspect.signature(self._original)
+        self._max_images = max_images
+        self._features: "OrderedDict[str, object]" = OrderedDict()
+        self._armed: Optional[tuple] = None
+        self.last_encoded = 0
+        inner.get_image_features = self._get_image_features
+
+    def __len__(self) -> int:
+        return len(self._features)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._features
+
+    def missing(self, keys: Sequence[str]) -> List[str]:
+        """The distinct keys in *keys* with no cached features, in order."""
+        out: List[str] = []
+        for key in keys:
+            if key not in self._features and key not in out:
+                out.append(key)
+        return out
+
+    def retain(self, keys: Sequence[str]) -> None:
+        """Drop every cached image whose key is not in *keys*."""
+        wanted = set(keys)
+        for key in [k for k in self._features if k not in wanted]:
+            del self._features[key]
+
+    def arm(self, keys: Sequence[str], image_inputs: Mapping[str, Mapping],
+            pixel_shape: Tuple[int, ...]) -> None:
+        """Serve the next ``get_image_features`` call from the cache.
+
+        *keys* are the request's image keys in prompt order, *image_inputs*
+        maps each uncached key to that image's own processor output (on the
+        model's device), and *pixel_shape* is the shape of the request's full
+        ``pixel_values``. A call whose ``pixel_values`` has another shape is
+        passed to the original method instead.
+        """
+        self._armed = (list(keys), dict(image_inputs), tuple(pixel_shape))
+        self.last_encoded = 0
+
+    def disarm(self) -> None:
+        self._armed = None
+
+    def clear(self) -> None:
+        self._features.clear()
+        self._armed = None
+
+    def uninstall(self) -> None:
+        """Empty the cache and restore the inner model's own
+        ``get_image_features``."""
+        self.clear()
+        if vars(self._inner).get("get_image_features") == self._get_image_features:
+            del self._inner.get_image_features
+
+    def _call_kwargs(self, args, kwargs) -> dict:
+        bound = self._signature.bind(*args, **kwargs)
+        call: dict = {}
+        for name, value in bound.arguments.items():
+            if self._signature.parameters[name].kind is inspect.Parameter.VAR_KEYWORD:
+                call.update(value)
+            else:
+                call[name] = value
+        return call
+
+    def _trim(self) -> None:
+        while len(self._features) > self._max_images:
+            self._features.popitem(last=False)
+
+    def _get_image_features(self, *args, **kwargs):
+        armed, self._armed = self._armed, None
+        if armed is None:
+            return self._original(*args, **kwargs)
+        keys, image_inputs, pixel_shape = armed
+        call = self._call_kwargs(args, kwargs)
+        pixel_values = call.get("pixel_values")
+        if pixel_values is None or tuple(pixel_values.shape) != pixel_shape:
+            logger.warning(
+                "hf vision cache: get_image_features received pixel_values of "
+                "shape %s, expected %s; encoding every image of this request",
+                None if pixel_values is None else tuple(pixel_values.shape), pixel_shape)
+            self.last_encoded = len(keys)
+            return self._original(*args, **kwargs)
+
+        import torch
+
+        per_image_names = [n for n, v in call.items() if torch.is_tensor(v)]
+        for key in self.missing(keys):
+            inputs = image_inputs.get(key)
+            absent = [n for n in per_image_names if inputs is None or n not in inputs]
+            if absent:
+                logger.warning(
+                    "hf vision cache: no per-image value for %s; encoding every "
+                    "image of this request", ", ".join(absent))
+                self.last_encoded = len(keys)
+                return self._original(*args, **kwargs)
+
+        entries = []
+        for key in keys:
+            entry = self._features.get(key)
+            if entry is None:
+                single = dict(call)
+                for name in per_image_names:
+                    single[name] = image_inputs[key][name]
+                single["return_dict"] = True
+                result = self._original(**single)
+                entry = {f: getattr(result, f) for f in _VISION_FEATURE_FIELDS
+                         if getattr(result, f, None) is not None}
+                self._features[key] = entry
+                self.last_encoded += 1
+            self._features.move_to_end(key)
+            entries.append(entry)
+        self._trim()
+        from transformers.modeling_outputs import BaseModelOutputWithPooling
+        joined = _join_image_features(entries)
+        output = BaseModelOutputWithPooling(pooler_output=joined.pop("pooler_output"))
+        for name, value in joined.items():
+            setattr(output, name, value)
+        return output
+
+
+def _install_vision_feature_cache(model) -> Optional[_VisionFeatureCache]:
+    """A :class:`_VisionFeatureCache` over *model*'s inner multimodal model
+    when its class is in ``_VISION_CACHE_MODEL_CLASSES``, else None."""
+    for inner in (getattr(model, "model", None), model):
+        if inner is None or type(inner).__name__ not in _VISION_CACHE_MODEL_CLASSES:
+            continue
+        if callable(getattr(inner, "get_image_features", None)):
+            return _VisionFeatureCache(inner)
+    logger.debug("hf load: no vision feature cache for %s; every image is "
+                 "encoded on every turn", type(model).__name__)
+    return None
+
+
 # transformers' naming convention for a GENERATIVE task head. A checkpoint whose
 # declared architecture ends in one of these generates text; anything else (the
 # bare ``*Model`` encoders: BertModel, XLMRobertaModel, NomicBertModel,
@@ -723,6 +939,7 @@ class HFWorker:
         self._supports_image = False
         self._supports_audio = False
         self._loaded = False
+        self._vision_cache: Optional[_VisionFeatureCache] = None
         # The RESOLVED device ("cuda"/"xpu"/"cpu"), set once load() picks
         # one - None beforehand ("auto" was requested and not decided yet).
         # Reported back to the parent proxy for its post-load status line
@@ -879,6 +1096,8 @@ class HFWorker:
                     "the xpu wheel index.") from e
 
         self._loaded = True
+        self._vision_cache = (_install_vision_feature_cache(self._model)
+                              if self._supports_image else None)
 
         config = getattr(self._model, "config", None)
         self.context_capacity = None
@@ -919,6 +1138,9 @@ class HFWorker:
 
     def unload(self) -> None:
         import gc
+        if self._vision_cache is not None:
+            self._vision_cache.uninstall()
+        self._vision_cache = None
         self._model = None
         self._processor = None
         self._tokenizer = None
@@ -1016,6 +1238,22 @@ class HFWorker:
     # ------------------------------------------------------------------ #
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
+
+    def _single_image_inputs(self, images: list, keys: List[str],
+                             wanted: List[str], device) -> Dict[str, Mapping]:
+        """Each image in *wanted* (keys into *keys*/*images*) processed on its
+        own, as the processor output of a one-image user turn, moved to
+        *device*. Text-only outputs are left out."""
+        text = self._processor.apply_chat_template(
+            [{"role": "user", "content": [{"type": "image"}]}],
+            tokenize=False, add_generation_prompt=False)
+        out: Dict[str, Mapping] = {}
+        for key in wanted:
+            image = images[keys.index(key)]
+            batch = self._processor(text=text, images=[image], return_tensors="pt",
+                                    add_special_tokens=False).to(device)
+            out[key] = {k: v for k, v in batch.items() if k not in _TEXT_PROCESSOR_KEYS}
+        return out
 
     def _declared_generative(self) -> Optional[bool]:
         """Whether the CHECKPOINT declares a generative architecture, or None when
@@ -1219,6 +1457,18 @@ class HFWorker:
             else:
                 template_messages.append(msg)
 
+        vision_cache = getattr(self, "_vision_cache", None)
+        image_keys: Optional[List[str]] = None
+        vision_plan: Optional[tuple] = None
+        if vision_cache is not None:
+            vision_cache.disarm()
+            keys = [_image_content_key(img) for img in images]
+            if images and all(keys):
+                image_keys = keys
+                vision_cache.retain(image_keys)
+            else:
+                vision_cache.clear()
+
         # --- Tokenize / process ---
         if self._processor and (images or audios):
             # Full multimodal path
@@ -1239,11 +1489,24 @@ class HFWorker:
                 audio_kwargs, audio_rate_verified = _build_audio_process_kwargs(
                     self._processor, audios)
                 process_kwargs.update(audio_kwargs)
-            if images and on_status:
+            to_encode = (vision_cache.missing(image_keys)
+                          if image_keys is not None else images)
+            if to_encode and on_status:
                 try:
                     on_status("Encoding image...")
                 except Exception:
                     logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
+            image_inputs: Dict[str, Mapping] = {}
+            if image_keys is not None and to_encode:
+                try:
+                    image_inputs = self._single_image_inputs(
+                        images, image_keys, to_encode, model.device)
+                except Exception as e:
+                    logger.warning(
+                        "hf vision cache: could not process the images one at "
+                        "a time (%s: %s); encoding every image of this request",
+                        type(e).__name__, e)
+                    image_keys = None
             try:
                 inputs = self._processor(**process_kwargs).to(model.device)
             except ValueError as e:
@@ -1254,6 +1517,9 @@ class HFWorker:
                         f"processor ({e}). Its expected sample rate could not "
                         "be read in advance to check it.") from e
                 raise
+            pixel_values = inputs.get("pixel_values")
+            if image_keys is not None and pixel_values is not None:
+                vision_plan = (image_keys, image_inputs, tuple(pixel_values.shape))
         else:
             # Text-only path (even if processor exists, no media was provided)
             _require_chat_template(tokenizer)
@@ -1365,21 +1631,31 @@ class HFWorker:
             except Exception:
                 logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
 
+        if vision_plan is not None:
+            vision_cache.arm(*vision_plan)
         thread = threading.Thread(target=_run_generate, daemon=True)
         thread.start()
 
-        first_token = True
-        for token_text in streamer:
-            if first_token:
-                first_token = False
-                if on_status:
-                    try:
-                        on_status("Generating response...")
-                    except Exception:
-                        logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
-            yield token_text
+        try:
+            first_token = True
+            for token_text in streamer:
+                if first_token:
+                    first_token = False
+                    if on_status:
+                        try:
+                            on_status("Generating response...")
+                        except Exception:
+                            logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
+                yield token_text
 
-        thread.join()
+            thread.join()
+        finally:
+            if vision_cache is not None:
+                vision_cache.disarm()
+        if vision_plan is not None:
+            logger.debug("hf vision: %d image(s), %d encoded, %d from cache",
+                         len(image_keys), vision_cache.last_encoded,
+                         len(image_keys) - vision_cache.last_encoded)
         if generation_errors:
             raise generation_errors[0]
         # EOS wins over the length budget whenever both are true at once
