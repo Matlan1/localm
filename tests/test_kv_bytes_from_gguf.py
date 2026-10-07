@@ -21,6 +21,7 @@ import pytest
 from localm.inference.backends.gguf import GgufBackend
 from localm.model_manager.gguf import (
     gguf_kv_bytes_per_token,
+    gguf_recurrent_state_bytes,
     gguf_mtp_draft_kv_bytes_per_token,
     gguf_nextn_predict_layers,
 )
@@ -912,3 +913,215 @@ def test_real_published_header(tmp_path, name, repo_path, expected, why):
     f = tmp_path / f"{name}.gguf"
     f.write_bytes(body)
     assert gguf_kv_bytes_per_token(f) == expected, why
+
+
+# --------------------------------------------------------------------------- #
+#  Recurrent state of a hybrid stack                                            #
+# --------------------------------------------------------------------------- #
+
+MIB = 1024 ** 2
+
+
+def _qwen35_tensors(n_repeating, interval, *, with_nextn=True):
+    """Tensor names of a qwen35-shaped hybrid: every layer whose 1-based index is
+    not a multiple of *interval* is gated-delta-net (ssm_conv1d, no attn_k/attn_v);
+    the others attend; one extra attending nextn layer follows the stack."""
+    names = []
+    for i in range(n_repeating):
+        names.append(f"blk.{i}.attn_norm.weight")
+        if (i + 1) % interval:
+            names += [f"blk.{i}.ssm_a", f"blk.{i}.ssm_conv1d.weight",
+                      f"blk.{i}.ssm_out.weight"]
+        else:
+            names += [f"blk.{i}.attn_k.weight", f"blk.{i}.attn_v.weight"]
+    if with_nextn:
+        names += [f"blk.{n_repeating}.attn_k.weight",
+                  f"blk.{n_repeating}.attn_v.weight"]
+    return names
+
+
+def _qwen35(tmp_path, *, n_repeating, inner, heads_kv=4, drop=(), tensors=None,
+            name="q35.gguf"):
+    """A qwen35 header + tensor list. *drop* names ssm.* suffixes to omit."""
+    ssm = {"conv_kernel": 4, "state_size": 128, "group_count": 16,
+           "inner_size": inner}
+    kv = [
+        ("general.architecture", _T_STRING, "qwen35"),
+        ("qwen35.block_count", _T_UINT32, n_repeating + 1),
+        ("qwen35.embedding_length", _T_UINT32, 2560),
+        ("qwen35.attention.head_count", _T_UINT32, 16),
+        ("qwen35.attention.head_count_kv", _T_UINT32, heads_kv),
+        ("qwen35.attention.key_length", _T_UINT32, 256),
+        ("qwen35.attention.value_length", _T_UINT32, 256),
+        ("qwen35.nextn_predict_layers", _T_UINT32, 1),
+    ]
+    kv += [(f"qwen35.ssm.{k}", _T_UINT32, v) for k, v in ssm.items()
+           if k not in drop]
+    if tensors is None:
+        tensors = _qwen35_tensors(n_repeating, 4)
+    return _gguf(tmp_path / name, kv, tensors=tensors)
+
+
+class TestGgufRecurrentStateBytes:
+    def test_4b_shape_matches_the_measured_runtime_figure(self, tmp_path):
+        # Qwen3.5-4B: 32 repeating layers, 24 gated-delta-net. The runtime logged
+        # 50.25 MiB for one copy: 24 * ((4-1) * (4096 + 2*16*128) + 128*4096) * 4.
+        f = _qwen35(tmp_path, n_repeating=32, inner=4096)
+        assert gguf_recurrent_state_bytes(f) == 24 * (3 * 8192 + 524288) * 4
+        assert gguf_recurrent_state_bytes(f) == int(50.25 * MIB)
+
+    def test_0_8b_shape_matches_the_measured_runtime_figure(self, tmp_path):
+        # Qwen3.5-0.8B: 24 repeating layers, 18 gated-delta-net, 19.27 MiB.
+        f = _qwen35(tmp_path, n_repeating=24, inner=2048)
+        assert gguf_recurrent_state_bytes(f) == 18 * (3 * 6144 + 262144) * 4
+        assert round(gguf_recurrent_state_bytes(f) / MIB, 2) == 19.27
+
+    def test_attending_and_nextn_layers_add_nothing(self, tmp_path):
+        with_nextn = _qwen35(tmp_path, n_repeating=32, inner=4096, name="a.gguf")
+        without = _qwen35(
+            tmp_path, n_repeating=32, inner=4096, name="b.gguf",
+            tensors=_qwen35_tensors(32, 4, with_nextn=False))
+        assert (gguf_recurrent_state_bytes(with_nextn)
+                == gguf_recurrent_state_bytes(without) > 0)
+
+    def test_scales_with_the_number_of_recurrent_layers(self, tmp_path):
+        every_other = _qwen35(
+            tmp_path, n_repeating=32, inner=4096,
+            tensors=_qwen35_tensors(32, 2))
+        assert gguf_recurrent_state_bytes(every_other) == 16 * (3 * 8192 + 524288) * 4
+
+    def test_group_count_is_optional(self, tmp_path):
+        f = _qwen35(tmp_path, n_repeating=32, inner=4096, drop=("group_count",))
+        assert gguf_recurrent_state_bytes(f) == 24 * (3 * 4096 + 524288) * 4
+
+    @pytest.mark.parametrize("missing", ["conv_kernel", "state_size", "inner_size"])
+    def test_zero_when_a_required_ssm_key_is_absent(self, tmp_path, missing):
+        f = _qwen35(tmp_path, n_repeating=32, inner=4096, drop=(missing,))
+        assert gguf_recurrent_state_bytes(f) == 0
+
+    def test_zero_when_no_layer_carries_a_recurrent_tensor(self, tmp_path):
+        f = _qwen35(tmp_path, n_repeating=32, inner=4096,
+                    tensors=["blk.0.attn_k.weight", "blk.0.attn_v.weight"])
+        assert gguf_recurrent_state_bytes(f) == 0
+
+    def test_zero_for_a_dense_model(self, tmp_path):
+        f = _gguf(tmp_path / "d.gguf", _shape("llama", 32, 4096, 32, 8))
+        assert gguf_recurrent_state_bytes(f) == 0
+
+    def test_zero_when_not_a_gguf_or_missing(self, tmp_path):
+        bad = tmp_path / "x.gguf"
+        bad.write_bytes(b"not a gguf at all")
+        assert gguf_recurrent_state_bytes(bad) == 0
+        assert gguf_recurrent_state_bytes(tmp_path / "absent.gguf") == 0
+
+    def test_precomputed_parse_gives_the_same_answer(self, tmp_path):
+        from localm.model_manager.gguf import _gguf_tensor_offset_entries
+        f = _qwen35(tmp_path, n_repeating=32, inner=4096)
+        assert (gguf_recurrent_state_bytes(f, _parsed=_gguf_tensor_offset_entries(f))
+                == gguf_recurrent_state_bytes(f))
+        assert gguf_recurrent_state_bytes(f, _parsed=None) == 0
+
+
+class TestMtpRsSeq:
+    @pytest.mark.parametrize("default,draft,expected", [
+        (0, 1, 2), (0, 2, 2), (0, 3, 3), (5, 1, 5), (None, 1, 2), (0, 99, 3), (0, 0, 2),
+    ])
+    def test_values(self, default, draft, expected):
+        from localm.inference.backends.llamacpp.llama import mtp_rs_seq
+        assert mtp_rs_seq(default, draft) == expected
+
+    @pytest.mark.parametrize("draft", [1, 2, 3])
+    def test_llamacpp_requests_exactly_what_sizing_charges(self, draft):
+        from types import SimpleNamespace
+        from localm.inference.backends.llamacpp.llama import LlamaCpp, mtp_rs_seq
+        llm = LlamaCpp.__new__(LlamaCpp)
+        llm._mtp_draft_max = draft
+        assert llm._mtp_rollback_snapshots(SimpleNamespace(n_rs_seq=0)) == \
+            mtp_rs_seq(0, draft)
+
+
+class TestRecurrentStateIsCharged:
+    """The VRAM estimate charges (1 + n_rs_seq) copies of the recurrent state."""
+
+    @staticmethod
+    def _backend(path, **kw):
+        b = GgufBackend(str(path), n_gpu_layers=99, n_ctx=4096, **kw)
+        b._model_bytes = lambda: 3 * GB          # faked size, real header on disk
+        return b
+
+    @pytest.fixture
+    def hybrid(self, tmp_path):
+        f = _qwen35(tmp_path, n_repeating=32, inner=4096)
+        return f, gguf_recurrent_state_bytes(f)
+
+    def test_one_copy_without_mtp(self, hybrid):
+        f, per_copy = hybrid
+        assert per_copy == int(50.25 * MIB)
+        assert self._backend(f)._recurrent_state_vram_bytes() == per_copy
+
+    def test_mtp_default_draft_tokens_holds_three_copies(self, hybrid):
+        f, per_copy = hybrid
+        b = self._backend(f, mtp_enabled=True)
+        assert b._recurrent_state_vram_bytes() == 3 * per_copy
+
+    @pytest.mark.parametrize("draft,copies", [(1, 3), (2, 3), (3, 4)])
+    def test_mtp_copies_follow_the_draft_token_count(self, hybrid, draft, copies):
+        f, per_copy = hybrid
+        b = self._backend(f, mtp_enabled=True, mtp_draft_tokens=draft)
+        assert b._recurrent_state_vram_bytes() == copies * per_copy
+
+    def test_mtp_on_a_dense_model_charges_nothing(self, tmp_path):
+        f = _gguf(tmp_path / "d.gguf", _shape("llama", 32, 4096, 32, 8))
+        assert self._backend(f, mtp_enabled=True)._recurrent_state_vram_bytes() == 0
+
+    def test_an_unreadable_file_charges_nothing(self, tmp_path):
+        bad = tmp_path / "x.gguf"
+        bad.write_bytes(b"junk")
+        assert self._backend(bad, mtp_enabled=True)._recurrent_state_vram_bytes() == 0
+
+    def test_full_offload_estimate_includes_it(self, hybrid):
+        f, per_copy = hybrid
+        with_rs = self._backend(f, mtp_enabled=True)
+        without = self._backend(f, mtp_enabled=True)
+        without._recurrent_state_vram_bytes = lambda: 0
+        assert (with_rs._full_offload_parts(1)[2] - without._full_offload_parts(1)[2]
+                == 3 * per_copy)
+
+    def test_context_ceiling_shrinks_by_it(self, hybrid):
+        f, per_copy = hybrid
+        free = 24 * GB
+        with_rs = self._backend(f)
+        without = self._backend(f)
+        without._recurrent_state_vram_bytes = lambda: 0
+        with patch("localm.inference.backends.llamacpp._sizing."
+                   "embedder_ctx_reservation_bytes", return_value=0):
+            hi = without._auto_ctx_max(capped=False, split_budget=(free, 1))
+            lo = with_rs._auto_ctx_max(capped=False, split_budget=(free, 1))
+        kv = with_rs._kv_bytes_per_token()
+        assert lo < hi
+        assert hi - lo in range(per_copy // kv - 1024, per_copy // kv + 1025)
+
+    def test_preflight_need_includes_it(self, hybrid):
+        f, per_copy = hybrid
+        b = self._backend(f)
+        b.effective_gpu_layers = 99
+        seen = {}
+
+        def fake_print(msg, *a, **k):
+            seen["msg"] = str(msg)
+
+        # Free VRAM exactly one byte short of (need without the state): the
+        # warning must fire only because the state is charged.
+        weights = b._effective_model_bytes_for_vram()
+        need_without = (weights + b.n_ctx * b._kv_bytes_per_token()
+                        + b._split_overhead_bytes(1))
+        with patch.object(GgufBackend, "_split_free_total_bytes",
+                          return_value=(None, None, 0)), \
+             patch.object(GgufBackend, "_free_vram_bytes",
+                          return_value=need_without + per_copy // 2), \
+             patch.object(GgufBackend, "_total_vram_bytes",
+                          return_value=64 * GB), \
+             patch("localm.inference.backends.llamacpp._sizing.console.print",
+                   side_effect=fake_print):
+            b._check_vram()
+        assert "Low VRAM" in seen.get("msg", "")
