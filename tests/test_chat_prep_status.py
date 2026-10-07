@@ -444,7 +444,7 @@ class TestMemoryInletAnnouncesRecall:
         from localm.plugins.builtin.memory import plug
 
         def _fake_body(messages, ctx, announce=None):
-            announce()
+            announce(RECALLING_MEMORY_STATUS)
             return None
 
         monkeypatch.setattr(plug, "_memory_inlet", _fake_body)
@@ -477,16 +477,42 @@ class TestMemoryInletAnnouncesRecall:
         monkeypatch.setattr(plug, "_persist_enabled", lambda: False)
         monkeypatch.setattr(plug, "_recall_in_privacy", lambda surface: True)
         monkeypatch.setattr(plug, "_chat_store", lambda principal=None: _Store())
-        monkeypatch.setattr(plug, "_embed_fn", lambda: None)
+        monkeypatch.setattr(plug, "_embed_fn", lambda: order.append("embedder") or None)
         monkeypatch.setattr(plug, "_legacy_bullets", lambda: [])
+        monkeypatch.setattr("localm.inference.embedder.will_download_on_first_use",
+                            lambda: False)
         plug._memory_inlet([{"role": "user", "content": "what is my name"}], None,
-                           announce=lambda: order.append("announce"))
-        assert order == ["announce", "recall"]
+                           announce=order.append)
+        assert order == [RECALLING_MEMORY_STATUS, "embedder", "recall"]
+
+    def test_a_first_use_download_is_announced_before_the_embedder_loads(
+            self, monkeypatch):
+        from localm.inference.protocol import DOWNLOADING_EMBEDDER_STATUS
+        from localm.plugins.builtin.memory import plug
+        order = []
+
+        class _Store:
+            def recall(self, query, **kw):
+                order.append("recall")
+                return []
+
+        monkeypatch.setattr(plug, "_recall_enabled", lambda: True)
+        monkeypatch.setattr(plug, "_persist_enabled", lambda: False)
+        monkeypatch.setattr(plug, "_recall_in_privacy", lambda surface: True)
+        monkeypatch.setattr(plug, "_chat_store", lambda principal=None: _Store())
+        monkeypatch.setattr(plug, "_embed_fn", lambda: order.append("embedder") or None)
+        monkeypatch.setattr(plug, "_legacy_bullets", lambda: [])
+        monkeypatch.setattr("localm.inference.embedder.will_download_on_first_use",
+                            lambda: True)
+        plug._memory_inlet([{"role": "user", "content": "what is my name"}], None,
+                           announce=order.append)
+        assert order == [DOWNLOADING_EMBEDDER_STATUS, "embedder",
+                         RECALLING_MEMORY_STATUS, "recall"]
 
     def test_recall_that_does_not_run_announces_nothing(self, monkeypatch):
         from localm.plugins.builtin.memory import plug
         monkeypatch.setattr(plug, "_recall_enabled", lambda: False)
         calls = []
         plug._memory_inlet([{"role": "user", "content": "hi"}], None,
-                           announce=lambda: calls.append(1))
+                           announce=calls.append)
         assert calls == []

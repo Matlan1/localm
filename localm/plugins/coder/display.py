@@ -95,6 +95,11 @@ def print_progress(text: str) -> None:
     err_console.print(_sanitized_text(f"  {text}", style="dim"))
 
 
+def tool_call_text(tool_name: str, args: dict) -> str:
+    """The tool call as one plain line, as print_tool_call shows it."""
+    return _tool_call_line(tool_name, args).plain.strip()
+
+
 def print_progress_tool_call(tool_name: str, args: dict) -> None:
     """The tool call a run without a live display is about to make, on
     stderr."""

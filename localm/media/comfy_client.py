@@ -2400,6 +2400,72 @@ POLL_FINISHED = "finished"
 POLL_TIMEOUT = "timeout"
 
 
+def comfy_jobs_ahead(api_url: str, prompt_id: str, *,
+                     timeout: float = 3.0) -> Optional[int]:
+    """How many ComfyUI jobs must finish before *prompt_id* starts, read from
+    ``GET /queue``: 0 while it runs, N while N jobs are running or queued ahead
+    of it, None when the queue cannot be read or does not list it."""
+    try:
+        req = urllib.request.Request(f"{api_url}/queue")
+        with _comfy_urlopen(req, timeout=timeout) as response:
+            queue = json.loads(response.read().decode("utf-8"))
+        running = queue.get("queue_running") or []
+        pending = queue.get("queue_pending") or []
+        if any(len(item) > 1 and item[1] == prompt_id for item in running):
+            return 0
+        mine = next((item[0] for item in pending
+                     if len(item) > 1 and item[1] == prompt_id), None)
+        if mine is None:
+            return None
+        return len(running) + sum(1 for item in pending
+                                  if len(item) > 1 and item[0] < mine)
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("reading the ComfyUI queue failed: %s", e)
+        return None
+
+
+def comfy_wait_heartbeat(api_url: str, prompt_id: str, say, *,
+                         every: float = 15.0):
+    """An ``on_tick`` for :func:`comfy_poll_until_done` that reports the wait
+    through ``say(text)``: "Waiting for ComfyUI to finish N other job(s)..."
+    while the job is queued behind other work, "Rendering… (Ns elapsed)"
+    otherwise. A change between the two is said at once; the same state is
+    repeated at most every *every* seconds, rendering first at *every*. The
+    queue is no longer read once the job has been seen running or after three
+    reads in a row fail; a failed read keeps the last state."""
+    state = {"kind": "rendering", "said": 0.0, "started": False, "misses": 0,
+             "ahead": None}
+
+    def _tick(elapsed: float) -> None:
+        if not state["started"] and state["misses"] < 3:
+            read = comfy_jobs_ahead(api_url, prompt_id, timeout=1.0)
+            if read is None:
+                state["misses"] += 1
+            else:
+                state["misses"] = 0
+                state["ahead"] = read
+                if read == 0:
+                    state["started"] = True
+        ahead = 0 if state["started"] else state["ahead"]
+        if ahead:
+            kind = f"queued:{ahead}"
+            text = (f"Waiting for ComfyUI to finish {ahead} other "
+                    f"job{'s' if ahead != 1 else ''}...")
+        else:
+            kind = "rendering"
+            text = f"Rendering… ({int(elapsed)}s elapsed)"
+        if kind != state["kind"] or elapsed - state["said"] >= every:
+            state["kind"] = kind
+            state["said"] = elapsed
+            try:
+                say(text)
+            except Exception as e:
+                from localm.debuglog import logger
+                logger.debug("media progress callback raised: %s", e)
+    return _tick
+
+
 def comfy_poll_until_done(
     api_url: str,
     prompt_id: str,

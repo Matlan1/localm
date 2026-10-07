@@ -151,12 +151,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     # the currently-configured workflow reference any model file ComfyUI does not
     # have, and if so, is there a curated HuggingFace source to download it from.
 
-    class _NullConsole:
-        """A do-nothing stand-in for rich.console.Console, so a read-only
-        pre-check (possibly polled repeatedly) never spams server-side console
-        output the way an actual generation job's progress printing would."""
-        def print(self, *a, **kw):
-            pass
+    def _discard_note(_text: str) -> None:
+        """Drops the workflow builder's notes: a read-only pre-check reports
+        missing models only."""
 
     def _build_check_workflow(kind: str, overrides: MediaPreflightRequest):
         """Load *kind*'s currently-configured workflow template and shape it
@@ -182,7 +179,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 cfg=None, seed=0, clip_name1=overrides.clip_name1,
                 clip_name2=overrides.clip_name2, lora_name=overrides.lora_name,
                 lora_strength_model=1.0, lora_strength_clip=0.5, input_image=None,
-                denoise=None, fast_dequant=True, con=_NullConsole())
+                denoise=None, fast_dequant=True, say=_discard_note)
             return workflow
         if kind == "video":
             from localm.video_gen.comfy import _build_video_workflow

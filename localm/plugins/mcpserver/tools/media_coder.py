@@ -255,6 +255,7 @@ def build(engines: EngineCache) -> Dict[str, dict]:
                 denoise=args.get("denoise"),
                 write_sidecar=not is_privacy,
                 delete_outputs=is_privacy,
+                on_progress=_srv.report_progress,
             )
         return _text_result(message, is_error=not ok)
 

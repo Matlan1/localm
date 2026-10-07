@@ -274,6 +274,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   its stream at once and reports each step; a request refused at that point
   ends the stream with the error, and the stream carries the routing and memory
   information otherwise sent as response headers.
+- **Long background steps say what they are doing too.** Adding documents to a
+  knowledge base names each file as it is read and embedded; the one-time
+  embedding-model download reports how much has arrived (also from the Memory
+  dialog, which previously showed only "Downloading…"), and a chat whose memory
+  recall triggers that download shows "Downloading the embedding model…".
+  Image, video and music generation say when they are waiting behind other
+  ComfyUI jobs instead of claiming to render, and image generation now shows
+  ComfyUI start-up and model-substitution notices that previously went only to
+  the server console. MCP clients that ask for progress get the image and
+  embedding-download progress too. A coder sub-agent's model statuses and tool
+  calls appear in the parent session while it works.
 - **`localm run` attached to a server, and the coder talking to a localm server,
   report a failed reply as an error.** A reply the server ended as failed (for
   example a conversation that still does not fit after compacting) used to be
