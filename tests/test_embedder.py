@@ -641,7 +641,7 @@ def test_embed_texts_none_when_no_model(monkeypatch):
                                  "n_gpu_layers": 99, "net_mode": "ask"})
     downloads = {"n": 0}
 
-    def _resolve(*, allow_download=None):
+    def _resolve(*, allow_download=None, on_progress=None):
         if allow_download is not False:       # the download-permitted probe
             downloads["n"] += 1
         return None
@@ -662,7 +662,7 @@ def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
                                  "n_gpu_layers": 99, "net_mode": "ask"})
     state = {"path": None}
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
-                        lambda *, allow_download=None: state["path"])
+                        lambda *, allow_download=None, on_progress=None: state["path"])
 
     class _FakeEmbedder:
         dim = 3
@@ -690,7 +690,7 @@ def test_get_embedder_on_progress_announces_stages_on_success(monkeypatch):
                         lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
-                        lambda *, allow_download=None: "/models/bge-small.gguf")
+                        lambda *, allow_download=None, on_progress=None: "/models/bge-small.gguf")
 
     class _Ok:
         dim = 5
@@ -743,7 +743,7 @@ def test_get_embedder_progress_states_the_real_load_bound(monkeypatch):
 
     _cfg(monkeypatch)
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
-                        lambda *, allow_download=None: "/models/bge-small.gguf")
+                        lambda *, allow_download=None, on_progress=None: "/models/bge-small.gguf")
 
     class _Ok:
         dim = 5
@@ -874,7 +874,7 @@ def test_get_embedder_on_progress_raising_sink_does_not_abort_load(monkeypatch):
                         lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
-                        lambda *, allow_download=None: "/models/bge-small.gguf")
+                        lambda *, allow_download=None, on_progress=None: "/models/bge-small.gguf")
 
     class _Ok:
         dim = 5

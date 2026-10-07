@@ -236,8 +236,8 @@ class TestSubAgentProgress:
         parent = _make_agent(tmp_path, on_event=events.append)
         sink = parent.child_progress_sink("worker")
         sink("Loading model...")
-        assert events == [{"type": "status", "text": "worker: Loading model...",
-                           "code": None}]
+        assert [e for e in events if e["type"] == "status"] == [
+            {"type": "status", "text": "worker: Loading model...", "code": None}]
 
     def test_a_terminal_parent_prints_child_progress(self, tmp_path):
         from localm.plugins.coder import display
