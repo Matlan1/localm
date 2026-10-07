@@ -1210,14 +1210,25 @@ class TestPlacementHeal:
         assert got is b and b.load_calls == 1 and b.unload_calls == 0
 
     def test_the_reload_happens_once_even_when_it_stays_degraded(self, monkeypatch):
-        a, b, env = _degraded_beside(monkeypatch, placements=(_PARTIAL,))
-        a.active_requests = 0
+        a1 = GatedEngine("model-a1")
+        a2 = GatedEngine("model-a2")
+        b = _SizedEngine("model-b", (_PARTIAL,))
+        env = _install(monkeypatch, {"model-a1": a1, "model-a2": a2, "model-b": b},
+                       total=10 * GB + NEED)
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        _seat("model-a1", a1, active=True, busy=1)
+        _seat("model-a2", a2, busy=1)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False, activate=False))
+        assert b.placement_heal.blockers == frozenset({"model-a1", "model-a2"})
 
+        a1.active_requests = 0
         asyncio.run(hs.get_engine("model-b", activate=False))
-        asyncio.run(hs.get_engine("model-b", activate=False))
+        assert b.load_calls == 2 and a1.unload_calls == 1 and a2.loaded
+        assert b.gpu_placement == _PARTIAL and b.placement_heal is None
 
-        assert b.load_calls == 2 and b.gpu_placement == _PARTIAL
-        assert b.placement_heal is None
+        a2.active_requests = 0
+        asyncio.run(hs.get_engine("model-b", activate=False))
+        assert b.load_calls == 2, "a reload that stayed degraded is not repeated"
 
     def test_an_explicit_switch_reuses_the_degraded_model_as_it_is(self, monkeypatch):
         a, b, env = _degraded_beside(monkeypatch)
