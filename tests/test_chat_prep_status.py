@@ -26,9 +26,11 @@ SLOW_LOAD_S = 1.0
 
 
 class FakeEngine:
-    def __init__(self, name, load_s=0.0, load_error=None):
+    def __init__(self, name, load_s=0.0, load_error=None, count_error=None):
         self.display_name = name
         self.loaded = False
+        self.active_requests = 0
+        self.count_error = count_error
         self.supports_images = False
         self.can_be_multimodal = False
         self.last_finish_reason = "stop"
@@ -52,6 +54,8 @@ class FakeEngine:
         return 3
 
     def count_messages_tokens(self, messages):
+        if self.count_error is not None:
+            raise self.count_error
         return 5
 
     def context_capacity(self):
@@ -137,11 +141,50 @@ class TestSlowLoadOpensTheStreamEarly:
 
     def test_a_fast_request_keeps_its_headers_and_sends_no_meta_chunk(self, serve):
         client = serve({"plain": FakeEngine("plain")})
+        _stash_memory(client)
         r = _post(client, "plain")
         assert r.status_code == 200
+        assert json.loads(r.headers["X-Localm-Memory"])["n"] == 1
+        assert r.headers["Cache-Control"] == "no-cache"
         events = [e for e in _events(r.text) if e is not None]
         assert not any("localm_headers" in e for e in events)
         assert not any(_delta(e).get("status") == LOADING_MODEL_STATUS for e in events)
+
+    def test_a_slow_request_carries_its_headers_in_the_stream(self, serve):
+        client = serve({"plain": FakeEngine("plain"),
+                        "slow": FakeEngine("slow", load_s=SLOW_LOAD_S)})
+        _stash_memory(client)
+        r = _post(client, "slow")
+        assert "X-Localm-Memory" not in r.headers
+        assert r.headers["Cache-Control"] == "no-cache"
+        events = [e for e in _events(r.text) if e is not None]
+        meta = [e["localm_headers"] for e in events if "localm_headers" in e]
+        assert len(meta) == 1
+        assert json.loads(meta[0]["X-Localm-Memory"])["n"] == 1
+        first_meta = next(i for i, e in enumerate(events) if "localm_headers" in e)
+        first_content = next(i for i, e in enumerate(events) if _delta(e).get("content"))
+        assert first_meta < first_content
+
+    @pytest.mark.parametrize("path", ["fast", "slow", "slow_refused", "fast_refused"])
+    def test_every_path_releases_the_engine_pin(self, serve, path):
+        from localm.inference.backends.base import PretokenizerUnsafeInputError
+        refuse = PretokenizerUnsafeInputError("a run the tokenizer cannot take")
+        engines = {"plain": FakeEngine("plain", count_error=(
+                       refuse if path == "fast_refused" else None)),
+                   "slow": FakeEngine("slow", load_s=SLOW_LOAD_S),
+                   "slow_refused": FakeEngine("slow_refused", load_s=SLOW_LOAD_S,
+                                              count_error=refuse)}
+        client = serve(engines)
+        name = path if path.startswith("slow") else "plain"
+        r = _post(client, name)
+        events = [e for e in _events(r.text) if e is not None] if r.status_code == 200 else []
+        if path == "slow_refused":
+            assert events[-1]["localm_error"]["status"] == 400
+        elif path == "fast_refused":
+            assert r.status_code == 400
+        else:
+            assert "".join(_delta(e).get("content") or "" for e in events).startswith("answered-by-")
+        assert engines[name].active_requests == 0
 
     def test_a_failed_slow_load_ends_the_stream_with_its_status_and_detail(self, serve):
         client = serve({"plain": FakeEngine("plain"),
@@ -158,6 +201,14 @@ class TestSlowLoadOpensTheStreamEarly:
         content = "".join(_delta(e).get("content") or "" for e in events)
         assert content == err["detail"]
         assert r.text.rstrip().endswith("data: [DONE]")
+
+
+def _stash_memory(client):
+    """Register an inlet hook that records one recalled memory for the turn."""
+    def _inlet(messages, ctx):
+        ctx.state["memory_used"] = [{"id": "m1", "text": "likes tea"}]
+        return messages
+    client.app.state.chat_pipeline.add_hook("inlet", _inlet, plugin="test-memory")
 
 
 class TestStreamAfterPrep:
@@ -223,6 +274,77 @@ class TestStreamAfterPrep:
         lines = self._run(_drive())
         assert ": keepalive\n\n" in lines
         assert sum(1 for line in lines if LOADING_MODEL_STATUS in line) == 1
+
+    def test_a_status_set_while_the_last_one_was_being_sent_is_not_lost(self):
+        async def _drive():
+            progress = hs.PrepProgress()
+            gate = asyncio.Event()
+
+            async def _prep():
+                progress.set(LOADING_MODEL_STATUS)
+                await gate.wait()
+                return "p"
+
+            async def _reply(prepared, chunk_id):
+                yield "data: done\n\n"
+
+            task = asyncio.ensure_future(_prep())
+            await asyncio.sleep(0)
+            gen = hs.stream_after_prep(task, progress, "m", _reply,
+                                       engine_of=lambda p: None, headers_of=lambda p: {})
+            await gen.__anext__()
+            first = await gen.__anext__()
+            progress.set(RECALLING_MEMORY_STATUS)
+            second = await asyncio.wait_for(gen.__anext__(), timeout=2)
+            gate.set()
+            rest = [line async for line in gen]
+            return first, second, rest
+
+        first, second, rest = self._run(_drive())
+        assert LOADING_MODEL_STATUS in first
+        assert RECALLING_MEMORY_STATUS in second
+        assert rest[-1] == "data: done\n\n"
+
+    def test_the_refusal_text_chunk_itself_carries_the_error(self):
+        lines = hs._prep_error_lines("no room", 503, "m", "id1", 0)
+        text_chunk, done_chunk = (json.loads(line[6:]) for line in lines[:2])
+        assert _delta(text_chunk)["content"] == "no room"
+        assert text_chunk["localm_error"] == {"status": 503, "detail": "no room"}
+        assert done_chunk["localm_error"] == {"status": 503, "detail": "no room"}
+        assert lines[2] == "data: [DONE]\n\n"
+
+    def test_a_prep_failure_after_the_client_left_is_logged(self, monkeypatch):
+        from localm.debuglog import logger
+        logged = []
+        monkeypatch.setattr(logger, "error",
+                            lambda msg, *a, **k: logged.append((msg, k.get("exc_info"))))
+        boom = RuntimeError("worker died")
+
+        async def _drive():
+            async def _prep():
+                await asyncio.sleep(0.01)
+                raise boom
+            task = asyncio.ensure_future(_prep())
+            hs.release_prepared_on_done(task, lambda p: p)
+            await asyncio.sleep(0.05)
+
+        self._run(_drive())
+        assert len(logged) == 1 and logged[0][1] is boom
+
+    def test_an_http_refusal_after_the_client_left_is_not_logged(self, monkeypatch):
+        from localm.debuglog import logger
+        logged = []
+        monkeypatch.setattr(logger, "error", lambda *a, **k: logged.append(a))
+
+        async def _drive():
+            async def _prep():
+                raise HTTPException(413, "too long")
+            task = asyncio.ensure_future(_prep())
+            await asyncio.sleep(0)
+            hs.release_prepared_on_done(task, lambda p: p)
+
+        self._run(_drive())
+        assert logged == []
 
     def test_an_http_refusal_becomes_an_error_reply(self):
         async def _drive():

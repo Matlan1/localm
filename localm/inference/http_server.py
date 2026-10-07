@@ -4462,7 +4462,14 @@ def release_prepared_on_done(task: "asyncio.Future", engine_of) -> None:
     engine, or None when the result holds no pin. A failed or cancelled task
     holds no pin."""
     def _release(t: "asyncio.Future") -> None:
-        if t.cancelled() or t.exception() is not None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            if not isinstance(exc, HTTPException):
+                from localm.debuglog import logger as _dbg
+                _dbg.error("chat request preparation failed after its client left",
+                           exc_info=exc)
             return
         engine = engine_of(t.result())
         if engine is not None:
@@ -4508,11 +4515,11 @@ async def stream_after_prep(
                 shown = progress.text
                 status = ChatChunk.status_chunk(shown, model_id, chunk_id, ts)
                 yield f"data: {status.model_dump_json()}\n\n"
+                continue
             if task.done():
                 break
-            before = progress.text
             await progress.wait_changed(task, PREP_KEEPALIVE_S)
-            if not task.done() and progress.text == before:
+            if not task.done() and progress.text == shown:
                 yield ": keepalive\n\n"
         try:
             prepared = task.result()
@@ -4550,11 +4557,15 @@ async def stream_after_prep(
 
 def _prep_error_lines(detail: str, status: int, model_id: str, chunk_id: str,
                       ts: int) -> list:
-    """The error reply and terminal lines that end an early-opened stream."""
-    err = ChatChunk.token(detail, model_id, chunk_id, ts)
+    """The error reply and terminal lines that end an early-opened stream. Both
+    the error text chunk and the terminal chunk carry ``localm_error``, so a
+    client that knows it can raise before showing the text as a reply."""
+    refusal = {"status": status, "detail": detail}
+    err = ChatChunk.token(detail, model_id, chunk_id, ts).model_dump()
+    err["localm_error"] = refusal
     done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error").model_dump()
-    done["localm_error"] = {"status": status, "detail": detail}
-    return [f"data: {err.model_dump_json()}\n\n",
+    done["localm_error"] = refusal
+    return ["data: " + json.dumps(err) + "\n\n",
             "data: " + json.dumps(done) + "\n\n",
             "data: [DONE]\n\n"]
 

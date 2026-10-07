@@ -41,7 +41,7 @@ const status = (text, code) => ({ choices: [{ delta: { status: text, status_code
 const content = (text) => ({ choices: [{ delta: { content: text } }] });
 const stop = { choices: [{ delta: {}, finish_reason: "stop" }] };
 const refusal = (code, detail) => [
-  content(detail),
+  { ...content(detail), localm_error: { status: code, detail } },
   { choices: [{ delta: {}, finish_reason: "error" }],
     localm_error: { status: code, detail } },
 ];

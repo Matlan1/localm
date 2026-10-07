@@ -88,6 +88,12 @@ def _response_detail(resp) -> str:
     return ""
 
 
+def _header(headers, name: str):
+    """*headers*' value for *name*, or None when absent or unreadable."""
+    getter = getattr(headers, "get", None)
+    return getter(name) if callable(getter) else None
+
+
 def _raise_for_status(resp) -> None:
     """Turn a 401/403 into a CoderAuthError whose message tells the user how to
     supply an API key. Any other non-2xx response with server-provided detail
@@ -714,7 +720,10 @@ class HTTPBackend(BaseLLMBackend):
             pinned=self._pinned,
         ) as resp:
             _raise_for_status(resp)
-            self._note_routing(getattr(resp, "headers", None))
+            headers = getattr(resp, "headers", None)
+            routing_noted = bool(_header(headers, "X-Localm-Model-Routing"))
+            if routing_noted:
+                self._note_routing(headers)
             for line in resp.iter_lines():
                 if not line:
                     continue
@@ -734,6 +743,7 @@ class HTTPBackend(BaseLLMBackend):
                 meta = chunk.get("localm_headers")
                 if isinstance(meta, dict):
                     self._note_routing(meta)
+                    routing_noted = True
                 refusal = chunk.get("localm_error")
                 if isinstance(refusal, dict):
                     raise CoderServerError(
@@ -777,6 +787,8 @@ class HTTPBackend(BaseLLMBackend):
                         _tc_buf[idx]["arguments"] += fn["arguments"]
 
         self._last_reasoning = "".join(_reasoning_parts)
+        if not routing_noted:
+            self._note_routing(headers)
 
         # Emit accumulated tool calls as XML after the stream ends
         flushed = self._flush_tool_calls_as_xml(_tc_buf)

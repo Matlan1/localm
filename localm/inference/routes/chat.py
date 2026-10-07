@@ -417,7 +417,9 @@ def register(app: FastAPI, ctx) -> None:
         if not done:
             return StreamingResponse(
                 _hs.stream_after_prep(
-                    task, progress, route.resolved or req.model or "localm",
+                    task, progress,
+                    (route.resolved if route.routed
+                     else req.model or route.resolved or "localm"),
                     _start_stream, engine_of=_prepared_engine,
                     headers_of=_prepared_headers),
                 media_type="text/event-stream", headers=sse_headers)

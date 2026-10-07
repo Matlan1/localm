@@ -23,23 +23,35 @@ def _sse(chunks):
 
 
 def _refusal(code, detail):
-    return [{"choices": [{"delta": {"content": detail}}]},
-            {"choices": [{"delta": {}, "finish_reason": "error"}],
-             "localm_error": {"status": code, "detail": detail}}]
+    """The chunks the server ends an early-opened stream with."""
+    from localm.inference.http_server import _prep_error_lines
+    return [json.loads(line[6:]) for line in _prep_error_lines(detail, code, "m", "id", 0)
+            if line.startswith("data: {")]
+
+
+def _drain(gen, yielded):
+    for piece in gen:
+        yielded.append(piece)
 
 
 class TestHttpEngineInStreamRefusal:
     def test_an_image_refusal_raises_unsupported_input(self, monkeypatch):
         monkeypatch.setattr("requests.post", lambda *a, **k: _sse(
             _refusal(400, "This model cannot accept image input (text-only).")))
+        yielded = []
         with pytest.raises(UnsupportedInputError):
-            list(HttpEngine("http://x/v1").chat_stream([{"role": "user", "content": "x"}]))
+            _drain(HttpEngine("http://x/v1").chat_stream(
+                [{"role": "user", "content": "x"}]), yielded)
+        assert yielded == [], "the refusal must not be shown as reply text"
 
     def test_another_refusal_raises_with_its_status_and_detail(self, monkeypatch):
         monkeypatch.setattr("requests.post", lambda *a, **k: _sse(
             _refusal(503, "Model load was cancelled: superseded")))
+        yielded = []
         with pytest.raises(RuntimeError) as caught:
-            list(HttpEngine("http://x/v1").chat_stream([{"role": "user", "content": "x"}]))
+            _drain(HttpEngine("http://x/v1").chat_stream(
+                [{"role": "user", "content": "x"}]), yielded)
+        assert yielded == []
         assert str(caught.value) == ("server error (HTTP 503): "
                                      "Model load was cancelled: superseded")
 

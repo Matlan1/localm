@@ -72,16 +72,42 @@ class TestHTTPBackend:
 
     @patch("requests.post")
     def test_an_in_stream_refusal_raises_like_the_http_error(self, mock_post):
+        from localm.inference.http_server import _prep_error_lines
         detail = "Grammar refused: would be ignored"
         mock_post.return_value = _stream_response([
-            _delta(content=detail),
-            {"choices": [{"delta": {}, "finish_reason": "error"}],
-             "localm_error": {"status": 400, "detail": detail}}])
+            json.loads(line[6:]) for line in _prep_error_lines(detail, 400, "m", "id", 0)
+            if line.startswith("data: {")])
         backend = HTTPBackend("http://127.0.0.1:8080/v1", "m")
+        yielded = []
         with pytest.raises(CoderServerError) as caught:
-            list(backend.chat_stream([{"role": "user", "content": "hi"}]))
+            for piece in backend.chat_stream([{"role": "user", "content": "hi"}]):
+                yielded.append(piece)
+        assert yielded == [], "the refusal must not be shown as reply text"
         assert str(caught.value).startswith("HTTP 400 error from ")
         assert str(caught.value).endswith(": " + detail)
+
+    @patch("requests.post")
+    def test_a_note_carried_in_the_stream_is_not_announced_again(self, mock_post):
+        routing = {"resolved": "a", "requested": "a", "routed": False,
+                   "pinned": False, "note": "b was skipped"}
+        early = [{"choices": [{"delta": {}, "finish_reason": None}],
+                  "localm_headers": {"X-Localm-Model-Routing": json.dumps(routing)}},
+                 _delta(content="x"), STOP]
+        backend = HTTPBackend("http://127.0.0.1:8080/v1", "m")
+        announced = []
+        backend.on_routing_note = announced.append
+        for _ in range(2):
+            mock_post.return_value = _stream_response(early)
+            list(backend.chat_stream([{"role": "user", "content": "hi"}]))
+        assert announced == ["b was skipped"]
+
+    @patch("requests.post")
+    def test_a_reply_with_no_routing_clears_the_note(self, mock_post):
+        backend = HTTPBackend("http://127.0.0.1:8080/v1", "m")
+        backend.routing_note = "old"
+        mock_post.return_value = _stream_response([_delta(content="x"), STOP])
+        list(backend.chat_stream([{"role": "user", "content": "hi"}]))
+        assert backend.routing_note is None
 
 
 class TestEngineBackends:

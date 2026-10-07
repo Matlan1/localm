@@ -2396,7 +2396,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         routing = parseRoutingHeader(inStream) || routing;
         if (inStream.headers.get("X-Localm-Context-Compacted")) serverCompacted = true;
       }
-      if (chunk.localm_error) streamErr = chunk.localm_error;
+      if (chunk.localm_error) {
+        streamErr = chunk.localm_error;
+        return;
+      }
       if (chunk.usage) usage = chunk.usage;
       if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const d = chunk.choices?.[0]?.delta || {};
