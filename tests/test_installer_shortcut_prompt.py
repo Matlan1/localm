@@ -46,6 +46,9 @@ def _shortcut_blocks(bat_text):
     return b1, b2
 
 
+_JOURNAL_LABELS = ":jr\r\nexit /b 0\r\n:step_done\r\nexit /b 0\r\n"
+
+
 def _manifest_record_block(bat_text):
     """The final `setlocal DisableDelayedExpansion` / install-manifest-record /
     `endlocal` wrapper (the one at the end of setup, not the early record after
@@ -693,7 +696,8 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
             + preamble +
             "{block}\r\n"
             "{readback}"
-            "exit /b 0\r\n".format(block=block_text, readback=readback),
+            "exit /b 0\r\n".format(block=block_text, readback=readback)
+            + _JOURNAL_LABELS,
             encoding="utf-8")
         return subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=15, cwd=str(directory))
@@ -887,7 +891,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\n'
             'set "UVDIR=%CD:!=^!%\\.uv"\r\nset "PATHMOD=--path-modified"\r\n'
             + echoed + "\r\n"
-            "exit /b 0\r\n")
+            "exit /b 0\r\n" + _JOURNAL_LABELS)
         probe = bangdir / "probe.bat"
         probe.write_text(script, encoding="utf-8")
         out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,

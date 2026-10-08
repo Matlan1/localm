@@ -67,6 +67,33 @@ pause
 exit /b 0
 :fresh_install
 
+rem ---- scratch folder and setup journal --------------------------------------
+rem  Temporary files setup needs live in .\.localm-setup-tmp inside this folder,
+rem  never in the system temp folder. The journal (.localm-setup-journal) gets one
+rem  tab-separated line per event, in the format localm.install_manifest reads:
+rem  "begin<TAB>step", "done<TAB>step", "complete" and "resume". A run that ends
+rem  without "complete" was interrupted, whatever the cause. Run again, setup says
+rem  where the last one stopped, reuses what finished and redoes the step that was
+rem  cut short. LOCALM_SETUP_ABORT_AFTER=<step> stops a run right after a step
+rem  ^(a testing aid^).
+set "STMP=.localm-setup-tmp"
+if not exist ".localm-setup-tmp" mkdir ".localm-setup-tmp" >nul 2>nul
+set "TAB="
+for /f "delims=" %%T in ('powershell -NoProfile -Command "[char]9"') do set "TAB=%%T"
+set "JRON=1"
+if not defined TAB set "JRON=0"
+if "%JRON%"=="0" echo  [^^!] Could not set up the setup journal - if this setup is interrupted it cannot say where it stopped.
+set "RESUMING=0"
+set "OPENSTEP="
+set "OPENSET=;"
+set "LASTDONE="
+set "JCOMP=0"
+set "JSEEN=0"
+if "%JRON%"=="1" if exist ".localm-setup-journal" call :journal_read
+if "%JSEEN%"=="1" if "%JCOMP%"=="1" del ".localm-setup-journal" >nul 2>nul
+if "%JSEEN%"=="1" if "%JCOMP%"=="0" set "RESUMING=1"
+if "%RESUMING%"=="1" call :resume_notice
+
 rem ---- point at the graphical installer -------------------------------------
 rem  Same install, same questions, in a window. Mentioned here rather than only
 rem  in the README because the person who would rather not answer questions in a
@@ -90,6 +117,7 @@ rem  outside-the-root write this project forbids. The UV_* vars are set for
 rem  THIS setup process only (not setx / not global), so they never touch any
 rem  other uv project. --python-preference only-managed forces the contained
 rem  download instead of reusing a system Python.
+call :jr begin portable-choice
 echo.
 echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
 echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
@@ -120,6 +148,7 @@ if "%CONTAINED%"=="1" (
     set "PYDIR=%CD:!=^!%\.python"
     set "CACHEDIR=%CD:!=^!%\.cache"
 )
+call :step_done portable-choice || exit /b 99
 
 rem ---- uv is required; bootstrap it ourselves if it is missing --------------
 rem  uv (Astral's fast Python package manager) drives the whole install: it builds
@@ -142,6 +171,7 @@ if not errorlevel 1 goto uv_ready
 goto uv_missing
 
 :uv_check_portable
+if "%RESUMING%"=="1" if not "!OPENSET:;uv-portable;=!"=="!OPENSET!" if exist ".uv" call :redo_uv
 if exist ".uv\uv.exe" (
     set "PATH=%CD:!=^!%\.uv;%PATH%"
     set "UVDIR=%CD:!=^!%\.uv"
@@ -158,6 +188,9 @@ if /i "!GETUV:~0,1!"=="N" goto uv_manual
 
 echo.
 echo  Installing uv ...
+set "UVSTEP=uv-bootstrap"
+if "%CONTAINED%"=="1" set "UVSTEP=uv-portable"
+call :jr begin %UVSTEP%
 if "%CONTAINED%"=="1" (
     rem  Portable was picked: confine uv's OWN binary to this folder too, not just
     rem  the Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
@@ -212,6 +245,7 @@ pause
 exit /b 1
 
 :uv_ready
+if defined UVSTEP call :step_done %UVSTEP% || exit /b 99
 
 rem ---- create the venv in the repo root -------------------------------------
 rem  An existing .venv is reused unless the user opts to replace it, so a
@@ -235,6 +269,8 @@ rem  transformers - inherits whichever choice wins (see the venv-creation retry
 rem  loop below for the actual fallback).
 set "UV_SYSTEM_CERTS=1"
 
+call :jr begin venv
+if "%RESUMING%"=="1" if not "!OPENSET:;venv;=!"=="!OPENSET!" if not exist ".venv\.localm-venv" if exist ".venv" goto venv_resume
 if not exist ".venv" goto venv_create
 
 rem .venv already exists - is it one we created, or a foreign one?
@@ -268,9 +304,9 @@ rem  :heartbeat_start below) covers the case that genuinely does take a while -
 rem  a fresh machine downloading uv's managed Python - so that never looks
 rem  like a hang.
 :venv_retry
-if exist "%TEMP%\localm_uv_err.txt" del "%TEMP%\localm_uv_err.txt"
+if exist "%STMP%\localm_uv_err.txt" del "%STMP%\localm_uv_err.txt"
 call :heartbeat_start 15 "  ... still creating the environment (this can take a few minutes on a slow connection)"
-uv venv --python %PYVER% %PYPREF% --clear .venv >"%TEMP%\localm_uv_err.txt" 2>&1
+uv venv --python %PYVER% %PYPREF% --clear .venv >"%STMP%\localm_uv_err.txt" 2>&1
 if not errorlevel 1 (
     call :heartbeat_stop
     goto venv_create_ok
@@ -281,9 +317,9 @@ rem  Failed silently so far. Only ever falls back once: if UV_SYSTEM_CERTS is
 rem  already empty, the fallback was already tried - show it for real below
 rem  instead of guessing again.
 if not defined UV_SYSTEM_CERTS goto venv_show_failure
-findstr /i "certificate" "%TEMP%\localm_uv_err.txt" >nul 2>nul
+findstr /i "certificate" "%STMP%\localm_uv_err.txt" >nul 2>nul
 if errorlevel 1 goto venv_show_failure
-del "%TEMP%\localm_uv_err.txt" 2>nul
+del "%STMP%\localm_uv_err.txt" 2>nul
 echo  [i] Your system's certificate store did not verify a required download
 echo      ^(possibly a freshly-installed Windows that has not cached the real
 echo      certificate yet^). Falling back to uv's own verified certificate
@@ -292,11 +328,11 @@ set "UV_SYSTEM_CERTS="
 goto venv_retry
 
 :venv_show_failure
-type "%TEMP%\localm_uv_err.txt" 2>nul
-findstr /c:"os error 5" /c:"os error 32" "%TEMP%\localm_uv_err.txt" >nul 2>nul
+type "%STMP%\localm_uv_err.txt" 2>nul
+findstr /c:"os error 5" /c:"os error 32" "%STMP%\localm_uv_err.txt" >nul 2>nul
 set "VENVLOCKISH=0"
 if not errorlevel 1 set "VENVLOCKISH=1"
-del "%TEMP%\localm_uv_err.txt" 2>nul
+del "%STMP%\localm_uv_err.txt" 2>nul
 echo.
 
 rem  "Access is denied"/"os error 5" (or "os error 32", a sharing violation)
@@ -320,19 +356,19 @@ if "!VENVLOCKISH!"=="1" (
         echo  One or more localm processes from this folder look like they are
         echo  still running and holding .venv locked:
         echo.
-        for /f "usebackq tokens=1,2 delims=|" %%a in ("%TEMP%\localm_lockers.txt") do echo    - PID %%a  %%b
+        for /f "usebackq tokens=1,2 delims=|" %%a in ("%STMP%\localm_lockers.txt") do echo    - PID %%a  %%b
         echo.
         set "STOPPICK="
         call :flush
         set /p "STOPPICK=  Stop them and retry now? [Y/n]: "
         if not defined STOPPICK set "STOPPICK=Y"
         if /i not "!STOPPICK:~0,1!"=="N" (
-            for /f "usebackq tokens=1,2 delims=|" %%a in ("%TEMP%\localm_lockers.txt") do taskkill /PID %%a /T /F >nul 2>nul
-            del "%TEMP%\localm_lockers.txt" 2>nul
+            for /f "usebackq tokens=1,2 delims=|" %%a in ("%STMP%\localm_lockers.txt") do taskkill /PID %%a /T /F >nul 2>nul
+            del "%STMP%\localm_lockers.txt" 2>nul
             timeout /t 2 /nobreak >nul 2>nul
             goto venv_retry
         )
-        del "%TEMP%\localm_lockers.txt" 2>nul
+        del "%STMP%\localm_lockers.txt" 2>nul
         set "VENVREASON=lockers_declined"
     ) else (
         if not defined VENV_WAIT_RETRIED (
@@ -392,6 +428,7 @@ setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% >nul 2>nul
 endlocal
 :venv_done
+call :step_done venv || exit /b 99
 
 rem ---- choose where data lives ----------------------------------------------
 rem  Asked before anything writes data: setup-llama records its builds in this
@@ -400,6 +437,7 @@ rem  Default is CONTAINED (.\home): there is NO silent ~/.localm fallback. Anyon
 rem  who wants a shared / other location picks Custom, and it is recorded
 rem  explicitly in localm-home.cfg (asked + recorded, never guessed).
 rem  A repair offers the data folder this install already uses first.
+call :jr begin data-folder
 .venv\Scripts\python -m localm.install_manifest current-data --root . >nul 2>nul
 set "CURDATA_RC=%errorlevel%"
 if "%CURDATA_RC%"=="3" goto data_folder_unavailable
@@ -453,6 +491,7 @@ rem  through install_manifest prepare-data, which records it for uninstall.
 if "%DATAPICK%"=="2" call :do_custom_home
 if not "%DATAPICK%"=="2" call :portable_home
 :data_folder_chosen
+call :step_done data-folder || exit /b 99
 
 rem ---- browser tab or standalone app window? ---------------------------------
 rem  Decides whether the `desktop` extra (pywebview) gets installed at all - a
@@ -487,6 +526,7 @@ rem  Base install first: GGUF chat needs no PyTorch, so this alone is a working
 rem  install. The GPU/torch stack for HuggingFace models is added below to match
 rem  the detected vendor. [voice] ships speech-to-text; its Whisper model is only
 rem  downloaded after the user consents in the GUI.
+call :jr begin install-localm
 echo.
 echo  Installing localm into .venv ...
 rem  NO heartbeat here, deliberately. uv writes STRAIGHT TO THE CONSOLE at this
@@ -505,6 +545,7 @@ call :offer_report "localm install failed during setup" "uv pip install -e .[%EX
 pause
 exit /b 1
 :install_ok
+call :step_done install-localm || exit /b 99
 
 rem ---- install the native-runtime wheel (self-contained inference) ----------
 rem  localm-llama-runtime carries llama.dll + ggml inside this venv so the
@@ -524,14 +565,14 @@ echo.
 echo  Detecting graphics hardware ...
 set "VENDOR=none"
 set "REC=cpu"
-.venv\Scripts\python -m localm.hwdetect > "%TEMP%\localm_hw.txt" 2>nul
-if exist "%TEMP%\localm_hw.txt" (
-    for /f "usebackq tokens=1,2" %%a in ("%TEMP%\localm_hw.txt") do (
+.venv\Scripts\python -m localm.hwdetect > "%STMP%\localm_hw.txt" 2>nul
+if exist "%STMP%\localm_hw.txt" (
+    for /f "usebackq tokens=1,2" %%a in ("%STMP%\localm_hw.txt") do (
         set "VENDOR=%%a"
         set "REC=%%b"
     )
 )
-del "%TEMP%\localm_hw.txt" 2>nul
+del "%STMP%\localm_hw.txt" 2>nul
 if "%VENDOR%"=="" set "VENDOR=none"
 if "%REC%"=="" set "REC=cpu"
 echo  Detected graphics vendor: %VENDOR%
@@ -594,10 +635,11 @@ rem  decides it - `hwdetect torch-args <backend>` resolves the exact wheel SOURC
 rem  for THIS hardware+OS (including AMD-on-Windows per gfx family: gfx103X uses the
 rem  bundled self-contained build, RX 7000/9000 use AMD's Windows ROCm wheels), so
 rem  setup.bat and setup.sh can never disagree and every card gets correct packages.
+call :jr begin torch
 set "TORCHSPEC="
-.venv\Scripts\python -m localm.hwdetect torch-args %BACKEND% > "%TEMP%\localm_torch.txt" 2>nul
-if exist "%TEMP%\localm_torch.txt" for /f "usebackq delims=" %%a in ("%TEMP%\localm_torch.txt") do set "TORCHSPEC=%%a"
-del "%TEMP%\localm_torch.txt" 2>nul
+.venv\Scripts\python -m localm.hwdetect torch-args %BACKEND% > "%STMP%\localm_torch.txt" 2>nul
+if exist "%STMP%\localm_torch.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_torch.txt") do set "TORCHSPEC=%%a"
+del "%STMP%\localm_torch.txt" 2>nul
 echo.
 rem  NO heartbeat around the installs below, deliberately - see the base install
 rem  above for the mechanism. uv's output goes straight to the console here, so it
@@ -616,12 +658,16 @@ if not defined TORCHSPEC (
     uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
     uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 )
+call :step_done torch || exit /b 99
 
 rem ---- provision the native llama.cpp binaries ------------------------------
 rem  The binaries are large and license/provenance-sensitive, so they are never
 rem  committed to git. setup-llama fetches the prebuilt matching the chosen
 rem  backend from upstream llama.cpp releases (AMD uses a self-contained ROCm
 rem  build), and places them in this venv so the install is runnable.
+call :jr begin native-runtime
+set "SLFORCE="
+if "%RESUMING%"=="1" if not "!OPENSET:;native-runtime;=!"=="!OPENSET!" set "SLFORCE=--force"
 echo.
 if /i "%BACKEND%"=="own" (
     set "LLAMABUILD="
@@ -639,7 +685,7 @@ if /i "%BACKEND%"=="own" (
         echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<vulkan^|cuda^|amd-rocm^|cpu^>
     )
 ) else (
-    .venv\Scripts\localm setup-llama --backend %BACKEND%
+    .venv\Scripts\localm setup-llama --backend %BACKEND% %SLFORCE%
     if errorlevel 1 (
         echo  [^^!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
         echo      ^(Double-click report-issue.bat to send a report about this.^)
@@ -648,7 +694,10 @@ if /i "%BACKEND%"=="own" (
     )
 )
 
+call :step_done native-runtime || exit /b 99
+
 rem ---- build the native LocaLM.exe launcher ---------------------------------
+call :jr begin launcher
 rem  So the running server shows as LocaLM.exe in Task Manager (not python.exe)
 rem  and carries the LocaLM icon. It is a branded copy of the venv interpreter,
 rem  placed in .venv\localm-app, self-contained in this clone. `localm gui` still
@@ -657,6 +706,7 @@ echo.
 echo  Branding the app executable ^(so it shows as LocaLM, not python^) ...
 .venv\Scripts\python -m localm make-launcher --force --quiet
 if errorlevel 1 echo  [^^!] Could not build LocaLM.exe - `localm gui` still works ^(shows python.exe^).
+call :step_done launcher || exit /b 99
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
@@ -670,6 +720,9 @@ call :flush
 set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
 if not defined SCPICK set "SCPICK=1"
 set "SCPATH="
+set "SCSTEP="
+if "%SCPICK%"=="1" call :intend_shortcut
+if "%SCPICK%"=="2" call :intend_shortcut
 if "%SCPICK%"=="1" (
     setlocal DisableDelayedExpansion
     set "SC_STILL_OPEN=1"
@@ -715,6 +768,7 @@ setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --shortcut "%SCPATH%" >nul 2>nul
 endlocal
 :shortcut_recorded
+if defined SCSTEP call :step_done menu-entry || exit /b 99
 
 rem ---- optional: make `localm` runnable from any terminal --------------------
 rem  Adds a small `localm` shim in .\bin and appends ONLY .\bin to your USER PATH
@@ -731,6 +785,8 @@ set "PATHDIR="
 set "CMDSHIM="
 set "PATHMOD="
 set "GCRC=99"
+set "GCSTEP="
+if /i "%GLOBALPICK%"=="y" call :intend_command
 if /i "%GLOBALPICK%"=="y" .venv\Scripts\python -m localm.globalcmd install --root .
 if /i "%GLOBALPICK%"=="y" set "GCRC=!errorlevel!"
 rem  globalcmd exit code: 0 = installed + PATH modified; 20 = installed but PATH was
@@ -747,6 +803,7 @@ setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 endlocal
 :globalcmd_recorded
+if defined GCSTEP call :step_done global-command || exit /b 99
 
 rem ---- choose which plugins to enable ---------------------------------------
 rem  `localm plugin setup` prints its own header (it states chat is always on),
@@ -757,10 +814,14 @@ echo  Optional features (plugins):
 
 rem ---- record what we installed (uninstall removes ONLY what we created) -----
 rem  The data folder was recorded when it was chosen (prepare-data).
+call :jr begin record
 setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 endlocal
 if errorlevel 1 echo  [^^!] Could not record the install manifest (uninstall will be conservative).
+call :step_done record || exit /b 99
+call :jr complete
+if exist ".localm-setup-tmp" rmdir /s /q ".localm-setup-tmp" >nul 2>nul
 
 rem ---- done ------------------------------------------------------------------
 echo.
@@ -912,7 +973,7 @@ if not exist ".localm-uninstall-pending" goto :eof
 for /f "usebackq delims=" %%d in (".localm-uninstall-pending") do call :remove_deferred "%%d"
 if defined LEFTOVER goto :eof
 del ".localm-uninstall-pending" >nul 2>nul
-if not defined KEEPREC del ".localm-install.json" >nul 2>nul
+if not defined KEEPREC del ".localm-install.json" ".localm-setup-journal" >nul 2>nul
 goto :eof
 
 :remove_deferred
@@ -967,7 +1028,7 @@ rem  heartbeat line after the first retry.
 rem ===========================================================================
 :heartbeat_start
 set /a HBSEQ+=1
-set "HBFLAG=%TEMP%\localm_setup_hb.%HBSEQ%.flag"
+set "HBFLAG=%STMP%\localm_setup_hb.%HBSEQ%.flag"
 if exist "%HBFLAG%" del "%HBFLAG%" >nul 2>nul
 start "" /b powershell -NoProfile -Command ^
   "while (-not (Test-Path -LiteralPath '%HBFLAG%')) { Start-Sleep -Seconds %~1; if (-not (Test-Path -LiteralPath '%HBFLAG%')) { Write-Host '%~2' } }; Remove-Item -LiteralPath '%HBFLAG%' -ErrorAction SilentlyContinue"
@@ -982,6 +1043,97 @@ rem  :offer_report "summary" "detail" - offer to file a bug report for a setup
 rem  failure via the standalone reporter (report-issue.bat), which works even
 rem  though setup did not finish (it needs no working install). Returns so the
 rem  CALLER still exits non-zero with its original error - reporting never masks the
+:venv_resume
+echo.
+echo  The previous setup stopped while creating .venv; recreating it.
+goto venv_create
+
+:redo_uv
+echo.
+echo  The previous setup stopped while installing uv here; starting that over.
+rmdir /s /q ".uv" >nul 2>nul
+goto :eof
+
+:intend_shortcut
+set "DESKDIR="
+for /f "usebackq delims=" %%d in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKDIR=%%d"
+if defined DESKDIR .venv\Scripts\python -m localm.install_manifest journal --root . intend shortcut "!DESKDIR!\LocaLM.lnk" >nul 2>nul
+call :jr begin menu-entry
+set "SCSTEP=1"
+goto :eof
+
+:intend_command
+.venv\Scripts\python -m localm.install_manifest journal --root . intend command "!CD!\bin\localm.cmd" >nul 2>nul
+call :jr begin global-command
+set "GCSTEP=1"
+goto :eof
+
+rem ===========================================================================
+rem  Setup journal helpers. :jr begin|done STEP or :jr complete|resume appends one
+rem  event to .localm-setup-journal. :step_done STEP records the step as finished
+rem  and stops the script with exit code 99 when LOCALM_SETUP_ABORT_AFTER names it:
+rem  the caller writes  call :step_done X ^|^| exit /b 99  so the stop ends setup,
+rem  not just the subroutine. :journal_read reads the journal into JSEEN, JCOMP,
+rem  LASTDONE, OPENSTEP (the latest step begun) and OPENSET (every step begun and
+rem  not finished, as ;a;b;).
+rem ===========================================================================
+:jr
+if "%JRON%"=="0" goto :eof
+if "%~2"=="" (
+    >>".localm-setup-journal" echo %~1|| call :jr_failed
+) else (
+    >>".localm-setup-journal" echo %~1%TAB%%~2|| call :jr_failed
+)
+goto :eof
+
+:jr_failed
+if defined JRWARNED goto :eof
+set "JRWARNED=1"
+echo  [^^!] Could not write .localm-setup-journal - if this setup is interrupted it cannot say where it stopped.
+goto :eof
+
+:step_done
+call :jr done %~1
+if /i "%LOCALM_SETUP_ABORT_AFTER%"=="%~1" (
+    echo  ^(stopping after '%~1': LOCALM_SETUP_ABORT_AFTER is set^)
+    exit /b 99
+)
+exit /b 0
+
+:journal_read
+for /f "usebackq tokens=1,* delims=%TAB%" %%A in (".localm-setup-journal") do (
+    set "JSEEN=1"
+    if /i "%%A"=="begin" (
+        set "JCOMP=0"
+        set "OPENSTEP=%%B"
+        if "!OPENSET:;%%B;=!"=="!OPENSET!" set "OPENSET=!OPENSET!%%B;"
+    )
+    if /i "%%A"=="done" (
+        set "LASTDONE=%%B"
+        set "OPENSET=!OPENSET:;%%B;=;!"
+        if /i "%%B"=="!OPENSTEP!" set "OPENSTEP="
+    )
+    if /i "%%A"=="complete" (
+        set "JCOMP=1"
+        set "OPENSTEP="
+        set "OPENSET=;"
+    )
+)
+goto :eof
+
+:resume_notice
+echo.
+set "OPENTXT="
+if defined OPENSTEP set "OPENTXT=, while running '!OPENSTEP!'"
+if defined LASTDONE (
+    echo  A previous setup in this folder stopped after '!LASTDONE!'!OPENTXT!.
+) else (
+    echo  A previous setup in this folder stopped before finishing its first step!OPENTXT!.
+)
+echo  Picking it up: what finished is reused, and the step that was cut short is redone.
+call :jr resume
+goto :eof
+
 rem ===========================================================================
 rem  :flush - drop any TYPE-AHEAD before asking a question.
 rem
@@ -1079,18 +1231,18 @@ rem  running from THIS folder's .venv. Matched by executable PATH, never by
 rem  process name alone, so a same-named process belonging to a DIFFERENT
 rem  localm clone on this machine is never listed or touched. Sets LOCKERS to
 rem  a non-empty sentinel and writes "PID|Name" lines to
-rem  %TEMP%\localm_lockers.txt when it finds any. Best-effort: any
+rem  %STMP%\localm_lockers.txt when it finds any. Best-effort: any
 rem  PowerShell/WMI failure leaves LOCKERS empty and the file absent/empty.
 rem ===========================================================================
 :find_venv_lockers
 set "LOCKERS="
-if exist "%TEMP%\localm_lockers.txt" del "%TEMP%\localm_lockers.txt"
+if exist "%STMP%\localm_lockers.txt" del "%STMP%\localm_lockers.txt"
 powershell -NoProfile -Command ^
     "$root = ('%CD%\.venv\').ToLowerInvariant();" ^
     "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($root) } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.Name }" ^
-    >"%TEMP%\localm_lockers.txt" 2>nul
-for %%s in ("%TEMP%\localm_lockers.txt") do if %%~zs GTR 0 set "LOCKERS=1"
-if not defined LOCKERS del "%TEMP%\localm_lockers.txt" >nul 2>nul
+    >"%STMP%\localm_lockers.txt" 2>nul
+for %%s in ("%STMP%\localm_lockers.txt") do if %%~zs GTR 0 set "LOCKERS=1"
+if not defined LOCKERS del "%STMP%\localm_lockers.txt" >nul 2>nul
 exit /b 0
 
 rem ===========================================================================

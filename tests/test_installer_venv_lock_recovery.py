@@ -82,12 +82,13 @@ class TestFindVenvLockers:
         probe = tmp_path / "probe.bat"
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            f'set "TEMP={tmp_path}"\r\n'
+            f'set "STMP={tmp_path}\\.localm-setup-tmp"\r\n'
+            'mkdir "%STMP%" 2>nul\r\n'
             f'cd /d "{tmp_path}"\r\n'
             "call :find_venv_lockers\r\n"
             "echo LOCKERS=[!LOCKERS!]\r\n"
             "echo ---file---\r\n"
-            'type "%TEMP%\\localm_lockers.txt" 2>nul\r\n'
+            'type "%STMP%\\localm_lockers.txt" 2>nul\r\n'
             "echo ---end---\r\n"
             "exit /b 0\r\n"
             + block.replace("\n", "\r\n") + "\r\n",

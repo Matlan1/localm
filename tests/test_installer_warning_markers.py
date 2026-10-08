@@ -65,6 +65,8 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] No path given - using the portable .\\home instead.',
         'echo  [^^!] Could not record the data folder; created .\\home anyway.',
         "echo  [^^!] LocaLM's data for this folder is set to:",
+        'echo  [^^!] Could not write .localm-setup-journal - if this setup is interrupted',
+        'echo  [^^!] Could not set up the setup journal - if this setup is interrupted',
     ]
     for site in sites:
         assert site in bat, site
