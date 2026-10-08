@@ -445,6 +445,10 @@ class TestFreeVramBytesUsesIsolatedNativeFallback:
         # correction is pinned off.
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped",
                             lambda: False)
+        # Windows never imports torch for this read (see
+        # test_server_never_cold_imports_torch.py); the torch-first order
+        # asserted here is every other platform's.
+        monkeypatch.setattr(sys, "platform", "linux")
 
     def _fake_torch_ok(self):
         fake = MagicMock()

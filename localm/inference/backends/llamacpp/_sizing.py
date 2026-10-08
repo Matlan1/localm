@@ -128,6 +128,9 @@ class VramSizingMixin:
           is only consulted when torch is NOT already resident: once it is in
           ``sys.modules`` the reads below are ordinary calls on an imported
           module.
+        - **No cold import on Windows.** Unless torch is already fully imported
+          in this process, the answer is (None, None) at once, so the caller
+          reads through the isolated native probe.
         - **A deadline.** Everything else runs on a helper thread with
           :meth:`_torch_vram_read_deadline`, and on overrun the caller is
           released with (None, None) - this method's "unmeasurable" answer,
@@ -163,6 +166,15 @@ class VramSizingMixin:
             return None, None
         # Only when torch is not already resident: an imported torch makes the
         # reads below ordinary calls.
+        if sys.platform == "win32":
+            from localm.gpu_usage import torch_fully_imported
+            if not torch_fully_imported():
+                # A cold torch import takes the OS loader lock and blocks thread
+                # creation process-wide, which no deadline here can bound.
+                _dbg.debug(
+                    "free-vram: torch is not imported in this process; reading "
+                    "through the isolated native probe instead of importing it")
+                return None, None
         if "torch" not in sys.modules:
             from localm import discover
             if discover.isolated_torch_unavailable():

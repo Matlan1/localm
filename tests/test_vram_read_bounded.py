@@ -44,6 +44,10 @@ def clean_sizing_state(monkeypatch):
     monkeypatch.setattr(VramSizingMixin, "_torch_vram_read_wedged", False)
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    # On Windows the read refuses to import torch at all (see
+    # test_server_never_cold_imports_torch.py); the bounded in-process read
+    # exercised here is the path every other platform takes.
+    monkeypatch.setattr(sys, "platform", "linux")
     yield
 
 

@@ -642,6 +642,60 @@ def _known_blind_without_torch(reason: str) -> bool:
     return resident
 
 
+def torch_fully_imported() -> bool:
+    """True when torch is in ``sys.modules`` AND its import has finished.
+
+    A module is inserted into ``sys.modules`` before its body runs, so a plain
+    membership test is also True while another thread is still deep inside
+    torch's DLL-loading ``__init__``; touching it then blocks on the per-module
+    import lock until that import ends. ``spec._initializing`` is True for
+    exactly that window. Never imports and never takes a lock."""
+    mod = sys.modules.get("torch")
+    if mod is None:
+        return False
+    return getattr(getattr(mod, "__spec__", None), "_initializing", False) is not True
+
+
+_torch_build_hip_cache: "tuple[Optional[bool]] | None" = None
+
+
+def torch_build_is_hip() -> Optional[bool]:
+    """Whether the installed torch is a ROCm/HIP build, read from the
+    ``hip`` assignment in the ``version.py`` that ships inside the torch
+    package, WITHOUT importing torch. True for a HIP build, False for a build
+    whose ``hip`` is ``None``, and ``None`` when torch is not installed or the
+    file cannot be read or parsed. Cached for the life of the process.
+
+    A cold ``import torch`` in this process takes the Windows OS loader lock
+    for as long as torch's ROCm preload runs, and no thread can be created
+    meanwhile; this answers the same question from the file. The package is
+    located on ``sys.path`` directly, never through ``sys.modules``, so a torch
+    another thread is still importing cannot interfere."""
+    global _torch_build_hip_cache
+    cached = _torch_build_hip_cache
+    if cached is not None:
+        return cached[0]
+    answer: Optional[bool] = None
+    try:
+        import importlib.machinery
+        import os
+        import re
+        spec = importlib.machinery.PathFinder.find_spec("torch")
+        dirs = list(getattr(spec, "submodule_search_locations", None) or [])
+        if dirs:
+            with open(os.path.join(dirs[0], "version.py"), encoding="utf-8") as fh:
+                text = fh.read()
+            m = re.search(r"^hip\s*(?::[^=\n]+)?=\s*(None|['\"]([^'\"]*)['\"])",
+                          text, re.MULTILINE)
+            if m:
+                answer = bool(m.group(2))
+    except Exception as e:
+        logger.debug("gpu_usage: could not read torch's build flavour from its "
+                     "version.py: %s", e)
+    _torch_build_hip_cache = (answer,)
+    return answer
+
+
 def raw_reading_is_process_scoped() -> bool:
     """True when this platform's RAW driver free-VRAM query (torch.cuda.mem_get_info)
     counts only the calling process's own allocations - blind to every other
@@ -653,8 +707,11 @@ def raw_reading_is_process_scoped() -> bool:
     device-global by documentation, so the answer there is False.
 
     Detected via ``torch.version.hip`` (set on ROCm builds, None on CUDA builds)
-    whenever torch can be consulted. When it CANNOT - torch is not resident and a
-    fresh import is unsafe or impossible - the answer comes from
+    when torch is fully imported in this process, else from
+    :func:`torch_build_is_hip`, which reads the same flag from the installed
+    torch's ``version.py`` without importing it. When neither can answer - torch
+    is not installed, or a resident native runtime makes the answer certain
+    first - the answer comes from
     :func:`_known_blind_without_torch` instead, i.e. from
     ``discover.native_hip_runtime_resident()``: a resident bundled HIP runtime
     means every raw reading this process can take (the in-process ggml query, or
@@ -663,44 +720,37 @@ def raw_reading_is_process_scoped() -> bool:
     context-grow sizing decision. Where no HIP runtime is resident either (a
     vulkan or cpu build's worker, a torch-less NVIDIA box), False.
 
-    Never runs a plain ``import torch`` while a GPU probe may be mid-import
-    (``discover._gpu_probe_inflight``, including an abandoned timed-out one) or
-    while a fresh import is the known-doomed native-runtime DLL conflict
-    (``discover._torch_gpu_probe_known_doomed``): a second thread blocking on
-    CPython's per-module import lock behind such an import can hard-crash the
-    process on this platform's ROCm native preload. Never imports torch either
-    in a process that has loaded the native llama.cpp runtime
-    (``_loader.native_lib_loaded``). In those three cases, and when a permitted fresh import itself fails, the
+    NEVER imports torch: a cold ROCm import holds the Windows OS loader lock,
+    which blocks thread creation process-wide. While a GPU probe may be
+    mid-import (``discover._gpu_probe_inflight``, including an abandoned
+    timed-out one), while a fresh import is the known-doomed native-runtime DLL
+    conflict (``discover._torch_gpu_probe_known_doomed``), or in a process that
+    has loaded the native llama.cpp runtime (``_loader.native_lib_loaded``), the
     resident-HIP-runtime signal answers. Reuses discover's probe-tracking lock.
     Never raises."""
     import sys
     if sys.platform != "win32":
         return False
     try:
-        torch = sys.modules.get("torch")
-        if torch is None:
-            from localm import discover as _discover
-            with _discover._gpu_probe_lock:
-                probe_may_be_mid_import = _discover._gpu_probe_inflight
-            if probe_may_be_mid_import:
-                return _known_blind_without_torch("a GPU probe may be mid-import")
-            if _discover._torch_gpu_probe_known_doomed():
-                # The resident-runtime signal answers instead of importing torch.
-                return _known_blind_without_torch(
-                    "a fresh torch import here is the known-doomed DLL conflict")
-            from localm.inference.backends.llamacpp import _loader
-            if _loader.native_lib_loaded():
-                # Torch is never imported into a process that holds the native
-                # llama.cpp runtime. See
-                # test_raw_reading_never_imports_torch_beside_the_native_runtime.
-                return _known_blind_without_torch(
-                    "the native llama.cpp runtime is loaded in this process")
-            try:
-                import torch
-            except Exception as e:
-                return _known_blind_without_torch(
-                    "torch import failed (%s)" % type(e).__name__)
-        return bool(getattr(torch.version, "hip", None))
+        if torch_fully_imported():
+            return bool(getattr(sys.modules["torch"].version, "hip", None))
+        from localm import discover as _discover
+        with _discover._gpu_probe_lock:
+            probe_may_be_mid_import = _discover._gpu_probe_inflight
+        if probe_may_be_mid_import:
+            return _known_blind_without_torch("a GPU probe may be mid-import")
+        if _discover._torch_gpu_probe_known_doomed():
+            return _known_blind_without_torch(
+                "a fresh torch import here is the known-doomed DLL conflict")
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            return _known_blind_without_torch(
+                "the native llama.cpp runtime is loaded in this process")
+        hip = torch_build_is_hip()
+        if hip is None:
+            return _known_blind_without_torch(
+                "torch is not installed or its build flavour is unreadable")
+        return hip
     except Exception:
         return False
 
@@ -750,7 +800,9 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
             mapped = {}
             any_bus_answered = False
             for g in gpus:
-                bus = _torch_pci_bus(g.get("index"))
+                bus = g.get("pci_bus_id")
+                if not isinstance(bus, int) or isinstance(bus, bool):
+                    bus = _torch_pci_bus(g.get("index"))
                 if bus is not None:
                     any_bus_answered = True
                     if bus in by_bus:
@@ -792,23 +844,19 @@ def _torch_pci_bus(index) -> Optional[int]:
     ``pci_bus_id`` is the physical bus, the same quantity ADL reports, so the
     pairing with an ADL adapter is exact rather than positional.
 
-    Never triggers a fresh ``import torch`` while a GPU probe is in flight or
-    while a resident native runtime makes the import known-doomed
-    (``discover._torch_gpu_probe_known_doomed`` - HIP or SYCL); returns None
-    in those cases. Never raises.
+    Reads torch only when it is already fully imported; never triggers an
+    ``import torch`` (see :func:`raw_reading_is_process_scoped`), returning None
+    otherwise. The isolated GPU probe carries ``pci_bus_id`` on each device
+    entry, which :func:`device_global_used_bytes` reads first. Never raises.
     """
     if index is None:
         return None
     try:
-        if "torch" not in sys.modules:
-            from localm import discover as _discover
-            with _discover._gpu_probe_lock:
-                inflight = _discover._gpu_probe_inflight
-            if inflight or _discover._torch_gpu_probe_known_doomed():
-                if _notice_once("no-pci-bus-id", index):
-                    logger.debug("gpu_usage: no pci_bus_id for device %s: torch "
-                                 "is not consultable in this process", index)
-                return None
+        if not torch_fully_imported():
+            if _notice_once("no-pci-bus-id", index):
+                logger.debug("gpu_usage: no pci_bus_id for device %s: torch "
+                             "is not imported in this process", index)
+            return None
         import torch
         props = torch.cuda.get_device_properties(int(index))
         bus = getattr(props, "pci_bus_id", None)

@@ -466,8 +466,9 @@ cuda = _Cuda()
         assert isinstance(devices, list)
         for d in devices:
             required = {"index", "name", "total", "free"}
-            assert required <= set(d) <= required | {"integrated"}
+            assert required <= set(d) <= required | {"integrated", "pci_bus_id"}
             assert isinstance(d.get("integrated", False), bool)
+            assert isinstance(d.get("pci_bus_id", 0), int)
             assert isinstance(d["index"], int) and isinstance(d["name"], str)
             assert d["total"] > 0 and d["free"] >= 0
         if torch.cuda.is_available():

@@ -861,6 +861,16 @@ def _reset_vram_probe_cache():
 
 
 @pytest.fixture(autouse=True)
+def _neutralise_quick_vram_seed(monkeypatch):
+    """sysstats._quick_vram() reads the display-adapter registry and ADL/PDH on
+    Windows. Hardware-free tests must not see the host's GPU, so it answers
+    nothing unless a test installs its own reader."""
+    from localm import sysstats
+    monkeypatch.setattr(sysstats, "_quick_vram", lambda: {})
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _neutralise_backend_vram_query():
     """loader.gpu_memory() reads the ACTIVE ggml backend's free VRAM (the signal
     GgufBackend._free_vram_bytes prefers). Once a real_gguf-gated test has RUN
