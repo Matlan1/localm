@@ -267,7 +267,8 @@ class TestTheScriptItself:
         assert '"!CD!\\bin\\localm.cmd"' in block.split("goto :eof")[0]
 
     def test_a_cut_short_runtime_download_is_forced(self):
-        assert 'set "SLFORCE=--force"' in self.text
+        assert ('if not "!OPENSET:;native-runtime;=!"=="!OPENSET!" set "SLFORCE=--force"'
+                in self.text)
         assert "setup-llama --backend %BACKEND% %SLFORCE%" in self.text
 
     def test_uninstall_removes_the_journal_with_the_record(self):
