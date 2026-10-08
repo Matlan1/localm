@@ -16,6 +16,11 @@ export LOCALM_SETUP=1
 #   --uninstall (or uninstall / --rollback)  remove LocaLM from this folder
 #   --purge-data        with --uninstall: also delete the saved data
 #   --finish-uninstall  remove the folders an uninstall left for later
+#
+#  Setup keeps a journal (.localm-setup-journal) of the steps it begins and
+#  finishes. Run again after an interruption, it says where the last run stopped,
+#  reuses what finished, and redoes the step that was cut short from scratch.
+#   LOCALM_SETUP_ABORT_AFTER=<step> stops a run right after that step (a testing aid).
 YES=0; UNINSTALL=0; PURGE=0; FINISH=0; RUNTIME_OK=1
 for arg in "$@"; do
   case "$arg" in
@@ -177,7 +182,7 @@ finish_pending() {  # sets LEFTOVER=1 when a folder could not be removed
   done < .localm-uninstall-pending
   if [ "$LEFTOVER" = 0 ]; then
     rm -f .localm-uninstall-pending
-    if [ "${KEEPREC:-0}" != 1 ]; then rm -f .localm-install.json; fi
+    if [ "${KEEPREC:-0}" != 1 ]; then rm -f .localm-install.json .localm-setup-journal; fi
   fi
   return 0
 }
@@ -286,6 +291,69 @@ if [ "$YES" != 1 ] && { [ -f .localm-install.json ] || [ -f .venv/.localm-venv ]
   esac
 fi
 
+# ---- setup journal: remember how far this run gets ---------------------------
+# One tab-separated line per event, appended to .localm-setup-journal in this
+# folder (the format localm.install_manifest reads): "begin<TAB>step",
+# "done<TAB>step", "intend<TAB>shortcut|command<TAB>path" (written BEFORE setup
+# creates something outside this folder, so an interrupted run can still be
+# cleaned up), "complete" and "resume". A run that ends without "complete" was
+# interrupted, whatever the cause: Ctrl+C, a closed window, a kill, a crash.
+JOURNAL=".localm-setup-journal"
+JOURNAL_WARNED=0
+RESUMING=0; OPEN_STEP=""
+jr_failed() {
+  if [ "$JOURNAL_WARNED" != 1 ]; then
+    JOURNAL_WARNED=1
+    say "  [!] Could not write $JOURNAL - if this setup is interrupted it cannot say where it stopped."
+  fi
+}
+jr() {  # jr begin|done STEP  |  jr intend KIND PATH  |  jr complete|resume
+  case "$1" in
+    intend)     printf 'intend\t%s\t%s\n' "$2" "$3" ;;
+    begin|done) printf '%s\t%s\n' "$1" "$2" ;;
+    *)          printf '%s\n' "$1" ;;
+  esac >> "$JOURNAL" 2>/dev/null || jr_failed
+}
+step_begin() { jr begin "$1"; }
+step_done() {
+  jr done "$1"
+  if [ "${LOCALM_SETUP_ABORT_AFTER:-}" = "$1" ]; then
+    say "  (stopping after '$1': LOCALM_SETUP_ABORT_AFTER is set)"
+    exit 99
+  fi
+}
+journal_lines() {  # the journal minus a final line that was cut off mid-write
+  if [ -n "$(tail -c 1 "$JOURNAL" 2>/dev/null)" ]; then sed '$d' "$JOURNAL"; else cat "$JOURNAL"; fi
+}
+journal_summary() {  # prints: <complete|incomplete> TAB <last finished step> TAB <step left open>
+  journal_lines | awk -F'\t' '
+    $1 == "begin"    { comp = 0; open[$2] = 1; order[++n] = $2 }
+    $1 == "done"     { delete open[$2]; last = $2 }
+    $1 == "complete" { comp = 1; for (k in open) delete open[k] }
+    END { o = ""; for (i = 1; i <= n; i++) if (order[i] in open) o = order[i]
+          print (comp ? "complete" : "incomplete") "\t" last "\t" o }'
+}
+if [ -f "$JOURNAL" ]; then
+  jline="$(journal_summary)"
+  jstate="${jline%%$(printf '\t')*}"
+  if [ "$jstate" = complete ] || [ -z "$jline" ]; then
+    rm -f "$JOURNAL"
+  else
+    jrest="${jline#*$(printf '\t')}"
+    jlast="${jrest%%$(printf '\t')*}"
+    OPEN_STEP="${jrest#*$(printf '\t')}"
+    RESUMING=1
+    say ""
+    if [ -n "$jlast" ]; then
+      say "  A previous setup in this folder stopped after '$jlast'${OPEN_STEP:+, while running '$OPEN_STEP'}."
+    else
+      say "  A previous setup in this folder stopped before finishing its first step${OPEN_STEP:+ ('$OPEN_STEP')}."
+    fi
+    say "  Picking it up: what finished is reused, and the step that was cut short is redone."
+    jr resume
+  fi
+fi
+
 # ---- point at the graphical installer ---------------------------------------
 # Same install, same questions, in a window. Mentioned here rather than only in
 # the README because the person who would rather not answer questions in a
@@ -309,6 +377,7 @@ fi
 # The UV_* vars are exported for THIS setup process only (not persisted / not
 # global), so they never touch any other uv project. --python-preference
 # only-managed forces the contained download instead of reusing a system Python.
+step_begin portable-choice
 say ""
 say "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 say "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
@@ -329,6 +398,7 @@ RCFLAG=""; PYDIR=""; CACHEDIR=""; UVSHARED=""
 if [ "$CONTAINED" = 1 ]; then
   RCFLAG="--runtime-contained"; PYDIR="$(pwd)/.python"; CACHEDIR="$(pwd)/.cache"
 fi
+step_done portable-choice
 
 # 1 = verify against the platform's NATIVE certificate store - the same trust a
 # browser, or an IT-provisioned corporate/security-product proxy's injected
@@ -381,6 +451,12 @@ if [ "$uv_present" != 1 ]; then
       ;;
   esac
   say "  Installing uv ..."
+  if [ "$CONTAINED" = 1 ]; then UVSTEP=uv-portable; else UVSTEP=uv-bootstrap; fi
+  if [ "$RESUMING" = 1 ] && [ "$OPEN_STEP" = uv-portable ] && [ -d ./.uv ]; then
+    say "  The previous setup stopped while installing uv here; starting that over."
+    rm -rf ./.uv
+  fi
+  step_begin "$UVSTEP"
   if [ "$CONTAINED" = 1 ]; then
     # Portable was picked: confine uv's OWN binary to this folder too, not just the
     # Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
@@ -416,6 +492,7 @@ if [ "$uv_present" != 1 ]; then
     offer_report "localm setup could not install uv" "setup.sh tried Astral's installer but uv was still not callable afterwards."
     exit 1
   fi
+  step_done "$UVSTEP"
 fi
 
 # ---- detect GPU acceleration ------------------------------------------------
@@ -526,7 +603,12 @@ create_venv() {
   done
 }
 
-if [ -d .venv ]; then
+step_begin venv
+if [ "$RESUMING" = 1 ] && [ "$OPEN_STEP" = venv ] && [ -d .venv ]; then
+  say ""
+  say "  The previous setup stopped while creating .venv; recreating it."
+  create_venv
+elif [ -d .venv ]; then
   if is_our_venv; then
     say ""
     say "  An existing localm .venv was found in this folder."
@@ -544,6 +626,7 @@ if [ -d .venv ]; then
 else
   create_venv
 fi
+step_done venv
 
 # ---- data directory ---------------------------------------------------------
 # Asked before anything writes data: setup-llama records its builds in this
@@ -553,6 +636,7 @@ fi
 # install_manifest prepare-data creates the folder, points localm-home.cfg at it
 # (or removes that file for ./home) and records it for uninstall, noting what
 # was already in a folder that existed.
+step_begin data-folder
 portable_home() {
   if ! .venv/bin/python -m localm.install_manifest prepare-data --root . --portable; then
     mkdir -p home; rm -f localm-home.cfg
@@ -623,6 +707,8 @@ else
 fi
 fi
 
+step_done data-folder
+
 # ---- browser tab or standalone app window? -----------------------------------
 # Decides whether the `desktop` extra (pywebview) gets installed at all - a NEW
 # dependency every fresh install would otherwise take on unasked (pythonnet on
@@ -661,6 +747,7 @@ if [ "$wpick" = 2 ]; then
 fi
 
 # ---- install localm (editable) ----------------------------------------------
+step_begin install-localm
 say "  Installing localm into .venv ..."
 # Catch a hard install failure (set -e would otherwise abort silently) so we can
 # offer a bug report before exiting - and still exit non-zero, never masking it.
@@ -718,8 +805,14 @@ fi
 # already been warned about above.
 LOCALM_BIN_OK=1
 [ -x .venv/bin/localm ] || LOCALM_BIN_OK=0
+step_done install-localm
 
 # ---- native llama.cpp runtime wheel (loader imports it) ---------------------
+step_begin native-runtime
+SL_FORCE=""
+if [ "$RESUMING" = 1 ] && [ "$OPEN_STEP" = native-runtime ]; then
+  SL_FORCE="--force"   # a cut-short download may have left a partial runtime
+fi
 # (The PyTorch/transformers stack is installed further down, AFTER the backend
 # pick, so the HF torch variant can FOLLOW the chosen runtime - see SETUP-1.)
 uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
@@ -802,12 +895,15 @@ elif [ "$BACKEND" = own ]; then
     say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
   fi
 else
-  .venv/bin/localm setup-llama --backend "$BACKEND" || handle_provision_failure \
+  .venv/bin/localm setup-llama --backend "$BACKEND" $SL_FORCE || handle_provision_failure \
     ".venv/bin/localm setup-llama --backend $BACKEND --force" \
     "Provisioning the native llama.cpp runtime (--backend $BACKEND) failed during setup."
 fi
 
+step_done native-runtime
+
 # ---- PyTorch + transformers for the HuggingFace backend (FOLLOWS the backend) -
+step_begin torch
 # PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none of it.
 # The variant FOLLOWS the llama.cpp BACKEND picked above (not just the detected
 # GPU), so choosing the vendor-neutral 'vulkan' runtime does not drag in the ROCm
@@ -845,7 +941,10 @@ else
   say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --torch-backend=xpu"
 fi
 
+step_done torch
+
 # ---- build the native LocaLM launcher ---------------------------------------
+step_begin launcher
 # So a process monitor shows LocaLM, not python. It is a copy of the venv
 # interpreter in .venv/bin/LocaLM, self-contained in this clone; if the copy
 # cannot run standalone (non-relocatable interpreter) the menu entry below falls
@@ -862,6 +961,8 @@ else
   say "  Skipping the LocaLM app launcher (.venv/bin/localm is missing)."
 fi
 
+step_done launcher
+
 # ---- application menu entry --------------------------------------------------
 SHORTCUT=""
 mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
@@ -869,6 +970,8 @@ case "$mk" in
   [Nn]*) say "  No desktop entry created." ;;
   *)
     apps="$HOME/.local/share/applications"
+    jr intend shortcut "$apps/localm.desktop"
+    step_begin menu-entry
     mkdir -p "$apps"
     SHORTCUT="$apps/localm.desktop"
     # Prefer the scalable SVG (the freedesktop-friendly format); fall back to
@@ -894,6 +997,7 @@ EOF
     say "  Created $apps/localm.desktop"
     .venv/bin/python -m localm.install_manifest record --root . --shortcut "$SHORTCUT" \
       >/dev/null 2>&1 || true
+    step_done menu-entry
     ;;
 esac
 
@@ -910,6 +1014,8 @@ case "$gmk" in
     # was already set (record the command but NOT --path-modified); other = failed
     # (record nothing). || gcrc=$? keeps set -e from aborting on the 20/failure code.
     gcrc=0
+    jr intend command "$HOME/.local/bin/localm"
+    step_begin global-command
     .venv/bin/python -m localm.globalcmd install --root . || gcrc=$?
     if [ "$gcrc" = 0 ] || [ "$gcrc" = 20 ]; then
       PATH_DIR="$HOME/.local/bin"; CMD_SHIM="$HOME/.local/bin/localm"
@@ -918,6 +1024,7 @@ case "$gmk" in
       .venv/bin/python -m localm.install_manifest record --root . --path-dir "$PATH_DIR" \
         --command-shim "$CMD_SHIM" ${PATH_MOD:-} >/dev/null 2>&1 || true
     fi
+    step_done global-command
     ;;
 esac
 
@@ -934,6 +1041,7 @@ else
 fi
 
 # ---- record what we installed (so uninstall removes ONLY what we created) ----
+step_begin record
 # The data folder was recorded when it was chosen (prepare-data).
 # $RCFLAG / $UVSHARED / $PATH_MOD are flags or empty; unquoted on purpose.
 # shellcheck disable=SC2086
@@ -945,6 +1053,8 @@ fi
   --path-dir "${PATH_DIR:-}" --command-shim "${CMD_SHIM:-}" ${PATH_MOD:-} \
   --stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")" \
   >/dev/null 2>&1 || say "  [!] Could not record the install manifest (uninstall will be conservative)."
+step_done record
+jr complete
 
 say ""
 if [ "$LOCALM_BIN_OK" = 1 ]; then
