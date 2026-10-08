@@ -73,14 +73,15 @@ test("a pinned chat always names its pinned model and pins it", async () => {
   assert.equal(post.body.pin_model, true);
 });
 
-test("web access asks for a model that can emit structured tool calls", async () => {
+test("web access alone never asks for another model", async () => {
   const { window, calls, doc } = setup();
   doc.getElementById("p-web").checked = true;
-  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "good evening" }] };
   activateConv(window, conv);
   await window.runCompletion(conv);
   const [post] = chatPosts(calls);
-  assert.deepEqual(post.body.required_capabilities, ["tool_use"]);
+  assert.equal(post.body.required_capabilities, undefined);
+  assert.equal(post.body.model, "plain");
 });
 
 test("without web access no capability is requested", async () => {
