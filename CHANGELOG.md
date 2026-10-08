@@ -241,6 +241,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **The one-click Linux/macOS install no longer puts uv in your home folder before it asks.**
+  `install.sh` used to install uv itself into `~/.local/bin` and edit your shell
+  startup files when uv was missing, even if you then chose the Portable setup.
+  It now only fetches localm and hands over to `setup.sh`, which installs uv inside
+  the folder for Portable and in its usual per-user place only if you pick Shared.
 - **Portable mode keeps its temp files in its own root folder, and running instances
   find each other directly.** For a self-contained install, temporary files go to
   `tmp` in the data folder. Settings > General > Temporary files (or the
