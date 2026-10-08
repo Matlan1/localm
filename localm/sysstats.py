@@ -244,8 +244,6 @@ def _compute_vram() -> dict:
         return {}
     vram: dict = {"total": int(total)}
     trusted = _vram_reading_trusted(info, status)
-    from localm.debuglog import logger
-    logger.debug("_vram: full reading trusted=%s", trusted)
     if trusted:
         used = max(0, int(total) - int(info["free"]))
         vram["used"] = used
