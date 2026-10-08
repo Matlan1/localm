@@ -371,7 +371,13 @@ def _vram_probe(my_epoch: int) -> None:
         if computed and computed.get("vram"):
             _vram_last = computed
             _vram_last_is_seed = False
-        elif computed is not None and not _vram_last_is_seed:
+        elif _vram_last_is_seed:
+            # The seed stood in for the first full reading and that attempt
+            # failed or found nothing: keep the total (a hardware fact), drop
+            # the used figure that nothing is refreshing any more.
+            _vram_last = {"vram": {"total": _vram_last["vram"]["total"]}}
+            _vram_last_is_seed = False
+        elif computed is not None:
             _vram_last = computed
         _vram_last_at = time.monotonic()
         _vram_inflight = False

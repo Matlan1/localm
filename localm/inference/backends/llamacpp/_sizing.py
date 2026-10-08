@@ -302,7 +302,12 @@ class VramSizingMixin:
         ROCm/HIP torch build, and the torch-less processes whose readings come
         from the resident bundled HIP runtime (the GGUF worker deciding a
         context grow, answered via ``discover.native_hip_runtime_resident()``).
-        NVIDIA / Linux / Vulkan reads are left unchanged."""
+        NVIDIA / Linux / Vulkan reads are left unchanged.
+
+        The device entry carries the PCI bus id from the last completed GPU
+        probe (``discover.last_known_gpus``, no new probe), which is what pairs
+        the card with its ADL adapter exactly on a box with more than one
+        adapter; without a completed probe the single-adapter rule applies."""
         if total is None:
             return None
         try:
@@ -310,9 +315,13 @@ class VramSizingMixin:
                                           raw_reading_is_process_scoped)
             if not raw_reading_is_process_scoped():
                 return None
-            from localm.discover import resolve_load_gpu_index
+            from localm.discover import last_known_gpus, resolve_load_gpu_index
             idx = resolve_load_gpu_index()
-            used = device_global_used_bytes([{"index": idx, "total": total}])
+            entry = {"index": idx, "total": total}
+            known = next((g for g in last_known_gpus() if g.get("index") == idx), None)
+            if known and known.get("pci_bus_id") is not None:
+                entry["pci_bus_id"] = known["pci_bus_id"]
+            used = device_global_used_bytes([entry])
             u = used.get(idx)
             if u is None:
                 return None

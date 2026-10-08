@@ -1756,6 +1756,10 @@ def _torch_gpus_isolated_once() -> list:
         else:
             logger.debug("list_gpus: isolated probe still unavailable; using "
                          "the in-process torch import again")
+        import sys
+        from localm.gpu_usage import torch_fully_imported
+        if "torch" in sys.modules and not torch_fully_imported():
+            return []
         return _torch_gpus_resident()
     return devices
 

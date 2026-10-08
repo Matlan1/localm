@@ -1486,14 +1486,32 @@ class TestFirstReadingIsServedBeforeTheFullProbeLands:
         assert _vram()["vram"]["used"] == 5 * GB
         assert sysstats._vram_last_is_seed is False
 
-    def test_a_probe_that_found_nothing_does_not_erase_the_seed(self, monkeypatch):
+    def test_a_probe_that_found_nothing_keeps_the_total_but_not_the_seeds_used(
+            self, monkeypatch):
+        """Nothing refreshes the seed's used figure once the first full attempt
+        has ended, so it must not stay on screen as if it were live."""
         entered, release, holder = self._hold_the_full_probe(monkeypatch)
         holder["result"] = {}
         _vram()
         assert entered.wait(VRAM_POLL_DEADLINE)
         release.set()
         assert sysstats._vram_ready.wait(VRAM_POLL_DEADLINE)
-        assert _vram()["vram"]["used"] == 4 * GB
+        assert _vram() == {"vram": {"total": 16 * GB}}
+        assert sysstats._vram_last_is_seed is False
+
+    def test_a_probe_that_raised_keeps_the_total_but_not_the_seeds_used(
+            self, monkeypatch):
+        _reset_vram_cache(monkeypatch)
+        monkeypatch.setattr(sysstats, "_vram_last_is_seed", False)
+        monkeypatch.setattr(sysstats, "_quick_vram", lambda: {
+            "total": 16 * GB, "used": 4 * GB, "percent": 25.0})
+
+        def _boom():
+            raise RuntimeError("driver exploded")
+        monkeypatch.setattr(sysstats, "_compute_vram", _boom)
+        _vram()
+        assert sysstats._vram_ready.wait(VRAM_POLL_DEADLINE)
+        assert _vram() == {"vram": {"total": 16 * GB}}
 
     def test_a_confirmed_empty_reading_without_a_seed_is_still_recorded(
             self, monkeypatch):

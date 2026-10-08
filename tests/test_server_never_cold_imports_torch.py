@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The server process never cold-imports torch.
+"""The model-load sizing and stats paths never cold-import torch in the server.
 
 A cold ROCm ``import torch`` on Windows holds the OS loader lock for as long as
 torch's native preload runs, and no thread can be created in the process
@@ -7,7 +7,8 @@ meanwhile: the asyncio loop cannot hand work to its executor, so every request
 stalls. Each test plants a ``torch`` package whose ``__init__`` records an
 import attempt in a marker file (an import that raises is evicted from
 ``sys.modules``, so the marker is the only reliable witness) and asserts the
-marker never appears.
+marker never appears. (The fallback taken when the isolated probe child itself
+cannot run is a separate, logged path: discover._torch_gpus_isolated_once.)
 """
 import importlib
 import importlib.machinery
@@ -270,3 +271,52 @@ class TestSizingReadNeverColdImports:
         monkeypatch.setattr(self.mixin, "_torch_free_total_uncapped",
                             staticmethod(lambda: pytest.fail("read a half import")))
         assert self.mixin._free_total_vram_bytes() == (None, None)
+
+
+class TestSizingCorrectionCarriesTheBusId:
+    """The load-sizing correction builds its own device entry; it must carry the
+    PCI bus id the last probe reported, or a box with several AMD adapters
+    cannot pair the card with its ADL adapter once torch is no longer imported
+    in this process."""
+
+    @pytest.fixture(autouse=True)
+    def _armed(self, monkeypatch):
+        from localm.inference.backends.llamacpp._sizing import VramSizingMixin
+        monkeypatch.setattr(gpu_usage, "raw_reading_is_process_scoped", lambda: True)
+        monkeypatch.setattr(discover, "resolve_load_gpu_index", lambda *a, **k: 0)
+        self.seen = []
+
+        def _used(entries):
+            self.seen.extend(entries)
+            return {0: 6 * GB}
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes", _used)
+        self.mixin = VramSizingMixin
+
+    def test_the_known_bus_id_rides_on_the_entry(self, monkeypatch):
+        monkeypatch.setattr(discover, "last_known_gpus", lambda: [
+            {"index": 1, "pci_bus_id": 9}, {"index": 0, "pci_bus_id": 45}])
+        assert self.mixin._device_global_free_bytes(16 * GB) == 10 * GB
+        assert self.seen == [{"index": 0, "total": 16 * GB, "pci_bus_id": 45}]
+
+    def test_no_completed_probe_means_no_bus_id_not_a_guess(self, monkeypatch):
+        monkeypatch.setattr(discover, "last_known_gpus", lambda: [])
+        assert self.mixin._device_global_free_bytes(16 * GB) == 10 * GB
+        assert self.seen == [{"index": 0, "total": 16 * GB}]
+
+    def test_a_probe_reading_without_a_bus_id_adds_none(self, monkeypatch):
+        monkeypatch.setattr(discover, "last_known_gpus", lambda: [{"index": 0}])
+        self.mixin._device_global_free_bytes(16 * GB)
+        assert "pci_bus_id" not in self.seen[0]
+
+
+class TestBrokenIsolationNeverEntersAHalfImportedTorch:
+    def test_the_in_process_fallback_declines_while_another_thread_imports(
+            self, monkeypatch):
+        mod = types.ModuleType("torch")
+        mod.__spec__ = types.SimpleNamespace(_initializing=True)
+        monkeypatch.setitem(sys.modules, "torch", mod)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident",
+            lambda: pytest.fail("entered a torch that is still importing"))
+        assert discover._torch_gpus_isolated_once() == []
