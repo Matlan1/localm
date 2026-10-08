@@ -2460,7 +2460,6 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const pinnedModel = conv.pinnedModel || "";
   const modelName = pinnedModel || modelSelect.value || modelCache.active;
   const body = { model: modelName, messages, stream: true, pin_model: !!pinnedModel };
-  if (webEnabled) body.required_capabilities = ["tool_use"];
   if (contextRouting && contextRouting.minContext) body.min_context = contextRouting.minContext;
   for (const k of ["temperature", "top_p", "top_k", "repeat_penalty",
                    "max_tokens", "seed"]) {

@@ -18,7 +18,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   already loaded, so nothing is loaded or unloaded; `auto` (the default) switches to
   an installed model when yours is known to lack what the chat needs; `eager` also
   switches when your model has never been checked. A chat pinned to a model is never
-  switched.
+  switched. Turning on Web access in a chat never switches the model by itself.
 - **Older vision models whose projector file does not say what kind of projector
   it is now read images.** LLaVA 1.5 projectors (`mmproj-model-f16.gguf` from
   the original LLaVA 1.5 GGUF releases) predate that field, and the bundled
