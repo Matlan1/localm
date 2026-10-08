@@ -129,8 +129,52 @@ class TestTheScriptItself:
         cmd = self.text.index('jr intend command "$HOME/.local/bin/localm"')
         assert cmd < self.text.index("-m localm.globalcmd install")
 
-    def test_a_cut_short_venv_is_rebuilt_not_trusted(self):
-        assert '[ "$OPEN_STEP" = venv ]' in self.text
-
     def test_a_cut_short_runtime_download_is_forced(self):
         assert 'SL_FORCE="--force"' in self.text
+        assert 'setup-llama --backend "$BACKEND" $SL_FORCE' in self.text
+
+
+_UV_STUB = """#!/bin/sh
+echo "uv $*" >> "$STUB_LOG"
+case "$1" in
+  venv) for last; do :; done; mkdir -p "$last/bin" ;;
+esac
+exit 0
+"""
+
+
+class TestACutShortVenv:
+    """The venv step is the one an interruption can leave looking fine and be broken:
+    ``uv venv`` writes the marker only when it succeeds, so a half-made ``.venv`` has
+    none, and setup would treat it as somebody else's and keep it. With a stub uv,
+    setup runs up to the venv step and shows whether it rebuilds."""
+
+    def _run(self, folder, tmp_path, journal):
+        uv_dir = folder / ".uv"
+        uv_dir.mkdir()
+        stub = uv_dir / "uv"
+        stub.write_bytes(_UV_STUB.replace("\r\n", "\n").encode("utf-8"))
+        stub.chmod(0o755)
+        (folder / ".venv").mkdir()                       # half made: no marker file
+        (folder / ".venv" / "half-written").write_text("x", encoding="utf-8")
+        if journal is not None:
+            (folder / ".localm-setup-journal").write_text(journal, encoding="utf-8")
+        log = tmp_path / "uv.log"
+        log.write_text("", encoding="utf-8")
+        rc, out = _setup(folder, abort_after="venv", extra_env={"STUB_LOG": str(log)})
+        return rc, out, log.read_text(encoding="utf-8")
+
+    def test_a_venv_the_journal_says_was_cut_short_is_rebuilt(self, folder, tmp_path):
+        rc, out, uv_log = self._run(
+            folder, tmp_path,
+            "begin\tportable-choice\ndone\tportable-choice\nbegin\tvenv\n")
+        assert rc == 99, out
+        assert "stopped while creating .venv; recreating it" in out
+        assert "uv venv" in uv_log and "--clear" in uv_log, uv_log
+        assert (folder / ".venv" / ".localm-venv").is_file()
+
+    def test_without_that_journal_a_marker_less_venv_is_left_alone(self, folder, tmp_path):
+        rc, out, uv_log = self._run(folder, tmp_path, None)
+        assert rc == 99, out
+        assert "uv venv" not in uv_log, uv_log
+        assert (folder / ".venv" / "half-written").is_file()
