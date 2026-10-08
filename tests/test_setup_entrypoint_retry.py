@@ -106,6 +106,10 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
         # "${EXTRAS}" without setting it itself - under `set -u` above that is
         # otherwise an unbound-variable error before uv is even reached.
         'EXTRAS="coder,voice,monitor"\n'
+        # The real script journals each step (see test_setup_sh_journal.py); the
+        # extracted block calls the journal helpers, which this synthetic script
+        # does not need to exercise.
+        'step_begin() { :; }\nstep_done() { :; }\n'
         + _heartbeat_functions()
         + _install_block()
         # LOCALM_BIN_OK is set at the tail of the extracted block (right before
@@ -203,7 +207,7 @@ def test_retry_install_is_guarded_in_source():
 def _provision_block() -> str:
     src = SETUP_SH.read_text(encoding="utf-8")
     start = src.index('if [ "$LOCALM_BIN_OK" != 1 ]; then\n')
-    end = src.index("\nfi\n\n# ---- PyTorch + transformers", start)
+    end = src.index("\nfi\n\nstep_done native-runtime\n", start)
     return src[start : end + len("\nfi")]
 
 
@@ -251,6 +255,7 @@ def _run_provision_block(tmp_path: Path, *, localm_bin_ok: bool, backend: str,
         f'ask() {{ {ask_body}; }}\n'
         'offer_report() { printf "OFFERED_REPORT detail=%s\\n" "$2"; }\n'
         'RUNTIME_OK=1\n'
+        'SL_FORCE=""\n'
         f'LOCALM_BIN_OK={1 if localm_bin_ok else 0}\n'
         f'BACKEND="{backend}"\n'
         + _handle_failure_function()

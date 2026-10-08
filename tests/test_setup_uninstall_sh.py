@@ -261,7 +261,9 @@ def _data_probe(clone: Path) -> Path:
     block = text[text.index("# ---- data directory"):
                  text.index("# ---- browser tab or standalone app window?")]
     probe = clone / "probe.sh"
-    probe.write_text("set -e\nYES=0\n" + helpers + block + "echo PROBE_DONE\n",
+    # The data-folder section is one journaled step; the probe does not need the journal.
+    stubs = "step_begin() { :; }\nstep_done() { :; }\n"
+    probe.write_text("set -e\nYES=0\n" + helpers + stubs + block + "echo PROBE_DONE\n",
                      encoding="utf-8")
     return probe
 
