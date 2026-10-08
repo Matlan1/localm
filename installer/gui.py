@@ -249,6 +249,37 @@ class Step:
     label: str
     run: Callable[[Callable[[str], None]], None]
     fatal: bool = True
+    key: str = ""             # the name this step goes by in the setup journal
+
+
+def journal(emit: Callable[[str], None], event: str, name: str = "", path: str = "") -> None:
+    """Append *event* to the setup journal, saying so once if it cannot be written."""
+    try:
+        install_manifest().journal_event(ROOT, event, name, path)
+    except (OSError, ValueError) as e:
+        if not getattr(journal, "warned", False):
+            journal.warned = True
+            emit(f"[!] Could not write the setup journal ({e}); if this setup is "
+                 "interrupted it cannot say where it stopped.")
+
+
+def begin_journal(emit: Callable[[str], None]) -> dict:
+    """Start (or pick up) the journal for this run and return the state it found.
+
+    A journal that ends in ``complete`` belongs to a finished setup and is replaced.
+    One that does not is the trace of an interrupted setup: it is reported, a
+    ``resume`` is recorded, and the returned state lists the steps it left open."""
+    journal.warned = False
+    im = install_manifest()
+    state = im.journal_state(ROOT)
+    if state["exists"] and state["complete"]:
+        im.journal_reset(ROOT)
+        return im.journal_state(ROOT)
+    if state["exists"]:
+        emit(f"A previous setup in this folder was interrupted: {im.describe_journal(state)}.")
+        emit("Picking it up: every step is run again, and an interrupted download is redone.")
+        journal(emit, "resume")
+    return state
 
 
 def _env_for(plan: Plan) -> dict:
@@ -326,9 +357,39 @@ def _record_now(emit: Callable[[str], None], **fields) -> None:
         emit(f"[!] could not record this step yet: {e}")
 
 
-def build_steps(plan: Plan) -> List[Step]:
-    """The install, as setup.bat performs it, in setup.bat's order."""
+def run_steps(steps: List[Step], emit: Callable[[str], None],
+              on_step: Callable[[int, int, str], None] = lambda i, n, label: None,
+              ) -> tuple:
+    """Run *steps* in order, journaling each by its key.
+
+    Returns ``(failures, fatal)``: the messages of the optional steps that failed,
+    and the message of the required step that stopped the run (None when it ran to
+    the end). A step that fails stays open in the journal; ``complete`` is written
+    only when the run reaches the end."""
+    failures: List[str] = []
+    for i, step in enumerate(steps):
+        on_step(i, len(steps), step.label)
+        if step.key:
+            journal(emit, "begin", step.key)
+        try:
+            step.run(emit)
+        except Exception as e:                # never leave the UI hanging
+            if step.fatal:
+                return failures, f"{step.label}: {e}"
+            failures.append(f"{step.label}: {e}")
+            emit(f"[!] {step.label} did not finish: {e}")
+        else:
+            if step.key:
+                journal(emit, "done", step.key)
+    journal(emit, "complete")
+    return failures, None
+
+
+def build_steps(plan: Plan, resume: Optional[dict] = None) -> List[Step]:
+    """The install, as setup.bat performs it, in setup.bat's order. *resume* is the
+    journal state of an interrupted earlier run (see begin_journal)."""
     steps: List[Step] = []
+    cut_short = set((resume or {}).get("started") or [])
     # What earlier steps created, so the manifest records exactly that.
     state: dict = {}
 
@@ -350,7 +411,7 @@ def build_steps(plan: Plan) -> List[Step]:
                                       **_tooling_fields(ROOT))
         except Exception as e:
             emit(f"[!] could not record the environment yet: {e}")
-    steps.append(Step("Creating the Python environment", venv))
+    steps.append(Step("Creating the Python environment", venv, key="venv"))
 
     # Runs before anything writes data: setup-llama records its builds in this
     # folder. See test_data_folder_is_chosen_before_the_runtime_is_provisioned.
@@ -366,17 +427,18 @@ def build_steps(plan: Plan) -> List[Step]:
             raise StepFailed(f"could not use that data folder: {e}")
         state["data_dir"] = str(target)
         emit(f"Data directory: {target}" + (" (portable)" if plan.portable_data else ""))
-    steps.append(Step("Recording where data lives", data_dir))
+    steps.append(Step("Recording where data lives", data_dir, key="data-folder"))
 
     def install_localm(emit):
         _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
              emit, plan)
-    steps.append(Step("Installing LocaLM", install_localm))
+    steps.append(Step("Installing LocaLM", install_localm, key="install-localm"))
 
     def install_runtime_pkg(emit):
         # Carries llama.dll + ggml inside the venv; setup-llama fills it below.
         _run(uv_argv("pip", "install", "-p", ".venv", "-e", "./runtime"), emit, plan)
-    steps.append(Step("Installing the native runtime package", install_runtime_pkg))
+    steps.append(Step("Installing the native runtime package", install_runtime_pkg,
+                      key="runtime-package"))
 
     def install_torch(emit):
         spec, problem = torch_spec_for(plan.backend)
@@ -400,28 +462,36 @@ def build_steps(plan: Plan) -> List[Step]:
                              "works, models that need PyTorch will not")
     # Not fatal: a failed torch stack still leaves a working GGUF chat install,
     # which is what setup.bat also says at this point.
-    steps.append(Step("Installing PyTorch and transformers", install_torch, fatal=False))
+    steps.append(Step("Installing PyTorch and transformers", install_torch, fatal=False,
+                      key="torch"))
 
     if plan.backend != "own":
         def provision(emit):
+            force = ["--force"] if "native-runtime" in cut_short else []
             _run([str(venv_bin(ROOT) / "localm"), "setup-llama",
-                  "--backend", plan.backend, "--yes"], emit, plan)
-        steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision))
+                  "--backend", plan.backend, "--yes", *force], emit, plan)
+        steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision,
+                          key="native-runtime"))
 
     def launcher(emit):
         _run([str(venv_python(ROOT)), "-m", "localm", "make-launcher",
               "--force", "--quiet"], emit, plan, allow_fail=True)
-    steps.append(Step("Building the launcher", launcher, fatal=False))
+    steps.append(Step("Building the launcher", launcher, fatal=False, key="launcher"))
 
     if plan.shortcut != "none":
         def shortcut(emit):
+            intended = intended_shortcut_path()
+            if intended:
+                journal(emit, "intend", "shortcut", intended)
             state["shortcut"] = make_shortcut(plan, emit) or ""
             if state["shortcut"]:
                 _record_now(emit, shortcut=state["shortcut"])
-        steps.append(Step("Creating the desktop shortcut", shortcut, fatal=False))
+        steps.append(Step("Creating the desktop shortcut", shortcut, fatal=False,
+                          key="menu-entry"))
 
     if plan.add_to_path:
         def global_cmd(emit):
+            journal(emit, "intend", "command", str(intended_command_path()))
             # --yes: a conflict prompt has no console to answer it here.
             code = _run([str(venv_python(ROOT)), "-m", "localm.globalcmd",
                          "install", "--root", ".", "--yes"], emit, plan,
@@ -438,7 +508,7 @@ def build_steps(plan: Plan) -> List[Step]:
             _record_now(emit, path_dir=state["path_dir"], command_shim=state["command_shim"],
                         path_modified=state["path_modified"])
         steps.append(Step("Adding 'localm' to your PATH", global_cmd,
-                          fatal=False))
+                          fatal=False, key="global-command"))
 
     if plan.plugins:
         def plugins(emit):
@@ -448,7 +518,7 @@ def build_steps(plan: Plan) -> List[Step]:
                   "--with-deps" if plan.plugin_deps else "--no-deps"],
                  emit, plan)
         steps.append(Step("Installing the optional features you chose",
-                          plugins, fatal=False))
+                          plugins, fatal=False, key="plugins"))
 
     def manifest(emit):
         # The data folder was recorded by the data step (prepare_data).
@@ -477,9 +547,33 @@ def build_steps(plan: Plan) -> List[Step]:
                 args += [flag, str(d)]
         _run(args, emit, plan)
         emit("Recorded what this install created, so uninstall removes only that.")
-    steps.append(Step("Writing the install record", manifest, fatal=False))
+    steps.append(Step("Writing the install record", manifest, fatal=False, key="record"))
 
     return steps
+
+
+def intended_shortcut_path() -> str:
+    """Where make_shortcut will write the shortcut, or empty when that cannot be
+    worked out. Journaled before the file exists so an interruption between
+    creating and recording it still lets uninstall remove it."""
+    if IS_WINDOWS:
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "[Environment]::GetFolderPath('Desktop')"],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        lines = (out.stdout or "").strip().splitlines()
+        return str(Path(lines[-1]) / "LocaLM.lnk") if lines and lines[-1].strip() else ""
+    return str(Path.home() / ".local/share/applications" / "LocaLM.desktop")
+
+
+def intended_command_path() -> Path:
+    """The file the global command step creates for this folder."""
+    if IS_WINDOWS:
+        return ROOT / "bin" / "localm.cmd"
+    return Path.home() / ".local" / "bin" / "localm"
 
 
 def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
@@ -1151,7 +1245,8 @@ class Wizard:
         self.action.configure(state="disabled", text="Installing...")
 
         self.lines = queue.Queue()
-        steps = build_steps(plan)
+        resume = begin_journal(self._emit)
+        steps = build_steps(plan, resume)
         threading.Thread(target=self._worker, args=(steps,), daemon=True).start()
         self.root.after(80, self._pump)
 
@@ -1159,23 +1254,13 @@ class Wizard:
         self.lines.put(("log", text))
 
     def _worker(self, steps: List[Step]) -> None:
-        failures: List[str] = []
-        for i, step in enumerate(steps):
-            self.lines.put(("step", (i, len(steps), step.label)))
-            try:
-                step.run(self._emit)
-            except StepFailed as e:
-                if step.fatal:
-                    self.lines.put(("done", f"{step.label}: {e}"))
-                    return
-                failures.append(f"{step.label}: {e}")
-                self.lines.put(("log", f"[!] {step.label} did not finish: {e}"))
-            except Exception as e:            # never leave the UI hanging
-                if step.fatal:
-                    self.lines.put(("done", f"{step.label}: {e}"))
-                    return
-                failures.append(f"{step.label}: {e}")
-                self.lines.put(("log", f"[!] {step.label} did not finish: {e}"))
+        def on_step(i: int, total: int, label: str) -> None:
+            self.lines.put(("step", (i, total, label)))
+
+        failures, fatal = run_steps(steps, self._emit, on_step)
+        if fatal:
+            self.lines.put(("done", fatal))
+            return
         self.lines.put(("done", None if not failures
                         else "PARTIAL:" + "; ".join(failures)))
 

@@ -247,3 +247,21 @@ class TestUninstallUsesTheJournal:
         im.journal_event(clone, "begin", "venv")
         im.uninstall(clone, dry_run=True)
         assert im.journal_path(clone).exists()
+
+    def test_the_scratch_folder_of_a_killed_setup_goes_too(self, tmp_path):
+        clone = tmp_path / "LocaLM"
+        scratch = clone / im.SETUP_TMP_NAME
+        scratch.mkdir(parents=True)
+        (scratch / "localm_uv_err.txt").write_text("x", encoding="utf-8")
+        im.record(clone)
+        rep = im.uninstall(clone, force=True)
+        assert not scratch.exists()
+        assert str(scratch) in rep["removed"]
+
+    def test_a_dry_run_keeps_the_scratch_folder(self, tmp_path):
+        clone = tmp_path / "LocaLM"
+        scratch = clone / im.SETUP_TMP_NAME
+        scratch.mkdir(parents=True)
+        rep = im.uninstall(clone, dry_run=True)
+        assert scratch.exists()
+        assert str(scratch) in rep["removed"]

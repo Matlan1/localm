@@ -241,12 +241,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
-- **Setup on Linux and macOS can pick up after being interrupted.** It keeps a short
-  journal of the steps it has started and finished. Run again after Ctrl+C, a closed
-  window or a crash, it says where the last run stopped, reuses what finished, and
-  rebuilds the step that was cut short (a half-made `.venv` is no longer mistaken for
-  someone else's and kept). Uninstall also uses the journal, so a menu entry or command
-  setup was creating when it stopped is still removed.
+- **Setup can pick up after being interrupted, on every platform.** `setup.sh`,
+  `setup.bat` and the graphical installer keep a short journal of the steps they have
+  started and finished. Run again after Ctrl+C, a closed window or a crash, setup says
+  where the last run stopped and redoes the step that was cut short (a half-made `.venv`
+  is no longer mistaken for someone else's and kept). Uninstall also uses the journal, so
+  a menu entry or command setup was creating when it stopped is still removed. On
+  Windows, `setup.bat` also keeps its scratch files inside the folder instead of the
+  system temp folder, and uninstall clears them.
 - **The one-click Linux/macOS install no longer puts uv in your home folder before it asks.**
   `install.sh` used to install uv itself into `~/.local/bin` and edit your shell
   startup files when uv was missing, even if you then chose the Portable setup.

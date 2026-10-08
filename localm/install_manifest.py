@@ -56,6 +56,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
 JOURNAL_NAME = ".localm-setup-journal"
+SETUP_TMP_NAME = ".localm-setup-tmp"
 DATA_MARKER = ".localm-data"
 HOME_CFG_NAME = "localm-home.cfg"
 PORTABLE_HOME = "home"
@@ -1377,6 +1378,11 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
     lock = lib_dir.with_name(lib_dir.name + ".setup.lock")
     if lib_ok and lock.is_dir():
         items.append(_Item(lock, "lib", "warn", "left by an interrupted runtime download"))
+
+    # Scratch files setup.bat keeps in the clone while it runs.
+    scratch = root / SETUP_TMP_NAME
+    if scratch.exists() or _is_link(scratch):
+        items.append(_Item(scratch, "data-entry", "remove"))
 
     # uv's own entries that point into this folder: PATH, shell files, receipt.
     uv_item = next((i for i in items if _same(i.path, root / ".uv")), None)
