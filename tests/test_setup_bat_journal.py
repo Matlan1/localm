@@ -47,7 +47,7 @@ def _setup(folder, *, abort_after="portable-choice", answers="\n\n\n\n", extra_e
     captured = folder.parent / (folder.name + ".out.txt")
     with open(captured, "wb") as sink:
         r = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/c", r".\setup.bat"],
-                           cwd=str(folder), env=env, input=answers.encode("utf-8"),
+                           cwd=str(folder), env=env, input=answers.replace("\n", "\r\n").encode("utf-8"),
                            stdout=sink, stderr=subprocess.STDOUT, timeout=120)
     return r.returncode, captured.read_text(encoding="utf-8", errors="replace")
 
