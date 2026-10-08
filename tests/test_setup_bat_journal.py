@@ -44,10 +44,12 @@ def _setup(folder, *, abort_after="portable-choice", answers="\n\n\n\n", extra_e
     if path_prefix:
         env["PATH"] = str(path_prefix) + os.pathsep + env["PATH"]
     env.update(extra_env or {})
-    r = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/c", r".\setup.bat"],
-                       cwd=str(folder), env=env, input=answers, capture_output=True,
-                       text=True, timeout=180)
-    return r.returncode, r.stdout + r.stderr
+    captured = folder.parent / (folder.name + ".out.txt")
+    with open(captured, "wb") as sink:
+        r = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/c", r".\setup.bat"],
+                           cwd=str(folder), env=env, input=answers.encode("utf-8"),
+                           stdout=sink, stderr=subprocess.STDOUT, timeout=120)
+    return r.returncode, captured.read_text(encoding="utf-8", errors="replace")
 
 
 def _journal_bytes(folder) -> bytes:
