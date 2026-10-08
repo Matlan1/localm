@@ -68,11 +68,16 @@ def register(app: FastAPI, ctx) -> None:
         VRAM, and (NVIDIA only) GPU utilisation. Any section that cannot be
         measured on this box is simply absent - the frontend renders what it
         gets. Runs off-thread so a slow probe (e.g. nvidia-smi) never blocks
-        the event loop."""
-        from localm.sysstats import system_stats
+        the event loop. Answers within ``sysstats.STATS_REPLY_BUDGET_S`` even
+        when the probe thread stalls, from ``sysstats.cached_stats()``."""
+        from localm import sysstats
         loop = asyncio.get_running_loop()
-        stats = await loop.run_in_executor(get_plugin_executor(), system_stats)
-        return stats
+        fut = loop.run_in_executor(get_plugin_executor(), sysstats.system_stats)
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut),
+                                          sysstats.STATS_REPLY_BUDGET_S)
+        except asyncio.TimeoutError:
+            return sysstats.cached_stats()
 
     @app.get("/api/companion", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def gui_companion():

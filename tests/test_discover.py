@@ -3859,60 +3859,41 @@ class TestGpuUsageSourceRobustness:
         monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
         assert gu.raw_reading_is_process_scoped() is False
 
-    def test_raw_reading_is_process_scoped_imports_fresh_when_no_probe_is_inflight(
+    def test_raw_reading_is_process_scoped_reads_the_build_without_importing_torch(
             self, monkeypatch):
-        """The common, safe case: nothing else is touching torch right now, so a
-        fresh `import torch` is fine - this must NOT be sacrificed for safety
-        against the abandoned-probe race below: always returning False when
-        torch is not yet imported is wrong on a machine where torch genuinely
-        has not been imported by anything else yet, e.g. very early in the
-        process.
-
-        Uses a fake `torch` injected via a patched `__import__`, like the sibling
-        test above, rather than deleting the REAL torch from sys.modules and
-        letting a genuine re-import run: torch's ROCm SDK native library preload
-        is not safe to run a second time in the same process once it has already
-        succeeded once (WinError 127, "the specified procedure could not be
-        found"), which would make this test flaky for reasons unrelated to the
-        code path under test."""
-        import localm.gpu_usage as gu
-        import localm.discover as _discover
-        import sys as _sys
+        """With torch not imported and nothing else touching it, the answer comes
+        from the installed build's flavour (gpu_usage.torch_build_is_hip) and no
+        import of torch is attempted: a cold ROCm import in the server process
+        holds the OS loader lock and blocks thread creation process-wide."""
         import builtins
+        import sys as _sys
+
+        import localm.discover as _discover
+        import localm.gpu_usage as gu
 
         monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
         monkeypatch.delitem(_sys.modules, "torch", raising=False)
         monkeypatch.setattr(_discover, "_gpu_probe_inflight", False)
-        # Pin the known-doomed detector False so this test, whose subject is the
-        # inflight-race logic, does not depend on whether a native HIP runtime is
-        # resident. TestTorchProbeKnownDoomedSkip covers the detector itself.
         monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed",
                             lambda: False)
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
 
-        class _FakeTorch:
-            version = SimpleNamespace(hip="7.13", cuda=None)
-
         _real_import = builtins.__import__
         attempted = []
 
-        def _fake_import(name, *a, **k):
+        def _tracking_import(name, *a, **k):
             if name == "torch":
                 attempted.append(name)
-                fake = _FakeTorch()
-                # setitem, NOT a raw `_sys.modules["torch"] = fake`: monkeypatch
-                # removes the fake at teardown. A raw assignment records nothing to
-                # restore where torch is not installed, so the fake survives into
-                # every later test in the same xdist worker.
-                monkeypatch.setitem(_sys.modules, "torch", fake)
-                return fake
             return _real_import(name, *a, **k)
 
-        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
 
+        monkeypatch.setattr(gu, "torch_build_is_hip", lambda: True)
         assert gu.raw_reading_is_process_scoped() is True
-        assert attempted == ["torch"], "the safe import must actually have been attempted"
+        monkeypatch.setattr(gu, "torch_build_is_hip", lambda: False)
+        assert gu.raw_reading_is_process_scoped() is False
+        assert attempted == [], "a torch import was attempted in-process"
 
     def test_raw_reading_is_process_scoped_skips_import_while_a_probe_is_inflight(
             self, monkeypatch):
@@ -4094,6 +4075,9 @@ class TestScopeGateAnswersWithoutTorch:
             return real_import(name, *a, **k)
 
         monkeypatch.setattr(builtins, "__import__", _tracking_import)
+        # torch is not installed in this scenario, so its build flavour cannot
+        # be read from disk either.
+        monkeypatch.setattr(gu, "torch_build_is_hip", lambda: None)
         return gu, attempted
 
     def test_known_doomed_with_resident_hip_answers_true_without_import(
@@ -4116,16 +4100,17 @@ class TestScopeGateAnswersWithoutTorch:
         assert gu.raw_reading_is_process_scoped() is True
         assert "torch" not in attempted
 
-    def test_torch_import_failure_with_resident_hip_answers_true(
+    def test_torch_not_installed_with_resident_hip_answers_true(
             self, monkeypatch):
-        """A GGUF-only install (no torch at all) on the HIP build: the import
-        legitimately fails, and the resident runtime still answers True."""
+        """A GGUF-only install (no torch at all) on the HIP build: torch's build
+        cannot be read, no import is attempted, and the resident runtime still
+        answers True."""
         gu, attempted = self._arm(monkeypatch, inflight=False,
                                   known_doomed=False, hip_resident=True)
         assert gu.raw_reading_is_process_scoped() is True
-        assert attempted == ["torch"], "the permitted import must be attempted"
+        assert attempted == [], "torch must not be imported here"
 
-    def test_torch_import_failure_without_resident_hip_stays_false(
+    def test_torch_not_installed_without_resident_hip_stays_false(
             self, monkeypatch):
         """No torch AND no resident HIP runtime (a vulkan/cpu build's worker, a
         torch-less NVIDIA box): no measured blindness to assert - False."""

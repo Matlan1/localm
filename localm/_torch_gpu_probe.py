@@ -38,12 +38,23 @@ def integrated_flag(torch, index: int):
     return bool(value) if isinstance(value, int) else None
 
 
+def pci_bus_flag(torch, index: int):
+    """The PCI bus number torch reports for device *index* (the physical bus,
+    the same quantity ADL reports), or ``None`` when it does not say."""
+    try:
+        value = torch.cuda.get_device_properties(index).pci_bus_id
+    except Exception:
+        return None
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _enumerate() -> list:
     """torch's CUDA/HIP device list, or [] when torch cannot answer.
 
     Mirrors the in-process branch of ``discover._list_gpus_probe`` field for
     field, so a caller cannot tell which path produced a reading. An entry
-    carries ``integrated`` only when torch reports it (:func:`integrated_flag`)."""
+    carries ``integrated`` only when torch reports it (:func:`integrated_flag`)
+    and ``pci_bus_id`` only when torch reports it (:func:`pci_bus_flag`)."""
     import torch
     if not torch.cuda.is_available():
         return []
@@ -61,6 +72,9 @@ def _enumerate() -> list:
         integrated = integrated_flag(torch, i)
         if integrated is not None:
             entry["integrated"] = integrated
+        bus = pci_bus_flag(torch, i)
+        if bus is not None:
+            entry["pci_bus_id"] = bus
         out.append(entry)
     return out
 

@@ -721,7 +721,7 @@ def _list_gpus_double(gpus, status):
     ``(gpus, status)`` when return_status=True. Drives the freshness (status) and
     scope (free_scope) the readouts gate on THROUGH the real vram_info/vram_capacity
     aggregation, rather than mocking capacity (which would test the test)."""
-    def _inner(*, deadline=None, return_status=False):
+    def _inner(*, deadline=None, return_status=False, wait_for_inflight=False):
         served = [dict(g) for g in gpus]
         return (served, status) if return_status else served
     return _inner
@@ -768,6 +768,30 @@ class TestStatsEndpoint:
                 r = client.get("/api/stats")
         assert r.status_code == 200
         assert r.json() == fake
+
+    def test_stats_endpoint_answers_from_the_cache_when_the_probe_stalls(
+            self, gui_app, monkeypatch):
+        """A system_stats() that never returns in time must not hold the reply:
+        the status bar gets the cached readings within the budget."""
+        import time as _time
+
+        from localm import sysstats
+        app, _ = gui_app
+        cached = {"ram": {"used": 1, "total": 2, "percent": 50.0}}
+        monkeypatch.setattr(sysstats, "STATS_REPLY_BUDGET_S", 0.2)
+        monkeypatch.setattr(sysstats, "cached_stats", lambda: cached)
+
+        def _stalled():
+            _time.sleep(3)
+            return {"never": "served"}
+        with patch("localm.sysstats.system_stats", side_effect=_stalled):
+            with TestClient(app) as client:
+                t0 = _time.monotonic()
+                r = client.get("/api/stats")
+                elapsed = _time.monotonic() - t0
+        assert r.status_code == 200
+        assert r.json() == cached
+        assert elapsed < 2.0, f"the reply waited {elapsed:.1f}s on a stalled probe"
 
     def test_stats_endpoint_ok_when_nothing_measurable(self, gui_app):
         app, _ = gui_app

@@ -167,6 +167,9 @@ _vram_last_at: float | None = None  # monotonic time of the last COMPLETED attem
 _vram_ready = threading.Event()     # set once, after the first completed attempt
                                     # lands; never cleared. Lets a one-shot caller
                                     # block for a real reading.
+_vram_last_is_seed = False          # True while _vram_last is the torch-free first
+                                    # reading from _quick_vram(), not a completed
+                                    # vram_capacity() attempt.
 _vram_probe_epoch = 0               # bumped by _reset_vram_probe_cache() to
                                     # retire an in-flight probe; read (never
                                     # assigned) by _vram_probe. See that
@@ -183,13 +186,40 @@ def _reset_vram_probe_cache() -> None:
     unmocked probe from writing its reading afterwards. Bumping the epoch makes
     that write a no-op - see :func:`_vram_probe`."""
     global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
-    global _vram_ready
+    global _vram_ready, _vram_last_is_seed
     with _vram_lock:
         _vram_last = None
+        _vram_last_is_seed = False
         _vram_last_at = None
         _vram_inflight = False
         _vram_probe_epoch += 1
         _vram_ready = threading.Event()
+
+
+def _quick_vram() -> dict:
+    """``{"total", "used", "percent"}`` from sources that never touch torch or
+    the native runtime, or ``{}`` when they cannot give an unambiguous answer.
+
+    Windows only: the display-adapter registry's total plus the ADL/PDH
+    device-global used figure, accepted only when
+    :func:`localm.gpu_usage.device_global_used_bytes` can pair them with that
+    one adapter (exactly one AMD adapter, or exactly one WDDM instance). A box
+    where the pairing is a guess answers ``{}`` and waits for the full probe.
+    Costs well under a second even cold, against several seconds for the torch
+    probe behind :func:`_compute_vram`."""
+    import sys
+    if sys.platform != "win32":
+        return {}
+    from localm import discover, gpu_usage
+    entry = discover._windows_largest_adapter_registry_entry()
+    if not entry or not entry.get("total"):
+        return {}
+    used = gpu_usage.device_global_used_bytes([entry]).get(entry["index"])
+    if used is None:
+        return {}
+    total = int(entry["total"])
+    used = max(0, min(total, int(used)))
+    return {"total": total, "used": used, "percent": round(used / total * 100, 1)}
 
 
 def _compute_vram() -> dict:
@@ -200,10 +230,15 @@ def _compute_vram() -> dict:
 
     ``used``/``percent`` are included ONLY when the free reading is trustworthy
     (see :func:`_vram_reading_trusted`); a stale or process-blind reading shows
-    ``total`` alone."""
+    ``total`` alone.
+
+    Joins a GPU probe already in flight (``wait_for_inflight``) instead of
+    taking its instant BUSY answer: this runs on its own thread, and a BUSY
+    reading is never trusted, so the figure would drop to ``total`` alone for a
+    whole refresh interval whenever another caller held the probe first."""
     from localm.discover import (FREE_SCOPE_DEVICE as _FREE_SCOPE_DEVICE,
                                  last_known_gpus, vram_capacity)
-    info, status = vram_capacity(return_status=True)
+    info, status = vram_capacity(return_status=True, wait_for_inflight=True)
     total = info.get("total")
     if not total:
         return {}
@@ -301,7 +336,21 @@ def _vram_probe(my_epoch: int) -> None:
     this probe claimed when :func:`_vram` started it; a mismatch at write time
     means :func:`_reset_vram_probe_cache` retired it in the meantime, so its
     reading is discarded instead of racing whatever probe holds the slot now."""
-    global _vram_inflight, _vram_last, _vram_last_at
+    global _vram_inflight, _vram_last, _vram_last_at, _vram_last_is_seed
+    with _vram_lock:
+        first_ever = _vram_last is None
+    if first_ever:
+        try:
+            quick = _quick_vram()
+        except Exception as e:
+            quick = {}
+            from localm.debuglog import logger
+            logger.debug("_vram: quick first reading unavailable: %s", e)
+        if quick:
+            with _vram_lock:
+                if _vram_probe_epoch == my_epoch and _vram_last is None:
+                    _vram_last = {"vram": quick}
+                    _vram_last_is_seed = True
     computed = None
     try:
         computed = _compute_vram()
@@ -314,7 +363,16 @@ def _vram_probe(my_epoch: int) -> None:
             logger.debug("_vram: discarding probe result from retired epoch "
                          "%s (current %s)", my_epoch, _vram_probe_epoch)
             return
-        if computed is not None:
+        if computed and computed.get("vram"):
+            _vram_last = computed
+            _vram_last_is_seed = False
+        elif _vram_last_is_seed:
+            # The seed stood in for the first full reading and that attempt
+            # failed or found nothing: keep the total (a hardware fact), drop
+            # the used figure that nothing is refreshing any more.
+            _vram_last = {"vram": {"total": _vram_last["vram"]["total"]}}
+            _vram_last_is_seed = False
+        elif computed is not None:
             _vram_last = computed
         _vram_last_at = time.monotonic()
         _vram_inflight = False
@@ -511,6 +569,42 @@ def system_stats(*, wait_first_vram: bool = False) -> dict:
     out.update(_vram(wait_first=wait_first_vram))
     out.update(_gpu_util())
     return out
+
+
+STATS_REPLY_BUDGET_S = 1.5   # longest the stats route waits for system_stats() before
+                             # answering from cached_stats() instead.
+
+
+def cached_stats() -> dict:
+    """The stats that need no probe: CPU and RAM read now (cheap system calls,
+    no thread and no GPU driver), plus the last completed VRAM and GPU-load
+    readings. Never blocks, never starts a thread, never raises. What the stats
+    route serves when :func:`system_stats` does not return within
+    :data:`STATS_REPLY_BUDGET_S`."""
+    out: dict = {}
+    try:
+        out.update(_cpu_ram())
+    except Exception:
+        pass
+    last = _vram_last
+    if last:
+        out.update(last)
+    util = _gpu_util_last
+    if util is not None:
+        out["gpu"] = {"percent": util}
+    return out
+
+
+def prewarm() -> None:
+    """Take the first CPU baseline and start the first VRAM and GPU-load
+    probes, so the first status-bar poll after startup finds readings instead
+    of starting them. Never raises."""
+    for fn in (_cpu_ram, _vram, _gpu_util):
+        try:
+            fn()
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("sysstats.prewarm: %s failed: %s", fn.__name__, e)
 
 
 # VRAM footprint estimate -------------------------------------------------- #

@@ -1527,9 +1527,14 @@ class _IsolatedTorchWedged(Exception):
 
 def _torch_is_resident() -> bool:
     """True when torch is ALREADY imported in this process, so enumerating here
-    is a free ``sys.modules`` cache hit that takes no OS loader lock."""
-    import sys
-    return "torch" in sys.modules
+    is a free ``sys.modules`` cache hit that takes no OS loader lock.
+
+    False while another thread is still importing it: a module sits in
+    ``sys.modules`` before its body has finished running, and touching it in
+    that window blocks on the per-module import lock for the rest of that
+    import (see :func:`localm.gpu_usage.torch_fully_imported`)."""
+    from localm.gpu_usage import torch_fully_imported
+    return torch_fully_imported()
 
 
 def _torch_gpus_resident() -> list:
@@ -1538,7 +1543,7 @@ def _torch_gpus_resident() -> list:
     COLD import here freezes every thread in the process. Same entry shape as
     :func:`localm._torch_gpu_probe._enumerate`."""
     import torch
-    from localm._torch_gpu_probe import integrated_flag
+    from localm._torch_gpu_probe import integrated_flag, pci_bus_flag
     if not torch.cuda.is_available():
         return []
     out = []
@@ -1555,6 +1560,9 @@ def _torch_gpus_resident() -> list:
         integrated = integrated_flag(torch, i)
         if integrated is not None:
             entry["integrated"] = integrated
+        bus = pci_bus_flag(torch, i)
+        if bus is not None:
+            entry["pci_bus_id"] = bus
         out.append(entry)
     return out
 
@@ -1748,6 +1756,10 @@ def _torch_gpus_isolated_once() -> list:
         else:
             logger.debug("list_gpus: isolated probe still unavailable; using "
                          "the in-process torch import again")
+        import sys
+        from localm.gpu_usage import torch_fully_imported
+        if "torch" in sys.modules and not torch_fully_imported():
+            return []
         return _torch_gpus_resident()
     return devices
 

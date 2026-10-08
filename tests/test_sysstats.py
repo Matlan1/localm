@@ -18,6 +18,8 @@ from localm import sysstats
 from localm.discover import FREE_SCOPE_DEVICE, GPU_PROBE_OK
 from localm.sysstats import _clamped_field_deltas, _CpuMeter, _cpu_ram, _vram
 
+_REAL_QUICK_VRAM = sysstats._quick_vram   # conftest stubs the module attribute per test
+
 
 GB = 1024 ** 3
 
@@ -1409,3 +1411,172 @@ class TestGpuUtilSourceOrder:
         monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
         monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {})
         assert sysstats._gpu_util() == {}
+
+
+class TestQuickFirstReading:
+    """The torch-free first reading (registry total + ADL/PDH used) that the
+    status bar shows while the full probe is still starting."""
+
+    def _win(self, monkeypatch, entry, used):
+        from localm import discover, gpu_usage
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: entry)
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes",
+                            lambda gpus: used)
+
+    def test_unambiguous_adapter_gives_total_used_percent(self, monkeypatch):
+        self._win(monkeypatch, {"index": 0, "name": "AMD", "total": 16 * GB},
+                  {0: 4 * GB})
+        assert _REAL_QUICK_VRAM() == {"total": 16 * GB, "used": 4 * GB,
+                                      "percent": 25.0}
+
+    def test_a_pairing_that_would_be_a_guess_gives_nothing(self, monkeypatch):
+        self._win(monkeypatch, {"index": 0, "name": "AMD", "total": 16 * GB}, {})
+        assert _REAL_QUICK_VRAM() == {}
+
+    def test_no_adapter_gives_nothing(self, monkeypatch):
+        self._win(monkeypatch, None, {})
+        assert _REAL_QUICK_VRAM() == {}
+
+    def test_used_is_clamped_to_the_total(self, monkeypatch):
+        self._win(monkeypatch, {"index": 0, "name": "AMD", "total": 16 * GB},
+                  {0: 20 * GB})
+        assert _REAL_QUICK_VRAM()["used"] == 16 * GB
+
+    def test_other_platforms_give_nothing(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert _REAL_QUICK_VRAM() == {}
+
+
+class TestFirstReadingIsServedBeforeTheFullProbeLands:
+    def _hold_the_full_probe(self, monkeypatch):
+        _reset_vram_cache(monkeypatch)
+        monkeypatch.setattr(sysstats, "_vram_last_is_seed", False)
+        monkeypatch.setattr(sysstats, "_quick_vram", lambda: {
+            "total": 16 * GB, "used": 4 * GB, "percent": 25.0})
+        entered, release = threading.Event(), threading.Event()
+        holder = {"result": {"vram": {"total": 16 * GB, "used": 5 * GB,
+                                      "percent": 31.2}}}
+
+        def _full():
+            entered.set()
+            release.wait(10)
+            return holder["result"]
+        monkeypatch.setattr(sysstats, "_compute_vram", _full)
+        return entered, release, holder
+
+    def test_seed_is_visible_while_the_full_probe_is_still_running(
+            self, monkeypatch):
+        entered, release, _ = self._hold_the_full_probe(monkeypatch)
+        try:
+            _vram()                                    # starts the probe
+            assert entered.wait(VRAM_POLL_DEADLINE)
+            assert _vram() == {"vram": {"total": 16 * GB, "used": 4 * GB,
+                                        "percent": 25.0}}
+        finally:
+            release.set()
+
+    def test_the_full_reading_replaces_the_seed(self, monkeypatch):
+        entered, release, _ = self._hold_the_full_probe(monkeypatch)
+        _vram()
+        assert entered.wait(VRAM_POLL_DEADLINE)
+        release.set()
+        assert sysstats._vram_ready.wait(VRAM_POLL_DEADLINE)
+        assert _vram()["vram"]["used"] == 5 * GB
+        assert sysstats._vram_last_is_seed is False
+
+    def test_a_probe_that_found_nothing_keeps_the_total_but_not_the_seeds_used(
+            self, monkeypatch):
+        """Nothing refreshes the seed's used figure once the first full attempt
+        has ended, so it must not stay on screen as if it were live."""
+        entered, release, holder = self._hold_the_full_probe(monkeypatch)
+        holder["result"] = {}
+        _vram()
+        assert entered.wait(VRAM_POLL_DEADLINE)
+        release.set()
+        assert sysstats._vram_ready.wait(VRAM_POLL_DEADLINE)
+        assert _vram() == {"vram": {"total": 16 * GB}}
+        assert sysstats._vram_last_is_seed is False
+
+    def test_a_probe_that_raised_keeps_the_total_but_not_the_seeds_used(
+            self, monkeypatch):
+        _reset_vram_cache(monkeypatch)
+        monkeypatch.setattr(sysstats, "_vram_last_is_seed", False)
+        monkeypatch.setattr(sysstats, "_quick_vram", lambda: {
+            "total": 16 * GB, "used": 4 * GB, "percent": 25.0})
+
+        def _boom():
+            raise RuntimeError("driver exploded")
+        monkeypatch.setattr(sysstats, "_compute_vram", _boom)
+        _vram()
+        assert sysstats._vram_ready.wait(VRAM_POLL_DEADLINE)
+        assert _vram() == {"vram": {"total": 16 * GB}}
+
+    def test_a_confirmed_empty_reading_without_a_seed_is_still_recorded(
+            self, monkeypatch):
+        _reset_vram_cache(monkeypatch)
+        monkeypatch.setattr(sysstats, "_vram_last_is_seed", False)
+        monkeypatch.setattr(sysstats, "_compute_vram", lambda: {})
+        _vram()
+        assert sysstats._vram_ready.wait(VRAM_POLL_DEADLINE)
+        assert sysstats._vram_last == {}
+
+
+def test_the_stats_probe_joins_an_inflight_gpu_probe(monkeypatch):
+    """A BUSY answer is never trusted, so without joining, the figure would drop
+    to total-only for a whole refresh interval whenever another caller (the
+    model-load sizing) held the probe first."""
+    seen = {}
+
+    def _capacity(*args, return_status=False, wait_for_inflight=False, **kw):
+        seen["wait_for_inflight"] = wait_for_inflight
+        info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
+        return (info, GPU_PROBE_OK) if return_status else info
+
+    monkeypatch.setattr("localm.discover.vram_capacity", _capacity)
+    monkeypatch.setattr("localm.discover.last_known_gpus", lambda: [])
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: [])
+    assert sysstats._compute_vram()["vram"]["used"] == 12 * GB
+    assert seen["wait_for_inflight"] is True
+
+
+class TestCachedStats:
+    def test_serves_cpu_ram_now_and_the_last_gpu_readings_without_probing(
+            self, monkeypatch):
+        monkeypatch.setattr(sysstats, "_vram_last",
+                            {"vram": {"total": 16 * GB}})
+        monkeypatch.setattr(sysstats, "_gpu_util_last", 12.5)
+
+        def _no(*a, **k):
+            raise AssertionError("cached_stats started a probe")
+        monkeypatch.setattr(sysstats, "_vram", _no)
+        monkeypatch.setattr(sysstats, "_gpu_util", _no)
+        monkeypatch.setattr(sysstats, "_cpu_ram", lambda: {
+            "ram": {"used": 1, "total": 2, "percent": 50.0}})
+        assert sysstats.cached_stats() == {
+            "ram": {"used": 1, "total": 2, "percent": 50.0},
+            "vram": {"total": 16 * GB}, "gpu": {"percent": 12.5}}
+
+    def test_omits_what_has_not_landed_and_never_raises(self, monkeypatch):
+        monkeypatch.setattr(sysstats, "_vram_last", None)
+        monkeypatch.setattr(sysstats, "_gpu_util_last", None)
+
+        def _boom():
+            raise RuntimeError("psutil exploded")
+        monkeypatch.setattr(sysstats, "_cpu_ram", _boom)
+        assert sysstats.cached_stats() == {}
+
+
+def test_prewarm_starts_every_probe_and_survives_a_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sysstats, "_cpu_ram", lambda: calls.append("cpu"))
+
+    def _boom(*a, **k):
+        calls.append("vram")
+        raise RuntimeError("x")
+    monkeypatch.setattr(sysstats, "_vram", _boom)
+    monkeypatch.setattr(sysstats, "_gpu_util", lambda: calls.append("gpu"))
+    sysstats.prewarm()
+    assert calls == ["cpu", "vram", "gpu"]

@@ -128,6 +128,9 @@ class VramSizingMixin:
           is only consulted when torch is NOT already resident: once it is in
           ``sys.modules`` the reads below are ordinary calls on an imported
           module.
+        - **No cold import on Windows.** Unless torch is already fully imported
+          in this process, the answer is (None, None) at once, so the caller
+          reads through the isolated native probe.
         - **A deadline.** Everything else runs on a helper thread with
           :meth:`_torch_vram_read_deadline`, and on overrun the caller is
           released with (None, None) - this method's "unmeasurable" answer,
@@ -163,6 +166,15 @@ class VramSizingMixin:
             return None, None
         # Only when torch is not already resident: an imported torch makes the
         # reads below ordinary calls.
+        if sys.platform == "win32":
+            from localm.gpu_usage import torch_fully_imported
+            if not torch_fully_imported():
+                # A cold torch import takes the OS loader lock and blocks thread
+                # creation process-wide, which no deadline here can bound.
+                _dbg.debug(
+                    "free-vram: torch is not imported in this process; reading "
+                    "through the isolated native probe instead of importing it")
+                return None, None
         if "torch" not in sys.modules:
             from localm import discover
             if discover.isolated_torch_unavailable():
@@ -290,7 +302,12 @@ class VramSizingMixin:
         ROCm/HIP torch build, and the torch-less processes whose readings come
         from the resident bundled HIP runtime (the GGUF worker deciding a
         context grow, answered via ``discover.native_hip_runtime_resident()``).
-        NVIDIA / Linux / Vulkan reads are left unchanged."""
+        NVIDIA / Linux / Vulkan reads are left unchanged.
+
+        The device entry carries the PCI bus id from the last completed GPU
+        probe (``discover.last_known_gpus``, no new probe), which is what pairs
+        the card with its ADL adapter exactly on a box with more than one
+        adapter; without a completed probe the single-adapter rule applies."""
         if total is None:
             return None
         try:
@@ -298,9 +315,13 @@ class VramSizingMixin:
                                           raw_reading_is_process_scoped)
             if not raw_reading_is_process_scoped():
                 return None
-            from localm.discover import resolve_load_gpu_index
+            from localm.discover import last_known_gpus, resolve_load_gpu_index
             idx = resolve_load_gpu_index()
-            used = device_global_used_bytes([{"index": idx, "total": total}])
+            entry = {"index": idx, "total": total}
+            known = next((g for g in last_known_gpus() if g.get("index") == idx), None)
+            if known and known.get("pci_bus_id") is not None:
+                entry["pci_bus_id"] = known["pci_bus_id"]
+            used = device_global_used_bytes([entry])
             u = used.get(idx)
             if u is None:
                 return None

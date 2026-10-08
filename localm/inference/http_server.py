@@ -4413,6 +4413,18 @@ def _make_lifespan():
                 _dbg.debug("executor saturation watch startup failed "
                           "(continuing): %s", e)
 
+        # Stats prewarm: the CPU baseline and the first VRAM / GPU-load probes
+        # start now, so the first status-bar poll finds readings. Skipped under
+        # pytest like its siblings.
+        if "pytest" not in sys.modules:
+            try:
+                from localm import sysstats as _sysstats
+                threading.Thread(target=_sysstats.prewarm, name="localm-stats-prewarm",
+                                 daemon=True).start()
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("stats prewarm startup failed (continuing): %s", e)
+
         # Hang ALARM: detect a hung server, surface it where a
         # user actually looks, and (by default) auto-restart when the hang is
         # provably a defect. Complements - does not replace - the forensic

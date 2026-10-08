@@ -244,6 +244,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The installer waits for Enter after you answer "Replace it?".** Typing Y on the
   existing-environment question in `setup.bat` used to continue at once, unlike every
   other question; its other yes/no questions now wait for Enter as well.
+- **RAM and VRAM now show right away at startup, and the server no longer freezes
+  while a model loads on Windows with an AMD GPU.** Loading a model made localm
+  load the ROCm version of PyTorch inside the server itself, which on Windows blocks
+  the server from starting any work for 10 to 30 seconds: the status bar stayed empty
+  for about a minute and the app reported a frozen server. localm now reads what it
+  needs from the installed files and from the separate GPU probe instead, so memory
+  figures appear in the first second and a stalled probe can no longer hold up the
+  status bar.
 - **The launcher can check the models folder again, and a clipped status message can
   be read.** Opening the launcher showed "Could not check the models folder:
   AttributeError" because the launcher runs without a console window and one startup
