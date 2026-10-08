@@ -217,3 +217,17 @@ def test_checker_still_flags_a_stray_paren_after_a_backtick_span() -> None:
     offenders = find_unescaped_block_parens(bad)
     assert offenders, "a stray paren after a backtick span must still be flagged"
     assert offenders[0][0] == 3
+
+
+def test_setup_prompts_wait_for_enter() -> None:
+    """`choice` returns on a single keypress, so a question asked with it
+    proceeds the moment Y is typed; every setup question uses `set /p`, which
+    waits for Enter."""
+    import re
+    text = (REPO_ROOT / "setup.bat").read_text(encoding="utf-8", errors="replace")
+    offenders = [
+        f"setup.bat:{n}: {line.strip()}"
+        for n, line in enumerate(text.splitlines(), 1)
+        if re.match(r"\s*choice(\s|\.exe\b)", line, re.IGNORECASE)
+    ]
+    assert not offenders, "\n".join(offenders)

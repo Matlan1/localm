@@ -241,6 +241,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **The installer waits for Enter after you answer "Replace it?".** Typing Y on the
+  existing-environment question in `setup.bat` used to continue at once, unlike every
+  other question; its other yes/no questions now wait for Enter as well.
 - **The launcher can check the models folder again, and a clipped status message can
   be read.** Opening the launcher showed "Could not check the models folder:
   AttributeError" because the launcher runs without a console window and one startup

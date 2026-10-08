@@ -242,15 +242,13 @@ set "OURS=0"
 if exist ".venv\.localm-venv" set "OURS=1"
 if exist ".venv\Scripts\localm.exe" set "OURS=1"
 echo.
-if "%OURS%"=="1" (
-    call :flush
-    choice /c YN /n /m "  LocalM .venv found. Replace it? [y/N]: "
-) else (
-    call :flush
-    choice /c YN /n /m "  Foreign .venv found. Replace it? [y/N]: "
-)
-rem choice sets errorlevel: 1=Y, 2=N. Test the higher index first.
-if errorlevel 2 (
+set "REPLACEVENV="
+set "VENVKIND=Foreign"
+if "%OURS%"=="1" set "VENVKIND=LocalM"
+call :flush
+set /p "REPLACEVENV=  !VENVKIND! .venv found. Replace it? [y/N]: "
+if not defined REPLACEVENV set "REPLACEVENV=N"
+if /i not "!REPLACEVENV:~0,1!"=="Y" (
     echo  Keeping existing .venv.
     goto venv_done
 )
@@ -324,9 +322,11 @@ if "!VENVLOCKISH!"=="1" (
         echo.
         for /f "usebackq tokens=1,2 delims=|" %%a in ("%TEMP%\localm_lockers.txt") do echo    - PID %%a  %%b
         echo.
+        set "STOPPICK="
         call :flush
-        choice /c YN /n /m "  Stop them and retry now? [Y/n]: "
-        if not errorlevel 2 (
+        set /p "STOPPICK=  Stop them and retry now? [Y/n]: "
+        if not defined STOPPICK set "STOPPICK=Y"
+        if /i not "!STOPPICK:~0,1!"=="N" (
             for /f "usebackq tokens=1,2 delims=|" %%a in ("%TEMP%\localm_lockers.txt") do taskkill /PID %%a /T /F >nul 2>nul
             del "%TEMP%\localm_lockers.txt" 2>nul
             timeout /t 2 /nobreak >nul 2>nul
@@ -372,9 +372,11 @@ if "!VENVREASON!"=="lockers_declined" (
     )
 )
 echo.
+set "RETRYPICK="
 call :flush
-choice /c YN /n /m "  Try again? [Y/n]: "
-if errorlevel 2 (
+set /p "RETRYPICK=  Try again? [Y/n]: "
+if not defined RETRYPICK set "RETRYPICK=Y"
+if /i "!RETRYPICK:~0,1!"=="N" (
     echo  Setup aborted. Install Python %PYVER% if it is missing, or close processes and try again.
     echo      ^(Double-click report-issue.bat to send a report about this.^)
     pause
