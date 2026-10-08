@@ -388,12 +388,45 @@ def contain_gpu_caches() -> None:
                 os.environ[key] = env[key]
 
 
+TEMP_DIR_ENV = "LOCALM_TMPDIR"
+
+
+def temp_dir() -> Path:
+    """localm's OWN temp directory: ``<data dir>/tmp``, or the directory in
+    ``LOCALM_TMPDIR`` when the user sets one. Everything localm and its child
+    processes create with ``tempfile`` (or any library that follows TMP/TEMP/
+    TMPDIR) lands here, so nothing is written to the system temp folder."""
+    override = os.environ.get(TEMP_DIR_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return home_dir() / "tmp"
+
+
+def contain_temp_dir() -> None:
+    """Point ``tempfile`` and TMP/TEMP/TMPDIR of THIS process at :func:`temp_dir`,
+    so in-process temp use and every child process inherit it. Runs when
+    ``localm.config`` is imported. When the directory cannot be created, says so
+    on stderr and leaves the temp location as it was."""
+    path = os.path.abspath(str(temp_dir()))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        print(f"[localm] WARNING: cannot create the temp folder {path} ({e}); "
+              "temporary files will go to the system temp folder instead.",
+              file=sys.stderr)
+        return
+    for var in ("TMP", "TEMP", "TMPDIR"):
+        os.environ[var] = path
+    tempfile.tempdir = path
+
+
 HOME_DIR = _detect_home()
 MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
 CONFIG_FILE = HOME_DIR / "config.json"
 contain_hf_cache()
 contain_gpu_caches()
+contain_temp_dir()
 
 
 # Only the keys the user actually changed are persisted to config.json; a key
