@@ -27,16 +27,7 @@ from pathlib import Path
 import pytest
 
 from localm import voice
-
-
-def _has_faster_whisper() -> bool:
-    try:
-        import faster_whisper.audio  # noqa: F401
-        return True
-    except (ImportError, OSError):
-        # The native lib can fail to load on Windows under load (documented
-        # WinError 127 flake); skip rather than report that flake as a failure.
-        return False
+from tests._voice_stack import voice_stack  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +155,7 @@ def test_stt_request_carries_the_contained_download_root(monkeypatch, tmp_path):
     assert local_files_only is True
 
 
-@pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
+@pytest.mark.usefixtures("voice_stack")
 def test_garbage_audio_raises_voiceerror_not_crash():
     # Undecodable bytes reach the worker, fail to decode there, and come back as
     # a clean VoiceError - never the native transcription path, never a crash.
@@ -204,7 +195,7 @@ def test_native_fault_bypasses_try_except():
 # Containment: a crashed / hung worker never takes the server (this process) down.
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
+@pytest.mark.usefixtures("voice_stack")
 def test_worker_hard_exit_is_contained_and_recovers(monkeypatch):
     # Force the next worker to vanish mid-request (no Python traceback), exactly
     # like a native abort. The server (this process) must survive with a clean
@@ -221,7 +212,7 @@ def test_worker_hard_exit_is_contained_and_recovers(monkeypatch):
     assert "decode" in str(ei2.value).lower()
 
 
-@pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
+@pytest.mark.usefixtures("voice_stack")
 def test_real_native_abort_in_worker_is_contained(monkeypatch):
     # The gold standard: a genuine uncatchable native abort (not a clean exit) in
     # the worker is still contained. Worker WER/abort dialogs are suppressed so it
@@ -232,7 +223,7 @@ def test_real_native_abort_in_worker_is_contained(monkeypatch):
     assert "crash" in str(ei.value).lower()
 
 
-@pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
+@pytest.mark.usefixtures("voice_stack")
 def test_hung_worker_times_out_and_recovers(monkeypatch):
     # A wedged native call must not block STT forever: the worker is killed at the
     # timeout and a clean error is returned, then STT recovers.
@@ -269,7 +260,7 @@ def _make_wav(seconds: float = 1.0, freq: float = 220.0, rate: int = 16000) -> b
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
+@pytest.mark.usefixtures("voice_stack")
 def test_real_transcription_runs_in_worker(monkeypatch):
     # End-to-end through the isolated worker with the real (tiny) model. A pure
     # tone has no speech, so "no speech detected" is a valid, non-crashing

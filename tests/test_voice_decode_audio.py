@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 
 from localm import voice
+from tests._voice_stack import unavailable, voice_stack  # noqa: F401
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("av") is None,
-                                reason="PyAV not installed")
+pytestmark = pytest.mark.usefixtures("voice_stack")
 
 _TONE_HZ = 440
 _RATE_OUT = 16000
@@ -67,7 +67,7 @@ def _encoded(container_format: str, codec: str, rate: int, seconds: float = 1.0)
             for packet in stream.encode(None):
                 out.mux(packet)
     except av.error.FFmpegError as e:
-        pytest.skip(f"this PyAV build cannot encode {codec}: {e}")
+        unavailable(f"this PyAV build cannot encode {codec}: {e}")
     return buf.getvalue()
 
 
@@ -158,7 +158,6 @@ def test_the_simulated_pyav_reproduces_the_failure_faster_whispers_decoder_hits(
         pyav_without_metadata_errors):
     """Fires-control for the fixture above: it must break the decoder that broke
     in the field, so the previous test passing means something."""
-    pytest.importorskip("faster_whisper")
     from faster_whisper.audio import decode_audio
     with pytest.raises(TypeError, match="metadata_errors"):
         decode_audio(io.BytesIO(_wav(16000, 1, 1.0)))
@@ -187,8 +186,6 @@ def test_the_worker_does_not_use_faster_whispers_decoder():
     assert "faster_whisper.audio" not in text
 
 
-@pytest.mark.skipif(importlib.util.find_spec("faster_whisper") is None,
-                    reason="faster-whisper not installed")
 def test_the_self_test_decodes_with_the_installed_pyav():
     state, detail = voice.decode_self_test()
     assert state == "ok", detail

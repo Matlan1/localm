@@ -11,6 +11,7 @@ import wave
 import pytest
 
 from localm import voice
+from tests._voice_stack import voice_stack  # noqa: F401
 from localm.plugins.builtin.voice.plug import _voice_error_status
 
 _KWARG_FAULT = "open() got an unexpected keyword argument 'metadata_errors'"
@@ -26,7 +27,7 @@ def _raiser(exc):
     return decode_audio
 
 
-@pytest.mark.skipif(not _has("av"), reason="PyAV not installed")
+@pytest.mark.usefixtures("voice_stack")
 def test_media_error_classified_as_decode():
     from av.error import InvalidDataError
     exc = InvalidDataError(1094995529, "Invalid data found when processing input")
@@ -90,8 +91,7 @@ def test_decoder_fault_tag_is_500_and_not_blamed_on_audio(monkeypatch):
     assert _voice_error_status(e)[0] == 500
 
 
-@pytest.mark.skipif(not (_has("faster_whisper") and _has("av")),
-                    reason="faster-whisper / PyAV not installed")
+@pytest.mark.usefixtures("voice_stack")
 def test_installed_pyav_decodes_a_wav_with_localms_decoder():
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
