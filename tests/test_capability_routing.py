@@ -821,16 +821,13 @@ class TestTheRegistryEntryShowsARoutedModel:
 
     def _written(self, monkeypatch, engines, active, sizes):
         written = {}
-        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me", "token": "t", "port": 1})
+        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me", "port": 1})
         monkeypatch.setattr(hs, "_engines", engines)
         monkeypatch.setattr(hs, "_active_model_name", active)
         monkeypatch.setattr(hs, "_model_file_size", lambda n: sizes.get(n))
         monkeypatch.setattr(hs, "_loaded_model_identities", lambda: [])
         monkeypatch.setattr(hs, "_current_gpu_index", lambda: 0)
-        monkeypatch.setattr("localm.gpu_registry.registry_dir", lambda: "unused")
-        monkeypatch.setattr("localm.gpu_registry.write_entry",
-                            lambda d, **kw: written.update(kw))
-        hs._gpu_registry_sync()
+        written.update(hs._gpu_status() or {})
         return written
 
     def test_a_routed_model_with_no_active_model_is_advertised(self, monkeypatch):

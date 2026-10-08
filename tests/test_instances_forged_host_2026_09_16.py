@@ -34,7 +34,7 @@ import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from localm import bindhost, gpu_registry, instances
+from localm import bindhost, instances
 
 FORGED_ID = "f0f0f0f0f0f0f0f0"
 
@@ -161,16 +161,6 @@ def dns_spy(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", spy)
     return looked_up
-
-
-@pytest.fixture
-def gpu_dir(tmp_path, monkeypatch):
-    """Point the machine-wide registry at a throwaway dir, so the listing route
-    never reads or probes whatever localm is really running on this box."""
-    d = tmp_path / "machine-registry"
-    d.mkdir()
-    monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
-    return d
 
 
 # --------------------------------------------------------------------------- #
@@ -440,7 +430,7 @@ def instances_app(tmp_path, monkeypatch):
 
 class TestListingRoute:
     def test_a_listing_reports_a_forged_entry_dead_without_dialing(
-            self, instances_app, gpu_dir, requests_spy, dns_spy):
+            self, instances_app, requests_spy, dns_spy):
         app, home = instances_app
         with whoami_server({"app": "localm", "instance_id": FORGED_ID,
                             "root_dir": "/proj/mine", "mode": "api",

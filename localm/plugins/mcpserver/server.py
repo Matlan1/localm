@@ -465,7 +465,7 @@ class EngineCache:
             target = peer
             if same_install is not None:
                 if str(same_install.get("port")) != str(peer.get("port")):
-                    _log(f"not using {name}: the machine-wide registry names this "
+                    _log(f"not using {name}: the running-instance lookup names this "
                          f"install's instance {peer.get('instance_id')} at port "
                          f"{peer.get('port')}, but it serves port "
                          f"{same_install.get('port')}")

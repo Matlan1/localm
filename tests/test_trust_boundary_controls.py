@@ -40,6 +40,8 @@ _REVIEWED_CROSS_ORIGIN_OK = (
     "/v1/embeddings",
     "/v1/surfaces/gui",
     "/v1/instances/cooperate-unload",
+    "/v1/instances/vouch",
+    "/v1/instances/status",
 )
 
 _CROSS_ORIGIN = {"Origin": "http://localhost:9999"}

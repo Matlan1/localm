@@ -3,9 +3,8 @@
 
 ``localm/sessions.py`` (session records carrying ``key_hash``, the same sha256
 digest the keystore stores), ``localm/instances.py`` (the per-instance attach
-token, written by both ``register_instance`` and ``set_mode``) and
-``localm/gpu_registry.py`` (the coordination token) all do the atomic
-temp+replace dance. Each restricts the TEMP file before the rename and retries
+token, written by both ``register_instance`` and ``set_mode``) both do the
+atomic temp+replace dance. Each restricts the TEMP file before the rename and retries
 the destination on failure. Creating that temp with ``tmp.write_text(...)``
 would leave the payload at the umask default (commonly 0644) on POSIX between
 the create and the chmod that follows it, so it is created private instead.
@@ -96,7 +95,7 @@ def _install_spies(monkeypatch):
     afterwards the temp file no longer exists to be inspected at all.
 
     Both spies delegate to the real implementation and assert nothing
-    themselves: ``instances.set_mode`` and ``gpu_registry.write_entry`` wrap
+    themselves: ``instances.set_mode`` wraps
     this region in ``except OSError``, so an OSError-shaped complaint raised
     here would be swallowed by the code under test.
     """
@@ -131,14 +130,13 @@ COORD_TOKEN = "coordination-token-h3b"
 
 
 def _drive_every_sibling_writer(home):
-    """Run all four sibling writers once. Returns the temp path each used,
+    """Run all three sibling writers once. Returns the temp path each used,
     paired with a marker that must appear in that temp file's content - without
     which a test could pass by fingerprinting an empty or unrelated file.
 
     ``register_instance`` and ``set_mode`` write the SAME destination, so
     callers must not assume one rename per destination.
     """
-    import localm.gpu_registry as gpu_registry
     import localm.instances as instances
     import localm.sessions as sessions
 
@@ -147,17 +145,10 @@ def _drive_every_sibling_writer(home):
         home, instance_id="iid-h3b", port=1234, host="127.0.0.1",
         root_dir=str(home), mode="api", token=ATTACH_TOKEN)
     assert instances.set_mode(home, "iid-h3b", "full") is True
-    gpath = gpu_registry.write_entry(
-        home / "gpu-reg", instance_id="iid-h3b", pid=os.getpid(), port=1234,
-        host="127.0.0.1", scheme="http", model=None,
-        vram_estimate_bytes=None, gpu_index=0,
-        coordination_token=COORD_TOKEN)
-    assert gpath is not None, "gpu_registry.write_entry reported a failure"
 
     return {
         str(sessions.sessions_file()) + ".tmp": SESSION_MARKER,
         str(reg) + ".tmp": ATTACH_TOKEN,          # register_instance AND set_mode
-        str(gpath) + ".tmp": COORD_TOKEN,
     }
 
 
@@ -165,8 +156,8 @@ def _temp_events(events, kind, expected):
     """The recorded *kind* events for the temp paths in *expected*, checked for
     count so a writer that silently stopped writing cannot pass by absence."""
     hits = [e for e in events if e[0] == kind and e[1] in expected]
-    assert len(hits) == 4, (
-        f"expected 4 {kind} events across the four sibling writers, saw "
+    assert len(hits) == 3, (
+        f"expected 3 {kind} events across the three sibling writers, saw "
         f"{len(hits)}: {[e[1] for e in events if e[0] == kind]}")
     return hits
 

@@ -389,25 +389,72 @@ def contain_gpu_caches() -> None:
 
 
 TEMP_DIR_ENV = "LOCALM_TMPDIR"
+TEMP_LOCATION_KEY = "temp_location"
 
 
-def temp_dir() -> Path:
-    """localm's OWN temp directory: ``<data dir>/tmp``, or the directory in
-    ``LOCALM_TMPDIR`` when the user sets one. Everything localm and its child
-    processes create with ``tempfile`` (or any library that follows TMP/TEMP/
-    TMPDIR) lands here, so nothing is written to the system temp folder."""
+def _is_portable_home(home: Path) -> bool:
+    """Whether *home* is the data folder of a self-contained checkout: inside a
+    source checkout (``pyproject.toml`` beside the package) and under it."""
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "pyproject.toml").is_file():
+        return False
+    try:
+        Path(home).resolve().relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _stored_temp_location(home: Path) -> str:
+    """The ``temp_location`` value in ``<home>/config.json``, or ``""`` when the
+    file or the key is absent or unreadable. Read straight from the file: this
+    runs while ``localm.config`` is still being imported."""
+    try:
+        data = json.loads((Path(home) / "config.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return ""
+    value = data.get(TEMP_LOCATION_KEY) if isinstance(data, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def temp_dir(home: Optional[Path] = None) -> Optional[Path]:
+    """Where localm's temporary files go, or None to leave the system temp folder.
+
+    In order: the ``LOCALM_TMPDIR`` environment variable; the ``temp_location``
+    setting (``data`` = ``<data dir>/tmp``, ``system`` = the system temp folder, or
+    an absolute folder path); then ``auto`` (the default), which keeps temp files
+    in ``<data dir>/tmp`` for a self-contained checkout and leaves the system temp
+    folder for any other install. A ``temp_location`` that is neither of those words
+    nor an absolute path is reported on stderr and treated as ``auto``."""
+    home = Path(home) if home is not None else home_dir()
     override = os.environ.get(TEMP_DIR_ENV, "").strip()
     if override:
         return Path(override).expanduser()
-    return home_dir() / "tmp"
+    choice = _stored_temp_location(home)
+    if choice.lower() == "data":
+        return home / "tmp"
+    if choice.lower() == "system":
+        return None
+    if choice and choice.lower() != "auto":
+        candidate = Path(choice).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        print(f"[localm] WARNING: temp_location {choice!r} in config.json is not "
+              "'auto', 'data', 'system' or an absolute folder; using 'auto'.",
+              file=sys.stderr)
+    return home / "tmp" if _is_portable_home(home) else None
 
 
 def contain_temp_dir() -> None:
     """Point ``tempfile`` and TMP/TEMP/TMPDIR of THIS process at :func:`temp_dir`,
     so in-process temp use and every child process inherit it. Runs when
-    ``localm.config`` is imported. When the directory cannot be created, says so
-    on stderr and leaves the temp location as it was."""
-    path = os.path.abspath(str(temp_dir()))
+    ``localm.config`` is imported; does nothing when :func:`temp_dir` is None. When
+    the directory cannot be created, says so on stderr and leaves the temp location
+    as it was."""
+    target = temp_dir()
+    if target is None:
+        return
+    path = os.path.abspath(str(target))
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as e:
@@ -616,6 +663,11 @@ DEFAULT_CONFIG: dict = {
     # window" value: a setting must never defeat run_native_window's
     # fallback-on-failure.
     "desktop_window_mode": "auto",
+    # Where localm's temporary files go. "auto" (default): <data dir>/tmp for a
+    # self-contained checkout, the system temp folder otherwise. "data": always
+    # <data dir>/tmp. "system": the system temp folder. Or an absolute folder.
+    # Applies on restart; the LOCALM_TMPDIR environment variable overrides it.
+    "temp_location": "auto",
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy; an explicit --port does not)
     # Bind address for a fresh server start when -H/--host is not given on the
@@ -1252,12 +1304,10 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
 
     Call sites: ``auth.key``, ``auth.json`` and the owner-KDF file in auth.py;
     ``model_source_credentials.json``; ``sessions.json``; the instance
-    registry entry from both ``register_instance`` and ``set_mode``; the GPU
-    coordination entry.
+    registry entry from both ``register_instance`` and ``set_mode``.
 
     The RETURN VALUE is the pre-rename ``ok``, so a caller that logs its own
-    subsystem-named warning on failure (``gpu_registry.write_entry``) keeps that
-    signal.
+    subsystem-named warning on failure keeps that signal.
 
     Best-effort by contract: a tightening that fails is reported by
     ``restrict_file_perms`` (which warns) and retried, never raised.

@@ -113,7 +113,6 @@ async def _assert_event_loop_stays_responsive(make_awaitable, *, lock_hold_s=2.0
 
 def test_unload_all_models_does_not_freeze_event_loop(hsclean, monkeypatch):
     monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": None})
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
 
     async def _drive():
         return await _assert_event_loop_stays_responsive(hs.unload_all_models)
@@ -193,7 +192,6 @@ def test_unload_all_models_offloads_active_requests_check(hsclean, monkeypatch):
     question atomically, so it runs via loop.run_in_executor; a direct call
     would block the event loop on the same lock."""
     monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": None})
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     emb._EMBEDDER = _FakeLoadedEmbedder()
 
     async def _drive():

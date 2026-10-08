@@ -94,7 +94,6 @@ def evicting(monkeypatch):
     monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
     monkeypatch.setattr("localm.vram.wait_for_vram_release",
                         lambda free_fn, before_bytes=None: (0, before_bytes))
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     reg = {"victim": {"path": "models/victim.gguf", "source": "local"},
            "incoming": {"path": "models/incoming.gguf", "source": "local"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: reg)

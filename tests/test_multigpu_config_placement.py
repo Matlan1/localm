@@ -302,17 +302,14 @@ class TestReadingsFollowTheLoadDevice:
         from localm.inference import http_server
         written = {}
         monkeypatch.setattr(http_server, "_gpu_coord",
-                            {"instance_id": "i", "token": "t", "port": 1})
+                            {"instance_id": "i", "port": 1})
         monkeypatch.setattr(http_server, "_engines", engines)
         monkeypatch.setattr(http_server, "_active_model_name", active)
         monkeypatch.setattr(http_server, "_loaded_model_identities", lambda: [])
         monkeypatch.setattr(http_server, "_model_file_size", lambda n: None)
-        monkeypatch.setattr("localm.gpu_registry.registry_dir", lambda: "unused")
-        monkeypatch.setattr("localm.gpu_registry.write_entry",
-                            lambda _d, **kw: written.update(kw))
         with _box(gpus, _registry([dict(g, integrated=False) for g in gpus])), \
                 mock.patch("localm.config.load_config", return_value=cfg):
-            http_server._gpu_registry_sync()
+            written.update(http_server._gpu_status() or {})
         return written
 
     def test_the_registry_names_the_gpu_a_one_entry_list_names(self, monkeypatch):

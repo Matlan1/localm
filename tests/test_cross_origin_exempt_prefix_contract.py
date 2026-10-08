@@ -41,6 +41,8 @@ _WATCHED_PREFIXES = ("/v1/surfaces/", "/v1/instances/")
 _REVIEWED_WATCHED_ROUTES = {
     ("POST", "/v1/surfaces/gui"),
     ("POST", "/v1/instances/cooperate-unload"),
+    ("POST", "/v1/instances/vouch"),
+    ("GET", "/v1/instances/status"),
 }
 
 
@@ -100,11 +102,13 @@ def test_cross_origin_ok_tuple_entries_are_full_paths_not_prefixes():
     full-path match, so it would report the same clean result either way."""
     app = create_app(None)
     cross_origin_ok = _live_cross_origin_ok(app)
-    assert cross_origin_ok[-2:] == (
-        "/v1/surfaces/gui", "/v1/instances/cooperate-unload"), (
-        f"_CROSS_ORIGIN_OK's last two entries are {cross_origin_ok[-2:]!r}, "
-        "expected the two full route paths ('/v1/surfaces/gui', "
-        "'/v1/instances/cooperate-unload') - a directory-prefix entry here "
+    assert cross_origin_ok[-4:] == (
+        "/v1/surfaces/gui", "/v1/instances/cooperate-unload",
+        "/v1/instances/vouch", "/v1/instances/status"), (
+        f"_CROSS_ORIGIN_OK's last four entries are {cross_origin_ok[-4:]!r}, "
+        "expected the four full route paths ('/v1/surfaces/gui', "
+        "'/v1/instances/cooperate-unload', '/v1/instances/vouch', "
+        "'/v1/instances/status') - a directory-prefix entry here "
         "(e.g. '/v1/surfaces/') would silently exempt every future route "
         "added under it from the cross-origin/CSRF refusal and the "
         "open-mode shell-token gate")

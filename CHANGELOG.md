@@ -241,15 +241,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
-- **Portable mode now keeps its temp files and GPU-sharing entries in its own root
-  folder.** Temporary files go to `tmp` in the data folder instead of the system
-  temp folder (set `LOCALM_TMPDIR` to choose another place), and the entries that
-  let instances sharing one data folder coordinate GPU memory live in `run/gpu`
-  there. Instances with different data folders share a registry only when you set
-  `LOCALM_GPU_REGISTRY_DIR` to the same folder. Separately, when the separate GPU
-  probe cannot answer on Windows, localm no longer loads PyTorch inside the server
-  as a fallback, which could stall it for tens of seconds; it reads the GPU from
-  `nvidia-smi` and the Windows display-adapter registry instead.
+- **Portable mode keeps its temp files in its own root folder, and running instances
+  find each other directly.** For a self-contained install, temporary files go to
+  `tmp` in the data folder. Settings > General > Temporary files (or the
+  `LOCALM_TMPDIR` variable) chooses the data folder, the system temp folder, or any
+  folder you name. Instances that share a GPU no longer use a registry file: each
+  running instance is found from the operating system's list of listening ports,
+  asked directly what model it holds, and asked directly to release it, which it
+  does only after the asking instance confirms the request. Instances serving a
+  network address are not detected. `LOCALM_PEER_DETECTION=off` turns detection
+  off. Separately, when the separate GPU probe cannot answer on Windows, localm no
+  longer loads PyTorch inside the server as a fallback, which could stall it for
+  tens of seconds; it reads the GPU from `nvidia-smi` and the Windows
+  display-adapter registry instead.
 - **The installer waits for Enter after you answer "Replace it?".** Typing Y on the
   existing-environment question in `setup.bat` used to continue at once, unlike every
   other question; its other yes/no questions now wait for Enter as well.

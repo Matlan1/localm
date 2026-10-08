@@ -934,19 +934,18 @@ class VramSizingMixin:
 
     def _vram_holder_hint(self) -> str:
         """Best-effort: name a concrete live sibling localm instance holding
-        VRAM on this same GPU device (port, model, how long ago it last
-        updated), via the cross-install GPU-coordination registry
-        (``localm.gpu_registry``) - instead of the generic "another GPU app"
-        text. Falls back to the generic text when the registry is empty or
-        unavailable or the lookup itself fails; purely a diagnostic, never
+        VRAM on this same GPU device (port, model), found by asking the running
+        instances directly (``localm.gpu_registry``) - instead of the generic
+        "another GPU app" text. Falls back to the generic text when no peer is
+        found or the lookup itself fails; purely a diagnostic, never
         load-blocking.
 
         ``gpu_registry.list_gpu_peers()`` always excludes THIS process
         (matched by pid), so ``holder`` below is always a genuinely different
         instance. When no external holder is found,
-        :func:`gpu_registry.own_entry` reports whether THIS process's own
-        registry entry explains it (e.g. this server has another model
-        resident while loading a second one)."""
+        :func:`gpu_registry.own_status` reports whether THIS process's own live
+        status explains it (e.g. this server has another model resident while
+        loading a second one)."""
         try:
             from localm.config import load_config
             from localm.discover import last_gpu_reading, resolve_load_gpu_index
@@ -960,14 +959,12 @@ class VramSizingMixin:
                 None,
             )
             if holder is not None:
-                age = gpu_registry.age_seconds(holder.get("updated_at"))
-                age_txt = f"{int(age)}s ago" if age is not None else "recently"
                 return (
                     f"another localm instance (port {holder.get('port')}) is "
-                    f"running '{holder.get('model')}' (active {age_txt}) - "
+                    f"running '{holder.get('model')}' - "
                     f"POST /v1/models/unload on port {holder.get('port')} to free it."
                 )
-            self_entry = gpu_registry.own_entry()
+            self_entry = gpu_registry.own_status()
             if (self_entry is not None and self_entry.get("model")
                     and int(self_entry.get("gpu_index", 0) or 0) == idx):
                 return (

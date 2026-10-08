@@ -33,10 +33,11 @@ from pathlib import Path
 _test_home_dir = tempfile.mkdtemp(prefix="localm_test_home_")
 os.environ["LOCALM_HOME"] = _test_home_dir
 
-# Keep the cross-install GPU registry inside the throwaway home, so a test that
-# reaches gpu_registry.registry_dir() unpatched can never see, or ask to unload,
-# a real instance of the user running the suite. Inherited by spawned subprocesses.
-os.environ["LOCALM_GPU_REGISTRY_DIR"] = os.path.join(_test_home_dir, "gpu-registry")
+# Peer detection off by default for the suite, so a test that reaches
+# gpu_registry.list_gpu_peers() unpatched can never see, or ask to unload, a real
+# localm instance of the user running the suite. Tests of detection turn it on.
+# Inherited by spawned subprocesses.
+os.environ["LOCALM_PEER_DETECTION"] = "off"
 
 # Disable the media-plugin legacy-workflow migration for the whole suite. The
 # flag is inherited by spawned subprocesses.

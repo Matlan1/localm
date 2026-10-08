@@ -286,17 +286,14 @@ class TestNoExtraProbes:
         from localm.inference import http_server
         written, calls = {}, []
         monkeypatch.setattr(http_server, "_gpu_coord",
-                            {"instance_id": "i", "token": "t", "port": 1})
+                            {"instance_id": "i", "port": 1})
         monkeypatch.setattr(http_server, "_engines", engines or {})
         monkeypatch.setattr(http_server, "_active_model_name", active)
         monkeypatch.setattr(http_server, "_loaded_model_identities", lambda: [])
         monkeypatch.setattr(http_server, "_model_file_size", lambda n: None)
-        monkeypatch.setattr("localm.gpu_registry.registry_dir", lambda: "unused")
-        monkeypatch.setattr("localm.gpu_registry.write_entry",
-                            lambda _d, **kw: written.update(kw))
         with _box(gpus, _registry(gpus), calls=calls, last=last), \
                 mock.patch("localm.config.load_config", return_value=cfg):
-            http_server._gpu_registry_sync()
+            written.update(http_server._gpu_status() or {})
         return written["gpu_index"], len(calls)
 
     @pytest.mark.parametrize("split,main,last,expected", [
@@ -351,18 +348,15 @@ class TestHfLoadsHonourOneChosenGpu:
 
         written = {}
         monkeypatch.setattr(http_server, "_gpu_coord",
-                            {"instance_id": "i", "token": "t", "port": 1})
+                            {"instance_id": "i", "port": 1})
         monkeypatch.setattr(http_server, "_engines", {})
         monkeypatch.setattr(http_server, "_active_model_name", None)
         monkeypatch.setattr(http_server, "_loaded_model_identities", lambda: [])
-        monkeypatch.setattr("localm.gpu_registry.registry_dir", lambda: "unused")
-        monkeypatch.setattr("localm.gpu_registry.write_entry",
-                            lambda _d, **kw: written.update(kw))
         with _box(gpus, _registry(gpus)), \
                 mock.patch("localm.config.load_config", return_value=cfg):
             device_map = _cuda_device_map(torch, cfg)
             probe = asyncio.run(_probe())
-            http_server._gpu_registry_sync()
+            written.update(http_server._gpu_status() or {})
         assert set(device_map["max_memory"]) == {1, "cpu"}
         assert probe.free == 20 * GiB
         assert written["gpu_index"] == 1
@@ -453,7 +447,7 @@ class TestCooperativeUnloadAsksDefaultSplitPeers:
         asked = []
         peers = [{"instance_id": "p", "port": 2, "model": "x", "gpu_index": peer_gpu}]
         monkeypatch.setattr(http_server, "_gpu_coord",
-                            {"instance_id": "i", "token": "t", "port": 1})
+                            {"instance_id": "i", "port": 1})
         monkeypatch.setattr("localm.gpu_registry.list_gpu_peers",
                             lambda exclude_self_id=None: peers)
         monkeypatch.setattr("localm.gpu_registry.request_cooperative_unload",

@@ -3,9 +3,8 @@
 SHARING): localm/peer_routing.py + GET/POST/DELETE /v1/models/{id}/peer-route
 + the /v1/chat/completions and /v1/completions forwarding short-circuit.
 
-Mirrors tests/test_gpu_registry.py's isolation pattern: every test redirects
-gpu_registry.registry_dir() to a per-test tmp_path so nothing ever touches the
-real machine-wide registry.
+Every test replaces gpu_registry.list_gpu_peers with a fake list of running
+instances (see _write_peer), so nothing ever talks to a real localm instance.
 """
 
 from __future__ import annotations
@@ -21,34 +20,48 @@ from localm.inference import http_server as hs
 from localm.inference.http_server import create_app
 
 
+# The fake "running instances" gpu_registry.list_gpu_peers reports in one test.
+_PEERS: list = []
+
+
 @pytest.fixture(autouse=True)
 def _isolated_state(tmp_path, monkeypatch):
-    """Redirect the gpu-registry location to a throwaway directory, clear
-    hs._gpu_coord, and clear peer_routing's in-memory route table - all reset
-    before AND after every test so nothing leaks between tests in this file
-    or into any other test file sharing the same process."""
+    """Replace live peer detection with the fake list, clear hs._gpu_coord, and
+    clear peer_routing's in-memory route table - all reset before AND after every
+    test so nothing leaks between tests in this file or into any other test file
+    sharing the same process. Yields a throwaway directory the tests pass to
+    _write_peer as a namespace."""
     d = tmp_path / "gpu"
-    monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
+    _PEERS.clear()
+
+    def _live(*, exclude_self_id=None, timeout=0.7):
+        return [dict(p) for p in _PEERS
+                if p["instance_id"] != exclude_self_id and p["pid"] != os.getpid()]
+
+    monkeypatch.setattr(gpu_registry, "list_gpu_peers", _live)
     hs._gpu_coord = None
     peer_routing._ROUTES.clear()
     yield d
     hs._gpu_coord = None
     peer_routing._ROUTES.clear()
+    _PEERS.clear()
 
 
-def _write_peer(d, iid, port, model=None, pid=None, host="127.0.0.1"):
+def _write_peer(d, iid, port, model=None, pid=None, host="127.0.0.1",
+                scheme="http", models=None):
     if pid is None:
         pid = os.getpid() + 1
-    return gpu_registry.write_entry(
-        d, instance_id=iid, pid=pid, port=port, host=host,
-        scheme="http", model=model, vram_estimate_bytes=None, gpu_index=0,
-        coordination_token=f"tok-{iid}")
+    peer = {"instance_id": iid, "pid": pid, "port": port, "host": host,
+            "scheme": scheme, "model": model, "vram_estimate_bytes": None,
+            "gpu_index": 0}
+    if models is not None:
+        peer["models"] = models
+    _PEERS.append(peer)
+    return peer
 
 
 def _make_live(monkeypatch):
-    monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(gpu_registry, "_try_whoami",
-                        lambda scheme, port, iid, timeout: True)
+    """Fake peers are live by construction; kept so each test still says so."""
 
 
 class _FakePeerServer:
@@ -145,7 +158,6 @@ class TestRegistryNameAndAliases:
 class TestFindOffer:
     def test_exact_name_match(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         _write_peer(d, "peer1", 9101, model="my-model")
         _make_live(monkeypatch)
         peer = peer_routing.find_offer("my-model", frozenset())
@@ -153,7 +165,6 @@ class TestFindOffer:
 
     def test_alias_match(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         _write_peer(d, "peer2", 9102, model="Peer-Chosen-Name")
         _make_live(monkeypatch)
         peer = peer_routing.find_offer("canonical", frozenset({"Peer-Chosen-Name"}))
@@ -161,7 +172,6 @@ class TestFindOffer:
 
     def test_casefolded_match(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         _write_peer(d, "peer3", 9103, model="MyModel")
         _make_live(monkeypatch)
         peer = peer_routing.find_offer("mymodel", frozenset())
@@ -169,14 +179,12 @@ class TestFindOffer:
 
     def test_no_match_returns_none(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         _write_peer(d, "peer4", 9104, model="unrelated-model")
         _make_live(monkeypatch)
         assert peer_routing.find_offer("my-model", frozenset()) is None
 
     def test_peer_with_no_model_is_never_offered(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         _write_peer(d, "peer5", 9105, model=None)
         _make_live(monkeypatch)
         assert peer_routing.find_offer("my-model", frozenset()) is None
@@ -366,7 +374,6 @@ class TestPeerOfferEndpoint:
 
     def test_live_peer_with_matching_model_is_offered(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         _write_peer(d, "peer-off", 9201, model="shared-model")
         _make_live(monkeypatch)
         client = self._client()
@@ -393,7 +400,6 @@ class TestAcceptPeerRouteEndpoint:
 
     def test_accept_stores_the_route(self, tmp_path, monkeypatch):
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         peer = _FakePeerServer(key="peer-key-123")
         _write_peer(d, "peer-acc", peer.port, model="shared-model")
         _make_live(monkeypatch)
@@ -411,9 +417,7 @@ class TestAcceptPeerRouteEndpoint:
     def test_stale_offer_is_rejected(self, tmp_path, monkeypatch):
         """The client's offer names a peer that is no longer live/matching -
         the endpoint must re-verify, not trust the caller."""
-        d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
-        # No peer registered at all - "peer-acc" never existed on this box.
+        # No peer running at all - "peer-acc" never existed on this box.
         client = self._client()
         r = client.post("/v1/models/shared-model/peer-route",
                         headers=self._write_hdr(client),
@@ -437,7 +441,6 @@ class TestAcceptPeerRouteEndpoint:
         read from/compared against gpu_registry's coordination_token at all.
         This endpoint has no coordination_token concept."""
         d = tmp_path / "reg"
-        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
         _write_peer(d, "peer-tok", 9302, model="shared-model")
         _make_live(monkeypatch)
         client = self._client()
@@ -890,11 +893,8 @@ class TestPeerSchemeIsPinnedToo:
 
     def test_a_peer_whose_scheme_smuggles_an_authority_is_never_offered(
             self, _isolated_state, monkeypatch):
-        gpu_registry.write_entry(
-            _isolated_state, instance_id="peer-smuggle", pid=os.getpid() + 1,
-            port=9601, host="127.0.0.1",
-            scheme="http://attacker.example/collect?x", model="shared-model",
-            vram_estimate_bytes=None, gpu_index=0, coordination_token="t")
+        _write_peer(_isolated_state, "peer-smuggle", 9601, model="shared-model",
+                    scheme="http://attacker.example/collect?x")
         _make_live(monkeypatch)
         assert peer_routing.find_offer("shared-model", frozenset()) is None
 
@@ -1140,11 +1140,8 @@ class TestForwardBody:
 
 
 def _write_peer_models(d, iid, port, models):
-    return gpu_registry.write_entry(
-        d, instance_id=iid, pid=os.getpid() + 1, port=port, host="127.0.0.1",
-        scheme="http", model=models[0]["name"] if models else None,
-        vram_estimate_bytes=None, gpu_index=0,
-        coordination_token=f"tok-{iid}", models=models)
+    return _write_peer(d, iid, port, model=models[0]["name"] if models else None,
+                       models=models)
 
 
 class TestFileIdentityMatching:

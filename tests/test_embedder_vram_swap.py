@@ -88,7 +88,6 @@ def _drive_evict(monkeypatch, *, free=None):
     thread (it blocks on fut.result) while unload_all_models runs on the server
     loop - the real cross-thread path, not a mock of it."""
     monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": free})
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
 
     async def _drive():
         hs._server_loop = asyncio.get_running_loop()

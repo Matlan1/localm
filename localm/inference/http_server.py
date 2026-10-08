@@ -153,8 +153,7 @@ _switch_cancel: Optional["threading.Event"] = None
 # None until lifespan startup populates it, and ONLY for a real, non-isolated,
 # instances.advertise()'d server (app.state.instance_id set, instance_isolated
 # falsy). A plain create_app() test app or an --isolated run never sets it, so it
-# never touches the shared machine-wide registry (zero-daemon). Shape:
-# {"instance_id", "port", "host", "scheme", "token"}.
+# is invisible to sibling instances. Shape: {"instance_id", "port", "host", "scheme"}.
 _gpu_coord: Optional[dict] = None
 
 # The coder plugin's SessionManager, published as a module global (mirroring
@@ -336,23 +335,21 @@ def _loaded_model_identities() -> list:
             for name, eng in list(_engines.items()) if getattr(eng, "loaded", False)]
 
 
-def _gpu_registry_sync() -> None:
-    """Best-effort: write this instance's current model/VRAM state to the
-    cross-install GPU coordination registry (called on every successful model
-    load/unload, plus a periodic heartbeat). A no-op when this instance is not
-    registered for coordination (``_gpu_coord`` unset - a plain test app or an
-    ``--isolated`` run never reaches the shared registry directory at all).
+def _gpu_status() -> Optional[dict]:
+    """This instance's live coordination status, served to sibling instances on
+    ``GET /v1/instances/status`` and read by the in-process VRAM-holder hint:
+    ``{instance_id, pid, port, host, scheme, model, models,
+    vram_estimate_bytes, gpu_index}``. None when this instance does not
+    coordinate (``_gpu_coord`` unset: a plain test app or an ``--isolated`` run).
 
-    Never raises into the caller: a registry write failure must not break the
-    model load/unload it is piggybacking on (RULE 5 - logged, not silenced)."""
-    global _gpu_coord
-    if not _gpu_coord:
-        return
+    Blocking: sizes the loaded model files and may probe the GPU driver for the
+    device index, so call it off the event loop. Never raises."""
+    coord = _gpu_coord
+    if not coord:
+        return None
     try:
         import os as _os
-        from localm import gpu_registry
         loaded = [n for n, e in list(_engines.items()) if getattr(e, "loaded", False)]
-        # ``model`` names a loaded model whenever one is, active or not.
         model = _active_model_name or (loaded[0] if loaded else None)
         vram_bytes = None
         sizes = [_model_file_size(n) for n in (loaded or ([model] if model else []))]
@@ -361,22 +358,21 @@ def _gpu_registry_sync() -> None:
         gpu_index = _loaded_gpu_index(model)
         if gpu_index is None:
             gpu_index = _current_gpu_index()
-        gpu_registry.write_entry(
-            gpu_registry.registry_dir(),
-            instance_id=_gpu_coord["instance_id"],
-            pid=_os.getpid(),
-            port=_gpu_coord.get("port"),
-            host=_gpu_coord.get("host") or "127.0.0.1",
-            scheme=_gpu_coord.get("scheme") or "http",
-            model=model,
-            vram_estimate_bytes=vram_bytes,
-            gpu_index=gpu_index,
-            coordination_token=_gpu_coord["token"],
-            models=_loaded_model_identities(),
-        )
+        return {
+            "instance_id": coord["instance_id"],
+            "pid": _os.getpid(),
+            "port": coord.get("port"),
+            "host": coord.get("host") or "127.0.0.1",
+            "scheme": coord.get("scheme") or "http",
+            "model": model,
+            "models": _loaded_model_identities(),
+            "vram_estimate_bytes": vram_bytes,
+            "gpu_index": gpu_index,
+        }
     except Exception as e:
         from localm.debuglog import logger as _dbg
-        _dbg.debug("gpu-registry sync failed (continuing): %s", e)
+        _dbg.debug("gpu status unavailable (continuing): %s", e)
+        return None
 
 
 def _load_gpu_indices() -> set:
@@ -397,7 +393,7 @@ def _load_gpu_indices() -> set:
     scripts/check_hygiene.py enforces.
 
     Known limitation: a registry entry
-    advertises ONE ``gpu_index`` per instance (see _gpu_registry_sync), so a
+    advertises ONE ``gpu_index`` per instance (see _gpu_status), so a
     SPLIT peer is represented only by its main device. A split peer whose main
     device is outside our set is therefore still skipped even though it may hold
     VRAM on a device we do use. Widening the entry to a device LIST is a registry
@@ -697,9 +693,6 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                                budget.pinned if budget is not None else frozenset(),
                                evictions, allowed=healing is None,
                                deferred=attempt.deferred_to_backend)
-        # Off the event loop: registry file I/O and, with a non-zero
-        # main_gpu_index, a GPU driver probe.
-        await loop.run_in_executor(None, _gpu_registry_sync)
         return {"status": "loaded", "model": name,
                 **_gpu_placement_fields(new_engine)}
 
@@ -1877,7 +1870,7 @@ async def unload_all_models(*, force: bool = False) -> dict:
     Extracted from the ``POST /v1/models/unload`` route so it has exactly ONE
     implementation, reused by two callers with two different auth models: the
     owner-scoped ``/v1/models/unload`` route (``MODELS_WRITE``), and the
-    coordination-token-gated ``POST /v1/instances/cooperate-unload`` (a
+    requester-vouched ``POST /v1/instances/cooperate-unload`` (a
     sibling localm instance asking THIS one to free VRAM - multi-instance GPU
     coordination, see ``localm.gpu_registry``). Behavior is unchanged from the
     original inline implementation."""
@@ -1951,10 +1944,6 @@ async def unload_all_models(*, force: bool = False) -> dict:
         result["confirm_required"] = confirm_required
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
-    # Cross-install GPU coordination: reflect the now-empty/changed state for a
-    # sibling's next eviction decision. No-op when not registered. Offloaded:
-    # registry file I/O plus, with a non-zero main_gpu_index, a GPU driver probe.
-    await loop.run_in_executor(None, _gpu_registry_sync)
     return result
 
 
@@ -2117,8 +2106,6 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     result = {"status": "unloaded", "model": name, "was_active": False}
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
-    # Offloaded for the same reason as this function's other executor hops above.
-    await loop.run_in_executor(None, _gpu_registry_sync)
     return result
 
 
@@ -2207,9 +2194,6 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     result = {"status": "unloaded", "model": name, "was_active": was_active}
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
-    # Offloaded: registry file I/O plus, with a non-zero main_gpu_index, a GPU
-    # driver probe - keep it OFF the event loop (same as the heartbeat).
-    await loop.run_in_executor(None, _gpu_registry_sync)
     return result
 
 
@@ -2495,11 +2479,6 @@ async def _idle_unload_once(ttl: int) -> bool:
             _dbg.info("idle-unload: freed %s after %ds idle (ttl=%ds); it reloads "
                       "on the next request", engine.display_name, idle_s, ttl)
             unloaded_any = True
-            # Cross-install GPU coordination: reflect the freed model. No-op when
-            # not registered. Offloaded: _gpu_registry_sync does filesystem I/O
-            # (and, when a non-zero main_gpu_index is set, a GPU probe via
-            # _current_gpu_index) - keep it OFF the event loop.
-            await loop.run_in_executor(None, _gpu_registry_sync)
 
     return unloaded_any
 
@@ -2543,59 +2522,6 @@ async def _mmproj_backfill_once() -> None:
     except Exception as e:
         _dbg.debug("vision-projector backfill failed (continuing): %s", e)
 
-
-async def _gpu_registry_heartbeat_loop(*, interval: float = 20.0) -> None:
-    """Keep this instance's cross-install GPU-coordination entry fresh
-    (~every 20s), matching the ``_idle_unload_loop`` pattern above. Only
-    started when this instance is actually registered for coordination (see
-    ``_gpu_coord`` / the lifespan startup below) - a plain test app or an
-    ``--isolated`` run never starts this loop at all. A transient failure is
-    logged, not fatal (RULE 5): the entry just ages until the next tick, and a
-    stale entry is skipped by a peer's own liveness+identity check anyway.
-
-    *interval* is the tick period; override it only in tests, same as
-    ``start_executor_saturation_watch``'s ``poll``.
-
-    THE WARNING IS LOGGED ONCE PER FAILURE RUN, then throttled to DEBUG. A
-    heartbeat failure is usually PERSISTENT (an unwritable registry path, a
-    wedged driver probe), and an unconditional warning on a 20s tick emits
-    three lines a minute WITH A FULL TRACEBACK for the life of the server -
-    which buries the one line that mattered and trains people to ignore the
-    log. This is the same log-once-then-throttle shape the VRAM-probe daemon
-    and the executor saturation watch already use.
-
-    A SUCCESS RESETS IT, so a LATER, separate failure warns again rather than
-    being silenced forever by the first one. That is the half a plain
-    "only ever warn once" flag gets wrong.
-
-    The catch stays broad ON PURPOSE - this loop must never be the thing that
-    kills the server - and that is unchanged. Only the volume is. Note that
-    ``asyncio.CancelledError`` derives from ``BaseException``, not
-    ``Exception``, so shutdown still cancels this loop rather than being
-    swallowed and logged as a heartbeat failure."""
-    warned = False
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            # Offloaded off the event loop: _gpu_registry_sync does filesystem I/O
-            # (registry write) and, when a non-zero main_gpu_index is configured, a
-            # GPU driver probe - either could otherwise stall the single loop and
-            # freeze the whole WebUI on this 20s tick while the box is idle.
-            await asyncio.get_running_loop().run_in_executor(None, _gpu_registry_sync)
-        except Exception as e:
-            from localm.debuglog import logger as _dbg
-            if not warned:
-                _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
-                warned = True
-            else:
-                # No exc_info on the throttled line: the traceback is what makes
-                # the repeat expensive, and it is identical to the one already
-                # logged above. The type and message still identify a CHANGE of
-                # cause, which is the only new information a repeat can carry.
-                _dbg.debug("gpu-registry heartbeat still failing (%s: %s)",
-                           type(e).__name__, e)
-        else:
-            warned = False
 
 
 async def _hang_heartbeat_loop() -> None:
@@ -4469,15 +4395,14 @@ def _make_lifespan():
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("hang alarm startup failed (continuing): %s", e)
 
-        # Cross-install GPU/VRAM coordination (see localm.gpu_registry): register
-        # this instance in the machine-wide registry, but ONLY for a real,
+        # Cross-install GPU/VRAM coordination (see localm.gpu_registry): a real,
         # non-isolated, advertise()'d server (instance_id + port/scheme are set by
-        # advertise() before uvicorn accepts connections; a bare create_app() test
-        # app or --isolated run never sets instance_id, so this is a no-op that
-        # never touches the shared directory). Best-effort: a failure must never
-        # block startup (RULE 5: logged, not silenced).
+        # advertise() before uvicorn accepts connections) publishes its live status
+        # to sibling instances that ask for it. A bare create_app() test app or an
+        # --isolated run never sets instance_id, so it stays invisible. Nothing is
+        # written to disk. Best-effort: a failure must never block startup (RULE 5:
+        # logged, not silenced).
         global _gpu_coord
-        gpu_task = None
         _instance_id = getattr(app.state, "instance_id", None)
         _isolated = getattr(app.state, "instance_isolated", False)
         if _instance_id and not _isolated:
@@ -4487,24 +4412,12 @@ def _make_lifespan():
                     "port": getattr(app.state, "instance_port", None),
                     "host": getattr(app.state, "bind_host", None) or "127.0.0.1",
                     "scheme": getattr(app.state, "instance_scheme", None) or "http",
-                    "token": secrets.token_urlsafe(32),
                 }
-                app.state.gpu_coordination_token = _gpu_coord["token"]
-                # Sweep entries left behind by an instance that crashed or was
-                # killed without reaching its own shutdown cleanup below -
-                # same reap-before-register pattern as instances.advertise().
                 from localm import gpu_registry
-                gpu_registry.reap_stale(gpu_registry.registry_dir(),
-                                        self_id=_instance_id)
-                # Offloaded for the same reason as the heartbeat's own call
-                # below: a non-zero main_gpu_index makes this probe the GPU
-                # driver, which can take seconds on this box.
-                await asyncio.get_running_loop().run_in_executor(
-                    None, _gpu_registry_sync)
-                gpu_task = asyncio.create_task(_gpu_registry_heartbeat_loop())
+                gpu_registry.set_local_status_provider(_gpu_status)
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.debug("gpu-registry startup failed (continuing without "
+                _dbg.debug("gpu coordination startup failed (continuing without "
                           "cross-instance GPU coordination): %s", e)
                 _gpu_coord = None
 
@@ -4552,12 +4465,6 @@ def _make_lifespan():
                 if _hang_alarm_instance is hang_alarm:
                     _hang_alarm_instance = None
                     _hang_dump_loop = None
-            if gpu_task is not None:
-                gpu_task.cancel()
-                try:
-                    await gpu_task
-                except asyncio.CancelledError:
-                    pass
             if mmproj_task is not None:
                 mmproj_task.cancel()
                 try:
@@ -4565,18 +4472,12 @@ def _make_lifespan():
                 except asyncio.CancelledError:
                     pass
             if _gpu_coord is not None:
-                # Best-effort: a crash just leaves the entry on disk. No live
-                # peer ever trusts it (list_gpu_peers' pid+identity check), and
-                # the next instance to start reaps it via gpu_registry.reap_stale
-                # above (same philosophy as instances.py's own registry cleanup).
                 try:
                     from localm import gpu_registry
-                    gpu_registry.remove_entry(
-                        gpu_registry.entry_path(gpu_registry.registry_dir(),
-                                                _gpu_coord["instance_id"]))
+                    gpu_registry.set_local_status_provider(None)
                 except Exception as e:
                     from localm.debuglog import logger as _dbg
-                    _dbg.debug("gpu-registry cleanup on shutdown failed: %s", e)
+                    _dbg.debug("gpu coordination cleanup on shutdown failed: %s", e)
                 _gpu_coord = None
             # The loop is stopping - stop advertising it so a late off-loop caller
             # falls back to the safe "no loop" path instead of a dead loop reference

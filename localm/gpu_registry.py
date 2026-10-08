@@ -1,381 +1,371 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cross-INSTALL GPU/VRAM coordination registry (multi-instance cooperation).
+"""Live detection of, and communication with, the other localm instances running on
+this machine (multi-instance GPU/VRAM cooperation).
 
-``localm/instances.py`` discovers and attaches localm instances of the SAME
-install, with its registry under ``<LOCALM_HOME>/run/``. Two different install
-locations have two different ``LOCALM_HOME``s and cannot see each other there,
-while still contending for the same physical GPU. By default this module keeps
-its entries inside the install's own data dir (``<LOCALM_HOME>/run/gpu``), so
-nothing is written outside it. Pointing ``LOCALM_GPU_REGISTRY_DIR`` of every
-install at one shared directory is the explicit opt-in that lets installs with
-different data dirs see each other.
+Nothing is written to disk. Running instances are found the way any program finds
+a listening server: the operating system's table of listening TCP ports
+(:mod:`localm.listeners`), narrowed to the range localm claims
+(``config.PORT_RANGE``), then asked who they are (``GET /whoami``, must answer
+``app == "localm"``) and what they hold (``GET /v1/instances/status``). When the
+socket table cannot be read, every port in the range is probed instead.
 
-Liveness reuses :func:`localm.instances.pid_alive`, and identity reuses the
-``GET /whoami`` handshake (``app == "localm"`` AND the instance_id matches the
-registry entry) via :func:`localm.instances._try_whoami`, so a stale entry whose
-port got reused by an unrelated process is never trusted here either. The
-registry file itself uses the same atomic temp-file + ``os.replace`` +
-0600-permission pattern as :func:`localm.instances.register_instance`.
+A peer asks another instance to release its VRAM with
+``POST /v1/instances/cooperate-unload``. There is no shared secret: the request
+names the requester (its instance id, port and scheme) and carries a random
+request id the requester remembers for :data:`REQUEST_TTL_S` seconds. The
+receiving instance calls the requester back on ``POST /v1/instances/vouch`` with
+that id and acts only if the requester confirms it really sent it. A caller that
+never received the id cannot get a confirmation.
 
-Entry schema (one JSON file per instance, ``<dir>/<instance_id>.json``)::
-
-    {instance_id, pid, port, host, scheme, model, models, vram_estimate_bytes,
-     gpu_index, updated_at, coordination_token}
-
-``coordination_token`` is a per-instance secret (``secrets.token_urlsafe(32)``,
-minted fresh at startup) - a SEPARATE credential from the real API key / shell
-token / instance attach token. It authenticates exactly one narrow action:
-``POST /v1/instances/cooperate-unload`` on ITS OWN instance, which unloads
-that instance's currently-loaded model(s), and grants nothing else.
-
-Everything here is advisory and best-effort: every public function returns a
-safe default rather than raising, failures are logged at debug, and nothing is
+Everything here is advisory and best-effort: every public function returns a safe
+default rather than raising, failures are logged at debug, and nothing is
 escalated into a harder failure than "no peer was found"."""
 
 from __future__ import annotations
 
-import json
 import os
 import secrets
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
+import socket
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
 
 from localm.debuglog import logger
-from localm.instances import pid_alive, read_entry as _read_entry, _try_whoami
+from localm.instances import fetch_any_whoami, fetch_whoami
 
-APP_NAME = "localm"
+REQUEST_TTL_S = 30.0
+DETECTION_ENV = "LOCALM_PEER_DETECTION"
+STATUS_PATH = "/v1/instances/status"
+UNLOAD_PATH = "/v1/instances/cooperate-unload"
+VOUCH_PATH = "/v1/instances/vouch"
+
+# Dialled for a listener that accepts any address.
+_LOOPBACK = "127.0.0.1"
+_WILDCARDS = ("0.0.0.0", "::", "*", "")
+_SCHEMES = ("http", "https")
+_FALLBACK_PROBE_WORKERS = 100
+_FALLBACK_PROBE_TIMEOUT = 0.5
 
 
 # ------------------------------------------------------------------ #
-#  Paths + ids                                                        #
+#  This instance's own live status                                    #
 # ------------------------------------------------------------------ #
 
-REGISTRY_DIR_ENV = "LOCALM_GPU_REGISTRY_DIR"
+_status_provider: Optional[Callable[[], Optional[dict]]] = None
 
 
-def registry_dir() -> Path:
-    """The rendezvous directory for GPU coordination.
-
-    ``LOCALM_GPU_REGISTRY_DIR`` is the explicit opt-in to a directory shared with
-    other installs. Without it the registry lives inside this install's own data
-    dir (``<LOCALM_HOME>/run/gpu``): nothing is written outside the install, and
-    the instances sharing this data dir still see each other. Installs with
-    different data dirs see each other only through a shared override."""
-    override = os.environ.get(REGISTRY_DIR_ENV)
-    if override:
-        return Path(override)
-    from localm.config import home_dir
-    return home_dir() / "run" / "gpu"
+def set_local_status_provider(provider: Optional[Callable[[], Optional[dict]]]) -> None:
+    """Register (or with None, clear) the callable that reports THIS instance's
+    live coordination status: ``{instance_id, pid, port, host, scheme, model,
+    models, vram_estimate_bytes, gpu_index}``, or None when this instance does not
+    coordinate (a plain test app or an ``--isolated`` run)."""
+    global _status_provider
+    _status_provider = provider
 
 
-def entry_path(directory, instance_id: str) -> Path:
-    return Path(directory) / f"{instance_id}.json"
-
-
-def new_coordination_token() -> str:
-    """A per-instance, single-purpose secret - NEVER the real API key, shell
-    token, or instance attach token. Knowing it grants exactly one thing:
-    telling THIS instance to unload its own model(s)."""
-    return secrets.token_urlsafe(32)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def age_seconds(updated_at_iso: Optional[str]) -> Optional[float]:
-    """Seconds since *updated_at_iso* (an entry's ``updated_at``), or None if
-    it is missing/unparseable. Best-effort - used only for a human-readable
-    diagnostic, never a liveness decision."""
-    if not updated_at_iso:
+def own_status() -> Optional[dict]:
+    """This instance's live coordination status from the registered provider, or
+    None when none is registered, the provider reports none, or it raises."""
+    provider = _status_provider
+    if provider is None:
         return None
     try:
-        then = datetime.fromisoformat(updated_at_iso)
-        if then.tzinfo is None:
-            then = then.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - then).total_seconds())
+        status = provider()
+    except Exception as e:
+        logger.debug("gpu_registry: local status provider failed: %s", e)
+        return None
+    return status if isinstance(status, dict) else None
+
+
+# ------------------------------------------------------------------ #
+#  Detecting running instances                                        #
+# ------------------------------------------------------------------ #
+
+def _dial_address(address: str) -> Optional[str]:
+    """The loopback literal to dial for a listener bound to *address*, or None
+    when it listens on a non-loopback interface only."""
+    if address in _WILDCARDS:
+        return _LOOPBACK
+    try:
+        import ipaddress
+        return address if ipaddress.ip_address(address).is_loopback else None
+    except ValueError:
+        return None
+
+
+def _probe_range(lo: int, hi: int) -> list:
+    """Every port in ``lo..hi`` accepting a TCP connection on loopback, as
+    ``(address, port)`` pairs. The fallback when the socket table is unreadable."""
+    def _try(port: int):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(_FALLBACK_PROBE_TIMEOUT)
+        try:
+            s.connect((_LOOPBACK, port))
+            return (_LOOPBACK, port)
+        except OSError:
+            return None
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=_FALLBACK_PROBE_WORKERS) as ex:
+        return [r for r in ex.map(_try, range(lo, hi + 1)) if r is not None]
+
+
+def candidate_endpoints() -> list:
+    """``(dial address, port)`` for every listening TCP port inside localm's claimed
+    range that this machine could dial on loopback, one per port. Empty when
+    ``LOCALM_PEER_DETECTION=off``."""
+    if os.environ.get(DETECTION_ENV, "").strip().lower() == "off":
+        return []
+    from localm.config import PORT_RANGE
+    from localm.listeners import listening_endpoints
+    lo, hi = PORT_RANGE
+    endpoints = listening_endpoints()
+    if endpoints is None:
+        found = _probe_range(lo, hi)
+    else:
+        found = [(a, p) for a, p in endpoints if lo <= p <= hi]
+    chosen: dict = {}
+    for address, port in found:
+        dial = _dial_address(address)
+        if dial is not None and port not in chosen:
+            chosen[port] = dial
+    return [(dial, port) for port, dial in sorted(chosen.items())]
+
+
+def fetch_status(scheme: str, port: int, timeout: float,
+                 dial: str = _LOOPBACK) -> Optional[dict]:
+    """``GET /v1/instances/status`` on *dial*:*port*: the peer's live coordination
+    status, or None when it is unreachable, refuses, or answers something that is
+    not a status object."""
+    import requests
+    from localm.bindhost import url_host
+    url = f"{scheme}://{url_host(dial)}:{int(port)}{STATUS_PATH}"
+    try:
+        from localm.tls import requests_verify
+        verify = requests_verify(url)
+    except FileNotFoundError:
+        verify = False
+    except Exception as e:
+        logger.debug("gpu_registry: could not determine TLS verification for %s: %s",
+                     url, e)
+        return None
+    try:
+        r = requests.get(url, timeout=timeout, verify=verify, allow_redirects=False)
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _probe_peer(endpoint: tuple, exclude_self_id: Optional[str],
+                timeout: float) -> Optional[dict]:
+    dial, port = endpoint
+    for scheme in _SCHEMES:
+        ident = fetch_any_whoami(scheme, port, timeout, dial)
+        if ident is not None:
+            break
+    else:
+        return None
+    iid = ident.get("instance_id")
+    if not iid or iid == exclude_self_id:
+        return None
+    status = fetch_status(scheme, port, timeout, dial)
+    if status is None or status.get("instance_id") != iid:
+        return None
+    try:
+        if int(status.get("pid", -1)) == os.getpid():
+            return None
     except (TypeError, ValueError):
         return None
+    return {**status, "host": dial, "scheme": scheme, "port": port,
+            "root_dir": ident.get("root_dir"), "mode": ident.get("mode"),
+            "version": ident.get("version")}
 
 
-def _lock_down_dir(path: Path) -> None:
-    # A mkdir failure surfaces: write_entry catches OSError, logs it, returns None.
-    path.mkdir(parents=True, exist_ok=True)
+def list_gpu_peers(*, exclude_self_id: Optional[str] = None,
+                   timeout: float = 0.7) -> list:
+    """The other localm instances running on this machine that coordinate GPU use,
+    found live: each candidate port inside localm's range must answer
+    ``GET /whoami`` as localm and ``GET /v1/instances/status`` as the same
+    instance. Excludes *exclude_self_id* and, unconditionally, THIS process.
+
+    Each peer is the status object (``instance_id``, ``pid``, ``model``,
+    ``models``, ``vram_estimate_bytes``, ``gpu_index``) plus ``host`` (the loopback
+    address dialled), ``scheme``, ``port`` and the ``root_dir`` / ``mode`` /
+    ``version`` from its ``/whoami`` answer. Sorted by instance id.
+
+    Best-effort and advisory: any failure yields the peers found so far."""
     try:
-        os.chmod(path, 0o700)
-    except OSError as e:
-        # 0700 is best-effort: chmod no-ops on Windows and can fail on some
-        # filesystems. The registry still functions without it.
-        logger.debug("gpu_registry: could not chmod 0700 %s: %s", path, e)
-
-
-# ------------------------------------------------------------------ #
-#  Registry read/write                                               #
-# ------------------------------------------------------------------ #
-
-def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
-                host: str, scheme: str, model: Optional[str],
-                vram_estimate_bytes: Optional[int], gpu_index: int,
-                coordination_token: str,
-                models: Optional[list] = None) -> Optional[Path]:
-    """Atomically write/update this instance's coordination entry (temp file +
-    ``os.replace``, 0600 - same pattern as ``instances.register_instance``).
-
-    *models* lists every model this instance has loaded, each as
-    ``{"name", "path", "size", "sha256"}`` (any of the last three may be None),
-    so a sibling can match one by file identity rather than by name alone.
-    *model* is the active model, or a loaded one when none is active.
-
-    Best-effort: a write failure is logged and returns None rather than
-    raising, so it never breaks the model load/unload it piggybacks on."""
-    d = Path(directory)
-    try:
-        _lock_down_dir(d)
-        entry = {
-            "instance_id": instance_id,
-            "pid": pid,
-            "port": port,
-            "host": host,
-            "scheme": scheme,
-            "model": model,
-            "vram_estimate_bytes": vram_estimate_bytes,
-            "gpu_index": gpu_index,
-            "updated_at": _now_iso(),
-            "coordination_token": coordination_token,
-        }
-        if models is not None:
-            entry["models"] = models
-        path = entry_path(d, instance_id)
-        # The entry carries the coordination token, so it gets the same
-        # Windows-aware restriction as instances.register_instance.
-        from localm.config import atomic_write_private
-        ok = atomic_write_private(path, json.dumps(entry, indent=2))
-        if not ok:
-            # Reported with this subsystem's own name on top of the warning
-            # restrict_file_perms already emits. Not fatal: the retry on the
-            # destination has already run by here.
-            logger.debug("gpu_registry: could not restrict perms on the temp "
-                         "file for %s", path)
-        return path
-    except OSError as e:
-        logger.debug("gpu_registry: failed to write entry for %s: %s", instance_id, e)
-        return None
-
-
-def remove_entry(path) -> None:
-    """Best-effort delete of one entry - call only with a path THIS process
-    owns (its own entry). A crash leaves the file to be aged out by
-    :func:`reap_stale` or the liveness check in :func:`list_gpu_peers`."""
-    try:
-        Path(path).unlink()
-    except OSError:
-        pass
-
-
-def list_entries(directory) -> list:
-    """All readable registry entries under *directory* (each gains a
-    ``_path`` key). A missing directory yields ``[]`` (the normal
-    zero-daemon-required case - no peer has ever registered here); a corrupt
-    file is skipped, not raised on."""
-    d = Path(directory)
-    if not d.is_dir():
-        return []
-    out = []
-    for f in sorted(d.glob("*.json")):
-        entry = _read_entry(f)
-        if entry is not None:
-            entry["_path"] = str(f)
-            out.append(entry)
-    return out
-
-
-# ------------------------------------------------------------------ #
-#  Liveness + reaping                                                 #
-# ------------------------------------------------------------------ #
-
-def reap_stale(directory, *, self_id: Optional[str] = None) -> list:
-    """Remove entries whose process is confirmed gone (or whose file is
-    corrupt). Never reaps *self_id*. Liveness reuses
-    :func:`localm.instances.pid_alive` (conservative: an undeterminable PID
-    counts as alive, so a doubtful entry is never reaped). PID reuse is handled
-    by :func:`list_gpu_peers`'s /whoami handshake, not here."""
-    d = Path(directory)
-    if not d.is_dir():
-        return []
-    removed = []
-    for f in sorted(d.glob("*.json")):
-        entry = _read_entry(f)
-        if entry is None:
-            try:
-                f.unlink()
-                removed.append(f.stem)
-            except OSError:
-                pass
-            continue
-        if entry.get("instance_id") == self_id:
-            continue
-        try:
-            alive = pid_alive(int(entry.get("pid", -1) or -1))
-        except (TypeError, ValueError):
-            alive = False
-        if not alive:
-            try:
-                f.unlink()
-                removed.append(entry.get("instance_id", f.stem))
-            except OSError:
-                pass
-    return removed
-
-
-def list_gpu_peers(directory=None, *, exclude_self_id: Optional[str] = None,
-                    timeout: float = 0.7) -> list:
-    """Live, identity-verified peer instances (excluding *exclude_self_id*
-    and, unconditionally, THIS process).
-
-    Self-exclusion is by PID as well as by *exclude_self_id*: a registry entry
-    whose pid equals ``os.getpid()`` is this process's own, so a caller with no
-    instance_id to hand (e.g. the backend's VRAM-sizing layer,
-    ``llamacpp/_sizing.py::_vram_holder_hint``) still never sees itself as a
-    peer. See :func:`own_entry` for finding that self entry back when the caller
-    needs to name it.
-
-    A registry entry is NEVER trusted on file contents alone: a candidate must
-    pass BOTH a process-liveness check (:func:`localm.instances.pid_alive`) AND
-    a ``GET /whoami`` handshake confirming ``app == "localm"`` and the
-    instance_id matches (:func:`localm.instances._try_whoami`), so a stale entry
-    whose port got reused by an unrelated process is never treated as a live
-    peer.
-
-    Best-effort and advisory only: any failure reading the directory yields
-    ``[]`` rather than raising, logged at debug."""
-    d = Path(directory) if directory is not None else registry_dir()
-    try:
-        entries = list_entries(d)
+        endpoints = candidate_endpoints()
     except Exception as e:
-        logger.debug("gpu_registry: failed to list peers under %s: %s", d, e)
+        logger.debug("gpu_registry: could not list candidate ports: %s", e)
+        return []
+    if not endpoints:
         return []
 
-    self_pid = os.getpid()
-    peers = []
-    for entry in entries:
-        iid = entry.get("instance_id")
-        if not iid or iid == exclude_self_id:
-            continue
+    def _one(endpoint: tuple) -> Optional[dict]:
         try:
-            pid = int(entry.get("pid", -1) or -1)
-        except (TypeError, ValueError):
-            continue
-        if pid == self_pid:
-            continue
-        if not pid_alive(pid):
-            continue
-        port = entry.get("port")
-        if not port:
-            continue
-        scheme = entry.get("scheme") or "http"
-        try:
-            verified = _try_whoami(scheme, int(port), iid, timeout)
+            return _probe_peer(endpoint, exclude_self_id, timeout)
         except Exception as e:
-            logger.debug("gpu_registry: whoami probe failed for %s: %s", iid, e)
-            verified = False
-        if verified:
-            peers.append(entry)
+            logger.debug("gpu_registry: probing %s failed: %s", endpoint, e)
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(len(endpoints), 8)) as ex:
+        peers = [p for p in ex.map(_one, endpoints) if p is not None]
+    peers.sort(key=lambda p: str(p.get("instance_id") or ""))
     return peers
 
 
-def own_entry(directory=None) -> Optional[dict]:
-    """This process's own registry entry, matched by pid (never by
-    instance_id - a caller may not have one at hand; see
-    :func:`list_gpu_peers`'s docstring), or None if this process has not
-    registered one or the directory cannot be read.
-
-    Unlike :func:`list_gpu_peers`, no liveness or ``/whoami`` check runs: a pid
-    equal to ``os.getpid()`` is this process by definition.
-
-    Best-effort: a read failure yields None rather than raising, logged at
-    debug."""
-    d = Path(directory) if directory is not None else registry_dir()
-    try:
-        entries = list_entries(d)
-    except Exception as e:
-        logger.debug("gpu_registry: failed to read own entry under %s: %s", d, e)
-        return None
-    self_pid = os.getpid()
-    for entry in entries:
-        try:
-            pid = int(entry.get("pid", -1) or -1)
-        except (TypeError, ValueError):
-            continue
-        if pid == self_pid:
-            return entry
-    return None
-
-
 # ------------------------------------------------------------------ #
-#  Cooperative unload request                                        #
+#  Asking a peer to release its VRAM, and vouching for the ask        #
 # ------------------------------------------------------------------ #
 
-def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
-    """Ask a verified peer to release its own VRAM via its own
-    ``POST /v1/instances/cooperate-unload``, authenticated with the PEER's OWN
-    ``coordination_token`` (never our real API key / shell token - a separate,
-    single-purpose credential the peer itself minted and stored only in its
-    own 0600 registry entry).
+# request id -> (peer instance id, monotonic expiry). Guarded by _pending_lock.
+_pending: dict = {}
+_pending_lock = threading.Lock()
 
-    Refuses before building the request unless the entry's ``host``/``scheme``
-    pass :func:`localm.peer_routing.is_routable_peer_endpoint` (dialled
-    address loopback AND scheme ``http``/``https``): :func:`list_gpu_peers`'s
-    ``/whoami`` handshake verifies loopback only, so an entry naming any other
-    host or a scheme smuggling its own authority was never checked and must
-    not receive the credential. See
-    test_a_non_loopback_host_is_refused_without_sending_the_token and
-    test_a_scheme_smuggling_an_authority_is_refused_without_sending_the_token.
 
-    Advisory and best-effort: any failure (missing port/token, network error,
-    timeout, non-200, malformed body) returns False. A caller must treat False
-    exactly like "no peer available"."""
-    port = peer.get("port")
-    token = peer.get("coordination_token")
-    if not port or not token:
+def _remember_request(request_id: str, peer_instance_id: str) -> None:
+    now = time.monotonic()
+    with _pending_lock:
+        for rid in [r for r, (_p, exp) in _pending.items() if exp <= now]:
+            _pending.pop(rid, None)
+        _pending[request_id] = (peer_instance_id, now + REQUEST_TTL_S)
+
+
+def _forget_request(request_id: str) -> None:
+    with _pending_lock:
+        _pending.pop(request_id, None)
+
+
+def vouch_for(request_id: object, asker_instance_id: object) -> bool:
+    """Whether THIS instance really sent the unload request *request_id* to the
+    instance *asker_instance_id*, and it is still within :data:`REQUEST_TTL_S`.
+    Confirms at most once: the id is consumed."""
+    if not isinstance(request_id, str) or not isinstance(asker_instance_id, str):
         return False
-    host = peer.get("host")
-    scheme = peer.get("scheme") or "http"
+    with _pending_lock:
+        entry = _pending.get(request_id)
+        if entry is None:
+            return False
+        peer_id, expiry = entry
+        if peer_id != asker_instance_id or expiry <= time.monotonic():
+            return False
+        _pending.pop(request_id, None)
+        return True
 
-    from localm.peer_routing import is_routable_peer_endpoint
-    if not is_routable_peer_endpoint(host, scheme):
-        logger.warning(
-            "gpu_registry: refusing cooperative-unload to peer %r at "
-            "unroutable endpoint scheme=%r host=%r; not sending the "
-            "coordination_token because only a loopback address over http "
-            "or https has had its occupant identity-verified",
-            peer.get("instance_id"), scheme, host)
-        return False
 
-    from localm.bindhost import self_connect_host, url_host
-    _h = url_host(self_connect_host(host))
-    url = f"{scheme}://{_h}:{int(port)}/v1/instances/cooperate-unload"
-
+def _post_json(url: str, body: dict, timeout: float):
+    """POST *body* as JSON to a loopback *url*; the response, or None on a
+    transport error."""
     import requests
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
     except FileNotFoundError:
-        # CA file absent: fall back to verify=False. _h above is loopback.
         verify = False
     except Exception as e:
-        logger.debug("gpu_registry: could not determine TLS verification for %s: %s", url, e)
-        return False
-
+        logger.debug("gpu_registry: could not determine TLS verification for %s: %s",
+                     url, e)
+        return None
     try:
-        r = requests.post(url, json={"coordination_token": token},
-                          headers={"X-LocalM-Coordination-Token": token},
-                          timeout=timeout, verify=verify)
+        return requests.post(url, json=body, timeout=timeout, verify=verify,
+                             allow_redirects=False)
     except requests.RequestException as e:
-        logger.debug("gpu_registry: cooperate-unload request to %s failed: %s", url, e)
+        logger.debug("gpu_registry: POST %s failed: %s", url, e)
+        return None
+
+
+def _loopback_url(scheme: str, host: object, port: int, path: str) -> Optional[str]:
+    """``scheme://host:port/path`` for a peer endpoint that is loopback over
+    http or https, or None for anything else."""
+    from localm.peer_routing import is_routable_peer_endpoint
+    if not is_routable_peer_endpoint(host, scheme):
+        return None
+    from localm.bindhost import self_connect_host, url_host
+    return f"{scheme}://{url_host(self_connect_host(host))}:{int(port)}{path}"
+
+
+def verify_requester(requester: object, request_id: object, self_instance_id: str,
+                     *, timeout: float = 2.0) -> bool:
+    """Whether *requester* (``{instance_id, port, scheme}``, from a received unload
+    request) is a live localm instance that confirms it sent *request_id* to this
+    instance. Dials loopback only, and sends nothing unless *requester* is
+    well-formed."""
+    if not isinstance(requester, dict) or not isinstance(request_id, str) or not request_id:
+        return False
+    iid, port, scheme = (requester.get("instance_id"), requester.get("port"),
+                         requester.get("scheme") or "http")
+    if (not isinstance(iid, str) or not iid or iid == self_instance_id
+            or isinstance(port, bool) or not isinstance(port, int)
+            or not 0 < port < 65536 or scheme not in _SCHEMES):
+        return False
+    if fetch_whoami(scheme, port, iid, timeout) is None:
+        return False
+    url = _loopback_url(scheme, _LOOPBACK, port, VOUCH_PATH)
+    if url is None:
+        return False
+    r = _post_json(url, {"request_id": request_id,
+                         "asker_instance_id": self_instance_id}, timeout)
+    if r is None or r.status_code != 200:
+        return False
+    try:
+        data = r.json()
+    except ValueError:
+        return False
+    return isinstance(data, dict) and data.get("vouched") is True
+
+
+def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
+    """Ask a live *peer* (as returned by :func:`list_gpu_peers`) to release its own
+    VRAM via ``POST /v1/instances/cooperate-unload``. The request names this
+    instance and carries a fresh request id this instance will confirm when the
+    peer calls back (see the module docstring).
+
+    Refuses before sending anything unless the peer's ``host``/``scheme`` are
+    loopback over http or https, and unless this instance itself coordinates
+    (:func:`own_status`).
+
+    Advisory and best-effort: any failure (no own status, no port, network error,
+    timeout, non-200, malformed body) returns False. A caller must treat False
+    exactly like "no peer available"."""
+    port = peer.get("port")
+    peer_id = peer.get("instance_id")
+    if not port or not isinstance(peer_id, str) or not peer_id:
+        return False
+    me = own_status()
+    if not me or not me.get("instance_id") or not me.get("port"):
+        return False
+    scheme = peer.get("scheme") or "http"
+    url = _loopback_url(scheme, peer.get("host"), port, UNLOAD_PATH)
+    if url is None:
+        logger.warning(
+            "gpu_registry: refusing cooperative-unload to peer %r at unroutable "
+            "endpoint scheme=%r host=%r; only a loopback address over http or "
+            "https has had its occupant identity-verified",
+            peer_id, scheme, peer.get("host"))
+        return False
+    request_id = secrets.token_urlsafe(24)
+    _remember_request(request_id, peer_id)
+    try:
+        r = _post_json(url, {
+            "requester": {"instance_id": me["instance_id"], "port": int(me["port"]),
+                          "scheme": me.get("scheme") or "http"},
+            "request_id": request_id}, timeout)
+    finally:
+        _forget_request(request_id)
+    if r is None:
         return False
     if r.status_code != 200:
-        logger.debug("gpu_registry: cooperate-unload to %s returned %s", url, r.status_code)
+        logger.debug("gpu_registry: cooperate-unload to %s returned %s", url,
+                     r.status_code)
         return False
     try:
         data = r.json()
