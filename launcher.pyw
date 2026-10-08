@@ -20,7 +20,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -91,6 +91,19 @@ def _ellipsize(text: str, limit: int = _STATUS_MAX_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _log_launcher_error(text: str) -> None:
+    """Append *text* with a timestamp to ``logs/launcher.log`` in the data
+    folder. Best-effort: a failed write is ignored, the status line already
+    shows the message."""
+    try:
+        logs = SETTINGS_FILE.parent / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        with open(logs / "launcher.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+    except OSError:
+        pass
 
 
 def logo_parts() -> tuple:
@@ -662,6 +675,7 @@ class Launcher(tk.Tk):
                                font=("Segoe UI", 9), width=_STATUS_MAX_CHARS,
                                anchor="w")
         self.status.pack(side="left", padx=12)
+        self.status.bind("<Button-1>", lambda _e: self._show_full_status())
         self.launch_btn = ttk.Button(footer, text="Launch", style="Launch.TButton",
                                      command=self._launch)
         self.launch_btn.pack(side="right")
@@ -919,11 +933,32 @@ class Launcher(tk.Tk):
         self.port_entry.configure(
             state="normal" if mode in ("gui", "serve") else "disabled")
 
+    _status_full = ""
+
     def status_msg(self, text: str, error: bool = False) -> None:
-        # Ellipsize so a long line cannot widen the window (the label is fixed
-        # width; the full text is still available as a tooltip-style title).
-        self.status.configure(text=_ellipsize(text),
-                              fg="#e25d5d" if error else GREEN)
+        """Show *text* on the status line, ellipsized so a long line cannot
+        widen the window. A clipped line is clickable and shows the full text;
+        an error is also appended to logs/launcher.log."""
+        self._status_full = text
+        shown = _ellipsize(text)
+        self.status.configure(text=shown, fg="#e25d5d" if error else GREEN,
+                              cursor="hand2" if shown != text else "")
+        if error:
+            _log_launcher_error(text)
+
+    def _show_full_status(self) -> None:
+        """Click on a clipped status line: show its full text and put it on the
+        clipboard."""
+        full = self._status_full
+        if not full or _ellipsize(full) == full:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(full)
+        except tk.TclError:
+            pass
+        messagebox.showinfo("LocaLM", "\n\n".join((full, "(Copied to the clipboard.)")),
+                            parent=self)
 
     def _gen_key(self) -> None:
         a = _auth()

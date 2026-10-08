@@ -253,6 +253,20 @@ def _window_profile_dir() -> Optional[str]:
         return None
 
 
+def _allow_window_downloads(webview) -> Optional[str]:
+    """Turn on file downloads in the app window, so an ``<a download>`` click
+    (chat export, saving an image or a coder result) opens a save dialog.
+    pywebview cancels every download otherwise.
+
+    Returns None on success, or a one-line description of why the setting could
+    not be applied (a pywebview without the setting). Never raises."""
+    try:
+        webview.settings["ALLOW_DOWNLOADS"] = True
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
 def _window_start_kwargs() -> dict:
     """The webview.start() arguments that decide where the app window keeps its
     profile: a folder in the data folder on Windows and Linux, private mode when
@@ -402,6 +416,11 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
     start_kwargs = _window_start_kwargs()
+    download_problem = _allow_window_downloads(webview)
+    if download_problem:
+        logger.warning("appface: downloads could not be enabled in the app "
+                       "window (%s); the Export button and other file saves "
+                       "will do nothing in it", download_problem)
     try:
         # One step under the lock close_native_window() reads under: either the
         # stop is seen here and no window is published, or the window is

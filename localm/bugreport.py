@@ -969,7 +969,15 @@ def build_report(summary: str, reason: str = "",
     ctx = context or {}
     native = ctx.get("native_trace")
     if native:
-        parts += ["", "## Native fault trace", "```", _scrub_secrets(str(native))[:4000], "```"]
+        parts += ["", "## Native fault trace", "```",
+                  trim_trace_for_report(_scrub_secrets(str(native))), "```"]
+    prior_exit = ctx.get("prior_exit")
+    if isinstance(prior_exit, dict) and isinstance(prior_exit.get("exit_code"), int):
+        from localm._mp_spawn import describe_exit_code
+        parts += ["", "## Process exit",
+                  f"- Exit code: {describe_exit_code(prior_exit['exit_code'], posix=False)}"]
+        if isinstance(prior_exit.get("watched_for_s"), (int, float)):
+            parts.append(f"- Watched for: {prior_exit['watched_for_s']}s")
     tail = ctx.get("recent_log_tail")
     if tail:
         parts += ["", "## Recent log (tail)", "```",
@@ -1807,6 +1815,52 @@ def _crash_trace_path(d, instance_id: Optional[str]):
     return d / "server-crash-trace.txt"
 
 
+def _exit_path_for_marker(d, marker):
+    """The exit record the crash-recovery watchdog wrote for *marker*'s
+    instance (``server-crash-exit.<instance_id>.json``: the dead process's pid
+    and exit code), derived from the marker's own filename."""
+    name = marker.name
+    prefix, suffix = "server-crash.", ".marker"
+    if name.startswith(prefix) and name.endswith(suffix) and name != "server-crash.marker":
+        return d / f"server-crash-exit.{name[len(prefix):-len(suffix)]}.json"
+    return d / "server-crash-exit.json"
+
+
+_TRACE_REPORT_LIMIT = 4000
+
+
+def trim_trace_for_report(text: str) -> str:
+    """*text* cut to the report limit by dropping the MIDDLE, so both the first
+    fault header and the end of the file (where the process stopped writing)
+    survive. Debug mode keeps the whole trace."""
+    from localm.debuglog import debug_enabled
+    if debug_enabled() or len(text) <= _TRACE_REPORT_LIMIT:
+        return text
+    head = _TRACE_REPORT_LIMIT // 3
+    tail = _TRACE_REPORT_LIMIT - head
+    dropped = len(text) - head - tail
+    return "\n".join((text[:head], f"... ({dropped} characters omitted) ...",
+                      text[-tail:]))
+
+
+def _read_exit_record(d, marker) -> dict:
+    """The watchdog's exit record for *marker*'s instance, consumed (deleted)
+    on read. ``{}`` when there is none or it is unreadable. Never raises."""
+    import json
+    path = _exit_path_for_marker(d, marker)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if not isinstance(data, dict) or not isinstance(data.get("exit_code"), int):
+        return {}
+    return data
+
+
 def _trace_path_for_marker(d, marker):
     """The native-fault-trace file that belongs WITH *marker* (same instance),
     derived from the marker's own filename rather than a second parameter, so a
@@ -2087,9 +2141,26 @@ def _raw_tail_truncation_signal(home=None, pid=None) -> "tuple[bool, str]":
         return False, ""
 
 
+def _first_chance_codes(native_trace: str) -> "list[str]":
+    """The distinct exception codes of the non-fatal fault headers in
+    *native_trace*, in order of first appearance."""
+    seen: "list[str]" = []
+    for line in (native_trace or "").splitlines():
+        m = _WIN_FAULT_LINE_RE.match(line.strip())
+        if m is None:
+            continue
+        code = _WIN_FAULT_CODE_RE.match(m.group(1).strip())
+        if code is not None and not _is_fatal_fault_description(m.group(1)):
+            label = "0x" + code.group(1).lower()
+            if label not in seen:
+                seen.append(label)
+    return seen
+
+
 def _classify_prior_death(*, native_trace: str, hang_trace: str,
                           raw_tail_truncated: bool,
-                          raw_tail_last_line: str) -> "tuple[str, str]":
+                          raw_tail_last_line: str,
+                          exit_code: Optional[int] = None) -> "tuple[str, str]":
     """(summary, reason) for report_failure(), classified from the evidence
     actually collected. Pure function (no I/O) so the classification logic is
     directly unit-testable without real marker/log/trace files.
@@ -2105,12 +2176,31 @@ def _classify_prior_death(*, native_trace: str, hang_trace: str,
     _fatal_fault_line). Such a trace is still attached to the report - it is
     context, just not the cause."""
     fatal_fault = _fatal_fault_line(native_trace)
+    exit_text = ""
+    exit_is_fault = False
+    if exit_code is not None:
+        from localm._mp_spawn import death_was_a_native_fault, describe_exit_code
+        exit_text = describe_exit_code(exit_code, posix=False)
+        exit_is_fault = death_was_a_native_fault(exit_code, posix=False)
     if fatal_fault:
         return (
             f"localm server crashed - native fault captured: {fatal_fault}",
             "a native crash was caught by the fault handler; see the captured "
             "trace below for the exact fault and thread/frame."
+            + (f" The process exited with {exit_text}." if exit_text else "")
         )
+    if exit_is_fault:
+        survived = _first_chance_codes(native_trace)
+        trace_note = (
+            f"The fault handler's trace holds only first-chance exception(s) "
+            f"{', '.join(survived)} that the process survived, and no fatal "
+            f"fault line, so the fault that ended the process was not recorded "
+            f"by the handler." if survived else
+            "The fault handler recorded no fatal fault line.")
+        return (
+            f"localm server crashed - exited with {exit_text}",
+            f"the previous server process ended with exit code {exit_text}, "
+            f"a native fault. {trace_note}")
     if raw_tail_truncated and _NATIVE_OP_LINE_RE.match(raw_tail_last_line.strip()):
         return (
             "localm server crashed during model load/construction "
@@ -2206,8 +2296,11 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
                 "privacy mode", marker.name)
             return None
         ctx = {"prior_run": info}
+        exit_record = _read_exit_record(d, marker)
+        if exit_record:
+            ctx["prior_exit"] = exit_record
         if trace:
-            ctx["native_trace"] = trace[:4000]
+            ctx["native_trace"] = trim_trace_for_report(trace)
         # Attach the crashed run's own log tail (matched by pid) so the report is
         # actionable even with no native trace (window-close / OS-kill leave none).
         tail, log_unavailable = _recent_log_tail_result(home, pid=info.get("pid"))
@@ -2231,7 +2324,8 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
             home, pid=info.get("pid"))
         summary, reason = _classify_prior_death(
             native_trace=trace, hang_trace=hang,
-            raw_tail_truncated=raw_truncated, raw_tail_last_line=raw_last_line)
+            raw_tail_truncated=raw_truncated, raw_tail_last_line=raw_last_line,
+            exit_code=exit_record.get("exit_code"))
         return report_failure(
             summary=summary, reason=reason,
             error=None, context=ctx, interactive=interactive)
@@ -2287,7 +2381,7 @@ def _report_one_stopping_record(d, record, home, interactive: bool):
                 "not reported: privacy mode", record.name)
             return None
         ctx = {"prior_run": dict(info, stage="stopping"),
-               "native_trace": text[:4000]}
+               "native_trace": trim_trace_for_report(text)}
         tail, log_unavailable = _recent_log_tail_result(home, pid=info.get("pid"))
         if tail:
             ctx["recent_log_tail"] = tail
