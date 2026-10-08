@@ -658,3 +658,27 @@ def test_secret_credential_keys_ignore_values_override(tmp_path, monkeypatch):
     assert fields["hf_token"]["is_set"] is True
     assert fields["hf_token"]["env_set"] is False
     assert "default" not in fields["hf_token"]
+
+
+def test_the_gui_shows_the_schema_help_text_for_every_setting():
+    """The settings page renders its help from app/i18n-en.js, not from the
+    schema, so the two must say the same thing."""
+    import re
+    from pathlib import Path
+
+    js = (Path(ss.__file__).parent / "plugins" / "gui" / "static" / "app"
+          / "i18n-en.js").read_text(encoding="utf-8")
+    shown = {
+        key: json.loads('"' + raw + '"')
+        for key, raw in re.findall(
+            r'"settings\.field\.(\w+)\.help": "((?:[^"\\]|\\.)*)"', js)
+    }
+
+    def camel(key):
+        head, *rest = key.split("_")
+        return head + "".join(part.capitalize() for part in rest)
+
+    compared = [f for f in ss.CORE_FIELDS if camel(f.key) in shown]
+    assert len(compared) > 50, "the GUI help strings were not found"
+    drifted = [f.key for f in compared if shown[camel(f.key)] != f.help]
+    assert not drifted, f"GUI help differs from the schema help for: {drifted}"

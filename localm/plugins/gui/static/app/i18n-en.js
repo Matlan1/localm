@@ -1377,7 +1377,7 @@ export const I18N_EN = {
   "settings.field.nGpuLayers.label": "GPU layers (next load)",
   "settings.field.nGpuLayers.help": "Model layers to run on the GPU. 99 puts the whole model on the GPU; lower it if you run out of VRAM.",
   "settings.field.nCpuMoe.label": "MoE expert layers on CPU",
-  "settings.field.nCpuMoe.help": "Mixture-of-Experts models only. Keeps this many layers' expert weights in system RAM instead of VRAM, so the model fits in far less VRAM at about the same speed. 0 turns it off.",
+  "settings.field.nCpuMoe.help": "MoE models only. Keeps this many layers' expert weights in system RAM, not VRAM. 0 is automatic: with auto-sized GPU layers, only as many as needed, before a whole layer moves to the CPU.",
   "settings.field.nGpuLayersAuto.label": "Auto-size GPU layers from VRAM",
   "settings.field.nGpuLayersAuto.help": "When GPU layers is left at 99 (all), fit as many as free VRAM allows at load: an oversized model runs some layers on CPU and still loads instead of being refused. An explicit value is kept.",
   "settings.field.mtpEnabled.label": "Multi-Token Prediction (MTP)",
