@@ -10,97 +10,27 @@ of the resulting contract:
     treats a registry miss as proof a model file is not held elsewhere, which is
     sound only while every server it reaches shares one registry - so widening
     snapshot would turn a safety refusal into a false all-clear.
-  * `instances.list_machine_peers` covers the OTHER installs, read from the
-    machine-wide coordination registry that every non-isolated server writes
-    whatever its LOCALM_HOME.
+  * `instances.list_machine_peers` covers the OTHER installs, found by detecting
+    the running instances directly (listening ports in localm's range that answer
+    /whoami and /v1/instances/status), whatever their LOCALM_HOME.
 
-The /whoami probes here run against a REAL loopback HTTP server rather than a
-patched `requests`, so the identity handshake gating every listed peer is
+The peers here are REAL loopback HTTP servers (tests/_peer_servers.py) rather than
+a patched `requests`, so the identity handshake gating every listed peer is
 exercised for real - including the impostor cases, where the responder is a
-genuine HTTP server answering with the wrong instance_id or a non-localm app
-name.
+genuine HTTP server answering with a non-localm app name or no status.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
-import sys
-import threading
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm import gpu_registry, instances
-
-_COORD_TOKEN = "coordination-token-that-must-never-be-returned"
-
-
-class _WhoamiHandler(BaseHTTPRequestHandler):
-    payload: dict = {}
-
-    def do_GET(self):
-        if self.path != "/whoami":
-            self.send_response(404)
-            self.end_headers()
-            return
-        body = json.dumps(self.payload).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        return
-
-
-@contextmanager
-def whoami_server(payload: dict):
-    """A real HTTP server answering GET /whoami with *payload*, on a throwaway
-    loopback port. Yields the port."""
-    handler = type("_Bound", (_WhoamiHandler,), {"payload": payload})
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield srv.server_address[1]
-    finally:
-        srv.shutdown()
-        srv.server_close()
-        thread.join(timeout=5)
-
-
-def write_gpu_entry(gpu_dir, *, instance_id, port, pid,
-                    host="127.0.0.1", scheme="http"):
-    """A machine-wide coordination entry, matching gpu_registry.write_entry's
-    schema.
-
-    *pid* is required and must be a live process OTHER than this one: an entry
-    is dropped when its pid is gone, and also when its pid is the caller's own
-    (that entry is the caller, not a peer). Passing os.getpid() here makes every
-    peer vanish, which every negative assertion in this file would still pass
-    on. Use the `foreign_pid` fixture."""
-    gpu_dir.mkdir(parents=True, exist_ok=True)
-    entry = {
-        "instance_id": instance_id,
-        "pid": pid,
-        "port": port,
-        "host": host,
-        "scheme": scheme,
-        "model": None,
-        "vram_estimate_bytes": None,
-        "gpu_index": 0,
-        "updated_at": "2026-09-01T00:00:00+00:00",
-        "coordination_token": _COORD_TOKEN,
-    }
-    (gpu_dir / f"{instance_id}.json").write_text(json.dumps(entry),
-                                                 encoding="utf-8")
-    return instance_id
+from tests._peer_servers import enable_detection, localm_whoami, peer_server
 
 
 def write_home_entry(home, *, instance_id, port=59999, pid=None,
@@ -115,40 +45,6 @@ def write_home_entry(home, *, instance_id, port=59999, pid=None,
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(entry), encoding="utf-8")
     return instance_id
-
-
-@pytest.fixture
-def foreign_pid():
-    """A REAL live process that is not this one, for a peer entry's pid."""
-    proc = subprocess.Popen([sys.executable, "-c",
-                             "import time; time.sleep(120)"])
-    try:
-        assert proc.pid != os.getpid()
-        yield proc.pid
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=15)
-
-
-@pytest.fixture
-def gpu_dir(tmp_path, monkeypatch):
-    """Point the machine-wide registry at a throwaway dir, so a test never reads
-    or writes the real one shared by every localm on the box."""
-    d = tmp_path / "machine-registry"
-    d.mkdir()
-    monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
-    return d
-
-
-def a_dead_pid():
-    """A pid that has genuinely exited."""
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
-    proc.wait(timeout=30)
-    return proc.pid
 
 
 # --------------------------------------------------------------------------- #
@@ -170,15 +66,13 @@ class TestSnapshotStaysHomeScoped:
             "selfclient.read_model_file_hold reads a registry miss as proof a "
             "model file is not held elsewhere")
 
-    def test_snapshot_ignores_the_machine_wide_registry(self, tmp_path, gpu_dir,
-                                                       foreign_pid):
+    def test_snapshot_ignores_instances_detected_on_the_machine(self, tmp_path,
+                                                                monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        with whoami_server({"app": "localm", "instance_id": "cccc000000000003",
-                            "root_dir": "/proj/other", "mode": "full",
-                            "version": "9.9.9"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc000000000003", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("cccc000000000003", root_dir="/proj/other",
+                                       version="9.9.9")) as srv:
+            enable_detection(monkeypatch, srv.port)
             assert instances.snapshot(home) == []
 
 
@@ -187,15 +81,12 @@ class TestSnapshotStaysHomeScoped:
 # --------------------------------------------------------------------------- #
 
 class TestListMachinePeers:
-    def test_finds_a_peer_registered_under_another_home(self, tmp_path, gpu_dir,
-                                                        foreign_pid):
+    def test_finds_a_running_instance_of_another_install(self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        with whoami_server({"app": "localm", "instance_id": "cccc000000000003",
-                            "root_dir": "/proj/other", "mode": "full",
-                            "version": "9.9.9"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc000000000003", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("cccc000000000003", root_dir="/proj/other",
+                                       version="9.9.9")) as srv:
+            enable_detection(monkeypatch, srv.port)
 
             peers = instances.list_machine_peers(home)
 
@@ -204,22 +95,16 @@ class TestListMachinePeers:
         assert peer["instance_id"] == "cccc000000000003"
         assert peer["same_install"] is False
         assert peer["alive"] is True
-        assert peer["port"] == port
-        # root_dir/mode/version come from the handshake: the coordination entry
-        # records none of them.
+        assert peer["port"] == srv.port
+        # root_dir/mode/version come from the instance's own /whoami answer.
         assert peer["root_dir"] == "/proj/other"
         assert peer["mode"] == "full"
         assert peer["version"] == "9.9.9"
 
-    def test_a_forged_host_is_never_dialed_verification_always_probes_loopback(
-            self, tmp_path, gpu_dir, foreign_pid, monkeypatch):
-        """A coordination entry's ``host`` is attacker-controlled (any
-        same-user process can write into the machine-wide registry), so the
-        identity handshake must never be sent to it - mirrors
-        gpu_registry.list_gpu_peers, which already probes loopback
-        unconditionally. Spies on the real requests.get (rather than
-        replacing it) so a genuine loopback peer is still exercised for real
-        in the same test."""
+    def test_only_ever_dials_loopback(self, tmp_path, monkeypatch):
+        """Detection dials addresses on this machine's loopback only, never a host
+        named by anything a peer says. Spies on the real requests.get so a
+        genuine loopback peer is still exercised for real in the same test."""
         import requests as requests_module
         home = tmp_path / "homeA"
         home.mkdir()
@@ -231,93 +116,86 @@ class TestListMachinePeers:
             return real_get(url, *a, **kw)
 
         monkeypatch.setattr(requests_module, "get", spy_get)
-
-        with whoami_server({"app": "localm", "instance_id": "cccc00000000000f",
-                            "root_dir": "/proj/other", "mode": "full",
-                            "version": "9.9.9"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc00000000000f", port=port,
-                            pid=foreign_pid, host="attacker.example")
+        with peer_server(localm_whoami("cccc00000000000f", root_dir="/proj/other",
+                                       host="attacker.example")) as srv:
+            enable_detection(monkeypatch, srv.port)
 
             peers = instances.list_machine_peers(home)
 
-        assert not any("attacker.example" in u for u in calls), (
-            f"a forged registry entry made this server dial an attacker-named "
-            f"host: {calls}")
-        # The forged host is ignored, not merely refused: the genuine
-        # loopback listener the attacker's port number happens to name is
-        # still found and verified, exactly as a truthful entry would be.
-        assert len(peers) == 1
-        assert peers[0]["instance_id"] == "cccc00000000000f"
+        assert calls, "no probe was sent"
+        assert all(u.startswith(("http://127.0.0.1:", "https://127.0.0.1:",
+                                 "http://[::1]:", "https://[::1]:")) for u in calls), calls
+        assert len(peers) == 1 and peers[0]["host"] == "127.0.0.1"
 
-    def test_excludes_an_instance_this_home_already_lists(self, tmp_path, gpu_dir,
-                                                          foreign_pid):
+    def test_excludes_an_instance_this_home_already_lists(self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
-        with whoami_server({"app": "localm", "instance_id": "dddd000000000004",
-                            "root_dir": "/proj/mine", "mode": "api"}) as port:
-            write_home_entry(home, instance_id="dddd000000000004", port=port)
-            write_gpu_entry(gpu_dir, instance_id="dddd000000000004", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("dddd000000000004", root_dir="/proj/mine",
+                                       mode="api")) as srv:
+            write_home_entry(home, instance_id="dddd000000000004", port=srv.port)
+            enable_detection(monkeypatch, srv.port)
 
             assert instances.list_machine_peers(home) == [], (
                 "an instance of THIS install must not be listed twice")
 
-    def test_rejects_a_responder_whose_instance_id_does_not_match(self, tmp_path,
-                                                                  gpu_dir,
-                                                                  foreign_pid):
+    def test_rejects_a_responder_that_is_not_localm(self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        with whoami_server({"app": "localm", "instance_id": "not-the-same-id",
-                            "root_dir": "/proj/other", "mode": "full"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="eeee000000000005", port=port,
-                            pid=foreign_pid)
+        with peer_server({"app": "something-else",
+                          "instance_id": "ffff000000000006"}) as srv:
+            enable_detection(monkeypatch, srv.port)
+
+            assert instances.list_machine_peers(home) == []
+
+    def test_rejects_a_responder_whose_status_names_another_instance(
+            self, tmp_path, monkeypatch):
+        home = tmp_path / "homeA"
+        home.mkdir()
+        with peer_server(localm_whoami("eeee000000000005"),
+                         status={"instance_id": "not-the-same-id", "pid": 1}) as srv:
+            enable_detection(monkeypatch, srv.port)
 
             assert instances.list_machine_peers(home) == [], (
-                "a reused port answering with a different identity is not the "
-                "registered instance")
+                "a whoami and a status that disagree are not one instance")
 
-    def test_rejects_a_responder_that_is_not_localm(self, tmp_path, gpu_dir,
-                                                    foreign_pid):
+    def test_an_instance_that_does_not_coordinate_is_not_listed(self, tmp_path,
+                                                                monkeypatch):
+        """An isolated (or network-bound) instance answers /whoami but serves no
+        coordination status; it is invisible to discovery."""
         home = tmp_path / "homeA"
         home.mkdir()
-        with whoami_server({"app": "something-else",
-                            "instance_id": "ffff000000000006"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="ffff000000000006", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("aaaa000000000009"), status=None) as srv:
+            enable_detection(monkeypatch, srv.port)
 
             assert instances.list_machine_peers(home) == []
 
-    def test_a_dead_pid_is_never_listed(self, tmp_path, gpu_dir):
+    def test_an_instance_that_has_stopped_is_not_listed(self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        with whoami_server({"app": "localm", "instance_id": "aaaa000000000007",
-                            "root_dir": "/proj/other", "mode": "full"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="aaaa000000000007", port=port,
-                            pid=a_dead_pid())
+        with peer_server(localm_whoami("aaaa000000000007")) as srv:
+            port = srv.port
+        enable_detection(monkeypatch, port)
 
-            assert instances.list_machine_peers(home) == []
+        assert instances.list_machine_peers(home) == []
 
-    def test_never_returns_the_coordination_token(self, tmp_path, gpu_dir,
-                                                  foreign_pid):
+    def test_never_returns_a_credential(self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        with whoami_server({"app": "localm", "instance_id": "bbbb000000000008",
-                            "root_dir": "/proj/other", "mode": "full"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="bbbb000000000008", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("bbbb000000000008", root_dir="/proj/other")) as srv:
+            enable_detection(monkeypatch, srv.port)
 
             peers = instances.list_machine_peers(home)
 
         assert len(peers) == 1
-        assert "coordination_token" not in peers[0]
-        assert "token" not in peers[0]
-        assert _COORD_TOKEN not in json.dumps(peers[0])
+        assert not any("token" in k for k in peers[0])
 
-    def test_an_unreadable_machine_registry_is_not_an_error(self, tmp_path,
-                                                            monkeypatch):
+    def test_a_failing_lookup_is_not_an_error(self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        monkeypatch.setattr(gpu_registry, "registry_dir",
-                            lambda: tmp_path / "nope" / "missing")
+
+        def boom(**kw):
+            raise RuntimeError("socket table unreadable")
+
+        monkeypatch.setattr(gpu_registry, "list_gpu_peers", boom)
         assert instances.list_machine_peers(home) == []
 
 
@@ -330,9 +208,8 @@ def instances_app(tmp_path, monkeypatch):
     """The GUI stack on a throwaway home, standing in for a REAL advertised
     server: `instance_id` set and not isolated.
 
-    Both route halves read the machine-wide registry only under exactly that
-    condition, mirroring the gate http_server.py puts on WRITING the same
-    registry. A bare app leaves instance_id unset, which is what keeps every
+    Both route halves look for other installs' instances only under exactly that
+    condition. A bare app leaves instance_id unset, which is what keeps every
     other GUI test in the suite from probing whatever localm happens to be
     running on the box - see TestIsolationGate."""
     home = tmp_path / ".localm"
@@ -352,13 +229,11 @@ def instances_app(tmp_path, monkeypatch):
 
 class TestRouteSpansInstalls:
     def test_lists_a_peer_from_another_install_flagged_same_install_false(
-            self, instances_app, gpu_dir, foreign_pid):
+            self, instances_app, monkeypatch):
         app, home = instances_app
-        with whoami_server({"app": "localm", "instance_id": "cccc000000000009",
-                            "root_dir": "/proj/other", "mode": "full",
-                            "version": "9.9.9"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc000000000009", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("cccc000000000009", root_dir="/proj/other",
+                                       version="9.9.9")) as srv:
+            enable_detection(monkeypatch, srv.port)
             write_home_entry(home, instance_id="aaaa00000000000a")
 
             with TestClient(app) as c:
@@ -374,28 +249,22 @@ class TestRouteSpansInstalls:
         assert rows["aaaa00000000000a"]["same_install"] is True
 
     def test_a_peer_row_leaks_no_token_and_no_registry_path(self, instances_app,
-                                                            gpu_dir,
-                                                            foreign_pid):
+                                                            monkeypatch):
         app, home = instances_app
-        with whoami_server({"app": "localm", "instance_id": "cccc00000000000b",
-                            "root_dir": "/proj/other", "mode": "full"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc00000000000b", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("cccc00000000000b", root_dir="/proj/other")) as srv:
+            enable_detection(monkeypatch, srv.port)
             with TestClient(app) as c:
                 body = c.get("/api/instances").json()
 
         blob = json.dumps(body)
-        assert _COORD_TOKEN not in blob
         assert "_path" not in blob
         assert "token" not in blob
 
     def test_stopping_another_installs_instance_is_refused_with_a_reason(
-            self, instances_app, gpu_dir, foreign_pid):
+            self, instances_app, monkeypatch):
         app, home = instances_app
-        with whoami_server({"app": "localm", "instance_id": "cccc00000000000c",
-                            "root_dir": "/proj/other", "mode": "full"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc00000000000c", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("cccc00000000000c", root_dir="/proj/other")) as srv:
+            enable_detection(monkeypatch, srv.port)
             with TestClient(app) as c:
                 resp = c.post("/api/instances/cccc00000000000c/stop")
 
@@ -406,7 +275,7 @@ class TestRouteSpansInstalls:
         assert "different localm install" in detail
         assert "crash" in detail
 
-    def test_an_unknown_id_is_still_a_404(self, instances_app, gpu_dir):
+    def test_an_unknown_id_is_still_a_404(self, instances_app):
         app, home = instances_app
         with TestClient(app) as c:
             resp = c.post("/api/instances/no-such-instance/stop")
@@ -414,7 +283,7 @@ class TestRouteSpansInstalls:
 
 
 class TestIsolationGate:
-    """A server that registers in NO machine-wide registry must not read one.
+    """A server that is invisible to discovery must not look for other instances.
 
     `--isolated` is documented as invisible to discovery, and a bare test app
     never advertises at all; both would otherwise start listing and probing
@@ -423,34 +292,28 @@ class TestIsolationGate:
     because the test app picked up live servers belonging to this machine.
     """
 
-    def _app_listing(self, app, gpu_dir, foreign_pid, home):
-        with whoami_server({"app": "localm", "instance_id": "cccc00000000000d",
-                            "root_dir": "/proj/other", "mode": "full"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc00000000000d", port=port,
-                            pid=foreign_pid)
+    def _app_listing(self, app, monkeypatch):
+        with peer_server(localm_whoami("cccc00000000000d", root_dir="/proj/other")) as srv:
+            enable_detection(monkeypatch, srv.port)
             with TestClient(app) as c:
                 return c.get("/api/instances").json()["instances"]
 
-    def test_an_isolated_server_lists_no_machine_peers(self, instances_app,
-                                                       gpu_dir, foreign_pid):
+    def test_an_isolated_server_lists_no_machine_peers(self, instances_app, monkeypatch):
         app, home = instances_app
         app.state.instance_isolated = True
-        assert self._app_listing(app, gpu_dir, foreign_pid, home) == []
+        assert self._app_listing(app, monkeypatch) == []
 
-    def test_an_unadvertised_app_lists_no_machine_peers(self, instances_app,
-                                                        gpu_dir, foreign_pid):
+    def test_an_unadvertised_app_lists_no_machine_peers(self, instances_app, monkeypatch):
         app, home = instances_app
         app.state.instance_id = None
-        assert self._app_listing(app, gpu_dir, foreign_pid, home) == []
+        assert self._app_listing(app, monkeypatch) == []
 
     def test_an_isolated_server_does_not_explain_a_cross_install_id(
-            self, instances_app, gpu_dir, foreign_pid):
+            self, instances_app, monkeypatch):
         app, home = instances_app
         app.state.instance_isolated = True
-        with whoami_server({"app": "localm", "instance_id": "cccc00000000000e",
-                            "root_dir": "/proj/other", "mode": "full"}) as port:
-            write_gpu_entry(gpu_dir, instance_id="cccc00000000000e", port=port,
-                            pid=foreign_pid)
+        with peer_server(localm_whoami("cccc00000000000e", root_dir="/proj/other")) as srv:
+            enable_detection(monkeypatch, srv.port)
             with TestClient(app) as c:
                 resp = c.post("/api/instances/cccc00000000000e/stop")
         assert resp.status_code == 404

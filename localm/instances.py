@@ -656,6 +656,19 @@ def fetch_whoami(scheme: str, port: int, instance_id: Optional[str],
 
     The payload carries ``version``, ``root_dir`` and ``mode``; a network-bound
     instance omits ``root_dir``."""
+    data = fetch_any_whoami(scheme, port, timeout, bind_host)
+    if data is None or data.get("instance_id") != instance_id:
+        return None
+    return data
+
+
+def fetch_any_whoami(scheme: str, port: int, timeout: float,
+                     bind_host: Optional[str] = None) -> Optional[dict]:
+    """:func:`fetch_whoami` without the instance-id match: the identity payload
+    of whatever localm instance answers ``GET /whoami`` on this machine's
+    *port* (``app == "localm"``), or None. The caller learns the instance id
+    from the payload; same dialing rules and single-hop behaviour as
+    :func:`fetch_whoami`."""
     import requests
     from localm.bindhost import is_own_address, self_connect_host, url_host
     if bind_host is not None and not isinstance(bind_host, str):
@@ -694,7 +707,7 @@ def fetch_whoami(scheme: str, port: int, instance_id: Optional[str],
         return None
     if not isinstance(data, dict):
         return None
-    if data.get("app") != APP_NAME or data.get("instance_id") != instance_id:
+    if data.get("app") != APP_NAME:
         return None
     return data
 
@@ -836,80 +849,44 @@ def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
     row shape, each carrying ``same_install: False``.
 
     ``snapshot`` reads ``<home>/run`` and so sees only instances sharing this
-    install's data dir. This reads the machine-wide coordination registry
-    (:mod:`localm.gpu_registry`), which every non-isolated server writes
-    whatever its LOCALM_HOME, and returns the entries that are NOT in *home*'s
-    own registry.
+    install's data dir. This detects the other running instances directly
+    (:func:`localm.gpu_registry.list_gpu_peers`: listening ports in localm's range
+    that answer ``GET /whoami`` as localm and ``GET /v1/instances/status`` as the
+    same instance) and returns the ones that are NOT in *home*'s own registry.
 
-    A peer is listed only on a verified ``GET /whoami`` handshake, run
-    concurrently across candidates, so a stale entry whose port got reused by
-    an unrelated process is never listed; ``root_dir``, ``mode`` and
-    ``version`` come from that handshake rather than from the coordination
-    entry, which does not record them. A network-bound peer omits
-    ``root_dir``. ``started`` is None: the coordination entry records a
-    heartbeat time, not a start time.
+    ``root_dir``, ``mode`` and ``version`` come from the instance's own
+    ``/whoami`` answer; a network-bound peer omits ``root_dir``. ``started`` is
+    None: a live probe has no start time.
 
-    Returns no credential. The coordination entry's ``coordination_token`` is
-    not an attach token and is dropped here, so a caller cannot use these rows
-    to authenticate to another install.
-
-    ``snapshot`` is deliberately NOT widened to cover these: callers that decide
-    whether a model file is held elsewhere (``selfclient.read_model_file_hold``)
-    treat a registry miss as a rule-out, which is only sound while every server
-    they reach shares one registry.
+    Returns no credential. ``snapshot`` is deliberately NOT widened to cover
+    these: callers that decide whether a model file is held elsewhere
+    (``selfclient.read_model_file_hold``) treat a miss as a rule-out, which is
+    only sound while every server they reach shares one registry.
 
     Best-effort: any failure yields the peers found so far rather than raising.
     """
     try:
         from localm import gpu_registry
-        entries = gpu_registry.list_entries(gpu_registry.registry_dir())
+        peers = gpu_registry.list_gpu_peers(timeout=timeout)
     except Exception as e:
         logger.debug("cross-install peer lookup unavailable: %s", e)
         return []
 
     own = {str(e.get("instance_id")) for e in list_entries(home)}
-    self_pid = os.getpid()
-    candidates: list[tuple[str, int, int, str, Optional[str]]] = []
-    for entry in entries:
-        iid = entry.get("instance_id")
-        port = entry.get("port")
-        if not iid or not port or str(iid) in own:
-            continue
-        try:
-            pid = int(entry.get("pid", -1) or -1)
-        except (TypeError, ValueError):
-            continue
-        if pid == self_pid or not pid_alive(pid):
-            continue
-        scheme = entry.get("scheme") or "http"
-        host = entry.get("host")
-        candidates.append((iid, pid, port, scheme, host))
-
-    def _probe(c: tuple) -> Optional[dict]:
-        iid, _pid, port, scheme, _host = c
-        try:
-            # No bind_host: always probes loopback, never the entry's own
-            # value. See
-            # test_a_forged_host_is_never_dialed_verification_always_probes_loopback.
-            return fetch_whoami(scheme, int(port), iid, timeout)
-        except Exception as e:
-            logger.debug("whoami probe failed for cross-install peer %s: %s", iid, e)
-            return None
-
-    idents = _threaded_map(_probe, candidates)
     rows: list[dict] = []
-    for (iid, pid, port, scheme, host), ident in zip(candidates, idents):
-        if ident is None:
+    for peer in peers:
+        iid = peer.get("instance_id")
+        if not iid or str(iid) in own:
             continue
         rows.append({
             "instance_id": iid,
-            "pid": pid,
-            "port": port,
-            "host": host,
-            "scheme": scheme,
-            "root_dir": ident.get("root_dir"),
-            "mode": ident.get("mode"),
-            "version": ident.get("version"),
+            "pid": peer.get("pid"),
+            "port": peer.get("port"),
+            "host": peer.get("host"),
+            "scheme": peer.get("scheme"),
+            "root_dir": peer.get("root_dir"),
+            "mode": peer.get("mode"),
+            "version": peer.get("version"),
             "started": None,
             "alive": True,
             "same_install": False,

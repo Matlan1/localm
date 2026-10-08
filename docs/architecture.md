@@ -281,8 +281,8 @@ that choose a model themselves: `cli/chat.py`'s `_TurnRouter` for `localm
 run`, the MCP server's `EngineCache.route`, and the jobs runner's
 `_served_engine`. `peer_routing.py` forwards a chat request straight to
 another localm instance on this machine that already has the model loaded,
-matched by model file through `gpu_registry`'s per-instance list of loaded
-models, after verifying the forward target resolves to loopback.
+matched by model file through the loaded-model list each running instance
+reports to `gpu_registry`'s live peer detection, after verifying the forward target resolves to loopback.
 
 ## Conversation compaction
 

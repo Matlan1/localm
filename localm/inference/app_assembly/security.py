@@ -82,13 +82,17 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
         # See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
         "/v1/surfaces/gui",
         # Multi-instance GPU coordination (localm.gpu_registry): a SIBLING localm
-        # instance calls this loopback-only, like surface-management above - no
-        # Origin, no shell_token (different process). Its own coordination_token
-        # (never the API key/shell token) is the real credential, checked in the
-        # route, so the same-origin gate is exempt for the same reason.
+        # instance calls these loopback-only, like surface-management above - no
+        # Origin, no shell_token (different process). The unload and vouch routes
+        # honour a request only when the named requester confirms it sent it
+        # (never the API key/shell token), and all three answer only on an
+        # instance that coordinates and is bound to loopback, so the same-origin
+        # gate is exempt for the same reason.
         # Also listed in _BESPOKE_GATED_ROUTES - keep both in sync.
         # See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
         "/v1/instances/cooperate-unload",
+        "/v1/instances/vouch",
+        "/v1/instances/status",
     )
     _cors_allowlist = frozenset(cors_cfg) if isinstance(cors_cfg, list) else frozenset()
     _cors_wildcard = cors_cfg == "*"

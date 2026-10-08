@@ -106,7 +106,6 @@ def registered(monkeypatch):
     monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
     monkeypatch.setattr("localm.vram.wait_for_vram_release",
                         lambda free_fn, before_bytes=None: (0, before_bytes))
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
 
 
 async def _await_started(engine, timeout=5.0):

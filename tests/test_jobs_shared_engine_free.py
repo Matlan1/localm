@@ -170,7 +170,6 @@ def _drive_evict(live, monkeypatch, *, wait_started=False):
     # makes before=None so it skips wait_for_vram_release entirely (no real GPU probe).
     monkeypatch.setattr("localm.discover.vram_capacity",
                         lambda config=None: {"free": None})
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     # Bound the worker-thread block so a routing regression fails fast.
     monkeypatch.setattr(runner, "_EVICT_TIMEOUT_S", 15.0)
 
@@ -246,7 +245,6 @@ def test_vram_gate_free_is_serialized_under_the_per_model_semaphore(hsclean, mon
 
     monkeypatch.setattr("localm.discover.vram_capacity",
                         lambda config=None: {"free": None})
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     monkeypatch.setattr(runner, "_EVICT_TIMEOUT_S", 15.0)
 
     async def _drive():

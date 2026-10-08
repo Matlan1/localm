@@ -3,13 +3,11 @@
 requests for one model name to a live sibling instance that already has that
 model loaded, instead of loading a redundant local copy.
 
-Builds on ``localm.gpu_registry`` (peer discovery, liveness + ``/whoami``
-identity verification) but is the other half: gpu_registry only cooperates on
-VRAM release, this module never touches that machinery and never reuses its
-``coordination_token`` - a route is authenticated with the PEER's own real API
-key, supplied by the user when they accept an offer, held in this process's
-memory only (never persisted, never the same credential as
-``coordination_token``).
+Builds on ``localm.gpu_registry`` (live peer detection, ``/whoami`` identity
+verification) but is the other half: gpu_registry only cooperates on VRAM
+release, this module never touches that machinery - a route is authenticated with
+the PEER's own real API key, supplied by the user when they accept an offer, held
+in this process's memory only (never persisted).
 
 Routing state (:data:`_ROUTES`) is process-local and in-memory: a restart
 drops every route, and a route is established again explicitly by the user

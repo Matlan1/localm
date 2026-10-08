@@ -28,7 +28,6 @@ def isolated(monkeypatch):
                         lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
     monkeypatch.setattr("localm.vram.wait_for_vram_release",
                         lambda free_fn, before_bytes=None: (0, before_bytes))
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     for d in (hs._engines, hs._engines_lru, hs._inference_sems,
               hs._last_activity_per_model):
         d.clear()

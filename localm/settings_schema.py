@@ -589,6 +589,11 @@ CORE_FIELDS: list = [
                  "window when available, else a browser tab. browser: always "
                  "a browser tab.",
                  group="Desktop", options=["auto", "browser"]),
+    SettingField("temp_location", Widget.TEXT, "Temporary files",
+                 "Where temporary files go: auto (default; the data folder "
+                 "for a self-contained install, else the system temp "
+                 "folder), data, system, or an absolute folder path.",
+                 group="General", applies=Applies.RESTART),
     SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
                  "Quit when the app window is closed",
                  "Only for the standalone app window (localm[desktop]). Off "

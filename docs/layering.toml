@@ -67,10 +67,10 @@ units = [
 
 [[tier]]
 name = "platform"
-role = "The host as localm sees it, built on the foundation alone: identity and keys, the audit and session mode, TLS and the verified HTTPS opener, network policy, DNS pinning, naming, the port multiplexer, peer routing, the self client, instance discovery, hardware and VRAM facts, native-app, shell and Windows console integration, the install ledger, the settings schema, model-source credentials, the model metadata and rag stores, failure reporting and its log digest."
+role = "The host as localm sees it, built on the foundation alone: identity and keys, the audit and session mode, TLS and the verified HTTPS opener, network policy, DNS pinning, naming, the port multiplexer, peer routing, the self client, instance discovery, the listening-port reader, hardware and VRAM facts, native-app, shell and Windows console integration, the install ledger, the settings schema, model-source credentials, the model metadata and rag stores, failure reporting and its log digest."
 units = [
     "auth", "audit", "tls", "http_ssl", "netpolicy", "netpin", "netname", "portmux",
-    "peer_routing", "selfclient", "instances", "gpu_usage", "hwdetect",
+    "peer_routing", "selfclient", "instances", "listeners", "gpu_usage", "hwdetect",
     "cpu_backend_select", "_torch_gpu_probe", "vram", "appface", "install_manifest",
     "globalcmd", "winconsole", "settings_schema", "model_source_credentials", "model_meta", "rag",
     "bugreport", "_log_digest",

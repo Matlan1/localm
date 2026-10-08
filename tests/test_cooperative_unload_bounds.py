@@ -85,10 +85,9 @@ def coordinated(monkeypatch):
     against the 2 GB free below, and can never fit locally."""
     monkeypatch.setattr(hs, "_gpu_coord", {
         "instance_id": "self-1", "port": 8081, "host": "127.0.0.1",
-        "scheme": "http", "token": "t",
+        "scheme": "http",
     })
     monkeypatch.setattr(hs, "_current_gpu_index", lambda: 0)
-    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     # 2 GB free; incoming model is 10 GB * 1.2 + 1 GB headroom -> never fits.
     monkeypatch.setattr("localm.discover.vram_capacity",
                         probe_double({"free": 2 * GB, "total": 16 * GB}))
@@ -142,8 +141,7 @@ def test_peer_is_not_re_asked_forever_when_it_keeps_advertising_a_model(
     see TestSwitchEngineDeferToBackendConfirm in test_gpu_registry.py for
     that gate itself."""
     peer = {"instance_id": "peer-1", "port": 8082, "model": "other",
-            "vram_estimate_bytes": 12 * GB, "gpu_index": 0,
-            "coordination_token": "x"}
+            "vram_estimate_bytes": 12 * GB, "gpu_index": 0}
     calls = _install_peers(monkeypatch, [peer], lambda p: True)  # always "freed"
 
     engine = FakeEngine("incoming", fails_to_fit=True)
@@ -163,8 +161,7 @@ def test_peer_models_are_not_yanked_when_freeing_them_cannot_help(
     force=True: without it this would return confirm_required before ever
     reaching the backend's own genuine sizing failure below."""
     peer = {"instance_id": "peer-1", "port": 8082, "model": "small",
-            "vram_estimate_bytes": 1 * GB, "gpu_index": 0,
-            "coordination_token": "x"}
+            "vram_estimate_bytes": 1 * GB, "gpu_index": 0}
     calls = _install_peers(monkeypatch, [peer], lambda p: True)
 
     engine = FakeEngine("incoming", fails_to_fit=True)
@@ -182,8 +179,7 @@ def test_peer_on_a_different_gpu_is_not_yanked(coordinated, monkeypatch):
     without it this would return confirm_required before ever reaching the
     backend's own genuine sizing failure below."""
     peer = {"instance_id": "peer-1", "port": 8082, "model": "other",
-            "vram_estimate_bytes": 12 * GB, "gpu_index": 1,
-            "coordination_token": "x"}
+            "vram_estimate_bytes": 12 * GB, "gpu_index": 1}
     calls = _install_peers(monkeypatch, [peer], lambda p: True)
 
     engine = FakeEngine("incoming", fails_to_fit=True)
@@ -217,8 +213,7 @@ def test_split_instance_still_asks_a_peer_on_its_other_split_device(
         {"index": 1, "name": "B", "total": 16 * GB, "free": 1 * GB},
     ]))
     peer = {"instance_id": "peer-1", "port": 8082, "model": "big",
-            "vram_estimate_bytes": 12 * GB, "gpu_index": 1,
-            "coordination_token": "x"}
+            "vram_estimate_bytes": 12 * GB, "gpu_index": 1}
     freed = {"yes": False}
 
     def _on_request(p):
@@ -245,8 +240,7 @@ def test_cooperation_still_happens_when_it_can_actually_free_enough(
     frees the VRAM the load proceeds. Guards against 'fixing' the loop by
     disabling cooperation altogether."""
     peer = {"instance_id": "peer-1", "port": 8082, "model": "big",
-            "vram_estimate_bytes": 12 * GB, "gpu_index": 0,
-            "coordination_token": "x"}
+            "vram_estimate_bytes": 12 * GB, "gpu_index": 0}
     freed = {"yes": False}
 
     def _on_request(p):

@@ -53,8 +53,11 @@ _PUBLIC_ROUTES = {
 _BESPOKE_GATED_ROUTES = {
     # attach-token-or-ADMIN check; localm/inference/routes/system.py
     ("POST", "/v1/surfaces/gui"),
-    # per-instance coordination_token check; localm/inference/routes/gpu.py
+    # requester-vouch check, loopback-and-coordinating only; localm/inference/routes/gpu.py
     ("POST", "/v1/instances/cooperate-unload"),
+    ("POST", "/v1/instances/vouch"),
+    # coordinating-and-loopback-only status read; localm/inference/routes/gpu.py
+    ("GET", "/v1/instances/status"),
 }
 
 

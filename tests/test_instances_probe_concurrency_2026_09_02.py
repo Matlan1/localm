@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""snapshot() and list_machine_peers() must probe registry entries
+"""snapshot() and list_machine_peers() must probe their candidates
 CONCURRENTLY, not one at a time - GET /api/instances calls both in sequence,
 so N sequential loopback probes at up to 0.7s each make the whole listing
 take up to N*0.7s. These tests prove wall-clock time for N fake probes stays
@@ -9,14 +9,8 @@ existing per-entry exception isolation or sort order.
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 import time
-from unittest.mock import patch
 
-import pytest
 
 from localm import gpu_registry, instances
 
@@ -86,96 +80,66 @@ class TestSnapshotProbesConcurrently:
         assert started == sorted(started)
 
 
-@pytest.fixture
-def gpu_dir(tmp_path, monkeypatch):
-    d = tmp_path / "machine-registry"
-    d.mkdir()
-    monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
-    return d
-
-
-@pytest.fixture
-def foreign_pid():
-    """A REAL live process that is not this one, shared across every fake
-    peer entry a test writes - one subprocess is enough since pid liveness is
-    checked per entry but no entry is tied to a unique pid."""
-    proc = subprocess.Popen([sys.executable, "-c",
-                             "import time; time.sleep(120)"])
-    try:
-        assert proc.pid != os.getpid()
-        yield proc.pid
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=15)
-
-
-def _write_gpu_entry(gpu_dir, *, instance_id, port, pid,
-                     host="127.0.0.1", scheme="http"):
-    gpu_dir.mkdir(parents=True, exist_ok=True)
-    entry = {
-        "instance_id": instance_id, "pid": pid, "port": port, "host": host,
-        "scheme": scheme, "model": None, "vram_estimate_bytes": None,
-        "gpu_index": 0, "updated_at": "2026-09-02T00:00:00+00:00",
-        "coordination_token": "irrelevant-for-this-test",
-    }
-    (gpu_dir / f"{instance_id}.json").write_text(json.dumps(entry),
-                                                  encoding="utf-8")
+def _fake_endpoints(count, base_port):
+    return [("127.0.0.1", base_port + i) for i in range(count)]
 
 
 class TestListMachinePeersProbesConcurrently:
-    def test_wall_clock_is_far_below_sequential(self, tmp_path, gpu_dir,
-                                                foreign_pid):
+    """Detection probes the candidate ports CONCURRENTLY, so N slow peers do not
+    cost N sequential timeouts. The seams faked are the three network calls
+    (/whoami, /v1/instances/status, and the candidate-port list); the threading
+    around them is what is under test."""
+
+    def _patch(self, monkeypatch, endpoints, whoami):
+        monkeypatch.setattr(gpu_registry, "candidate_endpoints", lambda: endpoints)
+        monkeypatch.setattr(gpu_registry, "fetch_any_whoami", whoami)
+        monkeypatch.setattr(
+            gpu_registry, "fetch_status",
+            lambda scheme, port, timeout, dial="127.0.0.1": {
+                "instance_id": f"peer{port:013d}", "pid": 1, "model": None})
+
+    def test_wall_clock_is_far_below_sequential(self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        ids = [f"peer{i:013d}" for i in range(_N)]
-        for i, iid in enumerate(ids):
-            _write_gpu_entry(gpu_dir, instance_id=iid, port=9200 + i,
-                             pid=foreign_pid)
+        endpoints = _fake_endpoints(_N, 9200)
 
-        def slow_fetch_whoami(scheme, port, iid, timeout, host=None):
+        def slow_whoami(scheme, port, timeout, bind_host=None):
             time.sleep(_SLEEP)
-            return {"app": "localm", "instance_id": iid, "root_dir": "/proj/x",
-                    "mode": "full", "version": "9.9.9"}
+            return {"app": "localm", "instance_id": f"peer{port:013d}",
+                    "root_dir": "/proj/x", "mode": "full", "version": "9.9.9"}
 
-        with patch.object(instances, "fetch_whoami", slow_fetch_whoami):
-            t0 = time.monotonic()
-            peers = instances.list_machine_peers(home)
-            elapsed = time.monotonic() - t0
+        self._patch(monkeypatch, endpoints, slow_whoami)
+        t0 = time.monotonic()
+        peers = instances.list_machine_peers(home)
+        elapsed = time.monotonic() - t0
 
-        assert {p["instance_id"] for p in peers} == set(ids)
+        assert {p["instance_id"] for p in peers} == {f"peer{p:013d}" for _a, p in endpoints}
         assert elapsed < _THRESHOLD, (
             f"list_machine_peers() took {elapsed:.3f}s probing {_N} peers at "
             f"{_SLEEP}s each ({_N * _SLEEP:.3f}s if sequential) - "
             "the probes are not running concurrently")
 
     def test_exception_isolation_and_sort_order_survive_concurrency(
-            self, tmp_path, gpu_dir, foreign_pid):
+            self, tmp_path, monkeypatch):
         home = tmp_path / "homeA"
         home.mkdir()
-        # Written in DESCENDING id order, so a correct sort must reverse them.
-        ids = [f"peer{n:013d}" for n in reversed(range(_N))]
-        for i, iid in enumerate(ids):
-            _write_gpu_entry(gpu_dir, instance_id=iid, port=9300 + i,
-                             pid=foreign_pid)
-        boom_id = ids[2]
+        # Listed in DESCENDING port order, so a correct sort must reverse them.
+        endpoints = list(reversed(_fake_endpoints(_N, 9300)))
+        boom_port = endpoints[2][1]
 
-        def flaky_fetch_whoami(scheme, port, iid, timeout, host=None):
-            if iid == boom_id:
+        def flaky_whoami(scheme, port, timeout, bind_host=None):
+            if port == boom_port:
                 raise RuntimeError("simulated whoami failure")
-            return {"app": "localm", "instance_id": iid, "root_dir": "/proj/x",
-                    "mode": "full", "version": "9.9.9"}
+            return {"app": "localm", "instance_id": f"peer{port:013d}",
+                    "root_dir": "/proj/x", "mode": "full", "version": "9.9.9"}
 
-        with patch.object(instances, "fetch_whoami", flaky_fetch_whoami):
-            peers = instances.list_machine_peers(home)
+        self._patch(monkeypatch, endpoints, flaky_whoami)
+        peers = instances.list_machine_peers(home)
 
         peer_ids = {p["instance_id"] for p in peers}
-        assert boom_id not in peer_ids, (
-            "a raised fetch_whoami must skip that one entry, matching the "
+        assert f"peer{boom_port:013d}" not in peer_ids, (
+            "a raised /whoami must skip that one endpoint, matching the "
             "pre-existing sequential continue-on-exception behavior")
-        assert peer_ids == set(ids) - {boom_id}
+        assert peer_ids == {f"peer{p:013d}" for _a, p in endpoints} - {f"peer{boom_port:013d}"}
         returned_order = [p["instance_id"] for p in peers]
         assert returned_order == sorted(returned_order)

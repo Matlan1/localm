@@ -16,8 +16,8 @@ from localm import scopes
 from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threadpool_bounded
 
 # Budget for run_in_threadpool_bounded() below. A peer lookup reads the
-# machine-wide registry directory and then runs one /whoami probe per
-# live-pid entry at gpu_registry.list_gpu_peers' own 0.7s timeout, so this
+# listening ports in localm's range and then runs a /whoami and a status
+# probe per candidate at gpu_registry.list_gpu_peers' own 0.7s timeout, so this
 # sits well above the worst case for a realistic number of local instances.
 _PEER_LOOKUP_TIMEOUT_S = 20.0
 
@@ -59,7 +59,7 @@ def register(app: FastAPI, ctx) -> None:
              dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def peer_offer(model_id: str):
         """Whether a live sibling instance already has this model loaded, and
-        if so, enough about it (never its coordination_token) for a client to
+        if so, enough about it (never a credential) for a client to
         decide whether to offer routing to the user."""
         from localm import peer_routing
         from localm.config import load_registry

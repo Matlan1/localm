@@ -641,21 +641,23 @@ class _Peer:
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
 
+def _live_peer(instance_id, port, host, plain):
+    """A running instance as ``gpu_registry.list_gpu_peers`` reports it, with
+    plain's model file loaded."""
+    return {"instance_id": instance_id, "pid": os.getpid() + 1, "port": port,
+            "host": host, "scheme": "http", "model": "their-plain",
+            "vram_estimate_bytes": None, "gpu_index": 0,
+            "models": [{"name": "their-plain", "path": plain,
+                        "size": os.path.getsize(plain), "sha256": None}]}
+
+
 def _advertise(reg, tmp_path, monkeypatch, p, *, instance_id="other", host="127.0.0.1"):
-    """A machine-wide registry entry for instance *instance_id* at *host* and
-    *p*'s port, with plain's model file loaded."""
+    """A running instance *instance_id* at *host* and *p*'s port, with plain's
+    model file loaded."""
     registry, _, _ = reg
-    d = tmp_path / "gpu"
-    monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
-    monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(gpu_registry, "_try_whoami", lambda scheme, port, iid, timeout: True)
     plain = os.path.realpath(registry["plain"]["path"])
-    gpu_registry.write_entry(
-        d, instance_id=instance_id, pid=os.getpid() + 1, port=p.port, host=host,
-        scheme="http", model="their-plain", vram_estimate_bytes=None, gpu_index=0,
-        coordination_token="t",
-        models=[{"name": "their-plain", "path": plain,
-                 "size": os.path.getsize(plain), "sha256": None}])
+    peers = [_live_peer(instance_id, p.port, host, plain)]
+    monkeypatch.setattr(gpu_registry, "list_gpu_peers", lambda **kw: list(peers))
 
 
 @pytest.fixture
@@ -846,21 +848,13 @@ class TestCoderTaskOnAPeer:
 
 def _claimed_as_this_install(reg, tmp_path, monkeypatch, advertised_port, served_port,
                              advertised_host="127.0.0.1"):
-    """A machine-wide registry entry naming this install's instance "mine" at
+    """A running-instance lookup naming this install's instance "mine" at
     *advertised_host*:*advertised_port* while this install's own instance file
     says it serves 127.0.0.1:*served_port*. The owner key is OWNER-KEY."""
     registry, _, _ = reg
-    d = tmp_path / "gpu"
-    monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
-    monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(gpu_registry, "_try_whoami", lambda scheme, port, iid, timeout: True)
     plain = os.path.realpath(registry["plain"]["path"])
-    gpu_registry.write_entry(
-        d, instance_id="mine", pid=os.getpid() + 1, port=advertised_port,
-        host=advertised_host, scheme="http", model="their-plain",
-        vram_estimate_bytes=None, gpu_index=0, coordination_token="t",
-        models=[{"name": "their-plain", "path": plain,
-                 "size": os.path.getsize(plain), "sha256": None}])
+    peers = [_live_peer("mine", advertised_port, advertised_host, plain)]
+    monkeypatch.setattr(gpu_registry, "list_gpu_peers", lambda **kw: list(peers))
     monkeypatch.setattr("localm.instances.list_entries", lambda home: [
         {"instance_id": "mine", "port": served_port, "host": "127.0.0.1",
          "scheme": "http", "token": "instance-token"}])
