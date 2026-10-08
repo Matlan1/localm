@@ -2,10 +2,10 @@
 import sys
 from typing import Optional
 
+from localm.stdio import force_utf8_stdio
+
 # Force UTF-8 output on Windows so Rich's Unicode markup doesn't crash
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+force_utf8_stdio()
 
 import click
 from rich.console import Console

@@ -251,7 +251,7 @@ def _spawn_crash_recovery_watchdog(*, host: str, port: int, tls: bool,
         import os
         import subprocess
 
-        from localm import bugreport
+        from localm import bugreport, debuglog
         from localm.bindhost import self_connect_host
         from localm.updater import repo_root
 
@@ -278,6 +278,8 @@ def _spawn_crash_recovery_watchdog(*, host: str, port: int, tls: bool,
         restart_history = os.environ.get("LOCALM_CRASH_WATCHDOG_HISTORY", "")
         if restart_history:
             argv += ["--restart-history", restart_history]
+        if debuglog.debug_enabled() and bugreport._diagnostics_allowed():
+            argv += ["--log-file", str(debuglog.logs_dir() / "crash-watchdog.log")]
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, close_fds=True)
         if sys.platform == "win32":

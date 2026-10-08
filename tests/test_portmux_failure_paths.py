@@ -344,3 +344,20 @@ def test_a_watchdog_setting_that_is_not_an_off_value_keeps_it_on(spawn, monkeypa
     monkeypatch.setenv("LOCALM_CRASH_WATCHDOG", "on")
     _spawn()
     assert len(calls) == 1
+
+
+def test_the_watchdog_logs_to_a_file_in_debug_mode(spawn, monkeypatch):
+    _root, calls = spawn
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    _spawn()
+    log_file = _arg(calls[0][0], "--log-file")
+    assert log_file.replace("\\", "/").endswith("logs/crash-watchdog.log")
+
+
+def test_the_watchdog_writes_no_log_file_outside_debug_mode(spawn, monkeypatch):
+    _root, calls = spawn
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+    _spawn()
+    assert "--log-file" not in calls[0][0]

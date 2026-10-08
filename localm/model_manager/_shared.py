@@ -17,10 +17,9 @@ import time
 from pathlib import Path
 
 import localm.model_manager as _mm  # read package-patchable names at call time
+from localm.stdio import force_utf8_stdio
 
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+force_utf8_stdio()
 
 from rich.console import Console
 

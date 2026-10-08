@@ -25,6 +25,7 @@ from pathlib import Path
 import click
 
 import localm.plugins.coder.cli as _cli
+from localm.stdio import force_utf8_stdio
 from ..backends.http import (
     HTTPBackend,
     make_anthropic_backend,
@@ -61,9 +62,7 @@ from .goal import _run_goal_loop
 from .estimate import _run_estimate
 from .repl import _repl
 
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+force_utf8_stdio()
 
 def _complete_model(ctx, param, incomplete):
     """Shell completion callback: suggest registered localm model names."""

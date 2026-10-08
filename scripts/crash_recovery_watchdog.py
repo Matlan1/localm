@@ -164,6 +164,30 @@ def trace_path(crash_dir: Path, instance_id: str) -> Path:
     return crash_dir / f"server-crash-trace.{instance_id}.txt"
 
 
+def exit_record_path(crash_dir: Path, instance_id: str) -> Path:
+    """Mirrors localm.bugreport._crash_exit_path's naming exactly - pinned
+    by test_exit_record_path_matches_bugreport so the two cannot silently
+    drift apart."""
+    return crash_dir / f"server-crash-exit.{instance_id}.json"
+
+
+def write_exit_record(crash_dir: Path, instance_id: str, *, pid: int,
+                      exit_code: int, watched_for_s: float,
+                      log_path: Optional[Path]) -> None:
+    """Record how the watched process ended, for the next start's crash
+    report. Holds the pid, the raw exit code and how long this watchdog had
+    watched the process; nothing else. Best-effort: a failed write is logged
+    and never blocks the relaunch."""
+    try:
+        crash_dir.mkdir(parents=True, exist_ok=True)
+        exit_record_path(crash_dir, instance_id).write_text(
+            json.dumps({"pid": pid, "exit_code": exit_code,
+                        "watched_for_s": round(watched_for_s, 1)}),
+            encoding="utf-8")
+    except OSError as e:
+        _log(log_path, f"could not write the exit record: {e}")
+
+
 def read_marker_pid(marker: Path) -> Optional[int]:
     """The pid recorded in *marker*, or None if it is missing/unreadable."""
     try:
@@ -350,7 +374,14 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
             "intentional stop. Nothing to recover.")
         return EXIT_OK
 
-    _log(log_path, f"pid {pid} is gone - waiting up to {grace_s}s for a "
+    if exit_code is None:
+        _log(log_path, f"pid {pid} is gone; its exit code could not be read")
+    else:
+        _log(log_path, f"pid {pid} is gone with exit code {exit_code} "
+                       f"(0x{exit_code:08X}) after {watched_for:.1f}s watched")
+        write_exit_record(crash_dir, instance_id, pid=pid, exit_code=exit_code,
+                          watched_for_s=watched_for, log_path=log_path)
+    _log(log_path, f"waiting up to {grace_s}s for a "
                    "replacement to come up on its own")
     replacement = poll_for_new_instance(
         host, port, scheme, instance_id, crash_dir, deadline_s=grace_s,

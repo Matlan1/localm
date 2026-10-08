@@ -241,6 +241,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **The launcher can check the models folder again, and a clipped status message can
+  be read.** Opening the launcher showed "Could not check the models folder:
+  AttributeError" because the launcher runs without a console window and one startup
+  step assumed a console. A status line that is cut short is now clickable: it shows the
+  full text and copies it, and errors are also written to `logs/launcher.log`.
+- **Export in the chat now saves the conversation in the app window.** The button did
+  nothing there because the window refused every file download; it now opens a save
+  dialog, as do the other save buttons (images, coder results).
+- **A crash report now says how the server process ended.** A server that died without a
+  fault trace was reported as "most likely an OS kill". The report now includes the
+  process exit code (for example an access violation), keeps the end of a long fault
+  trace instead of cutting it, and in debug mode keeps the whole trace and logs the
+  crash watchdog's own activity to `logs/crash-watchdog.log`.
 - **The VRAM estimate now counts the fixed-size state that hybrid models keep.**
   Models that mix linear-attention and full-attention layers (the Qwen3.5 family)
   hold a recurrent state in VRAM beside the context, and with MTP on the context holds

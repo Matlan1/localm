@@ -863,3 +863,55 @@ def test_the_profile_is_set_up_before_the_window_is_published(monkeypatch):
     _start_kwargs(monkeypatch, "win32")
 
     assert seen == [None]
+
+
+def test_the_app_window_allows_downloads_before_the_loop_starts(monkeypatch):
+    """pywebview cancels every download in its window unless ALLOW_DOWNLOADS is
+    set, which made the chat export button (and every other <a download>) do
+    nothing. The value is read inside start() because that is when the window
+    can begin a download."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _window = _fake_webview(loaded=True)
+    fake.settings = {"ALLOW_DOWNLOADS": False}
+    seen = {}
+    fake.start.side_effect = lambda *a, **k: (
+        seen.update(allow=fake.settings["ALLOW_DOWNLOADS"]), time.sleep(0.2))
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    assert seen == {"allow": True}
+
+
+def test_a_pywebview_without_the_download_setting_still_opens_the_window(
+        monkeypatch, caplog):
+    """An older pywebview has no such setting: the window must still open, and
+    the missing setting is logged rather than hidden."""
+    import logging
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _window = _fake_webview(loaded=True)
+    class _NoNewKeys(dict):
+        """pywebview's ImmutableDict: an unknown key is refused."""
+
+        def __setitem__(self, key, value):
+            if key not in self:
+                raise KeyError(key)
+            super().__setitem__(key, value)
+
+    fake.settings = _NoNewKeys()
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    assert any("download" in r.getMessage().lower() for r in caplog.records
+               if r.levelno >= logging.WARNING)
+
+
+def test_the_installed_pywebview_accepts_the_download_setting_we_set():
+    """The real artefact, not a fake: the key must exist in the installed
+    pywebview's settings or setting it would be refused."""
+    webview = pytest.importorskip("webview")
+    assert "ALLOW_DOWNLOADS" in webview.settings
