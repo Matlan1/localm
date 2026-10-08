@@ -353,6 +353,8 @@ def test_the_watchdog_logs_to_a_file_in_debug_mode(spawn, monkeypatch):
     _spawn()
     log_file = _arg(calls[0][0], "--log-file")
     assert log_file.replace("\\", "/").endswith("logs/crash-watchdog.log")
+    assert _arg(calls[0][0], "--instance-id") == "inst-1"
+    assert _arg(calls[0][0], "--port") == "8443"
 
 
 def test_the_watchdog_writes_no_log_file_outside_debug_mode(spawn, monkeypatch):

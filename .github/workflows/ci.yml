@@ -228,7 +228,7 @@ jobs:
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe.
       - name: Tests
-        run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
+        run: pytest -m "not integration" -n auto -rs --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
       # netpolicy, scopes, tls, bindhost, config, portmux): a missed branch in
@@ -853,6 +853,53 @@ jobs:
           list(segments)
           print("transcribed one second of silence, language:", info.language)
           PY
+
+  # The tests that need an optional package (torch, transformers, psutil, ...)
+  # call pytest.importorskip, so in every job above, which installs only
+  # `.[dev,rag]`, they SKIP and read green while checking nothing. This job
+  # installs those packages and runs exactly the test files that gate on them,
+  # with LOCALM_REQUIRE_OPTIONAL naming the packages: a skip for a missing one
+  # then FAILS (tests/_require_optional.py). Not required here, on purpose:
+  # tkinter (needs a display), playwright and webview (a browser or a window),
+  # and the private manifest checker. Same triggers as the test matrix: the
+  # weekly schedule, a manual dispatch, or a pull request labelled full-ci.
+  # Not part of merge-policy.
+  optional-stacks:
+    name: optional stacks (tests that need torch, transformers, ... must run, not skip)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    env:
+      LOCALM_REQUIRE_OPTIONAL: torch,transformers,tokenizers,accelerate,psutil,PIL,pypdf,numpy,soundfile,av,packaging,xgrammar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # torch first, from the CPU index, so no later install pulls a CUDA build.
+      # 2.11 is the minor the Windows ROCm build pins.
+      - name: Install the optional stacks
+        run: |
+          python -m pip install --upgrade pip
+          pip install "torch==2.11.0+cpu" --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+          pip install -e ".[dev,rag,hf,monitor,audio,voice,grammar]"
+
+      - name: Show the resolved versions
+        run: pip list 2>/dev/null | grep -i -E "^(torch|transformers|tokenizers|accelerate|psutil|pillow|pypdf|numpy|soundfile|av|xgrammar|faster-whisper) "
+
+      - name: Run every test file that gates on one of these packages
+        run: |
+          FILES=$(grep -rlE "importorskip\(.(torch|transformers|tokenizers|accelerate|psutil|PIL|pypdf|numpy|soundfile|av|packaging|xgrammar)" tests --include='*.py' | sort)
+          echo "$FILES" | wc -l
+          python -m pytest $FILES -m "not integration" -n 2 -rs -q --continue-on-collection-errors
 
   # The one check that sums up the others (docs/architecture.md, "Merge
   # policy"). Runs on every pull_request once the six jobs it needs have

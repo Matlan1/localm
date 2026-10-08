@@ -104,6 +104,16 @@ def test_ensure_cert_creates_ca_and_leaf(tmp_path):
     assert {"127.0.0.1", "::1", "192.168.1.50"}.issubset(ips)
 
 
+def test_ensure_cert_covers_a_hostname_and_an_ip_given_together(tmp_path):
+    cert_path, _ = tls.ensure_cert(
+        tmp_path, hostnames=["box.example.test"], ips=["192.168.1.50"])
+
+    hosts, ips = _sans(_load(cert_path))
+    assert "box.example.test" in hosts
+    assert "192.168.1.50" in ips
+    assert "192.168.1.50" not in hosts
+
+
 def test_leaf_is_signed_by_ca(tmp_path):
     cert_path, _ = tls.ensure_cert(tmp_path)
     leaf = _load(cert_path)
