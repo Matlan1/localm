@@ -76,14 +76,16 @@ rem  without "complete" was interrupted, whatever the cause. Run again, setup sa
 rem  where the last one stopped, reuses what finished and redoes the step that was
 rem  cut short. LOCALM_SETUP_ABORT_AFTER=<step> stops a run right after a step
 rem  ^(a testing aid^).
-set "STMP=%CD:!=^!%\.localm-setup-tmp"
+set "STMP=.localm-setup-tmp"
 if not exist ".localm-setup-tmp" mkdir ".localm-setup-tmp" >nul 2>nul
 set "TAB="
 for /f "delims=" %%T in ('powershell -NoProfile -Command "[char]9"') do set "TAB=%%T"
 set "JRON=1"
 if not defined TAB set "JRON=0"
+if "%JRON%"=="0" echo  [^^!] Could not set up the setup journal - if this setup is interrupted it cannot say where it stopped.
 set "RESUMING=0"
 set "OPENSTEP="
+set "OPENSET=;"
 set "LASTDONE="
 set "JCOMP=0"
 set "JSEEN=0"
@@ -169,7 +171,7 @@ if not errorlevel 1 goto uv_ready
 goto uv_missing
 
 :uv_check_portable
-if "%RESUMING%"=="1" if "%OPENSTEP%"=="uv-portable" if exist ".uv" call :redo_uv
+if "%RESUMING%"=="1" if not "!OPENSET:;uv-portable;=!"=="!OPENSET!" if exist ".uv" call :redo_uv
 if exist ".uv\uv.exe" (
     set "PATH=%CD:!=^!%\.uv;%PATH%"
     set "UVDIR=%CD:!=^!%\.uv"
@@ -268,7 +270,7 @@ rem  loop below for the actual fallback).
 set "UV_SYSTEM_CERTS=1"
 
 call :jr begin venv
-if "%RESUMING%"=="1" if "%OPENSTEP%"=="venv" if exist ".venv" goto venv_resume
+if "%RESUMING%"=="1" if not "!OPENSET:;venv;=!"=="!OPENSET!" if not exist ".venv\.localm-venv" if exist ".venv" goto venv_resume
 if not exist ".venv" goto venv_create
 
 rem .venv already exists - is it one we created, or a foreign one?
@@ -665,7 +667,7 @@ rem  backend from upstream llama.cpp releases (AMD uses a self-contained ROCm
 rem  build), and places them in this venv so the install is runnable.
 call :jr begin native-runtime
 set "SLFORCE="
-if "%RESUMING%"=="1" if "%OPENSTEP%"=="native-runtime" set "SLFORCE=--force"
+if "%RESUMING%"=="1" if not "!OPENSET:;native-runtime;=!"=="!OPENSET!" set "SLFORCE=--force"
 echo.
 if /i "%BACKEND%"=="own" (
     set "LLAMABUILD="
@@ -1061,7 +1063,7 @@ set "SCSTEP=1"
 goto :eof
 
 :intend_command
-.venv\Scripts\python -m localm.install_manifest journal --root . intend command "%CD%\bin\localm.cmd" >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest journal --root . intend command "!CD!\bin\localm.cmd" >nul 2>nul
 call :jr begin global-command
 set "GCSTEP=1"
 goto :eof
@@ -1072,7 +1074,8 @@ rem  event to .localm-setup-journal. :step_done STEP records the step as finishe
 rem  and stops the script with exit code 99 when LOCALM_SETUP_ABORT_AFTER names it:
 rem  the caller writes  call :step_done X ^|^| exit /b 99  so the stop ends setup,
 rem  not just the subroutine. :journal_read reads the journal into JSEEN, JCOMP,
-rem  LASTDONE and OPENSTEP.
+rem  LASTDONE, OPENSTEP (the latest step begun) and OPENSET (every step begun and
+rem  not finished, as ;a;b;).
 rem ===========================================================================
 :jr
 if "%JRON%"=="0" goto :eof
@@ -1103,14 +1106,17 @@ for /f "usebackq tokens=1,* delims=%TAB%" %%A in (".localm-setup-journal") do (
     if /i "%%A"=="begin" (
         set "JCOMP=0"
         set "OPENSTEP=%%B"
+        if "!OPENSET:;%%B;=!"=="!OPENSET!" set "OPENSET=!OPENSET!%%B;"
     )
     if /i "%%A"=="done" (
         set "LASTDONE=%%B"
+        set "OPENSET=!OPENSET:;%%B;=;!"
         if /i "%%B"=="!OPENSTEP!" set "OPENSTEP="
     )
     if /i "%%A"=="complete" (
         set "JCOMP=1"
         set "OPENSTEP="
+        set "OPENSET=;"
     )
 )
 goto :eof

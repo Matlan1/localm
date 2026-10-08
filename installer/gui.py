@@ -256,11 +256,15 @@ def journal(emit: Callable[[str], None], event: str, name: str = "", path: str =
     """Append *event* to the setup journal, saying so once if it cannot be written."""
     try:
         install_manifest().journal_event(ROOT, event, name, path)
-    except (OSError, ValueError) as e:
-        if not getattr(journal, "warned", False):
-            journal.warned = True
-            emit(f"[!] Could not write the setup journal ({e}); if this setup is "
-                 "interrupted it cannot say where it stopped.")
+    except Exception as e:
+        _warn_journal(emit, e)
+
+
+def _warn_journal(emit: Callable[[str], None], error: Exception) -> None:
+    if not getattr(journal, "warned", False):
+        journal.warned = True
+        emit(f"[!] Could not write the setup journal ({error}); if this setup is "
+             "interrupted it cannot say where it stopped.")
 
 
 def begin_journal(emit: Callable[[str], None]) -> dict:
@@ -270,10 +274,18 @@ def begin_journal(emit: Callable[[str], None]) -> dict:
     One that does not is the trace of an interrupted setup: it is reported, a
     ``resume`` is recorded, and the returned state lists the steps it left open."""
     journal.warned = False
-    im = install_manifest()
-    state = im.journal_state(ROOT)
+    try:
+        im = install_manifest()
+        state = im.journal_state(ROOT)
+    except Exception as e:
+        _warn_journal(emit, e)
+        return {"exists": False, "complete": False, "done": [], "started": []}
     if state["exists"] and state["complete"]:
-        im.journal_reset(ROOT)
+        try:
+            im.journal_reset(ROOT)
+        except OSError as e:
+            _warn_journal(emit, e)
+            return {"exists": False, "complete": False, "done": [], "started": []}
         return im.journal_state(ROOT)
     if state["exists"]:
         emit(f"A previous setup in this folder was interrupted: {im.describe_journal(state)}.")

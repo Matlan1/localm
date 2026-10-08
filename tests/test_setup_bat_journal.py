@@ -146,8 +146,10 @@ class TestACutShortVenv:
     none, and setup would treat it as somebody else's and keep it. With a stub uv, setup
     runs up to the venv step and shows whether it rebuilds."""
 
-    def _run(self, folder, tmp_path, journal, stubs):
+    def _run(self, folder, tmp_path, journal, stubs, *, marker=False):
         (folder / ".venv").mkdir()                        # half made: no marker file
+        if marker:
+            (folder / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
         (folder / ".venv" / "half-written").write_text("x", encoding="utf-8")
         if journal is not None:
             (folder / ".localm-setup-journal").write_bytes(journal)
@@ -155,7 +157,8 @@ class TestACutShortVenv:
         log.write_text("", encoding="utf-8")
         temp = tmp_path / "systemtemp"
         temp.mkdir()
-        rc, out = _setup(folder, abort_after="venv", answers="2\n\n\n\n\n",
+        answers = ("1\n" if marker else "") + "2\n\n\n\n\n"
+        rc, out = _setup(folder, abort_after="venv", answers=answers,
                          extra_env={"STUB_LOG": str(log), "TEMP": str(temp),
                                     "TMP": str(temp)}, path_prefix=stubs)
         return rc, out, log.read_text(encoding="utf-8"), temp
@@ -169,6 +172,27 @@ class TestACutShortVenv:
         assert "stopped while creating .venv; recreating it" in out
         assert "uv venv" in uv_log and "--clear" in uv_log, uv_log
         assert (folder / ".venv" / ".localm-venv").is_file()
+
+    def test_a_cut_short_venv_is_still_rebuilt_after_a_run_that_stopped_earlier(
+            self, folder, tmp_path, uv_stub_dir):
+        rc, out, uv_log, temp = self._run(
+            folder, tmp_path,
+            b"begin\tportable-choice\r\ndone\tportable-choice\r\nbegin\tvenv\r\n"
+            b"resume\r\nbegin\tportable-choice\r\n", uv_stub_dir)
+        assert rc == 99, out
+        assert "recreating it" in out
+        assert "--clear" in uv_log, uv_log
+
+    def test_a_venv_that_setup_finished_making_is_not_wiped_on_resume(
+            self, folder, tmp_path, uv_stub_dir):
+        rc, out, uv_log, temp = self._run(
+            folder, tmp_path,
+            b"begin\tportable-choice\r\ndone\tportable-choice\r\nbegin\tvenv\r\n",
+            uv_stub_dir, marker=True)
+        assert rc == 99, out
+        assert "recreating it" not in out
+        assert "uv venv" not in uv_log, uv_log
+        assert (folder / ".venv" / "half-written").is_file()
 
     def test_without_that_journal_a_marker_less_venv_is_left_alone(self, folder, tmp_path, uv_stub_dir):
         rc, out, uv_log, temp = self._run(folder, tmp_path, None, uv_stub_dir)
@@ -184,6 +208,26 @@ class TestACutShortVenv:
         assert rc == 99, out
         assert [p.name for p in temp.iterdir() if p.name.lower().startswith("localm")] == []
         assert (folder / ".localm-setup-tmp" / "localm_uv_err.txt").is_file()
+
+
+class TestAFolderWithABangInItsName:
+    """``!`` in the install path must not change where scratch files and the journal go."""
+
+    def test_the_scratch_files_and_the_journal_work_in_a_folder_with_a_bang(
+            self, tmp_path, uv_stub_dir):
+        clone = tmp_path / "bang!clone"
+        clone.mkdir()
+        shutil.copy(SETUP_BAT, clone / "setup.bat")
+        log = tmp_path / "uv.log"
+        log.write_text("", encoding="utf-8")
+        rc, out = _setup(clone, abort_after="venv", answers="2\n\n\n\n\n",
+                         extra_env={"STUB_LOG": str(log)}, path_prefix=uv_stub_dir)
+        assert rc == 99, out
+        assert "cannot find the path" not in out.lower(), out
+        assert "uv venv" in log.read_text(encoding="utf-8")
+        assert (clone / ".venv" / ".localm-venv").is_file()
+        assert (clone / ".localm-setup-tmp" / "localm_uv_err.txt").is_file()
+        assert im.journal_state(clone)["done"] == ["portable-choice", "venv"]
 
 
 class TestTheScriptItself:
@@ -217,6 +261,10 @@ class TestTheScriptItself:
         assert shortcut < self.text.index("CreateShortcut")
         command = self.text.index("call :intend_command")
         assert command < self.text.index("-m localm.globalcmd install")
+
+    def test_the_command_intent_survives_a_bang_in_the_path(self):
+        block = self.code[self.code.index("\n:intend_command\n"):]
+        assert '"!CD!\\bin\\localm.cmd"' in block.split("goto :eof")[0]
 
     def test_a_cut_short_runtime_download_is_forced(self):
         assert 'set "SLFORCE=--force"' in self.text

@@ -85,6 +85,22 @@ class TestRunSteps:
         assert sum("Could not write the setup journal" in line for line in lines) == 1
 
 
+class TestAJournalThatCannotBeReplaced:
+    def test_a_finished_journal_that_cannot_be_deleted_warns_and_the_install_goes_on(
+            self, gui, monkeypatch):
+        im.journal_event(gui.ROOT, "begin", "venv")
+        im.journal_event(gui.ROOT, "done", "venv")
+        im.journal_event(gui.ROOT, "complete")
+
+        def locked(root):
+            raise PermissionError("locked")
+        monkeypatch.setattr(im, "journal_reset", locked)
+        lines = []
+        state = gui.begin_journal(lines.append)
+        assert not state["exists"]
+        assert sum("Could not write the setup journal" in line for line in lines) == 1
+
+
 class TestPickingUp:
     def test_a_first_run_has_nothing_to_report(self, gui):
         lines = []
