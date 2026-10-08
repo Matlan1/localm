@@ -5,14 +5,13 @@ from __future__ import annotations
 import importlib.util
 import io
 import queue
-import re
 import struct
 import wave
-from pathlib import Path
 
 import pytest
 
 from localm import voice
+from tests._voice_stack import voice_stack  # noqa: F401
 from localm.plugins.builtin.voice.plug import _voice_error_status
 
 _KWARG_FAULT = "open() got an unexpected keyword argument 'metadata_errors'"
@@ -28,7 +27,7 @@ def _raiser(exc):
     return decode_audio
 
 
-@pytest.mark.skipif(not _has("av"), reason="PyAV not installed")
+@pytest.mark.usefixtures("voice_stack")
 def test_media_error_classified_as_decode():
     from av.error import InvalidDataError
     exc = InvalidDataError(1094995529, "Invalid data found when processing input")
@@ -92,29 +91,14 @@ def test_decoder_fault_tag_is_500_and_not_blamed_on_audio(monkeypatch):
     assert _voice_error_status(e)[0] == 500
 
 
-def test_voice_extra_bounds_av_below_19():
-    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
-        encoding="utf-8")
-    block = re.search(r"^voice\s*=\s*\[(.*?)\]", text, re.S | re.M).group(1)
-    reqs = re.findall(r'"([^"]+)"', block)
-    from packaging.requirements import Requirement
-    av = [Requirement(r) for r in reqs if Requirement(r).name == "av"]
-    assert len(av) == 1
-    assert av[0].specifier.contains("18.1.0")
-    assert not av[0].specifier.contains("19.0.0")
-    assert not av[0].specifier.contains("19.0.1")
-
-
-@pytest.mark.skipif(not (_has("faster_whisper") and _has("av")),
-                    reason="faster-whisper / PyAV not installed")
-def test_installed_decoder_pair_decodes_a_wav():
-    from faster_whisper.audio import decode_audio
+@pytest.mark.usefixtures("voice_stack")
+def test_installed_pyav_decodes_a_wav_with_localms_decoder():
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(16000)
         w.writeframes(struct.pack("<16000h", *([0] * 16000)))
-    audio, err = voice._decode_or_error(buf.getvalue(), decode_audio)
+    audio, err = voice._decode_or_error(buf.getvalue(), voice.decode_audio)
     assert err is None
     assert len(audio) == 16000

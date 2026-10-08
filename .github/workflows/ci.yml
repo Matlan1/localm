@@ -799,6 +799,61 @@ jobs:
         continue-on-error: true
         run: python scripts/check_web_search_canary.py
 
+  # Speech-to-text against the voice stack a user actually gets. Every other job
+  # installs `.[dev,rag]`, which has no PyAV or faster-whisper, so the voice
+  # tests skip there; this job installs the voice extra with pip, which resolves
+  # the NEWEST versions the extra allows, and runs the real decode tests on them.
+  # A PyAV or faster-whisper release that breaks decoding shows up here within a
+  # week at the latest (the weekly schedule), or on the next pull request. It is
+  # deliberately not one of the jobs merge-policy requires: an upstream break
+  # must be visible, but must not block an unrelated change.
+  voice-stack:
+    name: voice stack (real decode, newest allowed PyAV and faster-whisper)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the voice extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,voice]"
+
+      - name: Show the resolved versions
+        run: pip list 2>/dev/null | grep -i -E "^(av|faster-whisper|ctranslate2|numpy|tokenizers|onnxruntime) "
+
+      # LOCALM_REQUIRE_VOICE_STACK=1 turns "the voice stack is missing" into a
+      # test FAILURE instead of a skip, and the step then also fails if anything
+      # at all was skipped: a skipped voice test checks nothing and reads green.
+      - name: Real decode tests (nothing may be skipped)
+        env:
+          LOCALM_REQUIRE_VOICE_STACK: "1"
+        run: |
+          python -m pytest tests/test_voice_decode_audio.py tests/test_voice_decode_errors.py tests/test_voice_robustness.py tests/test_voice_stack_gating.py -m "not integration" -q -rs | tee voice-tests.log
+          if grep -qE "[0-9]+ skipped" voice-tests.log; then
+            echo "::error::a voice test was skipped; the voice stack must be fully exercised in this job"
+            exit 1
+          fi
+
+      - name: Whisper smoke (weekly and manual runs only, downloads the tiny model)
+        if: github.event_name != 'pull_request'
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from faster_whisper import WhisperModel
+          model = WhisperModel("tiny", device="cpu", compute_type="int8")
+          segments, info = model.transcribe(np.zeros(16000, dtype=np.float32))
+          list(segments)
+          print("transcribed one second of silence, language:", info.language)
+          PY
+
   # The one check that sums up the others (docs/architecture.md, "Merge
   # policy"). Runs on every pull_request once the six jobs it needs have
   # finished, whatever their results, and never on push, dispatch or

@@ -225,7 +225,7 @@ rag = [
 # Install with:  pip install "localm[voice]"
 voice = [
     "faster-whisper>=1.2.1",
-    "av>=11,<19",
+    "av>=11",
 ]
 # Live hardware monitor in the GUI status bar (CPU % + RAM). VRAM and NVIDIA
 # GPU % need no package. Optional: the monitor just omits CPU/RAM without it.

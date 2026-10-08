@@ -590,6 +590,26 @@ def _check_plugin_deps() -> None:
     console.print("       [dim]Install them with:  localm plugin install-deps --all[/dim]")
 
 
+def _check_voice_decode() -> None:
+    """Report whether speech-to-text can decode a recording with the PyAV that
+    is installed, by decoding a short generated one. Silent when the voice
+    extra is not installed."""
+    from rich.markup import escape
+
+    from localm import voice
+
+    state, detail = voice.decode_self_test()
+    if state == "absent":
+        return
+    if state == "ok":
+        console.print(f"  {_OK_SYM}  voice: recordings decode ({escape(detail)})")
+        return
+    console.print(f"  {_WARN_SYM}  voice: decoding a recording fails: {escape(detail)}")
+    fix = escape('pip install --upgrade --force-reinstall "localm[voice]"')
+    console.print("       [dim]Speech-to-text will not work until this is fixed. "
+                  f"Reinstall the voice extra:  {fix}[/dim]")
+
+
 def _check_managed_comfy() -> None:
     """Discovery hint for the opt-in localm-managed ComfyUI.
 
@@ -651,6 +671,8 @@ def doctor():
         USABLE - AutoTokenizer/AutoProcessor/AutoModelForCausalLM really load,
         in a worker process started the way a model load starts one
       - Enabled plugins have their pip extras installed
+      - Speech-to-text can decode a recording with the installed PyAV (when
+        the voice extra is installed)
     Also surfaces a one-line discovery hint for the opt-in managed ComfyUI.
     """
     # Resolve find_binary_dir from the package at call time so tests that
@@ -676,4 +698,5 @@ def doctor():
     modules = _check_packages()
     _check_hf_backend_usable(modules.get("torch"), modules.get("transformers"))
     _check_plugin_deps()
+    _check_voice_decode()
     _check_managed_comfy()

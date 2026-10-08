@@ -425,11 +425,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model; those that are only small talk are removed, and a removed one can still
   be restored from the memory archive. Greetings and thank-yous no longer count
   as something worth summarising.
-- **The microphone button works on a fresh install again.** A new install could
-  pull in a PyAV release that faster-whisper cannot use, so every recording
-  failed. The voice extra now keeps PyAV below version 19. A failure inside the
-  audio decoder itself is now reported as a server error naming the library
-  problem instead of "corrupt or unsupported audio".
+- **The microphone button works with every PyAV release again.** Speech-to-text
+  failed on any install that had PyAV 19, because faster-whisper's own audio
+  decoder passes an option that PyAV 19 removed, so every recording failed. localm
+  now decodes the recording itself: the audio is identical to before on PyAV 18,
+  the transcripts are identical on PyAV 19, and the voice extra no longer limits
+  the PyAV version. A failure inside the audio decoder itself is reported as a
+  server error naming the library problem instead of "corrupt or unsupported
+  audio", and `localm doctor` now checks that a recording can be decoded.
 - **Attaching an image in the Coder now says plainly that the Coder cannot take
   images.** It used to ask you to load a vision model, which could not help.
   Attach the image in Chat with a vision model, or paste the text instead.
