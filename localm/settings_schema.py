@@ -307,11 +307,12 @@ CORE_FIELDS: list = [
                  "one. Blank pins nothing.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("model_autoswitch", Widget.SELECT, "Model autoswitch",
-                 "If your model lacks what a chat needs: off = never switch; ask = "
-                 "offer one; loaded = only to a loaded model; auto = to an installed "
-                 "one; eager = also if yours is unchecked. Pinned chats never switch.",
+                 "off = never switch; image = only for an image your model can't "
+                 "read; ask = offer one; loaded = loaded models only; auto = any "
+                 "installed model; eager = also if unchecked. Pinned chats never "
+                 "switch.",
                  group="Models",
-                 options=["off", "ask", "loaded", "auto", "eager"]),
+                 options=["off", "image", "ask", "loaded", "auto", "eager"]),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "
                  "(0 = never; the model stays resident). The next message reloads "

@@ -57,17 +57,20 @@ _REQUIRED_TO_ANSWER = (caps.VISION,)
 # The ``model_autoswitch`` setting: when an unpinned request may be answered by
 # a model other than the one it names.
 #   off    never; the named or loaded model always answers
+#   image  only for an image the current model cannot read; no other need moves it
 #   ask    never on its own; the decision carries the model it would switch to
 #   loaded only to a model that is already loaded, so nothing is loaded or evicted
 #   auto   to an installed model when the current one is confirmed to lack a need
 #   eager  as auto, and also when the current model's capability is unknown
 AUTOSWITCH_OFF = "off"
+AUTOSWITCH_IMAGE = "image"
 AUTOSWITCH_ASK = "ask"
 AUTOSWITCH_LOADED = "loaded"
 AUTOSWITCH_AUTO = "auto"
 AUTOSWITCH_EAGER = "eager"
-AUTOSWITCH_MODES = (AUTOSWITCH_OFF, AUTOSWITCH_ASK, AUTOSWITCH_LOADED,
-                    AUTOSWITCH_AUTO, AUTOSWITCH_EAGER)
+AUTOSWITCH_MODES = (AUTOSWITCH_OFF, AUTOSWITCH_IMAGE, AUTOSWITCH_ASK,
+                    AUTOSWITCH_LOADED, AUTOSWITCH_AUTO, AUTOSWITCH_EAGER)
+AUTOSWITCH_DEFAULT = AUTOSWITCH_IMAGE
 AUTOSWITCH_KEY = "model_autoswitch"
 
 _warned_bad_mode: set = set()
@@ -82,7 +85,8 @@ def coerce_autoswitch_mode(val) -> Optional[str]:
 
 def configured_mode() -> str:
     """The ``model_autoswitch`` setting, always one of ``AUTOSWITCH_MODES``.
-    An unreadable value reads as ``auto`` and is reported once per value."""
+    An unreadable value reads as ``AUTOSWITCH_DEFAULT`` and is reported once per
+    value."""
     from localm import config
     raw = config.load_config().get(AUTOSWITCH_KEY)
     mode = coerce_autoswitch_mode(raw)
@@ -92,8 +96,8 @@ def configured_mode() -> str:
         _warned_bad_mode.add(repr(raw))
         from localm.debuglog import logger
         logger.warning("config %s=%r is not one of %s; using %r",
-                       AUTOSWITCH_KEY, raw, list(AUTOSWITCH_MODES), AUTOSWITCH_AUTO)
-    return AUTOSWITCH_AUTO
+                       AUTOSWITCH_KEY, raw, list(AUTOSWITCH_MODES), AUTOSWITCH_DEFAULT)
+    return AUTOSWITCH_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -403,7 +407,9 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     equivalent one.
 
     *mode* is the autoswitch mode (``AUTOSWITCH_MODES``; an unrecognised value
-    reads as ``auto``) and applies to an unpinned request only. For ``off``,
+    reads as ``auto``) and applies to an unpinned request only.
+    ``image`` drops every need except vision, so only an image the current model
+    cannot read moves the request. For ``off``, ``image``,
     ``ask``, ``loaded`` and ``auto`` an unknown capability on *current* (other
     than vision) is not a gap, so only a confirmed absence moves the request;
     ``eager`` also moves it on an unknown. ``off`` never moves it. ``ask``
@@ -433,18 +439,23 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     Ranking among qualified candidates: already resident first, then the largest
     confirmed context window, then name, so the result is deterministic and a
     test can assert on it."""
+    mode = coerce_autoswitch_mode(mode) or AUTOSWITCH_AUTO
+    if mode == AUTOSWITCH_IMAGE and not pinned:
+        needs = CapabilityNeeds(
+            capabilities=tuple(c for c in needs.capabilities
+                               if c in _REQUIRED_TO_ANSWER))
+
     # Before the registry read, not after: a request that states no needs is the
     # common case and must not pay for a read it cannot use.
     if needs.is_empty():
         return RoutingDecision(current=current, resolved=current, pinned=pinned,
-                               needs=needs)
+                               needs=needs, policy=mode)
 
     reg = caps._registry._mm.load_registry() if reg is None else reg
     if not isinstance(reg, dict):
         reg = {}
     dir_cache: dict = {}
 
-    mode = coerce_autoswitch_mode(mode) or AUTOSWITCH_AUTO
     gaps = _current_gaps(current, needs, reg, dir_cache, current_known,
                          ignore_unknown=not pinned and mode != AUTOSWITCH_EAGER)
     if not gaps:
