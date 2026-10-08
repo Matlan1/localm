@@ -243,12 +243,10 @@ if exist ".venv\.localm-venv" set "OURS=1"
 if exist ".venv\Scripts\localm.exe" set "OURS=1"
 echo.
 set "REPLACEVENV="
+set "VENVKIND=Foreign"
+if "%OURS%"=="1" set "VENVKIND=LocalM"
 call :flush
-if "%OURS%"=="1" (
-    set /p "REPLACEVENV=  LocalM .venv found. Replace it? [y/N]: "
-) else (
-    set /p "REPLACEVENV=  Foreign .venv found. Replace it? [y/N]: "
-)
+set /p "REPLACEVENV=  !VENVKIND! .venv found. Replace it? [y/N]: "
 if not defined REPLACEVENV set "REPLACEVENV=N"
 if /i not "!REPLACEVENV:~0,1!"=="Y" (
     echo  Keeping existing .venv.
