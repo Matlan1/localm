@@ -324,13 +324,11 @@ if [ "$spick" = 1 ]; then
 else
   say "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
 fi
-# What the install manifest records about this choice. install.sh exports
-# LOCALM_UV_BOOTSTRAPPED=1 when it installed uv into the user profile itself.
+# What the install manifest records about this choice.
 RCFLAG=""; PYDIR=""; CACHEDIR=""; UVSHARED=""
 if [ "$CONTAINED" = 1 ]; then
   RCFLAG="--runtime-contained"; PYDIR="$(pwd)/.python"; CACHEDIR="$(pwd)/.cache"
 fi
-if [ "${LOCALM_UV_BOOTSTRAPPED:-0}" = 1 ]; then UVSHARED="--uv-shared-installed"; fi
 
 # 1 = verify against the platform's NATIVE certificate store - the same trust a
 # browser, or an IT-provisioned corporate/security-product proxy's injected
