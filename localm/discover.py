@@ -790,9 +790,11 @@ def _reset_gpu_probe_cache() -> None:
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     global _gpu_probe_done, _gpu_probe_result, _isolated_torch_unavailable
     global _isolated_torch_broken_warned, _child_stderr_cap_reported
+    global _isolated_torch_unanswered
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
+        _isolated_torch_unanswered = False
         # Cleared with the rest of the probe state: a test (or a caller) resetting
         # the cache must get a clean slate, or one test's simulated spawn failure
         # would silently disable the torch path for every later test in the worker.
@@ -997,6 +999,7 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
             # separate one) because it is the same global _torch_gpus_isolated_once
             # mutates, and this probe thread is the only writer while it runs.
             conclusive = not (not value and (_isolated_torch_unavailable
+                                             or _isolated_torch_unanswered
                                              or _torch_gpu_probe_known_doomed()))
             if _gpu_probe_epoch != my_epoch:
                 # A reset retired this probe while it ran: its reading describes a
@@ -1425,6 +1428,22 @@ _isolated_torch_unavailable = False
 # in-process), so the warning would otherwise repeat on every probe.
 _isolated_torch_broken_warned = False
 
+# True for the probe round in which the isolated probe could not answer AND the
+# in-process fallback was refused (:func:`_in_process_torch_import_can_freeze`).
+# Cleared at the start of every probe round and by _reset_gpu_probe_cache. Unlike
+# _isolated_torch_unavailable it never skips the next round's isolated attempt.
+# Read/written under _gpu_probe_lock.
+_isolated_torch_unanswered = False
+
+
+def _in_process_torch_import_can_freeze() -> bool:
+    """True where a cold ``import torch`` in this process can hold the OS loader
+    lock for tens of seconds and freeze every thread (Windows; see
+    :mod:`localm._torch_gpu_probe`), so a failed isolated probe must not be
+    retried by importing here."""
+    import sys
+    return sys.platform == "win32"
+
 
 def isolated_torch_unavailable() -> bool:
     """True once the isolated probe has PROVEN, in a child process, that torch
@@ -1688,9 +1707,15 @@ def _torch_gpus_isolated_once() -> list:
     - ISOLATION IS BROKEN (cannot spawn, unusable reply). We learned nothing
       about torch. Falling through to nvidia-smi would SILENTLY LOSE real GPU
       enumeration on any box nvidia-smi cannot see - every AMD and Intel box -
-      turning "we could not look" into a confident "no GPU". So degrade to the
-      IN-PROCESS import and say plainly at WARNING that the isolation was lost
-      and the stall risk is back. A safety net for a genuine runtime failure,
+      turning "we could not look" into a confident "no GPU". Off Windows, degrade
+      to the IN-PROCESS import and say plainly at WARNING that the isolation was
+      lost. On Windows
+      (:func:`_in_process_torch_import_can_freeze`) that import can freeze the
+      server and a child that died printing nothing usually means torch's import
+      itself faulted, so return ``[]`` without importing, say so at WARNING, and
+      set ``_isolated_torch_unanswered`` for the round: the empty reading is then
+      reported inconclusive and the AMD registry fallback in
+      :func:`_list_gpus_probe` runs. A safety net for a genuine runtime failure,
       not the design.
 
     Once latched, this still returns [] and the probe still falls through to
@@ -1735,10 +1760,25 @@ def _torch_gpus_isolated_once() -> list:
                     _ISOLATED_TORCH_PROBE_TIMEOUT)
         return []
     if devices is None:
-        global _isolated_torch_broken_warned
+        global _isolated_torch_broken_warned, _isolated_torch_unanswered
         with _gpu_probe_lock:
             first = not _isolated_torch_broken_warned
             _isolated_torch_broken_warned = True
+        if _in_process_torch_import_can_freeze():
+            if first:
+                logger.warning(
+                    "list_gpus: could not run the isolated GPU probe. Importing "
+                    "torch in this process can freeze the server on Windows, so "
+                    "GPU detection uses the non-torch sources (nvidia-smi, the "
+                    "display-adapter registry) until the probe works again. "
+                    "Please report this - the isolated probe is meant to work "
+                    "everywhere.")
+            else:
+                logger.debug("list_gpus: isolated probe still unavailable; "
+                             "using the non-torch GPU sources")
+            with _gpu_probe_lock:
+                _isolated_torch_unanswered = True
+            return []
         if first:
             # ONCE per process, not once per probe. The live VRAM meter polls
             # /api/stats every 2.5s and each poll drives a probe, so an
@@ -1810,6 +1850,9 @@ def _list_gpus_probe() -> list:
     # Whether torch was actually asked this round, as opposed to being
     # skipped outright because it is known-doomed. Read by the AMD/Windows
     # fallback at the end of this function.
+    global _isolated_torch_unanswered
+    with _gpu_probe_lock:
+        _isolated_torch_unanswered = False
     torch_asked = not _torch_gpu_probe_known_doomed()
     if torch_asked:
         try:
@@ -1873,7 +1916,7 @@ def _list_gpus_probe() -> list:
     # torch was asked and answered honestly empty. See
     # test_amd_single_adapter_fallback_is_conclusive and
     # test_fires_control_genuine_no_gpu_box_stays_ok.
-    if not torch_asked or _isolated_torch_unavailable:
+    if not torch_asked or _isolated_torch_unavailable or _isolated_torch_unanswered:
         entry = _windows_largest_adapter_registry_entry()
         if entry is not None:
             _apply_device_global_free([entry])

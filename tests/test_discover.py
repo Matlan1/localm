@@ -1126,7 +1126,9 @@ class TestListGpus:
 
     def test_empty_when_nothing_available(self):
         with patch.dict(sys.modules, {"torch": None}), \
-             patch("subprocess.Popen", side_effect=FileNotFoundError):
+             patch("subprocess.Popen", side_effect=FileNotFoundError), \
+             patch.object(discover, "_windows_largest_adapter_registry_entry",
+                          return_value=None):
             assert list_gpus() == []
 
     def test_empty_when_torch_sees_no_cuda(self):

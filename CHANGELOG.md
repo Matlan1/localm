@@ -241,6 +241,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **Two localm instances now find each other even when they were started with
+  different temporary folders, and the GPU check no longer risks freezing the
+  server on Windows.** The registry that lets instances share one GPU's memory used
+  to live in the temporary folder, so an instance started by a launcher, service or
+  installer that set a different one could not see the others. It now lives in your
+  per-user cache folder (`%LOCALAPPDATA%\localm\gpu` on Windows; set
+  `LOCALM_GPU_REGISTRY_DIR` to move it). Separately, when the separate GPU probe
+  cannot answer on Windows, localm no longer loads PyTorch inside the server as a
+  fallback, which could stall it for tens of seconds; it reads the GPU from
+  `nvidia-smi` and the Windows display-adapter registry instead.
 - **The installer waits for Enter after you answer "Replace it?".** Typing Y on the
   existing-environment question in `setup.bat` used to continue at once, unlike every
   other question; its other yes/no questions now wait for Enter as well.
