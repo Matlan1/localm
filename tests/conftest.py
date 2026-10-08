@@ -47,6 +47,13 @@ def pytest_sessionfinish(session, exitstatus):
 
 import pytest
 
+# Hooks that fail a skip for a missing optional package or resource when the run
+# declares it required (LOCALM_REQUIRE_OPTIONAL); see tests/_require_optional.py.
+from tests._require_optional import (  # noqa: E402, F401
+    pytest_make_collect_report,
+    pytest_runtest_makereport,
+)
+
 
 # --------------------------------------------------------------------------- #
 #  The import-time temp home is cleaned up at PROCESS EXIT, unless it landed    #
