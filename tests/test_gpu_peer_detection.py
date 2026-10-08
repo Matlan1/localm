@@ -154,15 +154,33 @@ class TestCandidateEndpoints:
             assert gpu_registry.candidate_endpoints() == []
 
     def test_only_listeners_inside_the_claimed_range(self, monkeypatch):
-        with peer_server(localm_whoami("a1")) as inside, \
-                peer_server(localm_whoami("a2")) as outside:
-            lo, hi = sorted((inside.port, outside.port))
-            if hi - lo < 2:
-                pytest.skip("ephemeral ports too close to split a range")
-            enable_detection(monkeypatch, inside.port)
-            monkeypatch.setattr("localm.config.PORT_RANGE", (inside.port, inside.port))
-            ports = [p for _a, p in gpu_registry.candidate_endpoints()]
+        outside = None
+        with peer_server(localm_whoami("a1")) as inside:
+            for offset in range(2, 400):
+                s = socket.socket()
+                try:
+                    s.bind(("127.0.0.1", inside.port + offset))
+                    s.listen()
+                except OSError:
+                    s.close()
+                    continue
+                outside = s
+                break
+            assert outside is not None, "no free port near the test server"
+            try:
+                outside_port = outside.getsockname()[1]
+                enable_detection(monkeypatch, inside.port)
+                monkeypatch.setattr("localm.config.PORT_RANGE",
+                                    (inside.port, inside.port))
+                ports = [p for _a, p in gpu_registry.candidate_endpoints()]
+                # The control: the same listener IS found once the range covers it.
+                monkeypatch.setattr("localm.config.PORT_RANGE",
+                                    (inside.port, outside_port))
+                widened = [p for _a, p in gpu_registry.candidate_endpoints()]
+            finally:
+                outside.close()
         assert ports == [inside.port]
+        assert outside_port in widened
 
     def test_a_wildcard_listener_is_dialled_on_loopback(self, monkeypatch):
         monkeypatch.setenv("LOCALM_PEER_DETECTION", "on")
