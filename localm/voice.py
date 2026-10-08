@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import atexit
 import importlib.util
+import itertools
 import os
 import queue as _queue
 import threading
@@ -311,6 +312,123 @@ def _is_media_error(exc: BaseException) -> bool:
     return isinstance(exc, (OSError, ValueError, EOFError))
 
 
+def _ignore_invalid_frames(frames):
+    """Yield *frames*, skipping any frame PyAV reports as invalid data."""
+    from av.error import InvalidDataError
+    iterator = iter(frames)
+    while True:
+        try:
+            yield next(iterator)
+        except StopIteration:
+            return
+        except InvalidDataError:
+            continue
+
+
+def _open_container(source):
+    """Open *source* for reading with PyAV. Metadata that is not valid text is
+    ignored rather than raised, on the PyAV versions that have the
+    ``metadata_errors`` option; newer versions dropped it and need no option."""
+    import av
+    try:
+        return av.open(source, mode="r", metadata_errors="ignore")
+    except TypeError as e:
+        if "metadata_errors" not in str(e):
+            raise
+        return av.open(source, mode="r")
+
+
+def decode_audio(source, sampling_rate: int = 16000):
+    """Decode an audio file or binary file object to mono float32 samples in
+    [-1, 1] at *sampling_rate* Hz, using PyAV.
+
+    Accepts anything PyAV can read. Raises PyAV's ``FFmpegError`` family for a
+    recording that cannot be decoded and ``ValueError``/``IndexError`` for one
+    with no audio stream. Works with every PyAV version localm allows."""
+    import gc
+
+    import av
+    import numpy as np
+
+    resampler = av.audio.resampler.AudioResampler(
+        format="s16", layout="mono", rate=sampling_rate)
+    pieces = []
+    with _open_container(source) as container:
+        frames = _ignore_invalid_frames(container.decode(audio=0))
+        for frame in itertools.chain(frames, [None]):
+            for resampled in resampler.resample(frame):
+                pieces.append(resampled.to_ndarray().reshape(-1))
+    del resampler
+    gc.collect()
+    if not pieces:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(pieces).astype(np.float32) / 32768.0
+
+
+_SELF_TEST_SAMPLES = 4000
+
+
+def _self_test_child() -> int:
+    """Body of the child process behind ``decode_self_test``: decode a short
+    generated WAV with ``decode_audio``, print ``ok`` or the failure, and return
+    the process exit status."""
+    import io
+    import math
+    import struct
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(i / 10)))
+                               for i in range(_SELF_TEST_SAMPLES)))
+    try:
+        audio = decode_audio(io.BytesIO(buf.getvalue()))
+    except Exception as e:
+        print(f"{type(e).__name__}: {e}")
+        return 1
+    if len(audio) != _SELF_TEST_SAMPLES:
+        print(f"decoded {len(audio)} samples, expected {_SELF_TEST_SAMPLES}")
+        return 1
+    print("ok")
+    return 0
+
+
+def decode_self_test(timeout: float = 60.0) -> "tuple[str, str]":
+    """Decode a short generated recording with the installed PyAV, in a child
+    process so a native fault cannot take the caller down.
+
+    Returns ``(state, detail)``: ``("absent", ...)`` when the voice extra is not
+    installed, ``("ok", "PyAV x, faster-whisper y")`` when decoding works, or
+    ``("fail", reason)`` naming the exception, a timeout, or the child's exit
+    code."""
+    import importlib.metadata as md
+    import subprocess
+
+    if (importlib.util.find_spec("av") is None
+            or importlib.util.find_spec("faster_whisper") is None):
+        return "absent", "the voice extra (faster-whisper, PyAV) is not installed"
+    from localm._mp_spawn import describe_exit_code, interpreter_for_localm_children
+    code = "import sys; from localm.voice import _self_test_child; sys.exit(_self_test_child())"
+    try:
+        proc = subprocess.run([interpreter_for_localm_children(), "-c", code],
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "fail", f"decoding a short recording did not finish within {timeout:g}s"
+    except OSError as e:
+        return "fail", f"could not start the decoder check: {e}"
+    out = (proc.stdout or "").strip().splitlines()
+    last = out[-1] if out else ""
+    if proc.returncode == 0 and last == "ok":
+        return "ok", (f"PyAV {md.version('av')}, "
+                      f"faster-whisper {md.version('faster-whisper')}")
+    if proc.returncode in (0, 1) and last:
+        return "fail", last
+    return "fail", f"the decoder check exited with {describe_exit_code(proc.returncode)}"
+
+
 def _decode_or_error(data: bytes, decode_audio):
     """Decode ``data`` with ``decode_audio``; return ``(audio, None)`` or
     ``(None, (tag, detail))`` where tag is "decode" for a bad recording and
@@ -380,7 +498,6 @@ def _worker_main(req_q, resp_q) -> None:
 
         try:
             from faster_whisper import WhisperModel
-            from faster_whisper.audio import decode_audio
         except Exception as e:                   # native lib missing / failed to load
             resp_q.put(("error", "needs-faster-whisper", str(e)))
             continue
