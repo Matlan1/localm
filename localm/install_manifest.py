@@ -29,6 +29,14 @@ process exits, then deletes the pending file and the manifest.
 The manifest is deleted only when everything recorded is gone; after a failure
 it stays, so running uninstall again retries.
 
+Setup also keeps a journal, ``.localm-setup-journal`` in the clone: one tab-separated
+line per event (``begin`` / ``done`` a step, ``intend`` an artifact it is about to
+create outside the clone, ``complete``, ``resume``). A setup that is killed leaves a
+journal without ``complete``, so the next run can say where the last one stopped, and
+uninstall treats a journaled shortcut or command it never got to record as if it had
+been recorded (through the same checks). A step that was begun but never finished
+while it could touch the user's profile is reported as a note.
+
 Stdlib only.
 """
 
@@ -47,6 +55,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
+JOURNAL_NAME = ".localm-setup-journal"
 DATA_MARKER = ".localm-data"
 HOME_CFG_NAME = "localm-home.cfg"
 PORTABLE_HOME = "home"
@@ -58,6 +67,7 @@ EXIT_FAILED = 1          # something could not be removed; nothing deferred
 EXIT_PARTIAL = 2         # finished, but an item you asked to remove was refused
 EXIT_RUNNING = 3         # LocaLM is running from this folder; nothing touched
 EXIT_ABORTED = 4         # the record is newer than this uninstaller
+EXIT_INCOMPLETE = 5      # journal status: a setup started here and did not finish
 EXIT_UNAVAILABLE = 3     # current-data / prepare-data --keep-current: the data folder
                          # this install is set to use does not exist right now
 
@@ -130,6 +140,134 @@ def manifest_path(root) -> Path:
 
 def pending_path(root) -> Path:
     return Path(root) / PENDING_NAME
+
+
+def journal_path(root) -> Path:
+    return Path(root) / JOURNAL_NAME
+
+
+_JOURNAL_EVENTS = ("begin", "done", "intend", "complete", "resume")
+_INTENT_KINDS = ("shortcut", "command")
+# Steps that can touch the user's profile: an unfinished one is reported.
+_PROFILE_STEPS = {
+    "menu-entry": "the application-menu or desktop entry",
+    "global-command": "the global localm command (and the PATH change that goes with it)",
+    "uv-bootstrap": "uv in its shared per-user location",
+}
+
+
+def journal_event(root, event: str, name: str = "", path: str = "") -> Path:
+    """Append one event to the setup journal under *root*. ``begin`` and ``done``
+    take a step *name*; ``intend`` takes a *name* of ``shortcut`` or ``command`` and
+    the *path* of the artifact setup is about to create. The line is written with a
+    single append and flushed to disk, so a kill leaves either the whole line or
+    none of it. Raises ValueError for a malformed event."""
+    if event not in _JOURNAL_EVENTS:
+        raise ValueError(f"unknown journal event {event!r}")
+    fields = [event]
+    if event in ("begin", "done"):
+        fields.append(name)
+    elif event == "intend":
+        if name not in _INTENT_KINDS:
+            raise ValueError(f"unknown intent kind {name!r}")
+        fields += [name, _plain_abs(path)]
+    for f in fields[1:]:
+        if not f or any(c in f for c in "\t\r\n"):
+            raise ValueError(f"bad journal field {f!r}")
+    target = journal_path(root)
+    fd = os.open(str(target), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, ("\t".join(fields) + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return target
+
+
+def journal_state(root) -> dict:
+    """What the setup journal under *root* says. ``exists``; ``complete`` (the last
+    run reached ``complete``); ``done`` (finished steps, in order); ``started``
+    (steps begun and never finished); ``last_done``; ``intents`` as ``(kind, path)``
+    pairs; ``resumed`` (how many times setup was re-run over an unfinished journal).
+    A torn final line (no newline) and unrecognised lines are ignored."""
+    state = {"exists": False, "complete": False, "done": [], "started": [],
+             "last_done": "", "intents": [], "resumed": 0}
+    try:
+        text = journal_path(root).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return state
+    state["exists"] = True
+    lines = text.split("\n")
+    lines.pop()  # whatever follows the last newline is not a whole line
+    open_steps: List[str] = []
+    for line in lines:
+        parts = line.rstrip("\r").split("\t")
+        ev = parts[0]
+        if ev == "begin" and len(parts) == 2:
+            state["complete"] = False
+            if parts[1] not in open_steps:
+                open_steps.append(parts[1])
+        elif ev == "done" and len(parts) == 2:
+            if parts[1] in open_steps:
+                open_steps.remove(parts[1])
+            if parts[1] not in state["done"]:
+                state["done"].append(parts[1])
+            state["last_done"] = parts[1]
+        elif ev == "intend" and len(parts) == 3 and parts[1] in _INTENT_KINDS:
+            state["intents"].append((parts[1], parts[2]))
+        elif ev == "complete":
+            state["complete"] = True
+            open_steps = []
+        elif ev == "resume":
+            state["resumed"] += 1
+    state["started"] = open_steps
+    return state
+
+
+def journal_reset(root) -> None:
+    """Delete the setup journal under *root* (a fresh install over a finished one)."""
+    try:
+        journal_path(root).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def describe_journal(state: dict) -> str:
+    """One line saying how far the last setup got, for the next run to print."""
+    if not state.get("exists"):
+        return "no setup has started here"
+    if state.get("complete"):
+        return "the last setup finished"
+    done, started = state.get("last_done"), state.get("started") or []
+    after = f"after '{done}'" if done else "before finishing its first step"
+    during = f", while running '{started[-1]}'" if started else ""
+    return f"the last setup stopped {after}{during}"
+
+
+def _with_journal_intents(m: Optional[dict], root: Path) -> Optional[dict]:
+    """*m* with the shortcuts and command shims the journal says setup was about to
+    create added as if they had been recorded, so uninstall checks and removes them
+    through the same rules. Anything already recorded is left alone. Returns *m*
+    itself when the journal adds nothing."""
+    intents = journal_state(root)["intents"]
+    if not intents:
+        return m
+    out = dict(m) if m else {"schema": SCHEMA_VERSION, "root": str(root)}
+    files = list(out.get("files") or [])
+    added = False
+    for kind, path in intents:
+        if kind == "shortcut":
+            if not any(_same(path, f) for f in files) and not (
+                    out.get("shortcut") and _same(path, out["shortcut"])):
+                files.append(_plain_abs(path))
+                added = True
+        elif kind == "command" and not out.get("command_shim"):
+            out["command_shim"] = _plain_abs(path)
+            added = True
+    if not added:
+        return m
+    out["files"] = files
+    return _upgrade(out, root) if not m else out
 
 
 def _abs(p) -> str:
@@ -1535,6 +1673,13 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
         report["no_manifest"] = True
     else:
         m, old_root = _rebase(_upgrade(m, root), root)
+    m = _with_journal_intents(m, root)
+    for step in journal_state(root)["started"]:
+        if step in _PROFILE_STEPS:
+            report["notes"].append((
+                step, f"setup was stopped while it was creating {_PROFILE_STEPS[step]}; "
+                      "anything it left in your profile that does not point into this "
+                      "folder is not removed - check by hand"))
     report["venv"] = str(root / ".venv")
     report["moved_from"] = old_root
 
@@ -1762,12 +1907,13 @@ def _finish(report: dict, root: Path, m: Optional[dict], items: List[_Item],
         try:
             _write(root, keep)
             pending_path(root).write_text("\n".join(names) + "\n", encoding="ascii")
+            journal_reset(root)
         except OSError as e:
             report["failed"].append((str(pending_path(root)), f"could not write: {e}"))
             report["ok"] = False
             report["exit"] = EXIT_FAILED
         return report
-    for p in (manifest_path(root), pending_path(root)):
+    for p in (manifest_path(root), pending_path(root), journal_path(root)):
         try:
             p.unlink()
         except FileNotFoundError:
@@ -1991,6 +2137,13 @@ def main(argv=None) -> int:
     f = sub.add_parser("finish", help="remove what a previous uninstall deferred")
     f.add_argument("--root", default=".")
 
+    j = sub.add_parser("journal", help="the setup journal: begin/done STEP, "
+                                       "intend KIND PATH, complete, resume, status, reset")
+    j.add_argument("--root", default=".")
+    j.add_argument("action", choices=list(_JOURNAL_EVENTS) + ["status", "reset"])
+    j.add_argument("name", nargs="?", default="")
+    j.add_argument("path", nargs="?", default="")
+
     args = ap.parse_args(argv)
     try:
         sys.stdout.reconfigure(errors="replace")
@@ -2035,6 +2188,20 @@ def main(argv=None) -> int:
             print(f"  [!] Cannot use that data folder: {e}")
             return 1
         print(f"  Data directory: {target}")
+        return 0
+    if args.cmd == "journal":
+        if args.action == "reset":
+            journal_reset(args.root)
+            return 0
+        if args.action == "status":
+            st = journal_state(args.root)
+            print(describe_journal(st))
+            return EXIT_INCOMPLETE if st["exists"] and not st["complete"] else 0
+        try:
+            journal_event(args.root, args.action, args.name, args.path)
+        except (OSError, ValueError) as e:
+            print(f"[install] could not write the setup journal: {e}", file=sys.stderr)
+            return 1
         return 0
     if args.cmd == "finish":
         removed, left = finish_pending(args.root)
