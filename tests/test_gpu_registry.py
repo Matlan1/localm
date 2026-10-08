@@ -12,8 +12,8 @@ a peer cooperates), and the new endpoint's token-only auth (never reachable
 via a real API key/shell token alone).
 
 Every test here redirects gpu_registry.registry_dir() to a per-test tmp_path
-(autouse fixture below) so nothing ever touches the real machine-wide
-``%TEMP%/localm/gpu`` directory - that directory could hold a REAL running
+(autouse fixture below) so nothing ever touches the real per-user
+registry directory - that directory could hold a REAL running
 localm instance's entry, and this suite must never probe or ask a real
 process to unload its model.
 """

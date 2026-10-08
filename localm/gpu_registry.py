@@ -5,9 +5,10 @@
 install, with its registry under ``<LOCALM_HOME>/run/``. Two different install
 locations have two different ``LOCALM_HOME``s and cannot see each other there,
 while still contending for the same physical GPU. This module adds a
-MACHINE-WIDE (not per-install) rendezvous directory, resolved via the stdlib
-temp dir - never a hardcoded absolute path, never inside any one install's
-``HOME_DIR`` - so every localm process on the box can see every other one.
+PER-USER, cross-install rendezvous directory, resolved from the per-user cache
+root (``LOCALM_GPU_REGISTRY_DIR`` overrides) - never a hardcoded absolute path,
+never inside any one install's ``HOME_DIR``, never under the TMP/TEMP/TMPDIR
+environment - so every localm process of this OS user can see every other one.
 
 Liveness reuses :func:`localm.instances.pid_alive`, and identity reuses the
 ``GET /whoami`` handshake (``app == "localm"`` AND the instance_id matches the
@@ -36,7 +37,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import tempfile
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -51,12 +52,36 @@ APP_NAME = "localm"
 #  Paths + ids                                                        #
 # ------------------------------------------------------------------ #
 
+REGISTRY_DIR_ENV = "LOCALM_GPU_REGISTRY_DIR"
+
+
+def _user_cache_root() -> Path:
+    """The per-user cache root, independent of TMP/TEMP/TMPDIR: ``%LOCALAPPDATA%``
+    on Windows, ``~/Library/Caches`` on macOS, ``$XDG_CACHE_HOME`` or
+    ``~/.cache`` elsewhere."""
+    home = Path(os.path.expanduser("~"))
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA")
+        return Path(base) if base else home / "AppData" / "Local"
+    if sys.platform == "darwin":
+        return home / "Library" / "Caches"
+    base = os.environ.get("XDG_CACHE_HOME")
+    return Path(base) if base and os.path.isabs(base) else home / ".cache"
+
+
 def registry_dir() -> Path:
-    """The machine-wide rendezvous directory, shared by every localm install
-    on this machine (unlike ``instances.py``'s per-install ``run/`` under
-    ``LOCALM_HOME``). Resolved via the stdlib temp dir - portable, and never a
-    hardcoded absolute path or an install-specific location."""
-    return Path(tempfile.gettempdir()) / "localm" / "gpu"
+    """The rendezvous directory shared by every localm install run by this OS
+    user (unlike ``instances.py``'s per-install ``run/`` under ``LOCALM_HOME``).
+
+    ``LOCALM_GPU_REGISTRY_DIR`` overrides it. Otherwise it lives under the
+    per-user cache root (:func:`_user_cache_root`), never under the stdlib temp
+    dir, so a process started with a different TMP/TEMP/TMPDIR still finds the
+    same peers. Entries are per-user because the coordination token is a
+    filesystem secret scoped to the OS user."""
+    override = os.environ.get(REGISTRY_DIR_ENV)
+    if override:
+        return Path(override)
+    return _user_cache_root() / "localm" / "gpu"
 
 
 def entry_path(directory, instance_id: str) -> Path:

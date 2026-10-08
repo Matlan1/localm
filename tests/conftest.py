@@ -33,6 +33,11 @@ from pathlib import Path
 _test_home_dir = tempfile.mkdtemp(prefix="localm_test_home_")
 os.environ["LOCALM_HOME"] = _test_home_dir
 
+# Keep the cross-install GPU registry inside the throwaway home, so a test that
+# reaches gpu_registry.registry_dir() unpatched can never see, or ask to unload,
+# a real instance of the user running the suite. Inherited by spawned subprocesses.
+os.environ["LOCALM_GPU_REGISTRY_DIR"] = os.path.join(_test_home_dir, "gpu-registry")
+
 # Disable the media-plugin legacy-workflow migration for the whole suite. The
 # flag is inherited by spawned subprocesses.
 os.environ["LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"] = "1"
