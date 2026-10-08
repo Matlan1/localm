@@ -417,6 +417,16 @@ def _stored_temp_location(home: Path) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _absolute_folder(text: str) -> Optional[Path]:
+    """*text* as an absolute folder path (``~`` expanded), or None when it is
+    relative or its ``~user`` cannot be resolved."""
+    try:
+        candidate = Path(text).expanduser()
+    except (RuntimeError, OSError):
+        return None
+    return candidate if candidate.is_absolute() else None
+
+
 def temp_dir(home: Optional[Path] = None) -> Optional[Path]:
     """Where localm's temporary files go, or None to leave the system temp folder.
 
@@ -429,16 +439,20 @@ def temp_dir(home: Optional[Path] = None) -> Optional[Path]:
     home = Path(home) if home is not None else home_dir()
     override = os.environ.get(TEMP_DIR_ENV, "").strip()
     if override:
-        return Path(override).expanduser()
+        folder = _absolute_folder(override)
+        if folder is not None:
+            return folder
+        print(f"[localm] WARNING: {TEMP_DIR_ENV}={override!r} is not an absolute "
+              "folder; ignoring it.", file=sys.stderr)
     choice = _stored_temp_location(home)
     if choice.lower() == "data":
         return home / "tmp"
     if choice.lower() == "system":
         return None
     if choice and choice.lower() != "auto":
-        candidate = Path(choice).expanduser()
-        if candidate.is_absolute():
-            return candidate
+        folder = _absolute_folder(choice)
+        if folder is not None:
+            return folder
         print(f"[localm] WARNING: temp_location {choice!r} in config.json is not "
               "'auto', 'data', 'system' or an absolute folder; using 'auto'.",
               file=sys.stderr)

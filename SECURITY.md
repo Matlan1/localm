@@ -90,8 +90,11 @@ each because it carries its own credential instead: the OpenAI-compatible
 inference API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`),
 left cross-origin callable so a local app can use it; `/v1/surfaces/gui`
 (on-demand GUI mount), gated on its own attach token or the owner key; and
-`/v1/instances/cooperate-unload` (multi-instance GPU coordination), gated on
-a per-coordination token. Each is an exact route, not a prefix - exempting a
+`/v1/instances/cooperate-unload`, `/v1/instances/vouch` and
+`/v1/instances/status` (multi-instance GPU coordination between instances on one
+machine): they answer only on an instance that coordinates, refuse any request
+that carries an `Origin` header, and an unload happens only after the asking
+instance confirms the request on `/vouch`. Each is an exact route, not a prefix - exempting a
 future sibling route needs its own deliberate addition. A configured
 `"cors_origins"` (or `"*"`) opts specific origins into cross-origin use for
 everything else.

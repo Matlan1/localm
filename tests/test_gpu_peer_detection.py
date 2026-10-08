@@ -513,6 +513,25 @@ class TestStatusRoute:
         client = TestClient(_coordinating_app(bind_host="0.0.0.0"))
         assert client.get("/v1/instances/status").status_code == 404
 
+    def test_a_browser_page_cannot_read_it(self):
+        """A sibling instance sends no Origin header; a web page on another
+        localhost port always does, and the default CORS policy would otherwise
+        let it read the response (absolute model paths included)."""
+        client = TestClient(_coordinating_app())
+        assert client.get("/v1/instances/status").status_code == 200   # the control
+        r = client.get("/v1/instances/status",
+                       headers={"Origin": "http://localhost:3000"})
+        assert r.status_code == 404
+        assert "instance_id" not in r.text
+
+    def test_a_browser_page_cannot_read_it_with_an_api_key_configured(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_API_KEY", "k" * 40)
+        client = TestClient(_coordinating_app())
+        r = client.get("/v1/instances/status",
+                       headers={"Origin": "http://127.0.0.1:3000",
+                                "Authorization": "Bearer wrong"})
+        assert r.status_code == 404
+
 
 class TestVouchRoute:
     def test_confirms_a_request_this_instance_sent_exactly_once(self):
@@ -534,6 +553,25 @@ class TestVouchRoute:
         client = TestClient(_coordinating_app())
         assert client.post("/v1/instances/vouch", content=b"not json").status_code == 403
         assert client.post("/v1/instances/vouch", json=[1, 2]).status_code == 403
+
+    def test_a_browser_page_cannot_use_it(self):
+        client = TestClient(_coordinating_app())
+        gpu_registry._remember_request("rid-o", "peer-9")
+        body = {"request_id": "rid-o", "asker_instance_id": "peer-9"}
+        r = client.post("/v1/instances/vouch", json=body,
+                        headers={"Origin": "http://localhost:3000"})
+        assert r.status_code == 403
+        assert client.post("/v1/instances/vouch", json=body).status_code == 200
+
+    def test_a_network_bound_instance_can_still_vouch_for_its_own_request(self):
+        """A requester bound to a network address asks loopback peers to unload;
+        the peer reaches it for the confirmation on loopback, so a network bind
+        must not make every one of its requests fail."""
+        client = TestClient(_coordinating_app(bind_host="0.0.0.0"))
+        gpu_registry._remember_request("rid-n", "peer-9")
+        r = client.post("/v1/instances/vouch",
+                        json={"request_id": "rid-n", "asker_instance_id": "peer-9"})
+        assert (r.status_code, r.json()) == (200, {"vouched": True})
 
     def test_a_non_coordinating_instance_refuses(self):
         client = TestClient(create_app(None))
@@ -579,6 +617,17 @@ class TestCooperateUnloadRoute:
         r = client.post("/v1/instances/cooperate-unload",
                         json={"requester": {"instance_id": "req", "port": 1},
                               "request_id": "rid"})
+        assert r.status_code == 403
+        assert calls == []
+
+    def test_a_browser_page_cannot_trigger_it(self, monkeypatch):
+        calls = self._spy_unload(monkeypatch)
+        monkeypatch.setattr(gpu_registry, "verify_requester", lambda *a, **k: True)
+        client = TestClient(_coordinating_app())
+        r = client.post("/v1/instances/cooperate-unload",
+                        json={"requester": {"instance_id": "req", "port": 1},
+                              "request_id": "rid"},
+                        headers={"Origin": "http://localhost:3000"})
         assert r.status_code == 403
         assert calls == []
 

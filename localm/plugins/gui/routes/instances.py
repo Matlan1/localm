@@ -114,8 +114,8 @@ def register(app: FastAPI, ctx) -> None:
         matches = [e for e in instances.list_entries(home)
                    if str(e.get("instance_id", "")).startswith(instance_id)]
         if not matches:
-            # Same gate as the listing route: a server that registers in no
-            # machine-wide registry does not read one either.
+            # Same gate as the listing route: a server that is invisible to
+            # discovery does not look for other instances either.
             peers = (instances.list_machine_peers(home)
                      if getattr(app.state, "instance_id", None)
                      and not getattr(app.state, "instance_isolated", False)

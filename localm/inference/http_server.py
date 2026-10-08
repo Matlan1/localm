@@ -455,9 +455,8 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
 
     Only runs when THIS instance itself is registered for coordination
     (``_gpu_coord`` set - never for a plain test app or an ``--isolated`` run,
-    so tests and isolated runs never touch the shared machine-wide registry
-    directory or make an outbound loopback call). Fully advisory: ANY failure
-    (no registry dir, no live peer, request timeout/refusal) is logged and
+    so tests and isolated runs never probe or call another instance). Fully
+    advisory: ANY failure (no live peer, request timeout/refusal) is logged and
     returns False - the caller's pre-existing 503 remains the unchanged
     fallback (RULE 5: a failed cooperation attempt must never become a HARDER
     failure than today's baseline, and must never be silenced)."""

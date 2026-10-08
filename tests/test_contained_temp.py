@@ -150,6 +150,20 @@ class TestChoosingSystemOrAFolder:
         assert "temp_location" in err and "absolute" in err
         assert _same(out["gettempdir"], system_temp)
 
+    def test_a_relative_folder_in_the_setting_never_breaks_the_import(self, tmp_path):
+        system_temp = tmp_path / "systemtemp"
+        out, err = _run(tmp_path, home=tmp_path / "data", system_temp=system_temp,
+                        config={"temp_location": "relative/folder"})
+        assert "temp_location" in err
+        assert _same(out["gettempdir"], system_temp)
+
+    def test_a_relative_folder_in_the_environment_is_reported_and_ignored(self, tmp_path):
+        system_temp = tmp_path / "systemtemp"
+        out, err = _run(tmp_path, home=tmp_path / "data", system_temp=system_temp,
+                        extra_env={"LOCALM_TMPDIR": "relative/folder"})
+        assert "LOCALM_TMPDIR" in err
+        assert _same(out["gettempdir"], system_temp)
+
     def test_the_environment_variable_wins_over_the_setting(self, tmp_path):
         chosen = tmp_path / "from-env"
         out, _ = _run(tmp_path, home=tmp_path / "data", system_temp=tmp_path / "st",
@@ -177,3 +191,36 @@ class TestFailureIsSaidNotHidden:
         system_temp = tmp_path / "systemtemp"
         out, _ = _run(tmp_path, home=home, system_temp=system_temp)
         assert _same(out["gettempdir"], system_temp)
+
+
+class TestAHomeFolderThatCannotBeResolved:
+    """``~user`` for a user that does not exist makes ``Path.expanduser`` raise
+    ``RuntimeError`` on POSIX. Simulated here instead of with a real unknown user,
+    because Windows resolves ``~name`` to a sibling of the current user folder."""
+
+    @pytest.fixture
+    def failing_expanduser(self, monkeypatch):
+        def boom(self):
+            raise RuntimeError("Could not determine home directory.")
+        monkeypatch.setattr(Path, "expanduser", boom)
+
+    def test_the_folder_helper_reports_none(self, failing_expanduser):
+        from localm import config
+        assert config._absolute_folder("~nosuchuser/tmp") is None
+
+    def test_the_setting_falls_back_to_auto_with_a_warning(
+            self, failing_expanduser, tmp_path, capsys):
+        from localm import config
+        home = tmp_path / "data"
+        home.mkdir()
+        (home / "config.json").write_text(
+            json.dumps({"temp_location": "~nosuchuser/tmp"}), encoding="utf-8")
+        assert config.temp_dir(home) is None          # auto outside a checkout
+        assert "temp_location" in capsys.readouterr().err
+
+    def test_the_environment_variable_is_ignored_with_a_warning(
+            self, failing_expanduser, tmp_path, monkeypatch, capsys):
+        from localm import config
+        monkeypatch.setenv("LOCALM_TMPDIR", "~nosuchuser/tmp")
+        assert config.temp_dir(tmp_path / "data") is None
+        assert "LOCALM_TMPDIR" in capsys.readouterr().err
