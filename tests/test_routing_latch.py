@@ -274,6 +274,13 @@ class TestLoadFingerprint:
 #  plan_route with a skip set                                                  #
 # --------------------------------------------------------------------------- #
 
+@pytest.fixture(autouse=True)
+def _autoswitch_auto(monkeypatch):
+    """These tests exercise routing on tool and context needs, which only the
+    ``auto`` family acts on."""
+    monkeypatch.setattr(cr, "configured_mode", lambda: "auto")
+
+
 def _reg(**entries):
     out = {}
     for name, spec in entries.items():

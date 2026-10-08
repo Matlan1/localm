@@ -23,6 +23,17 @@ import localm.inference.http_server as hs
 from localm.inference import capability_routing as cr
 
 
+_REAL_CONFIGURED_MODE = cr.configured_mode
+
+
+@pytest.fixture(autouse=True)
+def _autoswitch_auto(monkeypatch):
+    """These tests exercise routing on tool and context needs, which only the
+    ``auto`` family acts on; the shipped default (``image``) is covered by the
+    tests that name it."""
+    monkeypatch.setattr(cr, "configured_mode", lambda: "auto")
+
+
 def _reg(**entries):
     """A registry in the shape registration actually writes.
 
@@ -1082,6 +1093,37 @@ class TestAutoswitchModes:
         assert d.routed is False
         assert d.suggested is None
 
+    def test_image_ignores_every_need_but_vision(self):
+        needs = cr.CapabilityNeeds(capabilities=("tool_use",), min_context=20000)
+        d = cr.plan_route("plain", needs, pinned=False, reg=TOOLS_ONLY,
+                          resident=["tooly"], mode="image")
+        assert d.resolved == "plain"
+        assert d.routed is False
+        assert d.has_gap is False
+        assert d.policy == "image"
+
+    def test_image_moves_an_image_request_to_a_model_that_reads_images(self, tmp_path):
+        (tmp_path / "seer").mkdir()
+        (tmp_path / "plain").mkdir()
+        proj = tmp_path / "seer" / "seer-mmproj.gguf"
+        proj.write_bytes(b"GGUF")
+        for name in ("plain", "seer"):
+            (tmp_path / name / f"{name}.gguf").write_bytes(b"GGUF")
+        reg = _reg(plain={"path": str(tmp_path / "plain" / "plain.gguf")},
+                   seer={"path": str(tmp_path / "seer" / "seer.gguf"),
+                         "mmproj": str(proj)})
+        needs = cr.CapabilityNeeds(capabilities=("vision", "tool_use"),
+                                   min_context=20000)
+        d = cr.plan_route("plain", needs, pinned=False, reg=reg, mode="image")
+        assert d.resolved == "seer"
+        assert d.routed is True
+        assert d.gaps == {"vision": False}
+
+    def test_image_still_reports_a_pinned_models_other_gaps(self):
+        d = cr.plan_route("plain", TOOLS, pinned=True, reg=TOOLS_ONLY, mode="image")
+        assert d.resolved == "plain"
+        assert d.gaps == {"tool_use": False}
+
     @pytest.mark.parametrize("mode", ["off", "ask"])
     def test_an_image_request_keeps_the_model_under_off_and_ask(self, mode):
         reg = _reg(plain={}, seer={"mmproj": "Z:/models/proj.gguf"})
@@ -1099,23 +1141,23 @@ class TestAutoswitchModes:
 class TestConfiguredMode:
     @pytest.mark.parametrize("raw,expected", [
         ("off", "off"), ("ASK", "ask"), (" loaded ", "loaded"),
-        ("eager", "eager"), ("auto", "auto")])
+        ("eager", "eager"), ("auto", "auto"), ("Image", "image")])
     def test_reads_the_setting(self, monkeypatch, raw, expected):
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"model_autoswitch": raw})
-        assert cr.configured_mode() == expected
+        assert _REAL_CONFIGURED_MODE() == expected
 
     @pytest.mark.parametrize("raw", [None, "", "sometimes", 3, True])
-    def test_an_unreadable_value_reads_as_auto(self, monkeypatch, raw):
+    def test_an_unreadable_value_reads_as_image(self, monkeypatch, raw):
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"model_autoswitch": raw})
-        assert cr.configured_mode() == "auto"
+        assert _REAL_CONFIGURED_MODE() == "image"
 
-    def test_the_shipped_default_is_auto_and_the_schema_offers_every_mode(self):
+    def test_the_shipped_default_is_image_and_the_schema_offers_every_mode(self):
         from localm import config, settings_schema
         field = next(f for f in settings_schema.CORE_FIELDS
                      if f.key == "model_autoswitch")
-        assert config.DEFAULT_CONFIG["model_autoswitch"] == "auto"
+        assert config.DEFAULT_CONFIG["model_autoswitch"] == "image"
         assert tuple(field.options) == cr.AUTOSWITCH_MODES
 
 
@@ -1157,6 +1199,24 @@ class TestAutoswitchOverHTTP:
         assert _answering_model(engines) == ["plain"]
         assert "tooly" not in engines
         assert r.status_code == 200
+
+    def test_image_keeps_the_loaded_model_for_tool_and_context_needs(
+            self, mode_server):
+        (client, engines), set_mode = mode_server
+        set_mode("image")
+        r = _ask(client, required_capabilities=["tool_use"], min_context=20000)
+        assert _answering_model(engines) == ["plain"]
+        assert "tooly" not in engines
+        assert r.status_code == 200
+
+    def test_image_still_answers_an_image_with_a_model_that_reads_it(
+            self, vision_server, monkeypatch):
+        client, engines, _ = vision_server
+        monkeypatch.setattr(cr, "configured_mode", lambda: "image")
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": False})
+        assert r.status_code == 200
+        assert _answering_model(engines) == ["seer"]
 
     def test_auto_still_routes_to_the_capable_model(self, mode_server):
         (client, engines), set_mode = mode_server

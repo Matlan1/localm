@@ -1581,7 +1581,7 @@ export const I18N_EN = {
   "settings.field.reloadLlmAfterImagine.label": "Reload chat model after generating",
   "settings.field.reloadLlmAfterImagine.help": "Free the media model's VRAM and reload the chat model after a gen. Turn off when making many in a row.",
   "settings.field.modelAutoswitch.label": "Model autoswitch",
-  "settings.field.modelAutoswitch.help": "If your model lacks what a chat needs: off = never switch; ask = offer one; loaded = only to a loaded model; auto = to an installed one; eager = also if yours is unchecked. Pinned chats never switch.",
+  "settings.field.modelAutoswitch.help": "off = never switch; image = only for an image your model can't read; ask = offer one; loaded = loaded models only; auto = any installed model; eager = also if unchecked. Pinned chats never switch.",
   "settings.field.modelSwapPolicy.label": "Media VRAM swap",
   "settings.field.modelSwapPolicy.help": "auto = keep chat loaded if the media model fits alongside; always = always unload chat; never = keep chat hot.",
   "settings.field.comfyTarget.label": "ComfyUI to use",

@@ -963,7 +963,7 @@ DEFAULT_CONFIG: dict = {
     #   auto   = to an installed model when the current one is confirmed to lack
     #            a capability the request needs (default)
     #   eager  = as auto, and also when the current model's capability is unknown
-    "model_autoswitch": "auto",
+    "model_autoswitch": "image",
     # Free the loaded model from VRAM after this many idle seconds, so a running
     # server stops holding the GPU; the next request reloads it lazily. 0 =
     # disabled (default): resident until an explicit unload or swap. Measured from

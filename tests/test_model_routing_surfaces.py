@@ -20,6 +20,14 @@ import pytest
 import uvicorn
 
 import localm.inference.http_server as hs
+from localm.inference import capability_routing as cr
+
+
+@pytest.fixture(autouse=True)
+def _autoswitch_auto(monkeypatch):
+    """These tests exercise routing on tool and context needs, which only the
+    ``auto`` family acts on."""
+    monkeypatch.setattr(cr, "configured_mode", lambda: "auto")
 
 
 class _Engine:
