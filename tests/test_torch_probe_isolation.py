@@ -299,6 +299,8 @@ class TestWedgedTorchIsNotRetriedForever:
         """Cannot-spawn tells us nothing about torch. Falling through to
         nvidia-smi would report "no GPU" on every AMD and Intel box."""
         caplog.set_level("WARNING", logger="localm")
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: False)
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
         monkeypatch.setattr(discover, "_torch_gpus_resident",
                             lambda: [{"index": 0, "name": "Radeon",
@@ -314,6 +316,8 @@ class TestWedgedTorchIsNotRetriedForever:
         """The live VRAM meter drives a probe about every 2.5s. An unconditional
         warning here would emit ~24 lines a minute for the life of the server."""
         caplog.set_level("WARNING", logger="localm")
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: False)
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
         monkeypatch.setattr(discover, "_torch_gpus_resident", lambda: [])
         for _ in range(5):
@@ -326,6 +330,8 @@ class TestWedgedTorchIsNotRetriedForever:
     def test_broken_isolation_does_NOT_latch(self, monkeypatch):
         """Latching on a cannot-spawn would disable the torch path permanently
         on a box where torch works fine."""
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: False)
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
         monkeypatch.setattr(discover, "_torch_gpus_resident", lambda: [])
         discover._torch_gpus_isolated_once()
@@ -361,6 +367,127 @@ class TestWedgedTorchIsNotRetriedForever:
                 <= discover._GPU_PROBE_DEADLINE), (
             "the child timeout plus nvidia-smi's own timeout=5 must fit inside "
             "_GPU_PROBE_DEADLINE")
+
+
+class TestBrokenIsolationOnWindowsNeverImportsInProcess:
+    """On Windows a cold ``import torch`` holds the OS loader lock and freezes the
+    server, and a child that died printing nothing usually means torch's import
+    itself faulted. A broken isolated probe there must not be retried by importing
+    here; the non-torch sources answer instead."""
+
+    _RADEON = {"index": 0, "name": "AMD Radeon RX 6900 XT", "total": 16 * 1024 ** 3}
+
+    def setup_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def teardown_method(self):
+        discover._reset_gpu_probe_cache()
+
+    @staticmethod
+    def _windows_with_broken_isolation(monkeypatch):
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: True)
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident",
+            lambda: pytest.fail("imported torch IN THIS PROCESS on Windows after "
+                                "the isolated probe failed"))
+
+    @staticmethod
+    def _no_nvidia_smi(monkeypatch):
+        monkeypatch.setattr(subprocess, "Popen",
+                            MagicMock(side_effect=FileNotFoundError("no nvidia-smi")))
+
+    def test_returns_empty_without_importing_torch_here(self, monkeypatch):
+        self._windows_with_broken_isolation(monkeypatch)
+        assert discover._torch_gpus_isolated_once() == []
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is True
+
+    def test_says_so_at_warning_exactly_once(self, monkeypatch, caplog):
+        caplog.set_level("WARNING", logger="localm")
+        self._windows_with_broken_isolation(monkeypatch)
+        for _ in range(4):
+            discover._torch_gpus_isolated_once()
+        hits = [r for r in caplog.records
+                if "could not run the isolated GPU probe" in r.message]
+        assert len(hits) == 1
+        assert "falling back to importing torch" not in hits[0].message, (
+            "the warning claims a fallback import that no longer happens")
+
+    def test_does_not_latch_the_next_round_still_asks_the_child(self, monkeypatch):
+        self._windows_with_broken_isolation(monkeypatch)
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unavailable is False
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            lambda: [{"index": 0, "name": "G", "total": 8, "free": 4}])
+        assert discover._torch_gpus_isolated_once()[0]["name"] == "G"
+
+    def test_probe_falls_through_to_the_amd_registry_source(self, monkeypatch):
+        self._windows_with_broken_isolation(monkeypatch)
+        self._no_nvidia_smi(monkeypatch)
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: dict(self._RADEON))
+        monkeypatch.setattr(
+            discover, "_apply_device_global_free",
+            lambda gpus: [g.update(free=g["total"] // 2) for g in gpus])
+        out = discover._list_gpus_probe()
+        assert [g["name"] for g in out] == ["AMD Radeon RX 6900 XT"]
+        assert out[0]["free"] == self._RADEON["total"] // 2
+
+    def test_probe_falls_through_to_nvidia_smi(self, monkeypatch):
+        self._windows_with_broken_isolation(monkeypatch)
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = (
+            "0, RTX 4090, 24576, 20000\n", "")
+        fake_popen.return_value.returncode = 0
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        out = discover._list_gpus_probe()
+        assert out and out[0]["name"] == "RTX 4090"
+
+    def test_empty_reading_is_inconclusive_not_no_gpu(self, monkeypatch):
+        self._windows_with_broken_isolation(monkeypatch)
+        self._no_nvidia_smi(monkeypatch)
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: None)
+        gpus, status = discover.list_gpus(return_status=True)
+        assert gpus == []
+        assert status == discover.GPU_PROBE_INCONCLUSIVE, (
+            "could not ask torch and nothing else answered: that is not 'no GPU'")
+
+    def test_the_flag_is_per_round_a_good_round_clears_it(self, monkeypatch):
+        self._windows_with_broken_isolation(monkeypatch)
+        self._no_nvidia_smi(monkeypatch)
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: None)
+        discover._list_gpus_probe()
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is True
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: [])
+        discover._list_gpus_probe()
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is False
+
+    def test_off_windows_keeps_the_in_process_degrade(self, monkeypatch):
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setattr(discover, "_torch_gpus_resident",
+                            lambda: [{"index": 0, "name": "G", "total": 8, "free": 4}])
+        assert discover._torch_gpus_isolated_once()[0]["name"] == "G"
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is False
+
+    def test_the_freeze_guard_is_true_on_windows_only(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert discover._in_process_torch_import_can_freeze() is True
+        for plat in ("linux", "darwin"):
+            monkeypatch.setattr(sys, "platform", plat)
+            assert discover._in_process_torch_import_can_freeze() is False
+
 
 class TestChildProbeContract:
     """The child must mirror the in-process branch field for field, so a caller
