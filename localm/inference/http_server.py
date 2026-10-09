@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, AsyncIterator, Callable, NamedTuple, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -4728,7 +4728,7 @@ class _GenerationMeter:
         task.add_done_callback(_abandoned_metric_tasks.discard)
 
 
-async def _metered_stream(stream: AsyncIterator[str],
+async def _metered_stream(stream: AsyncGenerator[str, None],
                           meter: _GenerationMeter) -> AsyncIterator[str]:
     """Yield *stream*'s chunks. When it ends, fails or is closed early, close
     it, then let *meter* record a generation that started but was never
@@ -5149,7 +5149,7 @@ async def _stream_sse_body(
     role_sent: bool = False,
     meter: Optional[_GenerationMeter] = None,
     **gen_kwargs,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     """Stream the reply to *messages* as SSE ``data:`` lines.
 
     *chunk_id* reuses the id of a stream the caller already opened, and
@@ -5452,7 +5452,7 @@ async def _stream_sse_completion_body(
     prompt_tokens: Optional[int] = None,
     meter: Optional[_GenerationMeter] = None,
     **gen_kwargs,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     meter = meter or _GenerationMeter()
     chunk_id = make_chunk_id()
     ts = int(time.time())
