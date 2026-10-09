@@ -321,6 +321,53 @@ def test_a_change_inside_a_reexport_facade_counts_as_a_change_to_the_package(fac
     assert mod._REEXPORT_FACADES == ("localm.setup_llama",)
 
 
+_MODULE_FACADE_FILES = {
+    "localm/__init__.py": "",
+    "localm/rag/__init__.py": "from localm.rag.store import Collection\n",
+    "localm/rag/store.py": "from localm.rag._store.cache import Collection\n",
+    "localm/rag/_store/__init__.py": "",
+    "localm/rag/_store/cache.py": "class Collection:\n    pass\n",
+    "localm/plugins/__init__.py": "",
+    "localm/plugins/rag.py": "from localm.rag import store\n",
+    "tests/conftest.py": "",
+    "tests/test_store_import.py": "import localm.rag.store\n",
+    "tests/test_store_caller.py": "import localm.plugins.rag\n",
+    "tests/test_store_patch.py": (
+        "def test_patch(monkeypatch):\n"
+        "    monkeypatch.setattr('localm.rag.store.Collection', object)\n"),
+    "tests/test_none.py": "def test_none():\n    assert True\n",
+}
+
+
+@pytest.fixture
+def module_facade_repo(tmp_path, monkeypatch):
+    """A committed throwaway checkout holding a re-export facade module."""
+    for rel, src in _MODULE_FACADE_FILES.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    mod = _load()
+    monkeypatch.setattr(mod, "REPO", tmp_path)
+    return mod, tmp_path
+
+
+def test_a_change_behind_a_reexport_module_counts_as_a_change_to_the_module(
+        module_facade_repo):
+    mod, _ = module_facade_repo
+    at_zero = _select(mod, ["localm/rag/_store/cache.py"])
+    assert "imports localm.rag.store" in at_zero["tests/test_store_import.py"]
+    assert at_zero["tests/test_store_patch.py"] == ["names localm.rag.store"]
+    assert "tests/test_store_caller.py" not in at_zero
+    at_one = _select(mod, ["localm/rag/_store/cache.py"], depth=1)
+    assert at_one["tests/test_store_caller.py"] == [
+        "imports localm.plugins.rag (1 hop(s) from a change)"]
+    assert "tests/test_none.py" not in at_one
+    assert mod._REEXPORT_MODULE_FACADES == {"localm.rag.store": "localm.rag._store"}
+
+
 # --------------------------------------------------------------------------- #
 #  Dependency changes: pyproject.toml and uv.lock                             #
 # --------------------------------------------------------------------------- #

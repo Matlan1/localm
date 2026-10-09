@@ -14,7 +14,9 @@ A test file is selected when any of these holds:
     import written as a string), a changed script by file name, or a changed
     non-Python file by file name;
   - a change to a module inside a package listed in _REEXPORT_FACADES also
-    counts as a change to that package, for both rules above;
+    counts as a change to that package, and a change to a module inside a
+    package mapped in _REEXPORT_MODULE_FACADES also counts as a change to the
+    module it is mapped from, for both rules above;
   - it imports a changed dependency, names it in a string literal, imports a
     module that imports it (with --depth N, also that module's importers, up
     to N hops), or sits under the folder of a conftest.py that imports it. A
@@ -75,6 +77,9 @@ _EVERYTHING = {"tests/conftest.py"}
 # Packages whose callers import and patch the package itself, which re-exports
 # its submodules' names.
 _REEXPORT_FACADES = ("localm.setup_llama",)
+# Modules whose callers import and patch the module itself, which re-exports the
+# names of the modules in the package mapped to it.
+_REEXPORT_MODULE_FACADES = {"localm.rag.store": "localm.rag._store"}
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
@@ -488,6 +493,9 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
             changed_modules.add(mod)
             facades.update(f for f in _REEXPORT_FACADES
                            if mod.startswith(f + ".") and f in graph.sources)
+            facades.update(f for f, pkg in _REEXPORT_MODULE_FACADES.items()
+                           if (mod == pkg or mod.startswith(pkg + "."))
+                           and f in graph.sources)
             text = _read(rel) + "\n" + _read_at(base_ref, rel)
             for prefix in sorted(route_prefixes(text)):
                 needles.append((f"names route {prefix}", re.compile(re.escape(prefix))))
