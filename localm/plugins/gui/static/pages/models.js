@@ -334,17 +334,17 @@ export function openAdapterAttachModal(m) {
     err.hidden = true;
     for (const [label, input] of [[t("models.adapter.baseLabel"), baseSel],
                                   [t("models.adapter.scaleLabel"), scaleIn]]) {
-      const row = el("div", "field");
+      const row = el("div", "adapter-field");
       row.appendChild(el("label", "", label));
       row.appendChild(input);
       body.appendChild(row);
     }
     body.appendChild(el("p", "sub", t("models.adapter.scaleHint")));
     body.appendChild(err);
-    const actions = el("div", "actions");
+    const actions = el("div", "actions adapter-actions");
     const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
     cancel.onclick = () => ($("modal").style.display = "none");
-    const ok = el("button", "primary adapter-attach-confirm", t("models.adapter.attachConfirm"));
+    const ok = el("button", "btn-secondary adapter-attach-confirm", t("models.adapter.attachConfirm"));
     ok.onclick = async () => {
       const scale = Number(scaleIn.value);
       if (!Number.isFinite(scale) || scale === 0) {

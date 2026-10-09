@@ -2731,6 +2731,14 @@ div:has(> .data-table) { overflow-x: auto; }
 .adapter-badge.adapter-idle { border-style: dashed; border-color: var(--border); }
 .adapter-badge.adapter-warn { color: var(--warn, #f59e0b); border-color: var(--warn, #f59e0b); }
 .adapter-error { color: var(--red); margin: 8px 0; }
+.modal-body .adapter-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.modal-body .adapter-field label { color: var(--text-dim); }
+.modal-body .adapter-field select, .modal-body .adapter-field input {
+  width: 100%; box-sizing: border-box; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+  padding: 8px 10px; font-size: 13.5px; font-family: var(--sans);
+}
+.modal-body .adapter-actions { display: flex; gap: 10px; margin-top: 14px; }
 /* Model CAPABILITY pills - what a model can DO. Its OWN palette (--accent),
    deliberately not the .fit.fits/.tight/.too-big green/yellow/red scale, which
    is a SIZE-against-VRAM verdict and would read as one here; and not a --cat-*
