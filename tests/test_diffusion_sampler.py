@@ -271,13 +271,14 @@ class TestResolveParams:
 
 
 class TestConfidence:
-    def test_entropy_is_negative_entropy_in_float32(self):
+    def test_entropy_follows_the_upstream_sign_in_float32(self):
         probs = [d.f32(0.5), d.f32(0.25), d.f32(0.25)]
         value = d.entropy_confidence(probs)
         assert value == d.f32(value)
-        assert value == pytest.approx(-1.0397, abs=1e-3)
+        assert value == pytest.approx(1.0397, abs=1e-3)
 
-    def test_peaked_distribution_is_more_confident(self):
-        assert d.entropy_confidence([d.f32(0.98), d.f32(0.02)]) > \
-            d.entropy_confidence([d.f32(0.5), d.f32(0.5)])
+    def test_flatter_distribution_ranks_first(self):
+        flat = d.entropy_confidence([d.f32(0.5), d.f32(0.5)])
+        peaked = d.entropy_confidence([d.f32(0.98), d.f32(0.02)])
+        assert flat > peaked
         assert d.entropy_confidence([d.f32(1.0)]) == pytest.approx(0.0, abs=1e-6)

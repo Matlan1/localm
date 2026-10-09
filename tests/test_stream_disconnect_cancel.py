@@ -816,3 +816,53 @@ def test_registration_is_removed_once_the_generation_ends():
 
     signaled = asyncio.run(scenario())
     assert signaled == 0, "a finished generation left its cancel_event registered"
+
+
+class _StatusOnlyEngine(_LockingEngine):
+    """Like a diffusion language model: reports progress through on_status
+    and yields nothing until the reply is done, which here is never. Follows
+    the GGUF runner's contract: a StreamCancelled raised by on_status ends the
+    generation. Without the HTTP layer raising it after a disconnect, this
+    holds the lock forever."""
+
+    cancelled = False
+
+    def chat_stream(self, messages, on_status=None, **kwargs):
+        return self._denoise(on_status)
+
+    def _denoise(self, on_status):
+        from localm.inference.backends.base import StreamCancelled
+        with self.inference_lock:
+            self.entered.set()
+            step = 0
+            while True:
+                try:
+                    on_status(f"Denoising reply ({step % 10 * 10}%)...")
+                except StreamCancelled:
+                    self.cancelled = True
+                    return
+                step += 1
+                time.sleep(0.01)
+        yield  # pragma: no cover - makes this a generator, as the real one is
+
+
+@pytest.mark.parametrize("producer,lead", [(_stream_sse, 2), (_stream_sse_completion, 0)])
+def test_disconnect_while_only_status_flows_stops_the_generation(producer, lead):
+    async def scenario():
+        eng = _StatusOnlyEngine()
+        sem = asyncio.Semaphore(1)
+
+        agen = producer(eng, _MSG, "lock-model", sem)
+        for _ in range(lead):
+            await agen.__anext__()           # role and "Processing prompt..."
+        status = await agen.__anext__()
+        assert "Denoising reply" in status
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        await agen.aclose()                   # disconnect
+
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "a generation reporting only status kept running after the disconnect"
+        assert eng.cancelled is True
+
+    asyncio.run(scenario())

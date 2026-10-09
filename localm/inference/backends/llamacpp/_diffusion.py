@@ -11,11 +11,8 @@ The step loop is a port of ``diffusion_generate`` from llama.cpp's
 ``examples/diffusion/diffusion.cpp``: the same schedules, selection
 algorithms, tie-breaking, float32 transfer-count arithmetic and random number
 stream, so a run with a fixed seed reproduces the upstream example token for
-token, with one deliberate difference: the ENTROPY algorithm ranks positions
-by negative entropy, most certain first, as Dream's reference sampler does
-(the upstream example negates it). Upstream's classifier-free guidance,
-``alg_temp`` and gumbel-noise branches are not ported
-(``llama-diffusion-cli`` never sets the first two).
+token. Upstream's classifier-free guidance, ``alg_temp`` and gumbel-noise
+branches are not ported (``llama-diffusion-cli`` never sets the first two).
 ``DiffusionParams.greedy`` is a localm addition: the highest-probability
 candidate is taken instead of a sampled one.
 
@@ -527,14 +524,13 @@ _ENTROPY_EPS = f32(1e-10)
 
 
 def entropy_confidence(probs: Sequence[float]) -> float:
-    """Negative entropy ``sum(p * log(p + 1e-10))`` of *probs*, accumulated in
-    float32 in order: 0 for a certain prediction, lower for a flatter one, so
-    the most certain positions rank first. This is the sign of Dream's
-    reference sampler; the upstream example returns its negation."""
+    """The upstream example's ENTROPY confidence: ``-sum(p * log(p + 1e-10))``
+    of *probs*, accumulated in float32 in order. It is the entropy itself, so
+    the positions the model is least certain about rank first."""
     entropy = 0.0
     for p in probs:
         entropy = f32(entropy + f32(p * f32(math.log(f32(p + _ENTROPY_EPS)))))
-    return entropy
+    return f32(-entropy)
 
 
 def _confidence(data, size: int, selected: int, algorithm: int) -> float:
