@@ -1582,3 +1582,22 @@ class TestRagReembedRouteKeyScopedRoots:
             _index_via(client, app, hdr, "kb", granted)
             r = client.post("/api/rag/collections/kb/reembed", headers=hdr)
             assert r.status_code != 403, r.text
+
+
+class TestRagListingSurvivesUndecodableMeta:
+    def test_listing_includes_both_collections_and_flags_the_corrupt_one(
+            self, tmp_path, monkeypatch):
+        from localm.rag import Collection
+        from localm.rag.store import rag_dir
+        app, _, _ = _scoped_rag_app(tmp_path, monkeypatch)
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        Collection("good", base=rag_dir()).create()
+        Collection("bad", base=rag_dir()).create()
+        (rag_dir() / "bad" / "meta.json").write_bytes(b"\xff\xfe\x00bad")
+        with TestClient(app) as client:
+            r = client.get("/api/rag/collections", headers=owner_hdr)
+            assert r.status_code == 200, r.text
+            by_name = {c["name"]: c for c in r.json()["collections"]}
+            assert set(by_name) == {"good", "bad"}
+            assert by_name["bad"]["corrupt"] is True
+            assert by_name["good"]["corrupt"] is False

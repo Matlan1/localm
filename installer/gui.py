@@ -40,9 +40,9 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 _SRC = Path(__file__).resolve().parents[1]
@@ -79,7 +79,7 @@ _BACKEND_CHOICES = [
 ]
 
 
-def backend_choices() -> List[tuple]:
+def backend_choices() -> list[tuple]:
     """The runtime menu for this platform. metal exists only on macOS and
     amd-rocm only on Windows, matching the console installer's menu."""
     out = []
@@ -96,7 +96,7 @@ def backend_choices() -> List[tuple]:
 RECOMMENDED_PLUGINS = ("coder", "rag", "web", "tts")
 
 
-def plugin_choices() -> List[tuple]:
+def plugin_choices() -> list[tuple]:
     """(name, description) for every plugin a user can choose, read from the
     package's own catalog so this menu cannot drift from it. Returns an empty
     list when the catalog cannot be read, and the Features page says so."""
@@ -119,7 +119,7 @@ def venv_python(root: Path) -> Path:
     return venv_bin(root) / ("python.exe" if IS_WINDOWS else "python")
 
 
-def uv_dirs(root: Path) -> List[Path]:
+def uv_dirs(root: Path) -> list[Path]:
     """Every directory uv may live in, most preferred first: the portable copy
     the launcher puts inside the clone, then Astral's own default install
     locations, which a shell started before the installer ran does not
@@ -233,7 +233,7 @@ class StepFailed(Exception):
     """A step that must not be reported as success."""
 
 
-def uv_argv(*args: str) -> List[str]:
+def uv_argv(*args: str) -> list[str]:
     """A uv command line, resolved when the step runs. Raises StepFailed when
     uv cannot be found, so a missing uv is reported as the step it broke."""
     exe = find_uv(ROOT)
@@ -320,7 +320,7 @@ def _env_for(plan: Plan) -> dict:
     return env
 
 
-def _run(cmd: List[str], emit: Callable[[str], None], plan: Plan,
+def _run(cmd: list[str], emit: Callable[[str], None], plan: Plan,
          *, allow_fail: bool = False) -> int:
     """Run a command, streaming its output into the log a line at a time.
 
@@ -337,7 +337,7 @@ def _run(cmd: List[str], emit: Callable[[str], None], plan: Plan,
         if allow_fail:
             emit(f"[!] could not start: {e}")
             return 1
-        raise StepFailed(f"could not start {cmd[0]}: {e}")
+        raise StepFailed(f"could not start {cmd[0]}: {e}") from e
     assert proc.stdout is not None
     for line in proc.stdout:
         emit(line.rstrip())
@@ -349,7 +349,7 @@ def _run(cmd: List[str], emit: Callable[[str], None], plan: Plan,
     return code
 
 
-def _query(args: List[str]) -> str:
+def _query(args: list[str]) -> str:
     """The first line the installed localm prints for *args*, or empty."""
     try:
         out = subprocess.run([str(venv_python(ROOT)), *args], cwd=str(ROOT),
@@ -369,7 +369,7 @@ def _record_now(emit: Callable[[str], None], **fields) -> None:
         emit(f"[!] could not record this step yet: {e}")
 
 
-def run_steps(steps: List[Step], emit: Callable[[str], None],
+def run_steps(steps: list[Step], emit: Callable[[str], None],
               on_step: Callable[[int, int, str], None] = lambda i, n, label: None,
               ) -> tuple:
     """Run *steps* in order, journaling each by its key.
@@ -378,7 +378,7 @@ def run_steps(steps: List[Step], emit: Callable[[str], None],
     and the message of the required step that stopped the run (None when it ran to
     the end). A step that fails stays open in the journal; ``complete`` is written
     only when the run reaches the end."""
-    failures: List[str] = []
+    failures: list[str] = []
     for i, step in enumerate(steps):
         on_step(i, len(steps), step.label)
         if step.key:
@@ -397,10 +397,10 @@ def run_steps(steps: List[Step], emit: Callable[[str], None],
     return failures, None
 
 
-def build_steps(plan: Plan, resume: Optional[dict] = None) -> List[Step]:
+def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     """The install, as setup.bat performs it, in setup.bat's order. *resume* is the
     journal state of an interrupted earlier run (see begin_journal)."""
-    steps: List[Step] = []
+    steps: list[Step] = []
     cut_short = set((resume or {}).get("started") or [])
     # What earlier steps created, so the manifest records exactly that.
     state: dict = {}
@@ -416,7 +416,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> List[Step]:
             (ROOT / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
         except OSError as e:
             raise StepFailed(f"the environment was not created where it was "
-                             f"expected: {e}")
+                             f"expected: {e}") from e
         # Recorded now; the manifest step at the end records again.
         try:
             install_manifest().record(ROOT, venv=str(ROOT / ".venv"),
@@ -436,7 +436,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> List[Step]:
             else:
                 target = install_manifest().prepare_data(ROOT, data_dir=plan.data_path)
         except (OSError, ValueError) as e:
-            raise StepFailed(f"could not use that data folder: {e}")
+            raise StepFailed(f"could not use that data folder: {e}") from e
         state["data_dir"] = str(target)
         emit(f"Data directory: {target}" + (" (portable)" if plan.portable_data else ""))
     steps.append(Step("Recording where data lives", data_dir, key="data-folder"))
@@ -542,7 +542,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> List[Step]:
                 "--path-dir", state.get("path_dir", ""),
                 "--command-shim", state.get("command_shim", ""),
                 "--stamp",
-                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+                datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")]
         if (ROOT / "LocaLM.desktop").is_file():
             args += ["--file", str(ROOT / "LocaLM.desktop")]
         if state.get("path_modified"):
@@ -647,7 +647,7 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
         f.write_text(text, encoding="utf-8")
         f.chmod(0o755)
     except OSError as e:
-        raise StepFailed(f"no desktop entry could be written: {e}")
+        raise StepFailed(f"no desktop entry could be written: {e}") from e
     emit(f"Wrote {f}")
     return str(f)
 
@@ -706,7 +706,7 @@ def _apps_use_light_theme():
         return winreg.QueryValueEx(key, "AppsUseLightTheme")[0]
 
 
-def _command_output(argv: List[str], timeout: float = 2.0) -> Optional[str]:
+def _command_output(argv: list[str], timeout: float = 2.0) -> Optional[str]:
     """stdout of argv, or None when it cannot start, exits non-zero or runs
     longer than timeout seconds."""
     try:
@@ -719,7 +719,7 @@ def _command_output(argv: List[str], timeout: float = 2.0) -> Optional[str]:
 
 def detect_theme(env=None, platform: Optional[str] = None,
                  read_windows: Optional[Callable[[], object]] = None,
-                 run: Optional[Callable[[List[str]], Optional[str]]] = None) -> str:
+                 run: Optional[Callable[[list[str]], Optional[str]]] = None) -> str:
     """Return "dark" or "light" for the setup window.
 
     LOCALM_THEME wins when it is "dark" or "light" (any case). Otherwise:
@@ -1265,7 +1265,7 @@ class Wizard:
     def _emit(self, text: str) -> None:
         self.lines.put(("log", text))
 
-    def _worker(self, steps: List[Step]) -> None:
+    def _worker(self, steps: list[Step]) -> None:
         def on_step(i: int, total: int, label: str) -> None:
             self.lines.put(("step", (i, total, label)))
 

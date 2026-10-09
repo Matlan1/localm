@@ -119,6 +119,16 @@ def test_a_plausible_library_with_no_vendor_blas_passes(tmp_path):
     assert res.healthy is True
 
 
+def test_a_macos_runtime_dir_with_libllama_dylib_is_healthy(tmp_path):
+    """The Metal build ships libllama.dylib; the check must recognise it
+    instead of reporting a binary dir with no llama library."""
+    (tmp_path / "libllama.dylib").write_bytes(b"\0" * (d.TINY_LIB_BYTES + 1))
+    res = d.check_llama_lib(lambda: tmp_path)
+    assert res.status == d.OK
+    assert res.healthy is True
+    assert "libllama.dylib found in" in res.summary
+
+
 def test_a_rocblas_install_with_no_kernel_data_fails_despite_a_good_library(tmp_path):
     """The silent one: the library is present and the right size, so every
     presence check passes, and the first GEMM hard-crashes the native process.

@@ -114,7 +114,7 @@ def fetch_release_assets(tag: str, opener=None) -> dict:
             body = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         raise Refused(f"could not read the {tag} release from the GitHub API: "
-                      f"{type(e).__name__}: {e}")
+                      f"{type(e).__name__}: {e}") from e
     assets = body.get("assets") if isinstance(body, dict) else None
     if not isinstance(assets, list):
         raise Refused(f"the {tag} release listing carries no asset list")
@@ -147,7 +147,7 @@ def derive_mtp_architectures(tag: str) -> set:
         derived = mod.refresh(tag)
     except Exception as e:
         raise Refused(f"could not re-derive MTP_GRAPH_ARCHITECTURES at {tag}: "
-                      f"{type(e).__name__}: {e}")
+                      f"{type(e).__name__}: {e}") from e
     if not derived:
         raise Refused(f"the MTP re-derivation at {tag} returned an empty set")
     return set(derived)
@@ -157,7 +157,7 @@ def derive_mtp_architectures(tag: str) -> set:
 #  Evidence                                                                    #
 # --------------------------------------------------------------------------- #
 
-def load_receipt(path: Path, tag: str, require: "tuple[str, ...]") -> set:
+def load_receipt(path: Path, tag: str, require: tuple[str, ...]) -> set:
     """The set of backends the receipt reports PASS for *tag*.
 
     Raises Refused when the receipt is unreadable, names another tag, or any
@@ -165,7 +165,7 @@ def load_receipt(path: Path, tag: str, require: "tuple[str, ...]") -> set:
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        raise Refused(f"could not read the receipt {path}: {e}")
+        raise Refused(f"could not read the receipt {path}: {e}") from e
     if receipt.get("tag") != tag:
         raise Refused(f"the receipt is for {receipt.get('tag')!r}, not {tag}; "
                       "confirm the target tag itself")
@@ -199,7 +199,7 @@ def measured_backends(setup_text: str) -> set:
 #  Rewrites (pure text -> text)                                                #
 # --------------------------------------------------------------------------- #
 
-def _replace_once(pattern: "re.Pattern", text: str, repl, what: str) -> str:
+def _replace_once(pattern: re.Pattern, text: str, repl, what: str) -> str:
     matches = list(pattern.finditer(text))
     if len(matches) != 1:
         raise Refused(f"{what}: expected exactly one match, found {len(matches)}; "
@@ -236,7 +236,7 @@ def set_mtp_set(api_text: str, archs: set) -> str:
 
 
 def rewrite(setup_text: str, api_text: str, tag: str, digests: dict,
-            archs: set) -> "tuple[str, str]":
+            archs: set) -> tuple[str, str]:
     """(new pins.py text, new _api.py text)."""
     setup_text = set_sha_block(set_pin(setup_text, tag), tag, digests)
     api_text = set_mtp_set(set_mtp_tag(api_text, tag), archs)
@@ -247,7 +247,7 @@ def rewrite(setup_text: str, api_text: str, tag: str, digests: dict,
 #  Entry point                                                                 #
 # --------------------------------------------------------------------------- #
 
-def _read(path: Path) -> "tuple[str, str]":
+def _read(path: Path) -> tuple[str, str]:
     """(text with LF newlines, the newline sequence the file uses)."""
     data = path.read_bytes().decode("utf-8")
     newline = "\r\n" if "\r\n" in data else "\n"

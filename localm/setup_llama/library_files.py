@@ -115,7 +115,7 @@ def _has_vendor_library(target: Path, name: str) -> bool:
     return False
 
 
-def blas_kernel_problems(target: Path) -> "list[str]":
+def blas_kernel_problems(target: Path) -> list[str]:
     """Human-readable problems with the BLAS kernel data in a provisioned runtime.
 
     Empty list means nothing to report, INCLUDING for every non-ROCm backend: the
@@ -129,7 +129,7 @@ def blas_kernel_problems(target: Path) -> "list[str]":
     kernel data is not", which is the SILENT failure - provisioning succeeds, chat
     works, and the crash arrives later on the first Tensile GEMM. It does not try
     to catch a missing library, because that one already fails loudly at load."""
-    problems: "list[str]" = []
+    problems: list[str] = []
     try:
         if not target.is_dir():
             return problems

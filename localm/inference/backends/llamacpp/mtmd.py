@@ -328,7 +328,7 @@ def _load_lib() -> ctypes.CDLL:
     try:
         m = ctypes.CDLL(str(path))
     except OSError as e:
-        raise MtmdUnavailable(f"could not load {name}: {e}")
+        raise MtmdUnavailable(f"could not load {name}: {e}") from e
 
     m.mtmd_context_params_default.restype = _MtmdParams
     m.mtmd_default_marker.restype = ctypes.c_char_p

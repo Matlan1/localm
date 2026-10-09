@@ -565,7 +565,7 @@ def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,
 # digest, because one process legitimately serves more than one LOCALM_HOME and
 # each home has its own salt.
 _DIGEST_CACHE_MAX = 64
-_digest_cache: "OrderedDict[str, str]" = OrderedDict()
+_digest_cache: OrderedDict[str, str] = OrderedDict()
 _DIGEST_CACHE_LOCK = threading.Lock()
 
 # Serialises MINTING an owner-key record. Without it two concurrent requests

@@ -84,7 +84,7 @@ def _fatal_fault_line(native_trace: str) -> str:
     return ""
 
 
-def _raw_tail_truncation_signal(home=None, pid=None) -> "tuple[bool, str]":
+def _raw_tail_truncation_signal(home=None, pid=None) -> tuple[bool, str]:
     """(truncated, last_line): whether the crashed run's OWN raw log file (see
     _find_run_log - the SAME file _recent_log_tail digests, read raw here
     instead) ends WITHOUT a trailing newline, and what that final (possibly
@@ -111,10 +111,10 @@ def _raw_tail_truncation_signal(home=None, pid=None) -> "tuple[bool, str]":
         return False, ""
 
 
-def _first_chance_codes(native_trace: str) -> "list[str]":
+def _first_chance_codes(native_trace: str) -> list[str]:
     """The distinct exception codes of the non-fatal fault headers in
     *native_trace*, in order of first appearance."""
-    seen: "list[str]" = []
+    seen: list[str] = []
     for line in (native_trace or "").splitlines():
         m = _WIN_FAULT_LINE_RE.match(line.strip())
         if m is None:
@@ -130,7 +130,7 @@ def _first_chance_codes(native_trace: str) -> "list[str]":
 def _classify_prior_death(*, native_trace: str, hang_trace: str,
                           raw_tail_truncated: bool,
                           raw_tail_last_line: str,
-                          exit_code: Optional[int] = None) -> "tuple[str, str]":
+                          exit_code: Optional[int] = None) -> tuple[str, str]:
     """(summary, reason) for report_failure(), classified from the evidence
     actually collected. Pure function (no I/O) so the classification logic is
     directly unit-testable without real marker/log/trace files.

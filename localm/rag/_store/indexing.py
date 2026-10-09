@@ -350,7 +350,7 @@ class _CollectionIndexing:
 
     def _embed_doc(self, new_chunks: list, position: str, label: str, *,
                    embed_fn: Optional[EmbedFn], embed_broken: bool,
-                   model_name: Optional[str], say: ProgressFn) -> "tuple[list, bool]":
+                   model_name: Optional[str], say: ProgressFn) -> tuple[list, bool]:
         """Vectors for one document's *new_chunks*, all None when embedding is
         unavailable, fails, or yields non-finite values, and whether embedding is
         now broken for the rest of the batch. *position* (``[i/n]``) and *label*

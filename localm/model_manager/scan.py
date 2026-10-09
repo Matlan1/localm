@@ -2,7 +2,7 @@
 """ComfyUI model directory scanner to auto-discover and register media models."""
 
 from pathlib import Path
-from typing import Optional, NamedTuple, Dict
+from typing import Optional, NamedTuple
 
 from localm.config import load_config, load_registry
 from localm.model_manager.registry import _register_with_dedup, _entry_path
@@ -39,7 +39,7 @@ class ScanPreview(NamedTuple):
     """Dry-run result: counts by model_type for NEW (not-yet-registered) files
     only, plus how many discovered files are already registered. `method`
     carries the same human-decodable reason ScanResult.method does."""
-    counts: Dict[str, int]
+    counts: dict[str, int]
     already_registered: int
     method: str
 
@@ -144,7 +144,7 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
         return None, f"none (models folder not found under {models_path})"
 
     # Pass 1: Walk the local folders
-    found_files: Dict[Path, str] = {}
+    found_files: dict[Path, str] = {}
     for sub, mtype in SUBFOLDER_MAPPING.items():
         sub_dir = models_path / sub
         if not sub_dir.is_dir():
@@ -269,7 +269,7 @@ def preview_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str]
         return ScanPreview(counts={}, already_registered=0, method=method)
 
     existing_paths = _existing_registered_paths(load_registry())
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     already_registered = 0
     for path, mtype in found_files.items():
         if path.resolve() in existing_paths:

@@ -10,21 +10,21 @@ then applies the feature gates.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Tuple
+from typing import Iterable
 
 
 class ToolNameCollision(RuntimeError):
     """Two tool families define a tool of the same name."""
 
 
-def merge_tool_groups(groups: Iterable[Tuple[str, Dict[str, dict]]]) -> Dict[str, dict]:
+def merge_tool_groups(groups: Iterable[tuple[str, dict[str, dict]]]) -> dict[str, dict]:
     """Merge ``(family label, tools)`` pairs into one tool table, in order.
 
     Raises :class:`ToolNameCollision` naming the tool and both families when a
     name appears twice; a later family never overwrites an earlier one.
     """
-    merged: Dict[str, dict] = {}
-    owner: Dict[str, str] = {}
+    merged: dict[str, dict] = {}
+    owner: dict[str, str] = {}
     for label, tools in groups:
         for name, spec in tools.items():
             if name in merged:

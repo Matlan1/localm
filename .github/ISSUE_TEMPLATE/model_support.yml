@@ -1,0 +1,68 @@
+name: Model support
+description: A model fails to load, is not recognised, or runs wrongly.
+labels: ["model support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Model-related setup questions can also go to [Discussions](https://github.com/Matlan1/localm/discussions).
+        Use this form when the model itself will not load or produces wrong output.
+  - type: input
+    id: model
+    attributes:
+      label: Model id
+      description: The Hugging Face repo, or the file name if it came from elsewhere.
+      placeholder: owner/repo or model-Q4_K_M.gguf
+    validations:
+      required: true
+  - type: input
+    id: quant
+    attributes:
+      label: Quantization and file size
+      placeholder: Q4_K_M, 4.9 GB
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - vulkan
+        - amd-rocm
+        - hip
+        - cuda
+        - sycl
+        - cpu
+        - HuggingFace transformers (torch)
+        - not sure / auto-detected
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU, VRAM, and OS
+      placeholder: e.g. AMD RX 6800 16 GB, Windows 11
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: localm version
+      description: Output of `localm --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you tried, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: The load error or the lines around it. Remove anything private first.
+      render: text
+    validations:
+      required: true

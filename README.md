@@ -150,6 +150,18 @@ Extras install the normal pip way, e.g. `pip install "localm[coder,rag]"` - see 
 
 The pip package covers the CLI, the server, and every plugin. It does not include the desktop shortcut, the native `LocaLM.exe` app window, or the interactive plugin-picking wizard the self-contained installers above provide; use one of those instead if you want them.
 
+### Docker (API server)
+
+Release images are published to `ghcr.io/matlan1/localm` (CPU and Vulkan; see the package page for the tags that exist), and `docker build --platform linux/amd64 -f docker/Dockerfile -t localm .` builds one from a clone. The container runs `localm serve`, keeps its data in the `/data` volume, and refuses to start without an API key:
+
+```bash
+docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate    # prints a key once
+docker run --rm -v localm-data:/data ghcr.io/matlan1/localm pull owner/repo:model.gguf
+docker run -d -v localm-data:/data -p 8642:8642 ghcr.io/matlan1/localm
+```
+
+The API is served over HTTPS with localm's built-in certificate. See [docs/docker.md](docs/docker.md) for GPU use, compose, certificates and options.
+
 ### Manual (any OS)
 
 <details>
@@ -431,6 +443,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/memory.md](docs/memory.md) | Durable memory: recall across chats, consolidation, privacy, `/api/memory` |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
+| [docs/docker.md](docs/docker.md) | Running the API server in Docker: images, first-run key, volume, certificate, GPU |
 | [docs/privacy.md](docs/privacy.md) | Privacy modes and diagnostics: what localm saves, what it never does, the two independent dials that control it, and how the update check respects network policy |
 | [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |
 | [docs/phone.md](docs/phone.md) | Using localm from your phone: the installable PWA companion |
