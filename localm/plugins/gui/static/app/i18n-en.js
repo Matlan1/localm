@@ -1425,7 +1425,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Models
   "settings.field.importMaxDepth.label": "Folder import depth",
-  "settings.field.importMaxDepth.help": "Subfolder levels `localm add <dir>` scans for models.",
+  "settings.field.importMaxDepth.help": "Folder levels `localm add <dir>` and the models-folder scan search for GGUF files and HuggingFace model folders.",
   "settings.field.confirmRemove.label": "Confirm before deleting models",
   "settings.field.confirmRemove.help": "Ask for confirmation before `localm rm` deletes a model's files on disk.",
   "settings.field.autopruneMissingModels.label": "Auto-remove entries for missing files",

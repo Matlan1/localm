@@ -137,6 +137,7 @@ class TestFolderOfLooseGGUFs:
         d.mkdir()
         (d / "config.json").write_text('{"model_type": "llama"}')
         (d / "tokenizer.json").write_text("{}")
+        (d / "model.safetensors").write_bytes(b"\0" * 64)
         _gguf(d, "extra.gguf")
         assert add_local(str(d), "hfmodel") is True
         reg = load_registry()

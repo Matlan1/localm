@@ -21,13 +21,14 @@ without paying a process-spawn cost.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional
 
 from localm.console import console
 
 from .base import (BaseBackend, ModelLoadCancelled, PretokenizerUnsafeInputError,
-                   PretokenizerUnusableModelError)
+                   PretokenizerUnusableModelError, UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
@@ -62,6 +63,10 @@ def _count(value) -> int:
 # loaded the weights, then could not create the context.
 _CONTEXT_FAILED_MSG = "Failed to create llama context"
 
+# llama.cpp's own error when a GGUF names an architecture the runtime has no
+# model class for.
+_UNKNOWN_ARCH_RE = re.compile(r"unknown model architecture: '([^'\r\n]{1,64})'")
+
 
 def _load_failure_message(exc: BaseException, hint: str = "") -> str:
     """The user-facing text for a failed native load, from the worker's error
@@ -81,6 +86,14 @@ def _load_failure_message(exc: BaseException, hint: str = "") -> str:
         prefix = ("The model failed to load" if exc.phase == "context"
                   else "Native llama runtime failed to load")
         return f"{prefix}: {reason}{hint}"
+    unknown_arch = _UNKNOWN_ARCH_RE.search(reason)
+    if unknown_arch:
+        return (f"The model failed to load: this llama.cpp runtime does not know the "
+                f"'{unknown_arch.group(1)}' architecture - the model is newer than "
+                f"the runtime.{hint}\n"
+                f"Update localm, or try a newer llama.cpp build with  "
+                f"localm setup-llama --tag latest  (upstream's newest release, "
+                f"which localm has not tested).")
     if reason.startswith(_CONTEXT_FAILED_MSG):
         return (f"The model failed to load: {reason} The weights loaded, so the "
                 f"runtime itself works; the context did not fit - try a smaller "
@@ -462,6 +475,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 f"Split GGUF is incomplete - missing part(s): {names}. "
                 f"Re-run 'localm pull' to download all parts."
             )
+        # A file that is not a chat model (draft head, diffusion LM, T5, codec)
+        # is refused here, before any VRAM probe or worker spawn.
+        from localm.model_manager import gguf_architecture, gguf_chat_refusal
+        role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
+        if role_refusal is not None:
+            raise UnsupportedModelRoleError(role_refusal)
         # A model whose declared pre-tokenizer cannot hold a conversation is
         # refused here, before any VRAM probe or worker spawn. The worker's own
         # metadata read refuses it again when the header read reports None.
@@ -479,7 +498,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         try:
             self._load_native()
         except (ModelLoadCancelled, PretokenizerUnusableModelError,
-                GpuSplitConfigError):
+                UnsupportedModelRoleError, GpuSplitConfigError):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:

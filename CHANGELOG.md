@@ -255,6 +255,33 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **Models you already have on disk are found where LM Studio and llama.cpp keep them.**
+  `localm add <folder>` and the models-folder scan now look inside subfolders (as far
+  as the Folder import depth setting allows, three levels by default, so LM Studio's
+  `publisher/repo/file.gguf` is covered) and register HuggingFace safetensors model
+  folders as well as GGUF files; before, a safetensors model was only found when you
+  pointed at its own folder, and the automatic scan only saw files sitting directly in
+  the models folder. A folder import also reads each GGUF's own header: a vision
+  projector is no longer listed as a chat model, an embedding model is listed as one,
+  and the model's architecture is recorded. A `.GGUF` file with an upper-case
+  extension is recognised.
+- **GGUF files that are not chat models are no longer added as chat models.** Draft
+  heads for speculative decoding (EAGLE3, DFlash, Gemma 4 assistant), diffusion
+  language models (Dream, LLaDA, RND1), T5 encoder-decoder models, text-to-speech
+  models (Qwen3-TTS) and the WavTokenizer codec are added as type `unknown`, and image
+  and video GGUFs (Flux, Wan and the other ComfyUI-GGUF checkpoints) as
+  `diffusion-unet`. Trying to load one says what it is, instead of failing in the
+  runtime; models you added earlier keep the type they were registered with.
+  `llama-embed` models and any encoder that declares non-causal attention are
+  recognised as embedding models, and openPangu-Embedded, which is a chat model, is
+  no longer mistaken for an embedding model. A folder downloaded from a GGUF
+  repository (a `config.json` and tokenizer beside the `.gguf` files) registers its
+  GGUF files instead of one model that cannot load, and the component folders of a
+  diffusers pipeline are no longer listed as models of their own.
+- **A model newer than the bundled llama.cpp now says so.** When the runtime does not
+  know a model's architecture, the error names the architecture and says the model is
+  newer than the runtime (with `localm setup-llama --tag latest` to try a newer build),
+  instead of telling you to repair the runtime.
 - **A model whose weights in system RAM do not fit free RAM now loads from disk-backed
   memory instead of failing.** With every layer on the GPU, localm read the weights it
   keeps in system RAM (the routed experts of a Mixture-of-Experts model that it moves

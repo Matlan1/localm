@@ -385,7 +385,8 @@ CORE_FIELDS: list = [
                  "HuggingFace-format model.",
                  group="Timeouts", min=1, step=1000),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
-                 "Subfolder levels `localm add <dir>` scans for models.",
+                 "Folder levels `localm add <dir>` and the models-folder scan search "
+                 "for GGUF files and HuggingFace model folders.",
                  group="Models", min=1, max=10, step=1),
     # ---- Chat (the DEFAULTS every chat starts from) ----
     # The GUI's per-chat "parameters" drawer OVERRIDES any of these for a single
