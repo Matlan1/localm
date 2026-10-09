@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from localm import pathsafe
 
@@ -65,9 +65,9 @@ class Skill:
     allowed_tools: list = field(default_factory=list)
 
 
-def _skill_roots(cwd: Path) -> List[Path]:
+def _skill_roots(cwd: Path) -> list[Path]:
     """Global (data dir) first, then project. Project skills win on a name clash."""
-    roots: List[Path] = []
+    roots: list[Path] = []
     try:
         from localm.config import home_dir
         roots.append(home_dir() / "skills")
@@ -83,7 +83,7 @@ def _split_list(v: str) -> list:
     return [t.strip().strip('"').strip("'") for t in v.split(",") if t.strip()]
 
 
-def _parse_frontmatter(text: str) -> Tuple[dict, str]:
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
     """Split a SKILL.md into (metadata, body).
 
     Minimal YAML-frontmatter parser for the flat ``key: value`` block skills use
@@ -106,7 +106,7 @@ def _parse_frontmatter(text: str) -> Tuple[dict, str]:
     return meta, body.lstrip("\n")
 
 
-def discover_skills(cwd: Path) -> List[Skill]:
+def discover_skills(cwd: Path) -> list[Skill]:
     """Every valid ``SKILL.md`` folder under the skill roots, sorted by name.
     Project skills override global ones on a name clash. Best-effort: unreadable
     or invalid entries are skipped, never raised."""
@@ -153,7 +153,7 @@ def _confine_skill_file(skill: Skill, rel: str) -> Path:
     try:
         return pathsafe.confined_under(skill.path, rel)
     except ValueError as e:
-        raise PermissionError(str(e))
+        raise PermissionError(str(e)) from e
 
 
 # ------------------------------------------------------------------ #
@@ -243,7 +243,7 @@ def tool_use_skill(cwd: Path, name: Optional[str] = None,
                       truncated=len(body) > _MAX_BODY)
 
 
-def register_skill_tools(cwd: Path) -> Tuple[List[str], List[str]]:
+def register_skill_tools(cwd: Path) -> tuple[list[str], list[str]]:
     """Register ``list_skills`` + ``use_skill`` IF any skills are discoverable.
 
     Mirrors register_mcp_tools / register_plugin_tools: returns
@@ -251,7 +251,7 @@ def register_skill_tools(cwd: Path) -> Tuple[List[str], List[str]]:
     (not destructive). When no skills exist, nothing is registered, so the
     feature has zero footprint until the user adds a skill folder.
     """
-    warnings: List[str] = []
+    warnings: list[str] = []
     try:
         skills = discover_skills(cwd)
     except Exception as e:                       # discovery must not break the agent

@@ -34,7 +34,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from localm.plugins.contract import KNOWN_PLUGIN_KEYS
 
@@ -56,7 +56,7 @@ class PluginManifest:
     description: str
     entry: str                    # "<module>:<attr>"
     path: Path                    # plugin directory
-    tool_exports: List[str] = field(default_factory=list)
+    tool_exports: list[str] = field(default_factory=list)
 
     @property
     def entry_module(self) -> str:
@@ -80,7 +80,7 @@ _RESERVED_NAMES = {
 
 
 def parse_manifest(plugin_dir: Path, *,
-                   warnings: Optional[List[str]] = None) -> PluginManifest:
+                   warnings: Optional[list[str]] = None) -> PluginManifest:
     """Parse and validate ``plugin.toml`` in *plugin_dir*. When *warnings* is
     given, non-fatal manifest problems (unknown/misspelled [plugin] keys) are
     appended to it as human-readable strings - surfaced, never escalated: a
@@ -93,6 +93,12 @@ def parse_manifest(plugin_dir: Path, *,
         data = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise PluginError(f"Invalid TOML in {manifest_path}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise PluginError(f"{manifest_path} is not valid UTF-8: {e}") from e
+    except RecursionError as e:
+        raise PluginError(f"Invalid TOML in {manifest_path}: nested too deeply") from e
+    except OSError as e:
+        raise PluginError(f"Cannot read {manifest_path}: {e}") from e
 
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):
@@ -106,7 +112,7 @@ def parse_manifest(plugin_dir: Path, *,
         raise PluginError(f"{manifest_path}: invalid plugin name {name!r}")
     if name in _RESERVED_NAMES:
         raise PluginError(f"{manifest_path}: name {name!r} clashes with a built-in command")
-    if not entry or ":" not in entry:
+    if not isinstance(entry, str) or ":" not in entry:
         raise PluginError(f"{manifest_path}: [plugin] entry must be '<module>:<attr>'")
 
     tools = data.get("tools", {})
@@ -137,7 +143,7 @@ def parse_manifest(plugin_dir: Path, *,
 #  Discovery and loading                                               #
 # ------------------------------------------------------------------ #
 
-def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
+def discover_plugins(root: Optional[Path] = None) -> list[PluginManifest]:
     """
     Scan the plugins directory and return manifests for every valid legacy
     (``entry =``) plugin - this is how ``plugin_tools.register_plugin_tools()``
@@ -150,13 +156,13 @@ def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
     return manifests
 
 
-def discover_errors(root: Optional[Path] = None) -> List[str]:
+def discover_errors(root: Optional[Path] = None) -> list[str]:
     """Return human-readable errors for plugins that failed validation."""
     _, errors, _ = _scan(root)
     return errors
 
 
-def discover_warnings(root: Optional[Path] = None) -> List[str]:
+def discover_warnings(root: Optional[Path] = None) -> list[str]:
     """Non-fatal manifest warnings (unknown/misspelled keys) for plugins that
     still parse and load, so a typo does not degrade silently."""
     _, _, warns = _scan(root)
@@ -172,7 +178,7 @@ def _is_engine_plugin(plugin_dir: Path) -> bool:
     ``engine.PluginManager``."""
     try:
         data = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, RecursionError, tomllib.TOMLDecodeError):
         return False
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):
@@ -180,11 +186,11 @@ def _is_engine_plugin(plugin_dir: Path) -> bool:
     return bool(plugin.get("register")) and not plugin.get("entry")
 
 
-def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str], List[str]]:
+def _scan(root: Optional[Path]) -> tuple[list[PluginManifest], list[str], list[str]]:
     root = root or plugins_dir()
-    manifests: List[PluginManifest] = []
-    errors: List[str] = []
-    warns: List[str] = []
+    manifests: list[PluginManifest] = []
+    errors: list[str] = []
+    warns: list[str] = []
     if not root.is_dir():
         return manifests, errors, warns
     for child in sorted(root.iterdir()):

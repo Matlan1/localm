@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import localm.inference.http_server as _hs
+from localm.inference import ollama_protocol as _ollama
 
 
 def add_cors(app: FastAPI) -> Any:
@@ -72,6 +73,8 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # _BESPOKE_GATED_ROUTES. See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
+        # OpenAI-compatible media routes mounted by the voice and image plugins.
+        "/v1/audio/transcriptions", "/v1/images/generations",
         # Surface management (phase 5 on-demand GUI mount) is driven by a local
         # process (the attaching `localm gui`), not the browser shell: no Origin,
         # no shell_token. The route does its OWN strict auth (this instance's
@@ -94,6 +97,12 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
         "/v1/instances/vouch",
         "/v1/instances/status",
     )
+    # The Ollama-native counterparts of the entries above, matched by exact path
+    # (see localm.inference.ollama_protocol): inference POSTs and /api/show here,
+    # the read-only GETs in _OLLAMA_OPEN_MODE_GETS below.
+    _OLLAMA_CROSS_ORIGIN_OK = _ollama.CROSS_ORIGIN_OK_PATHS
+    _OLLAMA_OPEN_MODE_GETS = _ollama.OPEN_MODE_GET_PATHS
+
     _cors_allowlist = frozenset(cors_cfg) if isinstance(cors_cfg, list) else frozenset()
     _cors_wildcard = cors_cfg == "*"
 
@@ -167,7 +176,8 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
              or (request.method == "GET"
                  and (_path in _CROSS_ORIGIN_GET_REFUSED
                       or _path.startswith(_CROSS_ORIGIN_GET_REFUSED_PREFIXES))))
-                and not _path.startswith(_CROSS_ORIGIN_OK)):
+                and not _path.startswith(_CROSS_ORIGIN_OK)
+                and _path not in _OLLAMA_CROSS_ORIGIN_OK):
             if _cross_origin_refused(request):
                 return JSONResponse(
                     status_code=403,
@@ -204,8 +214,11 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                  or request.url.path.startswith("/v1/"))
             and request.url.path != "/api/session"
             and not request.url.path.startswith("/v1/models")
+            and request.url.path not in _OLLAMA_OPEN_MODE_GETS
         )
-        if (is_unsafe or is_metadata_get) and not request.url.path.startswith(_CROSS_ORIGIN_OK):
+        if ((is_unsafe or is_metadata_get)
+                and not request.url.path.startswith(_CROSS_ORIGIN_OK)
+                and request.url.path not in _OLLAMA_CROSS_ORIGIN_OK):
             from localm.auth import (any_key_configured, ct_equal,
                                      require_auth_enabled)
             if not any_key_configured() and not require_auth_enabled():

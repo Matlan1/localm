@@ -94,7 +94,7 @@ def _gguf_with_tensors(path, kv, tensors, *, version=3, magic=b"GGUF",
         off += size
     tensor_info = [_tensor_info(name, dims, ggml_type, offset)
                    for (name, dims, ggml_type, _size), offset
-                   in zip(tensors, offsets)]
+                   in zip(tensors, offsets, strict=True)]
 
     body = b"".join(header) + b"".join(tensor_info)
     remainder = len(body) % alignment

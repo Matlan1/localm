@@ -259,6 +259,7 @@ cpu = []
 # Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
 dev = [
     "ruff>=0.16.5",
+    "basedpyright==1.40.2",
     "pytest>=8.0",
     # Coverage measurement (TEST-1). pytest-cov enforces the fail_under floor
     # from [tool.coverage.report] below.
@@ -292,6 +293,14 @@ dev = [
     # results on this tree, while this finds template expansion into run
     # blocks and credential persistence through checkout.
     "zizmor>=1.30.0",
+    # Property-based fuzzing of the untrusted-input parsers (tests/fuzz/).
+    "hypothesis>=6.168.5",
+]
+# Documentation site (mkdocs.yml). Install with:  pip install -e ".[docs]"
+# Build with:  mkdocs build --strict
+docs = [
+    "mkdocs>=1.6.1,<2",
+    "mkdocs-material>=9.7.7,<10",
 ]
 
 [project.scripts]
@@ -400,6 +409,22 @@ select = [
     "S601", "S602", "S604", "S605", "S609", "S610", "S611",
     # misc hardening
     "S612", "S701", "S702",
+    # bugbear
+    "B002", "B003", "B004", "B005", "B006", "B007", "B008", "B009", "B010",
+    "B011", "B012", "B013", "B014", "B015", "B016", "B017", "B018", "B019",
+    "B020", "B021", "B022", "B023", "B024", "B025", "B026", "B027", "B028",
+    "B029", "B030", "B031", "B032", "B033", "B034", "B035", "B039", "B904",
+    "B905", "B911", "B912",
+    # simplify
+    "SIM101", "SIM107", "SIM109", "SIM110", "SIM113", "SIM114", "SIM116",
+    "SIM118", "SIM201", "SIM202", "SIM208", "SIM210", "SIM211", "SIM212",
+    "SIM220", "SIM221", "SIM222", "SIM223", "SIM401", "SIM910", "SIM911",
+    # pyupgrade
+    "UP001", "UP003", "UP004", "UP005", "UP006", "UP008", "UP009", "UP010",
+    "UP011", "UP012", "UP013", "UP014", "UP015", "UP017", "UP018", "UP019",
+    "UP020", "UP021", "UP022", "UP023", "UP024", "UP025", "UP026", "UP029",
+    "UP030", "UP032", "UP033", "UP034", "UP037", "UP039", "UP040", "UP041",
+    "UP043", "UP044", "UP046", "UP049", "UP050",
 ]
 
 # The codebase deliberately uses a compact style: one-line guards (if x: return),
@@ -408,6 +433,44 @@ select = [
 # rest of ruff's default E set. The unused-import/variable backlog has been
 # cleared and CI's ruff step is now blocking (.github/workflows/ci.yml).
 ignore = ["E741", "E701", "E702", "E402"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]
+
+# Files an open pull request still changes; each entry is removed once that
+# pull request has merged and the rule's autofix has been applied to the file.
+[tool.ruff.lint.per-file-ignores]
+"localm/cli/models.py" = ["B007", "B904", "B905"]
+"localm/config.py" = ["B904"]
+"localm/inference/backends/gguf.py" = ["UP006"]
+"localm/inference/backends/llamacpp/_api.py" = ["B009", "UP037"]
+"localm/inference/backends/llamacpp/_draftmodel.py" = ["UP006"]
+"localm/inference/backends/llamacpp/_drafting.py" = ["UP006"]
+"localm/inference/backends/llamacpp/_ngram.py" = ["UP006"]
+"localm/inference/backends/llamacpp/_sizing.py" = ["UP037"]
+"localm/inference/backends/llamacpp/_stepcosts.py" = ["B905", "UP006"]
+"localm/inference/backends/llamacpp/_split_fit.py" = ["B905", "UP006", "UP037"]
+"localm/inference/backends/llamacpp/_worker.py" = ["UP006"]
+"localm/inference/backends/llamacpp/llama.py" = ["B905", "UP006", "UP015", "UP037"]
+"localm/inference/engine.py" = ["UP006", "UP037"]
+"localm/inference/protocol.py" = ["UP006", "UP037"]
+"localm/inference/routing_latch.py" = ["UP006"]
+"localm/model_manager/gguf.py" = ["B904", "UP006", "UP037"]
+"localm/model_manager/registry.py" = ["UP006"]
+"localm/settings_schema.py" = ["B904", "UP037"]
+"tests/test_draft_model_drafting.py" = ["B905"]
+"tests/test_model_rename_rekey.py" = ["B008"]
+
+# Type checking: basedpyright, ratcheted against .github/basedpyright-baseline.json.
+# Run `basedpyright` (no arguments) to fail on errors absent from the baseline.
+[tool.basedpyright]
+include = ["localm"]
+baselineFile = ".github/basedpyright-baseline.json"
+pythonVersion = "3.12"
+pythonPlatform = "Linux"
+typeCheckingMode = "standard"
+reportMissingImports = false
+reportMissingModuleSource = false
 
 # Coverage measurement (TEST-1). CI writes coverage.xml/coverage.json inside
 # the runner and prints a summary; neither file is uploaded or persisted past

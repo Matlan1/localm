@@ -29,7 +29,6 @@ from __future__ import annotations
 import inspect
 import multiprocessing as mp
 import threading
-from typing import List
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,7 +66,7 @@ class TestHFBackendForwardsOnStatus:
         backend._loaded = True
         backend._runner = _FakeHFRunner()
 
-        received: List[str] = []
+        received: list[str] = []
         tokens = list(backend.chat_stream(_MESSAGES, on_status=received.append))
 
         assert tokens == ["hi"]
@@ -114,7 +113,7 @@ def _make_hf_runner() -> HFRunner:
     return r
 
 
-def _fake_hf_child_with_status(r, stop, *, statuses: List[str], tokens: List[str]):
+def _fake_hf_child_with_status(r, stop, *, statuses: list[str], tokens: list[str]):
     while not stop.is_set():
         try:
             cmd = r._req_q.get(timeout=0.05)
@@ -144,7 +143,7 @@ class TestHFRunnerChatStreamRelaysStatus:
             daemon=True,
         )
         child.start()
-        received: List[str] = []
+        received: list[str] = []
         try:
             tokens = list(r.chat_stream(messages=[], on_status=received.append))
         finally:
@@ -251,7 +250,7 @@ class TestHFWorkerChatStreamCallsOnStatus:
         model, tokenizer = _fake_model_and_tokenizer()
         worker = _make_hf_worker(model, tokenizer)
 
-        received: List[str] = []
+        received: list[str] = []
         gen = worker.chat_stream(_MESSAGES, on_status=received.append)
         first = next(gen)
 
@@ -274,7 +273,7 @@ class TestHFWorkerChatStreamCallsOnStatus:
         model, tokenizer = _fake_model_and_tokenizer()
         worker = _make_hf_worker(model, tokenizer)
 
-        received: List[str] = []
+        received: list[str] = []
         out = list(worker.chat_stream(_MESSAGES, on_status=received.append))
 
         assert out == ["Hello", " world"]
@@ -325,7 +324,7 @@ class TestHFWorkerChatStreamCallsOnStatus:
             ],
         }]
 
-        received: List[str] = []
+        received: list[str] = []
         out = list(worker.chat_stream(messages, on_status=received.append))
 
         assert out == ["Hello", " world"]
@@ -349,7 +348,7 @@ class TestHFWorkerChatStreamCallsOnStatus:
         worker = _make_hf_worker(
             model, tokenizer, processor=processor, is_multimodal=True)
 
-        received: List[str] = []
+        received: list[str] = []
         out = list(worker.chat_stream(_MESSAGES, on_status=received.append))
 
         assert out == ["Hello", " world"]
@@ -439,7 +438,7 @@ class TestEveryBackendInvokesOnStatus:
         if cls in _ON_STATUS_EXEMPT:
             pytest.skip(f"{cls.__name__} is on the explicit on_status exempt list")
         backend = _stub_backend_for_contract(cls)
-        received: List[str] = []
+        received: list[str] = []
         tokens = list(backend.chat_stream(_MESSAGES, on_status=received.append))
         assert tokens == ["token"]
         assert received, (
@@ -502,7 +501,7 @@ class TestRealWorkerRelaysStatusEndToEnd:
         be.unload()
 
     def test_on_status_receives_real_stage_updates_before_the_first_token(self, hf_backend):
-        received: List[str] = []
+        received: list[str] = []
         gen = hf_backend.chat_stream(
             [{"role": "user", "content": "Say hi."}],
             max_tokens=8, temperature=0.0,

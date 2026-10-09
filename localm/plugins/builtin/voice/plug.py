@@ -5,6 +5,8 @@ Routes (mounted by the engine, auto-scoped to the ``voice`` capability):
   GET  /api/voice/status          - is STT usable / is the model cached / why not
   POST /api/voice/transcribe      - transcribe a base64 audio blob
   POST /api/voice/model/download  - one-time, non-persistent model download
+  POST /v1/audio/transcriptions   - OpenAI-compatible transcription upload
+                                    (see transcriptions.py)
 
 Audio is decoded in memory and never written to disk, so privacy mode stays
 trace-free.
@@ -21,6 +23,7 @@ from pydantic import BaseModel
 from localm.inference.errors import route_errors
 from localm.executor import get_plugin_executor
 from localm.voice import VoiceError
+from . import transcriptions as _transcriptions
 
 _router = APIRouter()
 
@@ -143,8 +146,8 @@ async def voice_transcribe(req: TranscribeRequest):
     from localm.voice import transcribe_bytes
     try:
         data = base64.b64decode(req.audio_b64, validate=True)
-    except Exception:
-        raise HTTPException(400, "audio_b64 is not valid base64")
+    except Exception as exc:
+        raise HTTPException(400, "audio_b64 is not valid base64") from exc
     if not data:
         raise HTTPException(422, "Empty recording (no audio was captured)")
     if len(data) > 25_000_000:
@@ -158,6 +161,7 @@ async def voice_transcribe(req: TranscribeRequest):
 
 def register(host) -> None:
     host.mount_router(_router)
+    host.mount_router(_transcriptions.router)
 
 
 def on_install() -> None:

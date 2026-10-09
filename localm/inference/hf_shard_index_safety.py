@@ -21,14 +21,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List
 
 from localm.pathsafe import confined_under
 
 INDEX_GLOB = "*.index.json"
 
 
-def _index_files(base: Path) -> List[Path]:
+def _index_files(base: Path) -> list[Path]:
     """Index files ``transformers`` can reach for *base*: the directory itself
     and one level down, matching its ``subfolder`` argument."""
     return sorted(set(base.glob(INDEX_GLOB)) | set(base.glob(f"*/{INDEX_GLOB}")))
@@ -55,7 +54,7 @@ def validate_shard_index(model_path: str) -> None:
     for index_file in _index_files(base):
         try:
             index = json.loads(index_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         if not isinstance(index, dict):
             continue

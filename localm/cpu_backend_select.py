@@ -54,7 +54,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from localm.debuglog import logger
 
@@ -134,7 +134,7 @@ def _cpu_fingerprint() -> str:
     return "unknown"
 
 
-def _candidates(lib_dir: Path) -> List[Path]:
+def _candidates(lib_dir: Path) -> list[Path]:
     """Every not-yet-pruned CPU-tier .so present, in a stable (sorted) order."""
     try:
         return sorted(lib_dir.glob(_CANDIDATE_GLOB))

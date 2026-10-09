@@ -107,7 +107,7 @@ def _install_spies(monkeypatch):
     def _capture(path):
         try:
             return (_perm_fingerprint(path),
-                    open(path, "r", encoding="utf-8-sig").read())
+                    open(path, encoding="utf-8-sig").read())
         except OSError:                      # not one of ours; stay transparent
             return (None, None)
 

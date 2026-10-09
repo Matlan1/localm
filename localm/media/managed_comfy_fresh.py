@@ -256,9 +256,7 @@ def _shipped_workflow_files(pkg_dir=None) -> list:
             name = p.name
             if name.endswith(".example.json"):
                 out.append(p)
-            elif name.endswith("_local.json"):
-                continue
-            elif name[:-len(".json")] in example_stems:
+            elif name.endswith("_local.json") or name[:-len(".json")] in example_stems:
                 continue
             else:
                 out.append(p)

@@ -22,6 +22,45 @@ permanent public record of what shipped and are never rewritten; the in-progress
   (`diffusion_max_tokens`, 256 by default). Grammar-constrained output, images and
   speculative decoding are not available with these models; a request for a
   grammar is refused with a message saying so.
+- **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
+  and the GUI add and pull routes name the format and the nearest runnable alternative for
+  GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
+  GGUFs, Mistral-native folders, `.onnx`, TensorRT, LiteRT and NeMo files, and MLC,
+  OpenVINO and EXL2/EXL3 folders. An MLX-quantized, EXL2/EXL3 or OpenVINO folder still
+  registers, with a note that it cannot be loaded, and is refused at load with the same
+  sentence before any worker starts. Direct-URL and Ollama-blob pulls apply the same
+  checks, and the automatic models-folder scan quietly skips the GGUFs it cannot load. A
+  Mistral-style folder holding both Hugging Face shards and `consolidated*` files is sized
+  by the shards only.
+- **Models other tools already downloaded can be added in place.** `localm add` (and
+  the Models page's add-path box) now takes the Hugging Face cache folder
+  (`~/.cache/huggingface`, or `HF_HOME`), registering one model per repository from
+  its current revision and named after the repo; an Ollama model folder
+  (`~/.ollama`, or `OLLAMA_MODELS`), registering every GGUF model in it as
+  `model-tag`, with a vision model's projector attached; and a `.llamafile`, whose
+  model (and projector) is unpacked into the models folder with a progress bar.
+  Moving models out of the Hugging Face cache is refused, since it would break the
+  cache; copy them instead.
+- **OpenAI-compatible speech-to-text and image endpoints.** `POST /v1/audio/transcriptions`
+  takes a multipart upload and returns `json`, `text`, `srt`, `vtt` or `verbose_json` (with
+  segment and word timestamps), transcribed locally with Whisper; the audio is never written
+  to disk. `POST /v1/images/generations` generates through the image plugin (ComfyUI) and
+  returns `b64_json`, or a gallery `url` when an API key is configured, honouring `n` and
+  `size`; in privacy mode no image is kept on disk. The official `openai` SDK works against
+  both, and local apps can call them like `/v1/chat/completions`. Speech synthesis
+  (`/v1/audio/speech`) is not served yet. See docs/server-api.md.
+- **An Ollama-compatible API on the same server and port.** `/api/chat`, `/api/generate`,
+  `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
+  answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
+  stream as NDJSON, `format: "json"`, `options.stop`, `think` and images work, and the same
+  API keys and scopes apply. Tool calling and a JSON-schema `format` are not supported yet.
+  `/api/copy` makes an alias; pulling, deleting and creating models stay in `localm`. See
+  docs/ollama-api.md.
+- **Release files carry build provenance and a software bill of materials.** The release
+  zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
+  the release workflow, so `gh attestation verify` proves which workflow built a file and
+  from which commit. SECURITY.md has the commands.
+- **Docker images for the API server.** Releases publish CPU and Vulkan images to `ghcr.io/matlan1/localm`, and `docker/Dockerfile` builds the same image from a clone. The container keeps its data in a `/data` volume, serves HTTPS, and refuses to start until an API key exists (`docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate`). See docs/docker.md.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing
@@ -166,6 +205,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for it, including an older one kept in the project's `.localcoder` folder;
   your project files are left alone. A session that is open, or a project
   with an open session, has to be ended first.
+- **A browsable documentation site, with an API reference generated from the
+  server's OpenAPI schema.** The `docs/` guides are built into a searchable site,
+  and the API reference lists every route, parameter and schema the server
+  declares. `scripts/export_openapi.py` writes the schema without loading a model.
+  The site is published with each release.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
@@ -265,6 +309,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **Malformed files and requests are refused with a clear error instead of crashing.** The MCP server no longer exits when a client sends a `tools/call` with the wrong parameter shape, a 4300-digit
+  number or deeply nested JSON; a grammar with an enormous repeat count is rejected as an invalid grammar; a plugin
+  with a non-UTF-8, over-nested or wrong-typed `plugin.toml` is reported as broken without hiding the other plugins;
+  an encrypted or unsupported-compression `.docx` is skipped with a message; and a model folder whose `config.json`,
+  `tokenizer.json` or shard index is over-nested, has an enormous number or has the wrong shape is refused or treated
+  as having no metadata, and an uploaded workflow, `model_meta.json` or install record that is over-nested is
+  rejected or ignored. An over-nested `config.json` no longer stops localm from starting.
+- **`localm doctor` recognises the macOS runtime.** On a Mac it reported the Metal build as "no llama library", skipped the native ABI check and the GPU probe, and ended with "CPU mode only"; it now checks the library like on other systems and names the Metal GPU.
+- **A knowledge collection whose `meta.json` is not valid UTF-8 no longer breaks the collection list.** The list, the collection detail view and a model rename now treat that collection as unreadable, flag it as corrupt and carry on with the others, instead of failing for every collection.
+- **Bug reports no longer carry email addresses.** Any email address in a report
+  (your description, an error, the log, a hang trace, the browser console or the
+  settings it lists) is
+  replaced with `<redacted-email>` before the report is shown, saved or sent, in the
+  app and in the standalone `report-issue` scripts. The maintainer's contact address
+  is kept.
 - **Models you already have on disk are found where LM Studio and llama.cpp keep them.**
   `localm add <folder>` and the models-folder scan now look inside subfolders (as far
   as the Folder import depth setting allows, three levels by default, so LM Studio's
@@ -302,6 +361,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   when they do not, or there is no GPU, the model file is memory-mapped wherever the
   device supports it, so only the parts in use stay in RAM and the rest is read from
   disk as needed.
+- **FP8 Hugging Face models (for example `Qwen/Qwen3-0.6B-FP8`) now load and answer
+  on CPUs and GPUs without native FP8 support.** They used to load and then stop at
+  the first reply with `No module named 'triton'`. Their weights are now expanded to
+  bf16 at load time (about 2 bytes per parameter), and the load output says so. A
+  model whose expanded size cannot fit in available memory is refused with the sizes
+  instead. FP8 runs natively only on an NVIDIA GPU with compute capability 8.9 or newer,
+  with triton installed and the FP8 kernel downloaded from the Hugging Face Hub (or
+  already downloaded by an earlier load, which then also works offline).
 - **Setup can pick up after being interrupted, on every platform.** `setup.sh`,
   `setup.bat` and the graphical installer keep a short journal of the steps they have
   started and finished. Run again after Ctrl+C, a closed window or a crash, setup says
@@ -1437,6 +1504,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
+- **Hugging Face models no longer download and run code from the Hugging Face kernel
+  hub unless the network policy allows it.** transformers could fetch a compiled kernel
+  package from the Hub while a model was loading or replying and import it, even with
+  `net_mode off`. The HF backend now blocks those kernels by default and, with
+  `net_mode off`, makes no Hub requests at all. Kernels are allowed only for a model
+  that needs one (native FP8 on a supported NVIDIA GPU, or MXFP4, EETQ, FBGEMM FP8 or
+  Metal quantization) and only when the network policy allows the Hub. With the Hub
+  refused, an MXFP4 model loads expanded to full precision and says so, and a model
+  that cannot run without its kernel is refused with the reason.
 - **Privacy mode no longer leaves the start of tool-enabled replies in the debug
   log.** With `--debug`, `LOCALM_DEBUG` or `keep_diagnostics` on, the text a model
   wrote before a tool call (coder turns, web-enabled chat, jobs) was copied into

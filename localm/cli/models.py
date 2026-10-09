@@ -904,6 +904,9 @@ def rm(model, yes):
 def add(path, name, no_hash, fast, on_duplicate, type, store):
     """Register a local model file, a HuggingFace model directory, or a folder of them.
 
+    Also reads where other tools keep models: the Hugging Face hub cache, an Ollama
+    model store, and a .llamafile (its model is unpacked into the models folder).
+
     Duplicate detection is two-tier: the resolved path is checked first,
     then the file's SHA256 against digests stored in the registry. For large
     files that hash runs off the main thread with a live progress bar; pass
@@ -918,6 +921,9 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
       localm add D:\\models\\lmstudio   # every GGUF and safetensors model inside
       localm add D:\\models\\mymodel.gguf --store copy   # copy into <data dir>/models
       localm add D:\\models\\mymodel.gguf --store move   # move into <data dir>/models
+      localm add ~/.cache/huggingface   # the Hugging Face cache, in place
+      localm add ~/.ollama              # every GGUF model in Ollama's store
+      localm add D:\\models\\tiny.llamafile   # unpacks the model into <data dir>/models
     """
     # Resolve add_local from the package at call time so tests that monkeypatch
     # localm.cli.add_local affect this call site.

@@ -183,7 +183,9 @@ def save_workflow(media: str, name: str, content: bytes) -> str:
     try:
         data = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise ValueError(f"not valid JSON: {e}")
+        raise ValueError(f"not valid JSON: {e}") from e
+    except RecursionError as e:
+        raise ValueError("not valid JSON: nested too deeply") from e
     if not is_workflow_json(data):
         raise ValueError(
             "not a ComfyUI API-format workflow (expected a dict of nodes, each "
@@ -416,7 +418,7 @@ def make_workflow_router(media: str):
             workflows, selected = await run_in_threadpool_bounded(
                 _do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Listing {media} workflows timed out: {e}")
+            raise HTTPException(504, f"Listing {media} workflows timed out: {e}") from e
         return {"workflows": workflows, "selected": selected}
 
     @router.post(f"/api/{media}/workflows")
@@ -438,9 +440,9 @@ def make_workflow_router(media: str):
         try:
             return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Uploading the {media} workflow timed out: {e}")
+            raise HTTPException(504, f"Uploading the {media} workflow timed out: {e}") from e
 
     @router.post(f"/api/{media}/workflows/select")
     async def _select_workflow(body: dict):
@@ -452,9 +454,9 @@ def make_workflow_router(media: str):
         try:
             return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Selecting the {media} workflow timed out: {e}")
+            raise HTTPException(504, f"Selecting the {media} workflow timed out: {e}") from e
 
     @router.delete(f"/api/{media}/workflows/{{name}}")
     async def _delete_workflow(name: str):
@@ -467,8 +469,8 @@ def make_workflow_router(media: str):
         try:
             return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Deleting the {media} workflow timed out: {e}")
+            raise HTTPException(504, f"Deleting the {media} workflow timed out: {e}") from e
 
     return router

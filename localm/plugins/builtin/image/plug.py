@@ -3,6 +3,8 @@
 
 Routes (mounted by the engine, auto-scoped to the ``image`` capability):
   POST   /api/imagine                       - generate an image (background job)
+  POST   /v1/images/generations             - OpenAI-compatible: generate and
+                                              return the image(s) in the response
   GET    /api/imagine/history               - generated images, newest first
   GET    /api/imagine/file/{name}           - serve a generated image
   DELETE /api/imagine/file/{name}           - delete an image (+ sidecar)
@@ -22,9 +24,14 @@ see backend.py. Ships DISABLED by default.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import os
+import re
 import shutil
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -33,7 +40,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from localm.image_gen.comfy import is_safe_lora_name
-from localm.inference.http_server import principal_id
+from localm.inference.http_server import _resolve_disconnect_poll, principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.pathsafe import confined_file, confined_name
@@ -89,43 +96,13 @@ def _validate_lora_name(raw: str) -> str:
     return name
 
 
-@_router.post("/api/imagine")
-async def imagine(req: ImagineRequest, request: Request):
-    if not req.prompt.strip():
-        raise HTTPException(400, "Empty prompt")
-    from localm.debuglog import logger
-    logger.info("imagine: %d-char prompt", len(req.prompt))
-    input_image = None
-    if req.input_image:
-        input_image = media_paths.confined_input_image(req.input_image)
-    lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
-
-    # Any app built through attach_engine has a background-job registry, so
-    # reaching this branch means the router was mounted on an app that never ran
-    # it. That is a construction error, answered with a clean 503 rather than an
-    # unguarded AttributeError and an opaque 500.
-    jobs = getattr(request.app.state, "jobs", None)
-    if jobs is None:
-        raise HTTPException(503, "Image generation needs this server's "
-                                 "background job registry, which is "
-                                 "unavailable.")
-    # A headless server may not know its OWN address, which the VRAM handover
-    # below needs (self_request raises on an empty base_url). Gate on that and
-    # say so.
-    self_url = resolve_self_url(request.app)
-    if not self_url:
-        raise HTTPException(503, "Image generation needs this server's own "
-                                 "address to free VRAM first, and it could not "
-                                 "be determined.")
-    # Threaded through to the VRAM handover below so it authenticates on a
-    # keyless server too - see selfclient.self_request's docstring.
-    instance_token = getattr(request.app.state, "instance_token", None)
-
-    images_dir = _images_dir()
-    images_dir.mkdir(parents=True, exist_ok=True)
-    out_path = images_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
-    owner = principal_id(request)
-
+def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
+                   instance_token, width=None, height=None, in_gallery=True):
+    """The background-job body for one image generation of ``req`` into
+    ``out_path``: backend availability, VRAM handover, generation, and the
+    chat-model reload on every exit path. ``width``/``height`` are forwarded to
+    the backend only when both are set. ``in_gallery=False`` skips recording
+    ``out_path`` as a gallery artifact owned by ``owner``."""
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
@@ -178,6 +155,8 @@ async def imagine(req: ImagineRequest, request: Request):
         # privacy mode forces deletion of ComfyUI's own output copy: no traces
         # left anywhere, regardless of the configured delete_outputs preference.
         delete_outputs = bool(s.get("delete_outputs")) or is_privacy
+        size_kwargs = ({"width": width, "height": height}
+                       if width is not None and height is not None else {})
         ok, message = _backend.generate(
             s, req.prompt, out_path,
             self_url=self_url,
@@ -200,11 +179,13 @@ async def imagine(req: ImagineRequest, request: Request):
             cancel_check=lambda: job.cancel_requested,
             placement=placement,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
+            **size_kwargs,
         )
         job.push({"type": "line", "text": message})
         if ok:
             job.result = out_path.name
-            gallery.stamp_owner("image", out_path.name, owner)
+            if in_gallery:
+                gallery.stamp_owner("image", out_path.name, owner)
         # Mark the outcome BEFORE the VRAM handover below, which is best-effort
         # cleanup that can itself raise (e.g. a non-comfy backend's free_vram())
         # and must never turn a successful generation into a reported failure.
@@ -216,10 +197,272 @@ async def imagine(req: ImagineRequest, request: Request):
             from localm.vram import reload_chat_after_media
             reload_chat_after_media(job, self_url, s, _backend, "image", instance_token)
         return ok
+    return _generate
 
-    job = jobs.start_fn("imagine", _generate, result_path=out_path.name,
-                        owner=owner)
+
+@_router.post("/api/imagine")
+async def imagine(req: ImagineRequest, request: Request):
+    if not req.prompt.strip():
+        raise HTTPException(400, "Empty prompt")
+    from localm.debuglog import logger
+    logger.info("imagine: %d-char prompt", len(req.prompt))
+    input_image = None
+    if req.input_image:
+        input_image = media_paths.confined_input_image(req.input_image)
+    lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
+
+    # Any app built through attach_engine has a background-job registry, so
+    # reaching this branch means the router was mounted on an app that never ran
+    # it. That is a construction error, answered with a clean 503 rather than an
+    # unguarded AttributeError and an opaque 500.
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, "Image generation needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    # A headless server may not know its OWN address, which the VRAM handover
+    # below needs (self_request raises on an empty base_url). Gate on that and
+    # say so.
+    self_url = resolve_self_url(request.app)
+    if not self_url:
+        raise HTTPException(503, "Image generation needs this server's own "
+                                 "address to free VRAM first, and it could not "
+                                 "be determined.")
+    # Threaded through to the VRAM handover below so it authenticates on a
+    # keyless server too - see selfclient.self_request's docstring.
+    instance_token = getattr(request.app.state, "instance_token", None)
+
+    images_dir = _images_dir()
+    images_dir.mkdir(parents=True, exist_ok=True)
+    out_path = images_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
+    owner = principal_id(request)
+
+    job = jobs.start_fn(
+        "imagine",
+        _make_generate(req, input_image=input_image, lora_name=lora_name,
+                       out_path=out_path, owner=owner, self_url=self_url,
+                       instance_token=instance_token),
+        result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
+
+
+MAX_IMAGES_PER_REQUEST = 4
+MIN_IMAGE_SIDE = 64
+MAX_IMAGE_SIDE = 2048
+MAX_IMAGE_PIXELS = 2048 * 2048
+MAX_PROMPT_CHARS = 32000
+_SIZE_RE = re.compile(r"^(\d{1,5})x(\d{1,5})$")
+
+
+class ImageGenerationRequest(BaseModel):
+    """Body of ``POST /v1/images/generations``. ``model``, ``quality``,
+    ``style`` and ``user`` are accepted and ignored: the image model is the one
+    the active workflow loads. Unknown fields are ignored."""
+    prompt: str
+    model: str | None = None
+    n: int = Field(1, ge=1, le=MAX_IMAGES_PER_REQUEST)
+    size: str | None = None
+    response_format: str | None = None
+    output_format: str | None = None
+
+
+def parse_image_size(size: str | None) -> tuple[int, int] | None:
+    """``(width, height)`` for a ``WIDTHxHEIGHT`` size, or None for "auto" or no
+    size (the workflow's own size). Raises ``HTTPException`` (400) for a size
+    outside ``MIN_IMAGE_SIDE``..``MAX_IMAGE_SIDE`` per side, off a multiple of 8,
+    or over ``MAX_IMAGE_PIXELS`` in total."""
+    if size is None or size.strip().lower() in ("", "auto"):
+        return None
+    m = _SIZE_RE.match(size.strip().lower())
+    if not m:
+        raise HTTPException(
+            400, f"size must be 'auto' or WIDTHxHEIGHT such as '1024x1024' (got {size!r}).")
+    w, h = int(m.group(1)), int(m.group(2))
+    if not (MIN_IMAGE_SIDE <= w <= MAX_IMAGE_SIDE and MIN_IMAGE_SIDE <= h <= MAX_IMAGE_SIDE):
+        raise HTTPException(
+            400, f"size sides must be between {MIN_IMAGE_SIDE} and {MAX_IMAGE_SIDE} pixels (got {size!r}).")
+    if w % 8 or h % 8:
+        raise HTTPException(400, f"size sides must be multiples of 8 (got {size!r}).")
+    if w * h > MAX_IMAGE_PIXELS:
+        raise HTTPException(
+            400, f"size is too large: at most {MAX_IMAGE_PIXELS} pixels in total (got {size!r}).")
+    return w, h
+
+
+def _is_private_session() -> bool:
+    from localm.audit import SessionMode, effective_mode
+    return effective_mode("server") == SessionMode.PRIVACY
+
+
+CANCEL_SETTLE_SECONDS = 30.0
+JOB_POLL_SECONDS = 1.0
+
+
+async def _await_job(job, request: Request) -> tuple[str, str]:
+    """Wait for a background job to end and return ``(status, last_line)``.
+
+    When the client goes away while it runs, cancels the job, waits up to
+    ``CANCEL_SETTLE_SECONDS`` for it to finish writing and stop, then raises
+    ``asyncio.CancelledError``."""
+    queue = job.subscribe()
+    poll = _resolve_disconnect_poll(request)
+    last_line = ""
+    deadline = None
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=JOB_POLL_SECONDS)
+            except TimeoutError:
+                if deadline is None:
+                    if poll is not None and await poll():
+                        job.cancel()
+                        deadline = time.monotonic() + CANCEL_SETTLE_SECONDS
+                elif time.monotonic() >= deadline:
+                    raise asyncio.CancelledError() from None
+                continue
+            kind = event.get("type")
+            if kind == "line":
+                last_line = str(event.get("text", ""))
+            elif kind == "end":
+                if deadline is not None:
+                    raise asyncio.CancelledError()
+                return str(event.get("status", "failed")), last_line
+    finally:
+        job.unsubscribe(queue)
+
+
+def _remove_tree_when_idle(path: Path, jobs: list) -> None:
+    """Remove a private generation directory once every job in ``jobs`` has
+    stopped writing: at once when they all have, otherwise from a background
+    thread that waits for them (at most ``CANCEL_SETTLE_SECONDS`` * 20) and logs a
+    warning if the directory still cannot be removed."""
+    def _idle() -> bool:
+        return all(getattr(j, "finished_at", None) is not None for j in jobs)
+
+    if _idle():
+        _remove_tree(path)
+        return
+
+    def _later() -> None:
+        deadline = time.monotonic() + CANCEL_SETTLE_SECONDS * 20
+        while not _idle() and time.monotonic() < deadline:
+            time.sleep(max(JOB_POLL_SECONDS / 2, 0.01))
+        try:
+            _remove_tree(path)
+        except HTTPException:
+            pass
+
+    threading.Thread(target=_later, name="localm-image-cleanup", daemon=True).start()
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete a private generation directory, failing loudly if any file stays."""
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("could not remove the private image directory %s: %s", path, e)
+        raise HTTPException(
+            500, "The generated image could not be removed from disk after it was "
+                 "read, so it was not returned (privacy mode keeps no image on disk)."
+        ) from e
+
+
+@_router.post("/v1/images/generations")
+async def create_image(req: ImageGenerationRequest, request: Request):
+    """OpenAI-compatible image generation: runs the same job as ``/api/imagine``
+    and returns the finished image(s) in the response.
+
+    Outside privacy mode each image is kept in the gallery (with its sidecar).
+    ``response_format`` defaults to ``url`` when an API key is configured (the
+    URL is the gallery file route, fetched with the same key) and to
+    ``b64_json`` when none is, where ``url`` is a 400. In privacy mode nothing
+    is kept: the image is generated into a private directory, returned as
+    ``b64_json`` (the default there; ``url`` is a 400) and the directory is
+    deleted before the response is sent."""
+    prompt = req.prompt.strip()
+    if not prompt:
+        raise HTTPException(400, "Empty prompt")
+    if len(prompt) > MAX_PROMPT_CHARS:
+        raise HTTPException(400, f"prompt is too long (max {MAX_PROMPT_CHARS} characters).")
+    size = parse_image_size(req.size)
+    if req.output_format is not None and req.output_format.strip().lower() != "png":
+        raise HTTPException(400, "output_format must be 'png': this server writes PNG images.")
+    private = _is_private_session()
+    from localm.auth import any_key_configured
+    url_servable = not private and any_key_configured()
+    fmt = (req.response_format or ("url" if url_servable else "b64_json")).strip().lower()
+    if fmt not in ("url", "b64_json"):
+        raise HTTPException(400, "response_format must be 'url' or 'b64_json' "
+                                 f"(got {req.response_format!r}).")
+    if fmt == "url" and private:
+        raise HTTPException(
+            400, "response_format 'url' needs the image kept on disk, and session mode "
+                 "'privacy' keeps none: request 'b64_json' instead.")
+    if fmt == "url" and not url_servable:
+        raise HTTPException(
+            400, "response_format 'url' needs an API key: the gallery file route cannot "
+                 "be fetched without one while no key is configured. Request 'b64_json', "
+                 "or create a key with 'localm key create'.")
+
+    from localm.debuglog import logger
+    logger.info("v1 images: %d-char prompt, n=%d", len(prompt), req.n)
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, "Image generation needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    self_url = resolve_self_url(request.app)
+    if not self_url:
+        raise HTTPException(503, "Image generation needs this server's own "
+                                 "address to free VRAM first, and it could not "
+                                 "be determined.")
+    instance_token = getattr(request.app.state, "instance_token", None)
+    owner = principal_id(request)
+    gen_req = ImagineRequest(prompt=prompt, guidance=None, cfg=None, denoise=None,
+                             lora_strength_model=None, lora_strength_clip=None)
+    width, height = size if size else (None, None)
+
+    private_dir = None
+    started_jobs = []
+    items = []
+    try:
+        if private:
+            from localm.config import temp_dir
+            private_dir = Path(tempfile.mkdtemp(prefix="localm-img-", dir=temp_dir()))
+            out_dir = private_dir
+        else:
+            out_dir = _images_dir()
+            out_dir.mkdir(parents=True, exist_ok=True)
+        base_url = str(request.base_url).rstrip("/")
+        for _ in range(req.n):
+            out_path = out_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
+            job = jobs.start_fn(
+                "imagine",
+                _make_generate(gen_req, input_image=None, lora_name=None,
+                               out_path=out_path, owner=owner, self_url=self_url,
+                               instance_token=instance_token, width=width,
+                               height=height, in_gallery=not private),
+                result_path=out_path.name, owner=owner)
+            started_jobs.append(job)
+            status, last_line = await _await_job(job, request)
+            if status == "cancelled":
+                raise HTTPException(409, "The image generation was cancelled.")
+            if status != "done" or not out_path.is_file():
+                raise HTTPException(
+                    502, f"Image generation failed: {last_line or 'no reason was reported'}")
+            if fmt == "b64_json":
+                loop = asyncio.get_running_loop()
+                data = await loop.run_in_executor(None, out_path.read_bytes)
+                items.append({"b64_json": base64.b64encode(data).decode("ascii")})
+            else:
+                items.append({"url": f"{base_url}/api/imagine/file/{out_path.name}"})
+    finally:
+        if private_dir is not None:
+            _remove_tree_when_idle(private_dir, started_jobs)
+    return {"created": int(time.time()), "data": items}
 
 
 @_router.get("/api/imagine/file/{name}",
@@ -253,7 +496,7 @@ async def imagine_move(name: str, req: MoveFileRequest, request: Request):
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        raise HTTPException(400, f"Cannot create destination: {e}")
+        raise HTTPException(400, f"Cannot create destination: {e}") from e
     if not dest_dir.is_dir():
         raise HTTPException(400, f"Not a directory: {req.dest}")
     target = dest_dir / path.name
@@ -361,7 +604,7 @@ async def imagine_comfy_models(request: Request):
             _backend._comfy_model_roles, s, roles, timeout=20.0)
         loras = await run_in_threadpool_bounded(_backend._comfy_lora_options, s, timeout=20.0)
     except ThreadCallTimeout as e:
-        raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}")
+        raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}") from e
     out = {"api_url": s["api_url"], "loras": loras or [], **resolved}
     if not resolved["reachable"]:
         out["message"] = "ComfyUI is not running - launch it to see available models."
@@ -393,7 +636,7 @@ async def imagine_comfy_launch():
         ok, message = await run_in_threadpool_bounded(
             _backend.ensure_available, s, timeout=budget)
     except ThreadCallTimeout as e:
-        raise HTTPException(504, f"Launching ComfyUI timed out: {e}")
+        raise HTTPException(504, f"Launching ComfyUI timed out: {e}") from e
     return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 

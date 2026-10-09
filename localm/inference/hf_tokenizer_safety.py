@@ -64,7 +64,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from typing import Iterator, List
+from typing import Iterator
 
 # Real pre_tokenizer/normalizer/decoder patterns are tiny (the GPT-2 pattern
 # above is 74 characters). Checked BEFORE anything else, including the recursive
@@ -107,7 +107,7 @@ def _iter_regex_patterns(node) -> Iterator[str]:
             yield from _iter_regex_patterns(item)
 
 
-def _extract_unique_patterns(model_path: str) -> List[str]:
+def _extract_unique_patterns(model_path: str) -> list[str]:
     """Unique Regex pattern strings from ``<model_path>/tokenizer.json``, in
     first-occurrence order. Returns ``[]`` when the file is absent (a "slow"
     /legacy/sentencepiece-only tokenizer ships no ``tokenizer.json`` and has
@@ -126,12 +126,12 @@ def _extract_unique_patterns(model_path: str) -> List[str]:
     try:
         text = path.read_text(encoding="utf-8")
         data = json.loads(text)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        return list(dict.fromkeys(_iter_regex_patterns(data)))
+    except (OSError, ValueError, RecursionError) as e:
         raise RuntimeError(
             f"'{Path(model_path).name}' ships a tokenizer.json that could not "
             f"be read as valid JSON ({type(e).__name__}: {e}), so its regex "
             "patterns cannot be verified safe; refusing to load.") from e
-    return list(dict.fromkeys(_iter_regex_patterns(data)))
 
 
 def _readline_with_timeout(stream, timeout: float):
@@ -142,7 +142,7 @@ def _readline_with_timeout(stream, timeout: float):
     once the read unblocks or the pipe closes, which killing the probe process
     (done by the caller immediately after a timeout) guarantees. Returns None on
     timeout, EOF, or any read error."""
-    q: "queue.Queue" = queue.Queue(maxsize=1)
+    q: queue.Queue = queue.Queue(maxsize=1)
 
     def _reader():
         try:
@@ -158,7 +158,7 @@ def _readline_with_timeout(stream, timeout: float):
     return line or None
 
 
-def _run_probe_subprocess(patterns: List[str]) -> "List[str] | None":
+def _run_probe_subprocess(patterns: list[str]) -> list[str] | None:
     """Spawn the isolated probe subprocess, feed it *patterns*, and return one
     verdict string per pattern successfully read ("OK" or "BAD <reason>").
 
@@ -192,7 +192,7 @@ def _run_probe_subprocess(patterns: List[str]) -> "List[str] | None":
         proc.kill()
         return None
 
-    verdicts: List[str] = []
+    verdicts: list[str] = []
     try:
         for _ in patterns:
             line = _readline_with_timeout(proc.stdout, _PROBE_TIMEOUT_SECONDS)
@@ -257,7 +257,7 @@ def validate_tokenizer_json(model_path: str) -> None:
             "crashed while checking it) - likely catastrophic native regex "
             "backtracking against ordinary chat text; refusing to load.")
 
-    for pattern, verdict in zip(patterns, verdicts):
+    for pattern, verdict in zip(patterns, verdicts, strict=False):
         if verdict == "OK":
             continue
         reason = verdict[4:] if verdict.startswith("BAD ") else verdict

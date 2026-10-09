@@ -212,9 +212,9 @@ def register(app: FastAPI, ctx) -> None:
             removed, failed = await run_in_threadpool_bounded(
                 remove_managed_comfy, False, timeout=_REMOVE_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Clearing the incomplete install timed out: {e}")
+            raise HTTPException(504, f"Clearing the incomplete install timed out: {e}") from e
         except ManagedComfyBusy as e:
-            raise HTTPException(409, e.reason)
+            raise HTTPException(409, e.reason) from e
         if failed:
             raise HTTPException(500, "Could not clear the incomplete install: "
                                 + "; ".join(failed))
@@ -294,9 +294,9 @@ def register(app: FastAPI, ctx) -> None:
             removed, failed = await run_in_threadpool_bounded(
                 remove_managed_comfy, with_models, timeout=_REMOVE_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Removing the managed ComfyUI timed out: {e}")
+            raise HTTPException(504, f"Removing the managed ComfyUI timed out: {e}") from e
         except ManagedComfyBusy as e:
-            raise HTTPException(409, e.reason)
+            raise HTTPException(409, e.reason) from e
         if failed:
             raise HTTPException(500, "Could not remove: " + "; ".join(failed))
         if not removed:

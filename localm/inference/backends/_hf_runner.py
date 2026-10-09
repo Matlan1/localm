@@ -120,7 +120,7 @@ import os
 import queue as _queue
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 
 class RunnerBusy(Exception):
@@ -294,6 +294,8 @@ def prepare_worker_process() -> None:
     if dll_dirs:
         logger.debug("hf worker: added the venv's DLL directories: %s",
                      ", ".join(dll_dirs))
+    from localm.inference.backends._hf_hub_gate import close_hub_gate
+    close_hub_gate()
 
 
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
@@ -377,6 +379,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "can_embed": worker.can_embed,
                     "device": worker.resolved_device,
                     "context_capacity": getattr(worker, "context_capacity", None),
+                    "load_notes": list(getattr(worker, "load_notes", None) or []),
                 }))
             except Exception as e:
                 resp_q.put(("error", str(e)))
@@ -710,12 +713,12 @@ class HFRunner:
         while result is None:
             try:
                 result = self._resp_q.get(timeout=_POLL_INTERVAL)
-            except _queue.Empty:
+            except _queue.Empty as e:
                 if not self._proc.is_alive():
                     raise RuntimeError(
                         f"The HuggingFace model-loading process crashed (exit "
                         f"code {self._exit_reason()}) while loading. The server "
-                        "stayed up." + self._crash_detail())
+                        "stayed up." + self._crash_detail()) from e
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     from localm.debuglog import native_fault_hint
@@ -724,7 +727,7 @@ class HFRunner:
                         f"- the worker process may be hung ({native_fault_hint()}). "
                         "The server stayed up and the load was aborted; retry, "
                         "or raise hf_load_timeout_s if this model genuinely "
-                        "needs longer to load.")
+                        "needs longer to load.") from e
         kind = result[0]
         if kind == "ok":
             return result[1]
@@ -778,7 +781,7 @@ class HFRunner:
                             return
                         try:
                             result = self._resp_q.get(timeout=_POLL_INTERVAL)
-                        except (ValueError, _queue.Empty):
+                        except (ValueError, _queue.Empty) as e:
                             if self._shutdown_requested:
                                 logger.debug("hf: shutdown requested during queue get, ending chat_stream")
                                 return
@@ -799,7 +802,7 @@ class HFRunner:
                                     f"{opening} (worker exit "
                                     f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
-                                    "request." + detail)
+                                    "request." + detail) from e
                             if time.monotonic() > deadline:
                                 self.shutdown(grace=0)
                                 if awaiting_first:
@@ -810,11 +813,11 @@ class HFRunner:
                                         "processing. It has been unloaded and "
                                         "will reload on the next request. Raise "
                                         "hf_first_token_timeout_s if this prompt "
-                                        "genuinely needs longer on this hardware.")
+                                        "genuinely needs longer on this hardware.") from e
                                 raise RuntimeError(
                                     "Generation stalled: the model process "
                                     "stopped responding. It has been unloaded "
-                                    "and will reload on the next request.")
+                                    "and will reload on the next request.") from e
                     kind = result[0]
                     if kind == "status":
                         status_text = result[1]
@@ -940,15 +943,15 @@ class HFRunner:
                 wait = max(0.01, min(0.5, deadline - time.monotonic()))
                 try:
                     result = self._resp_q.get(timeout=wait)
-                except _queue.Empty:
+                except _queue.Empty as e:
                     if not self.is_alive():
                         raise RuntimeError(
                             f"The HF model process crashed (exit code "
                             f"{self._exit_reason()}) while handling '{name}'."
-                            + self._crash_detail())
+                            + self._crash_detail()) from e
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
-                        raise RuntimeError(f"'{name}' timed out waiting for the HF model process.")
+                        raise RuntimeError(f"'{name}' timed out waiting for the HF model process.") from e
             kind = result[0]
             if kind == "ok":
                 return result[1]
@@ -966,7 +969,7 @@ class HFRunner:
     def count_messages_tokens(self, messages: list) -> int:
         return self._simple_request("count_messages_tokens", messages, try_lock=True)
 
-    def embed(self, texts: List[str], timeout: float = EMBED_TIMEOUT_DEFAULT) -> List[List[float]]:
+    def embed(self, texts: list[str], timeout: float = EMBED_TIMEOUT_DEFAULT) -> list[list[float]]:
         # NOT try_lock: unlike a token count, embedding has no honest
         # fallback value - a caller that needs it must wait, mirroring
         # IsolatedEmbedder.embed()'s plain blocking _rpc_lock.

@@ -6,7 +6,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 from abc import ABC, abstractmethod
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 
 class UnsupportedInputError(ValueError):
@@ -182,7 +182,7 @@ class PretokenizerUnusableModelError(RuntimeError):
     """
 
 
-_STREAM_STOP: "contextvars.ContextVar[Optional[Callable[[], bool]]]" = (
+_STREAM_STOP: contextvars.ContextVar[Optional[Callable[[], bool]]] = (
     contextvars.ContextVar("localm_stream_stop", default=None))
 
 
@@ -317,7 +317,7 @@ GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE = (
 )
 
 
-def messages_contain_image(messages: List[dict]) -> bool:
+def messages_contain_image(messages: list[dict]) -> bool:
     """True if any message carries an ``image_url`` content part.
 
     Operates on the plain-dict OpenAI message shape used between the server and
@@ -446,7 +446,7 @@ class BaseBackend(ABC):
         :meth:`set_load_cancel` is set during the load (preemptive switching).
         """
 
-    def set_load_cancel(self, event) -> None:
+    def set_load_cancel(self, event) -> None:  # noqa: B027
         """Install a ``threading.Event`` that, when set during ``load()``, aborts
         the load mid-flight (raising :class:`ModelLoadCancelled`).
 
@@ -462,7 +462,7 @@ class BaseBackend(ABC):
     @abstractmethod
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -522,7 +522,7 @@ class BaseBackend(ABC):
         """
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """
         Return the estimated number of tokens in a list of structured messages,
         including chat template formatting.  Subclasses should override this
@@ -536,7 +536,7 @@ class BaseBackend(ABC):
         )
         return self.count_tokens(text)
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """
         Return embedding vectors for a list of texts.
 

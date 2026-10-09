@@ -98,7 +98,7 @@ def pinned_tag(path: Path = _SETUP_PATH) -> str:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
-        raise SystemExit(f"could not read {path}: {e}")
+        raise SystemExit(f"could not read {path}: {e}") from e
     m = _PIN_RE.search(text)
     if not m:
         raise SystemExit(
@@ -113,18 +113,18 @@ def _build_number(tag: str):
     return int(m.group(1)) if m else None
 
 
-def _parse_date(value) -> "_dt.datetime | None":
+def _parse_date(value) -> _dt.datetime | None:
     """'2026-08-12T12:18:24Z' -> aware UTC datetime; anything else -> None."""
     if not isinstance(value, str):
         return None
     try:
         return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=_dt.timezone.utc)
+            tzinfo=_dt.UTC)
     except ValueError:
         return None
 
 
-def upstream_releases() -> "tuple[list, str]":
+def upstream_releases() -> tuple[list, str]:
     """(releases newest-first, error). Each release is a dict with ``tag`` and
     ``published_at`` (aware datetime or None). Never raises: a failed lookup is
     reported as an error string, never as an empty list that would read as
@@ -159,13 +159,13 @@ def upstream_releases() -> "tuple[list, str]":
     return out, ""
 
 
-def upstream_tags() -> "tuple[list, str]":
+def upstream_tags() -> tuple[list, str]:
     """(tags newest-first, error): upstream_releases() reduced to tag names."""
     releases, err = upstream_releases()
     return [r["tag"] for r in releases], err
 
 
-def release_date(tag: str, repo: str = _REPO, *, opener=None) -> "_dt.datetime | None":
+def release_date(tag: str, repo: str = _REPO, *, opener=None) -> _dt.datetime | None:
     """*tag*'s own published_at, looked up directly - for when the fetched
     listing page does not reach it (a stale pin is exactly the one that has
     fallen off page 1). Never raises: any failure reads as unknown, mirroring
@@ -240,7 +240,7 @@ def _annotate(level: str, message: str) -> None:
         print(f"::{level}::{message}")
 
 
-def _summarise(lines: "list[str]") -> None:
+def _summarise(lines: list[str]) -> None:
     try:
         ci_runner_files.append(ci_runner_files.STEP_SUMMARY, "\n".join(lines) + "\n")
     except OSError as e:

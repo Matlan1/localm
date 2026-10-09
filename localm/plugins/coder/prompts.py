@@ -406,7 +406,7 @@ def _prependable_leaf(shown_cwd: str) -> str | None:
 def build_system_prompt(
     cwd: Path,
     agent_name: str = "localcoder",
-    project_map: "ProjectMap | None" = None,
+    project_map: ProjectMap | None = None,
     memory: str = "",
     model_name: str = "",
     extra_tool_docs: str = "",

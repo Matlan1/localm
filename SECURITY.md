@@ -400,6 +400,36 @@ you obtained the zip some other way than the recommended `git clone` install. Th
 `git clone` path itself is unchanged by this: it never downloads a zip, so it continues
 to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.
 
+## Verifying a release
+
+Every release carries build provenance that proves which workflow built a file and
+from which commit, independent of the Ed25519 update signature above. Two sets of
+files are covered:
+
+- **GitHub release files.** The release zip, the sdist (`localm-<version>.tar.gz`),
+  the wheel (`localm-<version>-py3-none-any.whl`) and the CycloneDX SBOM
+  (`localm-<version>-sbom.cdx.json`) are attested with GitHub Artifact Attestations
+  (SLSA build provenance, Sigstore). Download the file from the release page, then:
+
+  ```
+  gh attestation verify localm-<version>.zip --repo Matlan1/localm     --signer-workflow Matlan1/localm/.github/workflows/release-attest.yml
+  ```
+
+  The same command verifies the sdist, the wheel and the SBOM. A file that was
+  modified after the build, or built by any other workflow or repository, fails.
+
+- **PyPI files.** The PyPI publish workflow uses Trusted Publishing, which uploads
+  PEP 740 attestations next to each file. Verify what `pip` would install with:
+
+  ```
+  pip install pypi-attestations
+  pypi-attestations verify pypi --repository https://github.com/Matlan1/localm     pypi:localm-<version>-py3-none-any.whl
+  ```
+
+The SBOM lists every package pinned in `uv.lock` for a runtime install (the base
+dependencies plus every optional extra except `dev`), one component each with its
+version, `pkg:pypi` package URL and the SHA-256 of each distribution file.
+
 ## Supported versions
 
 localm is pre-1.0; security fixes land on the latest `master`.

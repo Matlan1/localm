@@ -303,12 +303,12 @@ def test_the_fetch_does_not_block_the_event_loop(monkeypatch):
         main = asyncio.ensure_future(endpoint(url="https://example.com/a.png"))
         try:
             await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-        except asyncio.TimeoutError:
+        except TimeoutError as e:
             main.cancel()
             raise AssertionError(
                 "a concurrent trivial coroutine never got to run while the "
                 "image fetch was in flight - the fetch is on the event loop, "
-                "so ONE slow image URL freezes the whole server")
+                "so ONE slow image URL freezes the whole server") from e
         elapsed = trivial_done[0] - t0
         resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
         return elapsed, resp

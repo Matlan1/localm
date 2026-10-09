@@ -5,7 +5,7 @@ shift_logits, cancellation and the request parameters."""
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Sequence
 
 import pytest
 
@@ -20,16 +20,16 @@ class FakeNative:
     sampled for row r is ``1000 + r``."""
 
     def __init__(self, confidence=None, decode_code=0):
-        self.confidence: Dict = confidence or {}
+        self.confidence: dict = confidence or {}
         self.decode_code = decode_code
-        self.decodes: List[List[int]] = []
-        self.samples: List[Tuple[int, int]] = []
+        self.decodes: list[list[int]] = []
+        self.samples: list[tuple[int, int]] = []
 
     def decode(self, tokens: Sequence[int]) -> int:
         self.decodes.append(list(tokens))
         return self.decode_code
 
-    def sample(self, row: int, algorithm: int, greedy: bool) -> Tuple[int, float]:
+    def sample(self, row: int, algorithm: int, greedy: bool) -> tuple[int, float]:
         step = len(self.decodes) - 1
         self.samples.append((step, row))
         conf = self.confidence.get((row, step), self.confidence.get(row, 0.5))
@@ -118,7 +118,7 @@ class TestDenoise:
         canvas = d.denoise(native, [1, 2, 3], _params(shift_logits=True))
         assert canvas[3:] == [1002, 1003, 1004, 1005, 1006]
         assert all(row == pos - 1 for (_step, row), pos in
-                   zip(native.samples[:5], range(3, 8)))
+                   zip(native.samples[:5], range(3, 8), strict=True))
 
     def test_logit_row(self):
         assert d.logit_row(0, True) == 0

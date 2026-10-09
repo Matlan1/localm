@@ -58,7 +58,7 @@ class ProgressEvent(str):
 
     def __new__(cls, line: str, *, phase: Optional[str] = None,
                done: Optional[int] = None, total: Optional[int] = None,
-               unit: Optional[str] = None) -> "ProgressEvent":
+               unit: Optional[str] = None) -> ProgressEvent:
         self = super().__new__(cls, line)
         self.phase = phase
         self.done = done

@@ -837,7 +837,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     if not child_log_path:
                         return ""
                     try:
-                        with open(child_log_path, "r", encoding="utf-8",
+                        with open(child_log_path, encoding="utf-8",
                                   errors="replace") as f:
                             return f.read()[-limit:].strip()
                     except OSError:

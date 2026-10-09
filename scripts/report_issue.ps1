@@ -40,7 +40,7 @@ function Read-Proxy {
 
 function Scrub([string]$t) {
   if (-not $t) { return $t }
-  # Mirror scripts/report_issue.py scrub() / localm/bugreport.py _scrub_secrets: strip
+  # Mirror scripts/report_issue.py scrub() / localm/bugreport/scrub.py _scrub_secrets: strip
   # the account name from any home path AND obvious credentials, so nothing this
   # reporter files carries a username or a pasted secret. Every strip the Python
   # reporters apply is applied here too, in the same order: a fallback reporter that
@@ -52,13 +52,16 @@ function Scrub([string]$t) {
   $t = [regex]::Replace($t, '(://)[^/@\s]+@', '${1}<redacted>@')
   # Credential-named assignments (a URL query parameter, a .env line, a shell line)
   # and pasted HTTP header lines. .NET ports of _QUERY_SECRET_RE / _HEADER_SECRET_RE
-  # in localm/bugreport.py; the three-branch reasoning is documented there. Applied
+  # in localm/bugreport/scrub.py; the three-branch reasoning is documented there. Applied
   # in the same order as scripts/report_issue.py, so all three reporters agree.
   $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))=)(?![\"'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[`\"''\)\]\}]{0,4}(?:[\s&#]|$))(?:\"[^\"\r\n]*\"?|''[^''\r\n]*''?|[^&\s#\"''\)\]\}]*)', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+', '${1}<redacted>')
   # Bearer tokens and OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')
+  # Tokens that contain an email address, except the maintainer's ($email: ASCII, case-insensitive,
+  # %40 read as @, edge single quotes and trailing periods set aside). Same pattern as _EMAIL_RE in localm/bugreport/scrub.py.
+  $t = [regex]::Replace($t, '(?<![^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*])[^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]*?[^@\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*](?:@|%40)[^@.%+\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]+(?:\.[^@.%+\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]+)*\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}[^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]*', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $v = $m.Value; $c = $v.TrimStart([char]39); $lead = $v.Substring(0, $v.Length - $c.Length); $c = $c.TrimEnd([char[]]@('.', [char]39)); $trail = $v.Substring($lead.Length + $c.Length); $a = $c.Replace('%40', '@'); if ($email -and $a -cmatch '^[\x00-\x7f]*$' -and [string]::Equals($a, $email, [System.StringComparison]::OrdinalIgnoreCase)) { $v } else { $lead + '<redacted-email>' + $trail } })
   return $t
 }
 

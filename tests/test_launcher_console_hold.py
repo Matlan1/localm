@@ -116,7 +116,7 @@ def _write_marker_stub(directory, marker=CMDLINE_MARKER, exit_code=0):
     directory.mkdir(parents=True, exist_ok=True)
     bat = directory / "probe.bat"
     bat.write_text(
-        "@echo off\r\necho {}\r\nexit /b {}\r\n".format(marker, exit_code),
+        f"@echo off\r\necho {marker}\r\nexit /b {exit_code}\r\n",
         encoding="utf-8")
     return bat
 
@@ -199,7 +199,7 @@ class TestWindowsCommandLineExecution:
     def test_no_injection_from_an_argument_value(self, tmp_path):
         main_stub = _write_marker_stub(tmp_path / "main")
         second_stub = _write_marker_stub(tmp_path / "second", marker=SECOND_STUB_MARKER)
-        payload = "X&{}".format(second_stub)
+        payload = f"X&{second_stub}"
         assert " " not in payload
         cmd = [str(main_stub), "--cwd", payload]
         line = _win_cmdline(cmd, {})

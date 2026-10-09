@@ -168,8 +168,8 @@ class TestBackendRefusesBeforeLoading:
         f = _gguf(tmp_path / "m.gguf", arch)
         backend = GgufBackend(str(f))
         for hook in ("_check_vram", "_load_native", "_effective_gpu_layers"):
-            monkeypatch.setattr(backend, hook, lambda *a, **k: pytest.fail(
-                f"{hook} ran for a model that cannot chat"))
+            monkeypatch.setattr(backend, hook, lambda *a, _hook=hook, **k: pytest.fail(
+                f"{_hook} ran for a model that cannot chat"))
         with pytest.raises(UnsupportedModelRoleError) as caught:
             backend.load()
         assert f"'{arch}'" in str(caught.value)

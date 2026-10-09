@@ -1623,13 +1623,13 @@ class TestCompanionEndpoint:
             main = asyncio.ensure_future(endpoint())
             try:
                 await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError as e:
                 main.cancel()
                 raise AssertionError(
                     "a concurrent trivial coroutine never got to run while "
                     "companion_addresses() was in flight - /api/companion is "
                     "on the event loop, so one slow DNS lookup freezes the "
-                    "whole server")
+                    "whole server") from e
             elapsed = trivial_done[0] - t0
             resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
             return elapsed, resp
@@ -2945,7 +2945,7 @@ class TestJobs:
         while time.monotonic() < deadline:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
@@ -2970,7 +2970,7 @@ class TestJobs:
         while time.monotonic() < deadline:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
@@ -2998,7 +2998,7 @@ class TestJobs:
             while time.monotonic() < deadline:
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=0.5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 if ev["type"] == "end":
                     end = ev
@@ -4259,7 +4259,7 @@ class TestRagEndpoints:
         import base64
         app, _ = rag_app
         with TestClient(app) as client:
-            b64 = base64.b64encode("hello attachment".encode()).decode()
+            b64 = base64.b64encode(b"hello attachment").decode()
             r = client.post("/api/rag/extract",
                             json={"filename": "note.txt", "content_b64": b64})
             assert r.status_code == 200
@@ -4840,7 +4840,7 @@ class TestImageComfyModelPicker:
         # unaltered, and that the annotation happened rather than silently
         # letting new keys through.
         assert len(data["slots"]) == len(fake_slots)
-        for got, sent in zip(data["slots"], fake_slots):
+        for got, sent in zip(data["slots"], fake_slots, strict=True):
             assert {k: got[k] for k in sent} == sent
             assert got["model_type"] == "diffusion-unet"
             assert got["installed"] is True          # "a.gguf" is among options
@@ -5242,13 +5242,13 @@ class TestPairingQR:
             main = asyncio.ensure_future(endpoint())
             try:
                 await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError as e:
                 main.cancel()
                 raise AssertionError(
                     "a concurrent trivial coroutine never got to run while "
                     "the QR render was in flight - /api/pairing/qr is on the "
                     "event loop, so the first pairing-QR request after a "
-                    "restart freezes the whole server")
+                    "restart freezes the whole server") from e
             elapsed = trivial_done[0] - t0
             resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
             return elapsed, resp

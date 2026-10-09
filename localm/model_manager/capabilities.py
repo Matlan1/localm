@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from . import registry as _registry
 from .gguf import chat_template_tool_signal
@@ -87,7 +87,7 @@ def _hf_dir_chat_template(model_dir: Path) -> Optional[str]:
         if not cfg.is_file():
             return None
         data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.debug("chat template read failed for %s (%s): %s",
                      model_dir, type(e).__name__, e)
         return None
@@ -114,7 +114,7 @@ def _hf_dir_context_length(model_dir: Path) -> Optional[int]:
         if not cfg.is_file():
             return None
         data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.debug("context length read failed for %s (%s): %s",
                      model_dir, type(e).__name__, e)
         return None
@@ -258,7 +258,7 @@ def model_capabilities(name: str, *, reg: Optional[dict] = None,
 
 
 def models_with_capability(capability: str, *, reg: Optional[dict] = None,
-                           dir_cache: Optional[dict] = None) -> List[str]:
+                           dir_cache: Optional[dict] = None) -> list[str]:
     """Registered model names CONFIRMED to have *capability*, sorted.
 
     POSITIVE MEMBERSHIP ONLY, exactly like ``vision_capable_models``: a name is
@@ -282,7 +282,7 @@ def models_with_capability(capability: str, *, reg: Optional[dict] = None,
 
 
 def models_with_context_at_least(tokens: int, *,
-                                 reg: Optional[dict] = None) -> List[str]:
+                                 reg: Optional[dict] = None) -> list[str]:
     """Registered model names whose CONFIRMED trained context window is at least
     *tokens*, sorted by that window descending so the roomiest comes first.
 

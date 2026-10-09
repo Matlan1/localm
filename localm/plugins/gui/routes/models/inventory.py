@@ -256,7 +256,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     "total_new": sum(res.counts.values()),
                 }
             except Exception as e:
-                raise HTTPException(500, f"Scan failed: {e}")
+                raise HTTPException(500, f"Scan failed: {e}") from e
 
         def _run_scan(job):
             job.push({"type": "line", "text": "Scanning ComfyUI model folders..."})
@@ -321,7 +321,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 switch_model(req.model, force=True) if req.force
                 else switch_model(req.model))
         except Exception as e:
-            raise HTTPException(500, f"Failed to load {req.model}: {e}")
+            raise HTTPException(500, f"Failed to load {req.model}: {e}") from e
         # A switch_model that does not report a status (a minimal/legacy callable)
         # still counts as a successful load of the requested model.
         return result if result is not None else {"status": "loaded", "model": req.model}

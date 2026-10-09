@@ -15,7 +15,9 @@ it cannot be quietly skipped, narrowed or made non-blocking.
 """
 
 import importlib.util
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -108,7 +110,7 @@ def test_each_matrix_category_matches_its_files(mp, path, category):
     "localm/plugins/coder/plug.py",
     "localm/plugins/builtin/chat/plug.py",
     "localm/plugins/mcpserver/server.py",
-    "localm/bugreport.py",
+    "localm/bugreport/__init__.py",
     "localm/discover.py",
     "scripts/check_hygiene.py",
     "scripts/write_coverage_summary.py",
@@ -426,10 +428,39 @@ def _norm(expr):
     return " ".join(str(expr).split())
 
 
+def _merge_policy_names(name):
+    """The (pull_request, other event) check names a `${{ cond && 'a' || 'b' }}` job name resolves to."""
+    m = re.fullmatch(r"\$\{\{ github\.event_name == 'pull_request' && '([^']+)' \|\| '([^']+)' \}\}", _norm(name))
+    assert m, f"the merge-policy job name must be the pull_request conditional, got {name!r}"
+    return m.group(1), m.group(2)
+
+
+def test_the_merge_policy_check_name_exists_only_on_pull_request_runs():
+    ci = _load_workflow(_CI)
+    on_pull_request, elsewhere = _merge_policy_names(ci["jobs"]["merge-policy"]["name"])
+    assert on_pull_request == "merge-policy"
+    assert elsewhere != "merge-policy"
+    assert "pull_request" in ci["on"], "the check only ever reports on pull_request"
+    assert "push" in ci["on"], "the push trigger is why a second, skipped run of this job exists"
+
+
+def test_the_master_ruleset_requires_exactly_the_checks_the_workflows_report():
+    rules = json.loads((REPO_ROOT / ".github" / "rulesets" / "master.json").read_text(encoding="utf-8"))["rules"]
+    required = next(r for r in rules if r["type"] == "required_status_checks")["parameters"]["required_status_checks"]
+    codeql = _load_workflow(REPO_ROOT / ".github" / "workflows" / "codeql.yml")["jobs"]["analyze"]
+    assert _norm(codeql["name"]) == "analyze (${{ matrix.language }})"
+    reported = {"merge-policy"} | {f"analyze ({lang})" for lang in codeql["strategy"]["matrix"]["language"]}
+    assert {c["context"] for c in required} == reported
+    assert {c["integration_id"] for c in required} == {15368}, "GitHub Actions app: no other app may satisfy a required check"
+    pr_rule = next(r for r in rules if r["type"] == "pull_request")["parameters"]
+    assert pr_rule["required_approving_review_count"] == 0 and pr_rule["require_code_owner_review"] is False
+    assert {"deletion", "non_fast_forward"} <= {r["type"] for r in rules}
+
+
 def test_the_merge_policy_job_cannot_be_skipped_green():
     ci = _load_workflow(_CI)
     job = ci["jobs"]["merge-policy"]
-    assert job["name"] == "merge-policy", "the one check name to read"
+    assert _merge_policy_names(job["name"]) == ("merge-policy", "merge-policy (pull_request runs only)")
     assert sorted(job["needs"]) == ["gui-tests", "lint", "mutation-scope", "mutation-test",
                                     "python-pr-gate", "test"]
     cond = _norm(job["if"])

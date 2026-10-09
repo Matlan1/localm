@@ -28,7 +28,7 @@ import math
 import operator
 import struct
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Optional, Protocol, Sequence
 
 ALGORITHM_ORIGIN = 0
 ALGORITHM_ENTROPY = 1
@@ -187,7 +187,7 @@ def uniform_float(rng: Mt19937) -> float:
 #  Schedules                                                                   #
 # --------------------------------------------------------------------------- #
 
-def num_transfer_tokens(mask_count: int, steps: int) -> List[int]:
+def num_transfer_tokens(mask_count: int, steps: int) -> list[int]:
     """Masks to fill at each of *steps* steps of one block: an even split, the
     remainder going to the first steps."""
     base, remainder = divmod(mask_count, steps)
@@ -221,13 +221,13 @@ class Native(Protocol):
         """Run the model over the whole canvas; 0 on success, the native code
         otherwise."""
 
-    def sample(self, row: int, algorithm: int, greedy: bool) -> Tuple[int, float]:
+    def sample(self, row: int, algorithm: int, greedy: bool) -> tuple[int, float]:
         """Sample a token from logit row *row* of the last decode and return it
         with its confidence under *algorithm* (any value for RANDOM and
         ORIGIN, which do not use it)."""
 
 
-StepCallback = Callable[[int, int, List[int]], bool]
+StepCallback = Callable[[int, int, list[int]], bool]
 
 
 def logit_row(pos: int, shift_logits: bool) -> int:
@@ -238,7 +238,7 @@ def logit_row(pos: int, shift_logits: bool) -> int:
 
 
 def denoise(native: Native, input_tokens: Sequence[int], params: DiffusionParams,
-            on_step: Optional[StepCallback] = None) -> Optional[List[int]]:
+            on_step: Optional[StepCallback] = None) -> Optional[list[int]]:
     """Run the denoising loop and return the full canvas (prompt included).
 
     *on_step* is called at the start of every step with ``(step, total_steps,
@@ -293,8 +293,8 @@ def denoise(native: Native, input_tokens: Sequence[int], params: DiffusionParams
                             params.algorithm, params.greedy)[0]
                 continue
 
-            sampled: List[int] = []
-            ranked: List[Tuple[float, int]] = []
+            sampled: list[int] = []
+            ranked: list[tuple[float, int]] = []
             for i, pos in enumerate(positions):
                 token, confidence = native.sample(
                     logit_row(pos, params.shift_logits),
@@ -313,11 +313,11 @@ def denoise(native: Native, input_tokens: Sequence[int], params: DiffusionParams
 
 
 def reply_tokens(canvas: Sequence[int], n_input: int, mask_token_id: int,
-                 is_eog: Callable[[int], bool]) -> Tuple[List[int], bool]:
+                 is_eog: Callable[[int], bool]) -> tuple[list[int], bool]:
     """The reply part of a finished *canvas*: the tokens after the prompt up to
     the first end-of-generation token, and whether one was found. A mask token
     left in the canvas ends the reply too and counts as not found."""
-    out: List[int] = []
+    out: list[int] = []
     for token in canvas[n_input:]:
         if token == mask_token_id:
             return out, False
@@ -331,7 +331,7 @@ def reply_tokens(canvas: Sequence[int], n_input: int, mask_token_id: int,
 #  Parameters for one chat request                                             #
 # --------------------------------------------------------------------------- #
 
-def arch_defaults(architecture: Optional[str]) -> Tuple[int, float, int, int]:
+def arch_defaults(architecture: Optional[str]) -> tuple[int, float, int, int]:
     """``(schedule, eps, block_length, algorithm)`` for *architecture*."""
     return _ARCH_DEFAULTS.get(architecture or "", _ARCH_DEFAULTS["dream"])
 
@@ -476,7 +476,7 @@ class NativeCanvas:
                     return -1
             return code
 
-    def sample(self, row: int, algorithm: int, greedy: bool) -> Tuple[int, float]:
+    def sample(self, row: int, algorithm: int, greedy: bool) -> tuple[int, float]:
         if not 0 <= row < self._length:
             raise IndexError(f"logit row {row} outside the {self._length}-token canvas")
         with self._guard():
@@ -514,7 +514,7 @@ class NativeCanvas:
             self._chain = None
 
 
-def _probs(data, size: int) -> List[float]:
+def _probs(data, size: int) -> list[float]:
     """The ``p`` of the first *size* candidates at *data*, in order."""
     from ._structs import LlamaTokenData
     address = ctypes.cast(data, ctypes.c_void_p).value

@@ -793,16 +793,16 @@ class ModelRunner:
                 cancel_sent = True
             try:
                 result = self._poll(_LOAD_POLL_INTERVAL)
-            except _RunnerTornDown:
+            except _RunnerTornDown as e:
                 # unload()/eviction released this runner mid-load. Reported the
                 # same way a superseded load is (GgufBackend.load re-raises
                 # ModelLoadCancelled untouched), not as a runtime needing repair.
                 raise ModelLoadCancelled(
-                    "the model was unloaded while it was still loading")
-            except _queue.Empty:
+                    "the model was unloaded while it was still loading") from e
+            except _queue.Empty as e:
                 if self._proc is None:
                     raise ModelLoadCancelled(
-                        "the model was unloaded while it was still loading")
+                        "the model was unloaded while it was still loading") from e
                 if not self._proc.is_alive():
                     self._last_crash_phase = None
                     detail = self._crash_detail()
@@ -812,7 +812,7 @@ class ModelRunner:
                         f"{self._exit_reason()}) while loading. The server stayed up."
                         + detail + _load_crash_advice(phase),
                         phase=phase,
-                    )
+                    ) from e
             else:
                 # A NON-TERMINAL envelope reports that the load is still running,
                 # so clear it and keep waiting. The isinstance guard sends a
@@ -926,20 +926,20 @@ class ModelRunner:
                             return
                         try:
                             result = self._poll(_LOAD_POLL_INTERVAL)
-                        except _RunnerTornDown:
+                        except _RunnerTornDown as e:
                             raise RuntimeError(
                                 "The model was unloaded while this reply was "
                                 "being generated. It will reload on the next "
                                 "request."
-                            )
-                        except _queue.Empty:
+                            ) from e
+                        except _queue.Empty as e:
                             if not self.is_alive():
                                 if self._proc is None:
                                     raise RuntimeError(
                                         "The model was unloaded while this reply "
                                         "was being generated. It will reload on "
                                         "the next request."
-                                    )
+                                    ) from e
                                 # Do NOT call this a native fault unless the
                                 # evidence says so. An uncaught Python exception
                                 # in the worker exits 1, which is
@@ -968,7 +968,7 @@ class ModelRunner:
                                     f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
                                     "request." + detail
-                                )
+                                ) from e
                             if time.monotonic() > deadline:
                                 self.shutdown(grace=0)
                                 if awaiting_first:
@@ -980,12 +980,12 @@ class ModelRunner:
                                         "next request. Raise gguf_first_token_timeout_s "
                                         "if this prompt genuinely needs longer on this "
                                         "hardware."
-                                    )
+                                    ) from e
                                 raise RuntimeError(
                                     "Generation stalled: the model process stopped "
                                     "responding. It has been unloaded and will "
                                     "reload on the next request."
-                                )
+                                ) from e
                     kind = result[0]
                     if kind == "status":
                         status_text = result[1]
@@ -1126,21 +1126,21 @@ class ModelRunner:
                 wait = max(0.01, min(0.5, deadline - time.monotonic()))
                 try:
                     result = self._poll(wait)
-                except _RunnerTornDown:
+                except _RunnerTornDown as e:
                     raise RuntimeError(
-                        f"The model was unloaded while handling '{name}'.")
-                except _queue.Empty:
+                        f"The model was unloaded while handling '{name}'.") from e
+                except _queue.Empty as e:
                     if not self.is_alive():
                         if self._proc is None:
                             raise RuntimeError(
-                                f"The model was unloaded while handling '{name}'.")
+                                f"The model was unloaded while handling '{name}'.") from e
                         raise RuntimeError(
                             f"The model process crashed (exit code "
                             f"{self._exit_reason()}) while handling '{name}'."
-                            + self._crash_detail())
+                            + self._crash_detail()) from e
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
-                        raise RuntimeError(f"'{name}' timed out waiting for the model process.")
+                        raise RuntimeError(f"'{name}' timed out waiting for the model process.") from e
             kind = result[0]
             if kind == "ok":
                 return result[1]

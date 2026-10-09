@@ -353,7 +353,7 @@ class _SessionMixin:
                 deadline=_CLI_REFLECTION_DEADLINE_S)
 
     def _reflect_into_episode(self, changed: list, diff_override=None,
-                              deadline: "float | None" = None) -> None:
+                              deadline: float | None = None) -> None:
         """Build and store one episode for this session (best-effort).
 
         *diff_override* supplies the work-log diff when the changes were detected

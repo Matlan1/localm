@@ -194,7 +194,7 @@ def _extract_symbols(text: str, lang: str) -> list[str]:
 # to itself). Mirrors the language grouping _extract_symbols already uses;
 # a language without its own entry falls back to _GENERIC_DEF_LINE_RE, the
 # same grouping _extract_symbols_generic covers.
-_DEF_LINE_PATTERNS: dict[str, "re.Pattern[str]"] = {
+_DEF_LINE_PATTERNS: dict[str, re.Pattern[str]] = {
     "python":     re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+\w"),
     "javascript": re.compile(r"^\s*(?:export\s+)?(?:async\s+)?(?:function|class)\s+\w"),
     "typescript": re.compile(r"^\s*(?:export\s+)?(?:async\s+)?(?:function|class)\s+\w"),
@@ -362,7 +362,7 @@ class ProjectMap:
     def build(cls, root: Path, max_files: int = _MAX_FILE_COUNT, *,
               deadline_s: float | None = _BUILD_DEADLINE_S,
               on_progress=None,
-              cache_path: Path | None = None) -> "ProjectMap":
+              cache_path: Path | None = None) -> ProjectMap:
         """Scan *root* and summarise up to *max_files* files.
 
         Walks with ``os.walk`` and PRUNES uninteresting directories in place
@@ -525,7 +525,7 @@ class ProjectMap:
         }
 
     @classmethod
-    def _from_cache_dict(cls, root: Path, data: dict) -> Optional["ProjectMap"]:
+    def _from_cache_dict(cls, root: Path, data: dict) -> Optional[ProjectMap]:
         """Reconstruct a ProjectMap from to_cache_dict()'s shape, or None for
         anything that does not look right - a corrupt/foreign/future-version
         cache file must fall back to a full build(), never raise and never be
@@ -554,7 +554,7 @@ class ProjectMap:
     @classmethod
     def load_cached_and_reconcile(cls, root: Path, cache_path: Path,
                                   max_age_s: float = _MAX_CACHE_AGE_S,
-                                  ) -> Optional["ProjectMap"]:
+                                  ) -> Optional[ProjectMap]:
         """Load a map cached by save_cache() and bring it up to date against
         the CURRENT filesystem via the existing _rescan_if_dirty() machinery -
         NOT a raw cache hit. Returns None (never raises) when there is no

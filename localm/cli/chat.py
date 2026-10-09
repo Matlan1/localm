@@ -852,7 +852,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 count_tokens=engine.count_tokens,
                 on_compact=lambda: console.print(
                     "[dim]Compacting the conversation to free context...[/dim]"),
-                generate=lambda m, max_tok: "".join(
+                generate=lambda m, max_tok, engine=engine: "".join(
                     engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
                                        thinking=False)),
             )

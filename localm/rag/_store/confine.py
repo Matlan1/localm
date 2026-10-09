@@ -178,9 +178,9 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     """
     try:
         rp = Path(p).expanduser()
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
         raise ConfinementError(f"Invalid path: {p}",
-                               path=Path(str(p)), reason="invalid")
+                               path=Path(str(p)), reason="invalid") from e
     # Refuse UNC/device syntax unconditionally, BEFORE the .resolve() below ever
     # runs, and on the EXPANDED string. Raised OUTSIDE the try/except above.
     if is_unc_or_device_path(str(rp)):
@@ -188,9 +188,9 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
                                path=Path(str(p)), reason="unc_or_device")
     try:
         rp = rp.resolve()
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
         raise ConfinementError(f"Invalid path: {p}",
-                               path=Path(str(p)), reason="invalid")
+                               path=Path(str(p)), reason="invalid") from e
 
     # Credential folders are denied wherever they appear in the resolved path,
     # not only at the home root. rp is already resolved, so a symlink pointing

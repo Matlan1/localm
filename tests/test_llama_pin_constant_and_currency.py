@@ -56,7 +56,7 @@ def _no_network(monkeypatch):
 
 
 def _day(n: int) -> dt.datetime:
-    return dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=n)
+    return dt.datetime(2026, 1, 1, tzinfo=dt.UTC) + dt.timedelta(days=n)
 
 
 def _releases(*pairs):
@@ -479,13 +479,14 @@ def test_run_abi_input_gates_only_the_abi_check_job():
         """)
     assert _norm(ci["jobs"]["gui-tests"]["if"]) == full_ci_gated
     assert _norm(ci["jobs"]["test"]["if"]) == full_ci_gated
-    # The mutation shards run on dispatch, on the weekly schedule, or on the
+    # The mutation shards run on dispatch, on the weekly cron only, or on the
     # `mutation-test` label - never automatically on a pull request, which
     # would wait about an hour on the auth shard; the mutation-test gate
     # follows the shards whenever they ran. mutation-scope only notices.
     assert _norm(ci["jobs"]["mutation-run"]["if"]) == _norm("""
         github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'schedule' ||
+        (github.event_name == 'schedule' &&
+         github.event.schedule == '37 6 * * 1') ||
         (github.event_name == 'pull_request' &&
          contains(github.event.pull_request.labels.*.name, 'mutation-test'))
         """)

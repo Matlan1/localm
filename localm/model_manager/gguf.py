@@ -24,6 +24,7 @@ from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
 from ..debuglog import logger
 from ._shared import console
+from .unsupported import GGUF_IMATRIX_REFUSAL, gguf_file_refusal, gguf_header_refusal, gguf_version_supported
 
 
 
@@ -357,7 +358,8 @@ _GGUF_MIN_BYTES = 1024
 
 
 def _has_gguf_magic(path: Path) -> bool:
-    """True when *path* begins with the GGUF magic ``b"GGUF"``, is at least
+    """True when *path* begins with the GGUF magic ``b"GGUF"``, declares a GGUF
+    version that loads (2 or 3), is at least
     ``_GGUF_MIN_BYTES`` long, and - when its header can be parsed - is not
     shorter than what that header's own tensor-info section declares it must
     be (see ``_gguf_declared_min_size`` for exactly what that check does and
@@ -381,10 +383,15 @@ def _has_gguf_magic(path: Path) -> bool:
     floor = _mm._GGUF_MIN_BYTES
     try:
         with open(path, "rb") as fh:
-            if fh.read(4) != b"GGUF":
-                return False
+            head = fh.read(24)
         size = path.stat().st_size
     except OSError:
+        return False
+    if head[:4] != b"GGUF":
+        return False
+    version_refusal = gguf_header_refusal(head)
+    if version_refusal is not None:
+        logger.debug("skipping %s: %s", path.name, version_refusal)
         return False
     if size < floor:
         logger.debug(
@@ -510,6 +517,147 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
     return ggufs, hf_dirs
 
 
+_HUB_REPO_PREFIX = "models--"
+
+
+class HubCacheUnit(NamedTuple):
+    """One repository of a Hugging Face hub cache: its id (``org/name``) and the
+    snapshot folder (one revision's files) to register."""
+
+    repo_id: str
+    snapshot: Path
+
+
+class HubCacheScan(NamedTuple):
+    """Result of :func:`scan_hub_cache`: the repositories with downloaded files
+    and the count of repository folders that hold none."""
+
+    units: List[HubCacheUnit]
+    empty_repos: int
+
+
+def hub_repo_id(folder_name: str) -> Optional[str]:
+    """The repository id a hub-cache repo folder name encodes (``models--org--name``
+    -> ``org/name``, ``models--name`` -> ``name``); None for any other name."""
+    if not folder_name.startswith(_HUB_REPO_PREFIX):
+        return None
+    parts = folder_name[len(_HUB_REPO_PREFIX):].split("--")
+    if not all(parts):
+        return None
+    return "/".join(parts)
+
+
+def is_hub_blob(path: Path) -> bool:
+    """True when *path* is a file inside a hub-cache repo's ``blobs`` folder."""
+    return (path.parent.name == "blobs"
+            and hub_repo_id(path.parent.parent.name) is not None)
+
+
+def hub_snapshot_repo_id(path: Path) -> Optional[str]:
+    """The repository id when *path* is ``<models--repo>/snapshots/<revision>``
+    (a snapshot folder of a hub cache, its path left unresolved); else None."""
+    if path.parent.name != "snapshots":
+        return None
+    return hub_repo_id(path.parent.parent.name)
+
+
+def logical_model_path(path: Path) -> Path:
+    """*path* made absolute with every symlink resolved except a final component
+    that links into a hub cache's ``blobs`` folder.
+
+    A file in a hub-cache snapshot is a symlink named after the real file
+    (``model.Q4_K_M.gguf``) pointing at a content-hash blob that has no
+    extension; resolving it fully would register the blob. That final link is
+    kept, with its parent folder resolved. Any other path resolves normally."""
+    path = Path(path)
+    try:
+        if path.is_symlink() and is_hub_blob(path.resolve()):
+            return path.parent.resolve() / path.name
+    except OSError:
+        pass
+    return path.resolve()
+
+
+def _hub_revision(repo_dir: Path) -> Optional[Path]:
+    """The snapshot folder to register for a hub-cache repo folder: the revision
+    ``refs/main`` names when that snapshot exists, otherwise the most recently
+    modified snapshot; None when the repo has no snapshot folder."""
+    snapshots = repo_dir / "snapshots"
+    try:
+        revisions = [c for c in snapshots.iterdir() if c.is_dir()]
+    except OSError:
+        return None
+    if not revisions:
+        return None
+    try:
+        wanted = (repo_dir / "refs" / "main").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        wanted = ""
+    for rev in revisions:
+        if wanted and rev.name == wanted:
+            return rev
+    return max(revisions, key=lambda r: (_mtime(r), r.name))
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _is_hub_repo_dir(folder: Path) -> bool:
+    """True for a hub-cache repo folder: a ``models--*`` name holding at least
+    one of the ``snapshots``, ``refs`` or ``blobs`` folders."""
+    if hub_repo_id(folder.name) is None:
+        return False
+    try:
+        return any((folder / sub).is_dir() for sub in ("snapshots", "refs", "blobs"))
+    except OSError:
+        return False
+
+
+def _hub_cache_root(d: Path) -> Optional[Path]:
+    """The hub-cache root *d* denotes: *d* itself when it holds repo folders,
+    ``d/hub`` when that does (an ``HF_HOME`` folder); else None."""
+    for cand in (d, d / "hub"):
+        try:
+            if any(c.is_dir() and _is_hub_repo_dir(c) for c in cand.iterdir()):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def scan_hub_cache(d: Path) -> Optional[HubCacheScan]:
+    """Scan *d* as a Hugging Face hub cache; None when *d* is not one.
+
+    *d* is a cache when it is a ``models--*`` repo folder, holds ``models--*``
+    folders, or is a folder whose ``hub`` child does. One unit per repository:
+    the snapshot ``refs/main`` points at (newest snapshot when absent), sorted by
+    repo id. ``blobs``, ``refs`` and ``.no_exist`` are never entered, so partial
+    ``*.incomplete`` downloads are never seen. A repo folder with no snapshot is
+    counted in ``empty_repos`` and left out."""
+    if _is_hub_repo_dir(d):
+        repos = [d]
+    else:
+        root = _hub_cache_root(d)
+        if root is None:
+            return None
+        try:
+            repos = [c for c in root.iterdir()
+                     if c.is_dir() and _is_hub_repo_dir(c)]
+        except OSError:
+            return None
+    units: List[HubCacheUnit] = []
+    empty = 0
+    for repo in sorted(repos, key=lambda r: r.name):
+        snapshot = _hub_revision(repo)
+        if snapshot is None:
+            empty += 1
+            continue
+        units.append(HubCacheUnit(hub_repo_id(repo.name) or repo.name, snapshot))
+    return HubCacheScan(units, empty)
 
 
 # ------------------------------------------------------------------ #
@@ -690,6 +838,8 @@ def _gguf_skip_value(buf: bytes, off: int, vtype: int) -> int:
         size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
         if size is None:
             raise struct.error(f"unsupported gguf array element type {elem_type}")
+        if size * count > len(buf) - off:
+            raise struct.error("gguf array runs past the end of the buffer")
         return off + size * count
     size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
     if size is None:
@@ -839,7 +989,7 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
         if buf[:4] != b"GGUF":
             return 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0            # v1's 32-bit counts predate every arch we size
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -972,7 +1122,7 @@ def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
         if buf[:4] != b"GGUF":
             return "", 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return "", 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1040,7 +1190,7 @@ def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
         if buf[:4] != b"GGUF":
             return 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1131,7 +1281,7 @@ def gguf_expert_counts(path: Path) -> "tuple[int, int]":
         if buf[:4] != b"GGUF":
             return 0, 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0, 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1222,7 +1372,7 @@ def _gguf_tensor_offset_entries(
             if f.read(4) != b"GGUF":
                 return None
             (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
+            if not gguf_version_supported(version):
                 return None
             tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
             for _ in range(kv_count):
@@ -1297,7 +1447,10 @@ def _gguf_skip_value_stream(f, vtype: int) -> None:
         size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
         if size is None:
             raise struct.error(f"unsupported gguf array element type {elem_type}")
-        f.seek(size * count, 1)
+        try:
+            f.seek(size * count, 1)
+        except (OSError, ValueError, OverflowError) as exc:
+            raise struct.error("gguf array runs past the end of the file") from exc
         return
     size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
     if size is None:
@@ -1309,6 +1462,10 @@ def _gguf_skip_value_stream(f, vtype: int) -> None:
 # begins (the format's default; a file may override it via a general.alignment
 # KV key). gguf_moe_pinned_expert_bytes does not read that key.
 _GGUF_DEFAULT_ALIGNMENT = 32
+
+# Largest general.alignment _gguf_header_layout accepts. The padding the
+# rewriter appends is at most one alignment unit, so this bounds it.
+_GGUF_MAX_ALIGNMENT = 1 << 20
 
 # Sanity ceiling on a single tensor's dimension count, generous against
 # GGML_MAX_DIMS (4 in every real ggml build) - guards against a corrupt/
@@ -1505,7 +1662,7 @@ def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
         if buf[:4] != b"GGUF":
             return 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1564,7 +1721,7 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
             if f.read(4) != b"GGUF":
                 return None
             (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
+            if not gguf_version_supported(version):
                 return None
             _tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
             architecture = None
@@ -1656,7 +1813,7 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
             if f.read(4) != b"GGUF":
                 return None
             (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
+            if not gguf_version_supported(version):
                 return None
             tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
             if tensor_count > _GGUF_MAX_TENSOR_COUNT:
@@ -1711,7 +1868,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
         if buf[:4] != b"GGUF":
             return {}
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             # v1 used 32-bit tensor/kv counts and predates every architecture
             # this detector cares about; no signal rather than mis-parsing it
             # with the v2+ 64-bit layout.
@@ -1765,7 +1922,7 @@ def gguf_pretokenizer(path: Path) -> Optional[str]:
         if buf[:4] != b"GGUF":
             return None
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return None
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1779,6 +1936,51 @@ def gguf_pretokenizer(path: Path) -> Optional[str]:
             off = _gguf_skip_value(buf, off, vtype)
     except (struct.error, IndexError, UnicodeDecodeError):
         pass
+    return None
+
+
+_GGUF_GENERAL_TYPE_KEY = "general.type"
+
+
+def gguf_general_type(path: Path) -> Optional[str]:
+    """The ``general.type`` string a GGUF declares, or ``None`` when it declares
+    none within the bounded read or the header could not be read or parsed.
+    Never raises."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return None
+    try:
+        if buf[:4] != b"GGUF":
+            return None
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if not gguf_version_supported(version):
+            return None
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == _GGUF_GENERAL_TYPE_KEY and vtype == _GGUF_TYPE_STRING:
+                value, _off = _gguf_read_string(buf, off)
+                return value
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+    return None
+
+
+def gguf_unusable_reason(path: Path) -> Optional[str]:
+    """The sentence explaining why the GGUF file *path* cannot be registered or
+    loaded as a model (unsupported GGUF version, byte-swapped file, importance
+    matrix), or None when nothing is wrong with it. Never raises."""
+    reason = gguf_file_refusal(path)
+    if reason is not None:
+        return reason
+    if gguf_general_type(path) == "imatrix":
+        return GGUF_IMATRIX_REFUSAL
     return None
 
 
@@ -1949,7 +2151,7 @@ def gguf_n_embd(path: Path) -> Optional[int]:
         if buf[:4] != b"GGUF":
             return None
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return None
         tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -2021,7 +2223,7 @@ def _gguf_header_layout(f) -> _GgufLayout:
     if f.read(4) != b"GGUF":
         raise struct.error("not a GGUF file")
     (version,) = struct.unpack("<I", f.read(4))
-    if version < 2:
+    if not gguf_version_supported(version):
         raise struct.error(f"unsupported GGUF version {version}")
     tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
     if tensor_count > _GGUF_MAX_TENSOR_COUNT:
@@ -2037,6 +2239,8 @@ def _gguf_header_layout(f) -> _GgufLayout:
             (alignment,) = struct.unpack("<I", f.read(4))
             if not alignment:
                 raise struct.error("general.alignment is 0")
+            if alignment > _GGUF_MAX_ALIGNMENT:
+                raise struct.error(f"implausible general.alignment {alignment}")
             continue
         if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
             architecture = _gguf_read_string_stream(f)
@@ -2230,7 +2434,7 @@ def _gguf_capability_probe(path: Path) -> dict:
             return {"chat_template": None, "context_length": None,
                     "complete": False}
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return {"chat_template": None, "context_length": None,
                     "complete": False}
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
