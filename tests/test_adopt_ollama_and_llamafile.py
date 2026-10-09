@@ -164,6 +164,22 @@ class TestOllamaProjector:
         assert "no vision projector attached" in capsys.readouterr().out
 
 
+class TestOllamaSharedBlob:
+    def test_the_tag_with_a_projector_keeps_it_when_another_tag_shares_the_model(self, tmp_path, isolated_home):
+        root = tmp_path / "ollama"
+        model = _blob(root, _gguf(tag="shared"))
+        proj_bytes = _gguf(arch="clip", tag="proj")
+        proj = _blob(root, proj_bytes)
+        _manifest(root, "registry.ollama.ai/library/llama3/8b", [_layer(_MODEL, model)])
+        _manifest(root, "registry.ollama.ai/library/llama3/latest",
+                  [_layer(_MODEL, model), _layer(_PROJECTOR, proj)])
+        assert add_local(str(root)) is True
+        reg = load_registry()
+        assert set(reg) == {"llama3-8b", "llama3-latest"}
+        assert reg["llama3-latest"]["path"] == reg["llama3-8b"]["path"]
+        assert reg["llama3-latest"].get("mmproj")
+
+
 class TestOllamaProblems:
     def test_a_non_gguf_model_layer_is_reported_and_skipped(self, tmp_path, isolated_home, capsys):
         root = _store(tmp_path,

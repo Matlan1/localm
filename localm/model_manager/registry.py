@@ -3859,7 +3859,7 @@ def _add_local_ollama_root(
 ) -> Optional[bool]:
     """Register every GGUF model in an Ollama model store (see
     ``_scan_ollama_root``). A manifest sharing a blob with one registered earlier
-    in the same scan becomes an alias of it. *name* applies only when the store
+    in the same scan becomes an alias of it; manifests with a projector go first. *name* applies only when the store
     holds one model. Returns True when anything was registered, False when
     nothing could be, and None when the folder holds no Ollama manifest at all
     (so the caller treats it as an ordinary folder)."""
@@ -3874,6 +3874,7 @@ def _add_local_ollama_root(
         console.print(f"[red]Not a model:[/red] no GGUF model found in the Ollama "
                       f"store {escape(str(root))}")
         return False
+    models.sort(key=lambda m: m.projector is None)
     registered_any = False
     first_name_for_blob: dict = {}
     for model in models:
