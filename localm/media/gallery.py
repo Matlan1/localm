@@ -185,7 +185,7 @@ def require_owner(media_kind: str):
     return _require_owner(_resolve)
 
 
-def owned_names(request: Request, media_kind: str, names: "list[str]") -> "list[str]":
+def owned_names(request: Request, media_kind: str, names: list[str]) -> list[str]:
     """Filter already-listed *names* down to the ones the caller may see - same
     rule as `require_owner`, applied to a whole history listing in one index read.
 
