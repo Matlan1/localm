@@ -7,7 +7,10 @@ import random
 
 import pytest
 
-from localm.inference.backends.llamacpp._ngram import NgramIndex, NgramSource
+from localm.inference.backends.llamacpp._ngram import (
+    NGRAM_LIFE_DECAY, NGRAM_PRIOR_MISS_CONTEXT, NGRAM_PRIOR_MISS_REPLY,
+    NGRAM_PRIOR_WEIGHT, NGRAM_REPLY_DECAY, NGRAM_REPLY_PRIOR_WEIGHT, NGRAM_RESUME_GAP,
+    CandidateRuns, NgramIndex, NgramSource)
 from tests._bare_llama import make_bare_llama
 from tests.test_mtp_drafting import EOG, PROMPT, FakeNative, _generate, _reference
 
@@ -508,6 +511,175 @@ def test_measured_ngram_keeps_drafting_where_verifying_is_cheap():
     assert src.accepted > 90
     assert measured < 0.4 * plain
     assert 0 in src._observed and max(src._observed) == 8
+
+
+def test_match_reports_where_the_occurrence_ends():
+    idx = _index([0, 1, 2, 3, 7, 5, 1, 2, 3, 8, 0, 1, 2])
+    assert idx.match(3, 2) == ([7, 5], 3)
+    assert idx.match(9, 2) == ([], -1)
+    assert idx.match(3, 0) == ([], -1)
+
+
+# --------------------------------------------------------------------------- #
+#  The draft length from how far candidates run                               #
+# --------------------------------------------------------------------------- #
+
+def test_a_new_kind_starts_from_the_prior_of_its_source():
+    runs = CandidateRuns(4)
+    assert runs.miss(("start", "context"), 1) == pytest.approx(NGRAM_PRIOR_MISS_CONTEXT)
+    assert runs.miss(("start", "reply"), 3) == pytest.approx(NGRAM_PRIOR_MISS_REPLY)
+    hit = 1.0 - NGRAM_PRIOR_MISS_CONTEXT
+    assert runs.expected_tokens(("start", "context"), 2) == pytest.approx(
+        [1.0, 1.0 + hit, 1.0 + hit + hit * hit])
+
+
+def test_the_reply_counts_lead_and_the_life_counts_are_their_prior():
+    runs = CandidateRuns(4)
+    kind = ("resume", "context")
+    runs.new_candidate(kind)
+    runs.check(kind, 1, False)
+    runs.check(kind, 2, True)
+
+    def life(wrong, checked):
+        return ((wrong + NGRAM_PRIOR_MISS_CONTEXT * NGRAM_PRIOR_WEIGHT)
+                / (checked + NGRAM_PRIOR_WEIGHT))
+
+    def both(wrong, checked, life_miss):
+        return ((wrong + life_miss * NGRAM_REPLY_PRIOR_WEIGHT)
+                / (checked + NGRAM_REPLY_PRIOR_WEIGHT))
+
+    assert runs.miss(kind, 1) == pytest.approx(both(0.0, 1.0, life(0.0, 1.0)))
+    assert runs.miss(kind, 2) == pytest.approx(both(1.0, 1.0, life(1.0, 1.0)))
+    assert runs.miss(kind, 3) == pytest.approx(NGRAM_PRIOR_MISS_CONTEXT)
+    runs.new_candidate(kind)
+    aged_life, aged_reply = NGRAM_LIFE_DECAY, NGRAM_REPLY_DECAY
+    assert runs.miss(kind, 2) == pytest.approx(
+        both(aged_reply, aged_reply, life(aged_life, aged_life)))
+    runs.new_reply()
+    assert runs.miss(kind, 2) == pytest.approx(life(aged_life, aged_life))
+    assert runs.miss(("resume", "reply"), 2) == pytest.approx(NGRAM_PRIOR_MISS_REPLY)
+
+
+@pytest.mark.parametrize("last_right,end,expected", [
+    (None, 40, ("start", "context")),
+    (40, 40, ("continue", "context")),
+    (40, 41, ("resume", "context")),
+    (40, 40 + NGRAM_RESUME_GAP, ("resume", "context")),
+    (40, 41 + NGRAM_RESUME_GAP, ("start", "context")),
+    (40, 39, ("start", "context")),
+    (100, 100, ("continue", "reply")),
+    (90, 105, ("resume", "reply")),
+])
+def test_a_candidate_is_kinded_by_where_its_match_ends(last_right, end, expected):
+    src = _llama()._source
+    src._reply_start = 100
+    src._last_right = last_right
+    assert src._kind(end) == expected
+
+
+def test_an_open_candidate_is_checked_until_its_first_wrong_token():
+    src = _llama()._source
+    kind = ("start", "context")
+    src._open = [[10, [1, 2, 3, 4], 0, kind, 3]]
+    src._check_open(list(range(10)) + [50], 1)
+    assert src._open == [[10, [1, 2, 3, 4], 1, kind, 3]]
+    assert src._last_right == 4
+
+    src._check_open(list(range(10)) + [50, 1, 2], 9)
+
+    life, reply = src.runs._counts(kind)
+    assert life.checked[1:] == [1.0, 1.0, 1.0] + [0.0] * 5
+    assert life.wrong[1:] == [0.0, 0.0, 1.0] + [0.0] * 5
+    assert (reply.checked, reply.wrong) == (life.checked, life.wrong)
+    assert src._last_right == 5
+    assert src._open == []
+
+
+def test_a_new_reply_keeps_what_the_model_learned_and_clears_the_reply():
+    src = _llama()._source
+    kind = ("continue", "reply")
+    src.runs.check(kind, 1, True)
+    src._open = [[3, [1], 0, kind, 1]]
+    src._last_right = 7
+    src.reset_call()
+    life, reply = src.runs._counts(kind)
+    assert (life.checked[1], life.wrong[1]) == (1.0, 1.0)
+    assert (reply.checked[1], reply.wrong[1]) == (0.0, 0.0)
+    assert src._open == [] and src._last_right is None
+
+
+def test_the_report_carries_the_runs_and_a_draft_model_keeps_its_acceptance():
+    from localm.inference.backends.llamacpp._drafting import CountedSource
+    src = _llama()._source
+    src.runs.check(("start", "context"), 1, False)
+    rep = src.report()
+    assert rep["runs"] == src.runs.report()
+    assert set(rep["runs"]) == {"start/context"}
+    assert "acceptance" not in rep and "acceptance_after_full_accept" not in rep
+    other = CountedSource(4).report()
+    assert other["acceptance"] == pytest.approx(0.6)
+    assert "runs" not in other
+
+
+def test_the_length_with_the_most_expected_tokens_per_second_wins():
+    src = _llama(8)._source
+    src.costs = _row_costs(0.5)
+    kind = ("continue", "context")
+    src.runs.expected_tokens = lambda k, n: [1.0, 1.9, 2.7, 3.4, 4.0][:n + 1]
+    assert src._length(kind, 4) == 3
+    assert src._length(kind, 2) == 2
+    src.runs.expected_tokens = lambda k, n: [1.0, 1.4, 1.5][:n + 1]
+    assert src._length(kind, 2) == 0
+
+
+def _renamed_copy(segments=6, run=9):
+    """A prompt holding a file whose runs of *run* distinct tokens each end
+    in identifier 40, and a reply that copies the file with 40 renamed to 41."""
+    file, first = [], 200
+    for _ in range(segments):
+        file += list(range(first, first + run)) + [40]
+        first += run
+    return [1, 2, 3] + file + [4, 5], [41 if t == 40 else t for t in file]
+
+
+def _scripted_run(prompt, reply, row, costs):
+    """Generate *reply* after *prompt* with the target scripted to it: ``(the
+    source, virtual seconds)``. *costs* "off" decodes one token at a time."""
+    from localm.inference.backends.llamacpp._drafting import DraftSource
+    llm = _llama(8)
+    if costs == "off":
+        llm._source = DraftSource()
+    else:
+        llm._source.costs = costs
+    fake = FakeNative(llm, main_cost=1.0, row_cost=row,
+                      grammar=lambda i, chosen: reply[i] if i < len(reply) else chosen)
+    tokens, _ = _generate(llm, fake, max_new_tokens=len(reply), prompt=prompt)
+    assert tokens == reply
+    return llm._source, fake.now
+
+
+@pytest.mark.parametrize("row", [0.15, 0.4])
+def test_a_copy_with_renames_drafts_up_to_each_rename(row):
+    prompt, reply = _renamed_copy()
+    _, plain_s = _scripted_run(prompt, reply, row, "off")
+    blind, blind_s = _scripted_run(prompt, reply, row, None)
+    src, measured_s = _scripted_run(prompt, reply, row, _row_costs(row))
+    assert measured_s <= 1.02 * blind_s
+    assert plain_s - measured_s > 0.25 * len(reply)
+    assert src.accepted >= 0.8 * blind.accepted
+    assert src.runs.report()["resume/context"] > 5.0
+
+
+def test_a_context_whose_matches_are_always_wrong_is_held_back():
+    stems = [list(range(300 + 3 * i, 303 + 3 * i)) for i in range(20)]
+    prompt = [1, 2] + [t for s in stems for t in s + [50]] + [4, 5]
+    reply = [t for s in stems for t in s + [51]]
+    _, plain_s = _scripted_run(prompt, reply, 0.4, "off")
+    src, measured_s = _scripted_run(prompt, reply, 0.4, _row_costs(0.4))
+    assert src.accepted == 0
+    assert src.steps <= 3
+    assert measured_s - plain_s <= 0.1 * len(reply)
+    assert src.held_steps > 10
 
 
 def test_a_diverging_follow_up_reindexes_only_what_changed():

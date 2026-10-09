@@ -581,13 +581,30 @@ turn shares with the previous one and indexes only what is new. A step with no
 match decodes one token as a plain step, so a reply that never repeats itself
 costs a dictionary lookup per token. It pays on text that repeats earlier text:
 rewriting a file, quoting a passage, repeated tool-call JSON. At load its step
-costs are measured as for a draft model (below, without the draft figures), and
-each step proposes at most the length that pays at the current acceptance, so
-on a target whose verification batches are dear, such as a Mixture-of-Experts
-model, it holds back unless its drafts are being accepted. A target on which
-drafts accepted 90% of the time would not beat one-token decoding by 5% turns
-it off with status `ngram-cannot-pay`. When the costs cannot be measured it
-proposes up to the cap and the pacer alone decides.
+costs are measured as for a draft model (below, without the draft figures); a
+target on which drafts accepted 90% of the time would not beat one-token
+decoding by 5% turns it off with status `ngram-cannot-pay`. Each step looks
+its candidate up first and then drafts the part of it with the most expected
+tokens per second under the measured costs, none unless that beats a plain step
+by 5%. Every candidate is checked token by token against the tokens the reply
+goes on to hold, whether it was drafted or not, so how far candidates run before
+a wrong token is learned without paying for drafts. The counts are kept per
+draft position and per kind of candidate: where its match ends relative to the
+source position of the last candidate token found right in this reply (on it:
+a copy continuing; 1 to 32 positions past it (`NGRAM_RESUME_GAP`): a copy
+picking up again after an edit, such as a renamed identifier; otherwise a fresh
+match), and whether the match lies in the context before the reply or in the
+reply itself. A kind starts from a 10% chance per token of being wrong for a
+match in the context and 40% for one in the reply; its counts over the model's
+life are the prior of its counts in the current reply. So a copy that picks up
+again after an edit drafts up to the next edit in one step, matches that keep
+going wrong (prose, code written from scratch) are held back, and on a target
+whose verification batches are dear, such as a Mixture-of-Experts model, a long
+draft is chosen only where candidates are nearly always right. The speculation
+report carries `runs` (per kind, the tokens a full-length candidate is expected
+to yield) and `held_steps` (the reply's candidates held back) beside `costs`
+and `observed_ms`. When the costs cannot be measured it proposes up to the cap
+and the pacer alone decides.
 
 **`draft`** (`_draftmodel.py`) drafts with a second, smaller GGUF named by
 `spec_draft_model` (a registered model name or a path). The draft model must

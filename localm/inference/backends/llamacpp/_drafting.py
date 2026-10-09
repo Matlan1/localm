@@ -145,17 +145,19 @@ class CountedSource(DraftSource):
     ``usable`` and ``status`` are model level: ``disable`` clears the first and
     names why in the second, for the rest of the model's life. The counters are
     reset by ``begin_call`` (through ``reset_call``) and by ``skip_call``;
-    ``held_steps`` counts the reply's steps ``choose_length`` gave no drafts.
+    ``held_steps`` counts the reply's steps the length choice gave no drafts.
     ``label`` names the source in log lines.
 
     ``costs`` is the ``StepCosts`` measured at load, or None. With costs,
     ``step_cost`` corrects them with the step times the loop reports through
-    ``on_step_seconds`` and ``choose_length`` picks the draft length. The
-    acceptance is estimated separately for a step right after one that
-    verified every draft it proposed ("after a full accept") and for any other
-    step. The estimates and the observed figures live for the model's life;
-    the probe interval restarts at ``ACCEPTANCE_PROBE_EVERY`` each reply. A
-    subclass needs ``_llm`` for ``cap_drafts``.
+    ``on_step_seconds``, and ``choose_length`` picks the draft length for a
+    subclass that does not choose its own (``NgramSource`` does). The
+    acceptance ``choose_length`` uses is estimated separately for a step right
+    after one that verified every draft it proposed ("after a full accept")
+    and for any other step. The estimates and the observed figures live for
+    the model's life; the probe interval restarts at
+    ``ACCEPTANCE_PROBE_EVERY`` each reply. A subclass needs ``_llm`` for
+    ``cap_drafts``.
     """
 
     label = "drafting"
@@ -204,22 +206,27 @@ class CountedSource(DraftSource):
         self._drafting = False
 
     def report(self) -> dict:
-        """``DraftSource.report`` plus ``held_steps``, ``acceptance`` and
-        ``acceptance_after_full_accept``, and with measured costs ``costs``
+        """``DraftSource.report`` plus ``held_steps``, the fields of
+        ``length_report``, and with measured costs ``costs``
         (``StepCosts.report``) and ``observed_ms``, the corrected step
         milliseconds of each draft length seen so far."""
         out = {"status": self.status, "active": self.active_this_call,
                "call_status": self.call_status, "skipped": self.skipped,
                "drafted": self.drafted, "accepted": self.accepted,
                "steps": self.steps, "paused_steps": self.paused_steps,
-               "held_steps": self.held_steps, "draft_max": self.draft_max,
-               "acceptance": round(self.acceptance(), 3),
-               "acceptance_after_full_accept": round(self.acceptance(True), 3)}
+               "held_steps": self.held_steps, "draft_max": self.draft_max}
+        out.update(self.length_report())
         if self.costs is not None:
             out["costs"] = self.costs.report()
             out["observed_ms"] = {k: round(s * 1000, 3)
                                   for k, s in sorted(self._observed.items())}
         return out
+
+    def length_report(self) -> dict:
+        """The estimates the draft length is chosen from: ``acceptance`` and
+        ``acceptance_after_full_accept``."""
+        return {"acceptance": round(self.acceptance(), 3),
+                "acceptance_after_full_accept": round(self.acceptance(True), 3)}
 
     def drafting(self) -> bool:
         return self._drafting
@@ -246,10 +253,7 @@ class CountedSource(DraftSource):
         ``ACCEPTANCE_PROBE_EVERY`` when the probe had no rejection or drafting
         now pays at the updated ``acceptance``, else it doubles, up to
         ``ACCEPTANCE_PROBE_MAX_EVERY``."""
-        self.steps += 1
-        self.drafted += drafted
-        self.accepted += accepted
-        self.active_this_call = True
+        self.count_verify(drafted, accepted)
         rejected = accepted < drafted
         evidence = self._evidence[self._chosen_hot]
         evidence[0] = evidence[0] * ACCEPTANCE_DECAY + accepted
@@ -262,6 +266,14 @@ class CountedSource(DraftSource):
             self._probing = False
         self._hot = drafted > 0 and not rejected
         self._since_probe = 0
+
+    def count_verify(self, drafted: int, accepted: int) -> None:
+        """Count a verification of *drafted* drafts of which *accepted* were
+        kept in the reply's counters."""
+        self.steps += 1
+        self.drafted += drafted
+        self.accepted += accepted
+        self.active_this_call = True
 
     def on_paused_step(self) -> None:
         self.paused_steps += 1
