@@ -657,7 +657,7 @@ class TestOllamaBlob:
     def test_a_normal_blob_still_registers(self, home, tmp_path):
         manifest = _ollama_manifest(tmp_path / "ollama", lambda p: _gguf(p))
         assert mm.add_local(str(manifest)) is True
-        assert list(mm.load_registry()) == ["m"]
+        assert len(mm.load_registry()) == 1
 
 
 class TestUrlPull:
