@@ -51,6 +51,7 @@ class GgufWorker(VramSizingMixin):
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         spec_draft_model: Optional[str] = None,
+        spec_draft_gpu: bool = True,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -61,6 +62,7 @@ class GgufWorker(VramSizingMixin):
         self.spec_source = spec_source             # None = follow mtp_enabled
         self.spec_draft_tokens = spec_draft_tokens # None = the source's default
         self.spec_draft_model = spec_draft_model   # draft GGUF path for the draft source
+        self.draft_model_on_gpu = spec_draft_gpu   # where the parent placed the draft model
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
@@ -239,6 +241,7 @@ class GgufWorker(VramSizingMixin):
                if self.spec_draft_tokens is not None else {}),
             **({"spec_draft_model": self.spec_draft_model}
                if self.spec_draft_model is not None else {}),
+            **({"spec_draft_gpu": False} if not self.draft_model_on_gpu else {}),
         )
         self._loaded = True
         return {

@@ -755,9 +755,10 @@ class VramSizingMixin:
         self._recurrent_state_vram_bytes_cached = charge
         return charge
 
-    def _draft_model_vram_bytes(self) -> int:
-        """VRAM the draft source's second model needs for THIS load, 0 unless
-        ``spec_source`` is "draft" and ``spec_draft_model`` is a readable GGUF.
+    def _draft_model_charge_bytes(self) -> int:
+        """VRAM the draft source's second model needs on the GPU for THIS load,
+        0 unless ``spec_source`` is "draft" and ``spec_draft_model`` is a
+        readable GGUF.
 
         The draft model's file size (its weights), its KV cache for
         ``self.n_ctx`` tokens, the logits buffer of a context whose batch is
@@ -766,7 +767,7 @@ class VramSizingMixin:
         failure charges 0. Memoised per instance."""
         if getattr(self, "spec_source", None) != "draft":
             return 0
-        cached = getattr(self, "_draft_model_vram_bytes_cached", None)
+        cached = getattr(self, "_draft_model_charge_bytes_cached", None)
         if cached is not None:
             return cached
         charge = 0
@@ -792,8 +793,51 @@ class VramSizingMixin:
             _dbg.debug("draft-model VRAM probe failed (%s); charging nothing "
                        "extra for it", type(exc).__name__)
             charge = 0
-        self._draft_model_vram_bytes_cached = charge
+        self._draft_model_charge_bytes_cached = charge
         return charge
+
+    def _draft_model_vram_bytes(self) -> int:
+        """VRAM the draft model takes for THIS load: ``_draft_model_charge_bytes``
+        while ``draft_model_on_gpu`` is True (the default until
+        ``_decide_draft_placement`` runs), else 0."""
+        if not getattr(self, "draft_model_on_gpu", True):
+            return 0
+        return self._draft_model_charge_bytes()
+
+    def _decide_draft_placement(self) -> bool:
+        """Whether the draft model goes on the GPU, recorded in
+        ``draft_model_on_gpu`` and returned.
+
+        True when the draft source is not configured, its charge is 0, or free
+        VRAM cannot be read. False when the target runs on the CPU
+        (``n_gpu_layers`` 0). Otherwise True exactly when free VRAM covers the
+        target's GPU weights (every layer, or ``n_gpu_layers`` of them when
+        fewer are configured), its KV cache for ``self.n_ctx`` tokens, the
+        compute overhead, any MTP draft context, the recurrent state and the
+        draft charge. A draft model that does not fit runs on the CPU, so it
+        never takes GPU layers from the target. Reads free VRAM, so it must not
+        run on an event loop thread."""
+        on_gpu = True
+        charge = self._draft_model_charge_bytes()
+        if getattr(self, "spec_source", None) == "draft" and charge > 0:
+            if self.n_gpu_layers <= 0:
+                on_gpu = False
+            else:
+                free, _total, split_devices = self._split_free_total_bytes()
+                if free is None:
+                    free, split_devices = self._free_vram_bytes(), 1
+                if free is not None:
+                    model = self._vram_model_bytes(int(getattr(self, "n_cpu_moe", 0) or 0))
+                    if self.n_gpu_layers < self._DEFAULT_GPU_LAYERS:
+                        layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+                        model = model * min(self.n_gpu_layers, layers) // layers
+                    need = (model + self.n_ctx * self._kv_bytes_per_token()
+                            + self._split_overhead_bytes(split_devices or 1)
+                            + self._mtp_draft_context_vram_bytes()
+                            + self._recurrent_state_vram_bytes() + charge)
+                    on_gpu = free >= need
+        self.draft_model_on_gpu = on_gpu
+        return on_gpu
 
     def _spec_extra_vram_bytes(self) -> int:
         """VRAM the configured draft source needs beyond the main model and
@@ -801,11 +845,13 @@ class VramSizingMixin:
         return self._mtp_draft_context_vram_bytes() + self._draft_model_vram_bytes()
 
     def _spec_kv_per_token(self) -> int:
-        """KV bytes per token of context a draft source adds: the MTP draft
-        context's or the draft model's, both of which grow with the main one."""
-        self._draft_model_vram_bytes()
-        return (self._mtp_draft_kv_per_token()
-                + int(getattr(self, "_draft_kv_per_token_cached", 0) or 0))
+        """KV bytes per token of context a draft source adds on the GPU: the MTP
+        draft context's or the draft model's while it is on the GPU, both of
+        which grow with the main one."""
+        draft = 0
+        if self._draft_model_vram_bytes():
+            draft = int(getattr(self, "_draft_kv_per_token_cached", 0) or 0)
+        return self._mtp_draft_kv_per_token() + draft
 
     def _mtp_draft_kv_per_token(self) -> int:
         """Draft-context KV bytes per token of context, 0 when this load has no

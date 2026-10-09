@@ -1130,12 +1130,14 @@ class LlamaCpp:
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         spec_draft_model: Optional[str] = None,
+        spec_draft_gpu: bool = True,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
         # spec_source names the draft source (off, mtp, ngram, draft); None
         # follows mtp_enabled. MTP is enabled exactly when the source is mtp.
-        # spec_draft_model is the draft GGUF's path for the draft source.
+        # spec_draft_model is the draft GGUF's path for the draft source;
+        # spec_draft_gpu False loads it on the CPU.
         self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
         self._mtp_enabled = self._spec_source_name == SPEC_MTP
         self._mtp_draft_max = max(1, min(int(mtp_draft_tokens), MTP_DRAFT_TOKENS_MAX))
@@ -1471,7 +1473,8 @@ class LlamaCpp:
         from localm.debuglog import logger as _mtp_log
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
         if self._spec_source_name == SPEC_DRAFT:
-            self._load_draft_model(spec_draft_model, n_threads, verbose)
+            self._load_draft_model(spec_draft_model, n_threads, verbose,
+                                   on_gpu=spec_draft_gpu)
         if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
             source = self._draft_source()
             if source.usable and not self._cache_can_drop_a_speculative_token():
@@ -2740,9 +2743,11 @@ class LlamaCpp:
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
     def _load_draft_model(self, path: Optional[str], n_threads: Optional[int],
-                          verbose: bool) -> None:
-        """Load the draft GGUF at *path* on the main GPU and attach a
-        DraftModelSource drafting with it on its own context.
+                          verbose: bool, on_gpu: bool = True) -> None:
+        """Load the draft GGUF at *path* and attach a DraftModelSource drafting
+        with it on its own context: on the main GPU without splitting, or on
+        the CPU when *on_gpu* is False, which sets the source's status to
+        "ok-cpu".
 
         Any failure leaves the model working without drafting, with the
         source's status naming why: "draft-model-missing", "draft-load-failed",
@@ -2759,7 +2764,7 @@ class LlamaCpp:
             source.disable("draft-model-missing")
             return
         mp = api.llama_model_default_params()
-        mp.n_gpu_layers = 99
+        mp.n_gpu_layers = 99 if on_gpu else 0
         if hasattr(mp, "split_mode"):
             mp.split_mode = 0
         mp.main_gpu = self._main_gpu_index
@@ -2798,10 +2803,12 @@ class LlamaCpp:
             source.disable("draft-rewind-unsupported")
             source.close()
             return
-        failure = source.create_context(self._ctx_capacity, self._offload_kqv)
+        failure = source.create_context(self._ctx_capacity, self._offload_kqv and on_gpu)
         if failure:
             source.disable(failure)
             source.close()
+        elif not on_gpu:
+            source.status = "ok-cpu"
 
     def _model_has_recurrent_layers(self) -> Optional[bool]:
         """Whether the loaded model has recurrent layers (fully recurrent or

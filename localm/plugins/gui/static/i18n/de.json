@@ -128,6 +128,7 @@
   "chat.usage.ngramReason": "N-Gramm-Entwürfe: {reason}",
   "chat.usage.draftOn": "Entwurf {pct}% angenommen",
   "chat.usage.draftOn.title": "Entwurfsmodell: {accepted} von {drafted} Entwurfstokens angenommen",
+  "chat.usage.draftOnCpu.title": "Entwurfsmodell auf der CPU, da es neben dem Modell nicht in den VRAM passt: {accepted} von {drafted} Entwurfstokens angenommen",
   "chat.usage.draftPaused": "Entwurf pausiert",
   "chat.usage.draftPaused.title": "Das Entwurfsmodell war bei diesem Modell messbar langsamer als die Erzeugung Token für Token und pausierte deshalb für {steps} Schritte dieser Antwort",
   "chat.usage.draftOff": "Entwurf aus",

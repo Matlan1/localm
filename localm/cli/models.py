@@ -207,7 +207,8 @@ _SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting", "draft": "Draft model"
 
 def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
                     draft_tokens=None, draft_model=None):
-    """Load *model_path* with draft source *source* ("off", "mtp" or "ngram")
+    """Load *model_path* with draft source *source* ("off", "mtp", "ngram" or
+    "draft", with *draft_model*)
     and return ``(decode rates, usable, status, gpu_placement, (drafted,
     accepted), texts, greedy_text, per_prompt)``: ``usable`` is False when the
     source cannot draft on this model (``status`` says why), ``texts`` is the
@@ -239,6 +240,9 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
         usage = engine.speculation_usage() or {}
         status = usage.get("reason")
         usable = source == "off" or usage.get("state") not in (None, "unavailable")
+        if status == "draft-on-cpu":
+            console.print("[yellow]The draft model does not fit in VRAM beside "
+                          "the model, so it runs on the CPU.[/yellow]")
         if not usable:
             return ([], False, status, engine.gpu_placement, (0, 0), [], "", [])
         per_prompt = []

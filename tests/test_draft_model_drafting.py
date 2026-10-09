@@ -500,6 +500,135 @@ def test_no_draft_charge_without_the_draft_source_or_a_file(tmp_path):
     assert missing._draft_model_vram_bytes() == 0
 
 
+GiB = 1024 ** 3
+_TARGET, _KV, _OVERHEAD, _CHARGE = 8 * GiB, 1000, 512 * 1024 * 1024, 1 * GiB
+
+
+def _placed(tmp_path, free, *, n_gpu_layers=99, layer_count=48):
+    from localm.inference.backends.gguf import GgufBackend
+    draft = tmp_path / "d.gguf"
+    draft.write_bytes(b"x")
+    b = GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
+                    spec_draft_model=str(draft), n_ctx=2048, n_gpu_layers=n_gpu_layers)
+    with patch.object(GgufBackend, "_draft_model_charge_bytes", return_value=_CHARGE), \
+         patch.object(GgufBackend, "_split_free_total_bytes", return_value=(free, None, 1)), \
+         patch.object(GgufBackend, "_free_vram_bytes", return_value=None), \
+         patch.object(GgufBackend, "_vram_model_bytes", return_value=_TARGET), \
+         patch.object(GgufBackend, "_kv_bytes_per_token", return_value=_KV), \
+         patch.object(GgufBackend, "_split_overhead_bytes", return_value=_OVERHEAD), \
+         patch.object(GgufBackend, "_mtp_draft_context_vram_bytes", return_value=0), \
+         patch.object(GgufBackend, "_recurrent_state_vram_bytes", return_value=0), \
+         patch.object(GgufBackend, "_cached_layer_count", return_value=layer_count):
+        on_gpu = b._decide_draft_placement()
+        extra = b._spec_extra_vram_bytes()
+    return b, on_gpu, extra
+
+
+def test_the_draft_model_goes_on_the_gpu_only_beside_the_whole_target(tmp_path):
+    need = _TARGET + 2048 * _KV + _OVERHEAD + _CHARGE
+    b, on_gpu, extra = _placed(tmp_path, need)
+    assert (on_gpu, b.draft_model_on_gpu, extra) == (True, True, _CHARGE)
+    b, on_gpu, extra = _placed(tmp_path, need - 1)
+    assert (on_gpu, b.draft_model_on_gpu, extra) == (False, False, 0)
+    assert b._spec_kv_per_token() == 0
+
+
+def test_a_partial_target_counts_only_its_gpu_layers(tmp_path):
+    need = _TARGET // 2 + 2048 * _KV + _OVERHEAD + _CHARGE
+    assert _placed(tmp_path, need, n_gpu_layers=24)[1] is True
+    assert _placed(tmp_path, need - 1, n_gpu_layers=24)[1] is False
+    assert _placed(tmp_path, 10 ** 15, n_gpu_layers=0)[1] is False
+
+
+def test_unmeasurable_vram_keeps_the_draft_model_on_the_gpu(tmp_path):
+    b, on_gpu, extra = _placed(tmp_path, None)
+    assert (on_gpu, extra) == (True, _CHARGE)
+
+
+def test_the_draft_model_is_placed_before_the_target_is_sized(tmp_path):
+    from localm.inference.backends.gguf import GgufBackend
+    order = []
+    b = GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
+                    spec_draft_model=str(tmp_path / "d.gguf"))
+
+    def place(self):
+        order.append("place")
+        self.draft_model_on_gpu = False
+        return False
+
+    def size(self):
+        order.append(("size", self._spec_extra_vram_bytes()))
+        return 99
+
+    with patch("localm.model_manager.missing_split_parts", return_value=[]), \
+         patch("localm.model_manager.gguf_pretokenizer", return_value=None), \
+         patch("localm.inference.pretokenizer_guard.load_refusal", return_value=None), \
+         patch.object(GgufBackend, "_decide_draft_placement", place), \
+         patch.object(GgufBackend, "_draft_model_charge_bytes", return_value=_CHARGE), \
+         patch.object(GgufBackend, "_mtp_draft_context_vram_bytes", return_value=0), \
+         patch.object(GgufBackend, "_effective_gpu_layers", size), \
+         patch.object(GgufBackend, "_check_vram"), \
+         patch.object(GgufBackend, "_load_native"):
+        b.load()
+    assert order == ["place", ("size", 0)]
+
+
+def test_the_worker_hands_a_cpu_placement_to_the_draft_load():
+    from localm.inference.backends.llamacpp import _worker
+    seen = {}
+
+    class _Llm:
+        supports_images = False
+
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    for on_gpu, expected in ((False, False), (True, None)):
+        seen.clear()
+        w = _worker.GgufWorker("m.gguf", None, 2048, 99, None, 0, spec_source="draft",
+                               spec_draft_model="d.gguf", spec_draft_gpu=on_gpu)
+        with patch("localm.inference.backends.llamacpp._loader.load_lib"), \
+             patch("localm.inference.backends.llamacpp.LlamaCpp", _Llm):
+            w.load()
+        assert seen.get("spec_draft_gpu") is expected
+        assert w.draft_model_on_gpu is on_gpu
+
+
+def test_a_cpu_placed_draft_model_loads_without_gpu_layers_and_says_so(tmp_path):
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"):
+        params = SimpleNamespace(n_gpu_layers=-1, split_mode=1, main_gpu=0)
+        api.llama_model_default_params.return_value = params
+        _view_api(api)
+        api.llama_load_model_from_file.return_value = ctypes.c_void_p(5)
+        api.has_hybrid_api.return_value = True
+        api.llama_model_is_recurrent.return_value = False
+        api.llama_model_is_hybrid.return_value = False
+        made = []
+        api.llama_context_default_params.side_effect = lambda: made.append(
+            SimpleNamespace()) or made[-1]
+        api.llama_init_from_model.return_value = ctypes.c_void_p(6)
+        llm._offload_kqv = True
+        llm._load_draft_model(path, None, True, on_gpu=False)
+    src = llm._source
+    assert params.n_gpu_layers == 0
+    assert made[-1].offload_kqv is False
+    assert (src.usable, src.status) == (True, "ok-cpu")
+
+
+def test_a_cpu_placed_draft_model_is_reported_on_the_reply():
+    from localm.inference.backends.gguf import GgufBackend
+    b = GgufBackend("m.gguf", spec_source="draft")
+    b._loaded = True
+    b._record_mtp({"finish_reason": "stop", "speculation": {
+        "source": "draft", "status": "ok-cpu", "active": True, "call_status": "",
+        "skipped": "", "drafted": 8, "accepted": 5, "steps": 4, "paused_steps": 0,
+        "draft_max": 2}})
+    usage = b.last_speculation_usage
+    assert (usage["source"], usage["state"], usage["reason"]) == ("draft", "on", "draft-on-cpu")
+
+
 def test_the_draft_model_charge_covers_the_measured_buffers():
     """Qwen2.5-0.5B-Instruct Q8_0 as a draft at n_ctx 4096 on ROCm: llama.cpp
     reported 500.84 MiB of weights on the GPU, a 48.00 MiB KV buffer and a

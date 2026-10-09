@@ -236,6 +236,7 @@ export const I18N_EN = {
   "chat.usage.ngramReason": "N-gram drafting: {reason}",
   "chat.usage.draftOn": "Draft {pct}% accepted",
   "chat.usage.draftOn.title": "Draft-model drafting: {accepted} of {drafted} drafted tokens accepted",
+  "chat.usage.draftOnCpu.title": "Draft-model drafting on the CPU, since the draft model does not fit in VRAM beside the model: {accepted} of {drafted} drafted tokens accepted",
   "chat.usage.draftPaused": "Draft paused",
   "chat.usage.draftPaused.title": "Draft-model drafting was measured slower than generating one token at a time on this model, so it was paused for {steps} steps of this reply",
   "chat.usage.draftOff": "Draft off",

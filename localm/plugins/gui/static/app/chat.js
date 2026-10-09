@@ -1777,6 +1777,7 @@ const SPECULATION_USAGE_KEYS = {
   },
   draft: {
     on: "chat.usage.draftOn", onTitle: "chat.usage.draftOn.title",
+    onCpuTitle: "chat.usage.draftOnCpu.title",
     paused: "chat.usage.draftPaused", pausedTitle: "chat.usage.draftPaused.title",
     off: "chat.usage.draftOff", offImage: "chat.usage.draftOff.image",
     stopped: "chat.usage.draftStopped", unavailable: "chat.usage.draftUnavailable",
@@ -1793,8 +1794,9 @@ export function speculationUsageText(spec) {
   }
   if (spec.state === "on" && spec.drafted > 0) {
     const pct = Math.round((100 * spec.accepted) / spec.drafted);
+    const onTitle = spec.reason === "draft-on-cpu" && keys.onCpuTitle ? keys.onCpuTitle : keys.onTitle;
     return { text: t(keys.on, { pct }),
-             title: t(keys.onTitle, { accepted: spec.accepted, drafted: spec.drafted }) };
+             title: t(onTitle, { accepted: spec.accepted, drafted: spec.drafted }) };
   }
   if (spec.state === "paused") {
     return { text: t(keys.paused),

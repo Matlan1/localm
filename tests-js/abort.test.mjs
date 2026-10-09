@@ -188,6 +188,11 @@ test("the usage line shows n-gram drafting from usage.speculation and leaves an 
   assert.match(usage("chat-usage").textContent, /3 tok\/s · Draft 60% accepted/);
   assert.match(usage("chat-usage").title, /Draft-model drafting: 6 of 10/);
 
+  window.updateUsageDisplay({ total_tokens: 7,
+    speculation: { source: "draft", state: "on", drafted: 10, accepted: 6, reason: "draft-on-cpu" } });
+  assert.match(usage("chat-usage").textContent, /Draft 60% accepted/);
+  assert.match(usage("chat-usage").title, /on the CPU.*6 of 10/);
+
   window.updateUsageDisplay({ total_tokens: 7, speculation: { source: "draft", state: "unavailable",
                                                               drafted: 0, accepted: 0, reason: "draft-model-missing" } });
   assert.match(usage("chat-usage").textContent, /Draft unavailable/);
