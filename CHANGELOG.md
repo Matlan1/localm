@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5, MADLAD-400
+  translation models and other `t5` GGUFs register as chat models and answer through
+  `localm run`, the GUI chat and `/v1/chat/completions`, where they were refused before.
+  These models have no chat template: a single message is read as typed, and a
+  conversation is read as one labelled transcript. A prompt can be up to 2,048 tokens
+  (fewer when the context window is smaller); a longer one is refused with that limit
+  named. They read text only, and speculative decoding does not apply to them.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing

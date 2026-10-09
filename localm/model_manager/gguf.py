@@ -540,11 +540,15 @@ _GGUF_NON_CHAT_ARCHITECTURES = {
     "llada": "a diffusion language model",
     "llada-moe": "a diffusion language model",
     "rnd1": "a diffusion language model",
-    "t5": "an encoder-decoder (T5) model",
     "wavtokenizer-dec": "an audio codec decoder",
     "qwen3tts": "a text-to-speech model",
     "pockettts": "a text-to-speech model",
 }
+
+# llama.cpp architectures with an encoder and a decoder stack. They register as
+# chat models; gguf_kv_bytes_per_token sizes their decoder stack and reads a
+# missing attention.head_count_kv as attention.head_count.
+_GGUF_ENCODER_DECODER_ARCHITECTURES = frozenset({"t5"})
 
 # general.architecture values ComfyUI-GGUF's converter writes for image and
 # video generation checkpoints; none is a llama.cpp architecture.
@@ -599,6 +603,7 @@ _GGUF_SCALAR_FORMATS = {
 # expert weights cost VRAM but contribute nothing to KV.
 _GGUF_KV_SHAPE_SUFFIXES = (
     ".block_count",
+    ".decoder_block_count",
     ".embedding_length",
     ".attention.head_count",
     ".attention.head_count_kv",
@@ -815,6 +820,11 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
     (several architectures set a head_dim that is NOT n_embd/n_head) and falls
     back to n_embd // n_head otherwise.
 
+    An encoder-decoder architecture (``_GGUF_ENCODER_DECODER_ARCHITECTURES``) is
+    sized for its decoder stack, ``decoder_block_count`` (defaulting to
+    ``block_count``), with a missing ``attention.head_count_kv`` read as
+    ``attention.head_count``, as llama.cpp reads it.
+
     Returns 0 - never raises - when the file is not a readable GGUF, or the
     shape keys are absent, non-scalar, or non-positive. 0 means 'no signal', and
     the caller keeps its previous heuristic."""
@@ -880,6 +890,10 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
         return int(v) if isinstance(v, int) and v > 0 else 0
 
     n_layers = _get(".block_count")
+    encoder_decoder = architecture in _GGUF_ENCODER_DECODER_ARCHITECTURES
+    if encoder_decoder:
+        # The KV cache holds the decoder stack, which defaults to block_count.
+        n_layers = _get(".decoder_block_count") or n_layers
 
     # Total KV heads summed over the whole stack. Every layer contributes on a
     # uniform architecture; on a hybrid only the attending layers do.
@@ -893,6 +907,8 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
         total_kv_heads = sum(v for v in per_layer if v > 0)
     else:
         n_head_kv = _get(_GGUF_KV_HEADS_SUFFIX)
+        if not n_head_kv and encoder_decoder:
+            n_head_kv = _get(".attention.head_count")
         if not n_layers or not n_head_kv:
             return 0
         if any(k.startswith(f"{architecture}{infix}")
@@ -1803,7 +1819,8 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
         return True
     # llama.cpp reads "<arch>.attention.causal"; a file declaring it false is
     # an encoder, not a text generator.
-    return bool(meta.get("non_causal")) and arch not in _GGUF_NON_CHAT_ARCHITECTURES
+    return (bool(meta.get("non_causal")) and arch not in _GGUF_NON_CHAT_ARCHITECTURES
+            and arch not in _GGUF_ENCODER_DECODER_ARCHITECTURES)
 
 
 def gguf_architecture(path: Path, meta: Optional[dict] = None) -> Optional[str]:

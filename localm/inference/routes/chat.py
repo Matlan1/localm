@@ -305,7 +305,9 @@ def register(app: FastAPI, ctx) -> None:
             if (not compact_in_stream and isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
                 raise HTTPException(
-                    413, _hs.context_overflow_detail(prompt_tokens, capacity))
+                    413, _hs.context_overflow_detail(
+                        prompt_tokens, capacity,
+                        getattr(engine, "encoder_decoder", False)))
 
         except BaseException:
             _hs._unpin(engine)

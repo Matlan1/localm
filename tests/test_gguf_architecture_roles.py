@@ -59,6 +59,7 @@ CHAT_ARCHITECTURES = [
     "llama", "qwen3", "qwen3next", "qwen35", "gpt-oss", "gemma3", "gemma3n", "gemma4",
     "glm4moe", "lfm2", "smollm3", "mistral3", "minimax-m2", "deepseek2", "mamba2",
     "rwkv7", "granitehybrid", "qwen3vl", "pangu-embedded", "hunyuan-moe", "seed_oss",
+    "t5",
 ]
 EMBEDDING_ARCHITECTURES = [
     "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert", "jina-bert-v2",
@@ -67,7 +68,7 @@ EMBEDDING_ARCHITECTURES = [
 ]
 NON_CHAT_ARCHITECTURES = [
     "eagle3", "dflash", "gemma4-assistant", "dream", "llada", "llada-moe", "rnd1",
-    "t5", "wavtokenizer-dec", "qwen3tts", "pockettts",
+    "wavtokenizer-dec", "qwen3tts", "pockettts",
 ]
 
 
@@ -118,6 +119,11 @@ class TestArchitectureRoles:
         assert gguf_embedding_signal(f) is False
         assert _type_of(f) == "unknown"
 
+    def test_encoder_decoder_declaring_non_causal_stays_llm(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", "t5", [("t5.attention.causal", _kv_bool(False))])
+        assert gguf_embedding_signal(f) is False
+        assert _type_of(f) == "llm"
+
     def test_mmproj_is_still_mmproj(self, tmp_path):
         assert _type_of(_gguf(tmp_path / "m.gguf", "clip")) == "mmproj"
 
@@ -126,7 +132,7 @@ class TestChatRefusal:
     @pytest.mark.parametrize("arch,what", [
         ("eagle3", "draft head"), ("dflash", "draft head"), ("gemma4-assistant", "draft head"),
         ("dream", "diffusion language model"), ("llada", "diffusion language model"),
-        ("t5", "encoder-decoder"), ("wavtokenizer-dec", "audio codec"),
+        ("wavtokenizer-dec", "audio codec"),
         ("qwen3tts", "text-to-speech"), ("flux", "image or video generation"),
     ])
     def test_message_names_the_architecture_and_what_it_is(self, arch, what):
@@ -143,7 +149,7 @@ class TestChatRefusal:
 
 
 class TestBackendRefusesBeforeLoading:
-    @pytest.mark.parametrize("arch", ["eagle3", "llada", "t5", "wavtokenizer-dec", "flux"])
+    @pytest.mark.parametrize("arch", ["eagle3", "llada", "wavtokenizer-dec", "flux"])
     def test_load_raises_before_any_vram_probe_or_worker(self, tmp_path, monkeypatch, arch):
         f = _gguf(tmp_path / "m.gguf", arch)
         backend = GgufBackend(str(f))

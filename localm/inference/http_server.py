@@ -5040,7 +5040,8 @@ async def _stream_sse(
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
                 and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
-            refusal = context_overflow_detail(prompt_tokens, capacity)
+            refusal = context_overflow_detail(
+                prompt_tokens, capacity, getattr(engine, "encoder_decoder", False))
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -5436,8 +5437,15 @@ def _needs_compaction(capacity, prompt_tokens, messages) -> bool:
     return capacity - prompt_tokens < max(2048, int(capacity * 0.10))
 
 
-def context_overflow_detail(prompt_tokens: int, capacity: int) -> str:
-    """The refusal text for a prompt larger than the context capacity."""
+def context_overflow_detail(prompt_tokens: int, capacity: int,
+                            encoder_decoder: bool = False) -> str:
+    """The refusal text for a prompt larger than the context capacity. With
+    *encoder_decoder* the text names the model's one-pass prompt limit instead
+    of the context window settings."""
+    if encoder_decoder:
+        return (f"Prompt ({prompt_tokens} tokens) exceeds the {capacity} tokens "
+                f"this encoder-decoder model reads in one pass. Shorten the "
+                f"message or start a new chat.")
     return (f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
             f"context capacity ({capacity} tokens). Start a new chat, "
             f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
