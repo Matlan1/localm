@@ -489,6 +489,7 @@ class TestLoadSetup:
         api.llama_model_default_params.return_value = SimpleNamespace(
             main_gpu=0, n_gpu_layers=0, use_mmap=True)
         api.llama_model_is_diffusion.return_value = True
+        api.llama_model_has_encoder.return_value = False
         api.has_diffusion_api.return_value = True
         api.has_model_meta_api.return_value = True
         api.llama_model_meta_val_str.side_effect = lambda model, key: values.get(key)
