@@ -342,3 +342,18 @@ def test_bench_spec_never_writes_the_setting(cli_runner):
         res = cli_runner.invoke(models_mod.main, ["bench-spec", "model.gguf", "--rounds", "1"])
     assert res.exit_code == 0, res.output
     assert load_config()["spec_source"] is None
+
+
+@pytest.mark.parametrize("source,expected", [("ngram", "NgramSource"), ("mtp", "MtpSource"),
+                                             ("off", "MtpSource")])
+def test_the_model_drives_the_source_it_was_configured_with(source, expected):
+    llm = make_bare_llama()
+    llm._spec_source_name = source
+    llm._ngram_draft_max = 5 if source == "ngram" else 0
+    llm._source = None
+    picked = llm._draft_source()
+    assert type(picked).__name__ == expected
+    assert llm._draft_source() is picked
+    assert llm.speculation_report()["source"] == source
+    if source == "ngram":
+        assert picked.draft_max == 5
