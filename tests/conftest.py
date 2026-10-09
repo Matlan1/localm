@@ -444,6 +444,41 @@ def _no_system_path_touches(request):
                     + _format_syspath_hits(new) + "\n" + _SYSPATH_ADVICE)
 
 
+_TEMP_ENV_NAMES = ("TMPDIR", "TEMP", "TMP")
+_temp_env_at_start: dict = {}
+
+
+def pytest_runtest_logstart(nodeid, location):
+    _temp_env_at_start.clear()
+    _temp_env_at_start.update({name: os.environ.get(name) for name in _TEMP_ENV_NAMES})
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Fail the test that left TMPDIR, TEMP or TMP changed in the process
+    environment, and put the original values back.
+
+    Runs after every fixture finalizer, so a change scoped with
+    ``monkeypatch.setenv`` is already undone. Every later test on the same
+    worker inherits a leaked value: a subprocess it spawns, or a tempfile
+    call, then uses a directory that may no longer exist."""
+    result = yield
+    leaked = {name: os.environ.get(name) for name in _TEMP_ENV_NAMES
+              if os.environ.get(name) != _temp_env_at_start.get(name)}
+    for name in leaked:
+        original = _temp_env_at_start.get(name)
+        if original is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = original
+    if leaked:
+        pytest.fail("this test left the process environment changed (scope it with "
+                    "monkeypatch.setenv): "
+                    + ", ".join(f"{name}={value!r} (was {_temp_env_at_start.get(name)!r})"
+                                for name, value in leaked.items()))
+    return result
+
+
 def _report_system_path_touches(session):
     """Session-level backstop: report touches and fail the run.
 
