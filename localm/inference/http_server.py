@@ -5017,7 +5017,8 @@ async def _stream_sse(
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
         compact = compact or (
-            _needs_compaction(engine.context_capacity(), prompt_tokens, messages)
+            _needs_compaction(engine.context_capacity(), prompt_tokens, messages,
+                              _engine_is_encoder_decoder(engine))
             and compactable(messages))
 
     if not role_sent:
@@ -5050,7 +5051,8 @@ async def _stream_sse(
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
                 and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
-            refusal = context_overflow_detail(prompt_tokens, capacity)
+            refusal = context_overflow_detail(
+                prompt_tokens, capacity, _engine_is_encoder_decoder(engine))
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -5479,18 +5481,36 @@ COMPACTION_DISCONNECT_DETAIL = (
     "Client closed the request while the conversation was being compacted.")
 
 
-def _needs_compaction(capacity, prompt_tokens, messages) -> bool:
+def _needs_compaction(capacity, prompt_tokens, messages,
+                      encoder_decoder: bool = False) -> bool:
     """True when *prompt_tokens* leaves less than the reply buffer (2048 tokens
     or 10% of *capacity*, whichever is larger) free in *capacity*, for a
-    conversation of more than three messages."""
+    conversation of more than three messages. With *encoder_decoder* the reply
+    does not occupy *capacity*, so it is True only when the prompt itself is
+    larger than *capacity*."""
     if not (isinstance(capacity, int) and capacity > 0
             and isinstance(prompt_tokens, int) and len(messages) > 3):
         return False
+    if encoder_decoder:
+        return prompt_tokens > capacity
     return capacity - prompt_tokens < max(2048, int(capacity * 0.10))
 
 
-def context_overflow_detail(prompt_tokens: int, capacity: int) -> str:
-    """The refusal text for a prompt larger than the context capacity."""
+def _engine_is_encoder_decoder(engine) -> bool:
+    """True only when *engine* reports an encoder-decoder model with a real
+    ``True`` (a stand-in engine without the attribute answers False)."""
+    return getattr(engine, "encoder_decoder", False) is True
+
+
+def context_overflow_detail(prompt_tokens: int, capacity: int,
+                            encoder_decoder: bool = False) -> str:
+    """The refusal text for a prompt larger than the context capacity. With
+    *encoder_decoder* the text names the model's one-pass prompt limit instead
+    of the context window settings."""
+    if encoder_decoder:
+        return (f"Prompt ({prompt_tokens} tokens) exceeds the {capacity} tokens "
+                f"this encoder-decoder model reads in one pass. Shorten the "
+                f"message or start a new chat.")
     return (f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
             f"context capacity ({capacity} tokens). Start a new chat, "
             f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
@@ -5910,7 +5930,8 @@ async def _complete(
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
-        if _needs_compaction(capacity, prompt_tokens, messages):
+        if _needs_compaction(capacity, prompt_tokens, messages,
+                             _engine_is_encoder_decoder(engine)):
             new_messages, changed, gone = await _compact_for_capacity(
                 engine, messages, request)
             if gone:

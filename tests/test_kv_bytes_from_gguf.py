@@ -197,6 +197,46 @@ class TestGgufKvBytesPerToken:
         assert gguf_kv_bytes_per_token(cut) == 0     # no signal, and no exception
 
 
+def _t5_shape(n_layers, n_embd, n_head, extra=()):
+    """The shape keys a T5 GGUF declares: no attention.head_count_kv."""
+    return [
+        ("general.architecture", _T_STRING, "t5"),
+        ("t5.block_count", _T_UINT32, n_layers),
+        ("t5.embedding_length", _T_UINT32, n_embd),
+        ("t5.attention.head_count", _T_UINT32, n_head),
+        ("t5.attention.key_length", _T_UINT32, 64),
+        ("t5.attention.value_length", _T_UINT32, 64),
+        *extra,
+    ]
+
+
+class TestEncoderDecoderKvBytesPerToken:
+    @pytest.mark.parametrize("n_layers,n_embd,n_head,expected", [
+        (8, 512, 6, 12288),      # flan-t5-small
+        (12, 768, 12, 36864),    # LaMini-Flan-T5-248M
+    ])
+    def test_matches_the_kv_cache_llama_cpp_allocates(self, tmp_path, n_layers, n_embd,
+                                                       n_head, expected):
+        f = _gguf(tmp_path / "m.gguf", _t5_shape(n_layers, n_embd, n_head))
+        assert gguf_kv_bytes_per_token(f) == expected
+
+    def test_the_decoder_block_count_sizes_the_cache(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", _t5_shape(
+            8, 512, 6, extra=[("t5.decoder_block_count", _T_UINT32, 4)]))
+        assert gguf_kv_bytes_per_token(f) == 4 * 6 * (64 + 64) * 2
+
+    def test_a_declared_head_count_kv_still_wins(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", _t5_shape(
+            8, 512, 6, extra=[("t5.attention.head_count_kv", _T_UINT32, 2)]))
+        assert gguf_kv_bytes_per_token(f) == 8 * 2 * (64 + 64) * 2
+
+    def test_a_decoder_only_architecture_without_head_count_kv_is_still_no_signal(self, tmp_path):
+        kv = [(k.replace("t5", "gpt2"), t, v.replace("t5", "gpt2") if isinstance(v, str) else v)
+              for k, t, v in _t5_shape(8, 512, 6)]
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_kv_bytes_per_token(f) == 0
+
+
 # --------------------------------------------------------------------------- #
 #  gguf_nextn_predict_layers / gguf_mtp_draft_kv_bytes_per_token: the MTP      #
 #  draft context's OWN pre-load metadata, distinct from the whole model's.     #
