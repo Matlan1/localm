@@ -102,7 +102,7 @@ class Finding:
         return out
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Finding":
+    def from_dict(cls, d: dict) -> Finding:
         return cls(status=str(d.get("status") or WARN),
                    text=str(d.get("text") or ""),
                    note=str(d.get("note") or ""),
@@ -136,7 +136,7 @@ class CheckResult:
                 "findings": [f.as_dict() for f in self.findings]}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "CheckResult":
+    def from_dict(cls, d: dict) -> CheckResult:
         return cls(key=str(d.get("key") or ""), label=str(d.get("label") or ""),
                    status=str(d.get("status") or WARN),
                    summary=str(d.get("summary") or ""),
@@ -162,7 +162,7 @@ class DiagnosticsReport:
         return out
 
     @classmethod
-    def from_dict(cls, d: dict) -> "DiagnosticsReport":
+    def from_dict(cls, d: dict) -> DiagnosticsReport:
         return cls(checks=tuple(CheckResult.from_dict(c)
                                 for c in (d.get("checks") or ())),
                    verdict=str(d.get("verdict") or WARN),

@@ -213,7 +213,7 @@ def save_state(state: dict, *, pin: str = "llama") -> None:
 
 def _parse_iso(value: str) -> _dt.datetime | None:
     try:
-        return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+        return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.UTC)
     except (TypeError, ValueError):
         return None
 
@@ -232,7 +232,7 @@ def should_skip(state: dict, candidate: str, *, now: _dt.datetime | None = None)
         return f"{candidate} already recorded FAIL; no newer candidate has appeared since"
     if verdict == "INCONCLUSIVE":
         tried_at = _parse_iso(state.get("timestamp", ""))
-        now = now or _dt.datetime.now(_dt.timezone.utc)
+        now = now or _dt.datetime.now(_dt.UTC)
         if tried_at is not None and (now - tried_at) < _dt.timedelta(hours=INCONCLUSIVE_COOLDOWN_HOURS):
             return (f"{candidate} was INCONCLUSIVE {tried_at.isoformat()}; "
                     f"cooldown ({INCONCLUSIVE_COOLDOWN_HOURS}h) has not elapsed")
@@ -496,7 +496,7 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
     if not issues_path.exists():
         return False
     text = issues_path.read_text(encoding="utf-8")
-    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    today = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d")
     title = (f"NEW-PIN-PIPELINE-{pin.upper()}-"
             f"{candidate.upper().replace('.', '-')}-{kind}")
     if title in text:
@@ -548,7 +548,7 @@ def _record_inconclusive(candidate: str, receipt_path: Path | None, *, pin: str 
     streak = (prior.get("inconclusive_streak", 0) + 1
              if prior.get("last_tag_tried") == candidate and prior.get("verdict") == "INCONCLUSIVE"
              else 1)
-    now_iso = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     state = {"last_tag_tried": candidate, "verdict": "INCONCLUSIVE", "timestamp": now_iso,
              "receipt_path": str(receipt_path), "inconclusive_streak": streak}
     if reason is not None:
@@ -897,7 +897,7 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
     if rc == LEASE_BUSY_EXIT:
         print("GPU busy this run; not recording a verdict, will retry next run")
         return 2
-    now_iso = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     if rc == 1:
         reason = "confirm_llama_runtime.py reported FAIL"
         save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,
@@ -1026,7 +1026,7 @@ def run_comfyui_pipeline(*, dry_run: bool) -> int:
     if rc == LEASE_BUSY_EXIT:
         print("GPU busy this run; not recording a verdict, will retry next run")
         return 2
-    now_iso = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     if rc == 1:
         reason = "confirm_comfyui_runtime.py reported FAIL"
         save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,

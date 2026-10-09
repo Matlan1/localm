@@ -29,7 +29,7 @@ import os
 import secrets
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -73,7 +73,7 @@ def _version() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ------------------------------------------------------------------ #
@@ -220,7 +220,7 @@ def _describe_unreadable(path) -> str:
     reportable outcome rather than an exception escaping the log call."""
     try:
         st = Path(path).stat()
-        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=UTC).isoformat()
         return f"size={st.st_size} mtime={mtime}"
     except OSError as e:
         return f"stat also failed: {e}"

@@ -3981,7 +3981,7 @@ def _add_local_hub_cache(
             stored = _mm._store_loose_gguf_dir(first_parts, store)
             if stored is None:
                 return False
-            names = {new: names[old] for old, new in zip(first_parts, stored)
+            names = {new: names[old] for old, new in zip(first_parts, stored, strict=True)
                      if names and old in names}
             first_parts = stored
         registered_any = _add_local_gguf_dir(
