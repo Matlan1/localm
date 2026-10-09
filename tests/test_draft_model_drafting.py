@@ -254,6 +254,23 @@ def test_a_failing_draft_decode_stops_drafting_for_the_reply_and_resets_the_cach
     assert again == _reference(PROMPT, 6)
 
 
+def test_a_catch_up_decode_that_fails_part_way_clears_what_it_wrote():
+    llm = _llama(2)
+    assert len(PROMPT) + 1 > llm._source._ctx_batch
+    fake = DraftFake(llm, fail_draft_decode=lambda index, positions: index == 1)
+
+    tokens, _ = _run(llm, fake, max_new_tokens=8)
+
+    src = llm._source
+    assert tokens == _reference(PROMPT, 8)
+    assert (src.call_status, src.accepted) == ("draft-decode-failed:1", 0)
+    assert fake.draft_cache == {}
+
+    again, _ = _run(llm, fake, max_new_tokens=8)
+    assert again == _reference(PROMPT, 8)
+    assert src.call_status == "" and src.accepted > 0
+
+
 def test_a_draft_cache_that_cannot_drop_a_rejected_draft_disables_the_source():
     llm = _llama(4)
     fake = DraftFake(llm, wrong_draft_positions=(8,), refuse_draft_rm=True)
@@ -455,7 +472,10 @@ def test_the_draft_model_charge_is_weights_kv_logits_and_margin(tmp_path):
 
 def test_no_draft_charge_without_the_draft_source_or_a_file(tmp_path):
     from localm.inference.backends.gguf import GgufBackend
-    assert GgufBackend(str(tmp_path / "m.gguf"), spec_source="ngram")._draft_model_vram_bytes() == 0
+    draft = tmp_path / "d.gguf"
+    draft.write_bytes(b"x" * 4096)
+    assert GgufBackend(str(tmp_path / "m.gguf"), spec_source="ngram",
+                       spec_draft_model=str(draft))._draft_model_vram_bytes() == 0
     missing = GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
                           spec_draft_model=str(tmp_path / "gone.gguf"))
     assert missing._draft_model_vram_bytes() == 0
