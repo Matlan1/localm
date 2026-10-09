@@ -33,7 +33,8 @@ from localm.textguard import (
 )
 
 from . import _api as api
-from ._drafting import SPEC_MTP, SPEC_NGRAM, DraftSource, MtpSource, resolve_spec_source
+from ._drafting import (
+    SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, resolve_spec_source)
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
@@ -1480,6 +1481,11 @@ class LlamaCpp:
             api.llama_free_model(self._model_ptr)
             self._model_ptr = None
             raise
+        if self.is_encoder_decoder:
+            # No draft source runs on an encoder-decoder model, and nothing
+            # below may decode on its context before llama_encode has run.
+            self._spec_source_name = SPEC_OFF
+            self._mtp_enabled = False
 
         # Model's true transformer layer count, read once here from the loaded
         # model. This is the only place it is currently EXPOSED, which is NOT the
@@ -1550,10 +1556,10 @@ class LlamaCpp:
             self.encoder_input_limit = self._read_encoder_input_limit(cp)
 
         # Multi-Token Prediction (MTP) draft context initialization
-        if not self._mtp_enabled:
-            self.mtp_status = "disabled"
-        elif self.is_encoder_decoder:
+        if self.is_encoder_decoder:
             self.mtp_status = "encoder-decoder"
+        elif not self._mtp_enabled:
+            self.mtp_status = "disabled"
         else:
             try:
                 eligible, self.mtp_status = api.llama_model_mtp_support(self._model_ptr)
@@ -1583,10 +1589,7 @@ class LlamaCpp:
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
         if self._spec_source_name == SPEC_NGRAM:
             source = self._draft_source()
-            if self.is_encoder_decoder:
-                source.usable = False
-                source.status = "encoder-decoder"
-            elif not self._cache_can_drop_a_speculative_token():
+            if not self._cache_can_drop_a_speculative_token():
                 source.usable = False
                 source.status = "rewind-unsupported"
             _mtp_log.info("n-gram drafting: status=%s draft_max=%d",
@@ -3088,10 +3091,7 @@ class LlamaCpp:
 
     def _spec_rollback_wanted(self) -> bool:
         """Whether contexts keep recurrent-state snapshots for rejected drafts:
-        True while the configured source drafts (mtp or ngram), False for an
-        encoder-decoder model, which never drafts."""
-        if self.is_encoder_decoder:
-            return False
+        True while the configured source drafts (mtp or ngram)."""
         return self._spec_source_name == SPEC_NGRAM or self._mtp_enabled
 
     def _spec_rollback_snapshots(self, cp) -> int:
@@ -3103,10 +3103,7 @@ class LlamaCpp:
 
     def _apply_initial_spec_params(self, cp, spec_draft_tokens: Optional[int]) -> None:
         """Set the n-gram draft cap for the loaded model, then the recurrent
-        snapshots the first context keeps for the configured source. Sets
-        nothing for an encoder-decoder model."""
-        if self.is_encoder_decoder:
-            return
+        snapshots the first context keeps for the configured source."""
         if self._spec_source_name == SPEC_NGRAM:
             self._ngram_draft_max = ngram_draft_cap(
                 spec_draft_tokens, self._model_has_recurrent_layers() is not False)

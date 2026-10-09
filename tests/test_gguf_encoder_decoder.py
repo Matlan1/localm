@@ -449,13 +449,20 @@ class TestLoad:
         assert llm.mtp_status == "encoder-decoder" and llm.supports_mtp is False
         mock_api.llama_model_mtp_support.assert_not_called()
 
-    def test_ngram_drafting_is_off_with_an_encoder_decoder_status(self, monkeypatch):
+    @pytest.mark.parametrize("spec_source", ["ngram", "mtp"])
+    def test_the_draft_source_is_off_with_an_encoder_decoder_status(self, monkeypatch,
+                                                                     spec_source):
         mock_api = self._api()
-        llm, _ = self._build(mock_api, monkeypatch, spec_source="ngram")
+        llm, _ = self._build(mock_api, monkeypatch, spec_source=spec_source)
         report = llm.speculation_report()
-        assert report["source"] == "ngram" and report["status"] == "encoder-decoder"
-        assert llm._draft_source().usable is False
+        assert report["source"] == "off" and report["status"] == "encoder-decoder"
+        assert llm._mtp_enabled is False
         mock_api.llama_decode.assert_not_called()
+        mock_api.llama_model_mtp_support.assert_not_called()
+
+    def test_a_decoder_only_model_keeps_its_draft_source(self, monkeypatch):
+        llm, _ = self._build(self._api(has_encoder=False), monkeypatch, spec_source="ngram")
+        assert llm.speculation_report()["source"] == "ngram"
 
     def test_no_recurrent_rollback_snapshots_are_requested(self, monkeypatch):
         mock_api = self._api()
