@@ -33,6 +33,7 @@ from localm.inference.backends.base import (
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.pretokenizer_guard import count_tokens_or_estimate
+from localm.inference.stop_sequences import apply_stop
 from localm.inference.protocol import (
     CHECKING_GRAMMAR_STATUS, LOADING_MODEL_STATUS, PROCESSING_PROMPT_STATUS,
     RUNNING_CHAT_HOOKS_STATUS, ChatRequest, CompletionRequest, EmbeddingRequest,
@@ -191,6 +192,7 @@ def register(app: FastAPI, ctx) -> None:
                 repeat_penalty=req.repeat_penalty,
                 grammar=req.grammar,
                 seed=req.seed,
+                stop=req.stop,
                 thinking=(req.chat_template_kwargs or {}).get("enable_thinking"),
             )
             # Strip None so Engine uses its config defaults
@@ -650,6 +652,7 @@ def register(app: FastAPI, ctx) -> None:
                 repeat_penalty=req.repeat_penalty,
                 grammar=req.grammar,
                 seed=req.seed,
+                stop=req.stop,
             )
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
             if req.grammar_lazy:
@@ -750,6 +753,8 @@ def register(app: FastAPI, ctx) -> None:
                     # text, which a model-load RuntimeError carries verbatim.
                     text = _hs.inference_error_text(e)
 
+            if gen_error is None and req.stop:
+                text, _stopped = apply_stop(text, req.stop)
             outcome = "error" if gen_error is not None else "success"
             if ctx is not None:
                 ctx.outcome = outcome

@@ -12,6 +12,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **`stop` sequences on `/v1/chat/completions` and `/v1/completions`.** A string or a list
+  of up to 16: the reply is cut before the first match, the generation ends there instead of
+  running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
+  reasoning model's `<think>` block is not applied. The Ollama API's `options.stop` uses it.
 - **Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) run as chat models.**
   A GGUF of one of these architectures now loads and answers through `localm run`,
   the GUI chat and `/v1/chat/completions`, instead of being refused. These models

@@ -308,10 +308,11 @@ def test_chat_stop_sequence_cuts_the_reply(client):
     body = _chat(client, stream=False, options={"stop": ["wor"]}).json()
     assert body["message"]["content"] == "Hello "
     assert body["done_reason"] == "stop"
-    assert "eval_count" not in body and body["total_duration"] > 0
+    assert body["eval_count"] > 0 and body["total_duration"] > 0
     objs = _lines(_chat(client, options={"stop": ["wor"]}))
     assert "".join(o["message"]["content"] for o in objs) == "Hello "
     assert objs[-1]["done"] is True and objs[-1]["done_reason"] == "stop"
+    assert objs[-1]["eval_count"] > 0
 
 
 def test_chat_format_json_reaches_the_engine_as_a_grammar(client, engine):
