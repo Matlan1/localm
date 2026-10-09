@@ -72,6 +72,7 @@ nav:
       - Managed ComfyUI: managed-comfyui.md
   - Server and integrations:
       - HTTP Server API: server-api.md
+      - Ollama-compatible API: ollama-api.md
       - API reference: api-reference.md
       - MCP support: mcp.md
       - TLS and reverse proxies: tls.md

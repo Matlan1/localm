@@ -44,6 +44,17 @@ _REVIEWED_CROSS_ORIGIN_OK = (
     "/v1/instances/status",
 )
 
+# The reviewed contents of _OLLAMA_CROSS_ORIGIN_OK: the Ollama-native
+# counterparts of the OpenAI inference routes, plus /api/show. Matched by
+# equality on the full path, never by prefix.
+_REVIEWED_OLLAMA_CROSS_ORIGIN_OK = frozenset({
+    "/api/chat",
+    "/api/generate",
+    "/api/embed",
+    "/api/embeddings",
+    "/api/show",
+})
+
 _CROSS_ORIGIN = {"Origin": "http://localhost:9999"}
 
 
@@ -74,6 +85,20 @@ def _live_cross_origin_ok(app) -> tuple:
     raise AssertionError("_origin_guard not found in app.user_middleware")
 
 
+def _live_guard_var(app, name: str):
+    """The value of the closure variable *name* of the live ``_origin_guard``."""
+    for mw in app.user_middleware:
+        if mw.cls is not BaseHTTPMiddleware:
+            continue
+        fn = (getattr(mw, "kwargs", None) or {}).get("dispatch")
+        if fn is None or fn.__name__ != "_origin_guard":
+            continue
+        freevars = fn.__code__.co_freevars
+        assert name in freevars
+        return fn.__closure__[freevars.index(name)].cell_contents
+    raise AssertionError("_origin_guard not found in app.user_middleware")
+
+
 def _concrete(path: str) -> str:
     """A request path for a route template: every ``{param}`` becomes ``x``."""
     out = []
@@ -86,6 +111,10 @@ class TestOriginGateExemption:
     def test_live_exempt_tuple_equals_the_reviewed_list(self, app):
         assert _live_cross_origin_ok(app) == _REVIEWED_CROSS_ORIGIN_OK
 
+    def test_live_ollama_exempt_set_equals_the_reviewed_set(self, app):
+        live = _live_guard_var(app, "_OLLAMA_CROSS_ORIGIN_OK")
+        assert set(live) == _REVIEWED_OLLAMA_CROSS_ORIGIN_OK
+
     def test_every_unsafe_kernel_route_refuses_cross_origin_unless_reviewed(self, app):
         """The behavioural half: a route quietly added to _CROSS_ORIGIN_OK stops
         answering 403 here, whatever the tuple test above says."""
@@ -95,7 +124,8 @@ class TestOriginGateExemption:
         offenders = []
         with TestClient(app) as c:
             for method, path in unsafe:
-                if path in _REVIEWED_CROSS_ORIGIN_OK:
+                if (path in _REVIEWED_CROSS_ORIGIN_OK
+                        or path in _REVIEWED_OLLAMA_CROSS_ORIGIN_OK):
                     continue
                 r = c.request(method, _concrete(path), headers=_CROSS_ORIGIN)
                 detail = r.json().get("detail", "") if r.headers.get("content-type", "").startswith("application/json") else r.text

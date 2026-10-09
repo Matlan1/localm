@@ -31,6 +31,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model (and projector) is unpacked into the models folder with a progress bar.
   Moving models out of the Hugging Face cache is refused, since it would break the
   cache; copy them instead.
+- **An Ollama-compatible API on the same server and port.** `/api/chat`, `/api/generate`,
+  `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
+  answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
+  stream as NDJSON, `format: "json"`, `options.stop`, `think` and images work, and the same
+  API keys and scopes apply. Tool calling and a JSON-schema `format` are not supported yet.
+  `/api/copy` makes an alias; pulling, deleting and creating models stay in `localm`. See
+  docs/ollama-api.md.
 - **Release files carry build provenance and a software bill of materials.** The release
   zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
   the release workflow, so `gh attestation verify` proves which workflow built a file and
