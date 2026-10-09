@@ -785,7 +785,7 @@ class VramSizingMixin:
                 DRAFT_COMPUTE_MARGIN_BYTES, DRAFT_CONTEXT_BATCH)
             from localm.inference.backends.llamacpp._split_fit import logits_buffer_bytes
             from localm.model_manager.gguf import (
-                _gguf_split_layout_meta, gguf_kv_bytes_per_token)
+                _gguf_split_layout_meta, gguf_file_bytes, gguf_kv_bytes_per_token)
             raw = getattr(self, "spec_draft_model", None)
             path = Path(raw) if raw else None
             if (path is not None and path.is_file()
@@ -794,7 +794,7 @@ class VramSizingMixin:
                 meta = _gguf_split_layout_meta(path)
                 n_vocab = meta[1] if meta else 0
                 self._draft_kv_per_token_cached = kv_per_token
-                charge = (path.stat().st_size + self.n_ctx * kv_per_token
+                charge = (gguf_file_bytes(path) + self.n_ctx * kv_per_token
                           + logits_buffer_bytes(n_vocab, self.n_ctx,
                                                 max_batch=DRAFT_CONTEXT_BATCH)
                           + DRAFT_COMPUTE_MARGIN_BYTES)
@@ -947,15 +947,8 @@ class VramSizingMixin:
 
     def _model_bytes(self) -> int:
         """Total size of the model on disk (all parts of a split GGUF)."""
-        from localm.model_manager import split_gguf_parts
-        p = Path(self.model_path)
-        parts = split_gguf_parts(p.name)
-        if parts:
-            return sum(
-                (p.parent / part).stat().st_size
-                for part in parts if (p.parent / part).is_file()
-            )
-        return p.stat().st_size if p.is_file() else 0
+        from localm.model_manager.gguf import gguf_file_bytes
+        return gguf_file_bytes(Path(self.model_path))
 
     def _gguf_parsed_tensor_entries(self):
         """This load's own ``_gguf_tensor_offset_entries(model_path)`` result

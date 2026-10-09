@@ -1515,7 +1515,7 @@
   "settings.field.secretClearTitle": "Gespeichertes Secret beim Speichern löschen",
   "settings.field.specDraftModel.help": "Für Spekulative Entwürfe = draft: ein kleineres Modell mit demselben Vokabular, als Name oder GGUF-Pfad. `localm spec-drafts <model>` listet die vorhandenen.",
   "settings.field.specDraftModel.label": "Entwurfsmodell",
-  "settings.field.specDraftTokens.help": "Höchstens so viele Tokens schlägt ein N-Gramm- oder Entwurfsmodell-Schritt vor. Leer nimmt 8 für N-Gramm und 2 für ein Entwurfsmodell; Modelle mit rekurrenten Schichten nehmen höchstens 4.",
+  "settings.field.specDraftTokens.help": "Höchstens so viele Tokens schlägt ein N-Gramm- oder Entwurfsmodell-Schritt vor. Leer nimmt 8; ein Entwurfsmodell wählt kürzere Längen, wenn sich das nach seinen gemessenen Kosten mehr lohnt. Modelle mit rekurrenten Schichten nehmen höchstens 4.",
   "settings.field.specDraftTokens.label": "Entwurfstokens pro Schritt",
   "settings.field.specSource.help": "Woher Entwürfe kommen: mtp (der MTP-Kopf des Modells), ngram (Wiederholungen von früherem Chattext), draft (ein kleineres Modell, Entwurfsmodell) oder off. Erben folgt dem MTP-Schalter. Prüfen: `localm bench-spec <model>`.",
   "settings.field.specSource.label": "Spekulative Entwürfe",

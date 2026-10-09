@@ -463,8 +463,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             gguf_pretokenizer(Path(self.model_path)))
         if refusal is not None:
             raise PretokenizerUnusableModelError(refusal)
-        # Place the draft model before sizing the target, so a draft that does
-        # not fit beside the target runs on the CPU instead of costing it layers.
+        # Place the draft model before the target's GPU layers are sized.
         if (getattr(self, "spec_source", None) == "draft"
                 and not self._decide_draft_placement()):
             from localm.debuglog import logger as _dbg

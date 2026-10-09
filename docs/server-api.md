@@ -146,8 +146,9 @@ For `mtp` the other fields equal `usage.mtp`. For `ngram`, `idle` means
 nothing in the reply matched earlier text, and `unavailable` carries the model
 status as `reason` (`rewind-unsupported` when the model's cache cannot drop a
 rejected draft). `draft` reports the same states; its `unavailable` reasons
-also include `draft-model-missing`, `draft-load-failed`, `draft-vocab-mismatch`
-and `draft-context-refused`, and `stopped` carries `draft-decode-failed:<code>`
+also include `draft-model-missing`, `draft-load-failed`, `draft-vocab-mismatch`,
+`draft-context-refused` and `draft-cannot-pay` (measured too slow to help even
+when every draft is accepted), and `stopped` carries `draft-decode-failed:<code>`
 when a draft decode failed partway through the reply. An `on` reply carries
 `reason` `draft-on-cpu` when the draft model runs on the CPU (the model runs on
 the CPU, or the draft model did not fit in VRAM beside it). The field is `null` when no draft source is on.

@@ -411,7 +411,8 @@ def get_operator_model_info(name: str, *, reg: Optional[dict] = None):
 
     Only for a name the operator typed on the command line (the ``localm`` CLI,
     the ``localm gui <model>`` startup model, the MCP server's own ``--model``
-    default) or the ``coder_reviewer_model`` setting. Every downstream sink then
+    default) or the ``coder_reviewer_model`` or ``spec_draft_model`` setting
+    (both admin only). Every downstream sink then
     runs on that path, including
     create_backend importing an HF directory's own .py when
     ``hf_trust_remote_code`` is on. A name received over HTTP or MCP goes

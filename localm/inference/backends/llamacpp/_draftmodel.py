@@ -158,8 +158,7 @@ def gguf_vocab_view(signature: dict) -> VocabView:
 
 def native_vocab_view(api, model_ptr) -> VocabView:
     """The VocabView of a loaded model, read through the native vocab API.
-    Token text is read through one bound function, since the comparison reads
-    every token."""
+    Token text is read through one function bound once."""
     import ctypes
     vocab = api.llama_model_get_vocab(model_ptr)
     get_text = api._bind("llama_vocab_get_text", ctypes.c_char_p,

@@ -1080,7 +1080,7 @@ class LlamaCpp:
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _source = None               # the DraftSource for this model, created on first use
-    _spec_source_name = SPEC_MTP # the configured draft source: off, mtp or ngram
+    _spec_source_name = SPEC_MTP # the configured draft source: off, mtp, ngram or draft
     _spec_draft_max = 0          # draft tokens per step of an ngram or draft source, else 0
     _clock = time.perf_counter
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)

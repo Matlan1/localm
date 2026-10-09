@@ -23,10 +23,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   smaller model of the same family (`spec_source` `draft`, with the Draft model
   setting): it drafts a few tokens and your model checks them in one pass, so
   ordinary replies can come out faster too, not only ones that repeat earlier
-  text. Replies are the same model's replies. It is off by default; `localm
-  spec-drafts <model>` lists the downloaded models that can draft for yours, and
-  `localm bench-spec <model> --source draft` measures whether it pays on your
-  machine.
+  text. Replies are the same model's replies. It measures the draft and your
+  model on your hardware when it loads and drafts only as many tokens as pay off,
+  so a draft that cannot help is switched off instead of slowing replies down.
+  It is off by default; `localm spec-drafts <model>` lists the downloaded models
+  that can draft for yours, and `localm bench-spec <model> --source draft`
+  measures whether it pays on your machine.
 - **A "Model autoswitch" setting controls when a chat may be answered by a different
   model.** `off` never switches; `image` (the default) switches only for an image
   your model cannot read; `ask` keeps your model and offers the better one on the

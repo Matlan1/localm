@@ -593,9 +593,27 @@ target with every layer on the GPU, split over the same devices as the target
 (the same `main_gpu` and split ratios), and drafts on its own context of the
 main context's size, recreated when the main one grows. Its
 cache follows the main cache lazily: each step keeps the prefix the two share,
-removes the rest, decodes what is new plus the sampled token, then samples up
-to `spec_draft_tokens` drafts greedily (default 2, at most 16), decoding each
-before sampling the next. An end-of-generation draft ends the proposal. A
+removes the rest, decodes what is new plus the sampled token, then samples
+drafts greedily, decoding each before sampling the next.
+
+Once the draft model has loaded, its costs on this machine are measured
+(`LlamaCpp._measure_draft_step_costs`, a few dozen decodes): the target's
+one-token decode, its verification batches of 2, 3, 5, 9 and 17 tokens up to
+`spec_draft_tokens + 1` (others interpolated), the draft model's one-token
+decode and its batched decode per token. A draft model that cannot beat plain
+decoding even when every draft is accepted is freed with status
+`draft-cannot-pay`. Each step then drafts the length k up to `spec_draft_tokens`
+(default 8, at most 16) with the most expected tokens per second,
+`(1 + p + ... + p^k) / (k * draft + verify(k + 1))`, where p is the decayed
+fraction of drafts accepted so far; k 0 (a plain step) wins unless drafting is
+expected to beat it by 5%. The verification cost curve is what makes this model
+aware: a Mixture-of-Experts target, whose verification batch reads more experts
+per extra token, gets shorter drafts than a dense one, and a target whose
+experts sit in system RAM shorter still. A step skips drafting when catching the
+draft cache up (for a CPU draft model after a long prompt) costs more than the
+rest of the reply is expected to save. Without measurements a step drafts at
+most 2 tokens. The figures are in the speculation report (`costs`,
+`acceptance`) and in the debug log. An end-of-generation draft ends the proposal. A
 failed draft decode clears the draft cache and stops drafting for that reply; a
 draft cache that cannot drop a rejected draft turns drafting off for the model.
 The draft model is freed before the target. Its weights, its KV cache at the

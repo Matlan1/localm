@@ -253,8 +253,8 @@ CORE_FIELDS: list = [
                  options=["", "off", "mtp", "ngram", "draft"]),
     SettingField("spec_draft_tokens", Widget.NUMBER, "Draft tokens per step",
                  "Most tokens one n-gram or draft-model step proposes. Blank "
-                 "uses 8 for n-gram and 2 for a draft model; models with "
-                 "recurrent layers use at most 4.",
+                 "uses 8; a draft model picks a shorter length when its measured "
+                 "costs pay better. Models with recurrent layers use at most 4.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
     SettingField("spec_draft_model", Widget.TEXT, "Draft model",
                  "For Speculative drafting = draft: a smaller model with the same "

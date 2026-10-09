@@ -314,10 +314,11 @@ class MtpUsage(BaseModel):
 class SpeculationUsage(BaseModel):
     """Speculative drafting for one reply, for any draft source.
 
-    source is the draft source ("mtp" or "ngram"). state and the counts mean
-    what they mean in MtpUsage; for ngram, "unavailable" carries the model
-    status as reason (e.g. "rewind-unsupported") and "idle" means nothing in
-    the reply matched earlier text.
+    source is the draft source ("mtp", "ngram" or "draft"). state and the
+    counts mean what they mean in MtpUsage; for ngram and draft, "unavailable"
+    carries the model status as reason (e.g. "rewind-unsupported",
+    "draft-cannot-pay"), "on" carries "draft-on-cpu" for a draft model on the
+    CPU, and for ngram "idle" means nothing in the reply matched earlier text.
     """
     source: str
     state: str

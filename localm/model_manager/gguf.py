@@ -1512,6 +1512,20 @@ _VOCAB_SIGNATURE_KEYS = {
 }
 
 
+def gguf_file_bytes(path: Path) -> int:
+    """Bytes of the GGUF at *path* on disk, every part of a split GGUF summed;
+    0 when no part exists. Never raises."""
+    try:
+        path = Path(path)
+        parts = split_gguf_parts(path.name)
+        if parts:
+            return sum((path.parent / part).stat().st_size
+                       for part in parts if (path.parent / part).is_file())
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+
+
 def gguf_vocab_signature(path: Path) -> Optional[dict]:
     """The vocabulary a GGUF declares, from its metadata, without loading it:
     ``{"model", "tokens", "add_bos", "add_eos", "bos", "eos"}`` where

@@ -571,7 +571,7 @@ def spec_drafts(model):
     from ..inference.backends.llamacpp._draftmodel import (
         draft_vocab_mismatch, gguf_vocab_view)
     from localm.model_manager import load_registry
-    from ..model_manager.gguf import gguf_vocab_signature
+    from ..model_manager.gguf import gguf_file_bytes, gguf_vocab_signature
 
     info = get_operator_model_info(model)
     if info is None:
@@ -584,7 +584,7 @@ def spec_drafts(model):
                       "can read.[/red]")
         sys.exit(1)
     target = gguf_vocab_view(target_sig)
-    target_size = target_path.stat().st_size
+    target_size = gguf_file_bytes(target_path) or 1
     fits = []
     for name, entry in sorted(load_registry().items()):
         path = Path(str(entry.get("path") or "")) if isinstance(entry, dict) else None
@@ -595,7 +595,7 @@ def spec_drafts(model):
         sig = gguf_vocab_signature(path)
         if sig is None or draft_vocab_mismatch(target, gguf_vocab_view(sig)) is not None:
             continue
-        fits.append((path.stat().st_size, name))
+        fits.append((gguf_file_bytes(path), name))
     if not fits:
         console.print(f"No downloaded model shares {escape(model)}'s vocabulary. "
                       "A smaller model of the same family usually does.")

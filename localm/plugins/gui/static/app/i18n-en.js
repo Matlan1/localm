@@ -1406,7 +1406,7 @@ export const I18N_EN = {
   "settings.field.specSource.label": "Speculative drafting",
   "settings.field.specSource.help": "Where drafts come from: mtp (the model's MTP head), ngram (repeats of earlier text), draft (a smaller model, Draft model) or off. Inherit follows the MTP toggle. Check: `localm bench-spec <model>`.",
   "settings.field.specDraftTokens.label": "Draft tokens per step",
-  "settings.field.specDraftTokens.help": "Most tokens one n-gram or draft-model step proposes. Blank uses 8 for n-gram and 2 for a draft model; models with recurrent layers use at most 4.",
+  "settings.field.specDraftTokens.help": "Most tokens one n-gram or draft-model step proposes. Blank uses 8; a draft model picks a shorter length when its measured costs pay better. Models with recurrent layers use at most 4.",
   "settings.field.specDraftModel.label": "Draft model",
   "settings.field.specDraftModel.help": "For Speculative drafting = draft: a smaller model with the same vocabulary, by name or GGUF path. `localm spec-drafts <model>` lists the ones you have.",
   "settings.field.vramOverheadMb.label": "Reserved VRAM overhead (MB)",

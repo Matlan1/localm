@@ -1045,6 +1045,22 @@ def test_the_engine_reports_the_draft_placement():
     assert eng.draft_model_on_gpu() is None
 
 
+def test_a_split_draft_model_is_charged_for_every_part(tmp_path):
+    from localm.inference.backends.gguf import GgufBackend
+    from localm.model_manager.gguf import gguf_file_bytes
+    first = tmp_path / "d-00001-of-00002.gguf"
+    first.write_bytes(b"x" * 1000)
+    (tmp_path / "d-00002-of-00002.gguf").write_bytes(b"x" * 3000)
+    assert gguf_file_bytes(first) == 4000
+    assert gguf_file_bytes(tmp_path / "gone.gguf") == 0
+    b = GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
+                    spec_draft_model=str(first), n_ctx=16)
+    with patch("localm.model_manager.gguf.gguf_kv_bytes_per_token", return_value=0), \
+         patch("localm.model_manager.gguf._gguf_split_layout_meta", return_value=None), \
+         patch.object(GgufBackend, "_draft_model_rejected_by_metadata", return_value=False):
+        assert b._draft_model_charge_bytes() == 4000 + DRAFT_COMPUTE_MARGIN_BYTES
+
+
 def test_the_draft_model_charge_covers_the_measured_buffers():
     """Qwen2.5-0.5B-Instruct Q8_0 as a draft at n_ctx 4096 on ROCm: llama.cpp
     reported 500.84 MiB of weights on the GPU, a 48.00 MiB KV buffer and a

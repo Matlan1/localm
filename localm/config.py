@@ -555,7 +555,8 @@ DEFAULT_CONFIG: dict = {
     # measures it.
     "spec_source": None,
     # Draft tokens one ngram or draft step may propose (1-16). None uses the
-    # source's default (ngram 8, draft 2); a model with recurrent layers is
+    # default (8; a draft model picks shorter lengths from its measured step
+    # costs); a model with recurrent layers is
     # capped at 4.
     "spec_draft_tokens": None,
     # The draft model for spec_source "draft": a registered model name or a

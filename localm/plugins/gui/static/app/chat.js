@@ -1764,9 +1764,10 @@ export function mtpUsageText(mtp) {
   return { text: "", title: "" };
 }
 
-// The n-gram drafting part of the usage line for a reply's usage.speculation,
-// as {text, title}, in the same states as mtpUsageText. Empty when the source
-// is mtp (usage.mtp already covers it), for no figures, or for an idle turn.
+// The n-gram or draft-model drafting part of the usage line for a reply's
+// usage.speculation, as {text, title}, in the same states as mtpUsageText. Empty
+// when the source is mtp (usage.mtp already covers it), for no figures, or for
+// an idle turn.
 const SPECULATION_USAGE_KEYS = {
   ngram: {
     on: "chat.usage.ngramOn", onTitle: "chat.usage.ngramOn.title",
