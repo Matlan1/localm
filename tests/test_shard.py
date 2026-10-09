@@ -213,3 +213,23 @@ def test_the_committed_durations_for_each_ci_platform_are_well_formed(platform):
 
 def test_the_default_durations_file_is_named_for_the_running_platform():
     assert _shard.default_durations_path().name == f"shard_durations_{sys.platform}.json"
+
+
+def test_the_digest_ignores_repeats_and_order():
+    assert _shard.digest(["b", "a", "a"]) == _shard.digest(["a", "b"])
+    assert _shard.digest(["a"]) != _shard.digest(["a", "b"])
+
+
+def test_verify_cli_can_require_each_shards_coverage_file(suite, tmp_path):
+    ids = tmp_path / "ids"
+    ids.mkdir()
+    for i in (1, 2):
+        _shard_ids(suite, i, 2)
+        (suite / f"ids-{i}.json").replace(ids / f"ids-{i}.json")
+        (ids / f"status-{i}.txt").write_text("success\n", encoding="utf-8")
+    argv = ["verify", str(ids), "--count", "2", "--coverage-files"]
+    assert _shard.main(argv) == 1
+    (ids / "coverage-1.dat").write_bytes(b"x")
+    assert _shard.main(argv) == 1
+    (ids / "coverage-2.dat").write_bytes(b"x")
+    assert _shard.main(argv) == 0

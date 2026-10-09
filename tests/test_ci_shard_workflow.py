@@ -38,7 +38,7 @@ def test_the_shard_count_is_written_the_same_everywhere():
     shard, gather = jobs["test-shard"], jobs["test"]
     assert shard["name"].endswith(f"shard ${{{{ matrix.shard }}}}/{count})")
     assert f"--shard ${{{{ matrix.shard }}}}/{count}" in _norm(_step(shard, "Tests")["run"])
-    assert f"--count {count}" in _step(gather, "exactly one shard")["run"]
+    assert f"--count {count} --coverage-files" in _step(gather, "exactly one shard")["run"]
 
 
 def test_every_shard_runs_xdist_auto():
@@ -88,6 +88,7 @@ def test_shard_results_are_uploaded_and_downloaded_under_matching_names():
     assert download["with"]["merge-multiple"] is True
     assert upload["with"]["path"].rstrip("/") == download["with"]["path"]
     assert upload["if"] == "always()"
+    assert upload["with"]["overwrite"] is True, "re-running one failed shard must replace its artifact"
 
 
 def test_each_shard_writes_the_coverage_file_the_combine_step_reads():

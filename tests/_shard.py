@@ -87,7 +87,7 @@ def assign(node_ids: Iterable[str], default: float, durations: dict[str, float],
 
 
 def digest(node_ids: Iterable[str]) -> str:
-    return hashlib.sha256("\n".join(sorted(node_ids)).encode("utf-8")).hexdigest()
+    return hashlib.sha256("\n".join(sorted(set(node_ids))).encode("utf-8")).hexdigest()
 
 
 def verify_partition(parts: list[dict], count: int) -> list[str]:
@@ -197,6 +197,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     verify = sub.add_parser("verify", help="check the shards partition the selection")
     verify.add_argument("directory", type=Path)
     verify.add_argument("--count", type=int, required=True)
+    verify.add_argument("--coverage-files", action="store_true",
+                        help="also require one coverage-N.dat per shard")
     merge = sub.add_parser("merge", help="fold measured durations into a durations file")
     merge.add_argument("directories", type=Path, nargs="+")
     merge.add_argument("--out", type=Path, required=True)
@@ -207,6 +209,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         statuses = {int(p.stem.removeprefix("status-")): p.read_text(encoding="utf-8").strip()
                     for p in args.directory.glob("status-*.txt")}
         problems += verify_statuses(statuses, args.count)
+        if args.coverage_files:
+            problems += [f"shard {i} uploaded no coverage-{i}.dat"
+                         for i in range(1, args.count + 1)
+                         if not (args.directory / f"coverage-{i}.dat").is_file()]
         for problem in problems:
             print(f"::error::{problem}")
         if problems:

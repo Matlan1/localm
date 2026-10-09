@@ -227,6 +227,7 @@ jobs:
           name: shard-${{ matrix.os }}-${{ matrix.shard }}
           path: shard-out/
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
   test:
@@ -296,7 +297,7 @@ jobs:
       # success, their selections are identical, no test ran in two shards and
       # their union is the whole selection.
       - name: Every test ran in exactly one shard
-        run: python -m tests._shard verify shard-out --count 5
+        run: python -m tests._shard verify shard-out --count 5 --coverage-files
 
       # TEST-1: the coverage ratchet. pyproject.toml [tool.coverage.report]
       # sets fail_under=78, and `coverage report` reads it, so this step fails
@@ -346,6 +347,7 @@ jobs:
           name: shard-durations-${{ matrix.os }}
           path: shard-out/merged-durations.json
           if-no-files-found: ignore
+          overwrite: true
           retention-days: 30
 
   # Separate jobs rather than steps in `test`: a killed job skips every later

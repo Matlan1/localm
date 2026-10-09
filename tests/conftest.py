@@ -462,15 +462,17 @@ def pytest_runtest_teardown(item, nextitem):
     ``monkeypatch.setenv`` is already undone. Every later test on the same
     worker inherits a leaked value: a subprocess it spawns, or a tempfile
     call, then uses a directory that may no longer exist."""
-    result = yield
-    leaked = {name: os.environ.get(name) for name in _TEMP_ENV_NAMES
-              if os.environ.get(name) != _temp_env_at_start.get(name)}
-    for name in leaked:
-        original = _temp_env_at_start.get(name)
-        if original is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = original
+    try:
+        result = yield
+    finally:
+        leaked = {name: os.environ.get(name) for name in _TEMP_ENV_NAMES
+                  if os.environ.get(name) != _temp_env_at_start.get(name)}
+        for name in leaked:
+            original = _temp_env_at_start.get(name)
+            if original is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = original
     if leaked:
         pytest.fail("this test left the process environment changed (scope it with "
                     "monkeypatch.setenv): "
