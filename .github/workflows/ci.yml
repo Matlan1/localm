@@ -915,7 +915,10 @@ jobs:
   # label named; every other PR merges without the matrix. A skipped
   # required job never passes.
   merge-policy:
-    name: merge-policy
+    # Skipped runs keep the unevaluated expression as their check name, so only a
+    # pull_request run reports a check called merge-policy. See
+    # test_the_merge_policy_check_name_exists_only_on_pull_request_runs.
+    name: ${{ github.event_name == 'pull_request' && 'merge-policy' || 'merge-policy (pull_request runs only)' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [python-pr-gate, lint, gui-tests, test, mutation-scope, mutation-test]
