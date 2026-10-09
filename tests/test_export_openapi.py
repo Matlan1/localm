@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -170,3 +171,12 @@ def _load_hooks_marker() -> str:
     source = (SCRIPTS / "mkdocs_hooks.py").read_text(encoding="utf-8")
     line = next(ln for ln in source.splitlines() if ln.startswith("MARKER = "))
     return line.split("=", 1)[1].strip().strip('"')
+
+
+def test_the_docs_extra_pins_mkdocs_below_its_next_major():
+    extras = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["optional-dependencies"]["docs"]
+    mkdocs = [r for r in extras if r.startswith("mkdocs>=")]
+    material = [r for r in extras if r.startswith("mkdocs-material>=")]
+    assert len(mkdocs) == 1 and mkdocs[0].endswith(",<2")
+    assert len(material) == 1 and material[0].endswith(",<10")
