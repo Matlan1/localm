@@ -114,7 +114,7 @@ test("ticking the box PATCHes rag_rerank and repaints from the server", async ()
 test("a chat retrieval whose rerank was skipped toasts the reason once", async () => {
   const state = { current: { enabled: true, installed: [], model: null,
                              candidates: 20, note: null } };
-  const { window } = setup(state, { retrievalNote: "reranking failed (RuntimeError); using the unreranked order" });
+  const { window, calls } = setup(state, { retrievalNote: "reranking failed (RuntimeError); using the unreranked order" });
   runScript(window, `
     document.getElementById("p-kb").innerHTML = '<option value="kb" selected>kb</option>';
     document.getElementById("p-kb").value = "kb";
@@ -125,7 +125,12 @@ test("a chat retrieval whose rerank was skipped toasts the reason once", async (
   const toast = window.document.getElementById("toast");
   assert.match(toast.textContent, /Knowledge results were not reranked: reranking failed/);
   toast.textContent = "";
-  runScript(window, `retrieveKnowledge(globalThis.__conv, "and y?");`);
+  runScript(window, `
+    document.getElementById("p-kb").innerHTML = '<option value="kb" selected>kb</option>';
+    document.getElementById("p-kb").value = "kb";
+    retrieveKnowledge(globalThis.__conv, "and y?");
+  `);
   await tick(); await tick(); await tick();
+  assert.equal(calls.filter((c) => c.url.includes("/query")).length, 2, "both questions were retrieved");
   assert.equal(toast.textContent, "", "the same reason is not toasted twice in a row");
 });
