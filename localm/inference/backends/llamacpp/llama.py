@@ -1570,13 +1570,16 @@ class LlamaCpp:
         and UnsupportedModelRoleError for a diffusion model whose vocabulary
         declares no mask token."""
         from localm.model_manager.gguf import gguf_is_diffusion_architecture
+        model = self._model_ptr
+        if model is None:
+            return
         arch = None
         if api.has_model_meta_api():
-            arch = api.llama_model_meta_val_str(self._model_ptr, "general.architecture")
+            arch = api.llama_model_meta_val_str(model, "general.architecture")
         if not isinstance(arch, str):
             arch = None
         self.architecture = arch
-        self.is_diffusion = (api.llama_model_is_diffusion(self._model_ptr) is True
+        self.is_diffusion = (api.llama_model_is_diffusion(model) is True
                              or gguf_is_diffusion_architecture(arch))
         if not self.is_diffusion:
             return
@@ -1585,7 +1588,7 @@ class LlamaCpp:
                 f"This model ('{arch}') is a diffusion language model and this llama "
                 "runtime does not export the calls needed to run one. Update the "
                 "runtime with: localm setup-llama")
-        vocab = api.llama_model_get_vocab(self._model_ptr)
+        vocab = api.llama_model_get_vocab(model)
         self._diffusion_mask = api.llama_vocab_mask(vocab)
         if self._diffusion_mask == _diffusion.LLAMA_TOKEN_NULL:
             from localm.inference.backends.base import UnsupportedModelRoleError
@@ -1594,15 +1597,18 @@ class LlamaCpp:
                 "so it cannot be run.")
         shift = None
         if api.has_model_meta_api():
-            shift = api.llama_model_meta_val_str(self._model_ptr, "diffusion.shift_logits")
+            shift = api.llama_model_meta_val_str(model, "diffusion.shift_logits")
         self._diffusion_shift_logits = True if shift is None else shift == "true"
 
     def _read_diffusion_capacity(self) -> int:
         """The most tokens (prompt plus reply canvas) one diffusion decode may
         hold: the context's micro-batch, bounded by the trained context."""
-        capacity = int(api.llama_n_ubatch(self._ctx_ptr))
+        ctx, model = self._ctx_ptr, self._model_ptr
+        if ctx is None or model is None:
+            return 0
+        capacity = int(api.llama_n_ubatch(ctx))
         try:
-            trained = int(api.llama_model_n_ctx_train(self._model_ptr))
+            trained = int(api.llama_model_n_ctx_train(model))
         except Exception:
             trained = 0
         return min(capacity, trained) if trained > 0 else capacity
@@ -2300,12 +2306,13 @@ class LlamaCpp:
             _t0 = time.monotonic()
             try:
                 with self._gen_lock:
-                    if self._stop.is_set() or self._ctx_ptr is None:
+                    tokenizer = self._tokenizer
+                    if self._stop.is_set() or self._ctx_ptr is None or tokenizer is None:
                         self.last_finish_reason = "error"
                         return
                     native = _diffusion.NativeCanvas(
-                        api, self._ctx_ptr, self._tokenizer._vocab,
-                        api.llama_vocab_n_tokens(self._tokenizer._vocab),
+                        api, self._ctx_ptr, tokenizer._vocab,
+                        api.llama_vocab_n_tokens(tokenizer._vocab),
                         params, _guard)
                 with _ctx():
                     canvas = _diffusion.denoise(native, prompt_tokens, params, _on_step)
@@ -2321,7 +2328,7 @@ class LlamaCpp:
                 self.last_finish_reason = "error" if self._stop.is_set() else "stop"
                 return
             reply, ended = _diffusion.reply_tokens(
-                canvas, n_input, params.mask_token_id, self._tokenizer.is_eog)
+                canvas, n_input, params.mask_token_id, tokenizer.is_eog)
             if max_new_tokens > 0 and len(reply) > max_new_tokens:
                 reply = reply[:max_new_tokens]
                 ended = False

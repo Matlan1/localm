@@ -15,6 +15,7 @@ abort only ever kills this process, never the server."""
 
 from __future__ import annotations
 
+import threading
 from typing import Callable, List, Optional
 
 from ._sizing import VramSizingMixin
@@ -99,7 +100,7 @@ class GgufWorker(VramSizingMixin):
         self.diffusion_max_tokens = diffusion_max_tokens
         # Set by the runner: a threading.Event that asks the current generation
         # to stop. Polled between denoising steps of a diffusion model.
-        self.stream_cancel = None
+        self.stream_cancel: Optional[threading.Event] = None
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False

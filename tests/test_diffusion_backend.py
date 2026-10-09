@@ -597,10 +597,10 @@ class TestWindowAndReplyReserve:
                    return_value=True):
             assert b.reply_reserve is None
 
-    def test_pre_load_ceiling_is_the_base_window_with_no_auto_line(self, tmp_path, capsys):
+    def test_pre_load_ceiling_is_left_to_the_worker_with_no_auto_line(self, tmp_path, capsys):
         b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "llada")), n_ctx=4096,
                         ctx_auto=True)
-        assert b._effective_ctx_max() == 4096
+        assert b._effective_ctx_max() is None
         assert "ctx auto" not in capsys.readouterr().out
 
 

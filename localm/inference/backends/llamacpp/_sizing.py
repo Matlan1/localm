@@ -1380,11 +1380,9 @@ class VramSizingMixin:
                   - embedder_ctx_reservation_bytes()
                   - self._mtp_draft_context_vram_bytes()
                   - self._recurrent_state_vram_bytes())
-        if budget <= 0:
-            return max(self.n_ctx, self._AUTO_CTX_MIN)
         per_token = self._kv_bytes_per_token()
-        if per_token <= 0:
-            return int(max(self.n_ctx, self._AUTO_CTX_MIN))
+        if budget <= 0 or per_token <= 0:
+            return max(self.n_ctx, self._AUTO_CTX_MIN)
         auto = budget // per_token
         auto = (auto // 1024) * 1024
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
@@ -1400,9 +1398,10 @@ class VramSizingMixin:
         use the full VRAM-derived budget. When ctx_auto is off, n_ctx_max is used
         verbatim (0/None already mean unlimited downstream). ``split_budget`` is
         passed to :meth:`_auto_ctx_max`. A model that keeps no KV cache (a
-        diffusion model, whose window is fixed at load) gets ``n_ctx``."""
+        diffusion model) gets None: its fixed window is reported by the worker
+        at load."""
         if self._keeps_no_kv_cache():
-            return self.n_ctx
+            return None
         if self.ctx_auto:
             unlimited = (self.n_ctx_max == 0)
             auto = self._auto_ctx_max(capped=not unlimited, split_budget=split_budget)

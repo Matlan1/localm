@@ -28,7 +28,7 @@ import math
 import operator
 import struct
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, Sequence
+from typing import Callable, Optional, Protocol, Sequence, cast
 
 ALGORITHM_ORIGIN = 0
 ALGORITHM_ENTROPY = 1
@@ -220,11 +220,13 @@ class Native(Protocol):
     def decode(self, tokens: Sequence[int]) -> int:
         """Run the model over the whole canvas; 0 on success, the native code
         otherwise."""
+        ...
 
     def sample(self, row: int, algorithm: int, greedy: bool) -> tuple[int, float]:
         """Sample a token from logit row *row* of the last decode and return it
         with its confidence under *algorithm* (any value for RANDOM and
         ORIGIN, which do not use it)."""
+        ...
 
 
 StepCallback = Callable[[int, int, list[int]], bool]
@@ -466,8 +468,11 @@ class NativeCanvas:
         self._logits = 0
 
     def decode(self, tokens: Sequence[int]) -> int:
+        batch = self._batch
+        if batch is None:
+            raise RuntimeError("the diffusion canvas is closed")
         with self._guard():
-            ctypes.memmove(self._batch.token, self._tokens_t(*tokens), self._token_bytes)
+            ctypes.memmove(batch.token, self._tokens_t(*tokens), self._token_bytes)
             code = self._api.llama_encode(self._ctx, self._batch)
             if code == 0:
                 ptr = self._api.llama_get_logits(self._ctx)
@@ -517,9 +522,9 @@ class NativeCanvas:
 def _probs(data, size: int) -> list[float]:
     """The ``p`` of the first *size* candidates at *data*, in order."""
     from ._structs import LlamaTokenData
-    address = ctypes.cast(data, ctypes.c_void_p).value
+    address = ctypes.cast(data, ctypes.c_void_p).value or 0
     view = (LlamaTokenData * size).from_address(address)
-    return memoryview(view).cast("B").cast("f")[2::3].tolist()
+    return cast("list[float]", memoryview(view).cast("B").cast("f")[2::3].tolist())
 
 
 _ENTROPY_EPS = f32(1e-10)
