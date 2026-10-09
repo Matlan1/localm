@@ -1474,16 +1474,8 @@ class LlamaCpp:
                 self.mtp_status = f"error:{type(exc).__name__}"
         from localm.debuglog import logger as _mtp_log
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
-        if self._spec_source_name == SPEC_DRAFT:
-            self._load_draft_model(spec_draft_model, n_threads, verbose,
-                                   on_gpu=spec_draft_gpu)
         if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
-            source = self._draft_source()
-            if source.usable and not self._cache_can_drop_a_speculative_token():
-                source.usable = False
-                source.status = "rewind-unsupported"
-            _mtp_log.info("%s: status=%s draft_max=%d", source.label,
-                          source.status, self._spec_draft_max)
+            self._set_up_spec_source(spec_draft_model, n_threads, verbose, spec_draft_gpu)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
 
@@ -2743,6 +2735,26 @@ class LlamaCpp:
                          else DRAFT_MODEL_DRAFT_TOKENS_DEFAULT))
         if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
+
+    def _set_up_spec_source(self, spec_draft_model: Optional[str],
+                            n_threads: Optional[int], verbose: bool,
+                            spec_draft_gpu: bool) -> None:
+        """Create the ngram or draft source for the loaded model. The main
+        cache is probed first; when it cannot drop a rejected draft the source
+        is created unusable with status "rewind-unsupported" and no draft
+        model is loaded. Otherwise the draft source loads its draft model
+        (``_load_draft_model``)."""
+        from localm.debuglog import logger
+        can_drop = self._cache_can_drop_a_speculative_token()
+        if self._spec_source_name == SPEC_DRAFT and can_drop:
+            self._load_draft_model(spec_draft_model, n_threads, verbose,
+                                   on_gpu=spec_draft_gpu)
+        source = self._draft_source()
+        if source.usable and not can_drop:
+            source.usable = False
+            source.status = "rewind-unsupported"
+        logger.info("%s: status=%s draft_max=%d", source.label,
+                    source.status, self._spec_draft_max)
 
     def _load_draft_model(self, path: Optional[str], n_threads: Optional[int],
                           verbose: bool, on_gpu: bool = True) -> None:

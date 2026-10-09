@@ -436,6 +436,26 @@ def test_each_draft_load_outcome_is_reported_and_frees_what_it_loaded(tmp_path, 
         assert src._ctx_capacity == llm._ctx_capacity
 
 
+@pytest.mark.parametrize("source,can_drop,loads,status", [
+    ("draft", True, True, "ok"), ("draft", False, False, "rewind-unsupported"),
+    ("ngram", True, False, "ok"), ("ngram", False, False, "rewind-unsupported")])
+def test_the_main_cache_is_probed_before_a_draft_model_is_loaded(source, can_drop, loads, status):
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
+    llm._spec_source_name = source
+    llm._spec_draft_max = 2
+    order = []
+    llm._cache_can_drop_a_speculative_token = lambda: order.append("probe") or can_drop
+    llm._load_draft_model = lambda *a, **kw: order.append(("load", kw.get("on_gpu")))
+
+    llm._set_up_spec_source("d.gguf", None, False, False)
+
+    assert order == (["probe", ("load", False)] if loads else ["probe"])
+    src = llm._source
+    assert src.name == source and src.status == status and src.usable is (status == "ok")
+    if source == "draft" and not can_drop:
+        assert src._model is None and src._ctx is None
+
+
 def test_a_cancelled_draft_load_frees_the_target_and_raises(tmp_path):
     import threading
 
