@@ -176,7 +176,7 @@ def coder_engine(engines: EngineCache, decision):
     return engine, decision.current, decision
 
 
-def build(engines: EngineCache) -> Dict[str, dict]:
+def build(engines: EngineCache) -> dict[str, dict]:
     """``generate_image`` and ``run_coder_task``. The coder agent runs on an
     engine from *engines*, pinned for the length of the run."""
     def generate_image(args: dict) -> dict:

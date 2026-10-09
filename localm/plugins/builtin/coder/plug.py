@@ -394,7 +394,7 @@ def _tool_capability_note(model_name: str, pinned: bool = True) -> str:
         return ""
 
 
-def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
+def _resolve_backend(req: CreateSessionRequest, *, self_url: str,
                      model_name: str, restricted: bool, session_mode: str,
                      model_pinned: bool = True):
     """Build this session's LLM backend and describe it honestly.

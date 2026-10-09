@@ -39,7 +39,7 @@ def _child_identity_env() -> dict:
     return env
 
 
-def build() -> Dict[str, dict]:
+def build() -> dict[str, dict]:
     """``server_activity``, ``system_stats`` and ``run_doctor``."""
     def server_activity(args: dict) -> dict:
         """What any running localm server of this install is doing.

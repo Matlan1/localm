@@ -81,7 +81,7 @@ def _make_plugin_tool_fn(raw_fn, reg_name: str):
     return _fn
 
 
-def register_plugin_tools() -> Tuple[List[str], List[str]]:
+def register_plugin_tools() -> tuple[list[str], list[str]]:
     """Discover installed plugins and register their exported tools.
 
     Returns ``(registered_names, warnings)``. Never raises - a broken plugin
@@ -91,8 +91,8 @@ def register_plugin_tools() -> Tuple[List[str], List[str]]:
         PluginError, discover_plugins, import_plugin_module,
     )
 
-    registered: List[str] = []
-    warnings: List[str] = []
+    registered: list[str] = []
+    warnings: list[str] = []
 
     try:
         manifests = discover_plugins()

@@ -76,11 +76,11 @@ def answer_with(engines: EngineCache, decision, run):
     Another instance's copy that stops answering is dropped for this server's
     own. Returns ``(result, decision)``, the decision rewritten to name the
     model that answered."""
-    names: List[str] = []
+    names: list[str] = []
     if decision.routed:
         names = list(decision.candidates or (decision.resolved,))
     names.append(decision.current)
-    errors: List[str] = []
+    errors: list[str] = []
     for name in names:
         try:
             # A load prints native sizing diagnostics straight to stdout, the
@@ -111,7 +111,7 @@ def answer_with(engines: EngineCache, decision, run):
     raise RuntimeError("no model could answer: " + "; ".join(errors))
 
 
-def build(engines: EngineCache) -> Dict[str, dict]:
+def build(engines: EngineCache) -> dict[str, dict]:
     """``chat`` and ``embed``, both served from *engines*."""
     def chat(args: dict) -> dict:
         prompt = args.get("prompt", "")

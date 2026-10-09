@@ -48,7 +48,7 @@ _INIT_TIMEOUT = 15      # seconds for initialize + tools/list
 _CALL_TIMEOUT = 120     # seconds for a tool call
 
 # Live servers by spec key, shared by every registration in this process.
-_POOL: Dict[tuple, "MCPServer"] = {}
+_POOL: dict[tuple, MCPServer] = {}
 _POOL_LOCK = threading.Lock()
 
 
@@ -59,17 +59,17 @@ class MCPError(Exception):
 class MCPServer:
     """One running MCP server process and its JSON-RPC session."""
 
-    def __init__(self, name: str, command: str, args: Optional[List[str]] = None,
-                 env: Optional[Dict[str, str]] = None, trusted: bool = False) -> None:
+    def __init__(self, name: str, command: str, args: Optional[list[str]] = None,
+                 env: Optional[dict[str, str]] = None, trusted: bool = False) -> None:
         self.name = name
         self.command = command
         self.args = args or []
         self.env = env
         self.trusted = trusted
-        self.tools: List[dict] = []
+        self.tools: list[dict] = []
         self._proc: Optional[subprocess.Popen] = None
         self._stderr: Optional[StderrTail] = None
-        self._responses: "queue.Queue[dict]" = queue.Queue()
+        self._responses: queue.Queue[dict] = queue.Queue()
         self._next_id = 0
         self._lock = threading.Lock()
 
@@ -322,7 +322,7 @@ def stop_pooled_servers() -> None:
             pass
 
 
-def load_mcp_config(cwd: Path) -> Dict[str, dict]:
+def load_mcp_config(cwd: Path) -> dict[str, dict]:
     """Read the [mcp.servers.*] tables from the nearest project config."""
     from .project_config import find_project_config
     path = find_project_config(cwd)
@@ -344,15 +344,15 @@ def load_mcp_config(cwd: Path) -> Dict[str, dict]:
     return out
 
 
-def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
+def register_mcp_tools(cwd: Path) -> tuple[list[str], list[str]]:
     """
     Start every configured MCP server and register its tools.
 
     Returns (registered_tool_names, warnings). A failing server produces a
     warning, never an exception - MCP problems must not break the agent.
     """
-    registered: List[str] = []
-    warnings: List[str] = []
+    registered: list[str] = []
+    warnings: list[str] = []
 
     for name, spec in load_mcp_config(cwd).items():
         try:

@@ -135,7 +135,7 @@ class Job:
         }
 
     @classmethod
-    def from_record(cls, data: dict) -> "Job":
+    def from_record(cls, data: dict) -> Job:
         """Rebuild a job from a persisted row, or raise ValueError on a row this
         build cannot make sense of.
 
@@ -724,7 +724,7 @@ class _ActivityStore:
 # Every live JobManager in this process, reachable at module scope. A WeakSet, so
 # a manager built by a test (or by an app that is torn down) is not kept alive
 # here.
-_MANAGERS: "weakref.WeakSet" = weakref.WeakSet()
+_MANAGERS: weakref.WeakSet = weakref.WeakSet()
 
 def _live_store_paths() -> set:
     """The record-file paths owned by managers that are ALIVE in this process,
@@ -877,7 +877,7 @@ class JobManager:
 
     _TTL_S = 3600
 
-    def __init__(self, *, store: Optional["_ActivityStore"] = None,
+    def __init__(self, *, store: Optional[_ActivityStore] = None,
                  reconcile: bool = True) -> None:
         self._jobs: dict[str, Job] = {}
         # An RLock: persisting happens while holding it, and the persist path is

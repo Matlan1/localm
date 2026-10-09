@@ -56,7 +56,7 @@ class PluginManifest:
     description: str
     entry: str                    # "<module>:<attr>"
     path: Path                    # plugin directory
-    tool_exports: List[str] = field(default_factory=list)
+    tool_exports: list[str] = field(default_factory=list)
 
     @property
     def entry_module(self) -> str:
@@ -80,7 +80,7 @@ _RESERVED_NAMES = {
 
 
 def parse_manifest(plugin_dir: Path, *,
-                   warnings: Optional[List[str]] = None) -> PluginManifest:
+                   warnings: Optional[list[str]] = None) -> PluginManifest:
     """Parse and validate ``plugin.toml`` in *plugin_dir*. When *warnings* is
     given, non-fatal manifest problems (unknown/misspelled [plugin] keys) are
     appended to it as human-readable strings - surfaced, never escalated: a
@@ -137,7 +137,7 @@ def parse_manifest(plugin_dir: Path, *,
 #  Discovery and loading                                               #
 # ------------------------------------------------------------------ #
 
-def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
+def discover_plugins(root: Optional[Path] = None) -> list[PluginManifest]:
     """
     Scan the plugins directory and return manifests for every valid legacy
     (``entry =``) plugin - this is how ``plugin_tools.register_plugin_tools()``
@@ -150,13 +150,13 @@ def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
     return manifests
 
 
-def discover_errors(root: Optional[Path] = None) -> List[str]:
+def discover_errors(root: Optional[Path] = None) -> list[str]:
     """Return human-readable errors for plugins that failed validation."""
     _, errors, _ = _scan(root)
     return errors
 
 
-def discover_warnings(root: Optional[Path] = None) -> List[str]:
+def discover_warnings(root: Optional[Path] = None) -> list[str]:
     """Non-fatal manifest warnings (unknown/misspelled keys) for plugins that
     still parse and load, so a typo does not degrade silently."""
     _, _, warns = _scan(root)
@@ -180,11 +180,11 @@ def _is_engine_plugin(plugin_dir: Path) -> bool:
     return bool(plugin.get("register")) and not plugin.get("entry")
 
 
-def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str], List[str]]:
+def _scan(root: Optional[Path]) -> tuple[list[PluginManifest], list[str], list[str]]:
     root = root or plugins_dir()
-    manifests: List[PluginManifest] = []
-    errors: List[str] = []
-    warns: List[str] = []
+    manifests: list[PluginManifest] = []
+    errors: list[str] = []
+    warns: list[str] = []
     if not root.is_dir():
         return manifests, errors, warns
     for child in sorted(root.iterdir()):

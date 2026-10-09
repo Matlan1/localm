@@ -283,7 +283,7 @@ class _PersistenceMixin:
                 continue
         return notes
 
-    def _git_status_map(self) -> "dict[str, str] | None":
+    def _git_status_map(self) -> dict[str, str] | None:
         """Map of dirty path -> 2-char ``git status --porcelain`` code in cwd, or
         None when cwd is not a git work tree or git is unavailable. Best-effort
         helper for episodic change detection - never raises. The code lets the
@@ -309,7 +309,7 @@ class _PersistenceMixin:
                 out[p] = code
         return out
 
-    def _git_status_paths(self) -> "frozenset[str] | None":
+    def _git_status_paths(self) -> frozenset[str] | None:
         """The set of dirty (changed/untracked) paths at cwd, or None when cwd is
         not a git work tree. The pre-shell baseline for episodic change detection."""
         m = self._git_status_map()
@@ -350,7 +350,7 @@ class _PersistenceMixin:
                 pass          # unreadable/binary new file: skip its snapshot
         return "\n".join(p for p in parts if p)
 
-    def _detect_shell_changes(self) -> "tuple[list[dict], str]":
+    def _detect_shell_changes(self) -> tuple[list[dict], str]:
         """Best-effort detection of files changed via run_shell (git apply, a
         formatter, codegen) that the write-tool tracker never recorded.
 
