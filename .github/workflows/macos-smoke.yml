@@ -1,0 +1,120 @@
+name: macOS smoke
+
+# Installs localm on an Apple Silicon runner the way setup.sh does for a user,
+# then checks the pieces a Mac user meets first: `localm doctor`, the backend
+# auto-pick (Metal), a server that starts with no model and answers
+# /v1/models, and a small platform-neutral test selection.
+#
+# Not a required check: it is not in the merge-policy job's needs. It joins
+# that list only after it has been green on several consecutive scheduled runs
+# on master (see .github/workflows/ci.yml, job merge-policy).
+on:
+  pull_request:
+    paths:
+      - "localm/hwdetect*"
+      - "localm/setup_llama/**"
+      - "localm/inference/backends/**"
+      - "setup.sh"
+      - ".github/workflows/macos-smoke.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "11 4 * * *"
+
+concurrency:
+  group: macos-smoke-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  macos-smoke:
+    name: macOS smoke (Apple Silicon, install + doctor + Metal pick + serve)
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      SMOKE_PORT: "8651"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - name: Confirm the runner is Apple Silicon
+        run: |
+          uname -sm
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+
+      - name: Install with setup.sh (system bash, default answers)
+        run: /bin/bash setup.sh --yes
+
+      - name: Dev tools for the test selection
+        run: ./.uv/uv pip install -p .venv -e ".[dev,rag]"
+
+      - name: The auto-pick lands on Metal
+        run: |
+          pick="$(.venv/bin/python -m localm.hwdetect)"
+          echo "hwdetect: $pick"
+          test "$pick" = "apple metal"
+          marker="$(cat runtime/localm_llama_runtime/lib/.localm-backend)"
+          echo "provisioned backend marker: $marker"
+          test "${marker%% *}" = "metal"
+
+      - name: localm doctor
+        run: |
+          .venv/bin/localm doctor 2>&1 | tee doctor.log
+          if grep -q "CPU mode only" doctor.log; then
+            echo "::error::doctor reports CPU mode only on Apple Silicon"
+            exit 1
+          fi
+
+      - name: Server starts with no model and answers /v1/models
+        run: |
+          .venv/bin/localm serve --no-model --isolated --port "$SMOKE_PORT" > serve.log 2>&1 &
+          echo "$!" > serve.pid
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 5 "http://127.0.0.1:${SMOKE_PORT}/v1/models" -o models.json; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat serve.pid)" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != 1 ]; then
+            echo "::error::the server did not answer /v1/models"
+            cat serve.log
+            exit 1
+          fi
+          cat models.json
+          .venv/bin/python -c "import json; d = json.load(open('models.json')); assert d['object'] == 'list' and isinstance(d['data'], list), d"
+
+      - name: Stop the server this job started
+        if: always()
+        run: |
+          if [ -f serve.pid ]; then
+            kill "$(cat serve.pid)" 2>/dev/null || true
+          fi
+
+      - name: Platform-neutral tests
+        run: >-
+          .venv/bin/python -m pytest
+          tests/test_hwdetect.py
+          tests/test_hwdetect_recommended_is_legacy.py
+          tests/test_setup_llama_backend_marker.py
+          tests/test_setup_llama_backends.py
+          -m "not integration" -q -rs
+
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: macos-smoke-logs
+          path: |
+            doctor.log
+            serve.log
+            models.json
+          if-no-files-found: ignore
+          retention-days: 14
