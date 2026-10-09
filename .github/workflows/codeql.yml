@@ -49,7 +49,7 @@ jobs:
         # no compiler or toolchain setup is required. `actions` scans the workflow
         # files themselves for script injection, which is worth keeping on a
         # public repo where workflows run against forks.
-        language: [actions, javascript-typescript, python]
+        language: [actions, javascript-typescript, python, go]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
