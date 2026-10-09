@@ -41,6 +41,7 @@ request extras:
 |---|---|
 | `top_k`, `repeat_penalty` | extra sampling controls |
 | `seed` | reproducible generation |
+| `stop` | A string or a list of up to 16 strings (each up to 1024 characters). The reply is cut before the first match, the generation ends there, and `finish_reason` is `stop`. A stop sequence inside a model's `<think>` block is not applied. Also accepted by `POST /v1/completions`. |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
 | `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks to answer without reasoning. Only `enable_thinking` is applied and must be a boolean (otherwise 422); other keys are accepted and ignored. A model without a `<think>` convention is unaffected. |
 

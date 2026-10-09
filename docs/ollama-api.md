@@ -67,7 +67,7 @@ defaults to true, as in Ollama); send `"stream": false` for one JSON document.
 | `images` | Base64 images, on a message or on `/api/generate`. Needs a vision model. |
 | `options.temperature`, `top_p`, `top_k`, `repeat_penalty`, `seed` | Passed to the sampler. |
 | `options.num_predict` | A cap of 1 or more sets the maximum number of new tokens; -1 and -2 mean no cap. |
-| `options.stop` | A string or a list. The reply is cut at the first match and the generation is cancelled (a request with `stop` is answered through the streaming path even with `"stream": false`); `done_reason` is `stop`. A reply cut this way is not written to the audit log or transcript. |
+| `options.stop` | A string or a list. Sent as the request's `stop` (see [server-api.md](server-api.md)): the reply is cut before the first match, the generation ends there and `done_reason` is `stop`. |
 | `format` | `"json"` constrains the reply to a JSON object. A JSON schema is refused with a 400. |
 | `think` | `true` (or a level string) returns the model's reasoning in `message.thinking` (`thinking` on generate); `false` turns reasoning off. |
 | `keep_alive` | On a request with no messages or prompt: `0` unloads the model, anything else loads it (a model served by another instance is left to that instance). Unloading needs `models:write`; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |

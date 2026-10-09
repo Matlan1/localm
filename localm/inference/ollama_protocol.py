@@ -2,8 +2,7 @@
 """The Ollama wire format on top of localm's OpenAI-shaped chat path.
 
 Pure translation, no I/O: request models, option and message mapping, the
-NDJSON / JSON response builders, the SSE-to-NDJSON stream translator and the
-stop-sequence filter. ``routes/ollama.py`` owns the routes, auth and the calls
+NDJSON / JSON response builders and the SSE-to-NDJSON stream translator. ``routes/ollama.py`` owns the routes, auth and the calls
 into the engine."""
 
 from __future__ import annotations
@@ -150,7 +149,7 @@ def options_to_fields(options: Optional[dict[str, Any]]
     """Map Ollama ``options`` onto ChatRequest fields.
 
     Returns ``(fields, stop, ignored)``: *fields* are the OpenAI-shaped request
-    fields, *stop* the stop sequences (enforced by :class:`StopFilter`), and
+    fields, *stop* the stop sequences (sent as the request's ``stop``), and
     *ignored* the option names that have no localm equivalent. ``num_predict``
     maps to ``max_tokens`` only when it is 1 or more (-1 and -2 mean "no cap" and
     "fill the context" in Ollama, which an omitted cap already is)."""
@@ -281,7 +280,6 @@ class Plan:
     translation needs."""
     body: dict[str, Any]
     stream: bool
-    stop: list[str] = field(default_factory=list)
     want_thinking: bool = False
     ignored_options: list[str] = field(default_factory=list)
 
@@ -294,9 +292,11 @@ def _common_fields(req: _Base, resolved_model: str) -> tuple[dict[str, Any], Pla
     enable_thinking = thinking_requested(req.think)
     if enable_thinking is not None:
         fields["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    if stop:
+        fields["stop"] = stop
     stream = True if req.stream is None else bool(req.stream)
     body = {"model": resolved_model, "stream": stream, **fields}
-    return body, Plan(body=body, stream=stream, stop=stop,
+    return body, Plan(body=body, stream=stream,
                       want_thinking=bool(enable_thinking),
                       ignored_options=ignored)
 
@@ -335,59 +335,6 @@ def plan_generate(req: OllamaGenerateRequest, resolved_model: str) -> Plan:
         role="user", content=req.prompt or "", images=req.images)))
     body["messages"] = messages
     return plan
-
-
-# ------------------------------------------------------------------ #
-#  Stop sequences                                                      #
-# ------------------------------------------------------------------ #
-
-class StopFilter:
-    """Cuts a text stream at the first stop sequence.
-
-    ``feed`` returns the text that is safe to emit: everything before a stop
-    sequence, and everything except a tail that could still become one.
-    ``hit`` turns true once a stop sequence has been seen; nothing is emitted
-    after that. ``flush`` releases the held tail when the stream ends without
-    a hit."""
-
-    def __init__(self, stops: Iterable[str]) -> None:
-        self._stops = [s for s in stops if s]
-        self._buf = ""
-        self.hit = False
-
-    def feed(self, text: str) -> str:
-        if self.hit:
-            return ""
-        if not self._stops:
-            return text
-        self._buf += text
-        cut = min((i for i in (self._buf.find(s) for s in self._stops) if i >= 0),
-                  default=-1)
-        if cut >= 0:
-            out, self._buf, self.hit = self._buf[:cut], "", True
-            return out
-        hold = 0
-        for s in self._stops:
-            for k in range(min(len(s) - 1, len(self._buf)), 0, -1):
-                if self._buf.endswith(s[:k]):
-                    hold = max(hold, k)
-                    break
-        out = self._buf[:len(self._buf) - hold]
-        self._buf = self._buf[len(self._buf) - hold:]
-        return out
-
-    def flush(self) -> str:
-        out, self._buf = ("", "") if self.hit else (self._buf, "")
-        return out
-
-
-def apply_stop(text: str, stops: Iterable[str]) -> tuple[str, bool]:
-    """*text* cut at the first stop sequence, and whether one was found."""
-    flt = StopFilter(stops)
-    out = flt.feed(text)
-    if flt.hit:
-        return out, True
-    return out + flt.flush(), False
 
 
 # ------------------------------------------------------------------ #
@@ -443,9 +390,7 @@ def usage_stats(usage: Optional[dict[str, Any]], total_ns: int) -> dict[str, int
     return out
 
 
-def done_reason(finish_reason: Optional[str], stop_hit: bool = False) -> str:
-    if stop_hit:
-        return "stop"
+def done_reason(finish_reason: Optional[str]) -> str:
     return "length" if finish_reason == "length" else "stop"
 
 
@@ -488,8 +433,7 @@ def encode_line(obj: dict[str, Any]) -> bytes:
 
 
 def completion_to_reply(kind: str, data: dict[str, Any], model: str, *,
-                        want_thinking: bool, stop: list[str],
-                        total_ns: int) -> dict[str, Any]:
+                        want_thinking: bool, total_ns: int) -> dict[str, Any]:
     """A non-streaming OpenAI chat completion as an Ollama reply.
 
     Raises a 500 :class:`OllamaError` when the generation failed (the chat path
@@ -501,11 +445,10 @@ def completion_to_reply(kind: str, data: dict[str, Any], model: str, *,
     finish = choice.get("finish_reason")
     if finish == "error":
         raise OllamaError(500, text.strip() or "generation failed")
-    text, stopped = apply_stop(text, stop)
     thinking = (message.get("reasoning_content") or "") if want_thinking else ""
     return reply_object(
         kind, model, content=text, thinking=thinking, done=True,
-        reason=done_reason(finish, stopped),
+        reason=done_reason(finish),
         stats=usage_stats(data.get("usage"), total_ns))
 
 
@@ -555,15 +498,13 @@ _ERROR_TEXT_PREFIX = "[inference error"
 
 
 async def ndjson_stream(events: AsyncIterator[dict[str, Any]], *, kind: str,
-                        model: str, want_thinking: bool, stop: list[str],
+                        model: str, want_thinking: bool,
                         started: float) -> AsyncIterator[bytes]:
     """Translate OpenAI chat-completion chunks into Ollama NDJSON lines.
 
     Status chunks and the role chunk produce nothing. Reasoning deltas become
-    ``thinking`` lines when *want_thinking*. A stop-sequence hit ends the
-    reply (``done_reason: "stop"``) and closes *events*, which cancels the
-    generation. A failed generation ends with one ``{"error": ...}`` line."""
-    flt = StopFilter(stop)
+    ``thinking`` lines when *want_thinking*. A failed generation ends with one
+    ``{"error": ...}`` line."""
     finish: Optional[str] = None
     usage: Optional[dict[str, Any]] = None
     failure: Optional[str] = None
@@ -585,18 +526,12 @@ async def ndjson_stream(events: AsyncIterator[dict[str, Any]], *, kind: str,
             text = delta.get("content")
             if text:
                 if held is not None:
-                    out = flt.feed(held)
+                    yield encode_line(reply_object(kind, model, content=held))
                     held = None
-                    if out:
-                        yield encode_line(reply_object(kind, model, content=out))
                 if text.lstrip().startswith(_ERROR_TEXT_PREFIX):
                     held = text
                 else:
-                    out = flt.feed(text)
-                    if out:
-                        yield encode_line(reply_object(kind, model, content=out))
-                    if flt.hit:
-                        break
+                    yield encode_line(reply_object(kind, model, content=text))
             reason = choice.get("finish_reason")
             if reason:
                 finish = reason
@@ -609,46 +544,11 @@ async def ndjson_stream(events: AsyncIterator[dict[str, Any]], *, kind: str,
         yield encode_line({"error": failure or (held or "").strip() or "generation failed"})
         return
     if held is not None:
-        released = flt.feed(held)
-        if released:
-            yield encode_line(reply_object(kind, model, content=released))
-    tail = flt.flush()
-    if tail:
-        yield encode_line(reply_object(kind, model, content=tail))
+        yield encode_line(reply_object(kind, model, content=held))
     total_ns = int((time.perf_counter() - started) * 1_000_000_000)
     yield encode_line(reply_object(
-        kind, model, done=True, reason=done_reason(finish, flt.hit),
-        stats=usage_stats(None if flt.hit else usage, total_ns)))
-
-
-async def collect_reply(lines: AsyncIterator[bytes], kind: str) -> dict[str, Any]:
-    """Merge the NDJSON lines of one reply into the single object a
-    non-streaming request answers with. Raises a 500 :class:`OllamaError` when
-    the stream carries an error line, and a 502 when it ends without ``done``."""
-    content: list[str] = []
-    thinking: list[str] = []
-    final: Optional[dict[str, Any]] = None
-    async for raw in lines:
-        obj = json.loads(raw)
-        if "error" in obj:
-            raise OllamaError(500, str(obj["error"]))
-        part = obj.get("message", {}) if kind == "chat" else obj
-        content.append(part.get("content" if kind == "chat" else "response") or "")
-        thinking.append(part.get("thinking") or "")
-        if obj.get("done"):
-            final = obj
-    if final is None:
-        raise OllamaError(502, "the model route ended without a final reply")
-    text, reasoning = "".join(content), "".join(thinking)
-    if kind == "chat":
-        final["message"]["content"] = text
-        if reasoning:
-            final["message"]["thinking"] = reasoning
-    else:
-        final["response"] = text
-        if reasoning:
-            final["thinking"] = reasoning
-    return final
+        kind, model, done=True, reason=done_reason(finish),
+        stats=usage_stats(usage, total_ns)))
 
 
 # ------------------------------------------------------------------ #

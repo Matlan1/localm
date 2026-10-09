@@ -12,6 +12,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **`stop` sequences on `/v1/chat/completions` and `/v1/completions`.** A string or a list
+  of up to 16: the reply is cut before the first match, the generation ends there instead of
+  running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
+  reasoning model's `<think>` block is not applied. The Ollama API's `options.stop` uses it.
 - **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
   and the GUI add and pull routes name the format and the nearest runnable alternative for
   GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
