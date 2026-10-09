@@ -340,8 +340,15 @@ jobs:
         run: ruff check .
 
       # Fails on a type error absent from .github/basedpyright-baseline.json.
+      # basedpyright rewrites the baseline when errors were fixed; the diff
+      # check fails when that shrink was not committed.
       - name: Type check (basedpyright, baseline ratchet)
-        run: basedpyright
+        run: |
+          basedpyright
+          git diff --exit-code -- .github/basedpyright-baseline.json || {
+            echo "::error::The baseline lists type errors that no longer occur. Run basedpyright and commit .github/basedpyright-baseline.json."
+            exit 1
+          }
 
       # Static analysis of the workflow files themselves. --offline keeps it
       # free of network and of any token. It exits non-zero rather than
