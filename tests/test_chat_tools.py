@@ -435,3 +435,12 @@ def test_a_stop_prefix_before_a_call_does_not_end_the_generation_early(home):
     r = served.chat(tools=[WEATHER], stop=["STOP"])
     assert r.json()["choices"][0]["finish_reason"] == "tool_calls"
     assert served.produced == len(reply)
+
+
+def test_the_early_end_detector_never_joins_text_across_a_call():
+    from localm.inference.http_server import _StopDetector
+    detector = _StopDetector(["STOP"], {"get_weather"}, {})
+    tokens = pieces("go ST" + call() + "OP end")
+    assert not any(detector.feed(token) for token in tokens)
+    ends = _StopDetector(["STOP"], {"get_weather"}, {})
+    assert any(ends.feed(token) for token in pieces("go STOP" + call()))
