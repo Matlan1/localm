@@ -1031,6 +1031,7 @@ DEFAULT_CONFIG: dict = {
     # Loopback binds never advertise.
     "mdns_name": "localm",      # the .local name; sanitized to a DNS label on use
     "mdns_enabled": True,       # advertise the name over mDNS on network binds
+    "metrics_enabled": False,   # serve Prometheus GET /metrics (admin key; restart to apply)
     # Speech-to-text (GUI mic button; needs the [voice] extra).
     # Model sizes: tiny / base / small / medium - bigger = better + slower.
     "voice_stt_model": "base",

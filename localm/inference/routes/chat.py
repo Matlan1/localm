@@ -767,6 +767,7 @@ def register(app: FastAPI, ctx) -> None:
             completion_tokens = await loop.run_in_executor(
                 None, count_tokens_or_estimate, engine.count_tokens, text,
                 "the generated text")
+            _hs._record_generation_metrics(prompt_tokens, completion_tokens, None, None)
             ts  = int(time.time())
             cid = make_chunk_id()
             return {
