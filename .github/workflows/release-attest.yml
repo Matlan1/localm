@@ -1,0 +1,185 @@
+name: Release attestations and SBOM
+
+# On a published release: build the sdist and wheel from the tag, generate a
+# CycloneDX SBOM from uv.lock, attest the release zip, sdist, wheel and SBOM with
+# actions/attest-build-provenance, and attach the sdist, wheel and SBOM to the
+# release. Verification is documented in SECURITY.md.
+#
+# This workflow is independent of publish-pypi.yml. PyPI files carry their own
+# PEP 740 attestations from that workflow; the files attested here are the ones
+# attached to the GitHub release.
+#
+# workflow_dispatch with dry_run (the default) and a pull request that edits this
+# file build and validate everything and write nothing: no attestation, no
+# release upload. A pull request run builds the checked-out tree and looks for
+# the zip on the release matching VERSION, warning when there is none.
+#
+# Invariant: the `attest` job is the only one with id-token or attestations
+# write, and the only one that writes to the release.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build from (e.g. v0.3.0)"
+        type: string
+        required: true
+      dry_run:
+        description: "Build and validate only; no attestation, no release upload"
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - ".github/workflows/release-attest.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-attest-${{ inputs.tag || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build sdist, wheel and SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      EVENT: ${{ github.event_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.sha }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.12.23"
+
+      - name: Refuse a tag that disagrees with VERSION
+        run: |
+          set -euo pipefail
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "${EVENT}" = "pull_request" ]; then
+            TAG="v${file_version}"
+            echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          fi
+          echo "tag=${TAG}  VERSION=${file_version}"
+          if [ "${TAG}" != "v${file_version}" ]; then
+            echo "::error::tag ${TAG} does not match VERSION ${file_version} (expected v${file_version})"
+            exit 1
+          fi
+          echo "VERSION=${file_version}" >> "$GITHUB_ENV"
+
+      - name: Build sdist and wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build
+          python -m build --outdir out/
+          test -f "out/localm-${VERSION}.tar.gz"
+          test -f "out/localm-${VERSION}-py3-none-any.whl"
+
+      - name: Generate the CycloneDX SBOM from uv.lock
+        run: |
+          set -euo pipefail
+          uv export --frozen --no-dev --all-extras --no-extra dev --no-emit-project \
+            --format cyclonedx1.5 --output-file "out/localm-${VERSION}-sbom.cdx.json"
+
+      - name: Check the SBOM describes this release
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          version = os.environ["VERSION"]
+          path = f"out/localm-{version}-sbom.cdx.json"
+          doc = json.load(open(path, encoding="utf-8"))
+          errors = []
+          if doc.get("bomFormat") != "CycloneDX":
+              errors.append(f"bomFormat is {doc.get('bomFormat')!r}")
+          if doc.get("specVersion") != "1.5":
+              errors.append(f"specVersion is {doc.get('specVersion')!r}")
+          root = doc.get("metadata", {}).get("component", {})
+          if (root.get("name"), root.get("version")) != ("localm", version):
+              errors.append(f"root component is {root.get('name')}@{root.get('version')}")
+          components = doc.get("components", [])
+          if len(components) < 20:
+              errors.append(f"only {len(components)} components")
+          if any(not c.get("purl", "").startswith("pkg:pypi/") for c in components):
+              errors.append("a component has no pkg:pypi purl")
+          names = {c["name"] for c in components}
+          for expected in ("fastapi", "uvicorn", "httpx"):
+              if expected not in names:
+                  errors.append(f"missing runtime dependency {expected}")
+          for dev_only in ("pytest", "ruff", "zizmor"):
+              if dev_only in names:
+                  errors.append(f"dev-only package {dev_only} is in the SBOM")
+          if errors:
+              print("SBOM check failed:", *errors, sep="\n  ")
+              sys.exit(1)
+          print(f"SBOM OK: {len(components)} components")
+          PY
+
+      - name: Fetch the release zip
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern "localm-*.zip" --dir out/; then
+            ls -l out/*.zip
+          else
+            echo "::warning::release ${TAG} has no localm-*.zip asset at this time; no zip attestation. Re-run this workflow with that tag once the zip is attached."
+          fi
+
+      - name: List the files to attest
+        run: |
+          set -euo pipefail
+          ls -l out/
+          (cd out && sha256sum *) | tee "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-files
+          path: out/
+          if-no-files-found: error
+
+  attest:
+    name: attest and attach
+    needs: build
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-files
+          path: out/
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: |
+            out/*.zip
+            out/*.tar.gz
+            out/*.whl
+            out/*.cdx.json
+
+      - name: Attach the sdist, wheel and SBOM to the release
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            out/*.tar.gz out/*.whl out/*.cdx.json
