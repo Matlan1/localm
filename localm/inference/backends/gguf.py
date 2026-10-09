@@ -137,6 +137,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
         use_mmap: str = "auto",
         adapters: Optional[list] = None,
     ) -> None:
@@ -165,7 +166,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.spec_source = resolve_spec_source(spec_source, mtp_enabled)
         self.mtp_enabled = self.spec_source == SPEC_MTP
         self.mtp_draft_tokens = mtp_draft_tokens   # None = the native default
-        self.spec_draft_tokens = spec_draft_tokens  # None = the n-gram default
+        self.spec_draft_tokens = spec_draft_tokens  # None = the source's default
+        self.spec_draft_model = spec_draft_model    # draft GGUF path for the draft source
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
@@ -417,13 +419,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         (``reason`` names why), "unavailable" when the model cannot speculate
         (``reason`` is the model status, e.g. "rewind-unsupported"), "paused" when drafting was measured slower than
         one-token decoding for at least as many steps as it ran, "on" when it
-        speculated, "off" when this reply could not draft (``reason`` "image"),
-        and "idle" when nothing matched. ``drafted``, ``accepted`` and
-        ``paused_steps`` count as in ``last_mtp_usage``.
+        speculated (``reason`` "draft-on-cpu" when the draft model runs on the
+        CPU), "off" when this reply could not draft (``reason`` "image"),
+        and "idle" when it drafted nothing (``reason`` "not-paying" when the
+        measured step costs held drafting back on at least one step, else
+        None). ``drafted``, ``accepted`` and ``paused_steps`` count as in
+        ``last_mtp_usage``.
         """
         source = getattr(self, "spec_source",
                          "mtp" if getattr(self, "mtp_enabled", False) else "off")
-        if not self.loaded or source not in ("mtp", "ngram"):
+        if not self.loaded or source not in ("mtp", "ngram", "draft"):
             return None
         if source == "mtp":
             usage = self.last_mtp_usage
@@ -441,12 +446,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         elif paused and paused >= steps:
             state, reason = "paused", "slower-than-plain"
         elif rep.get("active"):
-            state, reason = "on", None
+            state, reason = "on", ("draft-on-cpu" if status == "ok-cpu" else None)
         elif rep.get("skipped"):
             state, reason = "off", str(rep.get("skipped"))
         else:
-            state, reason = "idle", None
-        return {"source": "ngram", "state": state,
+            state = "idle"
+            reason = "not-paying" if _count(rep.get("held_steps")) else None
+        return {"source": source, "state": state,
                 "drafted": _count(rep.get("drafted")),
                 "accepted": _count(rep.get("accepted")),
                 "paused_steps": paused, "reason": reason}
@@ -515,6 +521,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             gguf_pretokenizer(Path(self.model_path)))
         if refusal is not None:
             raise PretokenizerUnusableModelError(refusal)
+        # Place the draft model before the target's GPU layers are sized.
+        if (getattr(self, "spec_source", None) == "draft"
+                and not self._decide_draft_placement()):
+            from localm.debuglog import logger as _dbg
+            if self.n_gpu_layers <= 0:
+                _dbg.info("draft model %s runs on the CPU with %s",
+                          Path(str(self.spec_draft_model)).name, Path(self.model_path).name)
+            else:
+                _dbg.warning("draft model %s does not fit in VRAM beside %s; it runs "
+                             "on the CPU", Path(str(self.spec_draft_model)).name,
+                             Path(self.model_path).name)
         # Resolve the effective GPU-layer count once, so _check_vram and
         # _load_native both read the same value.
         self.effective_gpu_layers = self._effective_gpu_layers()
@@ -708,6 +725,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         source = getattr(self, "spec_source", None)
         if source is not None and source != ("mtp" if self.mtp_enabled else "off"):
             params["spec_source"] = source
+        if source == "draft":
+            params["spec_draft_model"] = getattr(self, "spec_draft_model", None)
+            params["spec_draft_gpu"] = bool(getattr(self, "draft_model_on_gpu", True))
         if getattr(self, "spec_draft_tokens", None) is not None:
             params["spec_draft_tokens"] = int(self.spec_draft_tokens)
         if main_gpu is not None:

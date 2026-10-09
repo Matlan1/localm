@@ -140,17 +140,27 @@ draft tokens sent to verification and kept; `paused_steps` counts the steps
 generated without drafting because drafting was slower. The field is `null`
 when `mtp_enabled` is off.
 
-With any draft source on (`spec_source` `mtp` or `ngram`), chat completions
+With any draft source on (`spec_source` `mtp`, `ngram` or `draft`), chat
+completions
 also carry `usage.speculation`, the same object plus the source:
 
 ```json
 {"speculation": {"source": "ngram", "state": "on", "drafted": 96, "accepted": 71, "paused_steps": 0, "reason": null}}
 ```
 
-For `mtp` the other fields equal `usage.mtp`. For `ngram`, `idle` means
-nothing in the reply matched earlier text, and `unavailable` carries the model
-status as `reason` (`rewind-unsupported` when the model's cache cannot drop a
-rejected draft). The field is `null` when no draft source is on.
+For `mtp` the other fields equal `usage.mtp`. For `ngram`, `idle` means the
+reply drafted nothing, with `reason` `not-paying` when the measured step costs
+held drafting back (otherwise nothing in the reply matched earlier text), and
+`unavailable` carries the model status as `reason` (`rewind-unsupported` when
+the model's cache cannot drop a rejected draft, `ngram-cannot-pay` when drafts
+accepted 90% of the time were measured not to beat one-token decoding by 5%).
+`draft` reports the same states; its `unavailable` reasons also include
+`draft-model-missing`, `draft-unsupported-role` (the file is not a causal chat
+model), `draft-load-failed`, `draft-vocab-mismatch`, `draft-context-refused` and
+`draft-cannot-pay` (measured too slow to help at an 85% acceptance), and `stopped` carries `draft-decode-failed:<code>`
+when a draft decode failed partway through the reply. An `on` reply carries
+`reason` `draft-on-cpu` when the draft model runs on the CPU (the model runs on
+the CPU, or the draft model did not fit in VRAM beside it). The field is `null` when no draft source is on.
 
 #### Tool calling
 

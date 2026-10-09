@@ -109,7 +109,7 @@ def _llama(draft_max=8):
     llm._can_reuse_kv = lambda needed: True
     llm._spec_source_name = "ngram"
     llm._mtp_enabled = False
-    llm._ngram_draft_max = draft_max
+    llm._spec_draft_max = draft_max
     llm._source = NgramSource(llm, draft_max=draft_max)
     return llm
 
@@ -368,7 +368,7 @@ def test_the_first_context_keeps_a_snapshot_per_draft_token(probe, expected_cap)
         if probe == "raises":
             api.llama_model_is_recurrent.side_effect = OSError("probe")
         llm._apply_initial_spec_params(cp, None)
-    assert llm._ngram_draft_max == expected_cap
+    assert llm._spec_draft_max == expected_cap
     assert cp.n_rs_seq == expected_cap
 
 
@@ -419,6 +419,26 @@ def test_ngram_output_survives_mid_generation_context_growth(draft_max):
     assert index == llm._cached_tokens[:len(index)]
 
 
+def test_a_step_that_grew_the_context_is_not_timed_for_the_source():
+    llm = _llama(8)
+    llm._source.costs = _row_costs(0.1)
+    llm._ctx_capacity = len(REPEATING) + 12
+    llm._n_ctx = llm._ctx_capacity
+    llm._n_ctx_grow = 256
+    fake = _GrowingFake(llm, capacity=llm._ctx_capacity)
+    seen = []
+    record = llm._source.on_step_seconds
+    llm._source.on_step_seconds = lambda k, s: (seen.append((k, s)), record(k, s))
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=40, prompt=REPEATING)
+
+    assert fake.grown >= 1
+    assert tokens == _reference(REPEATING, 40)
+    assert any(k is None and s > 5.0 for k, s in seen)
+    assert all(s < 2.0 for k, s in seen if k == 0)
+    assert llm._source.step_cost(0) < 1.5
+
+
 def test_ngram_drafting_that_costs_more_than_it_saves_is_paused():
     llm = _llama(8)
     fake = FakeNative(llm, main_cost=1.0, row_cost=1.5)
@@ -440,6 +460,54 @@ def test_cheap_ngram_drafting_keeps_going():
     assert llm._draft_pacer.pauses == 0
     assert llm._source.paused_steps == 0
     assert llm._source.steps > 5
+
+
+def _row_costs(row):
+    """Measured costs of FakeNative(main_cost=1.0, row_cost=row)."""
+    from localm.inference.backends.llamacpp._stepcosts import StepCosts
+    return StepCosts(target=1.0, verify={n: 1.0 + row * (n - 1) for n in (2, 3, 5, 9)})
+
+
+def _timed_run(prompt, n, row, costs):
+    from localm.inference.backends.llamacpp._drafting import DraftSource
+    llm = _llama(8)
+    if costs == "off":
+        llm._source = DraftSource()
+    else:
+        llm._source.costs = costs
+    fake = FakeNative(llm, main_cost=1.0, row_cost=row)
+    tokens, _ = _generate(llm, fake, max_new_tokens=n, prompt=prompt)
+    assert tokens == _reference(prompt, n)
+    return llm, fake.now
+
+
+@pytest.mark.parametrize("prompt", [REPEATING, DIVERGING, FRESH],
+                         ids=["repeating", "diverging", "fresh"])
+@pytest.mark.parametrize("row", [0.05, 0.6, 1.5])
+def test_measured_ngram_output_matches_the_target_alone(prompt, row):
+    llm, _ = _timed_run(prompt, 40, row, _row_costs(row))
+    assert llm._source.costs is not None
+
+
+@pytest.mark.parametrize("prompt", [REPEATING * 3, DIVERGING * 3, FRESH],
+                         ids=["repeating", "diverging", "fresh"])
+def test_measured_ngram_never_drafts_where_verifying_costs_more_than_it_yields(prompt):
+    plain_llm, plain = _timed_run(prompt, 120, 1.5, "off")
+    blind, blind_s = _timed_run(prompt, 120, 1.5, None)
+    measured, measured_s = _timed_run(prompt, 120, 1.5, _row_costs(1.5))
+    assert blind._source.drafted > 0 and blind_s > plain
+    assert measured._source.drafted == 0
+    assert measured_s == pytest.approx(plain)
+    assert set(measured._source._observed) == {0}
+
+
+def test_measured_ngram_keeps_drafting_where_verifying_is_cheap():
+    _, plain = _timed_run(REPEATING * 3, 120, 0.05, "off")
+    llm, measured = _timed_run(REPEATING * 3, 120, 0.05, _row_costs(0.05))
+    src = llm._source
+    assert src.accepted > 90
+    assert measured < 0.4 * plain
+    assert 0 in src._observed and max(src._observed) == 8
 
 
 def test_a_diverging_follow_up_reindexes_only_what_changed():

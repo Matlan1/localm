@@ -109,10 +109,12 @@ Loads the model twice per round, once with Multi-Token Prediction off and once o
 ```bash
 localm bench-spec mymodel                    # n-gram drafting vs none
 localm bench-spec mymodel --source mtp       # MTP vs none
+localm bench-spec mymodel --source draft --draft-model small   # a draft model vs none
 localm bench-spec mymodel --draft-tokens 4   # draft tokens per step for the "on" runs
+localm spec-drafts mymodel                   # downloaded models that can draft for mymodel
 ```
 
-Same comparison for any draft source (`--source ngram`, the default, or `mtp`), over the MTP prompts plus a rewrite that repeats its input, and it also reports whether a greedy reply matched. Takes the same `--gen-tokens`, `--rounds`, `--ctx` and `--gpu-layers` options. Nothing is written to your config.
+Same comparison for any draft source (`--source ngram`, the default, `mtp`, or `draft` with `--draft-model`, which defaults to the `spec_draft_model` setting), over the MTP prompts plus a rewrite that repeats its input, and it also reports whether a greedy reply matched. For `ngram` and `draft` it prints the step costs measured at load and the step times seen per draft length. Takes the same `--gen-tokens`, `--rounds`, `--ctx` and `--gpu-layers` options. Nothing is written to your config. `spec-drafts` reads each downloaded GGUF's metadata, loads nothing, and lists the causal chat models that share the model's vocabulary, smallest first.
 
 ---
 

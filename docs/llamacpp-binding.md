@@ -555,7 +555,7 @@ drafting partway: `draft-decode-failed:*`, `draft-decode-error:*`,
 `GgufBackend.last_mtp_usage` turns these into the `usage.mtp` object of the
 chat API (see server-api.md), which the GUI shows next to the reply's tok/s.
 
-### Draft sources and n-gram (prompt lookup) speculative decoding
+### Draft sources: n-gram (prompt lookup) and draft-model speculative decoding
 
 The decode loop in `LlamaCpp._generate` speculates through a `DraftSource`
 (`_drafting.py`): `begin_call`, then per step `drafting` / `ready` / `budget` /
@@ -566,7 +566,8 @@ matching prefix kept, the rest removed from the cache, and the first mismatch
 carried to the next step as the token to emit. Output is the target model's,
 whatever the source proposes.
 
-`spec_source` chooses the source: `off`, `mtp` (the MTP head above) or `ngram`.
+`spec_source` chooses the source: `off`, `mtp` (the MTP head above), `ngram` or
+`draft`.
 Unset, it follows `mtp_enabled` (true is `mtp`, false is `off`); an explicit value
 wins. One source is active per loaded model.
 
@@ -577,16 +578,96 @@ that token, finds its most recent earlier occurrence, and proposes what followed
 it, up to `spec_draft_tokens` (default 8, at most 16). An end-of-generation token
 is never proposed. The index follows the cache: it keeps the prefix a follow-up
 turn shares with the previous one and indexes only what is new. A step with no
-match decodes one token and is timed by the pacer as a plain step, so a reply
-that never repeats itself costs a dictionary lookup per token. It pays on text
-that repeats earlier text: rewriting a file, quoting a passage, repeated
-tool-call JSON.
+match decodes one token as a plain step, so a reply that never repeats itself
+costs a dictionary lookup per token. It pays on text that repeats earlier text:
+rewriting a file, quoting a passage, repeated tool-call JSON. At load its step
+costs are measured as for a draft model (below, without the draft figures), and
+each step proposes at most the length that pays at the current acceptance, so
+on a target whose verification batches are dear, such as a Mixture-of-Experts
+model, it holds back unless its drafts are being accepted. A target on which
+drafts accepted 90% of the time would not beat one-token decoding by 5% turns
+it off with status `ngram-cannot-pay`. When the costs cannot be measured it
+proposes up to the cap and the pacer alone decides.
+
+**`draft`** (`_draftmodel.py`) drafts with a second, smaller GGUF named by
+`spec_draft_model` (a registered model name or a path). The draft model must
+share the target's vocabulary (`draft_vocab_mismatch`): the same tokenizer type,
+the same add-BOS / add-EOS flags and the same BOS / EOS id where one is added,
+sizes at most `DRAFT_VOCAB_SIZE_MAX_DIFFERENCE` (128) apart, and the same token
+text for every id from `DRAFT_VOCAB_CHECK_START_ID` (5) up. It loads after the
+target with every layer on the GPU, split over the same devices as the target
+(the same `main_gpu` and split ratios), and drafts on its own context of the
+main context's size, recreated when the main one grows. Its
+cache follows the main cache lazily: each step keeps the prefix the two share,
+removes the rest, decodes what is new plus the sampled token, then samples
+drafts greedily, decoding each before sampling the next.
+
+Once the draft model has loaded, its costs on this machine are measured
+(`LlamaCpp._measure_step_costs`, a few dozen decodes): the target's one-token
+decode, its verification batches of 2, 3, 5, 9 and 17 tokens up to
+`spec_draft_tokens + 1` (others interpolated, the curve taken as never falling
+as the batch grows), the draft model's one-token decode and its batched decode
+per token. Each target figure is the median of 5 timed decodes after 3 warm-up
+ones; a target whose one-token decode takes more than 20 ms gets 3 after 1, and
+one taking more than 50 ms a single timed decode after 1 warm-up, of the
+batches of 2 and `spec_draft_tokens + 1` only. A draft model that cannot beat
+plain decoding at an acceptance of 0.85 (`DRAFT_GATE_ACCEPTANCE`) is freed with
+status `draft-cannot-pay`. Each step then drafts the length k up to
+`spec_draft_tokens` (default 8, at most 16) with the most expected tokens per
+second, `(1 + p + ... + p^k) / cost(k)`; k 0 (a plain step) wins unless
+drafting is expected to beat it by 5%. p is the fraction of drafts accepted,
+each verification weighing 0.9 of the evidence before it, kept separately for a
+step right after one whose drafts were all accepted, so a run of copied or easy
+text drafts long; that estimate starts from the other one and ages while it
+holds steps back. When the estimate says not to draft, a step after 32 held
+steps since the last verification (and the first held step of a model)
+drafts the length sized for p 0.9, if that length pays, so a draft that turns
+good is noticed; each such probe that had a rejection and after which
+drafting still does not pay doubles that interval for the rest of the reply,
+up to 256. `cost(k)` follows
+what steps actually take: the decode loop reports each step's seconds, and
+each length keeps a running figure that starts at its modelled cost and moves
+a fifth of the way to each new time, clipped to within 3 times the figure. A
+step whose verification failed or that grew the context is not counted; nor,
+for a draft model, is a step whose proposal failed, drafted nothing, or first
+caught the draft cache up on more than 3 tokens (for an n-gram source such a
+step counts as a plain step). A length not seen yet costs its measured
+`k * draft + verify(k + 1)`, plus the overhead seen per plain step and a
+drafting-step overhead fitted as fixed plus per draft to the lengths seen so
+far. The verification cost curve is what makes this model aware: a
+Mixture-of-Experts target, whose verification batch reads more experts per
+extra token, gets shorter drafts than a dense one, and a target whose experts
+sit in system RAM shorter still. A step skips drafting when catching the draft
+cache up (for a CPU draft model after a long prompt, or a draft context
+recreated for a grown main context) costs more than the rest of the reply is
+expected to save. Without measurements a step drafts at most 2 tokens. The
+figures are in the speculation report (`costs`, `observed_ms`, `acceptance`,
+`acceptance_after_full_accept`, and `held_steps`, the reply's steps the costs
+held back) and in the debug log. An end-of-generation draft ends the proposal. A
+failed draft decode clears the draft cache and stops drafting for that reply; a
+draft cache that cannot drop a rejected draft turns drafting off for the model.
+The draft model is freed before the target. Its weights, its KV cache at the
+main context's size, its logits buffer and a fixed margin are charged in the
+VRAM estimate; under llama.cpp's implicit multi-GPU split that charge is
+spread over the devices in proportion to their shares. The draft goes on the
+GPU only when it fits beside the whole target (on an implicit split: when the
+per-device plan with it keeps the target's split and fits every device);
+otherwise it runs on the CPU, so it never costs the target layers or devices,
+and the reply's usage reports `draft-on-cpu`. A draft model that is missing, is
+not a causal chat model by its metadata (a draft head, a diffusion,
+encoder-decoder, embedding, audio or image model; nothing is loaded), fails to
+load, does not share the vocabulary, has recurrent layers, or whose context is
+refused leaves the model working without drafting, with the status naming why
+(`draft-model-missing`, `draft-unsupported-role`, `draft-load-failed`,
+`draft-vocab-mismatch`, `draft-rewind-unsupported`, `draft-context-refused`).
+`localm spec-drafts MODEL` lists the downloaded causal chat models whose
+metadata passes the vocabulary rule.
 
 A model with recurrent layers needs one state snapshot per draft token to drop
-rejected drafts (`n_rs_seq`), so there the n-gram draft length is capped at 4
-(`NGRAM_RECURRENT_DRAFT_TOKENS_MAX`) and the snapshots are charged in the VRAM
-estimate. A cache that cannot drop a rejected draft at all is found at load
-(status `rewind-unsupported`) or on the first rejection, after which n-gram
+rejected drafts (`n_rs_seq`), so there the n-gram or draft-model draft length is
+capped at 4 (`NGRAM_RECURRENT_DRAFT_TOKENS_MAX`) and the snapshots are charged in
+the VRAM estimate. A cache that cannot drop a rejected draft at all is found at
+load (status `rewind-unsupported`) or on the first rejection, after which
 drafting stays off for that model. A turn with an image does not draft
 (`skipped` `image`). `LlamaCpp.speculation_report()` carries the source, its
 status and the reply's figures to the parent in the done envelope
@@ -649,6 +730,3 @@ persisted.
   dedicated on-device embedding-model loader (`localm.inference.embedder`),
   loaded independently of whatever chat model is active. HF-format models
   embed fine. (See server-api.md for the `/v1/embeddings` behavior.)
-- **No two-model (separate draft model) speculative decoding.** Drafts come
-  from the model's own MTP head or from n-gram lookup over the conversation
-  (see above); both are off by default.
