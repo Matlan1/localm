@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import List
 
 _ELF_MAGIC = b"\x7fELF"
 _ELFCLASS64 = 2

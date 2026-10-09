@@ -28,7 +28,7 @@ memory), never to trusted file reads that legitimately contain these strings.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import Optional
 
 # Frame markers localm owns. The body of untrusted content must not be able to
 # contain a literal one (or it could end / forge the frame). Match an opening or

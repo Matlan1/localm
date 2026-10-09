@@ -39,7 +39,7 @@ This module:
 from __future__ import annotations
 
 import re
-from typing import List, TypedDict
+from typing import TypedDict
 
 
 class LogRecord(TypedDict):

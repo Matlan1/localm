@@ -51,7 +51,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, Optional
 
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"

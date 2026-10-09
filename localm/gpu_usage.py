@@ -35,7 +35,7 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
-from typing import Dict, Optional
+from typing import Optional
 
 from localm.debuglog import logger
 

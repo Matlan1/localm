@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable
 
 # A home-rooted path whose account segment must go even when it is NOT exactly
 # Path.home() - a different account, or any path under the well-known user
