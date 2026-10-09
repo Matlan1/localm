@@ -81,7 +81,7 @@ _stop_requested = False
 # The current run_server() call has finished serving and is disarming.
 _stopping = False
 # One callable per server currently serving, each ending that server's serve.
-_stop_hooks: "list[Callable[[], None]]" = []
+_stop_hooks: list[Callable[[], None]] = []
 
 
 def _discard_stop_hook(hook) -> None:
@@ -455,7 +455,7 @@ def _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs) -> None:
         sys.exit(STARTUP_FAILURE)
 
 
-def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
+def _track_conn_task(inflight: set[asyncio.Task], coro) -> None:
     """Schedule *coro* as a tracked, fire-and-forget per-connection task.
 
     ``asyncio.start_server``'s ``client_connected_cb`` gives no way to keep a
@@ -472,7 +472,7 @@ def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
     task.add_done_callback(inflight.discard)
 
 
-async def _cancel_inflight_conns(inflight: "set[asyncio.Task]") -> None:
+async def _cancel_inflight_conns(inflight: set[asyncio.Task]) -> None:
     """Cancel and await every still-pending task tracked via
     :func:`_track_conn_task`, so shutdown never abandons a connection mid-relay.
     A task that already finished on its own (the common case) is not touched."""
@@ -518,7 +518,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         return
     _harden_uvicorn_logging()
 
-    inflight: "set[asyncio.Task]" = set()
+    inflight: set[asyncio.Task] = set()
 
     def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         _track_conn_task(inflight, _handle_conn(reader, writer, internal_port, port))
@@ -584,7 +584,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
     _harden_uvicorn_logging()
 
     state = {"warned": False, "count": 0}
-    inflight: "set[asyncio.Task]" = set()
+    inflight: set[asyncio.Task] = set()
 
     def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         _track_conn_task(

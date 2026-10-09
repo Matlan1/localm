@@ -35,7 +35,7 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
-from typing import Dict, Optional
+from typing import Optional
 
 from localm.debuglog import logger
 
@@ -59,7 +59,7 @@ _pdh_util_state: Optional[dict] = None
 # the pairing notice in device_global_used_bytes and across the process-scoped
 # notice reached from it, and _lock is not reentrant.
 _notice_lock = threading.Lock()
-_notices_said: Dict[str, set] = {}
+_notices_said: dict[str, set] = {}
 # Distinct keys a single site may announce before it stops. Reaching it is
 # announced rather than going silent.
 _NOTICE_KEY_CAP = 8
@@ -262,7 +262,7 @@ def _adl_open() -> dict:
         return {}
 
 
-def _adl_used_by_bus() -> Dict[int, int]:
+def _adl_used_by_bus() -> dict[int, int]:
     """``{pci_bus_number: device_global_used_bytes}`` for every present AMD adapter,
     or ``{}`` when ADL cannot answer.
 
@@ -282,7 +282,7 @@ def _adl_used_by_bus() -> Dict[int, int]:
         size = ctypes.sizeof(_AdapterInfo) * n.value
         if dll.ADL2_Adapter_AdapterInfo_Get(ctx, ctypes.byref(arr), size) != _ADL_OK:
             return {}
-        out: Dict[int, int] = {}
+        out: dict[int, int] = {}
         seen = set()
         for info in arr:
             if not info.iPresent or info.iVendorID != _ADL_VENDOR_AMD:
@@ -361,7 +361,7 @@ def _adl_legacy_activity(dll, ctx, adapter_index: int):
     return None
 
 
-def _adl_activity_by_bus() -> Dict[int, float]:
+def _adl_activity_by_bus() -> dict[int, float]:
     """``{pci_bus_number: whole_gpu_busy_percent}`` per present AMD adapter, or ``{}``.
 
     THE WHOLE-GPU FIGURE, whoever is causing the load - which is the one thing the
@@ -390,7 +390,7 @@ def _adl_activity_by_bus() -> Dict[int, float]:
         size = ctypes.sizeof(_AdapterInfo) * n.value
         if dll.ADL2_Adapter_AdapterInfo_Get(ctx, ctypes.byref(arr), size) != _ADL_OK:
             return {}
-        out: Dict[int, float] = {}
+        out: dict[int, float] = {}
         seen = set()
         for info in arr:
             if not info.iPresent or info.iVendorID != _ADL_VENDOR_AMD:
@@ -471,7 +471,7 @@ def _pdh_adapter_used() -> list:
         # Re-enumerate instances each call: an adapter can appear or disappear.
         _objs, instances = win32pdh_mod.EnumObjectItems(
             None, None, "GPU Adapter Memory", win32pdh.PERF_DETAIL_WIZARD)
-        totals: Dict[str, int] = {}
+        totals: dict[str, int] = {}
         for inst in set(instances):
             key = inst
             if key not in counters:
@@ -496,7 +496,7 @@ def _pdh_adapter_used() -> list:
         return []
 
 
-def adapter_utilisation() -> Dict[str, float]:
+def adapter_utilisation() -> dict[str, float]:
     """GPU busy percentage per WDDM adapter LUID, or ``{}`` when unavailable.
 
     Vendor-neutral: Windows exposes the figure for every vendor through the same
@@ -561,7 +561,7 @@ def adapter_utilisation() -> Dict[str, float]:
             # No previous sample: a rate counter cannot be read yet. Say nothing.
             return {}
 
-        by_engine: Dict[tuple, float] = {}
+        by_engine: dict[tuple, float] = {}
         for inst, handle in list(counters.items()):
             try:
                 _typ, val = pdh.GetFormattedCounterValue(handle, win32pdh.PDH_FMT_DOUBLE)
@@ -573,7 +573,7 @@ def adapter_utilisation() -> Dict[str, float]:
             eng = inst.split("engtype_")[-1] if "engtype_" in inst else "?"
             by_engine[(luid, eng)] = by_engine.get((luid, eng), 0.0) + float(val)
 
-        out: Dict[str, float] = {}
+        out: dict[str, float] = {}
         for (luid, _eng), pct in by_engine.items():
             out[luid] = max(out.get(luid, 0.0), pct)
         return {k: min(100.0, round(v, 1)) for k, v in out.items()}
@@ -656,7 +656,7 @@ def torch_fully_imported() -> bool:
     return getattr(getattr(mod, "__spec__", None), "_initializing", False) is not True
 
 
-_torch_build_hip_cache: "tuple[Optional[bool]] | None" = None
+_torch_build_hip_cache: tuple[Optional[bool]] | None = None
 
 
 def torch_build_is_hip() -> Optional[bool]:
@@ -769,7 +769,7 @@ def _gpu_is_amd(gpu: dict) -> bool:
     return "amd" in name or "radeon" in name
 
 
-def device_global_used_bytes(gpus: list) -> Dict[int, int]:
+def device_global_used_bytes(gpus: list) -> dict[int, int]:
     """``{gpu_index: device_global_used_bytes}`` for as many of *gpus* as can be
     mapped to a real adapter, or ``{}`` when this platform has no better source than
     the driver's own (already-correct, or unmeasurable) reading.
