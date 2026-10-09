@@ -493,7 +493,7 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
               help="Draft source to compare against no speculation.")
 @click.option("-n", "--gen-tokens", default=160, show_default=True,
               help="Tokens to generate per prompt.")
-@click.option("--rounds", default=2, show_default=True,
+@click.option("--rounds", default=3, show_default=True,
               type=click.IntRange(1, 5),
               help="Times to repeat the paired measurement.")
 @click.option("-c", "--ctx",        default=None, type=int)

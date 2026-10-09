@@ -40,7 +40,8 @@ def ngram_rs_seq(default_n_rs_seq, draft_max: int) -> int:
 
 class NgramIndex:
     """The tokens of one sequence and, for every n-gram of them with n in
-    n_min..n_max, the end position of its most recent occurrence.
+    n_min..n_max, the end positions of its occurrences in ascending order; the
+    last one is the most recent.
 
     ``lookup`` treats ``tokens + [token]`` as the history; the n-grams ending at
     that trailing token are not in the index, so the trailing n-gram never
@@ -53,7 +54,7 @@ class NgramIndex:
         self.n_min = n_min
         self.n_max = n_max
         self.tokens: List[int] = []
-        self._ends: Dict[Tuple[int, ...], int] = {}
+        self._ends: Dict[Tuple[int, ...], List[int]] = {}
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -66,16 +67,29 @@ class NgramIndex:
             toks.append(int(t))
             e = len(toks) - 1
             for n in range(self.n_min, min(self.n_max, e + 1) + 1):
-                ends[tuple(toks[e - n + 1:e + 1])] = e
+                key = tuple(toks[e - n + 1:e + 1])
+                at = ends.get(key)
+                if at is None:
+                    ends[key] = [e]
+                else:
+                    at.append(e)
 
     def truncate(self, length: int) -> None:
-        """Keep the first *length* tokens; the index is rebuilt from them."""
-        if length >= len(self.tokens):
-            return
-        kept = self.tokens[:max(0, length)]
-        self.tokens = []
-        self._ends = {}
-        self.extend(kept)
+        """Keep the first *length* tokens and drop every n-gram occurrence
+        ending at a removed position; the cost is proportional to the tokens
+        removed."""
+        length = max(0, length)
+        toks = self.tokens
+        ends = self._ends
+        for e in range(len(toks) - 1, length - 1, -1):
+            for n in range(self.n_min, min(self.n_max, e + 1) + 1):
+                key = tuple(toks[e - n + 1:e + 1])
+                at = ends.get(key)
+                if at and at[-1] == e:
+                    at.pop()
+                    if not at:
+                        del ends[key]
+        del toks[length:]
 
     def sync(self, tokens: Sequence[int]) -> None:
         """Make the index hold exactly *tokens*, keeping the shared prefix."""
@@ -98,8 +112,9 @@ class NgramIndex:
         end = len(toks)                    # position of *token*
         for n in range(min(self.n_max, end + 1), self.n_min - 1, -1):
             key = tuple(toks[end - n + 1:end]) + (int(token),)
-            q = self._ends.get(key)
-            if q is not None:
+            at = self._ends.get(key)
+            if at:
+                q = at[-1]
                 stop = min(q + 1 + n_draft, end + 1)
                 out = toks[q + 1:min(stop, end)]
                 if stop > end:

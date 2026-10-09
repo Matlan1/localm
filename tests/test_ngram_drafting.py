@@ -313,3 +313,147 @@ def test_a_longer_new_conversation_rebuilds_the_index_from_its_first_token():
 
     assert tokens == _reference(other, 6)
     assert llm._source.index.tokens[:len(other)] == other
+
+
+# --------------------------------------------------------------------------- #
+#  Review follow-ups: image turn, initial snapshots, growth, pacing           #
+# --------------------------------------------------------------------------- #
+
+def test_an_image_turn_after_a_drafting_reply_reports_off_image():
+    from unittest.mock import MagicMock, patch
+
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    from tests._fake_mtmd import fake_vision_prompt
+    llm = _llama()
+    _generate(llm, FakeNative(llm), max_new_tokens=20, prompt=REPEATING)
+    assert llm.speculation_report()["drafted"] > 0
+
+    llm._mtmd = MagicMock(marker="<image>", encode_count=0)
+    llm._mtmd.tokenize.return_value = fake_vision_prompt(text_tokens=(1, 2, 3, 4, 5))
+    llm._create_batch = MagicMock(return_value=MagicMock())
+    messages = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:fake"}},
+        {"type": "text", "text": "describe this"}]}]
+    with patch.object(llama_mod, "api") as mock_api, \
+         patch.object(llama_mod, "_apply_model_template", return_value=("prompt", None)), \
+         patch.object(llama_mod, "_build_sampler", return_value=MagicMock()), \
+         patch.object(llama_mod.LlamaCpp, "_messages_with_markers",
+                      return_value=(messages, [])):
+        mock_api.llama_sampler_sample.side_effect = [100, 101, EOG]
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_n_ctx.return_value = 4096
+        tokens = list(llm._generate_image(messages, max_new_tokens=8, temperature=0.8,
+                                          top_k=40, top_p=0.95, repeat_penalty=1.1))
+
+    assert tokens == [100, 101]
+    report = llm.speculation_report()
+    assert (report["skipped"], report["drafted"], report["active"]) == ("image", 0, False)
+
+
+@pytest.mark.parametrize("probe,expected_cap", [
+    ("attention", 8), ("recurrent", 4), ("hybrid", 4), ("no-api", 4), ("raises", 4)])
+def test_the_first_context_keeps_a_snapshot_per_draft_token(probe, expected_cap):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1))
+    llm._spec_source_name = "ngram"
+    llm._mtp_enabled = False
+    cp = SimpleNamespace(n_rs_seq=0)
+    with patch.object(llama_mod, "api") as api:
+        api.has_hybrid_api.return_value = probe != "no-api"
+        api.llama_model_is_recurrent.return_value = probe == "recurrent"
+        api.llama_model_is_hybrid.return_value = probe == "hybrid"
+        if probe == "raises":
+            api.llama_model_is_recurrent.side_effect = OSError("probe")
+        llm._apply_initial_spec_params(cp, None)
+    assert llm._ngram_draft_max == expected_cap
+    assert cp.n_rs_seq == expected_cap
+
+
+class _GrowingFake(FakeNative):
+    """A main context that refuses a decode past *capacity*; recreating the
+    context gives a bigger, empty one."""
+
+    def __init__(self, llm, capacity, **kw):
+        super().__init__(llm, **kw)
+        self.capacity = capacity
+        self.grown = 0
+
+    def decode(self, ctx, batch):
+        if ctx is self.main:
+            positions, _t, _l, _h = self._read(batch)
+            if max(positions) >= self.capacity:
+                return 1
+        return super().decode(ctx, batch)
+
+    def install(self, mock_api):
+        from types import SimpleNamespace
+        super().install(mock_api)
+        mock_api.llama_context_default_params.side_effect = lambda: SimpleNamespace(n_rs_seq=0)
+
+        def _init(model, cp):
+            self.grown += 1
+            self.capacity = cp.n_ctx
+            self.main_cache.clear()
+            return self.main
+        mock_api.llama_init_from_model.side_effect = _init
+
+
+@pytest.mark.parametrize("draft_max", [2, 8])
+def test_ngram_output_survives_mid_generation_context_growth(draft_max):
+    llm = _llama(draft_max)
+    llm._ctx_capacity = len(REPEATING) + 12
+    llm._n_ctx = llm._ctx_capacity
+    llm._n_ctx_grow = 256
+    fake = _GrowingFake(llm, capacity=llm._ctx_capacity)
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=40, prompt=REPEATING)
+
+    assert fake.grown >= 1
+    assert tokens == _reference(REPEATING, 40)
+    assert llm._source.accepted > 0
+    index = llm._source.index.tokens
+    assert len(index) > llm._n_ctx
+    assert index == llm._cached_tokens[:len(index)]
+
+
+def test_ngram_drafting_that_costs_more_than_it_saves_is_paused():
+    llm = _llama(8)
+    fake = FakeNative(llm, main_cost=1.0, row_cost=1.5)
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=120, prompt=REPEATING * 3)
+
+    assert tokens == _reference(REPEATING * 3, 120)
+    assert llm._draft_pacer.pauses >= 1
+    assert llm._source.paused_steps > 0
+
+
+def test_cheap_ngram_drafting_keeps_going():
+    llm = _llama(8)
+    fake = FakeNative(llm, main_cost=1.0, row_cost=0.05)
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=120, prompt=REPEATING * 3)
+
+    assert tokens == _reference(REPEATING * 3, 120)
+    assert llm._draft_pacer.pauses == 0
+    assert llm._source.paused_steps == 0
+    assert llm._source.steps > 5
+
+
+def test_a_diverging_follow_up_reindexes_only_what_changed():
+    class _Counting(NgramIndex):
+        indexed = 0
+
+        def extend(self, tokens):
+            self.indexed += len(tokens)
+            super().extend(tokens)
+
+    idx = _Counting()
+    idx.extend(list(range(1000)))
+    idx.indexed = 0
+    idx.sync(list(range(995)) + [7, 7])
+
+    assert idx.indexed == 2
+    assert idx._ends == _index(list(range(995)) + [7, 7])._ends

@@ -1419,11 +1419,7 @@ class LlamaCpp:
         # snapshots, and a step that proposes k drafts can reject all k.
         # Costs nothing on a model with no recurrent layers.
         # See test_recurrent_rollback_is_requested_when_mtp_is_enabled.
-        if self._spec_source_name == SPEC_NGRAM:
-            self._ngram_draft_max = ngram_draft_cap(
-                spec_draft_tokens, self._model_has_recurrent_layers())
-        if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
-            cp.n_rs_seq = self._spec_rollback_snapshots(cp)
+        self._apply_initial_spec_params(cp, spec_draft_tokens)
         cp.flash_attn_type   = -1  # keep default (unspecified)
         if n_threads is not None:
             cp.n_threads       = n_threads
@@ -2715,19 +2711,30 @@ class LlamaCpp:
             return ngram_rs_seq(getattr(cp, "n_rs_seq", 0), self._ngram_draft_max)
         return self._mtp_rollback_snapshots(cp)
 
-    def _model_has_recurrent_layers(self) -> bool:
+    def _apply_initial_spec_params(self, cp, spec_draft_tokens: Optional[int]) -> None:
+        """Set the n-gram draft cap for the loaded model, then the recurrent
+        snapshots the first context keeps for the configured source."""
+        if self._spec_source_name == SPEC_NGRAM:
+            self._ngram_draft_max = ngram_draft_cap(
+                spec_draft_tokens, self._model_has_recurrent_layers() is not False)
+        if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
+            cp.n_rs_seq = self._spec_rollback_snapshots(cp)
+
+    def _model_has_recurrent_layers(self) -> Optional[bool]:
         """Whether the loaded model has recurrent layers (fully recurrent or
-        hybrid). False when the runtime cannot say."""
+        hybrid); None when the runtime cannot say. A caller sizing recurrent
+        snapshots treats None as recurrent, which the VRAM estimate also
+        assumes."""
         try:
             if not api.has_hybrid_api():
-                return False
+                return None
             return bool(api.llama_model_is_recurrent(self._model_ptr)
                         or api.llama_model_is_hybrid(self._model_ptr))
         except Exception as exc:
             from localm.debuglog import logger
-            logger.debug("recurrent-layer probe failed (%s); treating the model "
-                         "as attention-only", type(exc).__name__)
-            return False
+            logger.debug("recurrent-layer probe failed (%s); capping n-gram "
+                         "drafts as for a recurrent model", type(exc).__name__)
+            return None
 
     def _mtp_draft_budget(self, pos: int, tokens_left: Optional[int]) -> int:
         """How many drafts the step at *pos* may propose: the configured count,

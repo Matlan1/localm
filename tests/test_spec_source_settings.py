@@ -138,13 +138,14 @@ def test_a_grown_context_keeps_the_snapshots_its_source_needs(source, draft, mtp
     assert _fresh_context_n_rs_seq(llm) == expected
 
 
-def test_the_initial_context_uses_the_same_snapshot_rule():
+def test_the_initial_context_is_set_up_by_the_tested_method():
     import inspect
 
     from localm.inference.backends.llamacpp.llama import LlamaCpp
     src = inspect.getsource(LlamaCpp.__init__)
-    assert "self._spec_rollback_wanted()" in src
-    assert "self._spec_rollback_snapshots(cp)" in src
+    assert "self._apply_initial_spec_params(cp, spec_draft_tokens)" in src
+    assert "n_rs_seq" not in src.split("_apply_initial_spec_params")[0].split(
+        "cp = api.llama_context_default_params()")[-1]
 
 
 def test_the_vram_charge_counts_the_ngram_snapshots(tmp_path):
