@@ -147,6 +147,13 @@ _GOOD_HEADER_CTX_V2 = _GOOD_HEADER.replace(
     "    uint32_t n_outputs_max;\n    uint32_t n_outputs_max_per_seq;\n",
 )
 
+# context_params after upstream b11480 inserted moe_cache_size directly after
+# type_v - localm's context_params V3 layout. Native size 160 -> 168.
+_GOOD_HEADER_CTX_V3 = _GOOD_HEADER_CTX_V2.replace(
+    "    enum ggml_type type_v;\n",
+    "    enum ggml_type type_v;\n    size_t moe_cache_size;\n",
+)
+
 
 def test_embedded_headers_are_the_three_real_layouts():
     """Guards the fixtures themselves: if the V2 or V3 edit above stopped
@@ -160,6 +167,8 @@ def test_embedded_headers_are_the_three_real_layouts():
     assert _GOOD_HEADER_V3_OLD_NAME != _GOOD_HEADER_V3
     assert abichk._header_context_params_layout(_GOOD_HEADER) == "v1"
     assert abichk._header_context_params_layout(_GOOD_HEADER_CTX_V2) == "v2"
+    assert abichk._header_context_params_layout(_GOOD_HEADER_CTX_V3) == "v3"
+    assert _GOOD_HEADER_CTX_V3 != _GOOD_HEADER_CTX_V2
 
 
 @pytest.mark.parametrize("struct", ["llama_model_params", "llama_context_params", "llama_batch"])
@@ -217,6 +226,34 @@ def test_verifier_fails_when_the_wrong_context_params_layout_is_selected():
     reached a user, had the verifier been run against a current header."""
     assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V2, "v1", "v1") > 0
     assert abichk._check("llama_context_params", _GOOD_HEADER, "v1", "v2") > 0
+
+
+def test_context_params_v3_header_matches_the_v3_class_field_for_field(capsys):
+    """Every upstream field of the moe_cache_size header resolves to the same
+    offset and size in LlamaContextParamsV3, including the 8-byte shift of
+    everything from abort_callback on."""
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V3, "v1", "v3") == 0
+    out = capsys.readouterr().out
+    assert "upstream native size: 168" in out
+    for line in ("moe_cache_size                 offset 112 size 8",
+                 "abort_callback                 offset 120 size 8",
+                 "embeddings                     offset 136 size 1",
+                 "samplers                       offset 144 size 8",
+                 "ctx_other                      offset 160 size 8"):
+        assert line in out, line
+
+
+def test_context_params_v2_and_v3_are_not_interchangeable():
+    """A moe_cache_size header against the V2 class is what the binding did
+    before V3 existed; it must fail, and so must the reverse."""
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V3, "v1", "v2") > 0
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V2, "v1", "v3") > 0
+
+
+def test_pinned_refs_cover_every_context_params_layout():
+    """The default run must reach a moe_cache_size header, or the
+    seen_context_layouts gate in main() fails every run."""
+    assert "ctx_v3" in abichk.LLAMA_ABI_REFS
 
 
 def test_layout_natural_alignment():

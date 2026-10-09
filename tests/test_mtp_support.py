@@ -247,7 +247,8 @@ def test_recurrent_rollback_is_requested_when_mtp_is_enabled():
     """
     from localm.inference.backends.llamacpp import _structs
 
-    for params in (_structs.LlamaContextParamsV1, _structs.LlamaContextParamsV2):
+    for params in (_structs.LlamaContextParamsV1, _structs.LlamaContextParamsV2,
+                   _structs.LlamaContextParamsV3):
         assert hasattr(params(), "n_rs_seq"), (
             f"{params.__name__} has no n_rs_seq, so rollback cannot be requested "
             "and MTP silently declines on every hybrid model")
