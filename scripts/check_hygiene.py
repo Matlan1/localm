@@ -1773,9 +1773,7 @@ def _own_route_paths(tree: ast.AST) -> set[str]:
         elif isinstance(node, ast.Call):
             if (isinstance(node.func, ast.Attribute)
                     and node.func.attr in ("add_api_route", "add_route", "api_route")
-                    and (p := literal(node))):
-                paths.add(p)
-            elif isinstance(node.func, ast.Call) and (p := literal(node.func)):
+                    and (p := literal(node))) or isinstance(node.func, ast.Call) and (p := literal(node.func)):
                 paths.add(p)
     return paths
 

@@ -337,7 +337,7 @@ class JobScheduler:
                 self._note_tick_ok()
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass        # normal wakeup; loop again
 
     def start(self) -> bool:

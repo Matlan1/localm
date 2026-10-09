@@ -303,7 +303,7 @@ def test_the_fetch_does_not_block_the_event_loop(monkeypatch):
         main = asyncio.ensure_future(endpoint(url="https://example.com/a.png"))
         try:
             await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             main.cancel()
             raise AssertionError(
                 "a concurrent trivial coroutine never got to run while the "
