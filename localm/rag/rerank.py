@@ -71,8 +71,14 @@ def rerank_plan(cfg: Optional[dict] = None, *,
         return RerankPlan(None, candidates, None, None)
     from localm.inference import reranker
     model = str(cfg.get("rag_rerank_model") or "").strip()
-    if not model and not reranker.registered_rerankers():
-        return RerankPlan(None, candidates, None, None)
+    if not model:
+        installed = reranker.registered_rerankers()
+        if not installed:
+            return RerankPlan(None, candidates, None, None)
+        if len(installed) > 1:
+            return RerankPlan(None, candidates, None,
+                              f"several rerankers are installed ({', '.join(installed)}); "
+                              "choose one in Settings > Knowledge > Reranker model")
     try:
         name, fn = make_rerank_fn(model)
     except reranker.RerankerModelError as e:

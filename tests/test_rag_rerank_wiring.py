@@ -122,7 +122,8 @@ class TestPlan:
             self, home, fake_reranker):
         fake_reranker.names[:] = ["a", "b"]
         plan = rr.rerank_plan()
-        assert plan.fn is None and "Several rerankers" in plan.note
+        assert plan.fn is None and "several rerankers are installed (a, b)" in plan.note
+        assert "Reranker model" in plan.note
         _set(home, rag_rerank_model="b")
         assert rr.rerank_plan().model == "b"
 
