@@ -147,6 +147,17 @@ class TestPlan:
         assert fake_reranker.calls[-1][0] == "/models/qwen.gguf"
 
 
+class TestRealReranker:
+    def test_an_install_with_no_registered_reranker_is_left_alone(self, home):
+        plan = rr.rerank_plan()
+        assert plan.fn is None and plan.model is None and plan.note is None
+
+    def test_naming_a_model_that_is_not_registered_is_reported(self, home):
+        _set(home, rag_rerank_model="ghost")
+        plan = rr.rerank_plan()
+        assert plan.fn is None and "ghost" in plan.note
+
+
 @pytest.fixture
 def rag_app(home, fake_reranker, tmp_path):
     from fastapi import FastAPI
