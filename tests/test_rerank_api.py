@@ -4,8 +4,7 @@ POST /v1/rerank, ``localm rerank`` and the MCP ``rerank`` tool.
 
 Registry entries come from real (synthetic) GGUF headers registered through the
 model manager, so the reranker flag is the one the product records. The native
-scoring is replaced where the worker would run; the real worker is covered by
-tests/test_rerank_real_gguf.py.
+scoring is replaced where the worker would run.
 """
 
 import json

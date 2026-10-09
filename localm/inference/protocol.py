@@ -138,7 +138,7 @@ class RerankDocument(BaseModel):
 
 class RerankRequest(BaseModel):
     """Jina / Cohere style /v1/rerank request."""
-    # None for the same reason as EmbeddingRequest.model.
+    # None when the request names no model.
     model: Optional[str] = None
     query: str
     documents: List[Union[str, RerankDocument]] = Field(min_length=1)
