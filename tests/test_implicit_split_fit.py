@@ -456,6 +456,33 @@ class TestBackendWiring:
         assert draft > 0
         assert [c.kv for c in on.default] == [off.default[0].kv, off.default[1].kv + draft]
 
+    def test_encoder_and_decoder_blocks_are_charged_to_their_layer(self, tmp_path):
+        def model(sub, layer_names):
+            tensors = [("token_embd.weight", 4000)]
+            for il in range(4):
+                tensors += [(name.format(il=il), size) for name, size in layer_names]
+            tensors += [("output.weight", 5000)]
+            (tmp_path / sub).mkdir()
+            return _write_gguf(tmp_path / sub / "m.gguf", arch="t5", block_count=4,
+                               vocab=self._VOCAB, tensors=tensors)
+
+        devices = [{"index": i, "free": 10**9, "total": 10**9 + 10} for i in range(2)]
+        plans = []
+        for path in (model("t5", [("enc.blk.{il}.attn_q.weight", 3000),
+                                  ("dec.blk.{il}.attn_q.weight", 1000)]),
+                     model("flat", [("blk.{il}.attn_q.weight", 3000),
+                                    ("blk.{il}.ffn.weight", 1000)])):
+            b = GgufBackend(str(path), n_ctx=4096, n_gpu_layers=99)
+            b._VRAM_OVERHEAD_BYTES = 1000
+            b._gguf_kv_bpt = 10
+            with mock.patch.object(discover, "implicit_split_devices",
+                                   return_value=devices), \
+                    mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+                plans.append(b._implicit_split_fit(99))
+        t5, flat = plans
+        assert [c.weights for c in t5.default] == [c.weights for c in flat.default]
+        assert sum(c.weights for c in t5.default) >= 4 * 4000
+
     def test_a_cpu_load_skips_the_fit(self, tmp_path):
         b, devices = self._backend(tmp_path, [10**9, 10**9])
         with mock.patch.object(discover, "implicit_split_devices",

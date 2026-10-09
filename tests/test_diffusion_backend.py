@@ -608,10 +608,10 @@ class TestCompactionGate:
     def test_reply_reserve_replaces_the_reply_buffer(self):
         from localm.inference.http_server import _needs_compaction
         msgs = [{"role": "user", "content": "x"}] * 4
-        assert _needs_compaction(2048, 1700, msgs, 256) is False
-        assert _needs_compaction(2048, 1800, msgs, 256) is True
+        assert _needs_compaction(2048, 1700, msgs, reply_reserve=256) is False
+        assert _needs_compaction(2048, 1800, msgs, reply_reserve=256) is True
         assert _needs_compaction(2048, 100, msgs) is True
-        assert _needs_compaction(2048, 1800, msgs[:3], 256) is False
+        assert _needs_compaction(2048, 1800, msgs[:3], reply_reserve=256) is False
 
     def test_engine_reply_reserve_accepts_only_a_positive_int(self):
         from types import SimpleNamespace
@@ -624,7 +624,7 @@ class TestCompactionGate:
 
     def test_overflow_text_names_the_fixed_window(self):
         from localm.inference.http_server import context_overflow_detail
-        text = context_overflow_detail(2100, 2048, 256)
+        text = context_overflow_detail(2100, 2048, reply_reserve=256)
         assert "diffusion model" in text and "2048" in text
         assert "n_ctx_max" not in text
         assert "n_ctx_max" in context_overflow_detail(5000, 4096)

@@ -189,12 +189,6 @@ def llama_n_ctx(ctx: ctypes.c_void_p) -> int:
     return _bind("llama_n_ctx", ctypes.c_uint32, LlamaContext)(ctx)
 
 
-def llama_n_ubatch(ctx: ctypes.c_void_p) -> int:
-    """The context's micro-batch size: the most tokens one non-causal decode
-    may hold. Only call after has_diffusion_api()."""
-    return int(_bind("llama_n_ubatch", ctypes.c_uint32, LlamaContext)(ctx))
-
-
 def llama_set_causal_attn(ctx: ctypes.c_void_p, causal: bool) -> None:
     """Switch the context between causal and bidirectional attention. Only call
     after has_diffusion_api()."""
@@ -551,18 +545,87 @@ def llama_batch_free(batch: LlamaBatch) -> None:
 #  Inference
 # ---------------------------------------------------------------------------
 
-def llama_encode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
-    """Run the model on *batch* without the KV cache, every position output.
-    Returns 0 on success, non-zero on error."""
-    return _bind("llama_encode", ctypes.c_int32, LlamaContext, LlamaBatch)(ctx, batch)
-
-
 def llama_decode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
     """
     Run the model on *batch*.  Returns 0 on success, 1 if no KV slot available,
     negative on error.
     """
     return _bind("llama_decode", ctypes.c_int32, LlamaContext, LlamaBatch)(ctx, batch)
+
+
+# ---------------------------------------------------------------------------
+#  Encoder-decoder models (probe with has_encoder_api before use)
+# ---------------------------------------------------------------------------
+
+LLAMA_TOKEN_NULL = -1
+
+
+def has_encoder_api() -> bool:
+    """True when this llama.dll exports the calls an encoder-decoder model (T5)
+    needs: llama_encode, llama_model_has_encoder, llama_model_has_decoder and
+    llama_model_decoder_start_token. A build without them cannot run one;
+    callers check this before binding any of the four."""
+    lib = load_lib()
+    return all(hasattr(lib, fn) for fn in (
+        "llama_encode", "llama_model_has_encoder", "llama_model_has_decoder",
+        "llama_model_decoder_start_token"))
+
+
+def llama_model_has_encoder(model: ctypes.c_void_p) -> bool:
+    """True for a model with an encoder stack (T5, T5 encoder-only). Only call
+    after has_encoder_api()."""
+    return bool(_bind("llama_model_has_encoder", ctypes.c_bool, LlamaModel)(model))
+
+
+def llama_model_has_decoder(model: ctypes.c_void_p) -> bool:
+    """True for a model with a decoder stack (every generator, including T5;
+    False for an encoder-only model). Only call after has_encoder_api()."""
+    return bool(_bind("llama_model_has_decoder", ctypes.c_bool, LlamaModel)(model))
+
+
+def llama_model_decoder_start_token(model: ctypes.c_void_p) -> int:
+    """The token an encoder-decoder model's decoder starts from, or
+    LLAMA_TOKEN_NULL when the model declares none. Only call after
+    has_encoder_api()."""
+    return int(_bind("llama_model_decoder_start_token", llama_token, LlamaModel)(model))
+
+
+def llama_encode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
+    """Run the encoder of an encoder-decoder model, or a diffusion model's whole
+    canvas (every position output), on *batch*, the whole input sequence
+    starting at position 0. Returns 0 on success, nonzero on error.
+
+    The native side ABORTS THE PROCESS (GGML_ASSERT, not an error return) when
+    *batch* holds more tokens than the context's n_ubatch, so the caller must
+    check ``llama_n_ubatch(ctx)`` first. Only call after has_encoder_api()."""
+    return _bind("llama_encode", ctypes.c_int32, LlamaContext, LlamaBatch)(ctx, batch)
+
+
+def llama_n_ubatch(ctx: ctypes.c_void_p) -> Optional[int]:
+    """The context's physical micro-batch size after llama.cpp's own clamping,
+    or None on a build that does not export the accessor."""
+    lib = load_lib()
+    if not hasattr(lib, "llama_n_ubatch"):
+        return None
+    return int(_bind("llama_n_ubatch", ctypes.c_uint32, LlamaContext)(ctx))
+
+
+def llama_vocab_get_add_bos(vocab: ctypes.c_void_p) -> Optional[bool]:
+    """Whether tokenizing with special tokens prepends BOS for this vocabulary,
+    or None on a build that does not export the accessor."""
+    lib = load_lib()
+    if not hasattr(lib, "llama_vocab_get_add_bos"):
+        return None
+    return bool(_bind("llama_vocab_get_add_bos", ctypes.c_bool, LlamaVocab)(vocab))
+
+
+def llama_vocab_get_add_eos(vocab: ctypes.c_void_p) -> Optional[bool]:
+    """Whether tokenizing with special tokens appends EOS for this vocabulary
+    (True for T5), or None on a build that does not export the accessor."""
+    lib = load_lib()
+    if not hasattr(lib, "llama_vocab_get_add_eos"):
+        return None
+    return bool(_bind("llama_vocab_get_add_eos", ctypes.c_bool, LlamaVocab)(vocab))
 
 
 # ---------------------------------------------------------------------------

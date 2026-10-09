@@ -5012,7 +5012,8 @@ async def _stream_sse(
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
         compact = compact or (
             _needs_compaction(engine.context_capacity(), prompt_tokens, messages,
-                              _engine_reply_reserve(engine))
+                              encoder_decoder=_engine_is_encoder_decoder(engine),
+                              reply_reserve=_engine_reply_reserve(engine))
             and compactable(messages))
 
     if not role_sent:
@@ -5045,8 +5046,10 @@ async def _stream_sse(
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
                 and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
-            refusal = context_overflow_detail(prompt_tokens, capacity,
-                                              _engine_reply_reserve(engine))
+            refusal = context_overflow_detail(
+                prompt_tokens, capacity,
+                encoder_decoder=_engine_is_encoder_decoder(engine),
+                reply_reserve=_engine_reply_reserve(engine))
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -5437,17 +5440,28 @@ COMPACTION_DISCONNECT_DETAIL = (
 
 
 def _needs_compaction(capacity, prompt_tokens, messages,
+                      encoder_decoder: bool = False,
                       reply_reserve: Optional[int] = None) -> bool:
     """True when *prompt_tokens* leaves less than the reply buffer (2048 tokens
     or 10% of *capacity*, whichever is larger) free in *capacity*, for a
-    conversation of more than three messages. *reply_reserve*, when given, is
-    the reply buffer instead (a diffusion model's whole reply canvas)."""
+    conversation of more than three messages. With *encoder_decoder* the reply
+    does not occupy *capacity*, so it is True only when the prompt itself is
+    larger than *capacity*. *reply_reserve*, when given, is the reply buffer
+    instead (a diffusion model's whole reply canvas)."""
     if not (isinstance(capacity, int) and capacity > 0
             and isinstance(prompt_tokens, int) and len(messages) > 3):
         return False
+    if encoder_decoder:
+        return prompt_tokens > capacity
     if reply_reserve is not None:
         return capacity - prompt_tokens < reply_reserve
     return capacity - prompt_tokens < max(2048, int(capacity * 0.10))
+
+
+def _engine_is_encoder_decoder(engine) -> bool:
+    """True only when *engine* reports an encoder-decoder model with a real
+    ``True`` (a stand-in engine without the attribute answers False)."""
+    return getattr(engine, "encoder_decoder", False) is True
 
 
 def _engine_reply_reserve(engine) -> Optional[int]:
@@ -5460,10 +5474,16 @@ def _engine_reply_reserve(engine) -> Optional[int]:
 
 
 def context_overflow_detail(prompt_tokens: int, capacity: int,
+                            encoder_decoder: bool = False,
                             reply_reserve: Optional[int] = None) -> str:
     """The refusal text for a prompt larger than the context capacity. With
-    *reply_reserve* (a diffusion model) the text names the fixed window that
-    holds prompt and reply together instead of the context window settings."""
+    *encoder_decoder* the text names the model's one-pass prompt limit, and with
+    *reply_reserve* (a diffusion model) the fixed window that holds prompt and
+    reply together, instead of the context window settings."""
+    if encoder_decoder:
+        return (f"Prompt ({prompt_tokens} tokens) exceeds the {capacity} tokens "
+                f"this encoder-decoder model reads in one pass. Shorten the "
+                f"message or start a new chat.")
     if reply_reserve is not None:
         return (f"Prompt ({prompt_tokens} tokens) does not fit the {capacity} "
                 f"tokens this diffusion model reads at once, prompt and reply "
@@ -5870,7 +5890,8 @@ async def _complete(
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
         if _needs_compaction(capacity, prompt_tokens, messages,
-                             _engine_reply_reserve(engine)):
+                             encoder_decoder=_engine_is_encoder_decoder(engine),
+                             reply_reserve=_engine_reply_reserve(engine)):
             new_messages, changed, gone = await _compact_for_capacity(
                 engine, messages, request)
             if gone:

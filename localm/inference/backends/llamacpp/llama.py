@@ -34,7 +34,8 @@ from localm.textguard import (
 
 from . import _api as api
 from . import _diffusion
-from ._drafting import SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, resolve_spec_source
+from ._drafting import (
+    SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, resolve_spec_source)
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
@@ -470,6 +471,70 @@ def _format_chatml(messages: List[Dict]) -> str:
     return "\n".join(parts)
 
 
+_ENCODER_ROLE_LABELS = {"user": "User", "assistant": "Assistant", "tool": "Tool"}
+
+
+def _encoder_message_text(message: Dict) -> str:
+    """The text an encoder-decoder prompt takes from one message: its text
+    parts (``_extract_text``), "" for absent or None content."""
+    return _extract_text(message.get("content") or "")
+
+
+def _flatten_for_encoder(messages: List[Dict]) -> str:
+    """The single text an encoder-decoder model (T5) reads for *messages*.
+
+    Such a model has no chat template. Each message becomes one line, in
+    message order, and the lines are joined with a newline:
+
+    * a system message: its text;
+    * when the messages hold exactly one non-system message and it is a user
+      message: that message's text, unchanged;
+    * otherwise each non-system message: ``"<Label>: <text>"``, the label being
+      ``User``, ``Assistant``, ``Tool``, or the role name capitalised, followed
+      by a last line ``"Assistant:"``.
+
+    Only the text parts of a content list are read.
+    """
+    turns = [m for m in messages if m.get("role", "user") != "system"]
+    labelled = not (len(turns) == 1 and turns[0].get("role", "user") == "user")
+    lines = []
+    for message in messages:
+        role = message.get("role", "user")
+        text = _encoder_message_text(message)
+        if role == "system" or not labelled:
+            lines.append(text)
+        else:
+            label = _ENCODER_ROLE_LABELS.get(role, str(role).capitalize())
+            lines.append(f"{label}: {text}")
+    if labelled:
+        lines.append(f"{_ENCODER_ROLE_LABELS['assistant']}:")
+    return "\n".join(lines)
+
+
+def _encoder_untrusted_ranges(messages: List[Dict], prompt: str) -> Tuple[Tuple[int, int], ...]:
+    """Untrusted character ranges of *prompt*, the ``_flatten_for_encoder``
+    text of *messages*, in prompt coordinates. Empty when no message carries
+    an annotation, and when the contents cannot be located exactly (logged)."""
+    per_message = [untrusted_spans_of(m.get("content")) for m in messages]
+    if not any(per_message):
+        return ()
+    contents = [_encoder_message_text(m) for m in messages]
+
+    def render(sentinels):
+        return _flatten_for_encoder(
+            [dict(m, content=s) for m, s in zip(messages, sentinels)])
+
+    spans = content_spans_via_sentinels(contents, render, prompt)
+    if spans is None:
+        from localm.debuglog import logger
+        logger.warning(
+            "textguard: could not locate message content in the encoder prompt, "
+            "so untrusted spans are tokenised with special-token parsing ON; "
+            "only the text-level defang applies to this request")
+        return ()
+    return map_untrusted_ranges(spans, per_message)
+
+
 def _warn_chatml_fallback(reason: str) -> None:
     """Log that a model's own chat template could not be used and generic ChatML
     was substituted.
@@ -861,7 +926,7 @@ def _common_prefix_len(a: List[int], b: List[int]) -> int:
 
 
 def _build_sampler(
-    vocab: int,
+    vocab: ctypes.c_void_p,
     temperature: float = 0.8,
     top_k: int = 40,
     top_p: float = 0.95,
@@ -871,7 +936,7 @@ def _build_sampler(
     grammar: Optional[str] = None,
     grammar_lazy: bool = False,
     grammar_triggers: Optional[List[str]] = None,
-) -> int:
+) -> ctypes.c_void_p:
     """
     Construct a sampler chain:
         [grammar] → [penalties] → top_k → top_p → min_p → temperature → dist
@@ -1116,6 +1181,8 @@ class LlamaCpp:
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
+    is_encoder_decoder = False   # the model runs llama_encode before decoding (T5)
+    encoder_input_limit = 0      # most tokens one llama_encode call takes, 0 unless encoder-decoder
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _source = None               # the DraftSource for this model, created on first use
     _spec_source_name = SPEC_MTP # the configured draft source: off, mtp or ngram
@@ -1430,12 +1497,15 @@ class LlamaCpp:
             raise pretokenizer_guard.PretokenizerUnusableModelError(refusal)
 
         try:
+            self.is_encoder_decoder = self._detect_encoder_decoder()
             self._detect_diffusion()
         except Exception:
             api.llama_free_model(self._model_ptr)
             self._model_ptr = None
             raise
-        if self.is_diffusion:
+        if self.is_encoder_decoder or self.is_diffusion:
+            # No draft source runs on an encoder-decoder or a diffusion
+            # model, and nothing below may decode on its context.
             self._spec_source_name = SPEC_OFF
             self._mtp_enabled = False
 
@@ -1507,11 +1577,15 @@ class LlamaCpp:
         if not self._ctx_ptr:
             api.llama_free_model(self._model_ptr)
             raise RuntimeError("Failed to create llama context")
+        if self.is_encoder_decoder:
+            self.encoder_input_limit = self._read_encoder_input_limit(cp)
         if self.is_diffusion:
             self._diffusion_capacity = self._read_diffusion_capacity()
 
         # Multi-Token Prediction (MTP) draft context initialization
-        if self.is_diffusion:
+        if self.is_encoder_decoder:
+            self.mtp_status = "encoder-decoder"
+        elif self.is_diffusion:
             self.mtp_status = _DIFFUSION_SPEC_STATUS
         elif not self._mtp_enabled:
             self.mtp_status = "disabled"
@@ -1555,10 +1629,14 @@ class LlamaCpp:
         # Optional in-process vision (C1): load the mmproj via mtmd so image
         # messages can be answered. Best-effort - any failure (no mtmd.dll, an
         # incompatible mmproj) leaves the model text-only rather than breaking it.
-        if mmproj_path and self.is_diffusion:
-            from localm.debuglog import logger as _dlog
-            _dlog.warning("diffusion language model: the vision projector %s is "
-                          "not loaded; this model answers text only", mmproj_path)
+        if mmproj_path and self.is_encoder_decoder:
+            _mtp_log.warning(
+                "vision: an encoder-decoder model reads text only, so the "
+                "projector %s was not loaded", os.path.basename(mmproj_path))
+        elif mmproj_path and self.is_diffusion:
+            _mtp_log.warning(
+                "vision: a diffusion language model reads text only, so the "
+                "projector %s was not loaded", os.path.basename(mmproj_path))
         elif mmproj_path:
             self._load_mmproj(mmproj_path, verbose)
 
@@ -1606,7 +1684,7 @@ class LlamaCpp:
         ctx, model = self._ctx_ptr, self._model_ptr
         if ctx is None or model is None:
             return 0
-        capacity = int(api.llama_n_ubatch(ctx))
+        capacity = int(api.llama_n_ubatch(ctx) or 0)
         try:
             trained = int(api.llama_model_n_ctx_train(model))
         except Exception:
@@ -1683,7 +1761,10 @@ class LlamaCpp:
         only (upstream n_head_kv() defaults il=0), so there is nothing here to sum
         over - and answering anyway over-charges by the ratio of attending layers
         to all layers. Returning 0 hands the question to the caller's next source,
-        the GGUF header probe, which CAN read the exact per-layer array."""
+        the GGUF header probe, which CAN read the exact per-layer array.
+
+        An encoder-decoder model is sized by ``_decoder_kv_bytes_per_token``
+        when its metadata states the head width."""
         try:
             if self.n_layers and api.has_kv_head_api():
                 if api.has_hybrid_api() and (
@@ -1694,6 +1775,10 @@ class LlamaCpp:
                 n_head    = int(api.llama_model_n_head(self._model_ptr))
                 n_head_kv = int(api.llama_model_n_head_kv(self._model_ptr))
                 if n_embd > 0 and n_head > 0 and n_head_kv > 0:
+                    if self.is_encoder_decoder:
+                        decoder_kv = self._decoder_kv_bytes_per_token(n_head_kv)
+                        if decoder_kv:
+                            return decoder_kv
                     head_dim = n_embd // n_head
                     return self.n_layers * n_head_kv * head_dim * 2 * 2
         except Exception as exc:
@@ -1706,6 +1791,77 @@ class LlamaCpp:
             _dbg.debug("kv_bytes_per_token computation failed (%s); falling back to "
                        "the size-class estimate", type(exc).__name__)
         return 0
+
+    def _architecture(self) -> Optional[str]:
+        """The loaded model's general.architecture, or None when no model is
+        loaded, this build cannot read metadata, or the key is absent."""
+        model = self._model_ptr
+        if model is None or not api.has_model_meta_api():
+            return None
+        return api.llama_model_meta_val_str(model, "general.architecture")
+
+    def _meta_int(self, key: str) -> int:
+        """The loaded model's metadata value under *key* as a positive int, or 0
+        when it is absent, unreadable or not a positive integer, or when no
+        model is loaded."""
+        model = self._model_ptr
+        if model is None or not api.has_model_meta_api():
+            return 0
+        raw = api.llama_model_meta_val_str(model, key)
+        try:
+            value = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
+
+    def _decoder_kv_bytes_per_token(self, n_head_kv: int) -> int:
+        """f16 KV-cache bytes per token of an encoder-decoder model's decoder
+        stack: ``<arch>.decoder_block_count`` layers (defaulting to n_layers) x
+        *n_head_kv* x (``key_length`` + ``value_length``) x 2 bytes. 0 when the
+        metadata does not state both head widths."""
+        arch = self._architecture()
+        if not arch:
+            return 0
+        k_len = self._meta_int(f"{arch}.attention.key_length")
+        v_len = self._meta_int(f"{arch}.attention.value_length")
+        if not (k_len and v_len):
+            return 0
+        layers = self._meta_int(f"{arch}.decoder_block_count") or self.n_layers or 0
+        return layers * n_head_kv * (k_len + v_len) * 2
+
+    def _detect_encoder_decoder(self) -> bool:
+        """True when the loaded model has both an encoder and a decoder stack
+        (T5); False for every other model, an encoder-only one included.
+
+        Raises RuntimeError when this build does not export the encoder API and
+        the model's architecture is an encoder-decoder one, since such a model
+        cannot generate without ``llama_encode``."""
+        model = self._model_ptr
+        if model is None:
+            return False
+        if api.has_encoder_api():
+            return (api.llama_model_has_encoder(model)
+                    and api.llama_model_has_decoder(model))
+        arch = self._architecture()
+        from localm.model_manager.gguf import _GGUF_ENCODER_DECODER_ARCHITECTURES
+        if arch in _GGUF_ENCODER_DECODER_ARCHITECTURES:
+            raise RuntimeError(
+                f"This model's architecture ('{arch}') is an encoder-decoder "
+                "model, and the loaded llama runtime does not export "
+                "llama_encode, so it cannot run it. Update the runtime with  "
+                "localm setup-llama")
+        return False
+
+    def _read_encoder_input_limit(self, cp) -> int:
+        """Most tokens one ``llama_encode`` call takes on the live context: its
+        n_ubatch as llama.cpp reports it, or, on a build without that accessor,
+        *cp*'s n_ubatch clamped as llama.cpp clamps it (to n_batch, itself
+        clamped to n_ctx)."""
+        ctx = self._ctx_ptr
+        native = api.llama_n_ubatch(ctx) if ctx is not None else None
+        if native:
+            return int(native)
+        return int(min(cp.n_ubatch, cp.n_batch, cp.n_ctx))
 
     @property
     def supports_images(self) -> bool:
@@ -2221,6 +2377,215 @@ class LlamaCpp:
                     api.llama_sampler_free(sampler)
                 if source is not None:
                     source.end_call()
+
+    def encoder_tokens(self, messages: List[Dict]) -> List[int]:
+        """The encoder input of an encoder-decoder model for *messages*.
+
+        The ``_flatten_for_encoder`` text, tokenized with control tokens parsed
+        everywhere except inside untrusted spans, with the vocabulary's BOS
+        prepended when it asks for one and its EOS appended unless it says not
+        to (a T5 vocabulary: EOS appended, no BOS)."""
+        tokenizer = self._loaded_tokenizer()
+        prompt = _flatten_for_encoder(messages)
+        ranges = _encoder_untrusted_ranges(messages, prompt)
+        tokens = tokenizer.encode(prompt, add_bos=False, untrusted_ranges=ranges)
+        vocab = tokenizer._vocab
+        if api.llama_vocab_get_add_bos(vocab):
+            bos = api.llama_token_bos(vocab)
+            if bos != api.LLAMA_TOKEN_NULL:
+                tokens.insert(0, bos)
+        if api.llama_vocab_get_add_eos(vocab) is not False:
+            eos = api.llama_token_eos(vocab)
+            if eos != api.LLAMA_TOKEN_NULL:
+                tokens.append(eos)
+        return tokens
+
+    def _clear_decoder_memory(self) -> None:
+        """Empty the KV cache before an encoder-decoder request: llama_memory_clear
+        when this build has the memory API, else a fresh context of the same
+        size. Caller holds _gen_lock."""
+        self._cached_tokens = []
+        ctx = self._ctx_ptr
+        if ctx is not None and self._memory_api_available():
+            api.llama_memory_clear(api.llama_get_memory(ctx), True)
+            return
+        self._prefill_fresh_context([], self._ctx_capacity)
+
+    def _loaded_tokenizer(self) -> _Tokenizer:
+        """The loaded model's tokenizer. Raises RuntimeError when no model is
+        loaded."""
+        tokenizer = self._tokenizer
+        if tokenizer is None:
+            raise RuntimeError("Model not loaded")
+        return tokenizer
+
+    def _decoder_start_token(self) -> int:
+        """The token an encoder-decoder model's decoder starts from: the model's
+        declared decoder-start token, else its BOS. Raises RuntimeError when the
+        model declares neither."""
+        model = self._model_ptr
+        if model is None:
+            raise RuntimeError("Model not loaded")
+        token = api.llama_model_decoder_start_token(model)
+        if token == api.LLAMA_TOKEN_NULL:
+            token = api.llama_token_bos(self._loaded_tokenizer()._vocab)
+        if token == api.LLAMA_TOKEN_NULL:
+            raise RuntimeError(
+                "This encoder-decoder model declares neither a decoder start "
+                "token nor a BOS token, so its decoder has nothing to start from.")
+        return int(token)
+
+    def _generate_encoder_decoder(
+        self,
+        messages: List[Dict],
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repeat_penalty: float,
+        grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[List[str]] = None,
+        seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Iterator[int]:
+        """Yield the token ids an encoder-decoder model (T5) generates for
+        *messages*, one at a time.
+
+        Every call starts from nothing: the KV cache is cleared, the whole
+        ``encoder_tokens(messages)`` input is encoded by one ``llama_encode``
+        call, and the decoder starts from ``_decoder_start_token()`` at
+        position 0. No state carries over between calls, so no prefix is reused
+        and no draft source runs.
+
+        The reply stops at an end-of-generation token, after *max_new_tokens*
+        tokens when that is positive, and after the context's n_ctx tokens
+        (decoder positions) in any case; the last two set
+        ``last_finish_reason`` to "length".
+
+        Raises ContextCapacityExceededError, before any native call, when the
+        encoder input is longer than ``encoder_input_limit``; RuntimeError when
+        the model is not loaded or ``llama_encode`` or the first decoder step
+        fails.
+        """
+        from localm.debuglog import logger
+        from localm.inference.backends.base import ContextCapacityExceededError
+
+        with self._inference_lock:
+            if not self._model_ptr:
+                raise RuntimeError("Model not loaded")
+            tokenizer = self._loaded_tokenizer()
+            if on_status:
+                on_status("Processing prompt...")
+            enc_tokens = self.encoder_tokens(messages)
+            n_enc = len(enc_tokens)
+            if n_enc > self.encoder_input_limit:
+                raise ContextCapacityExceededError(
+                    f"This prompt is {n_enc} tokens, and this encoder-decoder "
+                    f"model reads at most {self.encoder_input_limit} tokens of "
+                    f"prompt in one pass. Shorten the message or start a new chat.")
+            budget = self._ctx_capacity
+            if max_new_tokens > 0:
+                budget = min(budget, max_new_tokens)
+
+            self.mtp_skipped = ""
+            self.mtp_active_this_call = False
+            self.mtp_call_status = ""
+            self.mtp_drafted = 0
+            self.mtp_accepted = 0
+            self.mtp_steps = 0
+            self.mtp_paused_steps = 0
+            self.last_finish_reason = "stop"
+
+            _ctx = _stderr_ctx_for_generate(self._verbose)
+            logger.info("gguf generate: encoding %d prompt token(s)", n_enc)
+            _t0 = time.monotonic()
+            tokens_generated = 0
+            in_decode = False
+            sampler = None
+            try:
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        self.last_finish_reason = "error"
+                        return
+                    with _ctx():
+                        self._clear_decoder_memory()
+                        enc_arr = (llama_token * n_enc)(*enc_tokens)
+                        ret = api.llama_encode(
+                            self._ctx_ptr, api.llama_batch_get_one(enc_arr, n_enc))
+                    if ret != 0:
+                        raise RuntimeError(f"llama_encode failed (code {ret})")
+                    token = self._decoder_start_token()
+                logger.info("gguf generate: encode complete in %.2fs",
+                            time.monotonic() - _t0)
+
+                sampler = _build_sampler(
+                    vocab=tokenizer._vocab,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                    seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
+                    grammar=grammar,
+                    grammar_lazy=grammar_lazy,
+                    grammar_triggers=grammar_triggers,
+                )
+                in_decode = True
+                if on_status:
+                    on_status("Generating response...")
+                _decode_t0 = time.monotonic()
+                pos = 0
+                with _ctx():
+                    while True:
+                        with self._gen_lock:
+                            if self._stop.is_set() or self._ctx_ptr is None:
+                                self.last_finish_reason = "error"
+                                break
+                            batch = self._create_batch([token], pos, logits_at_last_only=True)
+                            try:
+                                ret = api.llama_decode(self._ctx_ptr, batch)
+                            finally:
+                                api.llama_batch_free(batch)
+                            if ret != 0:
+                                if pos == 0:
+                                    raise RuntimeError(
+                                        f"llama_decode failed on the decoder start token (code {ret})")
+                                logger.warning(
+                                    "gguf generate: decoder step failed at position %d "
+                                    "(code %d); ending the reply", pos, ret)
+                                self.last_finish_reason = "error"
+                                break
+                            pos += 1
+                            token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                            eog = tokenizer.is_eog(token)
+                        if eog:
+                            break
+                        yield token
+                        tokens_generated += 1
+                        if (tokens_generated
+                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
+                            logger.debug(
+                                "gguf generate: decode progress, %d token(s) in %.2fs",
+                                tokens_generated, time.monotonic() - _decode_t0)
+                        if tokens_generated >= budget:
+                            self.last_finish_reason = "length"
+                            break
+                logger.info(
+                    "gguf generate: complete, %d token(s) in %.2fs, finish_reason=%s",
+                    tokens_generated, time.monotonic() - _decode_t0, self.last_finish_reason)
+            except GeneratorExit:
+                logger.info(
+                    "gguf generate: aborted (cancelled) during %s, %d token(s) generated",
+                    "decode" if in_decode else "encode", tokens_generated)
+                raise
+            except Exception:
+                logger.info(
+                    "gguf generate: aborted (exception) during %s, %d token(s) generated",
+                    "decode" if in_decode else "encode", tokens_generated)
+                raise
+            finally:
+                if sampler is not None:
+                    api.llama_sampler_free(sampler)
 
     def _generate_diffusion(
         self,
@@ -3509,9 +3874,28 @@ class LlamaCpp:
         ``thinking=False`` starts a text-only reply with an empty reasoning
         block (``no_think_prompt``); an image request is unaffected.
 
+        An encoder-decoder model generates through
+        ``_generate_encoder_decoder``; ``thinking`` does not apply to it and is
+        ignored.
+
         A diffusion language model answers through ``_generate_diffusion``,
         which polls *should_stop* between denoising steps.
         """
+        if self.is_encoder_decoder:
+            return self._completion_result(self._generate_encoder_decoder(
+                messages,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                grammar=grammar,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
+                seed=seed,
+                on_status=on_status,
+            ), stream)
+
         # Use the model's embedded chat template when available (Gemma, Llama3,
         # Mistral, etc.) so we don't force ChatML on every model.
         prompt, fallback_reason = _apply_model_template(self._model_ptr, messages)
@@ -3586,6 +3970,12 @@ class LlamaCpp:
                 on_status=on_status,
             )
 
+        return self._completion_result(gen, stream)
+
+    def _completion_result(self, gen: Iterator[int], stream: bool):
+        """The ``create_chat_completion`` result for the token generator *gen*:
+        the streaming chunk generator when *stream*, else the whole completion
+        dict."""
         if stream:
             return self._stream_chunks(gen)
         else:

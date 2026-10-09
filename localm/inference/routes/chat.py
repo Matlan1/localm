@@ -278,7 +278,8 @@ def register(app: FastAPI, ctx) -> None:
             compacted_here = False
             compact_in_stream = False
             if (_hs._needs_compaction(capacity, prompt_tokens, messages,
-                                      _hs._engine_reply_reserve(engine))
+                                      encoder_decoder=_hs._engine_is_encoder_decoder(engine),
+                                      reply_reserve=_hs._engine_reply_reserve(engine))
                     and compactable(messages)):
                 if req.stream:
                     # The stream compacts after its role chunk, behind a
@@ -307,7 +308,9 @@ def register(app: FastAPI, ctx) -> None:
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
                 raise HTTPException(
                     413, _hs.context_overflow_detail(
-                        prompt_tokens, capacity, _hs._engine_reply_reserve(engine)))
+                        prompt_tokens, capacity,
+                        encoder_decoder=_hs._engine_is_encoder_decoder(engine),
+                        reply_reserve=_hs._engine_reply_reserve(engine)))
 
         except BaseException:
             _hs._unpin(engine)
