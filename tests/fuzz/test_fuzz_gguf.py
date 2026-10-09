@@ -15,13 +15,25 @@ import pytest
 
 pytest.importorskip("hypothesis")
 
-from hypothesis import given, strategies as st  # noqa: E402
+from hypothesis import example, given, strategies as st  # noqa: E402
 
 from localm.model_manager import gguf  # noqa: E402
 from tests.fuzz import _bounds  # noqa: E402
-from tests.fuzz._gguf_strategies import gguf_bytes, raw_gguf_like  # noqa: E402
+from tests.fuzz._gguf_strategies import gguf_bytes, lstr, raw_gguf_like  # noqa: E402
 
 _counter = itertools.count()
+
+
+def _header(*kvs: bytes) -> bytes:
+    return b"GGUF" + struct.pack("<IQQ", 3, 0, len(kvs)) + b"".join(kvs)
+
+
+_LYING_ARRAY = _header(
+    lstr("llama.block_count") + struct.pack("<IIQ", 9, 0, 2 ** 63),
+    lstr("general.architecture") + struct.pack("<I", 8) + lstr("llama"))
+_HUGE_ALIGNMENT = _header(
+    lstr("general.alignment") + struct.pack("<II", 4, 2 ** 24),
+    lstr("general.architecture") + struct.pack("<I", 8) + lstr("clip")) + b"\x00" * 64
 
 NEVER_RAISE = {
     "gguf_kv_bytes_per_token": gguf.gguf_kv_bytes_per_token,
@@ -65,6 +77,8 @@ def _write(tmp_path: Path, data: bytes) -> Path:
 
 @pytest.mark.parametrize("name", sorted({**NEVER_RAISE, **UNDOCUMENTED}))
 @given(data=st.one_of(gguf_bytes(), raw_gguf_like, st.binary(max_size=64)))
+@example(data=_LYING_ARRAY)
+@example(data=_HUGE_ALIGNMENT)
 def test_reader_never_raises_and_returns_promptly(name, data, tmp_path):
     fn = {**NEVER_RAISE, **UNDOCUMENTED}[name]
     path = _write(tmp_path, data)
@@ -105,6 +119,7 @@ def test_header_layout_raises_only_its_documented_types(data, tmp_path):
 
 
 @given(data=gguf_bytes())
+@example(data=_HUGE_ALIGNMENT)
 def test_write_with_string_kv_raises_only_value_or_os_error(data, tmp_path):
     src = _write(tmp_path, data)
     dst = tmp_path / f"out{next(_counter)}.gguf"

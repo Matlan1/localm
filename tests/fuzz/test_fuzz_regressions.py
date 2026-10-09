@@ -81,13 +81,13 @@ class TestLegacyManifest:
 
 class TestEngineSpec:
     @pytest.mark.parametrize("manifest", [
-        _HOSTILE_MANIFESTS["not_utf8"],
-        _HOSTILE_MANIFESTS["nested_too_deep"],
-        b"[plugin]\nname='x'\napi_version=inf\n",
-        b"[plugin]\nname='x'\napi_version='one'\n",
-        b"[plugin]\nname='x'\nrequires_extras=5\n",
-        b"[plugin]\nname='x'\nrequires='chat'\n",
-        b"[plugin]\nname='x'\ncapabilities=[1, 2]\n",
+        pytest.param(_HOSTILE_MANIFESTS["not_utf8"], id="not_utf8"),
+        pytest.param(_HOSTILE_MANIFESTS["nested_too_deep"], id="nested_too_deep"),
+        pytest.param(b"[plugin]\nname='x'\napi_version=inf\n", id="api_version_inf"),
+        pytest.param(b"[plugin]\nname='x'\napi_version='one'\n", id="api_version_text"),
+        pytest.param(b"[plugin]\nname='x'\nrequires_extras=5\n", id="requires_extras_int"),
+        pytest.param(b"[plugin]\nname='x'\nrequires='chat'\n", id="requires_string"),
+        pytest.param(b"[plugin]\nname='x'\ncapabilities=[1, 2]\n", id="capabilities_ints"),
     ])
     def test_a_hostile_manifest_raises_value_error(self, tmp_path, manifest):
         with pytest.raises(ValueError):
@@ -137,14 +137,14 @@ def _header_with_alignment(alignment: int) -> bytes:
 
 
 class TestGgufAlignment:
-    @pytest.mark.parametrize("alignment", [2 ** 20 + 1, 2 ** 31, 2 ** 32 - 1])
+    @pytest.mark.parametrize("alignment", [2 ** 20 + 1, 2 ** 24, 2 ** 26])
     def test_a_rewrite_refuses_an_implausible_alignment_without_allocating_for_it(
             self, tmp_path, alignment):
         src, dst = tmp_path / "src.gguf", tmp_path / "dst.gguf"
         src.write_bytes(_header_with_alignment(alignment))
         outcome, peak = _peak(gguf.write_gguf_with_string_kv, src, dst, "k.new", "v")
         assert isinstance(outcome, ValueError)
-        assert peak < 16 * 1024 * 1024
+        assert peak < 4 * 1024 * 1024
         assert not dst.exists()
 
     @pytest.mark.parametrize("alignment", [32, 64, 4096, 2 ** 20])
