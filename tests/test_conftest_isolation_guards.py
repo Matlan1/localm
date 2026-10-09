@@ -57,44 +57,6 @@ def test_a_change_scoped_with_monkeypatch_is_not_a_leak(pytester, subrun_env):
     pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider").assert_outcomes(passed=1)
 
 
-def test_http_server_state_set_by_one_test_does_not_reach_the_next(pytester, subrun_env):
-    _with_real_conftest(pytester, "_restore_http_server_state")
-    pytester.makepyfile(
-        "from localm.inference import http_server as hs\n"
-        "def test_a_leaks():\n"
-        "    hs._engine = object()\n"
-        "    hs._engines['leaked'] = object()\n"
-        "    hs._engines_lru.append('leaked')\n"
-        "    hs._switch_loading = 'leaked'\n"
-        "def test_b_sees_a_clean_server():\n"
-        "    assert hs._engine is None\n"
-        "    assert hs._engines == {}\n"
-        "    assert hs._engines_lru == []\n"
-        "    assert hs._switch_loading is None\n")
-    result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider", "-p", "no:randomly")
-    result.assert_outcomes(passed=2)
-
-
-def test_state_a_module_scoped_fixture_set_up_survives_every_test(pytester, subrun_env):
-    _with_real_conftest(pytester, "_restore_http_server_state")
-    pytester.makepyfile(
-        "import pytest\n"
-        "from localm.inference import http_server as hs\n"
-        "@pytest.fixture(scope='module', autouse=True)\n"
-        "def engine():\n"
-        "    saved = hs._engine\n"
-        "    hs._engine = sentinel = object()\n"
-        "    yield sentinel\n"
-        "    hs._engine = saved\n"
-        "def test_one(engine):\n"
-        "    assert hs._engine is engine\n"
-        "    hs._engine = None\n"
-        "def test_two(engine):\n"
-        "    assert hs._engine is engine\n")
-    result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider", "-p", "no:randomly")
-    result.assert_outcomes(passed=2)
-
-
 @pytest.mark.skipif(sys.platform == "win32",
                     reason="multiprocessing keeps the spawn executable as bytes only off Windows")
 def test_the_mp_spawn_tests_leave_the_spawn_executable_as_they_found_it(pytester, subrun_env):

@@ -27,6 +27,7 @@ class _FakeEngine:
 
 
 def _reset(*names):
+    hs._engine = None
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._inference_sems.clear()
