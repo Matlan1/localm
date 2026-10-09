@@ -2150,32 +2150,6 @@
                 }
             }
         ],
-        "./localm/inference/backends/llamacpp/_ngram.py": [
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 38,
-                    "endColumn": 52,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 27,
-                    "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 43,
-                    "endColumn": 53,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./localm/inference/backends/llamacpp/_runner.py": [
             {
                 "code": "reportCallIssue",
