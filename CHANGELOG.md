@@ -323,6 +323,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   when they do not, or there is no GPU, the model file is memory-mapped wherever the
   device supports it, so only the parts in use stay in RAM and the rest is read from
   disk as needed.
+- **FP8 Hugging Face models (for example `Qwen/Qwen3-0.6B-FP8`) now load and answer
+  on CPUs and GPUs without native FP8 support.** They used to load and then stop at
+  the first reply with `No module named 'triton'`. Their weights are now expanded to
+  bf16 at load time (about 2 bytes per parameter), and the load output says so. A
+  model whose expanded size cannot fit in available memory is refused with the sizes
+  instead. FP8 runs natively only on an NVIDIA GPU with compute capability 8.9 or newer,
+  with triton installed and the FP8 kernel downloaded from the Hugging Face Hub (or
+  already downloaded by an earlier load, which then also works offline).
 - **Setup can pick up after being interrupted, on every platform.** `setup.sh`,
   `setup.bat` and the graphical installer keep a short journal of the steps they have
   started and finished. Run again after Ctrl+C, a closed window or a crash, setup says
@@ -1458,6 +1466,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
+- **Hugging Face models no longer download and run code from the Hugging Face kernel
+  hub unless the network policy allows it.** transformers could fetch a compiled kernel
+  package from the Hub while a model was loading or replying and import it, even with
+  `net_mode off`. The HF backend now blocks those kernels by default and, with
+  `net_mode off`, makes no Hub requests at all. Kernels are allowed only for a model
+  that needs one (native FP8 on a supported NVIDIA GPU, or MXFP4, EETQ, FBGEMM FP8 or
+  Metal quantization) and only when the network policy allows the Hub. With the Hub
+  refused, an MXFP4 model loads expanded to full precision and says so, and a model
+  that cannot run without its kernel is refused with the reason.
 - **Privacy mode no longer leaves the start of tool-enabled replies in the debug
   log.** With `--debug`, `LOCALM_DEBUG` or `keep_diagnostics` on, the text a model
   wrote before a tool call (coder turns, web-enabled chat, jobs) was copied into

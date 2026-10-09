@@ -131,6 +131,15 @@ def _check_format_supported(model_path: str) -> None:
         raise UnsupportedModelRoleError(refusal)
 
 
+def _load_notes(notes) -> list[str]:
+    """The ``load_notes`` of the worker's load response as one-line strings;
+    [] when absent or not a list."""
+    if not isinstance(notes, list):
+        return []
+    from ._hf_fp8 import one_line
+    return [one_line(n) for n in notes if isinstance(n, str) and n.strip()]
+
+
 class HFBackend(BaseBackend):
     """
     Parent-side handle to a HuggingFace-format model loaded in an isolated
@@ -303,6 +312,9 @@ class HFBackend(BaseBackend):
         # UnicodeEncodeError.
         mm_note = " (multimodal)" if self._supports_images else ""
         device = meta.get("device") or "?"
+        from rich.markup import escape
+        for note in _load_notes(meta.get("load_notes")):
+            console.print(f"[dim]  {escape(note)}[/dim]")
         console.print(f"[green]✓[/green] Model loaded{mm_note} (device: {device})")
 
     @staticmethod

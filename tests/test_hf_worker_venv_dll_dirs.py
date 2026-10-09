@@ -150,10 +150,11 @@ class TestHfWorkerRegistersThemBeforeTorch:
     def test_registered_before_the_worker_is_built_or_loaded(self, monkeypatch):
         """The real worker imports torch in HFWorker.load(), so the directories
         must already be registered by the time the worker exists."""
-        from localm.inference.backends import _hf_runner, _hf_worker
+        from localm.inference.backends import _hf_hub_gate, _hf_runner, _hf_worker
 
         monkeypatch.setattr(_mp_spawn, "install_parent_death_watchdog", lambda *a: None)
         monkeypatch.setattr(_mp_spawn, "suppress_native_error_dialogs", lambda *a: None)
+        monkeypatch.setattr(_hf_hub_gate, "close_hub_gate", lambda: None)
         events = []
         monkeypatch.setattr(_mp_spawn, "add_venv_dll_directories",
                             lambda: events.append("dll directories") or [])
