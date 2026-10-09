@@ -326,7 +326,7 @@ jobs:
       - name: TEMP proof - the ratchet command fails on a raised number
         run: python -m coverage report --fail-under=99
       - name: TEMP proof - the floors script fails on a lowered number
-        if: matrix.os == 'windows-latest'
+        if: always() && matrix.os == 'windows-latest'
         run: |
           python - <<'PY'
           import json
