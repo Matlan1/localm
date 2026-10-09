@@ -34,7 +34,7 @@ from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
-from .gguf import gguf_chat_refusal
+from .gguf import gguf_non_chat_model_type
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_is_mmproj
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
@@ -211,8 +211,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                 return "mmproj", gguf_metadata
             if gguf_embedding_signal(path, meta=meta):
                 return "embedding", gguf_metadata
-            if gguf_chat_refusal(gguf_metadata.get("architecture")):
-                return "unknown", gguf_metadata
+            non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
+            if non_chat:
+                return non_chat, gguf_metadata
             return "llm", gguf_metadata
         if is_hf:
             if (path / "adapter_config.json").exists():
@@ -1773,6 +1774,15 @@ def _backup_registry() -> Optional[Path]:
         return None
 
 
+def _gguf_model_stem(path: Path) -> str:
+    """The model name a GGUF registers under by default: its filename stem, with
+    the ``-NNNNN-of-NNNNN`` suffix of a split set removed."""
+    split = _SPLIT_GGUF_RE.match(path.name)
+    if split and split_gguf_parts(path.name):
+        return split.group("stem")
+    return path.stem
+
+
 def _import_max_depth() -> int:
     """The ``import_max_depth`` setting as an int >= 1; the default (3) when the
     stored value is not a number."""
@@ -1875,7 +1885,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                         child.name)
                     continue
                 mtype, gmeta = _detect_local_model_type(child, is_gguf=True, is_hf=False)
-                _mm._register(_unique_registry_name(reg, child.stem), child,
+                _mm._register(_unique_registry_name(reg, _gguf_model_stem(child)), child,
                               model_type=mtype, architecture=gmeta.get("architecture"),
                               expert_count=gmeta.get("expert_count"))
                 reg = _mm.load_registry()
@@ -3421,8 +3431,7 @@ def _add_local_gguf_dir(
                               f"longer in {escape(str(gguf.parent))}.[/yellow]")
                 continue
             gguf = carried
-        split = _SPLIT_GGUF_RE.match(gguf.name)
-        base = split.group("stem") if (split and split_gguf_parts(gguf.name)) else gguf.stem
+        base = _gguf_model_stem(gguf)
         reg = _mm.load_registry()
         wanted = _sanitize_name(name) if use_given_name else base
         model_name = _unique_registry_name(reg, wanted)

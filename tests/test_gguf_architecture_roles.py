@@ -71,6 +71,12 @@ NON_CHAT_ARCHITECTURES = [
 ]
 
 
+IMAGE_ARCHITECTURES = [
+    "flux", "sd3", "aura", "hidream", "cosmos", "hyvid", "wan", "ltxv", "sdxl", "sd1",
+    "lumina2",
+]
+
+
 class TestArchitectureRoles:
     @pytest.mark.parametrize("arch", CHAT_ARCHITECTURES)
     def test_chat_architectures_stay_llm(self, tmp_path, arch):
@@ -86,6 +92,12 @@ class TestArchitectureRoles:
         mtype, meta = _detect_local_model_type(f, is_gguf=True, is_hf=False)
         assert mtype == "unknown"
         assert meta["architecture"] == arch
+
+    @pytest.mark.parametrize("arch", IMAGE_ARCHITECTURES)
+    def test_image_and_video_checkpoints_are_diffusion_models(self, tmp_path, arch):
+        f = _gguf(tmp_path / "m.gguf", arch)
+        assert _type_of(f) == "diffusion-unet"
+        assert gguf_chat_refusal(arch) is not None
 
     def test_pooling_type_key_marks_a_decoder_architecture_as_embedding(self, tmp_path):
         f = _gguf(tmp_path / "m.gguf", "qwen3", [("qwen3.pooling_type", _kv_uint32(3))])
@@ -115,7 +127,7 @@ class TestChatRefusal:
         ("eagle3", "draft head"), ("dflash", "draft head"), ("gemma4-assistant", "draft head"),
         ("dream", "diffusion language model"), ("llada", "diffusion language model"),
         ("t5", "encoder-decoder"), ("wavtokenizer-dec", "audio codec"),
-        ("qwen3tts", "text-to-speech"),
+        ("qwen3tts", "text-to-speech"), ("flux", "image or video generation"),
     ])
     def test_message_names_the_architecture_and_what_it_is(self, arch, what):
         msg = gguf_chat_refusal(arch)
@@ -131,7 +143,7 @@ class TestChatRefusal:
 
 
 class TestBackendRefusesBeforeLoading:
-    @pytest.mark.parametrize("arch", ["eagle3", "llada", "t5", "wavtokenizer-dec"])
+    @pytest.mark.parametrize("arch", ["eagle3", "llada", "t5", "wavtokenizer-dec", "flux"])
     def test_load_raises_before_any_vram_probe_or_worker(self, tmp_path, monkeypatch, arch):
         f = _gguf(tmp_path / "m.gguf", arch)
         backend = GgufBackend(str(f))

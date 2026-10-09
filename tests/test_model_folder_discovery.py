@@ -233,6 +233,11 @@ class TestModelsFolderSync:
         assert not any(p.endswith("00002-of-00002.gguf") for p in paths)
         assert any(p.endswith("00001-of-00002.gguf") for p in paths)
 
+    def test_split_set_registers_under_its_stem_like_a_folder_import(self, home):
+        _lmstudio_tree(home / "models")
+        mm.sync_models_dir(prune=False, backfill_mmproj=False)
+        assert "Big-Q8_0" in load_registry()
+
     def test_second_sync_adds_nothing(self, home):
         _lmstudio_tree(home / "models")
         mm.sync_models_dir(prune=False, backfill_mmproj=False)

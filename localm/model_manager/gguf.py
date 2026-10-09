@@ -517,6 +517,24 @@ _GGUF_NON_CHAT_ARCHITECTURES = {
     "pockettts": "a text-to-speech model",
 }
 
+# general.architecture values ComfyUI-GGUF's converter writes for image and
+# video generation checkpoints; none is a llama.cpp architecture.
+_GGUF_IMAGE_ARCHITECTURES = frozenset({
+    "flux", "sd3", "aura", "hidream", "cosmos", "hyvid", "wan", "ltxv",
+    "sdxl", "sd1", "lumina2",
+})
+_GGUF_NON_CHAT_ARCHITECTURES.update(
+    {arch: "an image or video generation model" for arch in _GGUF_IMAGE_ARCHITECTURES})
+
+
+def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
+    """The registry type for a GGUF whose ``general.architecture`` is not a chat
+    model (``diffusion-unet`` for image/video checkpoints, ``unknown`` for the
+    other non-chat roles), or None when it may be a chat model."""
+    if architecture in _GGUF_IMAGE_ARCHITECTURES:
+        return "diffusion-unet"
+    return "unknown" if architecture in _GGUF_NON_CHAT_ARCHITECTURES else None
+
 
 def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
     """The reason a GGUF with this ``general.architecture`` cannot be chatted

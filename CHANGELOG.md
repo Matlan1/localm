@@ -262,8 +262,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **GGUF files that are not chat models are no longer listed as chat models.** Draft
   heads for speculative decoding (EAGLE3, DFlash, Gemma 4 assistant), diffusion
   language models (Dream, LLaDA, RND1), T5 encoder-decoder models, text-to-speech
-  models (Qwen3-TTS) and the WavTokenizer codec now show as type `unknown` and say what they are if you try to load one,
-  instead of failing in the runtime. `llama-embed` models and any encoder that declares
+  models (Qwen3-TTS) and the WavTokenizer codec now show as type `unknown`, and image
+  and video GGUFs (Flux, Wan and the other ComfyUI-GGUF checkpoints) as
+  `diffusion-unet`. Trying to load one says what it is, instead of failing in the
+  runtime. `llama-embed` models and any encoder that declares
   non-causal attention are recognised as embedding models, and openPangu-Embedded,
   which is a chat model, is no longer mistaken for an embedding model.
 - **A model newer than the bundled llama.cpp now says so.** When the runtime does not
