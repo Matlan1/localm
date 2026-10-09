@@ -103,7 +103,7 @@ _ENUM_BINDINGS = (
         module="localm.inference.embedder",
         prefix="_POOLING_",
         c_prefix="LLAMA_POOLING_TYPE_",
-        members=("UNSPECIFIED", "NONE", "MEAN", "CLS", "LAST"),
+        members=("UNSPECIFIED", "NONE", "MEAN", "CLS", "LAST", "RANK"),
         gate=("llama_context_params", "pooling_type"),
     ),
 )

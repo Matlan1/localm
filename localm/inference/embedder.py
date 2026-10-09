@@ -50,6 +50,7 @@ from localm import pathscrub
 from localm.debuglog import dedup_native_stderr, logger
 from localm.inference import pretokenizer_guard
 from localm.inference.backends.llamacpp._sizing import VramSizingMixin
+from localm.inference.rerank_pairs import VocabSpecials, build_pair
 
 # Known small embedding models, keyed by friendly name -> (hf_repo, filename).
 # embedding_model may also name any GGUF path or a registered model.
@@ -72,6 +73,9 @@ _POOLING_NONE = 0
 _POOLING_MEAN = 1
 _POOLING_CLS = 2
 _POOLING_LAST = 3
+# Reranker / classifier pooling: the sequence's score(s) come from the model's
+# classification head. Never a user choice for embeddings (not in _POOLING_BY_NAME).
+_POOLING_RANK = 4
 
 # Pooling settings a user may choose (config embedding_pooling). auto is not a
 # llama.cpp value: it is resolved per-model against what the GGUF declares.
@@ -79,6 +83,7 @@ POOLING_AUTO = "auto"
 _POOLING_BY_NAME = {"none": _POOLING_NONE, "mean": _POOLING_MEAN,
                     "cls": _POOLING_CLS, "last": _POOLING_LAST}
 _POOLING_NAMES = {v: k for k, v in _POOLING_BY_NAME.items()}
+_POOLING_NAMES[_POOLING_RANK] = "rank"
 POOLING_CHOICES = [POOLING_AUTO, *_POOLING_BY_NAME]
 
 # Pooling used when embedding_pooling was never configured: MEAN for every
@@ -109,6 +114,10 @@ def _resolve_embed_ctx(native_ctx_train: int) -> int:
 # The largest batch (in TEXTS, not tokens) this embedder will try to pack into
 # one native multi-sequence llama_decode call. See _choose_n_seq_max.
 _EMBED_BATCH_TARGET = 32
+
+# Query / document pairs sent to the isolated worker in one rerank call. Each
+# call has its own worker timeout, so a long document list is sent in chunks.
+RERANK_PAIRS_PER_CALL = 32
 
 
 def configure_embed_context(cp, n_ctx: int, n_seq_max: int, pooling_type: int):
@@ -206,7 +215,11 @@ def _effective_pooling(requested: object, declared: Optional[int]) -> int:
     - an explicit choice (a real pooling int, including an explicit "mean") is
       returned as-is, never overridden;
     - AUTO honours what the model declares, falling back to MEAN when it
-      declares nothing usable."""
+      declares nothing usable;
+    - a model that declares RANK pooling (a reranker) always resolves to RANK,
+      whatever was requested."""
+    if declared == _POOLING_RANK:
+        return _POOLING_RANK
     if requested == _POOLING_UNSET:
         return _POOLING_LAST if declared == _POOLING_LAST else _POOLING_DEFAULT
     if requested != POOLING_AUTO:
@@ -603,6 +616,11 @@ class GGUFEmbedder:
         # up to IsolatedEmbedder through the runner's load meta.
         self.declared_pooling: Optional[int] = None
         self.pooling_type: int = _POOLING_DEFAULT
+        # Classifier head facts, read only for a RANK-pooled (reranker) model.
+        self.n_cls_out = 1
+        self.cls_labels: List[str] = []
+        self._rerank_template: Optional[str] = None
+        self._specials: Optional[VocabSpecials] = None
 
         if not api.has_embeddings_api():
             raise RuntimeError(
@@ -687,6 +705,43 @@ class GGUFEmbedder:
         # runtime sliced the KV cache into private per-sequence slots.
         self._effective_seq_ctx = (
             self.n_ctx if sliced_seq_ctx is None else sliced_seq_ctx)
+        if self.pooling_type == _POOLING_RANK:
+            self._read_rank_head()
+
+    def _read_rank_head(self) -> None:
+        """Read the classifier head's output count and labels, the model's
+        ``rerank`` chat template and the vocabulary's special tokens: what a
+        RANK-pooled model needs to build and score a query / document pair."""
+        api = self._api
+        if not api.has_rerank_api():
+            raise RuntimeError(
+                "this llama.dll build does not expose the reranking API")
+        self.n_cls_out = max(1, int(api.llama_model_n_cls_out(self._model)))
+        self.cls_labels = [api.llama_model_cls_label(self._model, i) or ""
+                           for i in range(self.n_cls_out)]
+        self._rerank_template = api.llama_model_chat_template(self._model, b"rerank")
+        self._specials = VocabSpecials.read(api, self._vocab)
+
+    def _tokenize_plain(self, text: str, add_special: bool,
+                        parse_special: bool) -> List[int]:
+        """Tokenise *text* in full with the given special-token flags, with no
+        truncation. An empty text gives no tokens."""
+        api = self._api
+        raw = text.encode("utf-8")
+        if not raw:
+            return []
+        cap = len(raw) + 8
+        buf = (self._llama_token * cap)()
+        n = api.llama_tokenize(self._vocab, raw, len(raw), buf, cap,
+                               add_special, parse_special)
+        if n < 0:
+            cap = -n
+            buf = (self._llama_token * cap)()
+            n = api.llama_tokenize(self._vocab, raw, len(raw), buf, cap,
+                                   add_special, parse_special)
+        if n < 0:
+            raise RuntimeError(f"tokenizer failed on a {len(raw)}-byte text ({n})")
+        return list(buf[:n])
 
     def _tokenize(self, text: str) -> list[int]:
         """Tokenize *text*, truncated to fit ``self._effective_seq_ctx`` -
@@ -763,6 +818,45 @@ class GGUFEmbedder:
         placeholder vector for the sequence that failed. embed()'s external
         contract is all-or-nothing either way; the failure UNIT here is one
         group rather than one text."""
+        return self._run_batch(token_lists, self._read_embedding, "embedding")
+
+    def _read_embedding(self, seq: int, n_seq: int) -> List[float]:
+        """The L2-normalised pooled embedding of sequence *seq* of a decoded
+        batch of *n_seq*."""
+        api = self._api
+        ptr = api.llama_get_embeddings_seq(self._ctx, seq)
+        if not ptr:
+            raise RuntimeError(
+                f"null embedding for sequence {seq} of {n_seq} in a "
+                "batched decode (pooling produced no output)")
+        v = [float(ptr[i]) for i in range(self.dim)]
+        norm = math.sqrt(sum(x * x for x in v))
+        if not math.isfinite(norm):
+            raise RuntimeError(
+                f"non-finite embedding for sequence {seq} of {n_seq} "
+                "in a batched decode")
+        return [x / norm for x in v] if norm else v
+
+    def _read_scores(self, seq: int, n_seq: int) -> List[float]:
+        """The classifier-head outputs (``n_cls_out`` values, label order) of
+        sequence *seq* of a decoded batch of *n_seq*."""
+        api = self._api
+        ptr = api.llama_get_embeddings_seq(self._ctx, seq)
+        if not ptr:
+            raise RuntimeError(
+                f"no score for sequence {seq} of {n_seq} in a batched decode "
+                "(the model produced no classifier output)")
+        scores = [float(ptr[i]) for i in range(self.n_cls_out)]
+        if not all(math.isfinite(s) for s in scores):
+            raise RuntimeError(
+                f"non-finite score for sequence {seq} of {n_seq} in a "
+                "batched decode")
+        return scores
+
+    def _run_batch(self, token_lists: List[List[int]], read, label: str) -> list:
+        """Decode *token_lists* as one multi-sequence batch and return
+        ``read(seq, n_seq)`` for each sequence, in order. *label* names the
+        operation in a decode-failure message."""
         api = self._api
         if self._mem is not None:
             api.llama_memory_clear(self._mem, True)
@@ -791,23 +885,9 @@ class GGUFEmbedder:
 
             ret = api.llama_decode(self._ctx, batch)
             if ret != 0:
-                raise RuntimeError(f"batched embedding decode failed (code {ret})")
+                raise RuntimeError(f"batched {label} decode failed (code {ret})")
 
-            out = []
-            for seq in range(n_seq):
-                ptr = api.llama_get_embeddings_seq(self._ctx, seq)
-                if not ptr:
-                    raise RuntimeError(
-                        f"null embedding for sequence {seq} of {n_seq} in a "
-                        "batched decode (pooling produced no output)")
-                v = [float(ptr[i]) for i in range(self.dim)]
-                norm = math.sqrt(sum(x * x for x in v))
-                if not math.isfinite(norm):
-                    raise RuntimeError(
-                        f"non-finite embedding for sequence {seq} of {n_seq} "
-                        "in a batched decode")
-                out.append([x / norm for x in v] if norm else v)
-            return out
+            return [read(seq, n_seq) for seq in range(n_seq)]
         finally:
             api.llama_batch_free(batch)
 
@@ -856,6 +936,11 @@ class GGUFEmbedder:
         with self._lock:
             if self._ctx is None:
                 raise RuntimeError("embedder is closed")
+            if self.pooling_type == _POOLING_RANK:
+                raise RuntimeError(
+                    f"{Path(self.model_path).name} is a reranker (rank "
+                    "pooling): it scores query and document pairs and cannot "
+                    "produce embeddings")
             if not texts:
                 return []
             token_lists = [self._tokenize(t) for t in texts]
@@ -879,6 +964,41 @@ class GGUFEmbedder:
                         else self._decode_batch(group_toks))
                 for gi, v in zip(group_idx, vecs, strict=False):
                     out[gi] = v
+            return out
+
+    def rerank(self, pairs: List["tuple[str, str]"]) -> List[dict]:
+        """Score each ``(query, document)`` pair (aligned 1:1 with *pairs*).
+
+        Each result is ``{"scores": [...], "tokens": N, "truncated": bool}``:
+        the classifier head's ``n_cls_out`` outputs in label order, the pair's
+        token count, and whether its document was cut to fit the window. The
+        score a ranking uses is ``scores[0]``. Pairs are packed into groups and
+        decoded one native ``llama_decode`` per group, the way ``embed`` packs
+        texts. Raises :class:`RerankInputError` for a query that leaves no room
+        for a document, and RuntimeError when this model is not RANK-pooled."""
+        with self._lock:
+            if self._ctx is None:
+                raise RuntimeError("embedder is closed")
+            if self.pooling_type != _POOLING_RANK or self._specials is None:
+                raise RuntimeError(
+                    f"{Path(self.model_path).name} was not loaded for "
+                    "reranking (it is not rank-pooled)")
+            if not pairs:
+                return []
+            built = []
+            for query, document in pairs:
+                pretokenizer_guard.check_text(self._pre_type, query or " ")
+                pretokenizer_guard.check_text(self._pre_type, document or " ")
+                built.append(build_pair(
+                    self._tokenize_plain, self._specials, self._rerank_template,
+                    self._effective_seq_ctx, query, document))
+            out: List[Optional[dict]] = [None] * len(pairs)
+            for group in self._pack_groups([b.tokens for b in built]):
+                scores = self._run_batch(
+                    [built[i].tokens for i in group], self._read_scores, "rerank")
+                for i, s in zip(group, scores):
+                    out[i] = {"scores": s, "tokens": len(built[i].tokens),
+                              "truncated": built[i].truncated}
             return out
 
     def close(self) -> None:
@@ -934,6 +1054,10 @@ class IsolatedEmbedder(VramSizingMixin):
         # what is actually pooled with.
         self.declared_pooling: Optional[int] = None
         self.effective_pooling: Optional[int] = None
+        # Reported by the child at load for a RANK-pooled (reranker) model.
+        self.n_cls_out = 1
+        self.cls_labels: List[str] = []
+        self.has_rerank_template = False
         # Set once a GPU-offloaded embed() crashes the worker and this embedder
         # falls back to CPU (see embed()'s crash-recovery branch), or seeded at
         # construction when automatic placement already chose CPU
@@ -1039,6 +1163,9 @@ class IsolatedEmbedder(VramSizingMixin):
         self.dim = meta["dim"]
         self.declared_pooling = meta.get("declared_pooling")
         self.effective_pooling = meta.get("effective_pooling")
+        self.n_cls_out = meta.get("n_cls_out", 1)
+        self.cls_labels = list(meta.get("cls_labels") or [])
+        self.has_rerank_template = bool(meta.get("has_rerank_template"))
         # Overwrites the preflight-time ceiling placeholder set in __init__:
         # only the child, which loads the model, can resolve auto against the
         # model's real native window.
@@ -1086,7 +1213,45 @@ class IsolatedEmbedder(VramSizingMixin):
         RPC together, so concurrent callers can neither swap responses on the
         correlation-free queue pair nor both respawn and orphan a worker. The
         pin is taken BEFORE the lock, so a caller merely queued behind another
-        still counts as in-flight."""
+        still counts as in-flight.
+
+        Refuses up front for a reranker (rank pooling): its worker returns
+        classifier scores, not embeddings."""
+        if self.effective_pooling == _POOLING_RANK:
+            raise RuntimeError(
+                f"{Path(self.model_path).name} is a reranker (rank pooling): it "
+                "scores query and document pairs and cannot produce embeddings")
+        texts = list(texts)
+        return self._call_worker(lambda runner: runner.embed(texts))
+
+    def rerank(self, pairs: List["tuple[str, str]"]) -> List[dict]:
+        """Score ``(query, document)`` pairs via the isolated worker, with the
+        same respawn, serialisation and CPU-fallback behaviour as :meth:`embed`.
+        Each result is ``{"scores": [...], "tokens": N, "truncated": bool}`` (see
+        :meth:`GGUFEmbedder.rerank`). Pairs go to the worker in chunks of
+        ``RERANK_PAIRS_PER_CALL`` so each worker call stays inside its timeout.
+
+        Refuses up front for a model that is not rank-pooled."""
+        if self.effective_pooling != _POOLING_RANK:
+            raise RuntimeError(
+                f"{Path(self.model_path).name} was not loaded for reranking "
+                f"(pooling is {pooling_name(self.effective_pooling)}, not rank)")
+        pairs = [(q, d) for q, d in pairs]
+        out: List[dict] = []
+        self.active_requests += 1
+        try:
+            for start in range(0, len(pairs), RERANK_PAIRS_PER_CALL):
+                chunk = pairs[start:start + RERANK_PAIRS_PER_CALL]
+                out.extend(self._call_worker(lambda runner, c=chunk: runner.rerank(c)))
+        finally:
+            self.active_requests = max(0, self.active_requests - 1)
+        return out
+
+    def _call_worker(self, call: Callable):
+        """Run ``call(runner)`` against the worker: pinned via
+        ``active_requests`` for the whole call, serialised on ``_rpc_lock``,
+        respawning a dead worker first and recovering from a GPU crash as
+        described on :meth:`embed`."""
         self.active_requests += 1
         try:
             with self._rpc_lock:
@@ -1095,7 +1260,7 @@ class IsolatedEmbedder(VramSizingMixin):
                                    self.model_path)
                     self._reload()
                 try:
-                    return self._runner.embed(list(texts))
+                    return call(self._runner)
                 except RuntimeError:
                     # Discard the worker ONLY if it is actually gone. The child's
                     # dispatch loop answers an ordinary embed failure with a
@@ -1133,7 +1298,7 @@ class IsolatedEmbedder(VramSizingMixin):
                                        self.gpu_fallback_reason)
                         self.n_gpu_layers = 0
                         self._reload()
-                        return self._runner.embed(list(texts))
+                        return call(self._runner)
                     raise
         finally:
             self.active_requests = max(0, self.active_requests - 1)
@@ -1424,6 +1589,14 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
                 _EMBEDDER = IsolatedEmbedder(
                     path, n_gpu_layers=ngl, pooling_type=pooling,
                     gpu_fallback_reason=placement_reason)
+                if getattr(_EMBEDDER, "effective_pooling", None) == _POOLING_RANK:
+                    rejected, _EMBEDDER = _EMBEDDER, None
+                    rejected.close()
+                    raise RuntimeError(
+                        f"{Path(path).name} is a reranker (rank pooling), not an "
+                        "embedding model: it scores query and document pairs "
+                        "(POST /v1/rerank). Choose an embedding model for "
+                        "embedding_model.")
                 # getattr, not attribute access: this line runs inside the try,
                 # so anything it raised would be caught as a LOAD failure.
                 logger.info("embedding model ready: %s (dim=%d, pooling=%s)", path,

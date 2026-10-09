@@ -16,11 +16,13 @@ Protocol (two ``multiprocessing.Queue``s, tagged tuples):
 ``req_q`` (parent -> child), one command processed at a time:
     ("load", {model_path, n_gpu_layers, n_ctx, pooling_type})
     ("embed", texts)
+    ("rerank", [(query, document), ...])
     ("shutdown", None)
 
 ``resp_q`` (child -> parent):
     ("ok", value)      - success (a {"dim": N} dict for load, a list of
-                          vectors for embed)
+                          vectors for embed, a list of
+                          {"scores", "tokens", "truncated"} dicts for rerank)
     ("error", message) - a clean, expected failure (e.g. a bad model path)
 
 A native abort, or any other uncaught fault in the child's dispatch loop,
@@ -35,7 +37,8 @@ import os
 import queue as _queue
 import time
 
-from localm.inference.backends.base import PretokenizerUnsafeInputError
+from localm.inference.backends.base import (
+    PretokenizerUnsafeInputError, RerankInputError)
 
 # Fault-injection hook, honoured by the child ONLY when this environment
 # variable is set; never set in production. Values: "abort" (a genuine
@@ -216,6 +219,9 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
                     "declared_pooling": embedder.declared_pooling,
                     "effective_pooling": embedder.pooling_type,
                     "n_ctx": embedder.n_ctx,
+                    "n_cls_out": embedder.n_cls_out,
+                    "cls_labels": embedder.cls_labels,
+                    "has_rerank_template": embedder._rerank_template is not None,
                 }))
             except Exception as e:
                 resp_q.put(("error", str(e)))
@@ -223,12 +229,17 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             # the process dies, and the parent detects that via is_alive().
             continue
 
-        if name == "embed":
+        if name in ("embed", "rerank"):
             if embed_stderr_ctx is None:
                 embed_stderr_ctx = dedup_native_stderr()
                 embed_stderr_ctx.__enter__()
             try:
-                resp_q.put(("ok", embedder.embed(payload)))
+                if name == "embed":
+                    resp_q.put(("ok", embedder.embed(payload)))
+                else:
+                    resp_q.put(("ok", embedder.rerank(payload)))
+            except RerankInputError as e:
+                resp_q.put(("error", str(e), "RerankInputError"))
             except PretokenizerUnsafeInputError as e:
                 # Text this model's pre-tokenizer aborts the process on, refused
                 # in Python before any native call. Tagged so the parent re-raises
@@ -394,6 +405,13 @@ class EmbedderRunner:
         self._req_q.put(("embed", texts))
         return self._wait(timeout, "embed")
 
+    def rerank(self, pairs: List["tuple[str, str]"],
+               timeout: float = _EMBED_TIMEOUT_DEFAULT) -> List[dict]:
+        """Score *pairs* via the isolated worker; the same failure contract and
+        the same one-RPC-at-a-time restriction as :meth:`embed`."""
+        self._req_q.put(("rerank", pairs))
+        return self._wait(timeout, "rerank")
+
     def _wait(self, timeout: float, label: str, *, shutdown_on_error: bool = False):
         """Block for the next response envelope for *label*.
 
@@ -430,6 +448,8 @@ class EmbedderRunner:
                 # A per-request refusal by a healthy worker, not a fault: it must
                 # not shut the worker down and must not read as a RuntimeError.
                 raise PretokenizerUnsafeInputError(result[1])
+            if tag == "RerankInputError":
+                raise RerankInputError(result[1])
             if shutdown_on_error:
                 self.shutdown(grace=0)
             raise RuntimeError(result[1])

@@ -215,6 +215,22 @@ def stream_stop_requested() -> bool:
         return False
 
 
+class RerankInputError(ValueError):
+    """Raised when a rerank request cannot be scored as given (a query that
+    alone fills the model's context window).
+
+    A ValueError subclass carried across IPC as a typed error, for the reason
+    given on :class:`ContextCapacityExceededError`: the check runs before any
+    native decode, so the loaded model is unharmed and the worker keeps serving.
+    """
+
+
+class RerankerHeadMissingError(RuntimeError):
+    """Raised when a model declared for reranking carries no classifier head
+    (neither a ``cls`` nor a ``cls.output`` tensor), so its output would be an
+    arbitrary pooled embedding value rather than a relevance score."""
+
+
 class UnsupportedModelRoleError(RuntimeError):
     """Raised by a load when the file is a model localm cannot chat with (a
     speculative-decoding draft head, an encoder-decoder model, an audio codec,

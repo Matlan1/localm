@@ -121,6 +121,21 @@ class EmbeddingRequest(BaseModel):
                                       # (base64 little-endian float32 buffer)
 
 
+class RerankDocument(BaseModel):
+    """A document object in a rerank request: ``{"text": "..."}``."""
+    text: str
+
+
+class RerankRequest(BaseModel):
+    """Jina / Cohere style /v1/rerank request."""
+    # None for the same reason as EmbeddingRequest.model.
+    model: Optional[str] = None
+    query: str
+    documents: List[Union[str, RerankDocument]] = Field(min_length=1)
+    top_n: Optional[int] = Field(None, ge=1)
+    return_documents: bool = False
+
+
 class CompletionRequest(BaseModel):
     """OpenAI /v1/completions (raw text completion) request."""
     # None, not "localm": "localm" is truthy, so a request that OMITS this

@@ -282,9 +282,9 @@ def test_field_sizes():
 #  Everything below is driven off a SYNTHESISED header, never a real upstream tag.
 # --------------------------------------------------------------------------- #
 
-# RANK is omitted from llama_pooling_type here, so this fixture's clean state
-# produces ZERO additive notes, and the additive assertions below can name the
-# injected member exactly.
+# Every llama_pooling_type member localm binds is present here, so this
+# fixture's clean state produces ZERO additive notes, and the additive
+# assertions below can name the injected member exactly.
 _ENUM_BLOCKS = """
 enum llama_load_mode {
     LLAMA_LOAD_MODE_AUTO       = -1,
@@ -300,6 +300,7 @@ enum llama_pooling_type {
     LLAMA_POOLING_TYPE_MEAN = 1,
     LLAMA_POOLING_TYPE_CLS  = 2,
     LLAMA_POOLING_TYPE_LAST = 3,
+    LLAMA_POOLING_TYPE_RANK = 4,
 };
 enum llama_lazy_mode {
     LLAMA_LAZY_MODE_OFF  = 0,

@@ -493,6 +493,60 @@ def llama_token_eos(vocab: ctypes.c_void_p) -> int:
     return _bind("llama_token_eos", llama_token, LlamaVocab)(vocab)
 
 
+def has_rerank_api() -> bool:
+    """True when this llama.dll exports the vocabulary special-token accessors and
+    the classifier-head accessors a reranker needs to build and read a query /
+    document pair. Every current build exports them; the probe lets an exotic
+    stripped build refuse reranking instead of raising AttributeError."""
+    lib = load_lib()
+    return all(hasattr(lib, fn) for fn in (
+        "llama_vocab_bos", "llama_vocab_eos", "llama_vocab_sep",
+        "llama_vocab_get_add_bos", "llama_vocab_get_add_eos",
+        "llama_vocab_get_add_sep", "llama_model_n_cls_out",
+        "llama_model_cls_label"))
+
+
+def llama_vocab_bos(vocab: ctypes.c_void_p) -> int:
+    """Beginning-of-sentence token id, or -1 when the vocabulary has none."""
+    return _bind("llama_vocab_bos", llama_token, LlamaVocab)(vocab)
+
+
+def llama_vocab_eos(vocab: ctypes.c_void_p) -> int:
+    """End-of-sentence token id, or -1 when the vocabulary has none."""
+    return _bind("llama_vocab_eos", llama_token, LlamaVocab)(vocab)
+
+
+def llama_vocab_sep(vocab: ctypes.c_void_p) -> int:
+    """Sentence-separator token id, or -1 when the vocabulary has none."""
+    return _bind("llama_vocab_sep", llama_token, LlamaVocab)(vocab)
+
+
+def llama_vocab_get_add_bos(vocab: ctypes.c_void_p) -> bool:
+    return bool(_bind("llama_vocab_get_add_bos", ctypes.c_bool, LlamaVocab)(vocab))
+
+
+def llama_vocab_get_add_eos(vocab: ctypes.c_void_p) -> bool:
+    return bool(_bind("llama_vocab_get_add_eos", ctypes.c_bool, LlamaVocab)(vocab))
+
+
+def llama_vocab_get_add_sep(vocab: ctypes.c_void_p) -> bool:
+    return bool(_bind("llama_vocab_get_add_sep", ctypes.c_bool, LlamaVocab)(vocab))
+
+
+def llama_model_n_cls_out(model: ctypes.c_void_p) -> int:
+    """Number of values the classifier head produces per sequence: the count of
+    ``<arch>.classifier.output_labels``, or 1 when the model declares none."""
+    return int(_bind("llama_model_n_cls_out", ctypes.c_uint32, LlamaModel)(model))
+
+
+def llama_model_cls_label(model: ctypes.c_void_p, i: int) -> Optional[str]:
+    """Label *i* of the classifier head, or None when the model declares no
+    label at that index."""
+    fn = _bind("llama_model_cls_label", ctypes.c_char_p, LlamaModel, ctypes.c_uint32)
+    result = fn(model, i)
+    return result.decode("utf-8", "replace") if result else None
+
+
 def llama_vocab_is_eog(vocab: ctypes.c_void_p, token: int) -> bool:
     return bool(_bind("llama_vocab_is_eog", ctypes.c_bool, LlamaVocab, llama_token)(vocab, token))
 

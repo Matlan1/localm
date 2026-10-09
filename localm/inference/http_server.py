@@ -1015,12 +1015,20 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     from localm.debuglog import logger as _dbg
     from localm.vram import wait_for_vram_release
 
+    from localm.inference import reranker as _reranker_mod
     embedder_dim = await loop.run_in_executor(None, embedder_mod.loaded_dim)
-    if embedder_dim is None:
+    reranker_loaded = await loop.run_in_executor(None, _reranker_mod.is_loaded)
+    if embedder_dim is None and not reranker_loaded:
         return False
     attempt.embedder_attempted = True
-    cleared = await loop.run_in_executor(
-        None, functools.partial(embedder_mod.reset_embedder, force=False))
+    cleared = False
+    if embedder_dim is not None:
+        cleared = await loop.run_in_executor(
+            None, functools.partial(embedder_mod.reset_embedder, force=False))
+    if reranker_loaded:
+        cleared = await loop.run_in_executor(
+            None, functools.partial(_reranker_mod.reset_reranker, force=False)
+        ) or cleared
     if not cleared:
         return False
     if probe.measurable:
@@ -2038,6 +2046,15 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
             embedder_was_loaded = True
         else:
             skipped_in_use.append("embedding model")
+    # The resident reranker is the same kind of separate lifecycle, released the
+    # same way: loaded()/reset off the event loop, a request in flight pins it.
+    from localm.inference import reranker as _reranker_mod
+    if await loop.run_in_executor(None, _reranker_mod.is_loaded):
+        if await loop.run_in_executor(
+                None, functools.partial(_reranker_mod.reset_reranker, force=False)):
+            embedder_was_loaded = True
+        else:
+            skipped_in_use.append("reranker model")
     return embedder_was_loaded
 
 
@@ -2787,6 +2804,11 @@ def _hang_restart_action(app) -> None:
         _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during forced restart failed")
+    try:
+        from localm.inference import reranker as _reranker_mod
+        _reranker_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("reranker release during forced restart failed")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
@@ -3731,6 +3753,11 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
         _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during shutdown failed (non-fatal)")
+    try:
+        from localm.inference import reranker as _reranker_mod
+        _reranker_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("reranker release during shutdown failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
