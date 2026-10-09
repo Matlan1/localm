@@ -235,7 +235,7 @@ export function fmtAdapterScale(scale) {
 export function adapterLoadState(m) {
   const attached = Array.isArray(m.adapters) ? m.adapters : [];
   const applied = Array.isArray(m.applied_adapters) ? m.applied_adapters : [];
-  if (!m.loaded) return attached.length ? "attached" : "none";
+  if (!m.loaded && !m.adapter_resident) return attached.length ? "attached" : "none";
   if (!attached.length && !applied.length) return "none";
   const key = (a) => `${a.file || a.name}|${Number(a.scale)}`;
   const want = attached.map(key).sort();

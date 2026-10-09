@@ -151,6 +151,28 @@ class TestAttachRoute:
         monkeypatch.setitem(_hs._engines, "renamed-by-another-process", engine)
         assert _attach(client).json()["needs_reload"] is True
 
+    def test_moving_an_adapter_off_a_resident_base_asks_for_a_reload(
+            self, registered, client, monkeypatch):
+        other = _write(registered.base.parent / "tiny.gguf", _gguf("llama", "model"))
+        assert mm.add_local(str(other), name="tiny") is True
+        assert _attach(client).status_code == 200
+        engine = SimpleNamespace(loaded=True, model_path=str(registered.base),
+                                 applied_adapters=[{"name": "adp.gguf", "scale": 1.0}])
+        monkeypatch.setitem(_hs._engines, "base", engine)
+        r = _attach(client, base="tiny")
+        assert r.status_code == 200
+        assert r.json()["needs_reload"] is True
+
+    def test_an_unresolvable_path_in_the_registry_does_not_fail_the_attach(
+            self, registered, client):
+        def _bad(reg):
+            reg["corrupt"] = {"path": "Z:/nope\x00.gguf", "source": "local"}
+
+        mm.update_registry(_bad)
+        r = _attach(client)
+        assert r.status_code == 200, r.text
+        assert r.json()["needs_reload"] is False
+
     def test_an_engine_that_is_not_loaded_does_not_count(
             self, registered, client, monkeypatch):
         engine = SimpleNamespace(loaded=False, model_path=str(registered.base),
@@ -237,6 +259,44 @@ class TestModelListAdapterFields:
         monkeypatch.setitem(_hs._engines, "base", engine)
         row = _row(client, "base")
         assert "adapters" not in row and "applied_adapters" not in row
+
+    def test_an_unresolvable_path_in_the_registry_does_not_fail_the_list(
+            self, registered, client):
+        _attach(client)
+
+        def _bad(reg):
+            reg["corrupt"] = {"path": "Z:/nope\x00.gguf", "source": "local"}
+
+        mm.update_registry(_bad)
+        r = client.get("/api/models")
+        assert r.status_code == 200, r.text
+        names = {m["name"] for m in r.json()["models"]}
+        assert {"base", "adp"} <= names
+        assert [a["name"] for a in _row(client, "base")["adapters"]] == ["adp"]
+
+    def test_one_adapter_file_registered_twice_is_listed_once(self, registered, client):
+        assert mm.alias_model("adp", "adp-alias")
+        assert _attach(client).status_code == 200
+        assert _attach(client, adapter="adp-alias").status_code == 200
+        assert len(_row(client, "base")["adapters"]) == 1
+
+    def test_a_base_resident_under_an_alias_reports_what_it_runs(
+            self, registered, client, monkeypatch):
+        assert mm.alias_model("base", "base-alias")
+        _attach(client, scale=0.8)
+        applied = [{"name": "adp.gguf", "scale": 0.8}]
+        engine = SimpleNamespace(loaded=True, model_path=str(registered.base),
+                                 applied_adapters=applied)
+        monkeypatch.setitem(_hs._engines, "base-alias", engine)
+        row = _row(client, "base")
+        assert row["loaded"] is False
+        assert row["adapter_resident"] is True
+        assert row["applied_adapters"] == applied
+
+    def test_a_base_that_is_not_resident_anywhere_is_not_marked_resident(
+            self, registered, client):
+        _attach(client)
+        assert "adapter_resident" not in _row(client, "base")
 
     def test_a_plain_model_row_carries_no_adapter_fields(self, registered, client):
         row = _row(client, "base")

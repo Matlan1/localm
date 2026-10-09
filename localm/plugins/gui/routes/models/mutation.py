@@ -15,35 +15,12 @@ from localm.inference.http_server import (principal_id, require_fs_host,
 import localm.inference.http_server as _hs
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import (ModelRouteContext,
-                                                       _require_registered)
+                                                       _require_registered,
+                                                       resident_engine)
 from localm.plugins.gui.web import (AdapterAttachRequest, AdapterDetachRequest,
                                     AliasRequest, RelocateModelRequest,
                                     RemoveModelRequest, RenameModelRequest,
                                     SetTypeRequest)
-
-
-def _base_is_resident(base: str, registry: dict) -> bool:
-    """True when a loaded engine in this process runs the model file that the
-    registered name *base* points at, under any of its names. Does filesystem
-    I/O; callers on the event loop use the executor."""
-    from pathlib import Path
-
-    from localm.model_manager import _entry_path, names_same_model
-    base_path = _entry_path(registry.get(base))
-    for key, engine in list(_hs._engines.items()):
-        if not getattr(engine, "loaded", False):
-            continue
-        if names_same_model(key, base, registry):
-            return True
-        model_path = getattr(engine, "model_path", None)
-        if model_path is None or base_path is None:
-            continue
-        try:
-            if Path(str(model_path)).resolve() == Path(base_path).resolve():
-                return True
-        except (OSError, ValueError):
-            return True
-    return False
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -150,18 +127,23 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         may be resident: adapters are applied when a model loads, so a loaded
         base keeps its previous adapters until it is unloaded and loaded again."""
         from localm.model_manager import AdapterError, attach_adapter
-        _require_registered(req.adapter)
-        registry = _require_registered(req.base)
+        registry = _require_registered(req.adapter)
+        _require_registered(req.base, registry)
+        previous = registry[req.adapter].get("base") if isinstance(registry[req.adapter], dict) else None
         loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(
                 get_plugin_executor(), attach_adapter, req.adapter, req.base, req.scale)
         except AdapterError as e:
             raise HTTPException(400, str(e)) from e
-        resident = await loop.run_in_executor(
-            get_plugin_executor(), _base_is_resident, req.base, registry)
+        needs_reload = False
+        for name in {req.base, previous}:
+            if isinstance(name, str) and name in registry:
+                engine = await loop.run_in_executor(
+                    get_plugin_executor(), resident_engine, name, registry)
+                needs_reload = needs_reload or engine is not None
         return {"status": "attached", "adapter": req.adapter, "base": req.base,
-                "scale": req.scale, "needs_reload": resident}
+                "scale": req.scale, "needs_reload": needs_reload}
 
     @app.post("/api/models/adapters/detach", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_adapter_detach(req: AdapterDetachRequest):
@@ -177,8 +159,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(404, f"'{req.adapter}' is not an attached adapter")
         needs_reload = False
         if isinstance(base, str) and base in registry:
-            needs_reload = await loop.run_in_executor(
-                get_plugin_executor(), _base_is_resident, base, registry)
+            engine = await loop.run_in_executor(
+                get_plugin_executor(), resident_engine, base, registry)
+            needs_reload = engine is not None
         return {"status": "detached", "adapter": req.adapter, "needs_reload": needs_reload}
 
     @app.post("/api/models/relocate", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
