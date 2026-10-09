@@ -40,6 +40,10 @@ class GgufWorker(VramSizingMixin):
     context genuinely needs to grow).
     """
 
+    # Set by the runner: a threading.Event that asks the current generation
+    # to stop. Polled between denoising steps of a diffusion model.
+    stream_cancel: Optional[threading.Event] = None
+
     def __init__(
         self,
         model_path: str,
@@ -100,9 +104,6 @@ class GgufWorker(VramSizingMixin):
         # for LlamaCpp's defaults.
         self.diffusion_steps = diffusion_steps
         self.diffusion_max_tokens = diffusion_max_tokens
-        # Set by the runner: a threading.Event that asks the current generation
-        # to stop. Polled between denoising steps of a diffusion model.
-        self.stream_cancel: Optional[threading.Event] = None
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False

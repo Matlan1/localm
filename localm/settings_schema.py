@@ -266,9 +266,9 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4096),
     SettingField("diffusion_max_tokens", Widget.NUMBER, "Diffusion reply length",
                  "Tokens a diffusion language model writes per reply. It fills "
-                 "the whole length every time, so longer is slower even for "
-                 "short answers. Shortened when the prompt leaves less room in "
-                 "the model's window (2048 tokens at most).",
+                 "the whole length every time, so longer is slower. Shortened "
+                 "when the prompt leaves less room in the model's window (2048 "
+                 "tokens at most).",
                  group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
