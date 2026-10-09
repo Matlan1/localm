@@ -8,7 +8,7 @@ tokens in the cache plus that token.
 from __future__ import annotations
 
 import weakref
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ._drafting import SPEC_NGRAM, CountedSource
 from ._stepcosts import DRAFT_GAIN_MARGIN
@@ -280,7 +280,7 @@ class NgramSource(CountedSource):
         self._reply_start = 0
 
     @property
-    def _llm(self):
+    def _llm(self) -> Any:
         return self._llm_ref()
 
     def reset_call(self, skipped: str = "") -> None:
