@@ -3,8 +3,7 @@
 model scores query / document pairs and refuses to embed, and the parent-side handle
 chunks, pins and recovers rerank calls the way it does embed calls.
 
-The native layer is faked at the _api boundary (one token per byte); the real
-model path is covered by tests/test_rerank_real_gguf.py.
+The native layer is faked at the _api boundary (one token per byte).
 """
 
 import ctypes
