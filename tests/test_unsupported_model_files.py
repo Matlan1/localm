@@ -339,9 +339,9 @@ class TestMlxQuantized:
     def test_registered_as_today_and_load_refused_before_any_worker(
             self, home, tmp_path, monkeypatch):
         hf_mod = _no_runner(monkeypatch)
-        d = _hf_dir(tmp_path / "Llama-3.2-1B-Instruct-4bit", MLX_CONFIG)
+        d = _hf_dir(tmp_path / "Llama-3-2-1B-Instruct-4bit", MLX_CONFIG)
         assert mm.add_local(str(d)) is True
-        assert "Llama-3.2-1B-Instruct-4bit" in mm.load_registry()
+        assert "Llama-3-2-1B-Instruct-4bit" in mm.load_registry()
         with pytest.raises(UnsupportedModelRoleError) as caught:
             hf_mod.HFBackend(str(d)).load()
         assert str(caught.value) == MLX_SENTENCE
@@ -436,7 +436,7 @@ class TestMistralNative:
         assert MISTRAL_SENTENCE in out and "Incomplete model" not in out
 
     def test_a_folder_with_both_layouts_is_one_hf_model(self, home, tmp_path):
-        d = _hf_dir(tmp_path / "Mistral-Small-3.1", weights=(
+        d = _hf_dir(tmp_path / "Mistral-Small-3-1", weights=(
             "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors",
             "consolidated.safetensors"))
         (d / "params.json").write_text(json.dumps(MISTRAL_PARAMS))
@@ -444,8 +444,8 @@ class TestMistralNative:
         assert explain_unsupported_model(d) is None
         assert mm.add_local(str(d)) is True
         reg = mm.load_registry()
-        assert list(reg) == ["Mistral-Small-3.1"]
-        assert Path(reg["Mistral-Small-3.1"]["path"]).is_dir()
+        assert list(reg) == ["Mistral-Small-3-1"]
+        assert Path(reg["Mistral-Small-3-1"]["path"]).is_dir()
 
     def test_sync_registers_the_two_layout_folder_once(self, home):
         d = _hf_dir(home / "models" / "Mistral-Small-3.1", weights=(
@@ -570,3 +570,38 @@ class TestOtherFormats:
         (d / "readme.txt").write_text("x")
         assert mm.add_local(str(d)) is False
         assert "Expected a .gguf file or a HuggingFace model directory" in "\n".join(printed)
+
+
+# --------------------------------------------------------------------------- #
+#  A downloaded GGUF that cannot be registered                                 #
+# --------------------------------------------------------------------------- #
+
+class TestPulledFile:
+    def _fake_hub(self, monkeypatch, tmp_path, make):
+        import huggingface_hub
+        import requests
+
+        def _download(repo_id, filename, local_dir, **kw):
+            return str(make(Path(local_dir) / filename))
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _download)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
+        monkeypatch.setattr(requests, "head", lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("no network in tests")))
+
+    @pytest.mark.parametrize("label,kw,sentence", [
+        ("v1", dict(version=1), V1_SENTENCE),
+        ("big_endian", dict(big_endian=True), BIG_ENDIAN_SENTENCE),
+        ("imatrix", dict(arch=None, general_type="imatrix"), IMATRIX_SENTENCE),
+    ])
+    def test_it_is_not_registered_and_the_sentence_is_printed(
+            self, home, tmp_path, monkeypatch, printed, label, kw, sentence):
+        self._fake_hub(monkeypatch, tmp_path, lambda p: _gguf(p, **kw))
+        assert mm.pull_model("owner/repo:pulled.gguf") is False
+        assert mm.load_registry() == {}
+        assert sentence in "\n".join(printed)
+
+    def test_a_normal_gguf_still_registers(self, home, tmp_path, monkeypatch):
+        self._fake_hub(monkeypatch, tmp_path, lambda p: _gguf(p))
+        assert mm.pull_model("owner/repo:pulled.gguf") is True
+        assert "pulled" in mm.load_registry()
