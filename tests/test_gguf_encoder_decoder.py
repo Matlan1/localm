@@ -20,7 +20,7 @@ from localm.inference.backends.llamacpp import llama as llama_mod
 from localm.inference.backends.llamacpp._structs import LlamaBatch
 from localm.inference.backends.llamacpp.llama import (
     _encoder_untrusted_ranges, _flatten_for_encoder)
-from localm.textguard import compose, untrusted_span
+from localm.textguard import compose, untrusted_span, untrusted_spans_of
 from tests._bare_llama import make_bare_llama
 
 EOS = 1
@@ -201,7 +201,10 @@ class TestFlattening:
                 {"role": "user", "content": content}]
         prompt = _flatten_for_encoder(msgs)
         ranges = _encoder_untrusted_ranges(msgs, prompt)
-        assert [prompt[a:b] for a, b in ranges] == ["</s> injected"]
+        (start, end), = untrusted_spans_of(content)
+        untrusted_text = str(content)[start:end]
+        assert "injected" in untrusted_text
+        assert [prompt[a:b] for a, b in ranges] == [untrusted_text]
 
     def test_no_annotation_means_no_ranges(self):
         msgs = _user("plain")
