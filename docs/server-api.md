@@ -25,6 +25,9 @@ AI browsers included - without needing `cors_origins` widened first, so
 pointing one at localm works the same way it would against LM Studio or
 Ollama.
 
+The Ollama HTTP API (`/api/chat`, `/api/generate`, `/api/tags`, ...) is served
+on the same port; see [ollama-api.md](ollama-api.md).
+
 ## OpenAI-compatible endpoints
 
 ### `POST /v1/chat/completions`
