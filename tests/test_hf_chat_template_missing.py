@@ -7,7 +7,7 @@ import threading
 import pytest
 
 import localm._mp_spawn as mp_spawn
-from localm.inference.backends import _hf_runner, _hf_worker
+from localm.inference.backends import _hf_hub_gate, _hf_runner, _hf_worker
 from localm.inference.backends.base import ChatTemplateMissingError
 from localm.inference.backends._hf_runner import HFRunner
 
@@ -44,6 +44,7 @@ def _drive_dispatch(monkeypatch, chat_stream):
     *chat_stream*. Returns ``(req_q, resp_q, died, thread)``."""
     monkeypatch.setattr(mp_spawn, "install_parent_death_watchdog", lambda *a: None)
     monkeypatch.setattr(mp_spawn, "suppress_native_error_dialogs", lambda *a: None)
+    monkeypatch.setattr(_hf_hub_gate, "close_hub_gate", lambda: None)
 
     class _FakeWorker:
         last_finish_reason = "stop"
