@@ -163,12 +163,15 @@ class TestAttachRoute:
         assert r.status_code == 200
         assert r.json()["needs_reload"] is True
 
-    def test_an_unresolvable_path_in_the_registry_does_not_fail_the_attach(
-            self, registered, client):
+    def test_a_resident_engine_with_an_unresolvable_registry_path_does_not_count(
+            self, registered, client, monkeypatch):
         def _bad(reg):
             reg["corrupt"] = {"path": "Z:/nope\x00.gguf", "source": "local"}
 
         mm.update_registry(_bad)
+        elsewhere = _write(registered.base.parent / "elsewhere.gguf", _gguf("llama", "model"))
+        engine = SimpleNamespace(loaded=True, model_path=str(elsewhere), applied_adapters=[])
+        monkeypatch.setitem(_hs._engines, "corrupt", engine)
         r = _attach(client)
         assert r.status_code == 200, r.text
         assert r.json()["needs_reload"] is False
