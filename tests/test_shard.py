@@ -148,8 +148,23 @@ def test_verify_cli_exit_status_follows_the_partition(suite, tmp_path):
     ids.mkdir()
     for i in (1, 2):
         (suite / f"ids-{i}.json").replace(ids / f"ids-{i}.json")
+        (ids / f"status-{i}.txt").write_text("success\n", encoding="utf-8")
     assert _shard.main(["verify", str(ids), "--count", "2"]) == 0
     (ids / "ids-2.json").unlink()
+    assert _shard.main(["verify", str(ids), "--count", "2"]) == 1
+
+
+def test_verify_cli_fails_on_a_shard_whose_job_did_not_succeed(suite, tmp_path):
+    ids = tmp_path / "ids"
+    ids.mkdir()
+    for i in (1, 2):
+        _shard_ids(suite, i, 2)
+        (suite / f"ids-{i}.json").replace(ids / f"ids-{i}.json")
+        (ids / f"status-{i}.txt").write_text("success\n", encoding="utf-8")
+    assert _shard.main(["verify", str(ids), "--count", "2"]) == 0
+    (ids / "status-2.txt").write_text("failure\n", encoding="utf-8")
+    assert _shard.main(["verify", str(ids), "--count", "2"]) == 1
+    (ids / "status-2.txt").unlink()
     assert _shard.main(["verify", str(ids), "--count", "2"]) == 1
 
 
@@ -167,8 +182,8 @@ def test_a_run_records_measured_durations_and_merge_folds_the_small_ones(suite, 
 def test_merge_cli_writes_a_file_load_durations_reads_back(tmp_path):
     directory = tmp_path / "m"
     directory.mkdir()
-    (directory / "a.json").write_text(json.dumps({"t1": 3.0, "t2": 0.01}), encoding="utf-8")
-    (directory / "b.json").write_text(json.dumps({"t3": 1.5}), encoding="utf-8")
+    (directory / "durations-a.json").write_text(json.dumps({"t1": 3.0, "t2": 0.01}), encoding="utf-8")
+    (directory / "durations-b.json").write_text(json.dumps({"t3": 1.5}), encoding="utf-8")
     out = tmp_path / "durations.json"
     assert _shard.main(["merge", str(directory), "--out", str(out)]) == 0
     default, tests = _shard.load_durations(out)

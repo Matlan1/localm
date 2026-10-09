@@ -19,9 +19,12 @@ Each xdist worker computes it on its own; xdist refuses to run when the workers 
 
 Command line, stdlib only:
 
-    python -m tests._shard verify DIR --count N     DIR holds the shards' --shard-ids-out files
-    python -m tests._shard merge DIR... --out FILE  fold --shard-durations-out files into a
-                                                    durations file
+    python -m tests._shard verify DIR --count N     DIR holds the shards' ids-*.json files
+                                                    (--shard-ids-out) and status-*.txt files
+                                                    (each shard job's result)
+    python -m tests._shard merge DIR... --out FILE  fold the durations-*.json files
+                                                    (--shard-durations-out) of each DIR into
+                                                    a durations file
 """
 from __future__ import annotations
 
@@ -108,6 +111,15 @@ def verify_partition(parts: list[dict], count: int) -> list[str]:
     return problems
 
 
+def verify_statuses(statuses: dict[int, str], count: int) -> list[str]:
+    """Problems with the recorded per-shard job results: a shard that is missing or whose
+    job did not end in ``success``."""
+    problems = [f"shard {i} recorded no result" for i in range(1, count + 1) if i not in statuses]
+    problems += [f"shard {i} ended {result!r}" for i, result in sorted(statuses.items())
+                 if result != "success"]
+    return problems
+
+
 def merge_durations(measured: dict[str, float]) -> dict:
     """The durations file for ``measured``: tests under ``KEEP_AT_LEAST`` seconds are folded
     into the ``default`` weight, the rest are listed."""
@@ -151,6 +163,7 @@ def pytest_collection_modifyitems(config, items):
         config.hook.pytest_deselected(items=dropped)
     out = config.getoption("--shard-ids-out")
     if out and _is_first_process(config):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
         payload = {"index": index, "count": count, "all_total": len(set(node_ids)),
                    "all_sha256": digest(node_ids), "selected": sorted(item.nodeid for item in kept)}
         Path(out).write_text(json.dumps(payload), encoding="utf-8")
@@ -166,11 +179,12 @@ def pytest_runtest_logreport(report):
 def pytest_sessionfinish(session):
     out = session.config.getoption("--shard-durations-out")
     if out and not _is_worker(session.config):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
         Path(out).write_text(json.dumps(_measured, sort_keys=True), encoding="utf-8")
 
 
-def _load_dir(directory: Path) -> list[dict]:
-    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(directory.glob("*.json"))]
+def _load_dir(directory: Path, pattern: str) -> list[dict]:
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(directory.glob(pattern))]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -184,8 +198,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     merge.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "verify":
-        parts = _load_dir(args.directory)
+        parts = _load_dir(args.directory, "ids-*.json")
         problems = verify_partition(parts, args.count)
+        statuses = {int(p.stem.removeprefix("status-")): p.read_text(encoding="utf-8").strip()
+                    for p in args.directory.glob("status-*.txt")}
+        problems += verify_statuses(statuses, args.count)
         for problem in problems:
             print(f"::error::{problem}")
         if problems:
@@ -194,7 +211,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     measured: dict[str, float] = {}
     for directory in args.directories:
-        for table in _load_dir(directory):
+        for table in _load_dir(directory, "durations-*.json"):
             measured.update(table)
     args.out.write_text(json.dumps(merge_durations(measured), indent=0, sort_keys=True) + "\n",
                         encoding="utf-8")
