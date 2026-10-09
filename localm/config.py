@@ -560,6 +560,13 @@ DEFAULT_CONFIG: dict = {
     # Draft tokens one n-gram step may propose (1-16). None uses the default (8);
     # a model with recurrent layers is capped at 4.
     "spec_draft_tokens": None,
+    # Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) write a whole
+    # reply at once over a number of denoising steps. diffusion_steps: steps
+    # per reply, None for 128 (or the reply length when shorter).
+    # diffusion_max_tokens: the reply length in tokens; a request's max_tokens
+    # caps it further.
+    "diffusion_steps": None,
+    "diffusion_max_tokens": 256,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
     # model weights for the GGUF backend, before deciding how many layers fit or
     # refusing outright. This is NOT a discardable safety margin - it funds the

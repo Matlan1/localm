@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) run as chat models.**
+  A GGUF of one of these architectures now loads and answers through `localm run`,
+  the GUI chat and `/v1/chat/completions`, instead of being refused. These models
+  write the whole reply at once over a number of denoising steps, so the reply
+  appears when it is finished and the status line shows the progress meanwhile.
+  Two settings control them: "Diffusion steps" (`diffusion_steps`, more steps give
+  better text and a slower reply) and "Diffusion reply length"
+  (`diffusion_max_tokens`, 256 by default). Grammar-constrained output, images and
+  speculative decoding are not available with these models; a request for a
+  grammar is refused with a message saying so.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing

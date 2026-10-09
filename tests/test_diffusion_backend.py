@@ -1,0 +1,457 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) through the GGUF
+backend: they load as chat models, refuse a grammar, charge no KV cache, carry
+their settings to the worker, answer through the denoising path with step
+status, and stop between steps when the stream is cancelled."""
+
+from __future__ import annotations
+
+import queue
+import struct
+import threading
+from unittest.mock import patch
+
+import pytest
+
+from localm.inference.backends.base import (
+    GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, ContextCapacityExceededError,
+    GrammarUnsupportedError)
+from localm.inference.backends.gguf import GgufBackend
+from localm.inference.backends.llamacpp import _diffusion
+from localm.inference.backends.llamacpp import llama as llama_mod
+from localm.inference.backends.llamacpp.llama import LlamaCpp
+
+_T_STRING = 8
+
+
+def _gguf(path, arch: str):
+    raw = arch.encode()
+    key = b"general.architecture"
+    body = (struct.pack("<Q", len(key)) + key + struct.pack("<I", _T_STRING)
+            + struct.pack("<Q", len(raw)) + raw)
+    path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0)
+                     + struct.pack("<Q", 1) + body + b"\0" * 4096)
+    return path
+
+
+class TestBackendCapabilities:
+    def test_diffusion_model_refuses_grammar_loaded_or_not(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "llada-moe")))
+        assert b.is_diffusion is True
+        assert b.supports_grammar is False
+        with pytest.raises(GrammarUnsupportedError) as caught:
+            b.validate_grammar("root ::= \"a\"")
+        assert str(caught.value) == GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE
+        b.validate_grammar(None)
+
+    def test_autoregressive_model_keeps_grammar(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "qwen3")))
+        assert b.is_diffusion is False
+        assert b.supports_grammar is True
+
+    def test_diffusion_model_reaches_the_loader(self, tmp_path, monkeypatch):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "dream")))
+        called = []
+        monkeypatch.setattr(b, "_effective_gpu_layers", lambda: 99)
+        monkeypatch.setattr(b, "_check_vram", lambda: called.append("vram"))
+        monkeypatch.setattr(b, "_load_native", lambda: called.append("load"))
+        b.load()
+        assert called == ["vram", "load"]
+
+
+class TestSizing:
+    def test_no_kv_cache_is_charged(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "llada")), n_ctx=8192)
+        assert b._kv_bytes_per_token() == 0
+        assert b._full_offload_parts(1)[1] == 0
+
+    def test_autoregressive_model_is_still_charged(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "qwen3")), n_ctx=8192)
+        assert b._kv_bytes_per_token() > 0
+
+    def test_auto_context_ceiling_does_not_divide_by_zero(self, tmp_path, monkeypatch):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "rnd1")), n_ctx=4096)
+        monkeypatch.setattr(b, "_split_free_total_bytes", lambda: (8 << 30, 16 << 30, 1))
+        assert b._auto_ctx_max() == max(4096, b._AUTO_CTX_MIN)
+
+    def test_loaded_model_answer_wins_over_the_file(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "qwen3")))
+
+        class _Llm:
+            is_diffusion = True
+            kv_bytes_per_token = 1234
+        b._llm = _Llm()
+        assert b._kv_bytes_per_token() == 0
+
+
+class TestWorkerParams:
+    def _load(self, b, cfg):
+        from localm.config import DEFAULT_CONFIG
+        merged = {**DEFAULT_CONFIG, **cfg}
+        with patch("localm.config.load_config", return_value=merged), \
+             patch("localm.discover.list_gpus", return_value=([], "ok")), \
+             patch("localm.inference.backends.llamacpp._runner.ModelRunner."
+                   "spawn_and_load", return_value={"diffusion": True}) as spawn:
+            b.effective_gpu_layers = 0
+            b._load_native()
+        return spawn.call_args[0][0]
+
+    def test_diffusion_settings_reach_the_worker(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "dream")))
+        params = self._load(b, {"diffusion_steps": 77, "diffusion_max_tokens": 64})
+        assert params["diffusion_steps"] == 77
+        assert params["diffusion_max_tokens"] == 64
+
+    def test_unset_steps_are_not_sent(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "dream")))
+        params = self._load(b, {"diffusion_steps": None})
+        assert "diffusion_steps" not in params
+
+    def test_autoregressive_model_gets_no_diffusion_settings(self, tmp_path):
+        b = GgufBackend(str(_gguf(tmp_path / "m.gguf", "qwen3")))
+        params = self._load(b, {"diffusion_steps": 77})
+        assert "diffusion_steps" not in params and "diffusion_max_tokens" not in params
+
+
+class _FakeCanvas:
+    """Stands in for NativeCanvas: fills the canvas with a scripted reply."""
+
+    instances: list = []
+    reply = [11, 12, 2, 13]
+
+    def __init__(self, api, ctx, vocab, n_vocab, params, guard):
+        self.params = params
+        self.guard = guard
+        self.closed = False
+        self.decodes = 0
+        _FakeCanvas.instances.append(self)
+
+    def decode(self, tokens):
+        with self.guard():
+            self.decodes += 1
+            return 0
+
+    def sample(self, row, algorithm, greedy):
+        pos = row + 1 if self.params.shift_logits else row
+        offset = pos - self._n_input
+        token = self.reply[offset] if 0 <= offset < len(self.reply) else 2
+        return token, 0.5
+
+    def close(self):
+        self.closed = True
+
+
+def _bare_llama(monkeypatch, *, capacity=256, steps=8, max_tokens=None, arch="dream"):
+    llm = LlamaCpp.__new__(LlamaCpp)
+    llm._inference_lock = threading.Lock()
+    llm._gen_lock = threading.RLock()
+    llm._stop = threading.Event()
+    llm._model_ptr = 1
+    llm._ctx_ptr = 1
+    llm._seed = 0
+    llm._verbose = True
+    llm.is_diffusion = True
+    llm.architecture = arch
+    llm._diffusion_mask = 99
+    llm._diffusion_shift_logits = False
+    llm._diffusion_capacity = capacity
+    llm._diffusion_steps = steps
+    llm._diffusion_max_tokens = max_tokens
+
+    class _Tok:
+        _vocab = 1
+
+        @staticmethod
+        def is_eog(t):
+            return t == 2
+    llm._tokenizer = _Tok()
+    native_calls = []
+    monkeypatch.setattr(llama_mod.api, "llama_set_causal_attn",
+                        lambda ctx, causal: native_calls.append(("causal", causal)))
+    monkeypatch.setattr(llama_mod.api, "llama_vocab_n_tokens", lambda vocab: 100)
+    _FakeCanvas.instances = []
+    monkeypatch.setattr(_diffusion, "NativeCanvas", _FakeCanvas)
+    return llm, native_calls
+
+
+def _run(llm, prompt, **kw):
+    _FakeCanvas._n_input = len(prompt)
+    return list(llm._generate_diffusion(prompt, **{
+        "max_new_tokens": 64, "temperature": 0.5, "top_k": 40, "top_p": 0.95, **kw}))
+
+
+class TestGenerateDiffusion:
+    def test_reply_ends_at_the_end_token_with_status(self, monkeypatch):
+        llm, calls = _bare_llama(monkeypatch)
+        statuses = []
+        out = _run(llm, [5, 6, 7], on_status=statuses.append)
+        assert out == [11, 12]
+        assert llm.last_finish_reason == "stop"
+        assert ("causal", False) in calls
+        assert statuses[0] == "Denoising reply (0%)..."
+        assert all(s.startswith("Denoising reply (") for s in statuses)
+        assert len(statuses) == len(set(statuses)) <= 11
+        assert _FakeCanvas.instances[0].closed is True
+
+    def test_request_max_tokens_cuts_the_reply(self, monkeypatch):
+        llm, _ = _bare_llama(monkeypatch)
+        _FakeCanvas.reply = [11, 12, 13, 14, 2]
+        try:
+            out = _run(llm, [5, 6, 7], max_new_tokens=2)
+        finally:
+            _FakeCanvas.reply = [11, 12, 2, 13]
+        assert out == [11, 12]
+        assert llm.last_finish_reason == "length"
+
+    def test_grammar_is_refused_before_any_native_call(self, monkeypatch):
+        llm, calls = _bare_llama(monkeypatch)
+        with pytest.raises(GrammarUnsupportedError):
+            _run(llm, [5, 6, 7], grammar="root ::= \"a\"")
+        assert calls == [] and _FakeCanvas.instances == []
+
+    def test_prompt_too_long_is_a_capacity_error(self, monkeypatch):
+        llm, calls = _bare_llama(monkeypatch, capacity=20)
+        with pytest.raises(ContextCapacityExceededError, match="diffusion window"):
+            _run(llm, list(range(10)))
+        assert calls == []
+
+    def test_stream_cancel_stops_between_steps_with_nothing_yielded(self, monkeypatch):
+        llm, _ = _bare_llama(monkeypatch, steps=8)
+        polls = []
+
+        def should_stop():
+            polls.append(1)
+            return len(polls) > 2
+        out = _run(llm, [5, 6, 7], should_stop=should_stop)
+        assert out == []
+        assert llm.last_finish_reason == "stop"
+        assert _FakeCanvas.instances[0].decodes == 2
+        assert _FakeCanvas.instances[0].closed is True
+
+    def test_unload_mid_run_stops_and_reports_an_error(self, monkeypatch):
+        llm, _ = _bare_llama(monkeypatch, steps=8)
+        original = _FakeCanvas.decode
+
+        def decode_then_unload(self, tokens):
+            code = original(self, tokens)
+            llm._stop.set()
+            return code
+        monkeypatch.setattr(_FakeCanvas, "decode", decode_then_unload)
+        assert _run(llm, [5, 6, 7]) == []
+        assert llm.last_finish_reason == "error"
+        assert _FakeCanvas.instances[0].closed is True
+
+    def test_dispatch_from_create_chat_completion(self, monkeypatch):
+        llm, _ = _bare_llama(monkeypatch)
+        seen = {}
+
+        def fake_generate(tokens, **kw):
+            seen.update(kw)
+            yield from ()
+        monkeypatch.setattr(llm, "_generate_diffusion", fake_generate)
+        monkeypatch.setattr(llama_mod, "_apply_model_template",
+                            lambda model, messages: ("hi", None))
+        monkeypatch.setattr(llama_mod, "_untrusted_prompt_ranges", lambda *a: ())
+        llm._tokenizer.encode = lambda text, add_bos=True, untrusted_ranges=(): [1, 2]
+        llm._mtmd = None
+        stop = threading.Event().is_set
+        out = llm.create_chat_completion(
+            [{"role": "user", "content": "hi"}], grammar="g", should_stop=stop)
+        assert out["choices"][0]["message"]["content"] == ""
+        assert seen["grammar"] == "g" and seen["should_stop"] is stop
+
+
+class TestWorkerPlumbing:
+    def test_chat_stream_hands_the_cancel_check_to_the_model(self):
+        from localm.inference.backends.llamacpp._worker import GgufWorker
+        w = GgufWorker("m.gguf", None, 512, 0, None, 512)
+        captured = {}
+
+        class _Llm:
+            def create_chat_completion(self, **kw):
+                captured.update(kw)
+                return iter([{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+        w._llm = _Llm()
+        ev = threading.Event()
+        w.stream_cancel = ev
+        assert list(w.chat_stream([{"role": "user", "content": "x"}])) == []
+        assert captured["should_stop"] == ev.is_set
+
+    def test_no_cancel_event_sends_no_cancel_check(self):
+        from localm.inference.backends.llamacpp._worker import GgufWorker
+        w = GgufWorker("m.gguf", None, 512, 0, None, 512)
+        captured = {}
+
+        class _Llm:
+            def create_chat_completion(self, **kw):
+                captured.update(kw)
+                return iter([])
+        w._llm = _Llm()
+        list(w.chat_stream([{"role": "user", "content": "x"}]))
+        assert "should_stop" not in captured
+
+    def test_load_forwards_diffusion_settings_and_reports_the_role(self, monkeypatch):
+        from localm.inference.backends.llamacpp import _worker
+        seen = {}
+
+        class _FakeLlama:
+            def __init__(self, **kw):
+                seen.update(kw)
+                self.is_diffusion = True
+                self.supports_images = False
+        monkeypatch.setattr("localm.inference.backends.llamacpp._loader.load_lib", lambda: None)
+        monkeypatch.setattr("localm.inference.backends.llamacpp.LlamaCpp", _FakeLlama)
+        w = _worker.GgufWorker("m.gguf", None, 512, 0, None, 512,
+                               diffusion_steps=40, diffusion_max_tokens=96)
+        meta = w.load()
+        assert seen["diffusion_steps"] == 40 and seen["diffusion_max_tokens"] == 96
+        assert meta["diffusion"] is True
+
+
+class TestRunnerCancel:
+    def test_cancel_stream_reaches_a_running_diffusion_generation(self, monkeypatch):
+        from localm.inference.backends.llamacpp import _runner
+        for name in ("install_parent_death_watchdog", "ignore_interrupt_signals",
+                     "suppress_native_error_dialogs"):
+            monkeypatch.setattr(f"localm._mp_spawn.{name}", lambda: None)
+        monkeypatch.setattr("localm.debuglog.attach_child_logging", lambda: None)
+        req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()
+        observed = {}
+
+        class _Worker:
+            last_finish_reason = "stop"
+            grammar_unsupported_this_call = False
+            chatml_fallback_reason = None
+            mtp_status = None
+            mtp_active_this_call = False
+            mtp_call_status = ""
+            mtp_drafted = mtp_accepted = mtp_steps = mtp_paused_steps = 0
+            mtp_skipped = ""
+            spec_report = None
+
+            def __init__(self, cancel_event=None, **payload):
+                self.stream_cancel = None
+
+            def load(self):
+                return {}
+
+            def chat_stream(self, on_status=None, **payload):
+                ctrl_q.put(("cancel_stream",))
+                stop = self.stream_cancel
+                observed["stopped"] = stop is not None and stop.wait(5.0)
+                return iter(())
+
+            def close(self):
+                pass
+        monkeypatch.setattr("localm.inference.backends.llamacpp._worker.GgufWorker", _Worker)
+        req_q.put(("load", {}))
+        req_q.put(("chat_stream", {"messages": []}))
+        req_q.put(None)
+        _runner._runner_main(req_q, resp_q, ctrl_q)
+        ctrl_q.put(None)
+        assert resp_q.get_nowait()[0] == "ok"
+        assert resp_q.get_nowait()[0] == "done"
+        assert observed["stopped"] is True
+
+
+class _FakeProc:
+    exitcode = 0
+
+    def __init__(self):
+        self.terminated = False
+
+    def is_alive(self):
+        return not self.terminated
+
+    def terminate(self):
+        self.terminated = True
+
+    def join(self, timeout=None):
+        return None
+
+
+def _runner_with_denoising_child(steps=10):
+    """A ModelRunner whose fake child sends one status per step and stops at
+    the first step after a cancel_stream arrives, like the diffusion worker."""
+    import multiprocessing as mp
+    from localm.inference.backends.llamacpp._runner import ModelRunner
+    ctx = mp.get_context("spawn")
+    r = ModelRunner()
+    r._req_q, r._resp_q, r._ctrl_q = ctx.Queue(), ctx.Queue(), ctx.Queue()
+    r._proc = _FakeProc()
+    seen = {"cancel": False, "steps": 0}
+
+    def child():
+        cmd = r._req_q.get(timeout=5)
+        assert cmd[0] == "chat_stream"
+        for step in range(steps):
+            try:
+                if r._ctrl_q.get(timeout=0.05)[0] == "cancel_stream":
+                    seen["cancel"] = True
+                    r._resp_q.put(("done", {"finish_reason": "stop", "cancelled": True}))
+                    return
+            except Exception:
+                pass
+            seen["steps"] += 1
+            r._resp_q.put(("status", f"Denoising reply ({step * 10}%)..."))
+        r._resp_q.put(("chunk", "full reply"))
+        r._resp_q.put(("done", {"finish_reason": "stop"}))
+    t = threading.Thread(target=child, daemon=True)
+    t.start()
+    return r, seen, t
+
+
+class TestRunnerStatusCancel:
+    def test_stream_cancelled_from_on_status_stops_the_child(self):
+        from localm.inference.backends.base import StreamCancelled
+        r, seen, t = _runner_with_denoising_child()
+
+        def on_status(s):
+            if s == "Denoising reply (20%)...":
+                raise StreamCancelled()
+        out = list(r.chat_stream(messages=[], on_status=on_status, cancel_on_status=True))
+        t.join(5)
+        assert out == []
+        assert seen["cancel"] is True and seen["steps"] < 10
+        assert r.last_done == {"finish_reason": "stop", "cancelled": True}
+        assert r._proc.terminated is False
+
+    def test_without_the_flag_stream_cancelled_is_ignored(self):
+        from localm.inference.backends.base import StreamCancelled
+        r, seen, t = _runner_with_denoising_child()
+
+        def on_status(s):
+            raise StreamCancelled()
+        out = list(r.chat_stream(messages=[], on_status=on_status))
+        t.join(5)
+        assert out == ["full reply"]
+        assert seen["cancel"] is False
+
+    def test_keyboard_interrupt_cancels_and_drains_before_propagating(self):
+        r, seen, t = _runner_with_denoising_child()
+
+        def on_status(s):
+            if s == "Denoising reply (30%)...":
+                raise KeyboardInterrupt()
+        with pytest.raises(KeyboardInterrupt):
+            list(r.chat_stream(messages=[], on_status=on_status))
+        t.join(5)
+        assert seen["cancel"] is True
+        assert r._resp_q.empty()
+        assert r._proc.terminated is False
+
+    def test_backend_asks_for_status_cancel_only_for_diffusion(self, tmp_path):
+        seen = {}
+
+        class _Runner:
+            last_done = {"finish_reason": "stop"}
+
+            def chat_stream(self, **kw):
+                seen.update(kw)
+                return iter(())
+        for arch, expected in (("dream", True), ("qwen3", False)):
+            b = GgufBackend(str(_gguf(tmp_path / f"{arch}.gguf", arch)))
+            b._runner = _Runner()
+            b._loaded = True
+            list(b.chat_stream([{"role": "user", "content": "x"}]))
+            assert seen["cancel_on_status"] is expected

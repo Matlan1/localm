@@ -51,6 +51,8 @@ class GgufWorker(VramSizingMixin):
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         use_mmap: Optional[bool] = None,
+        diffusion_steps: Optional[int] = None,
+        diffusion_max_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -85,6 +87,13 @@ class GgufWorker(VramSizingMixin):
         # The parent's mmap decision: True or False forces it, None keeps the
         # build's default.
         self.use_mmap = use_mmap
+        # Diffusion language models only: steps and reply canvas length, None
+        # for LlamaCpp's defaults.
+        self.diffusion_steps = diffusion_steps
+        self.diffusion_max_tokens = diffusion_max_tokens
+        # Set by the runner: a threading.Event that asks the current generation
+        # to stop. Polled between denoising steps of a diffusion model.
+        self.stream_cancel = None
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
@@ -168,7 +177,7 @@ class GgufWorker(VramSizingMixin):
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
-        "weight_placement", "moe_skip_reason", "mmap"}``.
+        "weight_placement", "moe_skip_reason", "mmap", "diffusion"}``.
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
         system RAM), the only ground truth for whether ``n_cpu_moe`` actually
         moved anything - this worker is the only process that can see it, since
@@ -180,6 +189,7 @@ class GgufWorker(VramSizingMixin):
         isolated child and only the parent (GgufBackend) may render a
         user-facing message. ``mmap`` is whether the load memory-mapped the
         model file, read from the native load log (None when not reported).
+        ``diffusion`` is True for a diffusion language model.
 
         Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
         ``cancel_event`` was set during the load (native progress-callback
@@ -241,6 +251,10 @@ class GgufWorker(VramSizingMixin):
                if self.spec_source is not None else {}),
             **({"spec_draft_tokens": self.spec_draft_tokens}
                if self.spec_draft_tokens is not None else {}),
+            **({"diffusion_steps": self.diffusion_steps}
+               if self.diffusion_steps is not None else {}),
+            **({"diffusion_max_tokens": self.diffusion_max_tokens}
+               if self.diffusion_max_tokens is not None else {}),
         )
         self._loaded = True
         return {
@@ -251,6 +265,7 @@ class GgufWorker(VramSizingMixin):
             "weight_placement": getattr(self._llm, "weight_placement", []),
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
             "mmap": getattr(self._llm, "mmap_mapped", None),
+            "diffusion": bool(getattr(self._llm, "is_diffusion", False)),
         }
 
     def close(self) -> None:
@@ -362,6 +377,8 @@ class GgufWorker(VramSizingMixin):
                 kw["seed"] = seed
             if thinking is not None:
                 kw["thinking"] = thinking
+            if self.stream_cancel is not None:
+                kw["should_stop"] = self.stream_cancel.is_set
             return kw
 
         def _stream(g: Optional[str]):

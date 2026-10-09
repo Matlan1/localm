@@ -5090,7 +5090,11 @@ async def _stream_sse(
         # surfaces it and the finally still enqueues _DONE.
         _log_assembled_prompt(messages)
         gen = None
+        from localm.inference.backends.base import StreamCancelled
+
         def _on_status(s: str) -> None:
+            if cancel_event.is_set():
+                raise StreamCancelled()
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
         try:
@@ -5101,6 +5105,8 @@ async def _stream_sse(
                 if cancel_event.is_set():
                     break
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        except StreamCancelled:
+            pass
         except Exception as e:
             # Log (full traceback to the debug log) and surface to the client - a
             # silent thread death looks like an empty reply. NOT
@@ -5284,7 +5290,11 @@ async def _stream_sse_completion(
         # orphan the consumer (see the fuller note in _stream_sse).
         _log_assembled_prompt(messages)
         gen = None
+        from localm.inference.backends.base import StreamCancelled
+
         def _on_status(s: str) -> None:
+            if cancel_event.is_set():
+                raise StreamCancelled()
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
         try:
@@ -5295,6 +5305,8 @@ async def _stream_sse_completion(
                 if cancel_event.is_set():
                     break
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        except StreamCancelled:
+            pass
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
             # daemon thread die (an uncaught death fires a crash report and looks

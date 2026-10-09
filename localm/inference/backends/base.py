@@ -180,11 +180,19 @@ class PretokenizerUnusableModelError(RuntimeError):
     """
 
 
+class StreamCancelled(Exception):
+    """Raised by a ``chat_stream`` caller's ``on_status`` callback to stop the
+    generation that status reports on. A backend that can stop between status
+    updates (a GGUF diffusion language model) cancels the generation and ends the
+    stream without an error; every other backend ignores it like any other
+    exception from ``on_status``."""
+
+
 class UnsupportedModelRoleError(RuntimeError):
     """Raised by a load when the file is a model localm cannot chat with (a
-    speculative-decoding draft head, a diffusion language model, an
-    encoder-decoder model, an audio codec). The message says which and is
-    reported as-is, with no runtime-repair advice appended."""
+    speculative-decoding draft head, an encoder-decoder model, an audio codec,
+    a text-to-speech model, an image or video checkpoint). The message says
+    which and is reported as-is, with no runtime-repair advice appended."""
 
 
 class ModelLoadCancelled(Exception):
@@ -254,6 +262,12 @@ GRAMMAR_LOAD_FAILED_MESSAGE = (
 # Shown when a LAZY grammar is requested of a backend that can constrain
 # generation but cannot do it lazily. A distinct string from
 # GRAMMAR_UNSUPPORTED_MESSAGE above, which names a different recovery.
+GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE = (
+    "This model is a diffusion language model: it fills in its whole reply at "
+    "once instead of token by token, so it cannot follow a grammar and the reply "
+    "would not match it. Use a regular chat model for grammar-constrained output."
+)
+
 GRAMMAR_LAZY_UNSUPPORTED_MESSAGE = (
     "This model cannot apply a LAZY grammar (one that leaves generation "
     "unconstrained until a trigger pattern matches, then enforces the grammar "

@@ -475,8 +475,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 f"Split GGUF is incomplete - missing part(s): {names}. "
                 f"Re-run 'localm pull' to download all parts."
             )
-        # A file that is not a chat model (draft head, diffusion LM, T5, codec)
-        # is refused here, before any VRAM probe or worker spawn.
+        # A file that is not a chat model (draft head, T5, codec, TTS, image
+        # checkpoint) is refused here, before any VRAM probe or worker spawn.
         from localm.model_manager import gguf_architecture, gguf_chat_refusal
         role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
         if role_refusal is not None:
@@ -668,6 +668,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             params["spec_draft_tokens"] = int(self.spec_draft_tokens)
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
+        if self.is_diffusion:
+            for key in ("diffusion_steps", "diffusion_max_tokens"):
+                value = cfg.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    params[key] = value
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"
@@ -881,10 +886,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         is_alive = getattr(self._runner, "is_alive", None)
         return True if is_alive is None else bool(is_alive())
 
-    # llama.cpp applies a GBNF grammar natively in the sampler, so this backend can
-    # always honour one. A plain class attribute, shadowing BaseBackend's
-    # deny-by-default property.
-    supports_grammar: bool = True
+    @property
+    def is_diffusion(self) -> bool:
+        """True when the model file is a diffusion language model, read from its
+        own GGUF header."""
+        return self._keeps_no_kv_cache()
+
+    @property
+    def supports_grammar(self) -> bool:
+        """llama.cpp applies a GBNF grammar natively in the sampler, so True for
+        every model except a diffusion language model, which writes its reply
+        all at once."""
+        return not self.is_diffusion
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
@@ -909,7 +922,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         carries that type across the worker IPC as a tagged envelope, so the
         caller gets the same clean 400 an up-front check would have given - one
         request later, and never a reply that silently does not match the
-        grammar."""
+        grammar.
+
+        A diffusion language model refuses any grammar with
+        :class:`GrammarUnsupportedError`, loaded or not."""
+        if grammar and self.is_diffusion:
+            from .base import GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
+            raise GrammarUnsupportedError(GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
         if grammar and self.loaded and self._runner is not None:   # the loaded property, not the raw flag
             try:
                 self._runner.check_grammar(grammar)
@@ -1084,6 +1103,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             yield from self._runner.chat_stream(
                 first_chunk_timeout=self._first_token_timeout_seconds(),
                 on_status=on_status,
+                cancel_on_status=self.is_diffusion,
                 **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled and the model is gone. Drop it
