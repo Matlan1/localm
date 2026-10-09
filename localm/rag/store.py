@@ -105,7 +105,7 @@ def check_collection_name(name: str) -> str:
     return name
 
 
-# Internal alias for the in-module call sites.
+# Internal alias for the call sites here and in localm/rag/_store/.
 _check_name = check_collection_name
 
 

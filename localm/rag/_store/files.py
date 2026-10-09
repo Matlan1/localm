@@ -336,7 +336,7 @@ class _CollectionFiles:
         # Cache the LISTING-relevant fields that are NOT otherwise persisted -
         # vector_degrade_reason and the vector-coverage math above - so a listing
         # can answer from meta.json alone, without reconstructing this Collection
-        # at all (see peek_stats() / peek_detail() below).
+        # at all (see peek_stats() / peek_detail() in introspect.py).
         #
         # The cache carries a cheap (mtime_ns, size) fingerprint of chunks.jsonl
         # and vectors.json, taken AFTER they were written: peek_stats() /
