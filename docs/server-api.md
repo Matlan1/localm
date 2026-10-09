@@ -624,7 +624,10 @@ path; anything that is not a plain route is `other`. No metric carries a prompt,
 a reply, a model name or a model path. The VRAM gauges come from the cached GPU
 reading and are left out until a trustworthy one exists;
 `localm_inference_queue_depth` counts requests waiting for a model's slot.
-Counters live in memory and start from zero at every server start.
+A reply the client abandons partway (a closed connection or a stop button) still
+counts its prompt, the tokens generated before it stopped, and its time to first
+token; a streamed request that leaves while still queued generated nothing and
+counts nothing. Counters live in memory and start from zero at every server start.
 
 Access: a server with an API key needs an `admin` key (the owner key from
 `localm key generate`, or `LOCALM_API_KEY`). A server with no key answers only

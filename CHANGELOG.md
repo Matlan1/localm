@@ -39,9 +39,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Prometheus metrics at `/metrics`.** Turn on "Prometheus metrics" in Settings > Server
   (or set `metrics_enabled`) and restart to serve request counts and latency by route,
   prompt and generated tokens, tokens per second, time to first token, queue depth, loaded
-  models and GPU memory in Prometheus text format. It needs an admin API key, answers only
-  on a loopback bind when no key exists, and carries no prompt, reply, model name or model
-  path in any label. Off by default.
+  models and GPU memory in Prometheus text format. A streamed reply the client stops partway
+  still counts the tokens generated before it stopped. It needs an admin API key, answers
+  only on a loopback bind when no key exists, and carries no prompt, reply, model name or
+  model path in any label. Off by default.
 - **Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) run as chat models.**
   A GGUF of one of these architectures now loads and answers through `localm run`,
   the GUI chat and `/v1/chat/completions`, instead of being refused. These models
