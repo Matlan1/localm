@@ -58,7 +58,7 @@ def _load_all() -> dict:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         logger.debug("model_meta: ignoring unreadable %s (%s)", path.name, exc)
         return {}
     return data if isinstance(data, dict) else {}

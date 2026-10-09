@@ -87,7 +87,7 @@ def _hf_dir_chat_template(model_dir: Path) -> Optional[str]:
         if not cfg.is_file():
             return None
         data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.debug("chat template read failed for %s (%s): %s",
                      model_dir, type(e).__name__, e)
         return None
@@ -114,7 +114,7 @@ def _hf_dir_context_length(model_dir: Path) -> Optional[int]:
         if not cfg.is_file():
             return None
         data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.debug("context length read failed for %s (%s): %s",
                      model_dir, type(e).__name__, e)
         return None

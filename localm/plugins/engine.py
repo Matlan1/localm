@@ -140,7 +140,7 @@ def _read_marker(dest: Path) -> Optional[dict]:
             data = json.loads(f.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return data
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         pass
     return None
 
@@ -182,6 +182,12 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         data = tomllib.loads(manifest.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"invalid TOML in {manifest}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{manifest} is not valid UTF-8: {e}") from e
+    except RecursionError as e:
+        raise ValueError(f"invalid TOML in {manifest}: nested too deeply") from e
+    except OSError as e:
+        raise ValueError(f"cannot read {manifest}: {e}") from e
 
     p = data.get("plugin")
     if not isinstance(p, dict):
@@ -189,6 +195,17 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
     name = p.get("name", "")
     if not name or not isinstance(name, str) or not name.replace("-", "_").isidentifier():
         raise ValueError(f"{manifest}: invalid or missing plugin name")
+
+    try:
+        api_version = int(p.get("api_version", API_VERSION))
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{manifest}: [plugin] api_version must be an integer") from e
+    str_lists = {}
+    for key in ("requires_extras", "requires", "capabilities"):
+        value = p.get(key, []) or []
+        if not (isinstance(value, list) and all(isinstance(t, str) for t in value)):
+            raise ValueError(f"{manifest}: [plugin] {key} must be a list of strings")
+        str_lists[key] = list(value)
 
     # [tools] exports must be a list of strings.
     _tools = data.get("tools", {})
@@ -215,12 +232,12 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
     return PluginSpec(
         name=name,
         version=str(p.get("version", "0.0.0")),
-        api_version=int(p.get("api_version", API_VERSION)),
+        api_version=api_version,
         description=str(p.get("description", "")),
         scope=str(p.get("scope", "") or name),
-        requires_extras=list(p.get("requires_extras", []) or []),
-        requires=list(p.get("requires", []) or []),
-        capabilities=list(p.get("capabilities", []) or []),
+        requires_extras=str_lists["requires_extras"],
+        requires=str_lists["requires"],
+        capabilities=str_lists["capabilities"],
         data_subdir=str(p.get("data_subdir", "")),
         builtin=builtin,
         protected=bool(p.get("protected", False)),
