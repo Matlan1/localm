@@ -455,6 +455,15 @@ def test_an_unreadable_log_is_reported_without_its_path(world, monkeypatch):
     _assert_scrubbed(text)
 
 
+def test_log_digest_is_scrubbed_at_its_source(world):
+    _write_run_log(world.logs, os.getpid())
+    digest, reason = bugreport._recent_log_tail_result(pid=os.getpid())
+    assert reason == ""
+    assert "localm.engine: load failed" in digest
+    _assert_scrubbed(digest)
+    assert bugreport._recent_log_tail(pid=os.getpid()) == digest
+
+
 def test_a_missing_log_says_so_and_an_opt_out_says_nothing(world):
     asked = bugreport.save_user_report("doing a thing", include_log=True)
     assert "(not collected: no log file was found for that run)" in \
