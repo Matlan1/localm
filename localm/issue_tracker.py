@@ -64,7 +64,7 @@ def get_issue(number: int, *, opener=None) -> Optional[dict]:
     try:
         n = int(number)
     except (TypeError, ValueError):
-        raise LocalmError("bad issue number", reason=str(number))
+        raise LocalmError("bad issue number", reason=str(number)) from None
     data = _proxy.request(base, f"/issues?number={n}", token=token, opener=opener)
     issue = data.get("issue") if isinstance(data, dict) else None
     return issue if isinstance(issue, dict) else None

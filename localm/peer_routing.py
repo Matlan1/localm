@@ -455,7 +455,7 @@ async def forward(route: PeerRoute, request, path: str, *,
         raise HTTPException(
             502, f"Peer instance at {route.host}:{route.port} became "
             f"unavailable while routing '{route.model}'; the route has been "
-            "cleared. Retry to load a local copy, or re-offer routing.")
+            "cleared. Retry to load a local copy, or re-offer routing.") from e
 
     if resp.status_code in (401, 403):
         resp.close()

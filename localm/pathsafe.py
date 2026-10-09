@@ -62,8 +62,8 @@ def confined_name(base: Path, name: str) -> Path:
         raise HTTPException(400, "Invalid file name")
     try:
         resolved = (base / name).resolve()
-    except (OSError, ValueError):
-        raise HTTPException(400, "Invalid file name")
+    except (OSError, ValueError) as e:
+        raise HTTPException(400, "Invalid file name") from e
     if resolved.parent != base.resolve() or resolved.name != name:
         raise HTTPException(400, "Invalid file name")
     return resolved
@@ -141,7 +141,7 @@ def confined_under(base: Path, relpath: str) -> Path:
         resolved = base.joinpath(*parts).resolve()
         base_resolved = base.resolve()
     except (OSError, ValueError) as e:
-        raise ValueError(f"path could not be resolved: {relpath!r} ({e})")
+        raise ValueError(f"path could not be resolved: {relpath!r} ({e})") from e
     # Strictly below base: base itself is not a valid target.
     if base_resolved not in resolved.parents:
         raise ValueError(f"path escapes {base_resolved}: {relpath!r}")
@@ -200,7 +200,7 @@ def confined_absolute_or_under(base: Path, raw: str) -> Path:
         resolved = joined.resolve()
         base_resolved = base.resolve()
     except (OSError, ValueError) as e:
-        raise ValueError(f"path could not be resolved: {raw!r} ({e})")
+        raise ValueError(f"path could not be resolved: {raw!r} ({e})") from e
     if resolved == base_resolved or base_resolved not in resolved.parents:
         raise ValueError(f"path escapes {base_resolved}: {raw!r}")
     depth = len(resolved.relative_to(base_resolved).parts)

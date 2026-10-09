@@ -28,7 +28,7 @@ import json
 import os
 import re
 import socket
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -291,9 +291,7 @@ def companion_addresses() -> dict:
             continue
         # The primary outbound interface wins the LAN slot; otherwise the first
         # private address seen.
-        if norm == primary:
-            lan = norm
-        elif not lan:
+        if norm == primary or not lan:
             lan = norm
     return {"lan": lan, "tailscale": tailscale}
 
@@ -370,7 +368,7 @@ def _write_private(path: Path, data: bytes) -> None:
 # ------------------------------------------------------------------ #
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _make_ca(home: Path):

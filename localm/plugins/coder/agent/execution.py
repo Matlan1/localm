@@ -732,7 +732,7 @@ class _ExecutionMixin:
         return result
 
     def _post_tool_success(self, call: ToolCall, result: ToolResult,
-                           snapshots: "dict[str, bytes | None]") -> None:
+                           snapshots: dict[str, bytes | None]) -> None:
         """Post-success bookkeeping split out of _execute_tool: record changed
         code files for the changed-files tracker and clear the unverified-writes
         set when the agent runs the test suite (or a test command).
@@ -912,7 +912,7 @@ class _ExecutionMixin:
         return confirm(f"  Allow {call.name}?")
 
     def _refresh_map_for_tool(self, call: ToolCall,
-                              result: "ToolResult | None" = None) -> None:
+                              result: ToolResult | None = None) -> None:
         """Update the project map for files touched by a write/edit tool call.
 
         *result* is optional (existing callers - and the test that drives

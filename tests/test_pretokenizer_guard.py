@@ -993,8 +993,8 @@ class TestTheGatesRefuseAndTheReportsEstimate:
         def _count_messages(_messages):
             try:
                 return next(counts)
-            except StopIteration:
-                raise PretokenizerUnsafeInputError(_REFUSAL)
+            except StopIteration as e:
+                raise PretokenizerUnsafeInputError(_REFUSAL) from e
 
         engine.count_messages_tokens.side_effect = _count_messages
         # capacity - prompt_tokens (4096 - 3000) < buffer (2048), so it compacts.

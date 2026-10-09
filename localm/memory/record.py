@@ -89,7 +89,7 @@ class MemoryRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "MemoryRecord":
+    def from_dict(cls, data: dict) -> MemoryRecord:
         # Keep only known fields so a forward-compat record with extra keys still
         # loads (mirrors coder Episode.from_dict).
         known = set(cls.__dataclass_fields__)     # type: ignore[attr-defined]

@@ -296,7 +296,7 @@ def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
     if not binary_dir:
         return _result("llama_lib", label, [Finding(
             FAIL, "llama binary dir not found - GGUF backend unavailable")])
-    dll_names = ["llama.dll", "llama.so", "libllama.so", "llama"]
+    dll_names = ["llama.dll", "llama.so", "libllama.so", "libllama.dylib", "llama"]
     found_dll = next(
         (binary_dir / d for d in dll_names if (binary_dir / d).exists()),
         None,
@@ -304,7 +304,7 @@ def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
     if not found_dll:
         files = [f.name for f in binary_dir.iterdir() if f.is_file()][:8]
         return _result("llama_lib", label, [Finding(
-            WARN, f"binary dir found ({binary_dir}) but no llama .dll/.so - "
+            WARN, f"binary dir found ({binary_dir}) but no llama .dll/.so/.dylib - "
                   f"contents: {files}")])
     try:
         size = found_dll.stat().st_size

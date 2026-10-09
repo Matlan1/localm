@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict
 
 from localm.pathsafe import is_unc_or_device_path
 
@@ -32,7 +31,7 @@ def _known_pull_repo(repo: str) -> bool:
     return any(info.get("source") == f"hf:{repo}" for info in reg.values())
 
 
-def build(engines: EngineCache) -> Dict[str, dict]:
+def build(engines: EngineCache) -> dict[str, dict]:
     """``list_models``, ``search_models``, ``list_model_files``, ``pull_model``,
     ``setup_embeddings`` and ``remove_model``. *engines* is this server's
     engine cache: ``pull_model`` loads into it and ``remove_model`` refuses to

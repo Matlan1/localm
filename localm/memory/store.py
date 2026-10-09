@@ -406,7 +406,7 @@ class MemoryStore:
 
     # ----------------------------------------------------------------- IO -- #
     @classmethod
-    def open_file(cls, path: Path) -> "MemoryStore":
+    def open_file(cls, path: Path) -> MemoryStore:
         """Open an EXISTING namespace file directly, without knowing the
         (principal, agent, scope_key) that produced it.
 

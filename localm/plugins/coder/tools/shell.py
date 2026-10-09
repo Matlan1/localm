@@ -64,7 +64,7 @@ def _split_command(command: str) -> list[str]:
     return list(lex)
 
 
-def _shell_argv(command: str) -> "list[str] | str":
+def _shell_argv(command: str) -> list[str] | str:
     """Route *command* to an argument list, or to the platform shell.
 
     When the command contains no shell operators (pipes, redirects, globs,
@@ -322,7 +322,7 @@ def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
                       summary=f"{job_id} {outcome}", truncated=trunc)
 
 
-def resolve_runner(name: str) -> "str | None":
+def resolve_runner(name: str) -> str | None:
     """The launchable path to *name*, or None when it is not installed.
 
     Returns the RESOLVED path rather than the bare name: these commands run as

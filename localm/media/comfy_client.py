@@ -1452,7 +1452,7 @@ _launch_locks: dict = {}
 _launch_locks_guard = _threading.Lock()
 
 
-def _launch_lock_for(api_url: str) -> "_threading.Lock":
+def _launch_lock_for(api_url: str) -> _threading.Lock:
     """The per-api_url lock serializing ensure_comfy()'s launch decision.
     Created on first use; never removed (one lock per distinct api_url this
     process ever launches for - unbounded only in the sense that the set of
@@ -2005,7 +2005,7 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     )
 
 
-def comfy_http_error_detail(e: "urllib.error.HTTPError") -> str:
+def comfy_http_error_detail(e: urllib.error.HTTPError) -> str:
     """
     Human-readable detail from a ComfyUI /prompt error response.
 

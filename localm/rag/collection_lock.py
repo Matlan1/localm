@@ -602,7 +602,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
     while True:
         try:
             fd = os.open(str(lockpath), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except PermissionError:
+        except PermissionError as e:
             # WINDOWS ONLY, and it is a WAIT, not a failure. On Windows a lock
             # file that exists but is momentarily inaccessible - the holder's
             # unlink in flight, a scanner or backup holding a handle - reports
@@ -624,7 +624,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             rec, mtime = _read_record(lockpath)
             waited = time.time() - started_waiting
             if time.time() >= deadline:
-                raise _refusal(rec, waited, mtime)
+                raise _refusal(rec, waited, mtime) from e
             if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
                 announced = True
                 on_wait(f"waiting for the write lock on '{collection}': "
@@ -632,7 +632,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             time.sleep(min(_POLL * (attempt + 1), _POLL_CAP))
             attempt += 1
             continue
-        except FileExistsError:
+        except FileExistsError as e:
             rec, mtime = _read_record(lockpath)
             seen = (rec.get("token") if isinstance(rec, dict) else None, mtime)
             quiet = _watch(lockpath, seen)
@@ -646,7 +646,7 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
             # ever consulting the deadline.
             waited = time.time() - started_waiting
             if time.time() >= deadline:
-                raise _refusal(rec, waited, mtime, quiet)
+                raise _refusal(rec, waited, mtime, quiet) from e
             if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
                 announced = True
                 on_wait(f"waiting for the write lock on '{collection}': "

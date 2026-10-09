@@ -69,7 +69,7 @@ def register(app: FastAPI, ctx) -> None:
             return await run_in_threadpool_bounded(
                 setup_llama.check_runtime_update, timeout=_CHECK_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Checking the runtime timed out: {e}")
+            raise HTTPException(504, f"Checking the runtime timed out: {e}") from e
 
     @app.post("/api/runtime/update",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

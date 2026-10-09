@@ -120,7 +120,7 @@ def _linux_listeners() -> Optional[list]:
     for path, family in (("/proc/net/tcp", socket.AF_INET),
                          ("/proc/net/tcp6", socket.AF_INET6)):
         try:
-            with open(path, "r", encoding="ascii", errors="replace") as f:
+            with open(path, encoding="ascii", errors="replace") as f:
                 text = f.read()
         except OSError:
             continue

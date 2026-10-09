@@ -262,7 +262,7 @@ async def _off_loop(fn, *, embedder_bound: bool = True):
                 return await loop.run_in_executor(None, fn)
         return await loop.run_in_executor(None, fn)
     except CollectionLockedError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
 
 
 def _legacy_memory_file() -> Path:
@@ -1059,7 +1059,7 @@ _auto_lock = _threading.Lock()       # guards the marker read + in-progress flag
 _auto_running = False                 # True while a background pass is in flight
 
 
-def _auto_marker() -> "Path":
+def _auto_marker() -> Path:
     return _memory_root() / ".auto_consolidate"
 
 
@@ -1202,7 +1202,7 @@ _sweep_lock = _threading.Lock()       # guards the marker read + in-progress fla
 _sweep_running = False                 # True while a background sweep is in flight
 
 
-def _sweep_marker() -> "Path":
+def _sweep_marker() -> Path:
     return _memory_root() / ".backfill_sweep"
 
 

@@ -88,7 +88,7 @@ def pinned_tag(path: Path = _SETUP_PATH) -> str:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
-        raise SystemExit(f"could not read {path}: {e}")
+        raise SystemExit(f"could not read {path}: {e}") from e
     m = _PIN_RE.search(text)
     if not m:
         raise SystemExit(
@@ -112,7 +112,7 @@ def _request(url: str) -> urllib.request.Request:
     return urllib.request.Request(url, headers=headers)
 
 
-def _get_json(url: str) -> "tuple[object, str]":
+def _get_json(url: str) -> tuple[object, str]:
     """(parsed body, error). Never raises; a failed request is an error string."""
     try:
         with urllib.request.urlopen(_request(url), timeout=20) as r:
@@ -123,7 +123,7 @@ def _get_json(url: str) -> "tuple[object, str]":
         return None, f"{type(e).__name__}: {e}"
 
 
-def _parse_date(value) -> "_dt.datetime | None":
+def _parse_date(value) -> _dt.datetime | None:
     """'2026-08-12T12:18:24Z' -> aware UTC datetime; anything else -> None."""
     if not isinstance(value, str):
         return None
@@ -134,7 +134,7 @@ def _parse_date(value) -> "_dt.datetime | None":
         return None
 
 
-def upstream_releases() -> "tuple[list, str]":
+def upstream_releases() -> tuple[list, str]:
     """(releases newest-first, error). Each release is a dict with ``tag`` and
     ``published_at`` (aware datetime or None). Only non-draft releases with a
     bNNNNN tag and uploaded assets are included. Never raises: a failed lookup is
@@ -161,13 +161,13 @@ def upstream_releases() -> "tuple[list, str]":
     return out, ""
 
 
-def upstream_tags() -> "tuple[list, str]":
+def upstream_tags() -> tuple[list, str]:
     """(tags newest-first, error): upstream_releases() reduced to tag names."""
     releases, err = upstream_releases()
     return [r["tag"] for r in releases], err
 
 
-def release_date(tag: str) -> "_dt.datetime | None":
+def release_date(tag: str) -> _dt.datetime | None:
     """``published_at`` of one release looked up by tag, or None when it cannot
     be read."""
     body, err = _get_json(f"https://api.github.com/repos/{_REPO}/releases/tags/{tag}")
@@ -222,7 +222,7 @@ def _annotate(level: str, message: str) -> None:
         print(f"::{level}::{message}")
 
 
-def _summarise(lines: "list[str]") -> None:
+def _summarise(lines: list[str]) -> None:
     try:
         ci_runner_files.append(ci_runner_files.STEP_SUMMARY, "\n".join(lines) + "\n")
     except OSError as e:

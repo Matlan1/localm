@@ -81,7 +81,7 @@ def _pyproject_text() -> str:
     return _PYPROJECT_PATH.read_text(encoding="utf-8")
 
 
-def _pinned_torch_stack_version(pkg: str) -> "str | None":
+def _pinned_torch_stack_version(pkg: str) -> str | None:
     """'2.11.0+rocm7.13.0' out of pyproject.toml's dependencies list, by text
     (not by parsing TOML): matches this tree's other check_*.py scripts, which
     all read their pin the same way so the CI job needs nothing installed.
@@ -90,7 +90,7 @@ def _pinned_torch_stack_version(pkg: str) -> "str | None":
     return m.group(1) if m else None
 
 
-def _pinned_rocm_sdk_version(pkg: str, path: Path = _UV_LOCK_PATH) -> "str | None":
+def _pinned_rocm_sdk_version(pkg: str, path: Path = _UV_LOCK_PATH) -> str | None:
     """rocm-sdk-core / rocm-sdk-libraries-gfx103x-all carry NO version
     constraint in pyproject.toml - only an index reference - so uv resolves
     whatever the AMD index currently publishes, and uv.lock records the
@@ -106,12 +106,12 @@ def _pinned_rocm_sdk_version(pkg: str, path: Path = _UV_LOCK_PATH) -> "str | Non
     return m.group(1) if m else None
 
 
-def _requires_python_floor() -> "str | None":
+def _requires_python_floor() -> str | None:
     m = _REQUIRES_PYTHON_RE.search(_pyproject_text())
     return m.group(1) if m else None
 
 
-def _floor_minor(requires_python: str) -> "int | None":
+def _floor_minor(requires_python: str) -> int | None:
     """'>=3.12,<3.13' -> 12. Reads the first '>=3.Y' clause; this repo has
     pinned exactly one such constraint since requires-python was written."""
     m = re.search(r">=\s*3\.(\d+)", requires_python)
@@ -132,7 +132,7 @@ def _fetch_index_http(pkg: str) -> str:
         return r.read().decode("utf-8")
 
 
-def _fetch_index(pkg: str, *, opener=None) -> "list[str] | None":
+def _fetch_index(pkg: str, *, opener=None) -> list[str] | None:
     """href targets listed on *pkg*'s AMD index page, or None if the page
     could not be fetched for ANY reason. None must be read as "unknown",
     never as "no wheels" and never as "current".
@@ -153,7 +153,7 @@ def _fetch_index(pkg: str, *, opener=None) -> "list[str] | None":
     return _HREF_RE.findall(html)
 
 
-def _parse_wheel(href: str) -> "dict | None":
+def _parse_wheel(href: str) -> dict | None:
     """One href -> {version, pytag, abitag, platform}, or None when it is not
     a plain 5- or 6-token PEP 427 wheel name (a build-tag wheel has 6 tokens;
     every wheel observed on this index has 5, but a stray non-.whl href, or a
@@ -174,7 +174,7 @@ def _parse_wheel(href: str) -> "dict | None":
     return {"version": unquote(ver), "pytag": pytag, "abitag": abitag, "platform": plat}
 
 
-def _base_version_tuple(version: str) -> "tuple[int, ...] | None":
+def _base_version_tuple(version: str) -> tuple[int, ...] | None:
     """'2.11.0+rocm7.13.0' -> (2, 11, 0). The local-version suffix is the AMD
     ROCm release tag shared by every wheel in one publish - it does not order
     numerically against a differently-suffixed version and is not what makes
@@ -186,8 +186,8 @@ def _base_version_tuple(version: str) -> "tuple[int, ...] | None":
 
 
 def newest_win_amd64_version(
-        wheels: "list[dict]", *, pytag: "str | None" = None
-) -> "tuple[str, tuple[int, ...]] | None":
+        wheels: list[dict], *, pytag: str | None = None
+) -> tuple[str, tuple[int, ...]] | None:
     """(raw version string, parsed base tuple) of the highest-version
     win_amd64 wheel, optionally filtered to an exact *pytag* (torch/
     torchvision: the ABI localm ships on; pass None for a py3-none package,
@@ -211,7 +211,7 @@ def newest_win_amd64_version(
 _CP3_TAG_RE = re.compile(r"^cp3(\d+)$")
 
 
-def _cp3_tag_minor(tag: str) -> "int | None":
+def _cp3_tag_minor(tag: str) -> int | None:
     """'cp312' -> 12, 'cp39' -> 9: this codebase's entire Python-version domain
     is 3.x (matching _floor_minor's own >=3.Y assumption), so a tag's minor is
     everything after the "cp3" prefix, never a bare slice off "cp" - "cp312"[2:]
@@ -221,7 +221,7 @@ def _cp3_tag_minor(tag: str) -> "int | None":
     return int(m.group(1)) if m else None
 
 
-def newest_win_amd64_pytag(wheels: "list[dict]") -> "str | None":
+def newest_win_amd64_pytag(wheels: list[dict]) -> str | None:
     """The highest cpNNN python tag published for a win_amd64 wheel, or None
     when no win_amd64 wheel in *wheels* carries a Python-3.x cp-tag at all (a
     py3-none-only package imposes no ceiling and is excluded by this filter,
@@ -242,7 +242,7 @@ def newest_win_amd64_pytag(wheels: "list[dict]") -> "str | None":
 #  Reporting                                                                  #
 # --------------------------------------------------------------------------- #
 
-def _report_package(pkg: str, pinned: "str | None", wheels: "list[dict] | None") -> None:
+def _report_package(pkg: str, pinned: str | None, wheels: list[dict] | None) -> None:
     if pinned is None:
         print(f"{pkg}: could not read the pinned version from the source - has it moved?")
         return
@@ -271,7 +271,7 @@ def _report_package(pkg: str, pinned: "str | None", wheels: "list[dict] | None")
         print(f"{pkg}: current - pinned {pinned} is the newest published ({where})")
 
 
-def _report_python_abi(wheels_by_pkg: "dict[str, list[dict] | None]") -> None:
+def _report_python_abi(wheels_by_pkg: dict[str, list[dict] | None]) -> None:
     """The BINDING ceiling is the LOWEST cp-tag among torch/torchvision's own
     individually-computed ceilings, never a tag pooled across both wheel lists
     combined - a bump is only as safe as whichever package lags furthest
@@ -280,7 +280,7 @@ def _report_python_abi(wheels_by_pkg: "dict[str, list[dict] | None]") -> None:
     package unreachable, or with no cp-tag wheel) would silently ignore the
     package that could not be checked, which is exactly the false-safe result
     this function exists to avoid."""
-    per_package_pytag: "dict[str, str]" = {}
+    per_package_pytag: dict[str, str] = {}
     missing = []
     for pkg in _TORCH_STACK:
         wheels = wheels_by_pkg.get(pkg)
@@ -326,12 +326,12 @@ def _report_python_abi(wheels_by_pkg: "dict[str, list[dict] | None]") -> None:
 #  Entry point                                                                #
 # --------------------------------------------------------------------------- #
 
-def main(argv: "list[str] | None" = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.parse_args(argv)
 
-    wheels_by_pkg: "dict[str, list[dict] | None]" = {}
+    wheels_by_pkg: dict[str, list[dict] | None] = {}
     for pkg in _PACKAGES:
         hrefs = _fetch_index(pkg)
         if hrefs is None:

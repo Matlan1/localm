@@ -51,7 +51,7 @@ import json
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 from localm.inference.backends.base import LOADING_MODEL_STATUS
 
@@ -150,7 +150,7 @@ class EngineCache:
         self.default_model = default_model
         # Display name -> engine, plus usage order (least-recently-used FIRST,
         # MRU last).
-        self._engines: Dict[str, Any] = {}
+        self._engines: dict[str, Any] = {}
         self._lru: list = []
         # Injection point for tests - real factory builds a localm Engine
         self._factory = engine_factory or self._build_engine
@@ -158,9 +158,9 @@ class EngineCache:
         # this machine already has loaded instead of loading a second copy.
         self.share_loaded = bool(share_loaded)
         # Display name -> a client for another instance's loaded copy.
-        self._peers: Dict[str, Any] = {}
+        self._peers: dict[str, Any] = {}
         # Display name -> (endpoint, credential) that copy was verified with.
-        self._peer_targets: Dict[str, tuple] = {}
+        self._peer_targets: dict[str, tuple] = {}
         # Held by every method that reads or changes the engines and peers to
         # pick or load one, on the protocol thread and on a coder run's worker
         # thread alike. Never acquired while holding a generation lock
@@ -807,7 +807,7 @@ def _quiet_stdout():
         yield
 
 
-def _backend_can_embed(engines: "EngineCache") -> bool:
+def _backend_can_embed(engines: EngineCache) -> bool:
     """True unless the active/default backend explicitly cannot embed.
 
     Avoids loading the model at startup by checking the registry for GGUF suffix
@@ -905,7 +905,7 @@ def _coder_available() -> bool:
 
 def build_tools(engines: EngineCache, enable_images: bool = True,
                 enable_coder: bool = True, enable_memory: bool = True,
-                enable_memory_write: bool = False) -> Dict[str, dict]:
+                enable_memory_write: bool = False) -> dict[str, dict]:
     """Return {tool_name: {schema, handler}} for everything this server offers.
 
     Composes the tool families under ``localm.plugins.mcpserver.tools`` and
@@ -959,7 +959,7 @@ class MCPStdioServer:
     ``message``, for each new status its handler passes to
     ``report_progress`` while ``run_stdio`` serves it."""
 
-    def __init__(self, tools: Dict[str, dict]) -> None:
+    def __init__(self, tools: dict[str, dict]) -> None:
         self.tools = tools
         self._out = None
         self._write_lock = threading.Lock()
