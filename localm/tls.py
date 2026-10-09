@@ -291,9 +291,7 @@ def companion_addresses() -> dict:
             continue
         # The primary outbound interface wins the LAN slot; otherwise the first
         # private address seen.
-        if norm == primary:
-            lan = norm
-        elif not lan:
+        if norm == primary or not lan:
             lan = norm
     return {"lan": lan, "tailscale": tailscale}
 
