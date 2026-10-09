@@ -532,7 +532,7 @@ _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
 
 # llama.cpp's diffusion language models: chat models that denoise a whole reply
 # canvas with bidirectional attention instead of decoding token by token, and
-# keep no KV cache. They declare "<arch>.attention.causal" false.
+# keep no KV cache.
 GGUF_DIFFUSION_ARCHITECTURES = frozenset({"dream", "llada", "llada-moe", "rnd1"})
 
 
