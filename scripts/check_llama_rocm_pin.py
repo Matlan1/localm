@@ -98,7 +98,7 @@ def pinned_tag(path: Path = _SETUP_PATH) -> str:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
-        raise SystemExit(f"could not read {path}: {e}")
+        raise SystemExit(f"could not read {path}: {e}") from e
     m = _PIN_RE.search(text)
     if not m:
         raise SystemExit(

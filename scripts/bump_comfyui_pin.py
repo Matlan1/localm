@@ -93,7 +93,7 @@ def load_receipt(path: Path, tag: str, commit: str, require: "tuple[str, ...]") 
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        raise Refused(f"could not read the receipt {path}: {e}")
+        raise Refused(f"could not read the receipt {path}: {e}") from e
     if receipt.get("tag") != tag:
         raise Refused(f"the receipt is for tag {receipt.get('tag')!r}, not {tag}; "
                       "confirm the target tag itself")

@@ -114,7 +114,7 @@ def fetch_release_assets(tag: str, opener=None) -> dict:
             body = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         raise Refused(f"could not read the {tag} release from the GitHub API: "
-                      f"{type(e).__name__}: {e}")
+                      f"{type(e).__name__}: {e}") from e
     assets = body.get("assets") if isinstance(body, dict) else None
     if not isinstance(assets, list):
         raise Refused(f"the {tag} release listing carries no asset list")
@@ -147,7 +147,7 @@ def derive_mtp_architectures(tag: str) -> set:
         derived = mod.refresh(tag)
     except Exception as e:
         raise Refused(f"could not re-derive MTP_GRAPH_ARCHITECTURES at {tag}: "
-                      f"{type(e).__name__}: {e}")
+                      f"{type(e).__name__}: {e}") from e
     if not derived:
         raise Refused(f"the MTP re-derivation at {tag} returned an empty set")
     return set(derived)
@@ -165,7 +165,7 @@ def load_receipt(path: Path, tag: str, require: "tuple[str, ...]") -> set:
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        raise Refused(f"could not read the receipt {path}: {e}")
+        raise Refused(f"could not read the receipt {path}: {e}") from e
     if receipt.get("tag") != tag:
         raise Refused(f"the receipt is for {receipt.get('tag')!r}, not {tag}; "
                       "confirm the target tag itself")

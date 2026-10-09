@@ -53,13 +53,13 @@ def register(app: FastAPI, ctx) -> None:
         if expires_in is not None:
             try:
                 expires = time.time() + float(expires_in)
-            except (TypeError, ValueError):
-                raise HTTPException(400, "'expires_in' must be seconds (a number)")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(400, "'expires_in' must be seconds (a number)") from exc
         elif expires is not None:
             try:
                 expires = float(expires)
-            except (TypeError, ValueError):
-                raise HTTPException(400, "'expires' must be an epoch number or null")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(400, "'expires' must be an epoch number or null") from exc
         # Only an owner/ADMIN caller may grant privileged scopes. In open mode
         # (caller is None) privileged grants are refused.
         is_owner = caller is not None and scopes.ADMIN in caller
@@ -91,9 +91,9 @@ def register(app: FastAPI, ctx) -> None:
                                  allow_privileged=is_owner, expires=expires,
                                  fs_access=fs_access, rag_roots=rag_roots or None)
         except PermissionError as e:
-            raise HTTPException(403, str(e))
+            raise HTTPException(403, str(e)) from e
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         # Catch at grant: warn (do not block) when a granted scope unlocks a
         # plugin the host cannot serve yet (not installed / missing pip extras).
         mgr = getattr(app.state, "plugin_manager", None)

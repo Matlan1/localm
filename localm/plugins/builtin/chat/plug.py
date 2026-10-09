@@ -175,8 +175,8 @@ async def conversation_get(conv_id: str):
         raise HTTPException(404, "No such conversation")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise HTTPException(500, "Conversation file is unreadable")
+    except (OSError, ValueError) as e:
+        raise HTTPException(500, "Conversation file is unreadable") from e
     data["id"] = conv_id
     return data
 
@@ -275,7 +275,7 @@ def _prompts_or_refuse() -> dict:
         logger.warning(
             "prompts.json exists but could not be read (%s); refusing the "
             "request rather than overwriting the persona library", e)
-        raise HTTPException(500, "Prompt library is unreadable")
+        raise HTTPException(500, "Prompt library is unreadable") from e
 
 
 def _save_prompts(data: dict) -> None:
