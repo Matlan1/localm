@@ -29,7 +29,7 @@ WEEKLY_JOBS = NIGHTLY_JOBS | {
 }
 
 _TOKEN = re.compile(
-    r"\s*(?:(?P<str>'[^']*')|(?P<op>&&|\|\||==|!=|[()!,])|(?P<name>[A-Za-z_][\w.*]*))"
+    r"\s*(?:(?P<str>'[^']*')|(?P<op>&&|\|\||==|!=|[()!,])|(?P<name>[A-Za-z_][\w.*-]*))"
 )
 
 
