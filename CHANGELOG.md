@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Ollama API's `format` takes a JSON schema.** The reply is constrained, token by
+  token, to documents that satisfy the schema: objects with required and optional
+  properties, arrays with length bounds, enums, integer ranges, `anyOf`, recursive `$ref`
+  and more. A keyword that cannot be enforced (`pattern`, `multipleOf`, number bounds)
+  is refused with a 400 naming it rather than ignored.
 - **`stop` sequences on `/v1/chat/completions` and `/v1/completions`.** A string or a list
   of up to 16: the reply is cut before the first match, the generation ends there instead of
   running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
@@ -54,7 +59,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
   stream as NDJSON, `format: "json"`, `options.stop`, `think` and images work, and the same
-  API keys and scopes apply. Tool calling and a JSON-schema `format` are not supported yet.
+  API keys and scopes apply. Tool calling is not supported yet.
   `/api/copy` makes an alias; pulling, deleting and creating models stay in `localm`. See
   docs/ollama-api.md.
 - **Release files carry build provenance and a software bill of materials.** The release
