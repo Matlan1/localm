@@ -204,6 +204,14 @@ class TestOllamaControls:
         assert add_local(str(root / "manifests" / "registry.ollama.ai" / "library" / "m")) is True
         assert set(load_registry()) == {"m-latest"}
 
+    def test_folder_named_like_a_store_without_manifests_is_an_ordinary_folder(self, tmp_path, isolated_home):
+        d = tmp_path / "plain"
+        (d / "manifests").mkdir(parents=True)
+        (d / "blobs").mkdir()
+        (d / "loose.gguf").write_bytes(_gguf(tag="loose"))
+        assert add_local(str(d)) is True
+        assert set(load_registry()) == {"loose"}
+
     def test_copy_brings_the_blob_into_the_models_folder(self, tmp_path, isolated_home):
         root = _store(tmp_path, ("registry.ollama.ai/library/m/latest", _gguf(tag="m")))
         assert add_local(str(root), store="copy") is True

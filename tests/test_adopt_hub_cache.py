@@ -334,3 +334,25 @@ class TestStore:
         hf = Path(reg["org-beta"]["path"])
         assert hf.parent == models.resolve() and hf.name == "org-beta"
         assert (hf / "config.json").is_file()
+
+
+@pytest.mark.integration
+class TestRealHubCache:
+    """A cache written by huggingface_hub itself, into a throwaway folder."""
+
+    def test_downloaded_repos_register_from_their_snapshots(self, tmp_path, isolated_home):
+        hf = pytest.importorskip("huggingface_hub")
+        hub = tmp_path / "hub"
+        hf.snapshot_download("hf-internal-testing/tiny-random-BertModel", cache_dir=str(hub))
+        hf.hf_hub_download("mradermacher/tiny-random-granite-moe-GGUF",
+                           "tiny-random-granite-moe.Q8_0.gguf", cache_dir=str(hub))
+        assert add_local(str(hub)) is True
+        reg = load_registry()
+        assert set(reg) == {"hf-internal-testing-tiny-random-BertModel",
+                            "mradermacher-tiny-random-granite-moe-GGUF"}
+        gguf = Path(reg["mradermacher-tiny-random-granite-moe-GGUF"]["path"])
+        assert gguf.name == "tiny-random-granite-moe.Q8_0.gguf" and gguf.is_file()
+        assert "snapshots" in gguf.parts and "blobs" not in gguf.parts
+        assert reg["mradermacher-tiny-random-granite-moe-GGUF"]["model_type"] == "llm"
+        snap = Path(reg["hf-internal-testing-tiny-random-BertModel"]["path"])
+        assert (snap / "config.json").is_file() and "snapshots" in snap.parts
