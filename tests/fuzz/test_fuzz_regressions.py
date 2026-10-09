@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import struct
+import subprocess
+import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -160,7 +164,51 @@ def _peak(fn, *args):
     return _bounds.peak_allocation(fn, *args)
 
 
+class TestGgufStreamSkip:
+    @pytest.mark.parametrize("count", [2 ** 44, 2 ** 50, 2 ** 63, 2 ** 64 - 1])
+    def test_header_layout_refuses_an_array_longer_than_any_file_with_struct_error(
+            self, tmp_path, count):
+        path = tmp_path / "lie.gguf"
+        path.write_bytes(_header_with_lying_array(count))
+        with open(path, "rb") as f, pytest.raises(struct.error):
+            gguf._gguf_header_layout(f)
+
+    def test_the_rewrite_reports_the_same_file_as_unreadable(self, tmp_path):
+        src = tmp_path / "lie.gguf"
+        src.write_bytes(_header_with_lying_array(2 ** 50))
+        with pytest.raises(ValueError, match="not a readable GGUF"):
+            gguf.write_gguf_with_string_kv(src, tmp_path / "out.gguf", "k.new", "v")
+
+
+class TestStartupConfigRead:
+    def test_importing_config_survives_an_over_nested_config_json(self, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "config.json").write_bytes(_DEEP_JSON)
+        root = Path(__file__).resolve().parents[2]
+        env = {**os.environ, "LOCALM_HOME": str(home), "PYTHONPATH": str(root)}
+        done = subprocess.run([sys.executable, "-c", "import localm.config"], env=env,
+                              capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0, done.stderr[-800:]
+
+
+class TestOllamaManifestScan:
+    def test_an_over_nested_manifest_is_skipped(self, tmp_path):
+        tag = tmp_path / "manifests" / "registry.ollama.ai" / "library" / "m" / "latest"
+        tag.parent.mkdir(parents=True)
+        tag.write_bytes(_DEEP_JSON)
+        models, problems = registry._scan_ollama_root(tmp_path)
+        assert models == [] and problems == []
+
+
 class TestMcpStdioServer:
+    def test_a_non_utf8_line_is_replaced_and_the_next_line_is_served(self):
+        raw = b'\xff\xfe\n{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n'
+        stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", errors="strict")
+        out = io.StringIO()
+        self._server().run_stdio(stdin, out)
+        assert json.loads(out.getvalue()) == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
     @staticmethod
     def _server():
         return MCPStdioServer({"echo": {"description": "d", "inputSchema": {},

@@ -3828,7 +3828,7 @@ def _scan_ollama_root(root: Path):
             continue
         try:
             manifest = _json.loads(tag_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         layers = manifest.get("layers") if isinstance(manifest, dict) else None
         if not isinstance(layers, list):

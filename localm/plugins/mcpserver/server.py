@@ -1066,6 +1066,9 @@ class MCPStdioServer:
         stdin = stdin or sys.stdin
         stdout = stdout or sys.stdout
         self._out = stdout
+        reconfigure = getattr(stdin, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
         _log("ready - waiting for MCP client")
         for line in stdin:
             line = line.strip()

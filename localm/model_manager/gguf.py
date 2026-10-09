@@ -1433,7 +1433,10 @@ def _gguf_skip_value_stream(f, vtype: int) -> None:
         size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
         if size is None:
             raise struct.error(f"unsupported gguf array element type {elem_type}")
-        f.seek(size * count, 1)
+        try:
+            f.seek(size * count, 1)
+        except (OSError, ValueError, OverflowError) as exc:
+            raise struct.error("gguf array runs past the end of the file") from exc
         return
     size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
     if size is None:
