@@ -255,6 +255,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **A knowledge collection whose `meta.json` is not valid UTF-8 no longer breaks the collection list.** The list, the collection detail view and a model rename now treat that collection as unreadable, flag it as corrupt and carry on with the others, instead of failing for every collection.
 - **Models you already have on disk are found where LM Studio and llama.cpp keep them.**
   `localm add <folder>` and the models-folder scan now look inside subfolders (as far
   as the Folder import depth setting allows, three levels by default, so LM Studio's
