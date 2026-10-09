@@ -469,9 +469,9 @@ def test_acceptance_starts_at_the_prior_and_follows_the_verify_results():
     for _ in range(10):
         src.on_verify(4, 4)
     high = src.acceptance()
-    for _ in range(10):
+    for _ in range(30):
         src.on_verify(4, 0)
-    assert high > 0.9 and src.acceptance() < high
+    assert high > 0.9 and src.acceptance() < 0.3
 
 
 def _steps(src, n, outcome):
