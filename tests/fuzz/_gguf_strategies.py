@@ -152,6 +152,9 @@ def kv_entries(draw):
         elif key == "general.architecture" or key.endswith(("chat_template", ".pre", ".name",
                                                           "projector_type", ".model")):
             vtype, body = draw(string_value())
+        elif key == "general.alignment":
+            vtype, body = T_UINT32, _u32(draw(st.sampled_from(
+                [0, 1, 3, 32, 64, 4096, 2 ** 20, 2 ** 20 + 1, 2 ** 31, 2 ** 32 - 1])))
         elif key.endswith("tokens"):
             vtype, body = T_ARRAY, struct.pack("<IQ", T_STRING, 3) + b"".join(
                 lstr(t) for t in ("a", "b", "c"))

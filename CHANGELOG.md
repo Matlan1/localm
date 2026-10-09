@@ -269,6 +269,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **Malformed files and requests are refused with a clear error instead of crashing.** The MCP server no longer exits when a client sends a `tools/call` with the wrong parameter shape, a 4300-digit
+  number or deeply nested JSON; a grammar with an enormous repeat count is rejected as an invalid grammar; a plugin
+  with a non-UTF-8, over-nested or wrong-typed `plugin.toml` is reported as broken without hiding the other plugins;
+  an encrypted or unsupported-compression `.docx` is skipped with a message; and a model folder whose `config.json`,
+  `tokenizer.json` or shard index is over-nested, has an enormous number or has the wrong shape is refused or treated
+  as having no metadata, and an uploaded workflow, `model_meta.json` or install record that is over-nested is
+  rejected or ignored.
 - **`localm doctor` recognises the macOS runtime.** On a Mac it reported the Metal build as "no llama library", skipped the native ABI check and the GPU probe, and ended with "CPU mode only"; it now checks the library like on other systems and names the Metal GPU.
 - **A knowledge collection whose `meta.json` is not valid UTF-8 no longer breaks the collection list.** The list, the collection detail view and a model rename now treat that collection as unreadable, flag it as corrupt and carry on with the others, instead of failing for every collection.
 - **Models you already have on disk are found where LM Studio and llama.cpp keep them.**

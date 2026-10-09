@@ -109,10 +109,13 @@ def test_write_with_string_kv_raises_only_value_or_os_error(data, tmp_path):
     src = _write(tmp_path, data)
     dst = tmp_path / f"out{next(_counter)}.gguf"
     try:
-        try:
-            _bounds.returns_within(gguf.write_gguf_with_string_kv, src, dst, "k.new", "v")
-        except (ValueError, OSError):
-            pass
+        outcome, peak = _bounds.peak_allocation(
+            gguf.write_gguf_with_string_kv, src, dst, "k.new", "v")
+        assert peak < _bounds.DEFAULT_PEAK_BYTES, (
+            f"allocated {peak} bytes rewriting a {len(data)}-byte file")
+        assert not isinstance(outcome, BaseException) or isinstance(
+            outcome, (ValueError, OSError)), repr(outcome)
+        assert not dst.exists() or dst.stat().st_size < 4 * len(data) + 2 * 1024 * 1024
     finally:
         src.unlink(missing_ok=True)
         dst.unlink(missing_ok=True)

@@ -1446,6 +1446,10 @@ def _gguf_skip_value_stream(f, vtype: int) -> None:
 # KV key). gguf_moe_pinned_expert_bytes does not read that key.
 _GGUF_DEFAULT_ALIGNMENT = 32
 
+# Largest general.alignment _gguf_header_layout accepts. The padding the
+# rewriter appends is at most one alignment unit, so this bounds it.
+_GGUF_MAX_ALIGNMENT = 1 << 20
+
 # Sanity ceiling on a single tensor's dimension count, generous against
 # GGML_MAX_DIMS (4 in every real ggml build) - guards against a corrupt/
 # misaligned stream being read as an implausibly large dims array.
@@ -2169,6 +2173,8 @@ def _gguf_header_layout(f) -> _GgufLayout:
             (alignment,) = struct.unpack("<I", f.read(4))
             if not alignment:
                 raise struct.error("general.alignment is 0")
+            if alignment > _GGUF_MAX_ALIGNMENT:
+                raise struct.error(f"implausible general.alignment {alignment}")
             continue
         if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
             architecture = _gguf_read_string_stream(f)

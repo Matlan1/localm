@@ -20,6 +20,7 @@ from localm.model_manager import capabilities, gguf, registry
 from localm.plugins import engine, loader
 from localm.plugins.mcpserver.server import MCPStdioServer
 from localm.rag import extract
+from tests.fuzz import _bounds
 
 
 class TestGrammarRepeatCount:
@@ -127,6 +128,36 @@ class TestDeeplyNestedJson:
     def test_an_uploaded_workflow_is_rejected_with_value_error(self):
         with pytest.raises(ValueError, match="nested too deeply"):
             media_workflows.save_workflow("image", "w.json", _DEEP_JSON)
+
+
+def _header_with_alignment(alignment: int) -> bytes:
+    kvs = (_lstr("general.alignment") + struct.pack("<II", 4, alignment)
+           + _lstr("general.architecture") + struct.pack("<I", 8) + _lstr("clip"))
+    return b"GGUF" + struct.pack("<IQQ", 3, 0, 2) + kvs + b"\x00" * 100
+
+
+class TestGgufAlignment:
+    @pytest.mark.parametrize("alignment", [2 ** 20 + 1, 2 ** 31, 2 ** 32 - 1])
+    def test_a_rewrite_refuses_an_implausible_alignment_without_allocating_for_it(
+            self, tmp_path, alignment):
+        src, dst = tmp_path / "src.gguf", tmp_path / "dst.gguf"
+        src.write_bytes(_header_with_alignment(alignment))
+        outcome, peak = _peak(gguf.write_gguf_with_string_kv, src, dst, "k.new", "v")
+        assert isinstance(outcome, ValueError)
+        assert peak < 16 * 1024 * 1024
+        assert not dst.exists()
+
+    @pytest.mark.parametrize("alignment", [32, 64, 4096, 2 ** 20])
+    def test_a_plausible_alignment_still_rewrites(self, tmp_path, alignment):
+        src, dst = tmp_path / "src.gguf", tmp_path / "dst.gguf"
+        src.write_bytes(_header_with_alignment(alignment))
+        gguf.write_gguf_with_string_kv(src, dst, "k.new", "v")
+        assert b"k.new" in dst.read_bytes()
+        assert len(dst.read_bytes()) >= alignment
+
+
+def _peak(fn, *args):
+    return _bounds.peak_allocation(fn, *args)
 
 
 class TestMcpStdioServer:
