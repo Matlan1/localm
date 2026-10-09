@@ -531,7 +531,7 @@ class TestPullUrlTagInjection:
 
 class TestPullUrlBracketDrop:
     def test_invalid_url_message_survives_verbatim(self, rich_capture, url_env):
-        url = f"https://example.com/{BRACKET_DROP}"   # no filename segment
+        url = f"https://example.com/{BRACKET_DROP}/"   # no filename segment
 
         ok = mm._pull_url(url, "m")
 

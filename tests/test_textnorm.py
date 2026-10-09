@@ -405,11 +405,15 @@ class TestStreamRelease:
             "<| channel |>", "< reasoning>", "</thinking >", "<Thinking>", "</ THOUGHT>",
             "<unused"]
         found = 0
+        checked = set()
         for _ in range(3000):
             text = "".join(rng.choice(frags) for _ in range(rng.randint(1, 6)))
             for m in _SCRUB_RE.finditer(text):
                 found += 1
                 whole = m.group(0)
+                if whole in checked:
+                    continue
+                checked.add(whole)
                 for end in range(1, len(whole) + 1):
                     assert _prefix_fits(_SCRUB_TREE, whole[:end], 0), (whole, end)
         assert found > 3000
