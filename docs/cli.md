@@ -857,6 +857,7 @@ localm setup-llama                       # auto-detect the GPU, fetch the right 
 localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor toolkit
 localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
+localm setup-llama --backend cuda --cuda-line cuda-12   # Linux: CUDA runtime without a GPU, for building images
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 localm setup-browser                     # download Chromium for the automated browser (coder tool)
 localm setup-browser --force             # reinstall even if already present
@@ -874,6 +875,8 @@ localm stop                              # stop the server serving this director
 localm stop <id>                         # stop one instance by id (or an id prefix, as shown by `ps`)
 localm stop --all                        # stop every running localm instance
 ```
+
+`--cuda-line cuda-12|cuda-13` (Linux, with `--backend cuda`) fetches the CUDA build and runtime libraries of that line on a machine with no NVIDIA GPU, which is how the `cuda` and `cuda13` Docker images are built (see [docs/docker.md](docker.md)). The driver check and the load test are skipped, the runtime is recorded as not load-tested, and `localm doctor` tests it on the machine it runs on. A failed fetch exits with an error; it never falls back to another backend.
 
 `localm run`/`localm gui`/`localm serve` start a background server that keeps running after the command exits; `localm stop` is how you end it - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 

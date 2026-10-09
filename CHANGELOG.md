@@ -62,6 +62,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the release workflow, so `gh attestation verify` proves which workflow built a file and
   from which commit. SECURITY.md has the commands.
 - **Docker images for the API server.** Releases publish CPU and Vulkan images to `ghcr.io/matlan1/localm`, and `docker/Dockerfile` builds the same image from a clone. The container keeps its data in a `/data` volume, serves HTTPS, and refuses to start until an API key exists (`docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate`). See docs/docker.md.
+- **NVIDIA CUDA Docker images.** Releases also publish `cuda` (every NVIDIA architecture before Blackwell) and `cuda13` (Blackwell) images, started with `docker run --gpus all`. On start the container checks that the CUDA runtime loads on the GPU it can see, and exits with the cause instead of serving on the CPU when it does not, for example with no GPU attached or with the wrong tag for the GPU. `localm setup-llama --backend cuda --cuda-line cuda-12` (or `cuda-13`) fetches the CUDA runtime on a machine without a GPU, which is how the images are built. See docs/docker.md.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing

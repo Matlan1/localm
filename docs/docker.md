@@ -13,9 +13,11 @@ a checkout (see [Build it yourself](#build-it-yourself)).
 |---|---|
 | `<version>`, `<version>-cpu`, `latest`, `cpu` | llama.cpp CPU runtime |
 | `<version>-vulkan`, `vulkan` | llama.cpp Vulkan runtime (Mesa drivers included) |
+| `<version>-cuda`, `cuda` | llama.cpp CUDA runtime, CUDA 12 line: every NVIDIA architecture before Blackwell |
+| `<version>-cuda13`, `cuda13` | llama.cpp CUDA runtime, CUDA 13 line: Blackwell (RTX 50-series and later) |
 
-`latest`, `cpu` and `vulkan` move with each release that is not a pre-release.
-Images are `linux/amd64` only (on an arm64 host, build with `--platform linux/amd64`). There is no CUDA image yet.
+`latest`, `cpu`, `vulkan`, `cuda` and `cuda13` move with each release that is not a pre-release.
+Images are `linux/amd64` only (on an arm64 host, build with `--platform linux/amd64`).
 
 ## First run
 
@@ -125,6 +127,8 @@ started with `-H 0.0.0.0`. Any other first argument runs as a `localm` command
 - A specific model: `serve <model-name>`. A context size: `serve -c 8192`.
 - `--insecure` serves without a key, to the whole network; use it only on an
   isolated network.
+- `-e LOCALM_ALLOW_NO_GPU=1` lets a `cuda` or `cuda13` container start without a GPU
+  (see [NVIDIA GPUs](#nvidia-gpus-cuda)).
 
 The container reports `healthy` once the server answers.
 
@@ -139,8 +143,46 @@ docker run -d --device /dev/dri -v localm-data:/data -p 8642:8642 ghcr.io/matlan
 
 If the render device on your host is restricted to a group, add that group with `--group-add`. The automated tests run the images on CPU-only runners, so GPU use is not covered
 by them. `localm doctor` inside the container (`docker exec <container> localm
-doctor`) reports which devices the runtime found. NVIDIA GPUs through CUDA are not
-supported by these images yet.
+doctor`) reports which devices the runtime found.
+
+### NVIDIA GPUs (CUDA)
+
+The `cuda` and `cuda13` images carry the CUDA build of llama.cpp and the CUDA runtime
+libraries (cudart, cuBLAS), so the host needs only the NVIDIA driver and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+No CUDA Toolkit is installed on the host or in the image.
+
+```bash
+docker run -d --gpus all -v localm-data:/data -p 8642:8642 ghcr.io/matlan1/localm:cuda
+```
+
+Pick the tag by GPU generation: `cuda` for every architecture before Blackwell,
+`cuda13` for Blackwell (RTX 50-series, B100/B200). The host driver must support the
+image's CUDA line: CUDA 12.4 or newer for `cuda`, CUDA 13.4 or newer for `cuda13`
+(`nvidia-smi` prints the version the driver supports).
+
+The image cannot be tested against a GPU while it is built, so the runtime is checked
+when the container starts. Before serving, the container confirms that an NVIDIA GPU is
+visible, that it matches the image's CUDA line, that the driver is new enough, and that
+the CUDA runtime loads and registers a compute device. If any of these fails, the
+container prints the cause to its log and exits with status 3 instead of serving on the
+CPU. The causes and their fixes:
+
+| Message | Fix |
+|---|---|
+| `no NVIDIA GPU is visible` | Start with `--gpus all` and install the NVIDIA Container Toolkit. |
+| `needs the cuda-13 runtime` / `Use the cuda13 image tag` | The GPU and the image tag do not match; use the tag the message names. |
+| `the host driver ... supports CUDA` | Update the host NVIDIA driver. |
+| `did not load` | The message carries the loader's error. |
+
+To run an NVIDIA image without a GPU anyway (the server then does not use CUDA), add
+`-e LOCALM_ALLOW_NO_GPU=1`. Commands other than serving (`key`, `pull`, `doctor`, ...)
+never need a GPU. `docker exec <container> localm doctor` reports the CUDA runtime as
+fetched without a GPU and repeats the same checks on the machine it runs on.
+
+GPU use of these images is not verified by the project's automated tests, which run
+without a GPU: they confirm that the CUDA build, the runtime libraries and the
+start check are in each image and that the container refuses to serve without a GPU.
 
 ## Build it yourself
 
@@ -149,9 +191,18 @@ From the repository root:
 ```bash
 docker build --platform linux/amd64 -f docker/Dockerfile --build-arg BACKEND=cpu -t localm:cpu .
 docker build --platform linux/amd64 -f docker/Dockerfile --build-arg BACKEND=vulkan -t localm:vulkan .
+docker build --platform linux/amd64 -f docker/Dockerfile --build-arg BACKEND=cuda -t localm:cuda .
+docker build --platform linux/amd64 -f docker/Dockerfile --build-arg BACKEND=cuda13 -t localm:cuda13 .
 ```
+
+The CUDA builds download about 1 GB (the CUDA build of llama.cpp and NVIDIA's runtime
+libraries from PyPI) and need no GPU on the build machine. Inside, they run
+`localm setup-llama --backend cuda --cuda-line cuda-12` (or `cuda-13`), which fetches
+the runtime for that CUDA line without checking the driver or loading it.
 
 `bash docker/smoke-test.sh localm:cpu` runs the same checks the project's CI runs
 on every image: it refuses to start without a key, `/v1/models` answers 401
 without a key and 200 with it, the server runs as a non-root user, and the
-container becomes healthy.
+container becomes healthy. For a `cuda` or `cuda13` image it also checks that the CUDA
+runtime files are present for the right line, that the container refuses to serve
+without a GPU, and that `localm doctor` reports the runtime as fetched without one.

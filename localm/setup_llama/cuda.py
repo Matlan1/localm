@@ -6,6 +6,7 @@ fetched from PyPI on Linux, and the interactive CUDA dialogue.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -427,3 +428,95 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
         return "cuda", True
     console.print("  [dim]Falling back to Vulkan (works on your driver).[/dim]")
     return "vulkan", False
+
+
+# --------------------------------------------------------------------------- #
+#  Staged CUDA runtimes (container images built on a host without a GPU)       #
+# --------------------------------------------------------------------------- #
+
+STAGED_NOTE = ".localm-cuda-staged"
+
+# Container image tag that carries each CUDA asset line.
+IMAGE_TAG_FOR_LINE = {"cuda-12": "cuda", "cuda-13": "cuda13"}
+
+# Exit status of cuda_container_check when the staged runtime cannot be used.
+CUDA_CHECK_FAILED = 3
+
+
+def record_staged_cuda(target: Path, cuda_line: str) -> None:
+    """Record in *target* that its CUDA runtime was fetched for *cuda_line*
+    without a GPU, so its load has not been tested. Raises ``OSError`` when the
+    note cannot be written: the container start check depends on it."""
+    (target / STAGED_NOTE).write_text(cuda_line + "\n", encoding="utf-8")
+
+
+def staged_cuda_line(target: Path) -> Optional[str]:
+    """The CUDA line recorded by :func:`record_staged_cuda`, or None when
+    *target* holds no staged runtime (no note, or one naming an unknown line)."""
+    try:
+        line = (target / STAGED_NOTE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return line if line in _MIN_DRIVER_CUDA else None
+
+
+def check_staged_cuda_runtime(target: Path, allow_no_gpu: bool = False) -> tuple:
+    """Whether the staged CUDA runtime in *target* can be used on this machine.
+    Returns ``(ok, lines)``: the lines to show the user either way. ``(True,
+    [])`` when *target* holds no staged runtime.
+
+    Fails when no NVIDIA GPU is visible (unless *allow_no_gpu*, which reports
+    that the GPU is not in use and passes), when the GPU needs the other CUDA
+    line, when the driver is too old for the staged line, and when the runtime
+    does not load and register a compute backend. Never raises."""
+    line = staged_cuda_line(target)
+    if line is None:
+        return True, []
+    try:
+        info = _sl.nvidia_preflight()
+    except Exception as e:
+        return False, [f"could not query the NVIDIA GPU: {e}"]
+    if not info.present:
+        if allow_no_gpu:
+            return True, [f"no NVIDIA GPU is visible; the {line} runtime is not in use "
+                          "(LOCALM_ALLOW_NO_GPU is set)"]
+        return False, [
+            "no NVIDIA GPU is visible to this container.",
+            "Start it with the NVIDIA Container Toolkit installed and --gpus all "
+            "(docker run --gpus all ...), or set LOCALM_ALLOW_NO_GPU=1 to start "
+            "without GPU acceleration.",
+        ]
+    gpu = info.gpu_name or "NVIDIA GPU"
+    if info.cuda_line != line:
+        want = IMAGE_TAG_FOR_LINE[info.cuda_line]
+        have = IMAGE_TAG_FOR_LINE[line]
+        return False, [
+            f"this image carries the {line} runtime ({have} tag), but {gpu} "
+            f"(compute capability {info.compute_capability or 'unknown'}) needs the "
+            f"{info.cuda_line} runtime.",
+            f"Use the {want} image tag instead.",
+        ]
+    if not info.driver_ok:
+        need = _MIN_DRIVER_CUDA[line]
+        return False, [
+            f"the host driver {info.driver_version or 'version unknown'} supports CUDA "
+            f"{info.cuda_capability}, and the {line} runtime needs {need[0]}.{need[1]} "
+            "or newer. Update the host NVIDIA driver."]
+    ok, detail = _sl._native_loads_ok()
+    if not ok:
+        return False, [f"the {line} runtime did not load for {gpu}: {detail}"]
+    return True, [f"CUDA runtime ({line}) loaded for {gpu}"]
+
+
+def cuda_container_check() -> int:
+    """Entrypoint hook: run :func:`check_staged_cuda_runtime` for this install's
+    runtime directory, print the outcome to stderr, and return 0 when the
+    container may start or :data:`CUDA_CHECK_FAILED`. LOCALM_ALLOW_NO_GPU=1
+    lets a container without a GPU start."""
+    target = _sl._repo_runtime_lib()
+    allow = os.environ.get("LOCALM_ALLOW_NO_GPU", "") == "1"
+    ok, lines = check_staged_cuda_runtime(target, allow_no_gpu=allow)
+    for index, text in enumerate(lines):
+        refusal = "refusing to start: " if index == 0 and not ok else ""
+        print(f"localm: {refusal}{text}", file=sys.stderr)
+    return 0 if ok else CUDA_CHECK_FAILED

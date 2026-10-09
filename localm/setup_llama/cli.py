@@ -64,13 +64,21 @@ BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
                    "backend and pin it. For when an upstream release turns out to "
                    "be broken on your hardware. See 'localm doctor' for what is "
                    "installed now.")
+@click.option("--cuda-line", "cuda_line", default=None,
+              type=click.Choice(["cuda-12", "cuda-13"], case_sensitive=False),
+              help="With --backend cuda on Linux: fetch the CUDA build and runtime "
+                   "libraries of this line without an NVIDIA GPU present, for building "
+                   "container images. cuda-12 covers every architecture before "
+                   "Blackwell, cuda-13 is for Blackwell. The driver check and the load "
+                   "test are skipped, the runtime is recorded as not load-tested, and "
+                   "the container's start check tests it on the GPU host.")
 @click.option("--yes", "-y", "assume_yes", is_flag=True,
               help="Non-interactive: accept the recommended action at every prompt "
                    "(e.g. fetch the self-contained CUDA runtime). Used by the "
                    "one-click installer and for scripted setups.")
 def main(from_dir: Optional[str], backend: str, url: Optional[str],
          sha256: Optional[str], force: bool, tag: Optional[str],
-         rollback: bool, assume_yes: bool) -> None:
+         rollback: bool, cuda_line: Optional[str], assume_yes: bool) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     The chosen backend is load-tested after provisioning. If it cannot load on
@@ -95,6 +103,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
       localm setup-llama --backend cuda         # NVIDIA: checks the driver, fetches a
                                                 #   self-contained CUDA runtime (no Toolkit)
       localm setup-llama --backend cpu          # no GPU
+      localm setup-llama --backend cuda --cuda-line cuda-12   # image build, no GPU
       localm setup-llama --from /path/to/llama.cpp/build/bin
       localm setup-llama --url https://.../llama-...zip
       localm setup-llama --sha256 <hex>         # pin the expected archive digest
@@ -105,6 +114,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     """
     lib_name = _sl._lib_name()
     target = _sl._repo_runtime_lib()
+    if cuda_line:
+        cuda_line = cuda_line.lower()
+        _require_staging_context(backend, cuda_line, from_dir, url, rollback)
     _apply_version_request(tag, rollback, backend, from_dir, url)
     # A version request is inherently a re-provision: the guard below compares
     # BACKENDS, and the whole point here is to change the BUILD while the
@@ -125,6 +137,10 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     # provisioned" read and its short-circuit) touches disk, so it runs unlocked.
     try:
         with _sl._provisioning_lock(target):
+            if cuda_line:
+                _provision_staged_cuda(cuda_line, target, lib_name, sha256)
+                _refresh_install_record(target)
+                return
             if from_dir:
                 _provision_from_dir(from_dir, target, lib_name)
             elif url:
@@ -136,6 +152,60 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             _sl._verify()
     except ProvisioningBusyError as e:
         _exit_provisioning_busy(e)
+
+
+def _require_staging_context(backend: str, cuda_line: str, from_dir: Optional[str],
+                             url: Optional[str], rollback: bool) -> None:
+    """Exit non-zero unless --cuda-line is used with --backend cuda on Linux and
+    without --from, --url or --rollback."""
+    problem = None
+    if backend.lower() != "cuda":
+        problem = "--cuda-line needs --backend cuda"
+    elif sys.platform != "linux":
+        problem = "--cuda-line is only available on Linux"
+    elif from_dir or url or rollback:
+        problem = "--cuda-line cannot be combined with --from, --url or --rollback"
+    if problem:
+        console.print(f"[red]{problem}.[/red]")
+        sys.exit(2)
+
+
+def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
+                           sha256: Optional[str]) -> None:
+    """Fetch the *cuda_line* CUDA build and runtime libraries into *target*
+    without testing that they load, and record that they were not tested.
+
+    Exits non-zero when the fetch fails or the archive holds no library; it never
+    falls back to another backend."""
+    console.print(f"[bold yellow]Staging the {cuda_line} CUDA runtime without a GPU.[/bold yellow] "
+                  "The NVIDIA driver check and the load test are skipped.")
+    _pin_note_for_backend("cuda")
+    try:
+        _sl._clear_target_or_refuse(target)
+        used_tag = _sl._provision_backend("cuda", target, sha256, True, cuda_line)
+    except RuntimeInUseError as e:
+        _exit_runtime_in_use(e)
+    except click.ClickException as e:
+        console.print(f"[red]Staging {cuda_line} failed:[/red] {e.message}")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Staging {cuda_line} failed:[/red] {e}")
+        sys.exit(1)
+    if not (target / lib_name).exists():
+        console.print(f"[red]The {cuda_line} archive did not contain {lib_name}.[/red]")
+        sys.exit(1)
+    _sl._bundle_missing_native_deps(target)
+    _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
+    _record_provisioned_backend(target, "cuda", build=used_tag)
+    _record_runtime_history("cuda", used_tag)
+    try:
+        _sl.record_staged_cuda(target, cuda_line)
+    except OSError as e:
+        console.print(f"[red]Could not record the staged runtime in {target}:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[yellow]Staged the {cuda_line} CUDA runtime in {target}. It has NOT "
+                  "been load-tested: a container started from this image tests it on "
+                  "the GPU host before serving.[/yellow]")
 
 
 def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bool,

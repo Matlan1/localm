@@ -291,6 +291,26 @@ def _provisioned_backend_name(find_binary_dir) -> Optional[str]:
         return None
 
 
+def _check_staged_cuda(find_binary_dir) -> None:
+    """For a CUDA runtime fetched without a GPU (a container image), say so and
+    test it on this machine. Prints nothing for any other runtime."""
+    binary_dir = find_binary_dir()
+    if not binary_dir:
+        return
+    from rich.markup import escape
+    from localm.setup_llama import check_staged_cuda_runtime, staged_cuda_line
+    line = staged_cuda_line(binary_dir)
+    if line is None:
+        return
+    console.print(f"  {_WARN_SYM}  CUDA runtime ({line}) fetched without a GPU")
+    console.print("     [dim]it was not load-tested at install; the check below tests it "
+                  "on this machine[/dim]")
+    ok, lines = check_staged_cuda_runtime(binary_dir)
+    sym = _OK_SYM if ok else _FAIL_SYM
+    for text in lines:
+        console.print(f"  {sym}  {escape(text)}")
+
+
 def _check_runtime_build(find_binary_dir) -> None:
     """Print WHICH llama.cpp build is provisioned, and whether it is pinned.
 
@@ -684,6 +704,7 @@ def doctor():
     lib_healthy = _check_llama_lib(find_binary_dir)
     # Immediately after the lib line and BEFORE the ABI check.
     _check_runtime_build(find_binary_dir)
+    _check_staged_cuda(find_binary_dir)
     # native ABI self-check only when a healthy lib is present.
     if lib_healthy:
         _check_native_abi()
