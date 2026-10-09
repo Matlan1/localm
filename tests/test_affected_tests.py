@@ -349,6 +349,9 @@ dev = ["devtool>=1"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
+
+[tool.ruff.lint]
+select = ["F"]
 """
 
 _LOCK = """\
@@ -511,6 +514,12 @@ def test_a_pyproject_change_outside_the_requirement_lists_affects_every_test(dep
     mod, root = dep_repo
     _edit(root, "pyproject.toml", 'addopts = "-q"', 'addopts = "-q -x"')
     assert _everything(mod, _select(mod, ["pyproject.toml"]), "pyproject.toml")
+
+
+def test_a_ruff_config_change_selects_no_test(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", 'select = ["F"]', 'select = ["F", "B"]')
+    assert _select(mod, ["pyproject.toml"]) == {}
 
 
 def test_a_lock_change_outside_the_packages_affects_every_test(dep_repo):
