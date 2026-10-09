@@ -357,9 +357,11 @@ jobs:
   #   0 + paths     pytest runs exactly those files
   #   0 + sentinel  no test file is affected (a docs-only change): no pytest
   #   3             the selection exceeds a quarter of the suite: the selector
-  #                 runs again at --depth 0 and that selection runs; still
-  #                 wide, empty or failed at depth 0 fails the job, which
-  #                 means the change needs the `full-ci` matrix
+  #                 runs again at --depth 0 and that selection runs; one still
+  #                 wide at depth 0 runs in full (a hub module most tests
+  #                 import); one that is every test file (a conftest.py or
+  #                 dependency-lock change), empty or failed at depth 0 fails
+  #                 the job, which means the change needs the `full-ci` matrix
   #   anything else the job fails: a crashed selector, an empty selection,
   #                 or a path that is not an existing tests/**/test_*.py
   # The selection, its depth, its reasons and the pytest command line go to
@@ -367,7 +369,7 @@ jobs:
   python-pr-gate:
     name: Python PR gate (lock, hygiene, ruff, affected tests)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     if: >-
       github.event_name == 'pull_request' &&
       !contains(github.event.pull_request.labels.*.name, 'full-ci')
