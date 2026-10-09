@@ -10,7 +10,7 @@ then applies the feature gates.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Tuple
+from typing import Iterable
 
 
 class ToolNameCollision(RuntimeError):
