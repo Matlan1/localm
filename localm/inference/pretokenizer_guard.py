@@ -51,7 +51,7 @@ backtracks linearly and cannot itself blow up on hostile input.
 
 from __future__ import annotations
 
-from typing import Dict, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 import regex
 
@@ -152,7 +152,7 @@ def _letters(label: str) -> Policy:
 # Keyed by the literal `tokenizer.ggml.pre` string a GGUF declares, NOT by
 # llama.cpp's LLAMA_VOCAB_PRE_TYPE_* enum name: several distinct strings share
 # one enum value and therefore one pattern.
-UNSAFE_PRE_TYPES: Dict[str, Policy] = {
+UNSAFE_PRE_TYPES: dict[str, Policy] = {
     # LLAMA_VOCAB_PRE_TYPE_EXAONE_MOE. Its run alternates letters with single
     # spaces, so a space does not end a run here as it does for the others,
     # and the run bound falls inside an ordinary sentence: the model is
@@ -228,7 +228,7 @@ def _run_scanner_keys():
 # One compiled scanner per distinct (class, limit) pair, built once at import.
 # Keyed by the pair itself rather than by the two values concatenated, so no two
 # policies can ever share a key.
-_SCANNERS: Dict[tuple, "regex.Pattern[str]"] = {
+_SCANNERS: dict[tuple, regex.Pattern[str]] = {
     (cls, limit): regex.compile(cls + "{" + str(limit + 1) + ",}")
     for cls, limit in _run_scanner_keys()
 }
@@ -236,7 +236,7 @@ _SCANNERS: Dict[tuple, "regex.Pattern[str]"] = {
 # For cost_budget, only runs longer than budget // max_chars can ever breach it,
 # because len(text) is itself capped at max_chars. Scanning just those keeps the
 # ordinary case one linear pass that matches nothing.
-_COST_SCANNERS: Dict[tuple, "regex.Pattern[str]"] = {
+_COST_SCANNERS: dict[tuple, regex.Pattern[str]] = {
     (p.cost_budget, p.max_chars):
         regex.compile(_CLASS_UNBROKEN + "{" + str(p.cost_budget // p.max_chars + 1) + ",}")
     for p in UNSAFE_PRE_TYPES.values()

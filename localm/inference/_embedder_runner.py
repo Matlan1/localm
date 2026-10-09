@@ -34,7 +34,6 @@ import multiprocessing as mp
 import os
 import queue as _queue
 import time
-from typing import List
 
 from localm.inference.backends.base import PretokenizerUnsafeInputError
 
@@ -383,7 +382,7 @@ class EmbedderRunner:
         self._req_q.put(("load", params))
         return self._wait(timeout, "load", shutdown_on_error=True)
 
-    def embed(self, texts: List[str], timeout: float = _EMBED_TIMEOUT_DEFAULT) -> List[List[float]]:
+    def embed(self, texts: list[str], timeout: float = _EMBED_TIMEOUT_DEFAULT) -> list[list[float]]:
         """Embed *texts* via the isolated worker. Raises RuntimeError on a
         clean failure, a child crash, or a timeout - the caller (embedder.py's
         IsolatedEmbedder) decides whether/how to recover.
