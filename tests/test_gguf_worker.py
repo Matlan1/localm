@@ -70,7 +70,8 @@ class TestLoad:
         assert meta == {"n_layers": 42, "kv_bytes_per_token": 12_345,
                          "supports_images": True, "supports_mtp": False,
                          "weight_placement": [], "moe_skip_reason": None,
-                         "mmap": None, "adapters": []}
+                         "mmap": None, "adapters": [], "encoder_decoder": False,
+                         "encoder_input_limit": 0}
         assert w._loaded is True
 
     def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):

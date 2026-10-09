@@ -170,9 +170,12 @@ class GgufWorker(VramSizingMixin):
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
-        "weight_placement", "moe_skip_reason", "mmap", "adapters"}``;
-        ``adapters`` lists the ``{"path", "scale"}`` of each LoRA adapter
-        applied to the context.
+        "weight_placement", "moe_skip_reason", "mmap", "adapters",
+        "encoder_decoder", "encoder_input_limit"}``. ``adapters`` lists the
+        ``{"path", "scale"}`` of each LoRA adapter applied to the context.
+        ``encoder_decoder`` is True for a model that
+        encodes its prompt before decoding (T5), and ``encoder_input_limit`` is
+        then the most prompt tokens one request may carry (0 otherwise).
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
         system RAM), the only ground truth for whether ``n_cpu_moe`` actually
         moved anything - this worker is the only process that can see it, since
@@ -257,6 +260,8 @@ class GgufWorker(VramSizingMixin):
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
             "mmap": getattr(self._llm, "mmap_mapped", None),
             "adapters": [dict(a) for a in getattr(self._llm, "applied_adapters", ())],
+            "encoder_decoder": bool(getattr(self._llm, "is_encoder_decoder", False)),
+            "encoder_input_limit": int(getattr(self._llm, "encoder_input_limit", 0) or 0),
         }
 
     def close(self) -> None:
@@ -283,9 +288,13 @@ class GgufWorker(VramSizingMixin):
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
         """Exact token count of the structured messages formatted with the
-        model's embedded chat template. Raises on failure: the parent's RPC
-        wrapper is what falls back to the chars/4 heuristic, at the process
-        boundary rather than around the native call directly."""
+        model's embedded chat template, or, for an encoder-decoder model, of
+        its encoder input (``LlamaCpp.encoder_tokens``). Raises on failure: the
+        parent's RPC wrapper is what falls back to the chars/4 heuristic, at
+        the process boundary rather than around the native call directly."""
+        llm = self._llm
+        if llm is not None and getattr(llm, "is_encoder_decoder", False):
+            return len(llm.encoder_tokens(messages))
         from .llama import _apply_model_template
         text_messages = []
         for m in messages:

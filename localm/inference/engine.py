@@ -402,6 +402,13 @@ class Engine:
         return getattr(self._backend, "effective_ctx_max", None)
 
     @property
+    def encoder_decoder(self) -> bool:
+        """True when the loaded model encodes its whole prompt in one pass
+        before decoding (a T5 GGUF); its context capacity is then that pass's
+        prompt limit."""
+        return bool(getattr(self._backend, "encoder_decoder", False))
+
+    @property
     def gpu_placement(self) -> Optional[dict]:
         """Where the last load's transformer layers actually ended up: GPU vs
         CPU. ``{"gpu_layers_offloaded": N, "gpu_layers_total": M, "degraded":

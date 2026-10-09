@@ -207,6 +207,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # True once loaded, from the child's load response.
         self._supports_images = False
         self._supports_mtp = False
+        # True once loaded with an encoder-decoder model (T5), from the child's
+        # load response.
+        self.encoder_decoder = False
         self.last_mtp_status = None    # why speculation is or is not running
         self.last_mtp_active = False   # whether the last call actually speculated
         self.last_mtp_call_status = ""  # why the last call stopped speculating partway
@@ -492,8 +495,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         unusable = gguf_unusable_reason(Path(self.model_path))
         if unusable is not None:
             raise UnsupportedModelRoleError(unusable)
-        # A file that is not a chat model (draft head, diffusion LM, T5, codec)
-        # is refused here, before any VRAM probe or worker spawn.
+        # A file that is not a chat model (draft head, diffusion LM, codec) is
+        # refused here, before any VRAM probe or worker spawn.
         from localm.model_manager import gguf_architecture, gguf_chat_refusal
         role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
         if role_refusal is not None:
@@ -736,6 +739,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         reported = meta.get("adapters")
         self.applied_adapters = list(reported) if isinstance(reported, list) else []
 
+        # An encoder-decoder model reads at most encoder_input_limit prompt
+        # tokens per request, which becomes this load's context capacity.
+        self.encoder_decoder = bool(meta.get("encoder_decoder"))
+        encoder_limit = meta.get("encoder_input_limit")
+        if self.encoder_decoder and isinstance(encoder_limit, int) and encoder_limit > 0:
+            self.effective_ctx_max = encoder_limit
+
         # Whether the model is memory-mapped: the worker's report from the
         # native load log, else the forced mode, else None (not known).
         # mmap_forced_by_ram marks an auto load mapped because its host-resident
@@ -842,6 +852,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         f"about {40 / gb:.0f} tokens/s at 40 GB/s)[/dim]")
 
         self._print_mmap_note()
+        if self.encoder_decoder:
+            console.print(
+                f"[dim]  encoder-decoder model: each request reads its messages "
+                f"as plain text, up to {self.effective_ctx_max} tokens[/dim]")
         console.print("[green]✓[/green] Model loaded")
 
     def _print_mmap_note(self) -> None:
