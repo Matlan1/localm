@@ -83,7 +83,7 @@ def stem(term: str) -> str:
     return term
 
 
-def tokenize(text: str, stop_words: "frozenset[str] | None" = None) -> list[str]:
+def tokenize(text: str, stop_words: frozenset[str] | None = None) -> list[str]:
     """Lowercase unicode word tokens.
 
     Word runs are split on unicode word boundaries (so accented latin,
@@ -117,7 +117,7 @@ class BM25:
     """Index a list of texts once; score queries against all of them."""
 
     def __init__(self, texts: list[str],
-                 stop_words: "frozenset[str] | None" = None) -> None:
+                 stop_words: frozenset[str] | None = None) -> None:
         # Applied to BOTH sides: indexed here, queries in scores(). Filtering at
         # index time also keeps stopwords out of the IDF table and document
         # lengths, so a stopword contributes no lexical signal at all.

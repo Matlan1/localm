@@ -258,7 +258,7 @@ def model_capabilities(name: str, *, reg: Optional[dict] = None,
 
 
 def models_with_capability(capability: str, *, reg: Optional[dict] = None,
-                           dir_cache: Optional[dict] = None) -> List[str]:
+                           dir_cache: Optional[dict] = None) -> list[str]:
     """Registered model names CONFIRMED to have *capability*, sorted.
 
     POSITIVE MEMBERSHIP ONLY, exactly like ``vision_capable_models``: a name is
@@ -282,7 +282,7 @@ def models_with_capability(capability: str, *, reg: Optional[dict] = None,
 
 
 def models_with_context_at_least(tokens: int, *,
-                                 reg: Optional[dict] = None) -> List[str]:
+                                 reg: Optional[dict] = None) -> list[str]:
     """Registered model names whose CONFIRMED trained context window is at least
     *tokens*, sorted by that window descending so the roomiest comes first.
 

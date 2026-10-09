@@ -220,7 +220,7 @@ def _sniff_content_kind(path: Path, peek: int = 4096) -> str:
         return "binary"
 
 
-def _diagnose_bad_artifact(path: Path, dl: Optional["_DownloadResult"]) -> str:
+def _diagnose_bad_artifact(path: Path, dl: Optional[_DownloadResult]) -> str:
     """Turn what the bytes on disk actually look like - plus, when available,
     what the response claimed (:func:`_download`'s result for this same file) -
     into ONE specific, evidence-backed explanation. Never states a cause the

@@ -187,8 +187,8 @@ def _passes_content_policy(item: dict) -> bool:
 
 
 def civitai_search(query: str = "", *, limit: int = 20,
-                    types: "Optional[list[str]]" = None,
-                    base_models: "Optional[list[str]]" = None,
+                    types: Optional[list[str]] = None,
+                    base_models: Optional[list[str]] = None,
                     tag: Optional[str] = None, period: Optional[str] = None,
                     sort: Optional[str] = None, nsfw: bool = False,
                     cursor: Optional[str] = None,
@@ -250,7 +250,7 @@ def civitai_list_files(version_id: object, *,
     return out
 
 
-def _pick_civitai_file(files: "list[dict]", file_id: Optional[object]) -> Optional[dict]:
+def _pick_civitai_file(files: list[dict], file_id: Optional[object]) -> Optional[dict]:
     if file_id is not None:
         for f in files:
             if str(f.get("id")) == str(file_id):
@@ -364,7 +364,7 @@ class CivitAISource:
         )
 
 
-SOURCES: "dict[str, ModelSource]" = {"hf": HFSource(), "civitai": CivitAISource()}
+SOURCES: dict[str, ModelSource] = {"hf": HFSource(), "civitai": CivitAISource()}
 
 
 def get_source(name: str) -> ModelSource:

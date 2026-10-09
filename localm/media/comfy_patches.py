@@ -53,7 +53,7 @@ FAILED = "failed"
 # A transform takes the current file TEXT and returns (new_text, note): new_text is
 # None (or unchanged) for a deliberate no-op; the note explains the decision either
 # way, so a SKIPPED outcome is never a silent mystery.
-Transform = Callable[[str], Tuple[Optional[str], str]]
+Transform = Callable[[str], tuple[Optional[str], str]]
 
 
 @dataclass(frozen=True)
@@ -97,10 +97,10 @@ _FRAGILE_RE = re.compile(
 )
 
 
-def _func_tolerant_transform(text: str) -> Tuple[Optional[str], str]:
+def _func_tolerant_transform(text: str) -> tuple[Optional[str], str]:
     """Rewrite the fragile ``getattr(type_obj, func).__func__`` into the plain-function
     tolerant form. Returns (new_text, note); new_text is None for a guarded no-op."""
-    def _repl(m: "re.Match") -> str:
+    def _repl(m: re.Match) -> str:
         indent = m.group("indent")
         return (f"{indent}attr = getattr(type_obj, func)\n"
                 f'{indent}method = attr.__func__ if hasattr(attr, "__func__") else attr')
@@ -129,7 +129,7 @@ FUNC_PATCH = ComfyPatch(
 )
 
 # The shipped, ordered patch set. Adding a localm patch = add a ComfyPatch here.
-PATCHES: Tuple[ComfyPatch, ...] = (FUNC_PATCH,)
+PATCHES: tuple[ComfyPatch, ...] = (FUNC_PATCH,)
 
 
 # --------------------------------------------------------------------------- #
@@ -185,8 +185,8 @@ def apply_patch(patch: ComfyPatch, managed_comfy_dir) -> PatchOutcome:
     return PatchOutcome(patch.name, APPLIED, note)
 
 
-def apply_patches(managed_comfy_dir, patches: Optional[Tuple[ComfyPatch, ...]] = None,
-                  ) -> List[PatchOutcome]:
+def apply_patches(managed_comfy_dir, patches: Optional[tuple[ComfyPatch, ...]] = None,
+                  ) -> list[PatchOutcome]:
     """Apply the localm patch set to the managed ComfyUI at *managed_comfy_dir*.
     Returns one PatchOutcome per patch, in order. Never raises. Callers surface any
     FAILED outcome, but a failed COMPAT patch is non-fatal to the base install (it
