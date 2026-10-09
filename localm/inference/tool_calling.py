@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from localm.inference.gbnf import TOOL_CALL_TRIGGER
+from localm.inference.gbnf import TOOL_CALL_TRIGGER, check_grammar_structure
 from localm.inference.json_schema_grammar import (
     SchemaGrammarError, literal, schema_to_grammar,
 )
@@ -206,7 +206,7 @@ def render_messages(messages: list[dict], tools: list[Tool], choice: ToolChoice)
             text = _text_of(m.get("content"))
             blocks = "\n".join(_call_text(c) for c in m["tool_calls"])
             rendered = {k: v for k, v in m.items() if k not in ("tool_calls", "content")}
-            rendered["content"] = (text + "\n" if text else "") + blocks
+            rendered["content"] = compose(text, "\n", blocks) if text else blocks
             out.append(rendered)
         elif role == "tool":
             body = compose("<tool_response>\n",
@@ -226,7 +226,7 @@ def render_messages(messages: list[dict], tools: list[Tool], choice: ToolChoice)
         if out and out[0].get("role") == "system":
             first = dict(out[0])
             existing = _text_of(first.get("content"))
-            first["content"] = (existing + "\n\n" if existing else "") + prompt
+            first["content"] = compose(existing, "\n\n", prompt) if existing else prompt
             out[0] = first
         else:
             out.insert(0, {"role": "system", "content": prompt})
@@ -242,21 +242,92 @@ def tool_grammar(tools: list[Tool], choice: ToolChoice,
 
     ``auto``: a lazy grammar, unconstrained until the model writes ``<tool_call>``.
     ``required`` or a named function: the grammar applies from the first token.
-    With *parallel* false the grammar admits one call. A tool whose parameter
-    schema uses a keyword the compiler cannot enforce takes any JSON object as
-    its arguments."""
+    With *parallel* false the grammar admits one call.
+
+    A parameter schema keyword the compiler cannot enforce (``pattern``, number
+    bounds, ...) is left out of that tool's schema and everything else in it is
+    still enforced. A schema that cannot be compiled at all, or tools whose
+    grammar is over the size limit, take any JSON object as their arguments.
+    Each such step is logged."""
+    from localm.inference.backends.base import InvalidGrammarError
+
     chosen = [t for t in tools if choice.kind != "function" or t.name == choice.name]
-    try:
-        grammar = schema_to_grammar(_calls_schema(chosen, generic=False))
-    except SchemaGrammarError:
+    grammar: Optional[str] = None
+    failure: Exception = ToolsError("no tools")
+    for generic in (False, True):
+        notes: list[str] = []
         try:
-            grammar = schema_to_grammar(_calls_schema(chosen, generic=True))
-        except SchemaGrammarError as exc:
-            raise ToolsError(f"the tools cannot be turned into a grammar: {exc}") from None
-    grammar = _wrap_calls(grammar, parallel)
+            candidate = _wrap_calls(
+                schema_to_grammar(_calls_schema(chosen, generic, notes)), parallel)
+            check_grammar_structure(candidate)
+        except (SchemaGrammarError, InvalidGrammarError) as exc:
+            failure = exc
+            if not generic:
+                _log_info("tools: the argument schemas gave an unusable grammar (%s); "
+                          "arguments are not constrained to the schemas", exc)
+            continue
+        grammar = candidate
+        for note in notes:
+            _log_info("tools: %s", note)
+        break
+    if grammar is None:
+        raise ToolsError(f"the tools cannot be turned into a grammar: {failure}")
     if choice.kind == "auto":
         return grammar, True, [TOOL_CALL_TRIGGER]
     return grammar, False, None
+
+
+def _log_info(message: str, *args: Any) -> None:
+    from localm.debuglog import logger
+    logger.info(message, *args)
+
+
+_SUBSCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
+_SUBSCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+_SUBSCHEMA_ONE = ("items", "additionalProperties", "not", "contains", "if", "then", "else",
+                  "propertyNames")
+_MAX_LOOSEN_STEPS = 32
+
+
+def _without_keyword(node: Any, keyword: str) -> Any:
+    """Copy of the schema *node* with *keyword* removed wherever a schema (not a
+    property name) carries it."""
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == keyword:
+            continue
+        if key in _SUBSCHEMA_MAPS and isinstance(value, dict):
+            out[key] = {name: _without_keyword(sub, keyword) for name, sub in value.items()}
+        elif key in _SUBSCHEMA_LISTS and isinstance(value, list):
+            out[key] = [_without_keyword(sub, keyword) for sub in value]
+        elif key in _SUBSCHEMA_ONE:
+            out[key] = _without_keyword(value, keyword)
+        else:
+            out[key] = value
+    return out
+
+
+def _loosen(schema: dict[str, Any]) -> tuple[Optional[dict[str, Any]], list[str]]:
+    """``(schema, dropped)``: *schema* with the keywords the compiler cannot
+    enforce removed one by one until it compiles, and the keywords removed;
+    ``None`` when it still does not compile."""
+    dropped: list[str] = []
+    current = schema
+    for _ in range(_MAX_LOOSEN_STEPS):
+        try:
+            schema_to_grammar(current)
+            return current, dropped
+        except SchemaGrammarError as exc:
+            if not exc.keyword:
+                return None, dropped
+            stripped = _without_keyword(current, exc.keyword)
+            if stripped == current:
+                return None, dropped
+            current = stripped
+            dropped.append(exc.keyword)
+    return None, dropped
 
 
 def _rebase_refs(node: Any, base: str) -> Any:
@@ -276,17 +347,22 @@ def _rebase_refs(node: Any, base: str) -> Any:
     return out
 
 
-def _calls_schema(tools: list[Tool], generic: bool) -> dict[str, Any]:
+def _calls_schema(tools: list[Tool], generic: bool, notes: list[str]) -> dict[str, Any]:
     alts = []
     for i, t in enumerate(tools):
         base = f"#/anyOf/{i}/properties/arguments" if len(tools) > 1 else "#/properties/arguments"
-        params: dict[str, Any] = {"type": "object"} if generic else t.parameters
-        if not generic:
-            try:
-                schema_to_grammar(params)
-                params = _rebase_refs(params, base)
-            except SchemaGrammarError:
-                params = {"type": "object"}
+        params: dict[str, Any] = {"type": "object"}
+        if generic:
+            notes.append(f"{t.name}: arguments are not constrained to its schema")
+        else:
+            loosened, dropped = _loosen(t.parameters)
+            if loosened is None:
+                notes.append(f"{t.name}: its schema cannot be compiled; arguments are not "
+                             f"constrained to it")
+            else:
+                params = _rebase_refs(loosened, base)
+                if dropped:
+                    notes.append(f"{t.name}: not enforced: {', '.join(dropped)}")
         alts.append({"type": "object",
                      "properties": {"name": {"const": t.name}, "arguments": params},
                      "required": ["name", "arguments"]})
@@ -334,6 +410,85 @@ def _held_prefix(text: str, tag: str) -> int:
     return 0
 
 
+_MAX_BARE_VALUE = 1 << 20
+
+
+class _ValueEnd:
+    """Finds, a chunk at a time, where the first JSON object or array of a text
+    ends; ``scan`` returns the index just past it, or ``None`` while it is open."""
+
+    def __init__(self) -> None:
+        self._pos = 0
+        self._depth = 0
+        self._started = False
+        self._in_string = False
+        self._escaped = False
+
+    def scan(self, text: str) -> Optional[int]:
+        i, n = self._pos, len(text)
+        while i < n:
+            ch = text[i]
+            i += 1
+            if self._in_string:
+                if self._escaped:
+                    self._escaped = False
+                elif ch == "\\":
+                    self._escaped = True
+                elif ch == '"':
+                    self._in_string = False
+            elif ch == '"':
+                self._in_string = True
+            elif ch in "{[":
+                self._started = True
+                self._depth += 1
+            elif ch in "}]":
+                self._depth -= 1
+                if self._started and self._depth <= 0:
+                    self._pos = i
+                    return i
+        self._pos = n
+        return None
+
+
+class _CloseFinder:
+    """Finds, a chunk at a time, the ``</tool_call>`` that ends a call whose body
+    is a JSON object: a tag inside a JSON string is part of the argument, not
+    the end. A body that does not start with ``{`` is searched as plain text."""
+
+    def __init__(self) -> None:
+        self._pos = 0
+        self._in_string = False
+        self._escaped = False
+
+    def find(self, text: str) -> int:
+        lead = text.lstrip()
+        if not lead:
+            return -1
+        if lead[0] != "{":
+            return text.find(CLOSE_TAG)
+        i, n = self._pos, len(text)
+        while i < n:
+            ch = text[i]
+            if self._in_string:
+                if self._escaped:
+                    self._escaped = False
+                elif ch == "\\":
+                    self._escaped = True
+                elif ch == '"':
+                    self._in_string = False
+            elif ch == '"':
+                self._in_string = True
+            elif ch == "<":
+                if text.startswith(CLOSE_TAG, i):
+                    return i
+                if CLOSE_TAG.startswith(text[i:]):
+                    self._pos = i
+                    return -1
+            i += 1
+        self._pos = n
+        return -1
+
+
 class ToolCallStream:
     """Splits a reply stream into text and tool calls.
 
@@ -341,35 +496,31 @@ class ToolCallStream:
     ``("call", ParsedCall)``. Text before a ``<tool_call>`` is released at once
     (minus a possible partial tag); a block is released when its closing tag
     arrives; one left open at the end is a call if its body is valid JSON, and
-    text otherwise. A reply that is only a JSON call object or a list of them,
-    the way some models answer without the tags, is a call too. Calls to a function not in
-    *names* stay text."""
+    text otherwise. A JSON object or list of objects that opens the reply or
+    follows a call, the way some models answer without the tags, is a call when
+    each object is one; otherwise it is text, released when its closing bracket
+    arrives. Calls to a function not in *names* stay text."""
 
     def __init__(self, names: Optional[set[str]] = None) -> None:
         self.names = names
         self._buf = ""
         self._in_call = False
-        self._bare: Optional[bool] = None
         self._seen_text = False
         self._skip_ws = False
+        self._bare_checked = False
+        self._value_end = _ValueEnd()
+        self._close = _CloseFinder()
+
+    def _new_segment(self) -> None:
+        self._bare_checked = False
+        self._value_end = _ValueEnd()
 
     def feed(self, text: str) -> list[tuple[str, Any]]:
         events: list[tuple[str, Any]] = []
         self._buf += text
-        if self._bare is None:
-            stripped = self._buf.lstrip()
-            if not stripped:
-                return events
-            if stripped[0] == "[" and not stripped[1:].lstrip():
-                return events
-            opens_object = stripped[0] == "{" or (
-                stripped[0] == "[" and stripped[1:].lstrip()[:1] == "{")
-            self._bare = opens_object and not self._seen_text and not self._in_call
-        if self._bare:
-            return events
         while True:
             if self._in_call:
-                end = self._buf.find(CLOSE_TAG)
+                end = self._close.find(self._buf)
                 if end < 0:
                     return events
                 body, self._buf = self._buf[:end], self._buf[end + len(CLOSE_TAG):]
@@ -381,12 +532,41 @@ class ToolCallStream:
                 else:
                     events.append(("call", call))
                     self._skip_ws = True
+                self._new_segment()
                 continue
             if self._skip_ws:
                 self._buf = self._buf.lstrip()
                 if not self._buf:
                     return events
                 self._skip_ws = False
+            if not self._bare_checked and not self._seen_text:
+                lead = self._buf.lstrip()
+                if not lead:
+                    return events
+                if lead[0] == "[" and not lead[1:].lstrip():
+                    return events
+                if lead[0] == "{" or (lead[0] == "[" and lead[1:].lstrip()[:1] == "{"):
+                    end = self._value_end.scan(self._buf)
+                    if end is None:
+                        if len(self._buf) <= _MAX_BARE_VALUE:
+                            return events
+                        events.append(("text", self._buf))
+                        self._buf = ""
+                        self._seen_text = True
+                        self._bare_checked = True
+                        return events
+                    raw, self._buf = self._buf[:end], self._buf[end:]
+                    calls = self._parse_bare(raw)
+                    if calls:
+                        events.extend(("call", c) for c in calls)
+                        self._skip_ws = True
+                        self._new_segment()
+                    else:
+                        events.append(("text", raw))
+                        self._seen_text = True
+                        self._bare_checked = True
+                    continue
+                self._bare_checked = True
             start = self._buf.find(OPEN_TAG)
             if start >= 0:
                 before, self._buf = self._buf[:start], self._buf[start + len(OPEN_TAG):]
@@ -394,6 +574,7 @@ class ToolCallStream:
                     events.append(("text", before))
                     self._seen_text = True
                 self._in_call = True
+                self._close = _CloseFinder()
                 continue
             hold = _held_prefix(self._buf, OPEN_TAG)
             release = self._buf[:len(self._buf) - hold]
@@ -406,11 +587,6 @@ class ToolCallStream:
     def finish(self) -> list[tuple[str, Any]]:
         events: list[tuple[str, Any]] = []
         rest, self._buf = self._buf, ""
-        if self._bare:
-            calls = self._parse_bare(rest)
-            if calls:
-                return [("call", c) for c in calls]
-            return [("text", rest)] if rest else []
         if self._in_call:
             call = self._parse_body(rest)
             if call is not None:

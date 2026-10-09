@@ -169,12 +169,17 @@ A reply can hold text before its calls, and more than one call.
 
 With `required` or a named function the arguments are constrained, token by
 token, to the function's `parameters` JSON schema (the keywords listed for
-`format` in [ollama-api.md](ollama-api.md); a function whose schema uses a
-keyword that cannot be enforced takes any JSON object). With `auto` the
-arguments are constrained from the moment the model opens a call. Whether a
-model opens one is the model's decision: a model that does not follow the
-call instruction answers in prose, and `required` or a named function is how to
-force a call. A call to a function that was not offered is left in the text.
+`format` in [ollama-api.md](ollama-api.md)). A keyword that cannot be enforced
+(`pattern`, bounds on a non-integer number, ...) is left out of that function's
+schema and everything else in it is still enforced; a function whose schema
+cannot be compiled, or a tool list too large for one grammar, takes any JSON
+object as its arguments. Each case is written to the debug log. With `auto` the
+arguments are constrained from the moment the model opens a call. A forced
+choice starts with the call, so the model has no room to reason before it.
+Whether a model opens a call under `auto` is the model's decision: a model
+that does not follow the call instruction answers in prose, and `required` or a
+named function is how to force a call. A call to a function that was not
+offered is left in the text.
 
 `stop` sequences apply to the visible text only, never inside a call, and a
 call after a matched stop sequence is dropped. `tools` cannot be combined with

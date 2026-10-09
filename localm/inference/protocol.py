@@ -196,7 +196,7 @@ class ChatRequest(BaseModel):
     # tools are given), "none", "required", or {"type": "function", "function":
     # {"name": ...}}. Calls come back in message.tool_calls (delta.tool_calls
     # when streaming) with finish_reason "tool_calls".
-    tools: Optional[List[Any]] = None
+    tools: Optional[Any] = None
     tool_choice: Optional[Any] = None
     # False: the reply holds at most one call and ends there.
     parallel_tool_calls: Optional[bool] = None

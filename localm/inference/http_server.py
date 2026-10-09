@@ -5642,27 +5642,17 @@ async def _compact_for_capacity(engine, messages: list, request=None
 
 
 class _StopDetector:
-    """Watches a non-streamed generation for a stop sequence in the visible
-    reply (reasoning inside ``<think>`` is not searched), so the generation can
-    end at the token that completes it."""
+    """Watches a non-streamed generation for the end of the reply: a stop
+    sequence in the visible text (reasoning inside ``<think>`` and tool calls are
+    not searched), or the call that reaches ``max_tool_calls``. The generation
+    can then end at the token that completes it."""
 
-    def __init__(self, stops, gen_kwargs: dict, tool_names=None) -> None:
-        from localm.inference.gbnf import think_exit_marker
-        from localm.textnorm import ThinkSplitter
-        self._think = ThinkSplitter(exit_marker=think_exit_marker(
-            gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
-        self._tools = ToolCallStream(tool_names) if tool_names else None
-        self._stop = StopFilter(stops)
+    def __init__(self, stops, tool_names, gen_kwargs: dict) -> None:
+        self._router = _ReplyRouter(stops, tool_names, gen_kwargs)
 
     def feed(self, token: str) -> bool:
-        content, _reasoning = self._think.feed(token)
-        if self._tools is None:
-            self._stop.feed(content)
-        else:
-            for kind, value in self._tools.feed(content):
-                if kind == "text":
-                    self._stop.feed(value)
-        return self._stop.hit
+        self._router.feed(token)
+        return self._router.stopped
 
 
 class _ReplyRouter:
@@ -5780,8 +5770,9 @@ async def _generate_full(engine, messages: list, request=None, *,
     poll = _resolve_disconnect_poll(request)
     stop = gen_kwargs.pop("stop", None)
     tool_names = gen_kwargs.pop("tool_names", None)
+    ends_early = bool(stop) or bool(tool_names and gen_kwargs.get("max_tool_calls"))
+    stop_detector = _StopDetector(stop, tool_names, gen_kwargs) if ends_early else None
     gen_kwargs.pop("max_tool_calls", None)
-    stop_detector = _StopDetector(stop, gen_kwargs, tool_names) if stop else None
 
     def _run() -> str:
         from localm.inference.backends.base import stream_stop_check

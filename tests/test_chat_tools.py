@@ -53,11 +53,14 @@ def home(tmp_path, monkeypatch):
 class Served:
     def __init__(self, tokens, finish="stop"):
         self.calls: list = []
+        self.produced = 0
         engine = MagicMock()
 
         def chat_stream(messages, **kwargs):
             self.calls.append((messages, kwargs))
-            yield from tokens
+            for token in tokens:
+                self.produced += 1
+                yield token
 
         engine.chat_stream.side_effect = chat_stream
         engine.display_name = MODEL
@@ -282,8 +285,7 @@ def test_malformed_tools_are_a_400_and_the_model_is_not_asked(home):
     served = Served(["ok"])
     for bad in ("x", [{"type": "function"}], [WEATHER, WEATHER],
                 [{"type": "function", "function": {"name": "has space"}}]):
-        r = served.chat(tools=bad)
-        assert r.status_code in (400, 422), bad
+        assert served.chat(tools=bad).status_code == 400, bad
     assert served.calls == []
 
 
@@ -397,3 +399,39 @@ def test_a_named_function_choice_reads_only_that_function(home):
                     tool_choice={"type": "function", "function": {"name": "get_time"}})
     message = r.json()["choices"][0]["message"]
     assert not message["tool_calls"] and "get_weather" in message["content"]
+
+
+def test_malformed_tools_of_the_wrong_json_type_are_a_400(home):
+    served = Served(["ok"])
+    for bad in ("x", 5, {"type": "function"}):
+        assert served.chat(tools=bad).status_code == 400, bad
+    assert served.calls == []
+
+
+def test_a_large_tool_list_still_works_with_auto(home):
+    kinds = [{"type": "string", "maxLength": 20}, {"type": "integer", "minimum": 0, "maximum": 99},
+             {"enum": ["a", "b", "c"]}, {"type": "array", "items": {"type": "string"}, "maxItems": 3}]
+    tools = [{"type": "function", "function": {"name": f"tool_{i}", "parameters": {
+        "type": "object", "properties": {f"p{j}": kinds[j % 4] for j in range(8)}}}}
+        for i in range(40)]
+    served = Served(pieces(call("tool_3", p0="x")))
+    r = served.chat(tools=tools)
+    assert r.status_code == 200
+    _messages, kwargs = served.last
+    assert 0 < len(kwargs["grammar"].encode()) <= 65536
+    assert r.json()["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "tool_3"
+
+
+def test_parallel_tool_calls_false_ends_a_non_streamed_generation_after_the_first_call(home):
+    served = Served(pieces(call()) + pieces(call("get_time", zone="CET")) + ["x"] * 50)
+    r = served.chat(tools=[WEATHER, TIME], parallel_tool_calls=False)
+    assert [c["function"]["name"] for c in r.json()["choices"][0]["message"]["tool_calls"]] == ["get_weather"]
+    assert served.produced < len(pieces(call())) + len(pieces(call("get_time", zone="CET"))) + 50
+
+
+def test_a_stop_prefix_before_a_call_does_not_end_the_generation_early(home):
+    reply = pieces("go ST" + call() + "OP end")
+    served = Served(reply)
+    r = served.chat(tools=[WEATHER], stop=["STOP"])
+    assert r.json()["choices"][0]["finish_reason"] == "tool_calls"
+    assert served.produced == len(reply)

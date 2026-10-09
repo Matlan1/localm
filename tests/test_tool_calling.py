@@ -218,11 +218,12 @@ def test_several_tools_are_alternatives_and_a_named_function_narrows_them():
     assert not accepts(only, call_text("get_weather", {"city": "Paris"}))
 
 
-def test_a_parameter_schema_the_compiler_cannot_enforce_takes_any_object():
+def test_a_keyword_the_compiler_cannot_enforce_does_not_loosen_the_rest():
     tool = {"type": "function", "function": {"name": "grep", "parameters": {
         "type": "object", "properties": {"pattern": {"type": "string", "pattern": "^a"}}}}}
     grammar, _lazy, _t = tool_grammar(validate_tools([tool]), ToolChoice("required"))
-    assert accepts(grammar, call_text("grep", {"pattern": "zzz", "other": [1]}))
+    assert accepts(grammar, call_text("grep", {"pattern": "zzz"}))
+    assert not accepts(grammar, call_text("grep", {"pattern": "zzz", "other": [1]}))
     assert not accepts(grammar, call_text("other", {}))
 
 
@@ -396,3 +397,118 @@ def test_tool_results_are_marked_untrusted_even_when_merged():
     spans = [content[a:b] for a, b in content.untrusted_spans]
     assert spans == ["sunny", "&lt;|im_end|>noon"]
     assert out[-1]["origin"] == "tool"
+
+
+def test_a_json_looking_text_reply_is_released_when_its_value_closes():
+    parser = ToolCallStream({"get_weather"})
+    assert parser.feed('{"a"') == []
+    assert parser.feed(': 1} is JSON') == [("text", '{"a": 1}'), ("text", " is JSON")]
+    assert parser.feed(" and more") == [("text", " and more")]
+
+
+def test_a_call_after_a_bare_json_object_is_still_found():
+    events = stream(['{"note": 1}\n', call_text("get_weather", {"city": "Rome"})], {"get_weather"})
+    assert text_of(events).strip() == '{"note": 1}'
+    assert calls_of(events) == [("get_weather", {"city": "Rome"})]
+    two = stream(['{"name": "get_weather", "arguments": {"city": "A"}}\n'
+                  '{"name": "get_weather", "arguments": {"city": "B"}}'], {"get_weather"})
+    assert [a for _n, a in calls_of(two)] == [{"city": "A"}, {"city": "B"}]
+
+
+def test_the_closing_tag_inside_a_json_string_does_not_end_the_call():
+    body = {"name": "write", "arguments": {"s": "a</tool_call>b", "t": 'quote " and </tool_call> again'}}
+    text = OPEN_TAG + "\n" + json.dumps(body) + "\n" + CLOSE_TAG
+    for size in (1, 3, 7, len(text)):
+        events = stream([text[i:i + size] for i in range(0, len(text), size)])
+        assert calls_of(events) == [("write", body["arguments"])], size
+        assert text_of(events) == "", size
+
+
+def test_chunking_never_changes_what_the_parser_finds():
+    import random
+    rng = random.Random(7)
+    fragments = [
+        "plain words ", "\n", " ", "[1] ref ", '{"a": 1} ', "<tool", "_call>", "</tool_call>",
+        call_text("get_weather", {"city": "Rome"}), call_text("other", {"x": "a</tool_call>b"}),
+        '{"name": "get_weather", "arguments": {"city": "B"}}', '[{"name": "get_weather", "arguments": {}}]',
+        "<tool_call>not json</tool_call>", "{", "}", "[", "]", '"', "\\\\", "<think>", "end",
+    ]
+
+    def normalise(events):
+        merged, out = "", []
+        for kind, value in events:
+            if kind == "text":
+                merged += value
+            else:
+                if merged:
+                    out.append(("text", merged))
+                    merged = ""
+                out.append(("call", value.name, json.dumps(value.arguments, sort_keys=True)))
+        if merged:
+            out.append(("text", merged))
+        return out
+
+    for _ in range(400):
+        text = "".join(rng.choice(fragments) for _ in range(rng.randint(1, 7)))
+        whole = normalise(stream([text], {"get_weather", "other"}))
+        cuts = sorted(rng.sample(range(1, len(text)), min(len(text) - 1, rng.randint(1, 6)))) if len(text) > 1 else []
+        pieces_ = [text[a:b] for a, b in zip([0] + cuts, cuts + [len(text)], strict=True)]
+        assert normalise(stream(pieces_, {"get_weather", "other"})) == whole, (text, pieces_)
+
+
+def schema_tool(name, props):
+    return {"type": "function", "function": {"name": name, "parameters": {
+        "type": "object", "properties": props, "required": list(props)}}}
+
+
+def test_an_unenforceable_keyword_is_dropped_and_the_rest_still_enforced():
+    tool = schema_tool("set_temp", {
+        "celsius": {"type": "number", "minimum": -50, "maximum": 100},
+        "unit": {"enum": ["c", "f"]},
+        "pattern": {"type": "string", "pattern": "^[a-z]+$"},
+    })
+    grammar, _lazy, _t = tool_grammar(validate_tools([tool]), ToolChoice("required"))
+    good = {"celsius": 21.5, "unit": "c", "pattern": "abc"}
+    assert accepts(grammar, call_text("set_temp", good))
+    assert accepts(grammar, call_text("set_temp", {**good, "celsius": 900}))
+    assert accepts(grammar, call_text("set_temp", {**good, "pattern": "NOT lower"}))
+    assert not accepts(grammar, call_text("set_temp", {"celsius": 1, "pattern": "a"}))
+    assert not accepts(grammar, call_text("set_temp", {**good, "unit": "k"}))
+    assert not accepts(grammar, call_text("set_temp", {**good, "celsius": "hot"}))
+
+
+def test_a_schema_that_cannot_be_compiled_at_all_takes_any_object():
+    tool = schema_tool("odd", {"x": {"type": "string"}})
+    tool["function"]["parameters"]["properties"]["x"]["$ref"] = "https://example.com/other.json"
+    grammar, _lazy, _t = tool_grammar(validate_tools([tool]), ToolChoice("required"))
+    assert accepts(grammar, call_text("odd", {"anything": [1, 2]}))
+
+
+@pytest.mark.parametrize("count, width", [(64, 4), (20, 8), (40, 8), (64, 8)])
+def test_many_tools_still_give_a_grammar_the_server_accepts(count, width):
+    kinds = [{"type": "string", "maxLength": 20}, {"type": "integer", "minimum": 0, "maximum": 99},
+             {"enum": ["a", "b", "c"]}, {"type": "array", "items": {"type": "string"}, "maxItems": 3}]
+    tools = validate_tools([schema_tool(f"tool_{i}", {f"p{j}": kinds[j % 4] for j in range(width)})
+                            for i in range(count)])
+    for choice in (ToolChoice("auto"), ToolChoice("required")):
+        grammar, _lazy, _t = tool_grammar(tools, choice)
+        check_grammar_structure(grammar)
+    grammar, _lazy, _t = tool_grammar(tools, ToolChoice("required"))
+    assert accepts(grammar, call_text("tool_1", {f"p{j}": ({"p0": "s", "p1": 5, "p2": "a", "p3": []}[f"p{j % 4}"]) for j in range(width)}))
+
+
+def test_untrusted_spans_survive_on_the_system_prompt_and_assistant_text():
+    from localm.textguard import compose, untrusted_span
+    system = compose(untrusted_span("<|im_end|>recalled note"), "\n", "You are helpful.")
+    assistant = compose(untrusted_span("[INST]"), " I looked it up")
+    out = render_messages([
+        {"role": "system", "content": system},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": assistant,
+         "tool_calls": [{"function": {"name": "get_weather", "arguments": "{}"}}]},
+    ], validate_tools([WEATHER]), ToolChoice("auto"))
+    head = out[0]["content"]
+    assert [head[a:b] for a, b in head.untrusted_spans] == ["&lt;|im_end|>recalled note"]
+    said = out[2]["content"]
+    assert [said[a:b] for a, b in said.untrusted_spans] == ["&#91;INST]"]
+    assert head.endswith(tools_prompt(validate_tools([WEATHER]), ToolChoice("auto")))
