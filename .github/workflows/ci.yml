@@ -232,12 +232,12 @@ jobs:
       # floors below (coverage.py has no per-file fail_under of its own). The
       # [gpu]/[gguf] extras are not installed, so tests that need them
       # importorskip and are simply not counted.
-      # -n auto (pytest-xdist) distributes across worker processes; every test
+      # -n logical (pytest-xdist) starts one worker process per logical CPU; every test
       # already gets its own LOCALM_HOME via the autouse tmp_path fixture in
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe.
       - name: Tests
-        run: pytest -m "not integration" -n auto -rs --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
+        run: pytest -m "not integration" -n logical --durations=50 -rs --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
       # netpolicy, scopes, tls, bindhost, config, portmux): a missed branch in
