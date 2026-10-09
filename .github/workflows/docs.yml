@@ -74,6 +74,12 @@ jobs:
           NO_MKDOCS_2_WARNING: "true"
         run: mkdocs build --strict
 
+      - name: Probe pages api
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh api "repos/$REPO/pages" || true
+
       - name: Decide whether to deploy
         id: decide
         env:
