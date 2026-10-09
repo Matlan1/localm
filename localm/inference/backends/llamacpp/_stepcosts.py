@@ -25,12 +25,16 @@ ACCEPTANCE_PRIOR_REJECTED = 0.8
 ACCEPTANCE_DECAY = 0.9
 # A draft length is chosen only when it beats a plain step by this fraction.
 DRAFT_GAIN_MARGIN = 0.05
-# Steps decided not to draft before one drafts anyway to measure acceptance.
+# Steps decided not to draft before one drafts anyway to measure acceptance;
+# doubled after each probe with a rejected draft, up to ACCEPTANCE_PROBE_MAX_EVERY.
 ACCEPTANCE_PROBE_EVERY = 32
+ACCEPTANCE_PROBE_MAX_EVERY = 256
 # Acceptance a probing step is sized for.
 ACCEPTANCE_PROBE_P = 0.9
 # Weight a newly observed step time gets in the running figure for its length.
 OBSERVED_COST_WEIGHT = 0.2
+# A newly observed step time is clipped to within this factor of that figure.
+OBSERVED_COST_CLIP = 3.0
 # Acceptance at which a draft model must beat plain decoding to be kept at load.
 DRAFT_GATE_ACCEPTANCE = 0.85
 # Tokens a reply of unknown length is assumed to have left.
@@ -88,11 +92,15 @@ class StepCosts:
     draft_prefill: float = 0.0
 
     def verify_cost(self, n: int) -> float:
-        """Seconds of a target batch of *n* tokens: the measured figure, linear
-        between measured sizes, and past the largest the last slope."""
+        """Seconds of a target batch of *n* tokens from the measured figures
+        made non-decreasing in n (each at least the one for fewer tokens):
+        the figure at a measured size, linear between measured sizes, and past
+        the largest the last slope."""
         if n <= 1:
             return self.target
-        points = sorted({1: self.target, **self.verify}.items())
+        points = []
+        for size, seconds in sorted({1: self.target, **self.verify}.items()):
+            points.append((size, max(seconds, points[-1][1]) if points else seconds))
         if len(points) == 1:
             return self.target * n
         for (n0, t0), (n1, t1) in zip(points, points[1:]):

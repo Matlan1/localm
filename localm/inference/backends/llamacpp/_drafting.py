@@ -30,7 +30,8 @@ from typing import Dict, List, Optional
 
 from ._stepcosts import (
     ACCEPTANCE_DECAY, ACCEPTANCE_PRIOR_ACCEPTED, ACCEPTANCE_PRIOR_REJECTED,
-    ACCEPTANCE_PROBE_EVERY, ACCEPTANCE_PROBE_P, OBSERVED_COST_WEIGHT, StepCosts, best_length)
+    ACCEPTANCE_PROBE_EVERY, ACCEPTANCE_PROBE_MAX_EVERY, ACCEPTANCE_PROBE_P,
+    OBSERVED_COST_CLIP, OBSERVED_COST_WEIGHT, StepCosts, best_length)
 
 SPEC_OFF = "off"
 SPEC_MTP = "mtp"
@@ -101,11 +102,14 @@ class DraftSource:
     def on_paused_step(self) -> None:
         pass
 
-    def on_step_seconds(self, drafted: int, seconds: float) -> None:
+    def on_step_seconds(self, drafted: Optional[int], seconds: float) -> None:
         """Record that a step of this reply took *seconds*, from before its
         proposal until the next token was in hand and without the time spent
-        in the consumer, and verified *drafted* drafts (0 for a step that
-        decoded one token without proposing any)."""
+        in the consumer, and verified *drafted* drafts: 0 for a step that
+        decoded one token without proposing any, None for a step whose time
+        does not stand for its length (a proposal or verification that
+        failed, a proposal that drafted nothing, a step that grew the
+        context)."""
 
     def rewind_unsupported(self) -> None:
         pass
@@ -145,15 +149,15 @@ class CountedSource(DraftSource):
 
     ``costs`` is the ``StepCosts`` measured at load, or None. With costs,
     ``step_cost`` corrects them with the step times the loop reports through
-    ``on_step_seconds`` and ``choose_length`` picks the draft length; the
-    acceptance estimate, the probing schedule and the observed figures live
+    ``on_step_seconds`` and ``choose_length`` picks the draft length. The
+    acceptance is estimated separately for a step right after one that
+    verified every draft it proposed ("after a full accept") and for any other
+    step. The estimates, the probing schedule and the observed figures live
     for the model's life. A subclass needs ``_llm`` for ``cap_drafts``.
     """
 
     label = "drafting"
     observes_steps = True
-    # Rows a step samples per draft beyond the one for the target's own token.
-    sampled_rows_per_draft = 1
 
     def __init__(self, draft_max: int) -> None:
         self.draft_max = draft_max
@@ -170,10 +174,15 @@ class CountedSource(DraftSource):
         self.held_steps = 0
         self.costs: Optional[StepCosts] = None
         self._observed: Dict[int, float] = {}
-        self._row_s = 0.0
-        self._acc_accepted = 0.0
-        self._acc_rejected = 0.0
+        self._step_over_s = 0.0
+        self._draft_over_s = 0.0
+        # Decayed [accepted drafts, rejections], keyed by "after a full accept".
+        self._evidence: Dict[bool, List[float]] = {False: [0.0, 0.0], True: [0.0, 0.0]}
+        self._hot = False
+        self._chosen_hot = False
         self._since_probe = ACCEPTANCE_PROBE_EVERY
+        self._probe_every = ACCEPTANCE_PROBE_EVERY
+        self._probing = False
 
     def reset_call(self, skipped: str = "") -> None:
         self.active_this_call = False
@@ -190,16 +199,17 @@ class CountedSource(DraftSource):
         self._drafting = False
 
     def report(self) -> dict:
-        """``DraftSource.report`` plus ``held_steps`` and ``acceptance``, and
-        with measured costs ``costs`` (``StepCosts.report``) and
-        ``observed_ms``, the corrected step milliseconds of each draft length
-        seen so far."""
+        """``DraftSource.report`` plus ``held_steps``, ``acceptance`` and
+        ``acceptance_after_full_accept``, and with measured costs ``costs``
+        (``StepCosts.report``) and ``observed_ms``, the corrected step
+        milliseconds of each draft length seen so far."""
         out = {"status": self.status, "active": self.active_this_call,
                "call_status": self.call_status, "skipped": self.skipped,
                "drafted": self.drafted, "accepted": self.accepted,
                "steps": self.steps, "paused_steps": self.paused_steps,
-               "held_steps": self.held_steps,
-               "draft_max": self.draft_max, "acceptance": round(self.acceptance(), 3)}
+               "held_steps": self.held_steps, "draft_max": self.draft_max,
+               "acceptance": round(self.acceptance(), 3),
+               "acceptance_after_full_accept": round(self.acceptance(True), 3)}
         if self.costs is not None:
             out["costs"] = self.costs.report()
             out["observed_ms"] = {k: round(s * 1000, 3)
@@ -225,13 +235,23 @@ class CountedSource(DraftSource):
         logger.warning("%s disabled for this model - %s", self.label, status)
 
     def on_verify(self, drafted: int, accepted: int) -> None:
+        """Count a verification of *drafted* drafts of which *accepted* were
+        kept, and fold it into the acceptance evidence of the state its length
+        was chosen in. A probe that had a rejection doubles the probe interval
+        up to ``ACCEPTANCE_PROBE_MAX_EVERY``; one without resets it."""
         self.steps += 1
         self.drafted += drafted
         self.accepted += accepted
         self.active_this_call = True
-        self._acc_accepted = self._acc_accepted * ACCEPTANCE_DECAY + accepted
-        self._acc_rejected = (self._acc_rejected * ACCEPTANCE_DECAY
-                              + (1.0 if accepted < drafted else 0.0))
+        rejected = accepted < drafted
+        evidence = self._evidence[self._chosen_hot]
+        evidence[0] = evidence[0] * ACCEPTANCE_DECAY + accepted
+        evidence[1] = evidence[1] * ACCEPTANCE_DECAY + (1.0 if rejected else 0.0)
+        if self._probing:
+            self._probe_every = (min(2 * self._probe_every, ACCEPTANCE_PROBE_MAX_EVERY)
+                                 if rejected else ACCEPTANCE_PROBE_EVERY)
+            self._probing = False
+        self._hot = drafted > 0 and not rejected
         self._since_probe = 0
 
     def on_paused_step(self) -> None:
@@ -240,24 +260,28 @@ class CountedSource(DraftSource):
     def rewind_unsupported(self) -> None:
         self.disable("rewind-unsupported")
 
-    def acceptance(self) -> float:
-        """Estimated probability that one draft is accepted: accepted drafts
-        over accepted drafts plus rejections, each verification weighing
-        ``ACCEPTANCE_DECAY`` of the evidence before it, with the prior added."""
-        a = self._acc_accepted + ACCEPTANCE_PRIOR_ACCEPTED
-        return a / (a + self._acc_rejected + ACCEPTANCE_PRIOR_REJECTED)
-
-    def sampled_rows(self, drafted: int) -> int:
-        """Rows a step verifying *drafted* drafts samples: one for the target's
-        own token and ``sampled_rows_per_draft`` per draft."""
-        return 1 + self.sampled_rows_per_draft * max(0, drafted)
+    def acceptance(self, after_full_accept: bool = False) -> float:
+        """Estimated probability that one draft is accepted. For a step that
+        is not after a full accept: accepted drafts over accepted drafts plus
+        rejections, each verification weighing ``ACCEPTANCE_DECAY`` of the
+        evidence before it, with the prior added. After a full accept
+        (*after_full_accept*): the same over that state's own evidence, with
+        the first estimate as its prior at the same weight."""
+        weight = ACCEPTANCE_PRIOR_ACCEPTED + ACCEPTANCE_PRIOR_REJECTED
+        accepted, rejected = self._evidence[False]
+        p = (accepted + ACCEPTANCE_PRIOR_ACCEPTED) / (accepted + rejected + weight)
+        if not after_full_accept:
+            return p
+        accepted, rejected = self._evidence[True]
+        return (accepted + weight * p) / (accepted + rejected + weight)
 
     def modelled_step_cost(self, drafted: int) -> float:
         """Seconds of a step drafting *drafted*: the measured ``costs`` plus
-        the estimated seconds per sampled row (never below 0) for each row it
-        samples. Requires ``costs``."""
-        return (self.costs.step_cost(drafted)
-                + max(0.0, self._row_s) * self.sampled_rows(drafted))
+        the estimated seconds every step takes beyond them and, per draft, the
+        estimated seconds a draft adds beyond that (each never below 0).
+        Requires ``costs``."""
+        return (self.costs.step_cost(drafted) + max(0.0, self._step_over_s)
+                + max(0.0, self._draft_over_s) * max(0, drafted))
 
     def step_cost(self, drafted: int) -> float:
         """Seconds of a step drafting *drafted*: the running figure of the
@@ -266,17 +290,26 @@ class CountedSource(DraftSource):
         seen = self._observed.get(drafted)
         return seen if seen is not None else self.modelled_step_cost(drafted)
 
-    def on_step_seconds(self, drafted: int, seconds: float) -> None:
-        """Fold a step's *seconds* into the running figure for its length,
-        which starts at ``step_cost`` and moves ``OBSERVED_COST_WEIGHT`` of the
-        way to each new time, and into the seconds per sampled row the step
-        took beyond ``costs``. Ignored without ``costs`` or for a time of 0 or
-        less."""
-        if self.costs is None or seconds <= 0.0:
+    def on_step_seconds(self, drafted: Optional[int], seconds: float) -> None:
+        """Fold a step's *seconds*, clipped to within ``OBSERVED_COST_CLIP``
+        times the running figure for its length, into that figure, which
+        starts at ``step_cost`` and moves ``OBSERVED_COST_WEIGHT`` of the way
+        to each new time, and into the overhead estimates of
+        ``modelled_step_cost``: a plain step's time beyond the measured
+        one-token decode is the overhead of every step, and a drafting step's
+        time beyond its measured decodes and that overhead, divided by its
+        drafts, the overhead of a draft. Ignored without ``costs``, for
+        *drafted* None or for a time of 0 or less."""
+        if drafted is None or self.costs is None or seconds <= 0.0:
             return
         before = self.step_cost(drafted)
-        row = (seconds - self.costs.step_cost(drafted)) / self.sampled_rows(drafted)
-        self._row_s += OBSERVED_COST_WEIGHT * (row - self._row_s)
+        seconds = min(max(seconds, before / OBSERVED_COST_CLIP), before * OBSERVED_COST_CLIP)
+        extra = seconds - self.costs.step_cost(drafted)
+        if drafted <= 0:
+            self._step_over_s += OBSERVED_COST_WEIGHT * (extra - self._step_over_s)
+        else:
+            per = (extra - max(0.0, self._step_over_s)) / drafted
+            self._draft_over_s += OBSERVED_COST_WEIGHT * (per - self._draft_over_s)
         self._observed[drafted] = before + OBSERVED_COST_WEIGHT * (seconds - before)
 
     def cap_drafts(self, pos: int, tokens_left: Optional[int]) -> int:
@@ -294,24 +327,37 @@ class CountedSource(DraftSource):
 
     def choose_length(self, n: int, tokens_left: Optional[int]) -> int:
         """The draft length of a step allowed at most *n* drafts: the
-        ``best_length`` under ``step_cost`` at the current ``acceptance``.
-        When that is 0 and ``ACCEPTANCE_PROBE_EVERY`` or more steps have
-        passed since the last verification (and before the first), the length
-        sized for ``ACCEPTANCE_PROBE_P`` instead, so the acceptance is
-        measured. 0 when ``length_pays`` refuses the length; each 0 counts in
-        ``held_steps``. Requires ``costs``."""
+        ``best_length`` under ``step_cost`` at the ``acceptance`` of the
+        step's state (after a full accept when the step before verified every
+        draft it proposed). When that is 0 and this method has given 0 for
+        at least the probe interval (``ACCEPTANCE_PROBE_EVERY`` at first)
+        since the last verification, the length sized for
+        ``ACCEPTANCE_PROBE_P`` instead (0 when none pays even there), so the
+        acceptance is measured. 0 when
+        ``length_pays`` refuses the length; each 0 counts in ``held_steps``,
+        and one after a full accept also decays that state's evidence by
+        ``ACCEPTANCE_DECAY``. Requires ``costs``."""
+        hot, self._hot = self._hot, False
+        self._chosen_hot = hot
+        self._probing = False
         if n <= 0:
             return 0
-        p = self.acceptance()
+        p = self.acceptance(hot)
         k = best_length(p, n, self.step_cost)
-        if k == 0 and self._since_probe >= ACCEPTANCE_PROBE_EVERY:
+        if k == 0 and self._since_probe >= self._probe_every:
             p = ACCEPTANCE_PROBE_P
             k = best_length(p, n, self.step_cost)
+            self._probing = k > 0
         if k and not self.length_pays(p, k, tokens_left):
             k = 0
+            self._probing = False
         if k == 0:
             self._since_probe += 1
             self.held_steps += 1
+            if hot:
+                evidence = self._evidence[True]
+                evidence[0] *= ACCEPTANCE_DECAY
+                evidence[1] *= ACCEPTANCE_DECAY
         return k
 
 

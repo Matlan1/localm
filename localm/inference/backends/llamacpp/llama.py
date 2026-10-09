@@ -1912,8 +1912,7 @@ class LlamaCpp:
                             step_s = clock() - step[0] - consumer_s
                             if step[4]:
                                 pacer.record(step[1], step_s, step[2])
-                            if step[3] is not None:
-                                source.on_step_seconds(step[3], step_s)
+                            source.on_step_seconds(step[3], step_s)
                             step = None
 
                         # Stop when the model signals end-of-generation via the vocabulary
@@ -1971,7 +1970,7 @@ class LlamaCpp:
                         # --- Speculative drafting (while the source drafts) ---
                         drafts: List[int] = []
                         accepted: List[int] = []
-                        timed = speculate = verified = observed = False
+                        timed = speculate = verify_ok = observed = grew = False
                         if source.drafting():
                             observed = source.observes_steps
                             if pacer.paused:
@@ -2021,7 +2020,7 @@ class LlamaCpp:
                                                 break
                                             accepted.append(draft)
                                         n_acc = len(accepted)
-                                        verified = True
+                                        verify_ok = True
                                         source.on_verify(len(drafts), n_acc)
                                         removed = True
                                         if n_acc < len(drafts):
@@ -2066,7 +2065,7 @@ class LlamaCpp:
                                         api.llama_batch_free(batch)
                             if timed:
                                 step = (step_t0, True, 1 + len(accepted),
-                                        len(drafts) if verified else None, True)
+                                        len(drafts) if verify_ok else None, True)
                             for draft in accepted:
                                 yield_t0 = clock()
                                 yield draft
@@ -2088,6 +2087,7 @@ class LlamaCpp:
                                         current_needed = pos + 512
                                         target = self._target_ctx(current_needed)
                                         if target > self._ctx_capacity:
+                                            grew = True
                                             # We can grow! Re-prefill the context. Free the
                                             # old batch (its layout matches the OLD context)
                                             # BEFORE the re-prefill, because
@@ -2116,8 +2116,8 @@ class LlamaCpp:
                                     pos += 1
                                     if timed or observed:
                                         step = (step_t0, speculate and not source.free_miss, 1,
-                                                0 if source.free_miss or not speculate else None,
-                                                timed)
+                                                None if grew or (speculate and not source.free_miss)
+                                                else 0, timed)
                                 finally:
                                     # Always release the native batch - including when
                                     # _prefill_fresh_context above raises mid-growth.
@@ -2794,12 +2794,12 @@ class LlamaCpp:
         measured (``_measure_step_costs``). A draft model that cannot beat
         plain decoding at an acceptance of ``DRAFT_GATE_ACCEPTANCE`` is freed
         with status "draft-cannot-pay"; an n-gram source that cannot beat it
-        even with every draft accepted is turned off with status
+        at ``ACCEPTANCE_PROBE_P`` is turned off with status
         "ngram-cannot-pay"."""
         from localm.debuglog import logger
 
         from ._draftmodel import DRAFT_MODEL_UNMEASURED_TOKENS
-        from ._stepcosts import DRAFT_GATE_ACCEPTANCE
+        from ._stepcosts import ACCEPTANCE_PROBE_P, DRAFT_GATE_ACCEPTANCE
         can_drop = self._cache_can_drop_a_speculative_token()
         draft = self._spec_source_name == SPEC_DRAFT
         if draft and can_drop:
@@ -2807,7 +2807,7 @@ class LlamaCpp:
                                    on_gpu=spec_draft_gpu)
         source = self._draft_source()
         if can_drop and source.usable and (not draft or source.loaded):
-            gate_p = DRAFT_GATE_ACCEPTANCE if draft else 1.0
+            gate_p = DRAFT_GATE_ACCEPTANCE if draft else ACCEPTANCE_PROBE_P
             quiet = _quiet_stderr if not verbose else contextlib.nullcontext
             with quiet():
                 costs = self._measure_step_costs(source)
@@ -2872,7 +2872,8 @@ class LlamaCpp:
         draft-model source the draft model's one-token and batched decodes;
         each after a short shared prefix of tokens spread over the vocabulary.
         The main cache and any draft cache are left empty. None when a decode
-        fails or the vocabulary has fewer than 256 tokens."""
+        fails, a target figure is not above 0, or the vocabulary has fewer than
+        256 tokens."""
         from localm.debuglog import logger
 
         from ._stepcosts import StepCosts, measure_plan
@@ -2899,6 +2900,8 @@ class LlamaCpp:
                 draft_prefill = self._time_decode(draft_ctx, prefix, spread(batch, 9),
                                                   False, 1, 3) / batch
                 source._reset_cache()
+            if min([target, *verify.values()]) <= 0.0:
+                return None
             return StepCosts(target=target, verify=verify, draft=draft,
                              draft_prefill=draft_prefill)
         except Exception as exc:

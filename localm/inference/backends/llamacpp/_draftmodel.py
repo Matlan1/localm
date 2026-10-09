@@ -116,7 +116,6 @@ class DraftModelSource(CountedSource):
     name = SPEC_DRAFT
     label = "draft-model drafting"
     free_miss = False
-    sampled_rows_per_draft = 2
 
     def __init__(self, llm, model_ptr, draft_max: int,
                  n_threads: Optional[int] = None) -> None:
@@ -190,10 +189,10 @@ class DraftModelSource(CountedSource):
         if model is not None:
             api.llama_free_model(model)
 
-    def on_step_seconds(self, drafted: int, seconds: float) -> None:
+    def on_step_seconds(self, drafted: Optional[int], seconds: float) -> None:
         """``CountedSource.on_step_seconds``, except for a step whose proposal
         decoded more than ``STEADY_CATCH_UP_TOKENS`` tokens before its first
-        draft, which is not recorded."""
+        draft, which is not recorded. Clears that count either way."""
         catch_up, self._catch_up = self._catch_up, 0
         if catch_up <= STEADY_CATCH_UP_TOKENS:
             super().on_step_seconds(drafted, seconds)
@@ -202,6 +201,7 @@ class DraftModelSource(CountedSource):
         self.reset_call()
         self._drafting = self.usable and self._ctx is not None
         self._valid = 0
+        self._catch_up = 0
         return self._drafting
 
     def ready(self, pos: int) -> bool:
@@ -220,15 +220,19 @@ class DraftModelSource(CountedSource):
         """Whether decoding the main cache's tokens the draft cache lacks costs
         less than drafting *k* at acceptance *p* is expected to save over the
         rest of the reply; always True for a catch-up of at most
-        ``CATCH_UP_FREE_TOKENS``. Advances ``_valid`` over the prefix the two
-        share."""
+        ``CATCH_UP_FREE_TOKENS``. A draft context smaller than the main one,
+        which the next proposal recreates empty, lacks every token. Otherwise
+        advances ``_valid`` over the prefix the two share."""
         cached = self._llm._cached_tokens
-        v = self._valid
-        lim = min(len(self._tokens), len(cached))
-        while v < lim and self._tokens[v] == cached[v]:
-            v += 1
-        self._valid = v
-        pending = len(cached) - v + 1
+        if self._llm._ctx_capacity > self._ctx_capacity:
+            pending = len(cached) + 1
+        else:
+            v = self._valid
+            lim = min(len(self._tokens), len(cached))
+            while v < lim and self._tokens[v] == cached[v]:
+                v += 1
+            self._valid = v
+            pending = len(cached) - v + 1
         if pending <= CATCH_UP_FREE_TOKENS:
             return True
         e = expected_tokens(p, k)

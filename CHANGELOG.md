@@ -25,9 +25,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tool-call JSON come out faster. Replies are the same model's replies. It
   measures your model when it loads and drafts only as many tokens as pay off, so
   on models where checking drafts is expensive, such as Mixture-of-Experts models,
-  it stays out of the way unless the reply really repeats. It is off by default;
-  `localm bench-spec <model>` measures whether it pays on your machine, and the
-  reply's usage line shows how many drafted tokens were accepted.
+  it holds back where drafting would not pay instead of slowing replies down. It is
+  off by default; `localm bench-spec <model>` measures whether it pays on your
+  machine, and the reply's usage line shows how many drafted tokens were accepted.
 - **Speculative decoding with a draft model.** Speculative drafting can now use a
   smaller model of the same family (`spec_source` `draft`, with the Draft model
   setting): it drafts a few tokens and your model checks them in one pass, so
