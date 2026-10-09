@@ -171,3 +171,39 @@ jobs:
             fi
           done
           echo "digests=$digests" >> "$GITHUB_OUTPUT"
+
+  attest:
+    name: Attest (${{ matrix.backend }})
+    needs: publish
+    if: needs.publish.outputs.digests != '' && needs.publish.outputs.digests != '{}'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write  # sign the provenance with this workflow's identity
+      attestations: write  # record the attestation
+      packages: write  # store the attestation next to the image in GHCR
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpu, vulkan]
+    steps:
+      - name: Read the pushed digest
+        id: digest
+        env:
+          DIGESTS: ${{ needs.publish.outputs.digests }}
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          set -eu
+          ref="$(printf '%s' "$DIGESTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$BACKEND")"
+          case "$ref" in
+            "$IMAGE"@sha256:*) ;;
+            *) echo "::error::unexpected image reference '$ref'"; exit 1 ;;
+          esac
+          echo "digest=${ref#*@}" >> "$GITHUB_OUTPUT"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true

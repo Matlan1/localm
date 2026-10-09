@@ -56,6 +56,14 @@ docker run -d -v localm-data:/data -p 8642:8642 -e LOCALM_API_KEY=<key> ghcr.io/
 Scoped keys for individual clients are created the same way, for example
 `docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key create dashboard --scope models:read`.
 
+## Verifying an image
+
+Each published image carries a build provenance attestation that ties its digest to the workflow run and commit that built it:
+
+```bash
+gh attestation verify oci://ghcr.io/matlan1/localm:<version> --repo Matlan1/localm
+```
+
 ## Compose
 
 ```yaml
